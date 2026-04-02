@@ -208,7 +208,9 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .max_turns
         .unwrap_or(config.agent.max_turns);
 
-    let prompt_builder = PromptBuilder::new(client.model(), "cli");
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let prompt_builder = PromptBuilder::new(client.model(), "cli")
+        .load_context(&cwd);
     let system_msg = prompt_builder.build_system_message();
 
     let messages = vec![system_msg, ChatMessage::user(prompt)];
@@ -248,7 +250,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let registry = Arc::new(build_registry());
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
-    let prompt_builder = PromptBuilder::new(client.model(), "cli");
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let prompt_builder = PromptBuilder::new(client.model(), "cli")
+        .load_context(&cwd);
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];
