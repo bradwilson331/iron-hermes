@@ -69,6 +69,12 @@ impl GatewaySession {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
+
+    /// Returns true if this session has been inactive longer than `timeout_hours`.
+    pub fn is_expired(&self, timeout_hours: u64) -> bool {
+        let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
+        self.updated_at < cutoff
+    }
 }
 
 /// In-memory session store for the gateway.
@@ -107,5 +113,11 @@ impl SessionStore {
 
     pub fn count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Remove all sessions that have been inactive longer than `timeout_hours`.
+    pub fn expire_stale(&mut self, timeout_hours: u64) {
+        let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
+        self.sessions.retain(|_, session| session.updated_at > cutoff);
     }
 }
