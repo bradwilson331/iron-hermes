@@ -39,7 +39,7 @@ pub trait PlatformAdapter: Send + Sync {
         content: &str,
     ) -> Result<()>;
 
-    /// Edit an existing message with Markdown formatting (for final edit).
+    /// Edit an existing message with Markdown formatting (final edit per D-03).
     async fn edit_message_markdown(
         &self,
         chat_id: &str,

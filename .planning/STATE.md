@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to plan
-stopped_at: Phase 2 context gathered
-last_updated: "2026-04-02T02:46:57.493Z"
+status: Ready to execute
+stopped_at: Completed 02-telegram-gateway/02-02-PLAN.md
+last_updated: "2026-04-02T11:58:51.715Z"
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 2
+  total_plans: 7
   completed_plans: 2
 ---
 
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-01)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram -- the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 01 — context-file-loading
+**Current focus:** Phase 02 — telegram-gateway
 
 ## Current Position
 
-Phase: 2
-Plan: Not started
+Phase: 02 (telegram-gateway) — EXECUTING
+Plan: 3 of 5
 
 ## Performance Metrics
 
@@ -48,6 +48,8 @@ Plan: Not started
 *Updated after each plan completion*
 | Phase 01-context-file-loading P01 | 5m | 2 tasks | 4 files |
 | Phase 01-context-file-loading P02 | 45 | 3 tasks | 14 files |
+| Phase 02-telegram-gateway P01 | 3 | 2 tasks | 7 files |
+| Phase 02-telegram-gateway P02 | 4m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -66,6 +68,10 @@ Recent decisions affecting current work:
 - [Phase 01-context-file-loading]: Project context uses first-match-wins priority chain (.hermes.md > AGENTS.md > CLAUDE.md > .cursorrules)
 - [Phase 01-context-file-loading]: All context content scanned before injection — 10 threat patterns + invisible unicode detection
 - [Phase 01-context-file-loading]: Frozen-snapshot: cwd captured and context loaded once at session start, never reloaded mid-session
+- [Phase 02-telegram-gateway]: CancellationToken pub use re-exported from telegram.rs so plan 03 polling module can import from single gateway-internal location
+- [Phase 02-telegram-gateway]: send_message uses plain text (no parse_mode); edit_message_markdown adds Markdown only for final streaming edit — per D-03
+- [Phase 02-telegram-gateway]: edit_message uses plain text, edit_message_markdown uses Markdown for final edit only (D-03)
+- [Phase 02-telegram-gateway]: find_split_point 4-tier priority: double-newline > single-newline > period-space > hard split for overflow chaining
 
 ### Pending Todos
 
@@ -78,6 +84,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-02T02:46:57.491Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-telegram-gateway/02-CONTEXT.md
+Last session: 2026-04-02T11:58:51.713Z
+Stopped at: Completed 02-telegram-gateway/02-02-PLAN.md
+Resume file: None

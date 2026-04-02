@@ -1,0 +1,368 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775087574782,
+  "projectRoot": "/Users/twilson/code/ironhermes",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "config": {
+      "path": "config",
+      "purpose": "Configuration files",
+      "fileCount": 0,
+      "lastAccessed": 1775087574774,
+      "keyFiles": []
+    },
+    "crates": {
+      "path": "crates",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775087574774,
+      "keyFiles": []
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775087574774,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "",
+      "accessCount": 16,
+      "lastAccessed": 1775112299329,
+      "type": "directory"
+    },
+    {
+      "path": ".planning/ROADMAP.md",
+      "accessCount": 16,
+      "lastAccessed": 1775130731456,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/src/adapter.rs",
+      "accessCount": 12,
+      "lastAccessed": 1775131203701,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/src/telegram.rs",
+      "accessCount": 11,
+      "lastAccessed": 1775131208811,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cli/src/main.rs",
+      "accessCount": 10,
+      "lastAccessed": 1775111513082,
+      "type": "file"
+    },
+    {
+      "path": ".planning/REQUIREMENTS.md",
+      "accessCount": 10,
+      "lastAccessed": 1775112282383,
+      "type": "file"
+    },
+    {
+      "path": "crates",
+      "accessCount": 9,
+      "lastAccessed": 1775088529447,
+      "type": "directory"
+    },
+    {
+      "path": ".planning/PROJECT.md",
+      "accessCount": 9,
+      "lastAccessed": 1775096346555,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/agent_loop.rs",
+      "accessCount": 9,
+      "lastAccessed": 1775111497332,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/src/lib.rs",
+      "accessCount": 9,
+      "lastAccessed": 1775131193404,
+      "type": "file"
+    },
+    {
+      "path": ".planning/research/async-patterns.md",
+      "accessCount": 8,
+      "lastAccessed": 1775088917163,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/src/runner.rs",
+      "accessCount": 8,
+      "lastAccessed": 1775111489694,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/src/session.rs",
+      "accessCount": 8,
+      "lastAccessed": 1775111490205,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/config.rs",
+      "accessCount": 8,
+      "lastAccessed": 1775111503237,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 7,
+      "lastAccessed": 1775098260836,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/registry.rs",
+      "accessCount": 6,
+      "lastAccessed": 1775088535402,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/types.rs",
+      "accessCount": 6,
+      "lastAccessed": 1775098247959,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/constants.rs",
+      "accessCount": 5,
+      "lastAccessed": 1775090688194,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/client.rs",
+      "accessCount": 5,
+      "lastAccessed": 1775098261105,
+      "type": "file"
+    },
+    {
+      "path": ".planning/STATE.md",
+      "accessCount": 5,
+      "lastAccessed": 1775111480379,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/context_compressor.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775087634526,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-state/src/lib.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775087636642,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cron/src/lib.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775087637580,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/error.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775088508058,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/web_search.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775088534897,
+      "type": "file"
+    },
+    {
+      "path": ".planning/research/self-improvement.md",
+      "accessCount": 4,
+      "lastAccessed": 1775090682791,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/lib.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775093502567,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/lib.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775098242072,
+      "type": "file"
+    },
+    {
+      "path": ".planning/config.json",
+      "accessCount": 4,
+      "lastAccessed": 1775098248496,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/terminal.rs",
+      "accessCount": 3,
+      "lastAccessed": 1775087635661,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/file_tools.rs",
+      "accessCount": 3,
+      "lastAccessed": 1775087638338,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/lib.rs",
+      "accessCount": 3,
+      "lastAccessed": 1775087645446,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/Cargo.toml",
+      "accessCount": 3,
+      "lastAccessed": 1775088611556,
+      "type": "file"
+    },
+    {
+      "path": ".planning/research/telegram-gateway.md",
+      "accessCount": 3,
+      "lastAccessed": 1775088910381,
+      "type": "file"
+    },
+    {
+      "path": ".planning/research/web-scraping.md",
+      "accessCount": 3,
+      "lastAccessed": 1775088911371,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/Cargo.toml",
+      "accessCount": 3,
+      "lastAccessed": 1775090749596,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-context-file-loading/01-01-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1775093492651,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-context-file-loading/01-02-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1775093492809,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/Cargo.toml",
+      "accessCount": 3,
+      "lastAccessed": 1775111503723,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1775087608053,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-state/Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1775087608270,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cli/Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1775087609839,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cron/Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1775087610522,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/ARCH.md",
+      "accessCount": 2,
+      "lastAccessed": 1775090683298,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1775087624546,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/TECH.md",
+      "accessCount": 1,
+      "lastAccessed": 1775087695428,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/QUALITY.md",
+      "accessCount": 1,
+      "lastAccessed": 1775087730572,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/CONCERNS.md",
+      "accessCount": 1,
+      "lastAccessed": 1775087804799,
+      "type": "file"
+    },
+    {
+      "path": ".planning/research/SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1775088966885,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-context-file-loading/01-01-SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1775093496265,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

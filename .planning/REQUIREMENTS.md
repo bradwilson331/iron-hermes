@@ -7,27 +7,27 @@
 
 ### Context Files
 
-- [ ] **CTX-01**: Agent loads SOUL.md from IRONHERMES_HOME into system prompt as personality/identity
-- [ ] **CTX-02**: Agent loads AGENTS.md from IRONHERMES_HOME into system prompt as capability definitions
-- [ ] **CTX-03**: Agent loads project-level context files from working directory (.ironhermes/ or configurable paths)
-- [ ] **CTX-04**: Context files are loaded once at session start (frozen-snapshot pattern for LLM cache stability)
-- [ ] **CTX-05**: Priority-based context assembly: SOUL.md > project context > AGENTS.md (matching hermes-agent order)
+- [x] **CTX-01**: Agent loads SOUL.md from IRONHERMES_HOME into system prompt as personality/identity
+- [x] **CTX-02**: Agent loads AGENTS.md from IRONHERMES_HOME into system prompt as capability definitions
+- [x] **CTX-03**: Agent loads project-level context files from working directory (.ironhermes/ or configurable paths)
+- [x] **CTX-04**: Context files are loaded once at session start (frozen-snapshot pattern for LLM cache stability)
+- [x] **CTX-05**: Priority-based context assembly: SOUL.md > project context > AGENTS.md (matching hermes-agent order)
 
 ### Telegram Gateway
 
 - [ ] **TG-01**: Telegram long polling runs continuously, receives messages, and dispatches to agent loop
 - [ ] **TG-02**: Agent responses (including tool use results) are sent back to the originating Telegram chat
-- [ ] **TG-03**: Streaming responses: progressive message editing as LLM chunks arrive
+- [x] **TG-03**: Streaming responses: progressive message editing as LLM chunks arrive
 - [ ] **TG-04**: Session management: chat_id maps to persistent conversation history via SessionStore
-- [ ] **TG-05**: Graceful shutdown: CancellationToken-based cooperative shutdown of polling and in-flight agent runs
+- [x] **TG-05**: Graceful shutdown: CancellationToken-based cooperative shutdown of polling and in-flight agent runs
 - [ ] **TG-06**: Concurrency limiting: Semaphore bounds maximum concurrent agent runs (default 4-8)
-- [ ] **TG-07**: Error recovery: exponential backoff on polling failures, automatic reconnection
+- [x] **TG-07**: Error recovery: exponential backoff on polling failures, automatic reconnection
 - [ ] **TG-08**: Typing indicator sent while agent is processing
 
 ### Async Infrastructure
 
-- [ ] **ASYNC-01**: SessionStore wrapped in Arc<RwLock> for safe sharing across tokio tasks
-- [ ] **ASYNC-02**: ToolRegistry wrapped in Arc for sharing across concurrent agent runs
+- [x] **ASYNC-01**: SessionStore wrapped in Arc<RwLock> for safe sharing across tokio tasks
+- [x] **ASYNC-02**: ToolRegistry wrapped in Arc for sharing across concurrent agent runs
 - [ ] **ASYNC-03**: Supervisor pattern for gateway subsystems with restart on transient failures
 
 ### Self-Improvement
@@ -95,21 +95,21 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CTX-01 | Phase 1 | Pending |
-| CTX-02 | Phase 1 | Pending |
-| CTX-03 | Phase 1 | Pending |
-| CTX-04 | Phase 1 | Pending |
-| CTX-05 | Phase 1 | Pending |
-| ASYNC-01 | Phase 2 | Pending |
-| ASYNC-02 | Phase 2 | Pending |
+| CTX-01 | Phase 1 | Complete |
+| CTX-02 | Phase 1 | Complete |
+| CTX-03 | Phase 1 | Complete |
+| CTX-04 | Phase 1 | Complete |
+| CTX-05 | Phase 1 | Complete |
+| ASYNC-01 | Phase 2 | Complete |
+| ASYNC-02 | Phase 2 | Complete |
 | ASYNC-03 | Phase 2 | Pending |
 | TG-01 | Phase 2 | Pending |
 | TG-02 | Phase 2 | Pending |
-| TG-03 | Phase 2 | Pending |
+| TG-03 | Phase 2 | Complete |
 | TG-04 | Phase 2 | Pending |
-| TG-05 | Phase 2 | Pending |
+| TG-05 | Phase 2 | Complete |
 | TG-06 | Phase 2 | Pending |
-| TG-07 | Phase 2 | Pending |
+| TG-07 | Phase 2 | Complete |
 | TG-08 | Phase 2 | Pending |
 | SEC-01 | Phase 3 | Pending |
 | SEC-02 | Phase 3 | Pending |
