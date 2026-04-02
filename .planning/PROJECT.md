@@ -23,12 +23,11 @@ A working conversational AI agent with personality (context files) that operates
 - [x] Cron job scheduler with file-based persistence and tick locking
 - [x] Context compression (token estimation, tool result pruning, middle message dropping)
 - [x] Telegram adapter skeleton (Bot API types, send/edit/delete/reactions)
+- [x] Context file loading — SOUL.md, AGENTS.md loaded into system prompt with priority chain, security scanning, and truncation. Validated in Phase 1: Context File Loading
 
 ### Active
 
 <!-- Current scope. Building toward these. -->
-
-- [ ] Context file loading — SOUL.md, AGENTS.md loaded into system prompt, configurable paths
 - [ ] Telegram gateway — long polling wired to agent loop, full conversational bot with tool use
 - [ ] Self-improvement loop — agent can modify its own context files, prompts, and behavior
 - [ ] Web scraping tools — page content reading, URL fetching beyond Firecrawl search
@@ -44,10 +43,10 @@ A working conversational AI agent with personality (context files) that operates
 
 - Ported from a ~277K line Python project; core architecture maps 1:1 but Rust version is ~4,250 lines
 - The Python hermes-agent has working Telegram, Discord, Slack gateways — IronHermes needs to reach Telegram parity first
-- PromptBuilder already has platform-hint scaffolding and context file path resolution — needs the actual file loading wired up
+- PromptBuilder fully wired: loads SOUL.md from IRONHERMES_HOME, discovers project context via priority chain, scans for injection, assembles in correct order
 - TelegramAdapter has Bot API types and message methods but polling isn't connected to the agent loop
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
-- 11 tests passing across cron and agent crates; state, tools, CLI, and gateway lack test coverage
+- 31 tests passing across cron and agent crates (20 in agent after Phase 1); state, tools, CLI, and gateway lack test coverage
 
 ## Constraints
 
@@ -69,4 +68,4 @@ A working conversational AI agent with personality (context files) that operates
 | Context files over database for personality | Matches Python approach; files are git-trackable and agent-editable | -- Pending |
 
 ---
-*Last updated: 2026-04-01 after initial project setup and codebase mapping*
+*Last updated: 2026-04-01 after Phase 1 (Context File Loading) completion*
