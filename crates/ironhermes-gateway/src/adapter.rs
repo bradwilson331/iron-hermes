@@ -1,12 +1,20 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use ironhermes_core::{MessageEvent, MessageResponse, Platform};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Handler for incoming messages — connects gateway to the agent.
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
-    /// Process an incoming message and return the response text.
-    async fn handle(&self, event: &MessageEvent) -> Result<String>;
+    /// Process an incoming message. The handler owns the adapter reference
+    /// and drives edits/responses directly (enabling streaming).
+    async fn handle(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()>;
 }
 
 /// Trait for platform-specific messaging adapters.
@@ -14,12 +22,6 @@ pub trait MessageHandler: Send + Sync {
 pub trait PlatformAdapter: Send + Sync {
     /// The platform this adapter handles.
     fn platform(&self) -> Platform;
-
-    /// Start listening for incoming messages.
-    async fn start(&mut self, handler: Box<dyn MessageHandler>) -> Result<()>;
-
-    /// Stop the adapter gracefully.
-    async fn stop(&mut self) -> Result<()>;
 
     /// Send a text message to a chat.
     async fn send_message(
@@ -29,8 +31,16 @@ pub trait PlatformAdapter: Send + Sync {
         thread_id: Option<&str>,
     ) -> Result<MessageResponse>;
 
-    /// Edit an existing message.
+    /// Edit an existing message (plain text — for streaming edits).
     async fn edit_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<()>;
+
+    /// Edit an existing message with Markdown formatting (for final edit).
+    async fn edit_message_markdown(
         &self,
         chat_id: &str,
         message_id: &str,
@@ -48,6 +58,11 @@ pub trait PlatformAdapter: Send + Sync {
         _emoji: &str,
     ) -> Result<()> {
         Ok(()) // Default no-op for platforms that don't support reactions
+    }
+
+    /// Send a chat action (e.g. "typing").
+    async fn send_chat_action(&self, _chat_id: &str, _action: &str) -> Result<()> {
+        Ok(()) // Default no-op
     }
 
     /// Check if the adapter is currently running.

@@ -3,11 +3,10 @@ use async_trait::async_trait;
 use ironhermes_core::{MessageEvent, MessageResponse, Platform};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tracing::{error, info, warn};
+use crate::adapter::PlatformAdapter;
 
-use crate::adapter::{MessageHandler, PlatformAdapter};
+// Re-export CancellationToken so polling modules in later plans can import it from here.
+pub use tokio_util::sync::CancellationToken;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
@@ -15,8 +14,7 @@ const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 pub struct TelegramAdapter {
     token: String,
     http: Client,
-    running: Arc<AtomicBool>,
-    poll_handle: Option<tokio::task::JoinHandle<()>>,
+    pub bot_username: Option<String>,
 }
 
 impl TelegramAdapter {
@@ -24,8 +22,7 @@ impl TelegramAdapter {
         Self {
             token: token.into(),
             http: Client::new(),
-            running: Arc::new(AtomicBool::new(false)),
-            poll_handle: None,
+            bot_username: None,
         }
     }
 
@@ -33,7 +30,7 @@ impl TelegramAdapter {
         format!("{}/bot{}/{}", TELEGRAM_API_BASE, self.token, method)
     }
 
-    async fn api_call<T: serde::de::DeserializeOwned>(
+    pub async fn api_call<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
         params: &impl Serialize,
@@ -63,128 +60,37 @@ impl TelegramAdapter {
 
         body.result.context("Telegram API returned no result")
     }
+
+    /// Get bot information.
+    pub async fn get_me(&self) -> Result<TgUser> {
+        self.api_call("getMe", &serde_json::json!({})).await
+    }
+
+    /// Register bot commands with Telegram.
+    pub async fn set_my_commands(&self, commands: &[TgBotCommand]) -> Result<()> {
+        let params = serde_json::json!({ "commands": commands });
+        let _: serde_json::Value = self.api_call("setMyCommands", &params).await?;
+        Ok(())
+    }
+
+    /// Get file metadata by file_id.
+    pub async fn get_file(&self, file_id: &str) -> Result<TgFile> {
+        let params = serde_json::json!({ "file_id": file_id });
+        self.api_call("getFile", &params).await
+    }
+
+    /// Download a file by its file_path from getFile response.
+    pub async fn download_file(&self, file_path: &str) -> Result<Vec<u8>> {
+        let url = format!("{}/file/bot{}/{}", TELEGRAM_API_BASE, self.token, file_path);
+        let bytes = self.http.get(&url).send().await?.bytes().await?;
+        Ok(bytes.to_vec())
+    }
 }
 
 #[async_trait]
 impl PlatformAdapter for TelegramAdapter {
     fn platform(&self) -> Platform {
         Platform::Telegram
-    }
-
-    async fn start(&mut self, handler: Box<dyn MessageHandler>) -> Result<()> {
-        info!("Starting Telegram adapter (long polling)");
-        self.running.store(true, Ordering::SeqCst);
-
-        let token = self.token.clone();
-        let http = self.http.clone();
-        let running = self.running.clone();
-        let handler = Arc::new(handler);
-
-        // Verify bot token by calling getMe
-        let me: TgUser = self
-            .api_call("getMe", &serde_json::json!({}))
-            .await
-            .context("Failed to verify Telegram bot token")?;
-        info!(
-            bot_name = %me.first_name,
-            username = ?me.username,
-            "Telegram bot connected"
-        );
-
-        let handle = tokio::spawn(async move {
-            let mut offset: Option<i64> = None;
-
-            while running.load(Ordering::SeqCst) {
-                let params = serde_json::json!({
-                    "timeout": 30,
-                    "offset": offset,
-                    "allowed_updates": ["message"],
-                });
-
-                let url = format!("{}/bot{}/getUpdates", TELEGRAM_API_BASE, token);
-                let result = http.post(&url).json(&params).send().await;
-
-                match result {
-                    Ok(response) => {
-                        let body: std::result::Result<TelegramResponse<Vec<TgUpdate>>, _> =
-                            response.json().await;
-                        match body {
-                            Ok(resp) if resp.ok => {
-                                if let Some(updates) = resp.result {
-                                    for update in updates {
-                                        offset = Some(update.update_id + 1);
-
-                                        if let Some(message) = update.message {
-                                            let event = tg_message_to_event(&message);
-                                            let handler = handler.clone();
-                                            let http = http.clone();
-                                            let token = token.clone();
-
-                                            tokio::spawn(async move {
-                                                match handler.handle(&event).await {
-                                                    Ok(response_text) => {
-                                                        if response_text.is_empty() {
-                                                            return;
-                                                        }
-                                                        let params = serde_json::json!({
-                                                            "chat_id": event.chat_id,
-                                                            "text": response_text,
-                                                            "parse_mode": "Markdown",
-                                                        });
-                                                        let url = format!(
-                                                            "{}/bot{}/sendMessage",
-                                                            TELEGRAM_API_BASE, token
-                                                        );
-                                                        if let Err(e) = http
-                                                            .post(&url)
-                                                            .json(&params)
-                                                            .send()
-                                                            .await
-                                                        {
-                                                            error!("Failed to send Telegram response: {}", e);
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        error!("Handler error: {}", e);
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(resp) => {
-                                warn!(
-                                    "Telegram getUpdates failed: {}",
-                                    resp.description.unwrap_or_default()
-                                );
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse Telegram updates: {}", e);
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Telegram poll error: {}", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }
-                }
-            }
-        });
-
-        self.poll_handle = Some(handle);
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        info!("Stopping Telegram adapter");
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(handle) = self.poll_handle.take() {
-            handle.abort();
-        }
-        Ok(())
     }
 
     async fn send_message(
@@ -196,7 +102,6 @@ impl PlatformAdapter for TelegramAdapter {
         let params = serde_json::json!({
             "chat_id": chat_id,
             "text": content,
-            "parse_mode": "Markdown",
         });
 
         let result: TgMessage = self.api_call("sendMessage", &params).await?;
@@ -209,6 +114,22 @@ impl PlatformAdapter for TelegramAdapter {
     }
 
     async fn edit_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<()> {
+        let params = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id.parse::<i64>().unwrap_or(0),
+            "text": content,
+        });
+
+        let _: serde_json::Value = self.api_call("editMessageText", &params).await?;
+        Ok(())
+    }
+
+    async fn edit_message_markdown(
         &self,
         chat_id: &str,
         message_id: &str,
@@ -251,8 +172,15 @@ impl PlatformAdapter for TelegramAdapter {
         Ok(())
     }
 
+    async fn send_chat_action(&self, chat_id: &str, action: &str) -> Result<()> {
+        let params = serde_json::json!({ "chat_id": chat_id, "action": action });
+        let _: serde_json::Value = self.api_call("sendChatAction", &params).await?;
+        Ok(())
+    }
+
     fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        // Lifecycle is managed by GatewayRunner; adapter itself has no running state
+        false
     }
 }
 
@@ -268,38 +196,73 @@ struct TelegramResponse<T> {
     description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TgUpdate {
-    update_id: i64,
-    message: Option<TgMessage>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgUpdate {
+    pub update_id: i64,
+    pub message: Option<TgMessage>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TgMessage {
-    message_id: i64,
-    from: Option<TgUser>,
-    chat: TgChat,
-    text: Option<String>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgMessage {
+    pub message_id: i64,
+    pub from: Option<TgUser>,
+    pub chat: TgChat,
+    pub text: Option<String>,
+    pub caption: Option<String>,
+    pub photo: Option<Vec<TgPhotoSize>>,
+    pub document: Option<TgDocument>,
     #[allow(dead_code)]
-    date: i64,
+    pub date: i64,
 }
 
-#[derive(Debug, Deserialize)]
-struct TgUser {
-    id: i64,
-    first_name: String,
-    username: Option<String>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgUser {
+    pub id: i64,
+    pub first_name: String,
+    pub username: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TgChat {
-    id: i64,
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgChat {
+    pub id: i64,
     #[serde(rename = "type")]
-    chat_type: String,
-    title: Option<String>,
+    pub chat_type: String,
+    pub title: Option<String>,
 }
 
-fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TgBotCommand {
+    pub command: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgFile {
+    pub file_id: String,
+    pub file_unique_id: Option<String>,
+    pub file_size: Option<i64>,
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgPhotoSize {
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub width: i32,
+    pub height: i32,
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgDocument {
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub file_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub file_size: Option<i64>,
+}
+
+pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
     MessageEvent {
         platform: Platform::Telegram,
         message_id: msg.message_id.to_string(),
@@ -309,7 +272,7 @@ fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
             .as_ref()
             .map(|u| u.id.to_string())
             .unwrap_or_default(),
-        content: msg.text.clone().unwrap_or_default(),
+        content: msg.text.clone().or_else(|| msg.caption.clone()).unwrap_or_default(),
         attachments: Vec::new(),
         thread_id: None,
         chat_type: match msg.chat.chat_type.as_str() {
@@ -323,3 +286,4 @@ fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
         replied_to_id: None,
     }
 }
+
