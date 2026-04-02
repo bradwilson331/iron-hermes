@@ -68,7 +68,13 @@ Plans:
   3. Multiple users can chat with the bot simultaneously without blocking each other
   4. Bot reconnects automatically after network interruptions with exponential backoff
   5. Sending ctrl+c gracefully stops the bot, waiting for in-flight agent runs to complete before exiting
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 02-01-PLAN.md — Async foundation: tokio-util dep, config extensions, trait redesign, TelegramAdapter refactor
+- [ ] 02-02-PLAN.md — StreamConsumer + BackoffState utility modules with tests
+- [ ] 02-03-PLAN.md — Core wiring: polling loop, channel dispatch, user queue, handler, runner
+- [ ] 02-04-PLAN.md — Slash commands (/start, /new, /clear, /help) and error recovery
+- [ ] 02-05-PLAN.md — Multimodal input (images, PDFs, documents) + gateway CLI subcommand
 
 ### Phase 3: Self-Improvement + Security
 **Goal**: Agent can safely read, edit, and extend its own context files (SOUL.md, AGENTS.md) and maintain a persistent memory of facts, with security scanning that prevents prompt injection or self-destructive modifications
@@ -161,6 +167,6 @@ Phases execute in numeric order: 1 > 2 > 3 > 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Context File Loading | 0/2 | Planned    |  |
-| 2. Telegram Gateway | 0/TBD | Not started | - |
+| 2. Telegram Gateway | 0/5 | Planned | - |
 | 3. Self-Improvement + Security | 0/TBD | Not started | - |
 | 4. Web Scraping Tools | 0/TBD | Not started | - |
