@@ -1,0 +1,22 @@
+[package]
+name = "ironhermes-tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tool registry and implementations for IronHermes"
+
+[dependencies]
+ironhermes-core = { path = "../ironhermes-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }

@@ -1,0 +1,61 @@
+[workspace]
+members = [
+    "crates/ironhermes-core",
+    "crates/ironhermes-state",
+    "crates/ironhermes-tools",
+    "crates/ironhermes-agent",
+    "crates/ironhermes-cli",
+    "crates/ironhermes-gateway",
+    "crates/ironhermes-cron",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Nous Research"]
+license = "MIT"
+description = "IronHermes — The self-improving AI agent, rewritten in Rust"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+# Database
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Error handling
+anyhow = "1"
+thiserror = "2"
+# Env
+dotenvy = "0.15"
+dirs = "6"
+# Async trait
+async-trait = "0.1"
+# Streaming
+tokio-stream = "0.1"
+futures = "0.3"
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+# UUID
+uuid = { version = "1", features = ["v4"] }
+# Regex
+regex = "1"
+# Glob
+glob = "0.3"
+# Terminal UI
+crossterm = "0.28"
+colored = "3"
+indicatif = "0.17"
+rustyline = "15"
+# Cron
+cron = "0.13"
