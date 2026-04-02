@@ -1,21 +1,332 @@
-use anyhow::Result;
+use std::sync::Arc;
+use anyhow::{Context, Result};
+use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use ironhermes_core::Config;
-use tracing::info;
+use ironhermes_tools::ToolRegistry;
+use tracing::{error, info, warn};
 
-/// Runs the multi-platform messaging gateway.
+use crate::adapter::MessageHandler;
+use crate::backoff::BackoffState;
+use crate::handler::GatewayMessageHandler;
+use crate::session::SessionStore;
+use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
+use crate::user_queue::UserQueueManager;
+
+/// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
+/// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
 pub struct GatewayRunner {
-    #[allow(dead_code)]
     config: Config,
+    session_store: Arc<RwLock<SessionStore>>,
+    tool_registry: Arc<ToolRegistry>,
+    cancel: CancellationToken,
 }
 
 impl GatewayRunner {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(config: Config, tool_registry: Arc<ToolRegistry>) -> Self {
+        Self {
+            config,
+            session_store: Arc::new(RwLock::new(SessionStore::new())),
+            tool_registry,
+            cancel: CancellationToken::new(),
+        }
     }
 
-    /// Start the gateway. Full implementation arrives in plan 03.
+    /// Start the gateway. Blocks until ctrl+c or fatal error.
     pub async fn start(&self) -> Result<()> {
-        info!("Gateway runner placeholder — full implementation in plan 03");
+        // --- 1. Resolve Telegram token ---
+        let tg_config = self
+            .config
+            .gateway
+            .platforms
+            .get("telegram")
+            .cloned()
+            .unwrap_or_default();
+
+        let token = resolve_token(&tg_config.token)
+            .context("No Telegram bot token configured. Set TELEGRAM_BOT_TOKEN or gateway.platforms.telegram.token in config.yaml")?;
+
+        // --- 2. Create adapter ---
+        let adapter: Arc<TelegramAdapter> = Arc::new(TelegramAdapter::new(&token));
+
+        // --- 3. Verify token via getMe ---
+        let bot_info = adapter
+            .get_me()
+            .await
+            .context("Failed to authenticate with Telegram (check bot token)")?;
+        let bot_username = bot_info.username.clone().unwrap_or_default();
+        info!(
+            bot_id = bot_info.id,
+            bot_name = %bot_info.first_name,
+            bot_username = %bot_username,
+            "Connected to Telegram"
+        );
+
+        // --- 4. Register slash commands (D-17) ---
+        let commands = vec![
+            TgBotCommand {
+                command: "start".into(),
+                description: "Start the bot".into(),
+            },
+            TgBotCommand {
+                command: "new".into(),
+                description: "New conversation".into(),
+            },
+            TgBotCommand {
+                command: "clear".into(),
+                description: "Clear history".into(),
+            },
+            TgBotCommand {
+                command: "help".into(),
+                description: "Show help".into(),
+            },
+        ];
+        if let Err(e) = adapter.set_my_commands(&commands).await {
+            warn!("Failed to register bot commands: {}", e);
+        } else {
+            info!("Bot commands registered");
+        }
+
+        // --- 5. Setup channels and concurrency primitives ---
+        let (msg_tx, msg_rx) = mpsc::channel::<crate::telegram::TgUpdate>(256);
+        let max_concurrent = tg_config.max_concurrent_runs.max(1);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let timeout_hours = tg_config.session_timeout_hours;
+        let whitelist = tg_config.whitelist.clone();
+
+        // --- 6. Create handler and queue manager ---
+        let handler = Arc::new(GatewayMessageHandler::new(
+            self.config.clone(),
+            self.session_store.clone(),
+            self.tool_registry.clone(),
+        ));
+        let user_queue = Arc::new(UserQueueManager::new(
+            adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
+            16,
+        ));
+
+        let mut join_set: JoinSet<()> = JoinSet::new();
+
+        // --- 7. Poll loop ---
+        let poll_cancel = self.cancel.clone();
+        let adapter_poll = adapter.clone();
+        let msg_tx_poll = msg_tx.clone();
+        join_set.spawn(async move {
+            let mut offset: Option<i64> = None;
+            let mut backoff = BackoffState::default_polling();
+
+            loop {
+                tokio::select! {
+                    _ = poll_cancel.cancelled() => {
+                        info!("Poll loop cancelled");
+                        break;
+                    }
+                    result = adapter_poll.get_updates(offset) => {
+                        match result {
+                            Ok(updates) => {
+                                backoff.record_success();
+                                for update in &updates {
+                                    if let Some(new_offset) = offset {
+                                        if update.update_id >= new_offset {
+                                            offset = Some(update.update_id + 1);
+                                        }
+                                    } else {
+                                        offset = Some(update.update_id + 1);
+                                    }
+                                    if msg_tx_poll.send(update.clone()).await.is_err() {
+                                        // Dispatch channel closed — shutting down
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string();
+                                if err_str.contains("Conflict") || err_str.contains("409") {
+                                    backoff.record_conflict();
+                                    if backoff.is_fatal_conflict() {
+                                        error!("Fatal 409 conflict — another bot instance is polling on this token. Shutting down.");
+                                        poll_cancel.cancel();
+                                        break;
+                                    }
+                                } else {
+                                    backoff.record_failure();
+                                }
+                                let delay = backoff.next_delay();
+                                warn!(
+                                    error = %e,
+                                    delay_ms = delay.as_millis(),
+                                    "Polling error, backing off"
+                                );
+                                tokio::time::sleep(delay).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // --- 8. Dispatch loop ---
+        let dispatch_cancel = self.cancel.clone();
+        let handler_dispatch = handler.clone();
+        let user_queue_dispatch = user_queue.clone();
+        let adapter_dispatch = adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>;
+        let semaphore_dispatch = semaphore.clone();
+        let cancel_dispatch = self.cancel.clone();
+        let mut msg_rx = msg_rx;
+        let bot_username_str = bot_username.clone();
+
+        // We run dispatch inline (not in JoinSet) so we control msg_rx lifetime
+        let dispatch_future = async move {
+            loop {
+                tokio::select! {
+                    _ = dispatch_cancel.cancelled() => {
+                        info!("Dispatch loop cancelled");
+                        break;
+                    }
+                    update = msg_rx.recv() => {
+                        let update = match update {
+                            Some(u) => u,
+                            None => break, // channel closed
+                        };
+
+                        let msg = match &update.message {
+                            Some(m) => m.clone(),
+                            None => continue,
+                        };
+
+                        // Convert to MessageEvent
+                        let event = tg_message_to_event(&msg);
+
+                        // Whitelist check (D-10/D-11/D-12)
+                        if !whitelist.is_empty() {
+                            let sender_id: i64 = event.sender_id.parse().unwrap_or(0);
+                            if !whitelist.contains(&sender_id) {
+                                // Silently ignore unauthorized users (D-11)
+                                continue;
+                            }
+                        } else {
+                            // Empty whitelist = deny all (D-12)
+                            continue;
+                        }
+
+                        // Group @mention check (D-09)
+                        if event.chat_type == "group" || event.chat_type == "supergroup" {
+                            let mention = format!("@{}", bot_username_str);
+                            if !event.content.contains(&mention) {
+                                continue;
+                            }
+                        }
+
+                        // Dispatch via per-user queue
+                        let maybe_rx = user_queue_dispatch.dispatch(event).await;
+                        if let Some(mut chat_rx) = maybe_rx {
+                            // New worker needed for this chat
+                            let handler_task = handler_dispatch.clone();
+                            let adapter_task = adapter_dispatch.clone();
+                            let sem_task = semaphore_dispatch.clone();
+                            let cancel_task = cancel_dispatch.clone();
+                            let queue_task = user_queue_dispatch.clone();
+                            let chat_id_task = msg.chat.id.to_string();
+
+                            // Spawn per-chat worker into a detached task
+                            // We don't add to join_set here (JoinSet is owned outside closure),
+                            // but per-chat workers drain when cancel fires because they select on it
+                            tokio::spawn(async move {
+                                while let Some(queued_msg) = chat_rx.recv().await {
+                                    // Acquire semaphore permit (bounded concurrency per TG-06)
+                                    let permit = match sem_task.acquire().await {
+                                        Ok(p) => p,
+                                        Err(_) => break, // semaphore closed
+                                    };
+
+                                    let result = handler_task
+                                        .handle(
+                                            &queued_msg.event,
+                                            adapter_task.clone(),
+                                            cancel_task.child_token(),
+                                        )
+                                        .await;
+
+                                    drop(permit);
+
+                                    if let Err(e) = result {
+                                        error!(
+                                            chat_id = %queued_msg.event.chat_id,
+                                            error = %e,
+                                            "Handler error for message"
+                                        );
+                                    }
+
+                                    // Check if we should stop
+                                    if cancel_task.is_cancelled() {
+                                        break;
+                                    }
+                                }
+                                // Worker done — remove from queue manager
+                                queue_task.remove(&chat_id_task).await;
+                            });
+                        }
+                    }
+                }
+            }
+        };
+
+        // --- 9. Session cleanup task ---
+        let cleanup_cancel = self.cancel.clone();
+        let session_store_cleanup = self.session_store.clone();
+        join_set.spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+            loop {
+                tokio::select! {
+                    _ = cleanup_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let mut store = session_store_cleanup.write().await;
+                        store.expire_stale(timeout_hours);
+                    }
+                }
+            }
+        });
+
+        // --- 10. Wait for shutdown signal ---
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl+C received, initiating graceful shutdown");
+            }
+            _ = self.cancel.cancelled() => {
+                info!("Cancellation token fired, shutting down");
+            }
+        }
+
+        // Propagate cancellation to all subtasks
+        self.cancel.cancel();
+
+        // Drop msg_tx to signal the dispatch loop to close when polling stops
+        drop(msg_tx);
+
+        // Run dispatch_future (it will exit immediately since cancel is set)
+        dispatch_future.await;
+
+        // Drain all JoinSet tasks (poll loop + session cleanup)
+        while join_set.join_next().await.is_some() {}
+
+        info!("Gateway shut down cleanly");
         Ok(())
     }
+}
+
+/// Resolve the bot token from config value or environment variable.
+/// Supports `${ENV_VAR}` syntax for indirection through environment.
+fn resolve_token(token: &Option<String>) -> Option<String> {
+    if let Some(t) = token {
+        if t.starts_with("${") && t.ends_with('}') {
+            let var_name = &t[2..t.len() - 1];
+            return std::env::var(var_name).ok();
+        }
+        if !t.is_empty() {
+            return Some(t.clone());
+        }
+    }
+    // Fall back to TELEGRAM_BOT_TOKEN environment variable
+    std::env::var("TELEGRAM_BOT_TOKEN").ok()
 }

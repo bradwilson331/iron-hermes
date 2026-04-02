@@ -85,6 +85,16 @@ impl TelegramAdapter {
         let bytes = self.http.get(&url).send().await?.bytes().await?;
         Ok(bytes.to_vec())
     }
+
+    /// Long-poll for updates with a 30-second timeout.
+    /// `offset` should be `last_update_id + 1` to avoid redelivery.
+    pub async fn get_updates(&self, offset: Option<i64>) -> Result<Vec<TgUpdate>> {
+        let mut params = serde_json::json!({ "timeout": 30 });
+        if let Some(off) = offset {
+            params["offset"] = serde_json::Value::Number(serde_json::Number::from(off));
+        }
+        self.api_call("getUpdates", &params).await
+    }
 }
 
 #[async_trait]
