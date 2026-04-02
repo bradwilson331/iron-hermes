@@ -280,6 +280,7 @@ struct TgMessage {
     from: Option<TgUser>,
     chat: TgChat,
     text: Option<String>,
+    #[allow(dead_code)]
     date: i64,
 }
 

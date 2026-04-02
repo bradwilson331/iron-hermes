@@ -27,18 +27,18 @@ impl GatewayRunner {
         info!("Starting gateway");
 
         // Check for Telegram
-        if let Some(platform_config) = self.config.gateway.platforms.get("telegram") {
-            if platform_config.enabled {
-                if let Some(ref token) = platform_config.token {
-                    let resolved_token = resolve_env_var(token);
-                    let adapter = TelegramAdapter::new(resolved_token);
-                    // Clone the handler for each adapter
-                    // In a real implementation, we'd use Arc<dyn MessageHandler>
-                    info!("Telegram adapter configured");
-                    self.adapters.push(Box::new(adapter));
-                } else {
-                    warn!("Telegram enabled but no token configured");
-                }
+        if let Some(platform_config) = self.config.gateway.platforms.get("telegram")
+            && platform_config.enabled
+        {
+            if let Some(ref token) = platform_config.token {
+                let resolved_token = resolve_env_var(token);
+                let adapter = TelegramAdapter::new(resolved_token);
+                // Clone the handler for each adapter
+                // In a real implementation, we'd use Arc<dyn MessageHandler>
+                info!("Telegram adapter configured");
+                self.adapters.push(Box::new(adapter));
+            } else {
+                warn!("Telegram enabled but no token configured");
             }
         }
 

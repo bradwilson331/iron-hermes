@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::client::{LlmClient, StreamEvent};
+use crate::client::{LlmClient, StreamEvent, ToolCallDelta};
 use crate::context_compressor::ContextCompressor;
 
 /// Result of an agent loop execution.
@@ -141,10 +141,10 @@ impl AgentLoop {
                 .is_some_and(|tc| !tc.is_empty());
 
             // Extract text response
-            if let Some(text) = assistant_message.content_text() {
-                if !text.is_empty() {
-                    final_response = Some(text.to_string());
-                }
+            if let Some(text) = assistant_message.content_text()
+                && !text.is_empty()
+            {
+                final_response = Some(text.to_string());
             }
 
             messages.push(assistant_message.clone());
@@ -210,8 +210,7 @@ impl AgentLoop {
             .context("Streaming LLM call failed")?;
 
         let mut content = String::new();
-        let mut tool_call_deltas: Vec<(usize, Option<String>, Option<String>, Option<String>)> =
-            Vec::new();
+        let mut tool_call_deltas: Vec<ToolCallDelta> = Vec::new();
         let mut usage = None;
 
         while let Some(event) = rx.recv().await {

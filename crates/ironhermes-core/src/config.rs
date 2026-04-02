@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub model: ModelConfig,
@@ -13,20 +13,6 @@ pub struct Config {
     pub gateway: GatewayConfig,
     pub cron: CronConfig,
     pub security: SecurityConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            model: ModelConfig::default(),
-            agent: AgentConfig::default(),
-            terminal: TerminalConfig::default(),
-            web: WebConfig::default(),
-            gateway: GatewayConfig::default(),
-            cron: CronConfig::default(),
-            security: SecurityConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,21 +91,13 @@ impl Default for WebConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayConfig {
     pub platforms: HashMap<String, PlatformGatewayConfig>,
 }
 
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            platforms: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlatformGatewayConfig {
     pub enabled: bool,
@@ -127,17 +105,6 @@ pub struct PlatformGatewayConfig {
     pub api_key: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
-}
-
-impl Default for PlatformGatewayConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            token: None,
-            api_key: None,
-            extra: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
