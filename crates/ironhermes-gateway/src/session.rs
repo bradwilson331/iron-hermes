@@ -1,6 +1,7 @@
 use ironhermes_core::{ChatMessage, Platform};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use tracing::debug;
 
 /// Unique key for a gateway session (platform + chat_id + optional user_id).
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -69,6 +70,12 @@ impl GatewaySession {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
+
+    /// Returns true if this session has not been updated within `timeout_hours`.
+    pub fn is_expired(&self, timeout_hours: u64) -> bool {
+        let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
+        self.updated_at < cutoff
+    }
 }
 
 /// In-memory session store for the gateway.
@@ -107,5 +114,16 @@ impl SessionStore {
 
     pub fn count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Remove all sessions not updated within `timeout_hours`.
+    pub fn expire_stale(&mut self, timeout_hours: u64) {
+        let before = self.sessions.len();
+        let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
+        self.sessions.retain(|_, session| session.updated_at > cutoff);
+        let evicted = before - self.sessions.len();
+        if evicted > 0 {
+            debug!("Evicted {} stale session(s)", evicted);
+        }
     }
 }
