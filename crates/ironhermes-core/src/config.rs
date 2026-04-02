@@ -103,9 +103,21 @@ pub struct PlatformGatewayConfig {
     pub enabled: bool,
     pub token: Option<String>,
     pub api_key: Option<String>,
+    /// Telegram user IDs allowed to interact with the bot. Empty = deny all (D-12).
+    #[serde(default)]
+    pub whitelist: Vec<i64>,
+    /// Session inactivity timeout in hours. Default 24 (D-14).
+    #[serde(default = "default_session_timeout_hours")]
+    pub session_timeout_hours: u64,
+    /// Maximum concurrent agent runs. Default 8 (TG-06).
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
+
+fn default_session_timeout_hours() -> u64 { 24 }
+fn default_max_concurrent_runs() -> usize { 8 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

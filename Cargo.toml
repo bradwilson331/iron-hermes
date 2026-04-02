@@ -59,3 +59,7 @@ indicatif = "0.17"
 rustyline = "15"
 # Cron
 cron = "0.13"
+# Async utilities
+tokio-util = { version = "0.7", features = ["rt"] }
+# PDF extraction
+pdf-extract = "0.10"
