@@ -1,0 +1,13 @@
+{
+  "workflow": "new-project",
+  "created_at": "2026-04-01",
+  "researcher_model": "sonnet",
+  "synthesizer_model": "sonnet",
+  "roadmapper_model": "sonnet",
+  "commit_docs": true,
+  "research_enabled": true,
+  "research_depth": "full",
+  "roadmap_strategy": "risk",
+  "brownfield": true,
+  "codebase_mapped": true
+}
