@@ -182,6 +182,11 @@ impl PromptBuilder {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    /// Tests that manipulate IRONHERMES_HOME must hold this lock
+    /// to avoid env var races (Rust tests run in parallel).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn make_temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("Failed to create temp dir")
@@ -197,6 +202,7 @@ mod tests {
 
     #[test]
     fn test_soul_replaces_default() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let home_dir = make_temp_dir();
         let cwd_dir = make_temp_dir();
         fs::write(home_dir.path().join("SOUL.md"), "You are a custom soul.").unwrap();
@@ -219,6 +225,7 @@ mod tests {
 
     #[test]
     fn test_project_context_priority() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let home_dir = make_temp_dir();
         let cwd_dir = make_temp_dir();
         fs::write(cwd_dir.path().join(".hermes.md"), "hermes context").unwrap();
@@ -241,6 +248,7 @@ mod tests {
 
     #[test]
     fn test_project_context_first_match_wins() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let home_dir = make_temp_dir();
         let cwd_dir = make_temp_dir();
         fs::write(cwd_dir.path().join("CLAUDE.md"), "claude context only").unwrap();
@@ -261,6 +269,7 @@ mod tests {
 
     #[test]
     fn test_assembly_order() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let home_dir = make_temp_dir();
         let cwd_dir = make_temp_dir();
         fs::write(home_dir.path().join("SOUL.md"), "SOUL CONTENT").unwrap();
@@ -291,6 +300,7 @@ mod tests {
 
     #[test]
     fn test_empty_files_skipped() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let home_dir = make_temp_dir();
         let cwd_dir = make_temp_dir();
         fs::write(home_dir.path().join("SOUL.md"), "   ").unwrap(); // whitespace only
