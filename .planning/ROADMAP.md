@@ -39,7 +39,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Project-level context files from the working directory are discovered and loaded using the priority chain
   4. Context files are loaded once at session start and do not change if the underlying files are edited mid-session
   5. Assembly order is SOUL.md > project context > AGENTS.md, matching hermes-agent's prompt layering
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 01-01-PLAN.md — Context scanner + PromptBuilder rewrite with layered loading
+- [ ] 01-02-PLAN.md — CLI wiring + full build verification
 
 ### Phase 2: Telegram Gateway
 **Goal**: A working Telegram bot that receives messages via long polling, runs them through the agent loop with tool use, streams responses back with progressive message editing, and handles multiple concurrent users reliably
@@ -157,7 +160,7 @@ Phases execute in numeric order: 1 > 2 > 3 > 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Context File Loading | 0/TBD | Not started | - |
+| 1. Context File Loading | 0/2 | Planning complete | - |
 | 2. Telegram Gateway | 0/TBD | Not started | - |
 | 3. Self-Improvement + Security | 0/TBD | Not started | - |
 | 4. Web Scraping Tools | 0/TBD | Not started | - |
