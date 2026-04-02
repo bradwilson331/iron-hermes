@@ -29,13 +29,27 @@ pub trait PlatformAdapter: Send + Sync {
         thread_id: Option<&str>,
     ) -> Result<MessageResponse>;
 
-    /// Edit an existing message.
+    /// Edit an existing message (plain text, no parse_mode).
     async fn edit_message(
         &self,
         chat_id: &str,
         message_id: &str,
         content: &str,
     ) -> Result<()>;
+
+    /// Edit an existing message with Markdown parse mode (final edit per D-03).
+    async fn edit_message_markdown(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<()>;
+
+    /// Send a chat action (e.g., "typing") per D-16.
+    async fn send_chat_action(&self, chat_id: &str, action: &str) -> Result<()> {
+        let _ = (chat_id, action);
+        Ok(()) // Default no-op
+    }
 
     /// Delete a message.
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()>;

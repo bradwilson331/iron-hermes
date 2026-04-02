@@ -214,6 +214,24 @@ impl PlatformAdapter for TelegramAdapter {
         message_id: &str,
         content: &str,
     ) -> Result<()> {
+        // Plain text during streaming edits per D-03 (no parse_mode)
+        let params = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id.parse::<i64>().unwrap_or(0),
+            "text": content,
+        });
+
+        let _: serde_json::Value = self.api_call("editMessageText", &params).await?;
+        Ok(())
+    }
+
+    async fn edit_message_markdown(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<()> {
+        // Markdown parse mode on final edit only per D-03
         let params = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id.parse::<i64>().unwrap_or(0),
