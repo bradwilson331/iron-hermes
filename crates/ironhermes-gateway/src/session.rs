@@ -1,6 +1,7 @@
 use ironhermes_core::{ChatMessage, Platform};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use tracing::debug;
 
 /// Unique key for a gateway session (platform + chat_id + optional user_id).
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -117,7 +118,12 @@ impl SessionStore {
 
     /// Remove all sessions that have been inactive longer than `timeout_hours`.
     pub fn expire_stale(&mut self, timeout_hours: u64) {
+        let before = self.sessions.len();
         let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
         self.sessions.retain(|_, session| session.updated_at > cutoff);
+        let evicted = before - self.sessions.len();
+        if evicted > 0 {
+            debug!("Evicted {} stale session(s)", evicted);
+        }
     }
 }

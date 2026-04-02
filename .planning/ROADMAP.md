@@ -70,8 +70,8 @@ Plans:
   5. Sending ctrl+c gracefully stops the bot, waiting for in-flight agent runs to complete before exiting
 **Plans**: 5 plans
 Plans:
-- [ ] 02-01-PLAN.md — Async foundation: tokio-util dep, config extensions, trait redesign, TelegramAdapter refactor
-- [ ] 02-02-PLAN.md — StreamConsumer + BackoffState utility modules with tests
+- [x] 02-01-PLAN.md — Async foundation: tokio-util dep, config extensions, trait redesign, TelegramAdapter refactor
+- [x] 02-02-PLAN.md — StreamConsumer + BackoffState utility modules with tests
 - [ ] 02-03-PLAN.md — Core wiring: polling loop, channel dispatch, user queue, handler, runner
 - [ ] 02-04-PLAN.md — Slash commands (/start, /new, /clear, /help) and error recovery
 - [ ] 02-05-PLAN.md — Multimodal input (images, PDFs, documents) + gateway CLI subcommand
@@ -167,6 +167,6 @@ Phases execute in numeric order: 1 > 2 > 3 > 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Context File Loading | 0/2 | Planned    |  |
-| 2. Telegram Gateway | 0/5 | Planned    |  |
+| 2. Telegram Gateway | 2/5 | In Progress|  |
 | 3. Self-Improvement + Security | 0/TBD | Not started | - |
 | 4. Web Scraping Tools | 0/TBD | Not started | - |

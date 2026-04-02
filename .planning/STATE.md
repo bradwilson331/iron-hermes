@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Completed 02-telegram-gateway/02-02-PLAN.md
-last_updated: "2026-04-02T11:58:51.715Z"
+stopped_at: Completed 02-telegram-gateway/02-03-PLAN.md
+last_updated: "2026-04-02T12:11:02.283Z"
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 7
-  completed_plans: 2
+  completed_plans: 4
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-04-01)
 ## Current Position
 
 Phase: 02 (telegram-gateway) — EXECUTING
-Plan: 3 of 5
+Plan: 5 of 5
 
 ## Performance Metrics
 
@@ -50,6 +50,8 @@ Plan: 3 of 5
 | Phase 01-context-file-loading P02 | 45 | 3 tasks | 14 files |
 | Phase 02-telegram-gateway P01 | 3 | 2 tasks | 7 files |
 | Phase 02-telegram-gateway P02 | 4m | 2 tasks | 5 files |
+| Phase 02-telegram-gateway P04 | 2 | 1 tasks | 3 files |
+| Phase 02-telegram-gateway P03 | 7m | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -72,6 +74,10 @@ Recent decisions affecting current work:
 - [Phase 02-telegram-gateway]: send_message uses plain text (no parse_mode); edit_message_markdown adds Markdown only for final streaming edit — per D-03
 - [Phase 02-telegram-gateway]: edit_message uses plain text, edit_message_markdown uses Markdown for final edit only (D-03)
 - [Phase 02-telegram-gateway]: find_split_point 4-tier priority: double-newline > single-newline > period-space > hard split for overflow chaining
+- [Phase 02-telegram-gateway]: Plan 03 handler.rs base created in plan 04 worktree since plans run in parallel — single file has both GatewayMessageHandler struct and slash command dispatch
+- [Phase 02-telegram-gateway]: with_rate_limit_retry wraps all bot-initiated send_message calls in slash command handlers for consistent 429 handling
+- [Phase 02-telegram-gateway]: Dispatch loop runs inline (not in JoinSet) to own msg_rx lifetime — JoinSet owns poll+cleanup tasks only
+- [Phase 02-telegram-gateway]: Per-chat workers spawned as detached tokio::spawn (not JoinSet) since JoinSet owned outside closure
 
 ### Pending Todos
 
@@ -84,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-02T11:58:51.713Z
-Stopped at: Completed 02-telegram-gateway/02-02-PLAN.md
+Last session: 2026-04-02T12:10:55.457Z
+Stopped at: Completed 02-telegram-gateway/02-03-PLAN.md
 Resume file: None

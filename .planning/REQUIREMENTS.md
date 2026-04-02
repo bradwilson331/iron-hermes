@@ -15,20 +15,20 @@
 
 ### Telegram Gateway
 
-- [ ] **TG-01**: Telegram long polling runs continuously, receives messages, and dispatches to agent loop
-- [ ] **TG-02**: Agent responses (including tool use results) are sent back to the originating Telegram chat
+- [x] **TG-01**: Telegram long polling runs continuously, receives messages, and dispatches to agent loop
+- [x] **TG-02**: Agent responses (including tool use results) are sent back to the originating Telegram chat
 - [x] **TG-03**: Streaming responses: progressive message editing as LLM chunks arrive
-- [ ] **TG-04**: Session management: chat_id maps to persistent conversation history via SessionStore
+- [x] **TG-04**: Session management: chat_id maps to persistent conversation history via SessionStore
 - [x] **TG-05**: Graceful shutdown: CancellationToken-based cooperative shutdown of polling and in-flight agent runs
-- [ ] **TG-06**: Concurrency limiting: Semaphore bounds maximum concurrent agent runs (default 4-8)
+- [x] **TG-06**: Concurrency limiting: Semaphore bounds maximum concurrent agent runs (default 4-8)
 - [x] **TG-07**: Error recovery: exponential backoff on polling failures, automatic reconnection
-- [ ] **TG-08**: Typing indicator sent while agent is processing
+- [x] **TG-08**: Typing indicator sent while agent is processing
 
 ### Async Infrastructure
 
 - [x] **ASYNC-01**: SessionStore wrapped in Arc<RwLock> for safe sharing across tokio tasks
 - [x] **ASYNC-02**: ToolRegistry wrapped in Arc for sharing across concurrent agent runs
-- [ ] **ASYNC-03**: Supervisor pattern for gateway subsystems with restart on transient failures
+- [x] **ASYNC-03**: Supervisor pattern for gateway subsystems with restart on transient failures
 
 ### Self-Improvement
 
@@ -102,15 +102,15 @@
 | CTX-05 | Phase 1 | Complete |
 | ASYNC-01 | Phase 2 | Complete |
 | ASYNC-02 | Phase 2 | Complete |
-| ASYNC-03 | Phase 2 | Pending |
-| TG-01 | Phase 2 | Pending |
-| TG-02 | Phase 2 | Pending |
+| ASYNC-03 | Phase 2 | Complete |
+| TG-01 | Phase 2 | Complete |
+| TG-02 | Phase 2 | Complete |
 | TG-03 | Phase 2 | Complete |
-| TG-04 | Phase 2 | Pending |
+| TG-04 | Phase 2 | Complete |
 | TG-05 | Phase 2 | Complete |
-| TG-06 | Phase 2 | Pending |
+| TG-06 | Phase 2 | Complete |
 | TG-07 | Phase 2 | Complete |
-| TG-08 | Phase 2 | Pending |
+| TG-08 | Phase 2 | Complete |
 | SEC-01 | Phase 3 | Pending |
 | SEC-02 | Phase 3 | Pending |
 | SEC-03 | Phase 3 | Pending |

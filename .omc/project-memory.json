@@ -88,6 +88,12 @@
       "type": "file"
     },
     {
+      "path": "crates/ironhermes-gateway/src/session.rs",
+      "accessCount": 11,
+      "lastAccessed": 1775131911270,
+      "type": "file"
+    },
+    {
       "path": "crates/ironhermes-cli/src/main.rs",
       "accessCount": 10,
       "lastAccessed": 1775111513082,
@@ -100,6 +106,12 @@
       "type": "file"
     },
     {
+      "path": "crates/ironhermes-agent/src/agent_loop.rs",
+      "accessCount": 10,
+      "lastAccessed": 1775131961948,
+      "type": "file"
+    },
+    {
       "path": "crates",
       "accessCount": 9,
       "lastAccessed": 1775088529447,
@@ -109,12 +121,6 @@
       "path": ".planning/PROJECT.md",
       "accessCount": 9,
       "lastAccessed": 1775096346555,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/agent_loop.rs",
-      "accessCount": 9,
-      "lastAccessed": 1775111497332,
       "type": "file"
     },
     {
@@ -133,12 +139,6 @@
       "path": "crates/ironhermes-gateway/src/runner.rs",
       "accessCount": 8,
       "lastAccessed": 1775111489694,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/session.rs",
-      "accessCount": 8,
-      "lastAccessed": 1775111490205,
       "type": "file"
     },
     {
@@ -184,6 +184,12 @@
       "type": "file"
     },
     {
+      "path": "crates/ironhermes-agent/src/lib.rs",
+      "accessCount": 5,
+      "lastAccessed": 1775131938703,
+      "type": "file"
+    },
+    {
       "path": "crates/ironhermes-agent/src/context_compressor.rs",
       "accessCount": 4,
       "lastAccessed": 1775087634526,
@@ -217,12 +223,6 @@
       "path": ".planning/research/self-improvement.md",
       "accessCount": 4,
       "lastAccessed": 1775090682791,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/lib.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775093502567,
       "type": "file"
     },
     {

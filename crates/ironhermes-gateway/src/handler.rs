@@ -1,25 +1,45 @@
 use std::sync::Arc;
+use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use ironhermes_core::{ChatMessage, Config, MessageEvent};
+use tracing::{error, info, warn};
+
+use ironhermes_core::{ChatMessage, Config, MessageContent, MessageEvent, Platform, Role};
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_tools::ToolRegistry;
+
 use crate::adapter::{MessageHandler, PlatformAdapter};
 use crate::session::{SessionKey, SessionStore};
 use crate::stream_consumer::StreamConsumer;
-use tracing::{error, info, warn};
 
-/// Bridges incoming MessageEvents to the AgentLoop with streaming output via StreamConsumer.
-///
-/// For each message handled:
-/// 1. Sends a placeholder message (gives StreamConsumer something to edit).
-/// 2. Spawns a typing indicator that fires every 5 seconds.
-/// 3. Runs the AgentLoop with streaming/tool-progress callbacks piped through mpsc channels.
-/// 4. A consumer task drives StreamConsumer edits from the mpsc channels.
-/// 5. Updates the session store with the result.
+/// Retry wrapper for Telegram API calls that may hit 429 rate limits (D-19).
+async fn with_rate_limit_retry<F, Fut, T>(f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for attempt in 0..3u64 {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("429") || err_str.contains("Too Many Requests") {
+                    let wait = (attempt + 1) * 2; // 2s, 4s, 6s
+                    warn!("Telegram rate limit hit, retrying in {}s (attempt {})", wait, attempt + 1);
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    anyhow::bail!("Bot is being rate limited, please wait")
+}
+
+/// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
     config: Config,
     session_store: Arc<RwLock<SessionStore>>,
@@ -38,6 +58,270 @@ impl GatewayMessageHandler {
             tool_registry,
         }
     }
+
+    /// Dispatch a slash command to the appropriate handler (plan 04).
+    async fn handle_slash_command(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let command = event.content.split_whitespace().next().unwrap_or("");
+        // Strip @botname suffix (e.g., "/start@mybot" -> "/start")
+        let command = command.split('@').next().unwrap_or(command);
+
+        match command {
+            "/start" => self.cmd_start(event, adapter, cancel).await,
+            "/new" => self.cmd_new(event, adapter).await,
+            "/clear" => self.cmd_clear(event, adapter).await,
+            "/help" => self.cmd_help(event, adapter).await,
+            _ => {
+                // Unknown slash command — pass through to agent loop as a normal message
+                self.run_agent(event, adapter, cancel).await
+            }
+        }
+    }
+
+    /// /start — Reset session, then generate in-character LLM greeting (D-15).
+    async fn cmd_start(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
+            .with_user(&event.sender_id);
+        {
+            let mut store = self.session_store.write().await;
+            store.remove(&key);
+        }
+        // Create synthetic event asking for introduction — LLM generates greeting with SOUL.md
+        let mut intro_event = event.clone();
+        intro_event.content =
+            "Please introduce yourself. This is the start of a new conversation.".to_string();
+        self.run_agent(&intro_event, adapter, cancel).await
+    }
+
+    /// /new — Archive current session and confirm fresh start (D-13).
+    async fn cmd_new(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+    ) -> Result<()> {
+        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
+            .with_user(&event.sender_id);
+        let had_session = {
+            let mut store = self.session_store.write().await;
+            store.remove(&key).is_some()
+        };
+        let msg = if had_session {
+            "Conversation cleared. Starting fresh."
+        } else {
+            "No active conversation. Ready for a new one."
+        };
+        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, msg, None)).await?;
+        Ok(())
+    }
+
+    /// /clear — Wipe history but keep session alive (D-13).
+    async fn cmd_clear(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+    ) -> Result<()> {
+        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
+            .with_user(&event.sender_id);
+        {
+            let mut store = self.session_store.write().await;
+            if let Some(session) = store.get_mut(&key) {
+                session.clear();
+            }
+        }
+        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "History cleared.", None))
+            .await?;
+        Ok(())
+    }
+
+    /// /help — Show available commands (D-13).
+    async fn cmd_help(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+    ) -> Result<()> {
+        let help_text = "/start - Start a new conversation with an introduction\n\
+                         /new - Start a fresh conversation (clears history)\n\
+                         /clear - Clear conversation history\n\
+                         /help - Show this help message";
+        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, help_text, None)).await?;
+        Ok(())
+    }
+
+    /// Run the agent loop for a message event — drives streaming to StreamConsumer.
+    async fn run_agent(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        // 1. Send initial placeholder message; get message_id for StreamConsumer
+        let placeholder = with_rate_limit_retry(|| {
+            adapter.send_message(&event.chat_id, "\u{2588}", None)
+        })
+        .await?;
+        let placeholder_id = placeholder.message_id.clone();
+
+        // 2. Spawn typing indicator task (D-16): sends "typing" every 5 seconds
+        let typing_cancel = cancel.child_token();
+        let adapter_typing = adapter.clone();
+        let chat_id_typing = event.chat_id.clone();
+        let typing_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = typing_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        let _ = adapter_typing.send_chat_action(&chat_id_typing, "typing").await;
+                    }
+                }
+            }
+        });
+        // Send first typing action immediately
+        let _ = adapter.send_chat_action(&event.chat_id, "typing").await;
+
+        // 3. Get or create session; clone messages immediately to avoid holding lock across await
+        let model = self.config.model.default.clone();
+        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
+            .with_user(&event.sender_id);
+
+        let mut session_messages = {
+            let mut store = self.session_store.write().await;
+            let session = store.get_or_create(key.clone(), &model);
+            // Add user message
+            session.add_message(ChatMessage {
+                role: Role::User,
+                content: Some(MessageContent::text(&event.content)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+            session.messages.clone()
+        };
+
+        // 4. Build system message via PromptBuilder (loads SOUL.md + project context)
+        let cwd = PathBuf::from(std::env::current_dir().unwrap_or_default());
+        let system_msg = PromptBuilder::new(&model, "telegram")
+            .load_context(&cwd)
+            .build_system_message();
+        // Prepend system message
+        let mut messages = vec![system_msg];
+        messages.append(&mut session_messages);
+
+        // 5. Create mpsc channels for streaming bridge
+        let (stream_tx, mut stream_rx) = mpsc::channel::<String>(256);
+        let (tool_tx, mut tool_rx) = mpsc::channel::<String>(64);
+
+        // 6. Spawn StreamConsumer task
+        let mut consumer = StreamConsumer::new(adapter.clone(), &event.chat_id, &placeholder_id);
+        let consumer_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = tool_rx.recv() => {
+                        match msg {
+                            Some(tool_name) => {
+                                consumer.tool_status(&tool_name);
+                                let _ = consumer.flush(false).await;
+                            }
+                            None => {
+                                // tool_rx closed — check stream_rx
+                            }
+                        }
+                    }
+                    chunk = stream_rx.recv() => {
+                        match chunk {
+                            Some(text) => {
+                                consumer.clear_tool_status();
+                                consumer.push(&text);
+                                let _ = consumer.flush(false).await;
+                            }
+                            None => {
+                                // stream_rx closed — do final flush
+                                let _ = consumer.flush(true).await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 7. Build AgentLoop
+        let base_url = self
+            .config
+            .model
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
+        let api_key = self.config.model.api_key.clone().unwrap_or_default();
+        let max_turns = self.config.agent.max_turns;
+
+        let client = LlmClient::new(base_url, api_key, &model);
+
+        let stream_tx_clone = stream_tx.clone();
+        let stream_callback: StreamCallback = Box::new(move |delta: &str| {
+            let _ = stream_tx_clone.try_send(delta.to_string());
+        });
+
+        let tool_tx_clone = tool_tx.clone();
+        let tool_callback: ToolProgressCallback = Box::new(move |name: &str, _args: &str| {
+            let _ = tool_tx_clone.try_send(name.to_string());
+        });
+
+        let agent = AgentLoop::new(client, self.tool_registry.clone(), max_turns)
+            .with_streaming(stream_callback)
+            .with_tool_progress(tool_callback);
+
+        // 8. Run agent with error recovery (D-18)
+        let agent_result = agent.run(messages).await;
+
+        // 9. Close stream channels to flush consumer
+        drop(stream_tx);
+        drop(tool_tx);
+        consumer_handle.await.ok();
+
+        // 10. Cancel typing indicator
+        cancel.cancel();
+        typing_handle.await.ok();
+
+        match agent_result {
+            Ok(result) => {
+                info!("Agent completed, turns_used={}", result.turns_used);
+                // 11. Update session with agent's response messages
+                let new_messages: Vec<ChatMessage> = result
+                    .messages
+                    .into_iter()
+                    .filter(|m| m.role == Role::Assistant)
+                    .collect();
+                if !new_messages.is_empty() {
+                    let mut store = self.session_store.write().await;
+                    if let Some(session) = store.get_mut(&key) {
+                        for msg in new_messages {
+                            session.add_message(msg);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // D-18: Append error indicator to whatever was already streamed
+                error!("Agent error: {}", e);
+                let error_suffix = "\n\n-- Something went wrong, please try again";
+                let _ = adapter
+                    .send_message(&event.chat_id, error_suffix, None)
+                    .await;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -48,185 +332,10 @@ impl MessageHandler for GatewayMessageHandler {
         adapter: Arc<dyn PlatformAdapter>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let chat_id = event.chat_id.clone();
-        let content = event.content.clone();
-
-        // --- 1. Send initial placeholder message ---
-        let placeholder = adapter
-            .send_message(&chat_id, "...", None)
-            .await
-            .map_err(|e| {
-                error!(chat_id = %chat_id, "Failed to send placeholder: {}", e);
-                e
-            })?;
-        let placeholder_message_id = placeholder.message_id.clone();
-
-        // --- 2. Typing indicator task ---
-        let typing_cancel = cancel.child_token();
-        let adapter_typing = adapter.clone();
-        let chat_id_typing = chat_id.clone();
-        let typing_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    _ = typing_cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        if let Err(e) = adapter_typing.send_chat_action(&chat_id_typing, "typing").await {
-                            warn!(chat_id = %chat_id_typing, "Failed to send typing action: {}", e);
-                        }
-                    }
-                }
-            }
-        });
-
-        // --- 3. Get/create session, clone messages, add user message ---
-        let tg_platform = ironhermes_core::Platform::Telegram;
-        let session_key = SessionKey::new(tg_platform, &chat_id);
-        let model = self.config.model.default.clone();
-        let timeout_hours = self
-            .config
-            .gateway
-            .platforms
-            .get("telegram")
-            .map(|p| p.session_timeout_hours)
-            .unwrap_or(24);
-        let max_turns = self.config.agent.max_turns;
-
-        // Resolve credentials
-        let base_url = self.config.resolve_base_url();
-        let api_key = self.config.resolve_api_key().unwrap_or_default();
-
-        // Get or create session — hold write lock briefly, then release
-        let mut session_messages: Vec<ChatMessage> = {
-            let mut store = self.session_store.write().await;
-            // Expire stale sessions opportunistically
-            store.expire_stale(timeout_hours);
-            let session = store.get_or_create(session_key.clone(), &model);
-            session.add_message(ChatMessage::user(&content));
-            session.messages.clone()
-        };
-
-        // --- 4. Build system prompt and prepend ---
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let system_msg = PromptBuilder::new(&model, "telegram")
-            .load_context(&cwd)
-            .build_system_message();
-        let mut messages = vec![system_msg];
-        messages.append(&mut session_messages);
-
-        // --- 5. Streaming bridge channels ---
-        let (stream_tx, mut stream_rx) = mpsc::channel::<String>(256);
-        let (tool_tx, mut tool_rx) = mpsc::channel::<(String, bool)>(64);
-        // tool channel: (name, is_clear) — true means clear_tool_status
-
-        // --- 6. StreamConsumer task ---
-        let adapter_consumer = adapter.clone();
-        let chat_id_consumer = chat_id.clone();
-        let ph_id_consumer = placeholder_message_id.clone();
-        let consumer_task = tokio::spawn(async move {
-            let mut consumer = StreamConsumer::new(adapter_consumer, chat_id_consumer, ph_id_consumer);
-            loop {
-                tokio::select! {
-                    // Tool progress updates
-                    Some((name, is_clear)) = tool_rx.recv() => {
-                        if is_clear {
-                            consumer.clear_tool_status();
-                        } else {
-                            consumer.tool_status(&name);
-                        }
-                        let _ = consumer.flush(false).await;
-                    }
-                    // Text chunks from the LLM
-                    Some(chunk) = stream_rx.recv() => {
-                        consumer.clear_tool_status();
-                        consumer.push(&chunk);
-                        let _ = consumer.flush(false).await;
-                    }
-                    // Both channels closed — do final flush
-                    else => {
-                        let _ = consumer.flush(true).await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        // --- 7. Build AgentLoop with streaming callbacks ---
-        let stream_tx_cb = stream_tx.clone();
-        let stream_callback: StreamCallback = Box::new(move |delta: &str| {
-            let _ = stream_tx_cb.try_send(delta.to_string());
-        });
-
-        let tool_tx_cb = tool_tx.clone();
-        let tool_progress_callback: ToolProgressCallback = Box::new(move |name: &str, _args: &str| {
-            let _ = tool_tx_cb.try_send((name.to_string(), false));
-        });
-
-        let client = LlmClient::new(&base_url, &api_key, &model);
-        let agent = AgentLoop::new(client, self.tool_registry.clone(), max_turns)
-            .with_streaming(stream_callback)
-            .with_tool_progress(tool_progress_callback);
-
-        // --- 8. Run agent ---
-        let agent_result = agent.run(messages).await;
-
-        // Drop channels to close them — signals consumer task to do final flush
-        drop(stream_tx);
-        drop(tool_tx);
-
-        // Wait for consumer to finish final flush
-        let _ = consumer_task.await;
-
-        // Cancel typing indicator
-        typing_task.abort();
-        let _ = typing_task.await;
-
-        // --- 9. Handle agent errors ---
-        match agent_result {
-            Ok(result) => {
-                // Update session with new messages from agent result
-                let new_messages: Vec<ChatMessage> = result
-                    .messages
-                    .iter()
-                    .skip(1) // skip system message
-                    .cloned()
-                    .collect();
-
-                let mut store = self.session_store.write().await;
-                if let Some(session) = store.get_mut(&session_key) {
-                    // Replace session messages with what agent returned (includes tool results)
-                    session.messages = new_messages
-                        .into_iter()
-                        .filter(|m| {
-                            // Keep user and assistant messages only (not system)
-                            m.role == ironhermes_core::Role::User
-                                || m.role == ironhermes_core::Role::Assistant
-                        })
-                        .collect();
-                    session.updated_at = chrono::Utc::now();
-                }
-                drop(store);
-
-                info!(
-                    chat_id = %chat_id,
-                    turns = result.turns_used,
-                    tokens = result.total_usage.total_tokens,
-                    "Agent run complete"
-                );
-            }
-            Err(e) => {
-                error!(chat_id = %chat_id, error = %e, "Agent run failed");
-                // Edit the placeholder with an error message
-                let _ = adapter
-                    .edit_message(
-                        &chat_id,
-                        &placeholder_message_id,
-                        "\u{26a0}\u{fe0f} Something went wrong, please try again.",
-                    )
-                    .await;
-            }
+        // Intercept slash commands before agent loop (plan 04)
+        if event.content.starts_with('/') {
+            return self.handle_slash_command(event, adapter, cancel).await;
         }
-
-        Ok(())
+        self.run_agent(event, adapter, cancel).await
     }
 }
