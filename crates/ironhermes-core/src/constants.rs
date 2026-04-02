@@ -31,10 +31,10 @@ pub fn get_hermes_home() -> PathBuf {
 /// Get a display-friendly path for the home directory.
 pub fn display_hermes_home() -> String {
     let home = get_hermes_home();
-    if let Some(user_home) = dirs::home_dir() {
-        if let Ok(relative) = home.strip_prefix(&user_home) {
-            return format!("~/{}", relative.display());
-        }
+    if let Some(user_home) = dirs::home_dir()
+        && let Ok(relative) = home.strip_prefix(&user_home)
+    {
+        return format!("~/{}", relative.display());
     }
     home.display().to_string()
 }

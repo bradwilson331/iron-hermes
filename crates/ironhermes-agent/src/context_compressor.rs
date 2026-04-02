@@ -109,7 +109,7 @@ impl ContextCompressor {
     }
 
     /// Prune old tool results to reduce token usage.
-    fn prune_tool_results(&self, messages: &mut Vec<ChatMessage>) {
+    fn prune_tool_results(&self, messages: &mut [ChatMessage]) {
         let total = messages.len();
         if total <= self.protect_first_n {
             return;
@@ -128,18 +128,18 @@ impl ContextCompressor {
         }
 
         // Prune tool results in the middle section
-        for i in self.protect_first_n..tail_start {
-            if messages[i].tool_call_id.is_some() {
-                if let Some(ref content) = messages[i].content {
-                    let text = match content {
-                        ironhermes_core::MessageContent::Text(t) => t.clone(),
-                        ironhermes_core::MessageContent::Parts(_) => continue,
-                    };
-                    if text.len() > 500 {
-                        messages[i].content = Some(ironhermes_core::MessageContent::Text(
-                            format!("{}... [truncated, {} chars total]", &text[..200], text.len()),
-                        ));
-                    }
+        for msg in messages[self.protect_first_n..tail_start].iter_mut() {
+            if msg.tool_call_id.is_some()
+                && let Some(ref content) = msg.content
+            {
+                let text = match content {
+                    ironhermes_core::MessageContent::Text(t) => t.clone(),
+                    ironhermes_core::MessageContent::Parts(_) => continue,
+                };
+                if text.len() > 500 {
+                    msg.content = Some(ironhermes_core::MessageContent::Text(
+                        format!("{}... [truncated, {} chars total]", &text[..200], text.len()),
+                    ));
                 }
             }
         }

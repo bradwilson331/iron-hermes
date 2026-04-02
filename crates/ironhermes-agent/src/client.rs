@@ -222,10 +222,11 @@ impl LlmClient {
     }
 }
 
+/// A streaming tool call delta: (index, id, name, arguments).
+pub type ToolCallDelta = (usize, Option<String>, Option<String>, Option<String>);
+
 /// Assemble a complete ChatMessage from streaming tool call deltas.
-pub fn assemble_tool_calls_from_stream(
-    deltas: &[(usize, Option<String>, Option<String>, Option<String>)],
-) -> Vec<ToolCall> {
+pub fn assemble_tool_calls_from_stream(deltas: &[ToolCallDelta]) -> Vec<ToolCall> {
     let mut tool_calls: HashMap<usize, (String, String, String)> = HashMap::new();
 
     for (index, id, name, arguments) in deltas {
@@ -233,15 +234,15 @@ pub fn assemble_tool_calls_from_stream(
             .entry(*index)
             .or_insert_with(|| (String::new(), String::new(), String::new()));
 
-        if let Some(id) = id {
-            if !id.is_empty() {
-                entry.0 = id.clone();
-            }
+        if let Some(id) = id
+            && !id.is_empty()
+        {
+            entry.0 = id.clone();
         }
-        if let Some(name) = name {
-            if !name.is_empty() {
-                entry.1 = name.clone();
-            }
+        if let Some(name) = name
+            && !name.is_empty()
+        {
+            entry.1 = name.clone();
         }
         if let Some(args) = arguments {
             entry.2.push_str(args);

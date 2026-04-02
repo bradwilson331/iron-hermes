@@ -1,7 +1,7 @@
-use ironhermes_core::{get_hermes_home, ChatMessage};
+use crate::context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
+use ironhermes_core::ChatMessage;
 use std::path::Path;
-
-use crate::context_scanner;
+use tracing::debug;
 
 const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Nous Research. You are helpful, harmless, and honest.
 
@@ -23,13 +23,12 @@ const TOOL_USE_GUIDANCE: &str = r#"When you need to use tools:
 
 /// Builds the system prompt for the agent with layered context loading.
 pub struct PromptBuilder {
-    #[allow(dead_code)]
     model: String,
     platform: String,
     // Loaded context (frozen at build time)
-    soul_content: Option<String>,      // From SOUL.md at IRONHERMES_HOME
-    project_context: Option<String>,   // First-match from priority chain in cwd
-    agents_md_content: Option<String>, // From AGENTS.md at IRONHERMES_HOME
+    soul_content: Option<String>,
+    project_context: Option<String>,
+    agents_md_content: Option<String>,
 }
 
 impl PromptBuilder {
@@ -43,7 +42,8 @@ impl PromptBuilder {
         }
     }
 
-    /// Load all context files (SOUL.md, project context, AGENTS.md) and freeze them.
+    /// Load all context files (SOUL.md, project context, AGENTS.md).
+    /// Context is frozen at call time — mid-session file edits do not change the prompt.
     pub fn load_context(mut self, cwd: &Path) -> Self {
         self.load_soul_md();
         self.load_project_context(cwd);
@@ -52,75 +52,82 @@ impl PromptBuilder {
     }
 
     fn load_soul_md(&mut self) {
-        let path = get_hermes_home().join("SOUL.md");
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) if !c.trim().is_empty() => c,
-            _ => return,
-        };
-        let scanned = context_scanner::scan_context_content(&content, "SOUL.md");
-        let truncated =
-            context_scanner::truncate_content(&scanned, "SOUL.md", context_scanner::CONTEXT_FILE_MAX_CHARS);
-        tracing::debug!("Loaded SOUL.md from {}", path.display());
-        self.soul_content = Some(truncated);
-    }
-
-    fn load_agents_md(&mut self) {
-        let path = get_hermes_home().join("AGENTS.md");
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) if !c.trim().is_empty() => c,
-            _ => return,
-        };
-        let scanned = context_scanner::scan_context_content(&content, "AGENTS.md");
-        let truncated = context_scanner::truncate_content(
-            &scanned,
-            "AGENTS.md",
-            context_scanner::CONTEXT_FILE_MAX_CHARS,
-        );
-        let wrapped = format!("## AGENTS.md\n\n{}", truncated);
-        tracing::debug!("Loaded AGENTS.md from {}", path.display());
-        self.agents_md_content = Some(wrapped);
-    }
-
-    fn load_project_context(&mut self, cwd: &Path) {
-        // Priority chain: first match wins, only ONE file loads
-        let candidates: &[&str] = &[
-            ".hermes.md",
-            "HERMES.md",
-            "AGENTS.md",
-            "agents.md",
-            "CLAUDE.md",
-            "claude.md",
-            ".cursorrules",
-        ];
-
-        for filename in candidates {
-            let path = cwd.join(filename);
-            if !path.exists() {
-                continue;
+        let path = ironhermes_core::get_hermes_home().join("SOUL.md");
+        match std::fs::read_to_string(&path) {
+            Ok(content) if !content.trim().is_empty() => {
+                let scanned = scan_context_content(&content, "SOUL.md");
+                let truncated = truncate_content(&scanned, "SOUL.md", CONTEXT_FILE_MAX_CHARS);
+                debug!("Loaded SOUL.md from {}", path.display());
+                self.soul_content = Some(truncated);
             }
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) if !c.trim().is_empty() => c,
-                _ => continue,
-            };
-            let scanned = context_scanner::scan_context_content(&content, filename);
-            let truncated = context_scanner::truncate_content(
-                &scanned,
-                filename,
-                context_scanner::CONTEXT_FILE_MAX_CHARS,
-            );
-            let wrapped = format!("## {}\n\n{}", filename, truncated);
-            tracing::debug!("Loaded project context: {}", filename);
-            self.project_context = Some(wrapped);
-            return; // first match wins
+            Ok(_) => {
+                debug!("SOUL.md at {} is empty, using default identity", path.display());
+            }
+            Err(e) => {
+                debug!("SOUL.md not found at {}: {}", path.display(), e);
+            }
         }
     }
 
-    /// Build the complete system prompt in assembly order:
-    /// identity > platform hint > tool guidance > project context > AGENTS.md from home
+    fn load_agents_md(&mut self) {
+        let path = ironhermes_core::get_hermes_home().join("AGENTS.md");
+        match std::fs::read_to_string(&path) {
+            Ok(content) if !content.trim().is_empty() => {
+                let scanned = scan_context_content(&content, "AGENTS.md");
+                let truncated = truncate_content(&scanned, "AGENTS.md", CONTEXT_FILE_MAX_CHARS);
+                let wrapped = format!("## AGENTS.md\n\n{}", truncated);
+                debug!("Loaded AGENTS.md from {}", path.display());
+                self.agents_md_content = Some(wrapped);
+            }
+            Ok(_) => {
+                debug!("AGENTS.md at {} is empty, skipping", path.display());
+            }
+            Err(e) => {
+                debug!("AGENTS.md not found at {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    fn load_project_context(&mut self, cwd: &Path) {
+        // Priority chain: first match wins, only ONE loads
+        let candidates: &[&[&str]] = &[
+            &[".hermes.md", "HERMES.md"],
+            &["AGENTS.md", "agents.md"],
+            &["CLAUDE.md", "claude.md"],
+            &[".cursorrules"],
+        ];
+
+        for group in candidates {
+            for &filename in *group {
+                let path = cwd.join(filename);
+                if !path.exists() {
+                    continue;
+                }
+                match std::fs::read_to_string(&path) {
+                    Ok(content) if !content.trim().is_empty() => {
+                        let scanned = scan_context_content(&content, filename);
+                        let truncated = truncate_content(&scanned, filename, CONTEXT_FILE_MAX_CHARS);
+                        let wrapped = format!("## {}\n\n{}", filename, truncated);
+                        debug!("Loaded project context: {}", filename);
+                        self.project_context = Some(wrapped);
+                        return; // first match wins
+                    }
+                    Ok(_) => {
+                        debug!("Project context file {} is empty, skipping", filename);
+                    }
+                    Err(e) => {
+                        debug!("Failed to read {}: {}", filename, e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the complete system prompt.
     pub fn build(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
 
-        // 1. Identity: SOUL.md if loaded, else default
+        // 1. Identity: SOUL.md or default
         let identity = self
             .soul_content
             .as_deref()
@@ -136,7 +143,7 @@ impl PromptBuilder {
         // 3. Tool use guidance
         parts.push(TOOL_USE_GUIDANCE.to_string());
 
-        // 4. Project context (first-match from cwd priority chain)
+        // 4. Project context
         if let Some(ref ctx) = self.project_context {
             parts.push(ctx.clone());
         }
@@ -149,7 +156,7 @@ impl PromptBuilder {
         parts.join("\n\n")
     }
 
-    /// Build the system message.
+    /// Build the system message (frozen snapshot).
     pub fn build_system_message(&self) -> ChatMessage {
         ChatMessage::system(self.build())
     }
@@ -163,142 +170,143 @@ impl PromptBuilder {
             _ => String::new(),
         }
     }
+
+    // Expose model field for potential future use
+    #[allow(dead_code)]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-    use std::io::Write;
-    use tempfile::tempdir;
+    use std::fs;
+
+    fn make_temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("Failed to create temp dir")
+    }
 
     #[test]
     fn test_build_default_identity() {
-        let pb = PromptBuilder::new("test-model", "cli");
-        let output = pb.build();
-        assert!(
-            output.contains(DEFAULT_AGENT_IDENTITY),
-            "Expected default identity in output"
-        );
+        let builder = PromptBuilder::new("test-model", "cli");
+        let output = builder.build();
+        assert!(output.contains("IronHermes"));
+        assert!(output.contains("Nous Research"));
     }
 
     #[test]
-    #[serial]
     fn test_soul_replaces_default() {
-        let dir = tempdir().unwrap();
-        let soul_content = "You are SoulBot, a custom identity.";
-        std::fs::write(dir.path().join("SOUL.md"), soul_content).unwrap();
+        let home_dir = make_temp_dir();
+        let cwd_dir = make_temp_dir();
+        fs::write(home_dir.path().join("SOUL.md"), "You are a custom soul.").unwrap();
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()); }
-        let pb = PromptBuilder::new("test-model", "cli").load_context(dir.path());
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        // SAFETY: env var tests must run with --test-threads=1
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home_dir.path());
+        }
 
-        let output = pb.build();
-        assert!(
-            output.contains(soul_content),
-            "Expected soul content in output"
-        );
-        assert!(
-            !output.contains(DEFAULT_AGENT_IDENTITY),
-            "Default identity should not appear when SOUL.md is loaded"
-        );
+        let builder = PromptBuilder::new("test-model", "cli").load_context(cwd_dir.path());
+        let output = builder.build();
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+
+        assert!(output.contains("You are a custom soul."));
+        assert!(!output.contains("IronHermes, an AI assistant"));
     }
 
     #[test]
-    #[serial]
     fn test_project_context_priority() {
-        let dir = tempdir().unwrap();
-        // Both .hermes.md and CLAUDE.md exist — .hermes.md should win
-        std::fs::write(dir.path().join(".hermes.md"), "hermes context").unwrap();
-        std::fs::write(dir.path().join("CLAUDE.md"), "claude context").unwrap();
+        let home_dir = make_temp_dir();
+        let cwd_dir = make_temp_dir();
+        fs::write(cwd_dir.path().join(".hermes.md"), "hermes context").unwrap();
+        fs::write(cwd_dir.path().join("CLAUDE.md"), "claude context").unwrap();
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()); }
-        let pb = PromptBuilder::new("test-model", "cli").load_context(dir.path());
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home_dir.path());
+        }
 
-        let output = pb.build();
-        assert!(
-            output.contains("hermes context"),
-            "Expected .hermes.md content"
-        );
-        assert!(
-            !output.contains("claude context"),
-            ".hermes.md should win over CLAUDE.md"
-        );
+        let builder = PromptBuilder::new("test-model", "cli").load_context(cwd_dir.path());
+        let output = builder.build();
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+
+        assert!(output.contains("hermes context"));
+        assert!(!output.contains("claude context"));
     }
 
     #[test]
-    #[serial]
     fn test_project_context_first_match_wins() {
-        let dir = tempdir().unwrap();
-        // Only CLAUDE.md exists
-        std::fs::write(dir.path().join("CLAUDE.md"), "claude only context").unwrap();
+        let home_dir = make_temp_dir();
+        let cwd_dir = make_temp_dir();
+        fs::write(cwd_dir.path().join("CLAUDE.md"), "claude context only").unwrap();
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()); }
-        let pb = PromptBuilder::new("test-model", "cli").load_context(dir.path());
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home_dir.path());
+        }
 
-        let output = pb.build();
-        assert!(
-            output.contains("claude only context"),
-            "Expected CLAUDE.md content to load"
-        );
+        let builder = PromptBuilder::new("test-model", "cli").load_context(cwd_dir.path());
+        let output = builder.build();
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+
+        assert!(output.contains("claude context only"));
     }
 
     #[test]
-    #[serial]
     fn test_assembly_order() {
-        let home_dir = tempdir().unwrap();
-        let cwd_dir = tempdir().unwrap();
+        let home_dir = make_temp_dir();
+        let cwd_dir = make_temp_dir();
+        fs::write(home_dir.path().join("SOUL.md"), "SOUL CONTENT").unwrap();
+        fs::write(home_dir.path().join("AGENTS.md"), "AGENTS HOME CONTENT").unwrap();
+        fs::write(cwd_dir.path().join("CLAUDE.md"), "PROJECT CONTEXT").unwrap();
 
-        // SOUL.md in IRONHERMES_HOME
-        std::fs::write(home_dir.path().join("SOUL.md"), "SOUL IDENTITY").unwrap();
-        // AGENTS.md in IRONHERMES_HOME
-        std::fs::write(home_dir.path().join("AGENTS.md"), "HOME AGENTS CONTENT").unwrap();
-        // AGENTS.md in cwd (project context — takes priority as AGENTS.md in chain)
-        std::fs::write(cwd_dir.path().join("AGENTS.md"), "PROJECT AGENTS CONTENT").unwrap();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home_dir.path());
+        }
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()); }
-        let pb = PromptBuilder::new("test-model", "cli").load_context(cwd_dir.path());
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        let builder = PromptBuilder::new("test-model", "cli").load_context(cwd_dir.path());
+        let output = builder.build();
 
-        let output = pb.build();
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
 
-        // Verify order: soul < project context < home agents.md
-        let soul_pos = output.find("SOUL IDENTITY").expect("SOUL.md content missing");
-        let project_pos = output
-            .find("PROJECT AGENTS CONTENT")
-            .expect("Project AGENTS.md content missing");
-        let home_agents_pos = output
-            .find("HOME AGENTS CONTENT")
-            .expect("Home AGENTS.md content missing");
+        let soul_pos = output.find("SOUL CONTENT").unwrap();
+        let project_pos = output.find("PROJECT CONTEXT").unwrap();
+        let agents_pos = output.find("AGENTS HOME CONTENT").unwrap();
 
+        assert!(soul_pos < project_pos, "SOUL must come before project context");
         assert!(
-            soul_pos < project_pos,
-            "SOUL.md should appear before project context"
-        );
-        assert!(
-            project_pos < home_agents_pos,
-            "Project context should appear before home AGENTS.md"
+            project_pos < agents_pos,
+            "Project context must come before AGENTS.md"
         );
     }
 
     #[test]
-    #[serial]
     fn test_empty_files_skipped() {
-        let dir = tempdir().unwrap();
-        // Empty SOUL.md — should fall back to default identity
-        let mut f = std::fs::File::create(dir.path().join("SOUL.md")).unwrap();
-        f.write_all(b"   ").unwrap(); // whitespace only
+        let home_dir = make_temp_dir();
+        let cwd_dir = make_temp_dir();
+        fs::write(home_dir.path().join("SOUL.md"), "   ").unwrap(); // whitespace only
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()); }
-        let pb = PromptBuilder::new("test-model", "cli").load_context(dir.path());
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home_dir.path());
+        }
 
-        let output = pb.build();
-        assert!(
-            output.contains(DEFAULT_AGENT_IDENTITY),
-            "Default identity should be used when SOUL.md is empty"
-        );
+        let builder = PromptBuilder::new("test-model", "cli").load_context(cwd_dir.path());
+        let output = builder.build();
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+
+        // Should fall back to default identity
+        assert!(output.contains("IronHermes, an AI assistant"));
     }
 }

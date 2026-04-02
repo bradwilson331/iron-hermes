@@ -8,4 +8,4 @@ pub use agent_loop::{AgentLoop, AgentResult};
 pub use client::LlmClient;
 pub use prompt_builder::PromptBuilder;
 pub use context_compressor::ContextCompressor;
-pub use context_scanner::{scan_context_content, truncate_content};
+pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};

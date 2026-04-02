@@ -124,11 +124,11 @@ impl Tool for WriteFileTool {
 
         debug!("Writing file: {}", path);
 
-        if let Some(parent) = Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| anyhow::anyhow!("Failed to create directories for '{}': {}", path, e))?;
-            }
+        if let Some(parent) = Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create directories for '{}': {}", path, e))?;
         }
 
         fs::write(path, content)

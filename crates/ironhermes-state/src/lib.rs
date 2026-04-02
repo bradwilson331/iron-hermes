@@ -328,7 +328,7 @@ impl StateStore {
         let tool_calls_json = msg
             .tool_calls
             .as_ref()
-            .map(|tc| serde_json::to_string(tc))
+            .map(serde_json::to_string)
             .transpose()?;
         let tool_name = msg.name.as_deref();
         let timestamp = unix_now();
