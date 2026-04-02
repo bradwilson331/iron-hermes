@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use ironhermes_core::{MessageEvent, MessageResponse, Platform};
+use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use crate::adapter::PlatformAdapter;
@@ -274,6 +274,32 @@ pub struct TgDocument {
 }
 
 pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
+    let mut attachments: Vec<Attachment> = Vec::new();
+
+    // Include photo attachment metadata (actual download deferred to multimodal.rs)
+    if let Some(ref photos) = msg.photo {
+        if let Some(largest) = photos.last() {
+            attachments.push(Attachment {
+                filename: Some(format!("photo_{}.jpg", largest.file_id)),
+                mime_type: Some("image/jpeg".to_string()),
+                data: None,
+                url: None,
+                file_id: Some(largest.file_id.clone()),
+            });
+        }
+    }
+
+    // Include document attachment metadata
+    if let Some(ref doc) = msg.document {
+        attachments.push(Attachment {
+            filename: doc.file_name.clone(),
+            mime_type: doc.mime_type.clone(),
+            data: None,
+            url: None,
+            file_id: Some(doc.file_id.clone()),
+        });
+    }
+
     MessageEvent {
         platform: Platform::Telegram,
         message_id: msg.message_id.to_string(),
@@ -284,7 +310,7 @@ pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
             .map(|u| u.id.to_string())
             .unwrap_or_default(),
         content: msg.text.clone().or_else(|| msg.caption.clone()).unwrap_or_default(),
-        attachments: Vec::new(),
+        attachments,
         thread_id: None,
         chat_type: match msg.chat.chat_type.as_str() {
             "private" => "dm".to_string(),

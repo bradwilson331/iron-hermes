@@ -299,6 +299,9 @@ pub struct Attachment {
     pub data: Option<Vec<u8>>,
     pub mime_type: Option<String>,
     pub filename: Option<String>,
+    /// Platform-specific file identifier (e.g., Telegram file_id for deferred download).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

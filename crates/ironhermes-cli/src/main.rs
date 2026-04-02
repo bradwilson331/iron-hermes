@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_core::{ChatMessage, Config};
+use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -56,6 +57,12 @@ enum Commands {
     Doctor,
     /// Show version information
     Version,
+    /// Start the Telegram gateway bot
+    Gateway {
+        /// Override Telegram bot token (or set TELEGRAM_BOT_TOKEN env var)
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +89,7 @@ async fn main() -> Result<()> {
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat { ref message }) => run_chat(&cli, message.clone()).await,
+        Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
         None => {
             if let Some(ref prompt) = cli.execute {
                 run_single(&cli, prompt.clone()).await
@@ -357,6 +365,27 @@ async fn run_agent_turn(
     *messages = result.messages;
 
     Ok(result.final_response)
+}
+
+/// Start the Telegram gateway bot.
+async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
+    let (_, mut config) = build_client(cli)?;
+    let registry = Arc::new(build_registry());
+
+    // Override token if provided via --token flag
+    if let Some(token) = token_override {
+        let tg = config
+            .gateway
+            .platforms
+            .entry("telegram".to_string())
+            .or_default();
+        tg.token = Some(token);
+        tg.enabled = true;
+    }
+
+    info!("Starting IronHermes Telegram Gateway");
+    let runner = GatewayRunner::new(config, registry);
+    runner.start().await
 }
 
 fn build_client(cli: &Cli) -> Result<(LlmClient, Config)> {

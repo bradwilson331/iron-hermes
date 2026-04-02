@@ -10,6 +10,10 @@ pub struct QueuedMessage {
     pub event: MessageEvent,
     /// True if this message was queued behind an in-flight agent run.
     pub is_queued: bool,
+    /// Text prefix from document extraction (prepended to user message content).
+    pub text_prefix: Option<String>,
+    /// Base64-encoded image data URI for vision LLM input.
+    pub image_data_uri: Option<String>,
 }
 
 /// Manages per-chat message queues. Each unique chat_id gets a dedicated
@@ -36,7 +40,12 @@ impl UserQueueManager {
     ///
     /// Returns `Some(receiver)` if a new worker must be spawned, `None` if the
     /// message was queued into an existing worker's channel.
-    pub async fn dispatch(&self, event: MessageEvent) -> Option<mpsc::Receiver<QueuedMessage>> {
+    pub async fn dispatch(
+        &self,
+        event: MessageEvent,
+        text_prefix: Option<String>,
+        image_data_uri: Option<String>,
+    ) -> Option<mpsc::Receiver<QueuedMessage>> {
         let chat_id = event.chat_id.clone();
         let message_id = event.message_id.clone();
         let mut senders = self.senders.lock().await;
@@ -45,7 +54,12 @@ impl UserQueueManager {
         // We need to handle ownership carefully: try_send takes ownership of the message,
         // and returns it back on error via TrySendError::into_inner().
         if let Some(sender) = senders.get(&chat_id) {
-            let msg = QueuedMessage { event: event.clone(), is_queued: true };
+            let msg = QueuedMessage {
+                event: event.clone(),
+                is_queued: true,
+                text_prefix: text_prefix.clone(),
+                image_data_uri: image_data_uri.clone(),
+            };
             match sender.try_send(msg) {
                 Ok(()) => {
                     // Successfully queued behind existing worker — add eye reaction
@@ -69,7 +83,12 @@ impl UserQueueManager {
                         // Fall through to create new worker with the reclaimed event
                         let (tx, rx) = mpsc::channel(self.queue_capacity);
                         // Re-send as non-queued (it's becoming the first message for the new worker)
-                        let _ = tx.try_send(QueuedMessage { event: original_msg.event, is_queued: false });
+                        let _ = tx.try_send(QueuedMessage {
+                            event: original_msg.event,
+                            is_queued: false,
+                            text_prefix: original_msg.text_prefix,
+                            image_data_uri: original_msg.image_data_uri,
+                        });
                         senders.insert(chat_id, tx);
                         return Some(rx);
                     }
@@ -79,7 +98,12 @@ impl UserQueueManager {
 
         // No active worker — create a fresh channel
         let (tx, rx) = mpsc::channel(self.queue_capacity);
-        let _ = tx.try_send(QueuedMessage { event, is_queued: false });
+        let _ = tx.try_send(QueuedMessage {
+            event,
+            is_queued: false,
+            text_prefix,
+            image_data_uri,
+        });
         senders.insert(chat_id, tx);
         Some(rx)
     }
@@ -187,7 +211,7 @@ mod tests {
         });
         let manager = UserQueueManager::new(adapter, 16);
 
-        let rx = manager.dispatch(make_event("chat1", "msg1")).await;
+        let rx = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
         assert!(rx.is_some(), "First dispatch should return Some(receiver)");
     }
 
@@ -200,10 +224,10 @@ mod tests {
         let manager = UserQueueManager::new(adapter, 16);
 
         // First dispatch — creates worker channel (don't consume rx so channel stays alive)
-        let _rx = manager.dispatch(make_event("chat1", "msg1")).await;
+        let _rx = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
 
         // Second dispatch for same chat — should queue and return None
-        let rx2 = manager.dispatch(make_event("chat1", "msg2")).await;
+        let rx2 = manager.dispatch(make_event("chat1", "msg2"), None, None).await;
         assert!(
             rx2.is_none(),
             "Second dispatch should return None (worker already running)"
@@ -226,8 +250,8 @@ mod tests {
         });
         let manager = UserQueueManager::new(adapter, 16);
 
-        let rx1 = manager.dispatch(make_event("chat1", "msg1")).await;
-        let rx2 = manager.dispatch(make_event("chat2", "msg2")).await;
+        let rx1 = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
+        let rx2 = manager.dispatch(make_event("chat2", "msg2"), None, None).await;
         assert!(rx1.is_some(), "chat1 should get a worker");
         assert!(rx2.is_some(), "chat2 should get independent worker");
         assert_eq!(
@@ -243,11 +267,11 @@ mod tests {
         let adapter = Arc::new(MockAdapter { reaction_count });
         let manager = UserQueueManager::new(adapter, 16);
 
-        let _rx = manager.dispatch(make_event("chat1", "msg1")).await;
+        let _rx = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
         manager.remove("chat1").await;
 
         // After remove, next dispatch should return Some (fresh worker)
-        let rx2 = manager.dispatch(make_event("chat1", "msg3")).await;
+        let rx2 = manager.dispatch(make_event("chat1", "msg3"), None, None).await;
         assert!(
             rx2.is_some(),
             "After remove, dispatch should create a new worker"

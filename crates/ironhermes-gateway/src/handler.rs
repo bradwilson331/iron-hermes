@@ -6,12 +6,13 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, MessageContent, MessageEvent, Platform, Role};
+use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform, Role};
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_tools::ToolRegistry;
 
 use crate::adapter::{MessageHandler, PlatformAdapter};
+use crate::multimodal::ProcessedAttachments;
 use crate::session::{SessionKey, SessionStore};
 use crate::stream_consumer::StreamConsumer;
 
@@ -77,7 +78,8 @@ impl GatewayMessageHandler {
             "/help" => self.cmd_help(event, adapter).await,
             _ => {
                 // Unknown slash command — pass through to agent loop as a normal message
-                self.run_agent(event, adapter, cancel).await
+                let no_attachments = ProcessedAttachments { text_prefix: None, image_data_uri: None };
+                self.run_agent(event, adapter, cancel, no_attachments).await
             }
         }
     }
@@ -99,7 +101,8 @@ impl GatewayMessageHandler {
         let mut intro_event = event.clone();
         intro_event.content =
             "Please introduce yourself. This is the start of a new conversation.".to_string();
-        self.run_agent(&intro_event, adapter, cancel).await
+        let no_attachments = ProcessedAttachments { text_prefix: None, image_data_uri: None };
+        self.run_agent(&intro_event, adapter, cancel, no_attachments).await
     }
 
     /// /new — Archive current session and confirm fresh start (D-13).
@@ -156,12 +159,28 @@ impl GatewayMessageHandler {
         Ok(())
     }
 
+    /// Public entry point for multimodal-aware message handling.
+    /// Called from runner.rs per-chat workers which have access to QueuedMessage.
+    pub async fn handle_with_multimodal(
+        &self,
+        event: &MessageEvent,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+        processed: ProcessedAttachments,
+    ) -> Result<()> {
+        if event.content.starts_with('/') {
+            return self.handle_slash_command(event, adapter, cancel).await;
+        }
+        self.run_agent(event, adapter, cancel, processed).await
+    }
+
     /// Run the agent loop for a message event — drives streaming to StreamConsumer.
     async fn run_agent(
         &self,
         event: &MessageEvent,
         adapter: Arc<dyn PlatformAdapter>,
         cancel: CancellationToken,
+        processed: ProcessedAttachments,
     ) -> Result<()> {
         // 1. Send initial placeholder message; get message_id for StreamConsumer
         let placeholder = with_rate_limit_retry(|| {
@@ -192,17 +211,14 @@ impl GatewayMessageHandler {
         let key = SessionKey::new(Platform::Telegram, &event.chat_id)
             .with_user(&event.sender_id);
 
+        // Build user message content — incorporate multimodal data
+        let user_message = build_user_message(event, processed);
+
         let mut session_messages = {
             let mut store = self.session_store.write().await;
             let session = store.get_or_create(key.clone(), &model);
             // Add user message
-            session.add_message(ChatMessage {
-                role: Role::User,
-                content: Some(MessageContent::text(&event.content)),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
+            session.add_message(user_message);
             session.messages.clone()
         };
 
@@ -336,6 +352,65 @@ impl MessageHandler for GatewayMessageHandler {
         if event.content.starts_with('/') {
             return self.handle_slash_command(event, adapter, cancel).await;
         }
-        self.run_agent(event, adapter, cancel).await
+        // No multimodal data via this path (text-only fallback)
+        let no_attachments = ProcessedAttachments {
+            text_prefix: None,
+            image_data_uri: None,
+        };
+        self.run_agent(event, adapter, cancel, no_attachments).await
+    }
+}
+
+/// Build a ChatMessage for the user's input, incorporating any multimodal data.
+///
+/// - If there is an image_data_uri: creates a multipart message with text + image.
+/// - If there is a text_prefix (document): prepends it to the message content.
+/// - Otherwise: plain text message.
+fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> ChatMessage {
+    if let Some(data_uri) = processed.image_data_uri {
+        // Vision input: multipart message with optional caption + image
+        let mut parts = Vec::new();
+        let text = if !event.content.is_empty() {
+            event.content.clone()
+        } else {
+            "What is in this image?".to_string()
+        };
+        parts.push(ContentPart::Text { text });
+        parts.push(ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: data_uri,
+                detail: None,
+            },
+        });
+        ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    } else if let Some(prefix) = processed.text_prefix {
+        // Document text: prepend extracted content to the user message
+        let combined = if event.content.is_empty() {
+            prefix
+        } else {
+            format!("{}\n\n{}", prefix, event.content)
+        };
+        ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::text(combined)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    } else {
+        // Plain text
+        ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::text(&event.content)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
     }
 }

@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod backoff;
 pub mod handler;
+pub mod multimodal;
 pub mod session;
 pub mod stream_consumer;
 pub mod telegram;

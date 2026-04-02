@@ -63,3 +63,5 @@ cron = "0.13"
 tokio-util = { version = "0.7", features = ["rt"] }
 # PDF extraction
 pdf-extract = "0.10"
+# Base64 encoding
+base64 = "0.22"

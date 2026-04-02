@@ -15,6 +15,7 @@ ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-state = { path = "../ironhermes-state" }
+ironhermes-gateway = { path = "../ironhermes-gateway" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

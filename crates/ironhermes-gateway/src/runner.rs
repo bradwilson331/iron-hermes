@@ -7,9 +7,10 @@ use ironhermes_core::Config;
 use ironhermes_tools::ToolRegistry;
 use tracing::{error, info, warn};
 
-use crate::adapter::MessageHandler;
+use crate::adapter::PlatformAdapter;
 use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
+use crate::multimodal;
 use crate::session::SessionStore;
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use crate::user_queue::UserQueueManager;
@@ -171,6 +172,7 @@ impl GatewayRunner {
         let handler_dispatch = handler.clone();
         let user_queue_dispatch = user_queue.clone();
         let adapter_dispatch = adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>;
+        let adapter_dispatch_mm = adapter.clone(); // typed Arc<TelegramAdapter> for multimodal
         let semaphore_dispatch = semaphore.clone();
         let cancel_dispatch = self.cancel.clone();
         let mut msg_rx = msg_rx;
@@ -218,8 +220,24 @@ impl GatewayRunner {
                             }
                         }
 
+                        // Process multimodal attachments (D-05 through D-08)
+                        let (text_prefix, image_data_uri) = if !event.attachments.is_empty() {
+                            match multimodal::process_attachments(&adapter_dispatch_mm, &msg).await {
+                                Ok(processed) => (processed.text_prefix, processed.image_data_uri),
+                                Err(e) => {
+                                    // Send user-friendly error and skip this message
+                                    let chat_id = event.chat_id.clone();
+                                    let err_msg = format!("Could not process attachment: {}", e);
+                                    let _ = adapter_dispatch_mm.send_message(&chat_id, &err_msg, None).await;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            (None, None)
+                        };
+
                         // Dispatch via per-user queue
-                        let maybe_rx = user_queue_dispatch.dispatch(event).await;
+                        let maybe_rx = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
                         if let Some(mut chat_rx) = maybe_rx {
                             // New worker needed for this chat
                             let handler_task = handler_dispatch.clone();
@@ -240,11 +258,17 @@ impl GatewayRunner {
                                         Err(_) => break, // semaphore closed
                                     };
 
+                                    let processed = crate::multimodal::ProcessedAttachments {
+                                        text_prefix: queued_msg.text_prefix,
+                                        image_data_uri: queued_msg.image_data_uri,
+                                    };
+
                                     let result = handler_task
-                                        .handle(
+                                        .handle_with_multimodal(
                                             &queued_msg.event,
                                             adapter_task.clone(),
                                             cancel_task.child_token(),
+                                            processed,
                                         )
                                         .await;
 
