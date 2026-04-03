@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use tokio::time::{timeout, Duration};
 use ironhermes_core::{
     ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk,
     ToolCall, FunctionCall, ToolSchema, Usage,
@@ -149,8 +150,18 @@ impl LlmClient {
         tokio::spawn(async move {
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
+            let chunk_timeout = Duration::from_secs(60);
 
-            while let Some(chunk_result) = byte_stream.next().await {
+            loop {
+                let chunk_result = match timeout(chunk_timeout, byte_stream.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => break, // stream ended
+                    Err(_) => {
+                        warn!("SSE stream read timed out after 60s");
+                        break;
+                    }
+                };
+
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
@@ -183,6 +194,10 @@ impl LlmClient {
 
                     match serde_json::from_str::<ChatStreamChunk>(data) {
                         Ok(chunk) => {
+                            // Process usage first (may appear in same chunk as finish_reason)
+                            if let Some(ref usage) = chunk.usage {
+                                let _ = tx.send(StreamEvent::Usage(usage.clone())).await;
+                            }
                             for choice in &chunk.choices {
                                 if let Some(ref content) = choice.delta.content {
                                     let _ = tx.send(StreamEvent::ContentDelta(content.clone())).await;
@@ -201,10 +216,8 @@ impl LlmClient {
                                 }
                                 if let Some(ref reason) = choice.finish_reason {
                                     let _ = tx.send(StreamEvent::Done(Some(reason.clone()))).await;
+                                    return; // Don't wait for [DONE] — finish_reason is authoritative
                                 }
-                            }
-                            if let Some(ref usage) = chunk.usage {
-                                let _ = tx.send(StreamEvent::Usage(usage.clone())).await;
                             }
                         }
                         Err(e) => {

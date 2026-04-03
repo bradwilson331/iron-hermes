@@ -294,7 +294,8 @@ impl GatewayMessageHandler {
         // 8. Run agent with error recovery (D-18)
         let agent_result = agent.run(messages).await;
 
-        // 9. Close stream channels to flush consumer
+        // 9. Drop agent first — its callbacks hold cloned channel senders
+        drop(agent);
         drop(stream_tx);
         drop(tool_tx);
         consumer_handle.await.ok();

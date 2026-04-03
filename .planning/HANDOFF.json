@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-03T01:35:56.026Z",
+  "timestamp": "2026-04-03T02:52:35.978Z",
   "phase": "02",
   "phase_name": "telegram-gateway",
   "phase_dir": ".planning/phases/02-telegram-gateway",
@@ -14,34 +14,36 @@
     {"id": 3, "plan": "02-03", "name": "Core wiring: polling, dispatch, user queue, handler, runner", "status": "done", "commit": "03b3460"},
     {"id": 4, "plan": "02-04", "name": "Slash commands and error recovery", "status": "done", "commit": "6c9197b"},
     {"id": 5, "plan": "02-05", "name": "Multimodal input + gateway CLI subcommand", "status": "done", "commit": "26f8ac9"},
-    {"id": 6, "plan": "02-05-task2", "name": "End-to-end Telegram bot smoke test", "status": "in_progress", "progress": "Bot connects, registers commands, receives messages, dispatches to handler. Agent loop starts but LLM response never arrives in Telegram."}
+    {"id": 6, "plan": "02-05-task2", "name": "End-to-end Telegram bot smoke test", "status": "in_progress", "progress": "Bot fully functional: receives messages, dispatches, runs agent loop with tool use, streams edits to Telegram. Two streaming completion bugs fixed this session. Needs human smoke test to confirm cursor removal works."}
   ],
   "remaining_tasks": [
-    {"id": 6, "name": "Human smoke test verification", "status": "blocked"}
+    {"id": 6, "name": "Human smoke test — verify streaming completes cleanly (cursor removed)", "status": "blocked"}
   ],
   "blockers": [
     {
-      "description": "Agent loop starts but LLM response never appears in Telegram. Bot connects, polls, dispatches correctly. Handler sends placeholder, creates AgentLoop, calls agent.run() which logs 'Starting agent loop' but never completes.",
-      "type": "technical",
-      "workaround": "Run with RUST_LOG=debug to get debug-level logs from client.rs which now has tracing around the HTTP request and response status. This will show whether the request hangs at connect, response, or stream parsing."
+      "description": "Need human to run smoke test to confirm streaming completion fix works. Two bugs were fixed: (1) handler didn't drop agent before channels so cloned senders kept consumer alive, (2) SSE parser didn't exit on finish_reason — hung waiting for [DONE] that OpenRouter may never send.",
+      "type": "human_action",
+      "workaround": "Run RUST_LOG=debug cargo run -- gateway, send a message, verify cursor disappears after response completes"
     }
   ],
   "human_actions_pending": [
-    {"action": "Run 'RUST_LOG=debug cargo run -- gateway' and send a message, share debug logs", "context": "Need to see where the LLM streaming request stalls", "blocking": true}
+    {"action": "Run 'RUST_LOG=debug cargo run -- gateway', send a Telegram message, verify the cursor disappears when response finishes", "context": "Two streaming bugs were fixed — need to confirm the fix works end-to-end", "blocking": true}
   ],
   "decisions": [
     {"decision": "Keep hand-rolled Telegram client (no teloxide)", "rationale": "Already 90% complete, zero new deps", "phase": "02"},
     {"decision": "CancellationToken over AtomicBool for shutdown", "rationale": "Cooperative shutdown propagates to all subtasks cleanly", "phase": "02"},
     {"decision": "dispatch_future must run in tokio::select! with shutdown signal", "rationale": "Bug fix: was defined but only awaited after ctrl+c, so dispatch never ran", "phase": "02"},
     {"decision": "Handler must use config.resolve_api_key() not config.model.api_key", "rationale": "Bug fix: env var resolution was bypassed, giving empty API key", "phase": "02"},
-    {"decision": "Default model updated to anthropic/claude-sonnet-4", "rationale": "Old versioned name was stale", "phase": "02"}
+    {"decision": "Default model updated to anthropic/claude-sonnet-4", "rationale": "Old versioned name was stale", "phase": "02"},
+    {"decision": "drop(agent) before drop(stream_tx) in handler", "rationale": "agent.run(&self) borrows — agent stays alive, its callback closures hold cloned channel senders, preventing consumer from receiving None", "phase": "02"},
+    {"decision": "SSE parser returns immediately on finish_reason", "rationale": "OpenRouter may not send [DONE] marker and keeps connection alive; finish_reason is authoritative signal that stream is complete", "phase": "02"},
+    {"decision": "60s chunk timeout on SSE byte_stream reads", "rationale": "Safety net — if stream stalls without sending finish_reason or closing, eventual timeout prevents indefinite hang", "phase": "02"},
+    {"decision": "Process usage before finish_reason in SSE parser", "rationale": "Some providers send usage in same chunk as finish_reason; early return on finish_reason would miss it otherwise", "phase": "02"}
   ],
   "uncommitted_files": [
     "crates/ironhermes-agent/src/client.rs",
-    "crates/ironhermes-core/src/constants.rs",
-    "crates/ironhermes-gateway/src/handler.rs",
-    "crates/ironhermes-gateway/src/runner.rs"
+    "crates/ironhermes-gateway/src/handler.rs"
   ],
-  "next_action": "Run with RUST_LOG=debug cargo run -- gateway, send a message, check debug logs for 'Sending streaming LLM request' and 'LLM response received' to identify where the streaming call stalls. The client.rs now has debug tracing at both points. If the request hangs before 'LLM response received', it's a connection/timeout issue. If it gets 200 but no stream data, it's an SSE parsing issue.",
-  "context_notes": "All 5 plans code-complete. 26 gateway tests pass. Two bugs already fixed: (1) dispatch_future not running concurrently, (2) API key not resolved from env vars. Current bug is that agent.run() never completes — likely the streaming HTTP request to OpenRouter hangs or returns data that doesn't parse. Added connect_timeout(30s) and debug logging to client.rs but haven't tested yet."
+  "next_action": "Run RUST_LOG=debug cargo run -- gateway, send a message via Telegram, confirm the cursor disappears after the response completes. If it works, commit the fixes and mark Phase 02 complete. If it still hangs, add more debug logging around flush(true) in stream_consumer.rs to trace whether the final edit is actually sent.",
+  "context_notes": "All 5 plans are code-complete with 55 tests passing. The streaming hang was a two-layer bug. Layer 1: handler dropped channels but not the agent — since run(&self) borrows, the agent's callback closures held cloned senders alive, so the consumer channel never closed. Layer 2: SSE parser sent Done on finish_reason but continued looping waiting for [DONE] — OpenRouter keeps connections alive without [DONE], so byte_stream.next() hung forever, keeping tx alive, so the agent loop's rx.recv() also hung. Both are now fixed but untested."
 }
