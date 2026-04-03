@@ -39,7 +39,10 @@ pub struct LlmClient {
 impl LlmClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             default_model: model.into(),
@@ -123,6 +126,7 @@ impl LlmClient {
 
         let url = format!("{}/chat/completions", self.base_url);
 
+        debug!(url = %url, model = %request.model, "Sending streaming LLM request");
         let response = self
             .http
             .post(&url)
@@ -134,6 +138,7 @@ impl LlmClient {
             .context("Failed to send streaming request")?;
 
         let status = response.status();
+        debug!(status = %status, "LLM response received");
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             anyhow::bail!("Streaming chat completion failed ({}): {}", status, body);

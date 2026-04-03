@@ -127,6 +127,9 @@ impl GatewayRunner {
                         match result {
                             Ok(updates) => {
                                 backoff.record_success();
+                                if !updates.is_empty() {
+                                    info!(count = updates.len(), "Received {} update(s) from polling", updates.len());
+                                }
                                 for update in &updates {
                                     if let Some(new_offset) = offset {
                                         if update.update_id >= new_offset {
@@ -199,16 +202,23 @@ impl GatewayRunner {
 
                         // Convert to MessageEvent
                         let event = tg_message_to_event(&msg);
+                        info!(
+                            chat_id = %event.chat_id,
+                            sender_id = %event.sender_id,
+                            content = %event.content,
+                            chat_type = %event.chat_type,
+                            "Received message from dispatch channel"
+                        );
 
                         // Whitelist check (D-10/D-11/D-12)
                         if !whitelist.is_empty() {
                             let sender_id: i64 = event.sender_id.parse().unwrap_or(0);
                             if !whitelist.contains(&sender_id) {
-                                // Silently ignore unauthorized users (D-11)
+                                warn!(sender_id = sender_id, "Sender not in whitelist, ignoring");
                                 continue;
                             }
                         } else {
-                            // Empty whitelist = deny all (D-12)
+                            warn!("Whitelist is empty — denying all messages (D-12)");
                             continue;
                         }
 
@@ -216,9 +226,12 @@ impl GatewayRunner {
                         if event.chat_type == "group" || event.chat_type == "supergroup" {
                             let mention = format!("@{}", bot_username_str);
                             if !event.content.contains(&mention) {
+                                info!("Group message without @mention, skipping");
                                 continue;
                             }
                         }
+
+                        info!(chat_id = %event.chat_id, "Message passed all filters, dispatching");
 
                         // Process multimodal attachments (D-05 through D-08)
                         let (text_prefix, image_data_uri) = if !event.attachments.is_empty() {

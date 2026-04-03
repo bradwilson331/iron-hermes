@@ -271,13 +271,8 @@ impl GatewayMessageHandler {
         });
 
         // 7. Build AgentLoop
-        let base_url = self
-            .config
-            .model
-            .base_url
-            .clone()
-            .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
-        let api_key = self.config.model.api_key.clone().unwrap_or_default();
+        let base_url = self.config.resolve_base_url();
+        let api_key = self.config.resolve_api_key().unwrap_or_default();
         let max_turns = self.config.agent.max_turns;
 
         let client = LlmClient::new(base_url, api_key, &model);

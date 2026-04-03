@@ -1,0 +1,47 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-04-03T01:35:56.026Z",
+  "phase": "02",
+  "phase_name": "telegram-gateway",
+  "phase_dir": ".planning/phases/02-telegram-gateway",
+  "plan": 5,
+  "task": 2,
+  "total_tasks": 2,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "plan": "02-01", "name": "Async foundation: tokio-util, config, trait redesign, TelegramAdapter", "status": "done", "commit": "49eeba0"},
+    {"id": 2, "plan": "02-02", "name": "StreamConsumer + BackoffState utility modules", "status": "done", "commit": "04caa6b"},
+    {"id": 3, "plan": "02-03", "name": "Core wiring: polling, dispatch, user queue, handler, runner", "status": "done", "commit": "03b3460"},
+    {"id": 4, "plan": "02-04", "name": "Slash commands and error recovery", "status": "done", "commit": "6c9197b"},
+    {"id": 5, "plan": "02-05", "name": "Multimodal input + gateway CLI subcommand", "status": "done", "commit": "26f8ac9"},
+    {"id": 6, "plan": "02-05-task2", "name": "End-to-end Telegram bot smoke test", "status": "in_progress", "progress": "Bot connects, registers commands, receives messages, dispatches to handler. Agent loop starts but LLM response never arrives in Telegram."}
+  ],
+  "remaining_tasks": [
+    {"id": 6, "name": "Human smoke test verification", "status": "blocked"}
+  ],
+  "blockers": [
+    {
+      "description": "Agent loop starts but LLM response never appears in Telegram. Bot connects, polls, dispatches correctly. Handler sends placeholder, creates AgentLoop, calls agent.run() which logs 'Starting agent loop' but never completes.",
+      "type": "technical",
+      "workaround": "Run with RUST_LOG=debug to get debug-level logs from client.rs which now has tracing around the HTTP request and response status. This will show whether the request hangs at connect, response, or stream parsing."
+    }
+  ],
+  "human_actions_pending": [
+    {"action": "Run 'RUST_LOG=debug cargo run -- gateway' and send a message, share debug logs", "context": "Need to see where the LLM streaming request stalls", "blocking": true}
+  ],
+  "decisions": [
+    {"decision": "Keep hand-rolled Telegram client (no teloxide)", "rationale": "Already 90% complete, zero new deps", "phase": "02"},
+    {"decision": "CancellationToken over AtomicBool for shutdown", "rationale": "Cooperative shutdown propagates to all subtasks cleanly", "phase": "02"},
+    {"decision": "dispatch_future must run in tokio::select! with shutdown signal", "rationale": "Bug fix: was defined but only awaited after ctrl+c, so dispatch never ran", "phase": "02"},
+    {"decision": "Handler must use config.resolve_api_key() not config.model.api_key", "rationale": "Bug fix: env var resolution was bypassed, giving empty API key", "phase": "02"},
+    {"decision": "Default model updated to anthropic/claude-sonnet-4", "rationale": "Old versioned name was stale", "phase": "02"}
+  ],
+  "uncommitted_files": [
+    "crates/ironhermes-agent/src/client.rs",
+    "crates/ironhermes-core/src/constants.rs",
+    "crates/ironhermes-gateway/src/handler.rs",
+    "crates/ironhermes-gateway/src/runner.rs"
+  ],
+  "next_action": "Run with RUST_LOG=debug cargo run -- gateway, send a message, check debug logs for 'Sending streaming LLM request' and 'LLM response received' to identify where the streaming call stalls. The client.rs now has debug tracing at both points. If the request hangs before 'LLM response received', it's a connection/timeout issue. If it gets 200 but no stream data, it's an SSE parsing issue.",
+  "context_notes": "All 5 plans code-complete. 26 gateway tests pass. Two bugs already fixed: (1) dispatch_future not running concurrently, (2) API key not resolved from env vars. Current bug is that agent.run() never completes — likely the streaming HTTP request to OpenRouter hangs or returns data that doesn't parse. Added connect_timeout(30s) and debug logging to client.rs but haven't tested yet."
+}

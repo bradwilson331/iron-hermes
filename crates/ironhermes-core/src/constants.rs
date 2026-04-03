@@ -11,7 +11,7 @@ pub const NOUS_API_CHAT_URL: &str = "https://inference-api.nousresearch.com/v1/c
 
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
-pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4-20250514";
+pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 pub const DEFAULT_MAX_ITERATIONS: usize = 90;
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 pub const DEFAULT_TOOL_DELAY_SECS: f64 = 1.0;
