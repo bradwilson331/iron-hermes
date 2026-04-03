@@ -312,8 +312,12 @@ impl GatewayRunner {
             }
         });
 
-        // --- 10. Wait for shutdown signal ---
+        // --- 10. Run dispatch loop concurrently with shutdown signal ---
+        // dispatch_future processes messages; ctrl+c or cancel token stops everything.
         tokio::select! {
+            _ = dispatch_future => {
+                info!("Dispatch loop exited");
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("Ctrl+C received, initiating graceful shutdown");
             }
@@ -325,11 +329,8 @@ impl GatewayRunner {
         // Propagate cancellation to all subtasks
         self.cancel.cancel();
 
-        // Drop msg_tx to signal the dispatch loop to close when polling stops
+        // Drop msg_tx to close the polling->dispatch channel
         drop(msg_tx);
-
-        // Run dispatch_future (it will exit immediately since cancel is set)
-        dispatch_future.await;
 
         // Drain all JoinSet tasks (poll loop + session cleanup)
         while join_set.join_next().await.is_some() {}
