@@ -65,3 +65,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 pdf-extract = "0.10"
 # Base64 encoding
 base64 = "0.22"
+# File locking
+fs2 = "0.4"

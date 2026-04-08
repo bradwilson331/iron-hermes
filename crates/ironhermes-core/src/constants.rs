@@ -18,6 +18,14 @@ pub const DEFAULT_TOOL_DELAY_SECS: f64 = 1.0;
 
 pub const VALID_REASONING_EFFORTS: &[&str] = &["xhigh", "high", "medium", "low", "minimal"];
 
+/// Memory subsystem constants (D-05, D-06)
+pub const ENTRY_DELIMITER: &str = "\n\u{00a7}\n";
+pub const MEMORY_CHAR_LIMIT: usize = 2_200;
+pub const USER_CHAR_LIMIT: usize = 1_375;
+pub const MEMORY_FILENAME: &str = "MEMORY.md";
+pub const USER_FILENAME: &str = "USER.md";
+pub const MEMORIES_DIR: &str = "memories";
+
 /// Get the IronHermes home directory (default: ~/.ironhermes).
 pub fn get_hermes_home() -> PathBuf {
     match std::env::var("IRONHERMES_HOME") {
