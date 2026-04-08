@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironhermes_core::ToolSchema;
+use ironhermes_core::{MemoryStore, ToolSchema};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -83,6 +84,13 @@ impl ToolRegistry {
         self.register(Box::new(PatchFileTool));
         self.register(Box::new(SearchFilesTool));
         self.register(Box::new(WebSearchTool));
+    }
+
+    /// Register the memory tool with a shared MemoryStore.
+    /// Called separately from register_defaults() because it requires a MemoryStore instance.
+    pub fn register_memory_tool(&mut self, store: Arc<Mutex<MemoryStore>>) {
+        use crate::memory_tool::MemoryTool;
+        self.register(Box::new(MemoryTool::new(store)));
     }
 }
 

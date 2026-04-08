@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform, Role};
+use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryStore, MessageContent, MessageEvent, Platform, Role};
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_tools::ToolRegistry;
@@ -45,6 +45,7 @@ pub struct GatewayMessageHandler {
     config: Config,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
+    memory_store: Option<Arc<Mutex<MemoryStore>>>,
 }
 
 impl GatewayMessageHandler {
@@ -57,7 +58,13 @@ impl GatewayMessageHandler {
             config,
             session_store,
             tool_registry,
+            memory_store: None,
         }
+    }
+
+    /// Set the memory store for prompt injection and tool access.
+    pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
+        self.memory_store = Some(store);
     }
 
     /// Dispatch a slash command to the appropriate handler (plan 04).
@@ -222,11 +229,14 @@ impl GatewayMessageHandler {
             session.messages.clone()
         };
 
-        // 4. Build system message via PromptBuilder (loads SOUL.md + project context)
+        // 4. Build system message via PromptBuilder (loads SOUL.md + project context + memory)
         let cwd = PathBuf::from(std::env::current_dir().unwrap_or_default());
-        let system_msg = PromptBuilder::new(&model, "telegram")
-            .load_context(&cwd)
-            .build_system_message();
+        let mut prompt_builder = PromptBuilder::new(&model, "telegram")
+            .load_context(&cwd);
+        if let Some(ref store) = self.memory_store {
+            prompt_builder.set_memory_store(store.clone());
+        }
+        let system_msg = prompt_builder.build_system_message();
         // Prepend system message
         let mut messages = vec![system_msg];
         messages.append(&mut session_messages);

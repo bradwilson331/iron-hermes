@@ -1,6 +1,8 @@
-use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
-use ironhermes_core::ChatMessage;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
+use ironhermes_core::{ChatMessage, MemoryStore, MemoryTarget};
 use tracing::debug;
 
 const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Nous Research. You are helpful, harmless, and honest.
@@ -29,6 +31,7 @@ pub struct PromptBuilder {
     soul_content: Option<String>,
     project_context: Option<String>,
     agents_md_content: Option<String>,
+    memory_store: Option<Arc<Mutex<MemoryStore>>>,
 }
 
 impl PromptBuilder {
@@ -39,7 +42,13 @@ impl PromptBuilder {
             soul_content: None,
             project_context: None,
             agents_md_content: None,
+            memory_store: None,
         }
+    }
+
+    /// Set the memory store for prompt injection (D-12: uses frozen snapshot).
+    pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
+        self.memory_store = Some(store);
     }
 
     /// Load all context files (SOUL.md, project context, AGENTS.md).
@@ -151,6 +160,17 @@ impl PromptBuilder {
         // 5. AGENTS.md from IRONHERMES_HOME
         if let Some(ref agents) = self.agents_md_content {
             parts.push(agents.clone());
+        }
+
+        // 6. Memory snapshot (D-12: uses frozen snapshot, not live state)
+        if let Some(ref store) = self.memory_store {
+            let store = store.lock().unwrap();
+            if let Some(block) = store.format_for_system_prompt(MemoryTarget::Memory) {
+                parts.push(block);
+            }
+            if let Some(block) = store.format_for_system_prompt(MemoryTarget::User) {
+                parts.push(block);
+            }
         }
 
         parts.join("\n\n")

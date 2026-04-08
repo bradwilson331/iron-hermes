@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use ironhermes_core::Config;
+use ironhermes_core::{Config, MemoryStore};
 use ironhermes_tools::ToolRegistry;
 use tracing::{error, info, warn};
 
@@ -21,6 +21,7 @@ pub struct GatewayRunner {
     config: Config,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
+    memory_store: Option<Arc<Mutex<MemoryStore>>>,
     cancel: CancellationToken,
 }
 
@@ -30,8 +31,14 @@ impl GatewayRunner {
             config,
             session_store: Arc::new(RwLock::new(SessionStore::new())),
             tool_registry,
+            memory_store: None,
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// Set the memory store for prompt injection and tool access.
+    pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
+        self.memory_store = Some(store);
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
@@ -97,11 +104,15 @@ impl GatewayRunner {
         let whitelist = tg_config.whitelist.clone();
 
         // --- 6. Create handler and queue manager ---
-        let handler = Arc::new(GatewayMessageHandler::new(
+        let mut handler = GatewayMessageHandler::new(
             self.config.clone(),
             self.session_store.clone(),
             self.tool_registry.clone(),
-        ));
+        );
+        if let Some(ref store) = self.memory_store {
+            handler.set_memory_store(store.clone());
+        }
+        let handler = Arc::new(handler);
         let user_queue = Arc::new(UserQueueManager::new(
             adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
             16,

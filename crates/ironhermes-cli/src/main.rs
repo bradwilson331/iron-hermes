@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config};
+use ironhermes_core::{ChatMessage, Config, MemoryStore};
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
-use std::sync::Arc;
-use tracing::info;
+use std::sync::{Arc, Mutex};
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(
@@ -370,7 +370,19 @@ async fn run_agent_turn(
 /// Start the Telegram gateway bot.
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config) = build_client(cli)?;
-    let registry = Arc::new(build_registry());
+
+    // Create MemoryStore and load from disk
+    let memory_dir = ironhermes_core::get_hermes_home().join("memories");
+    let mut store = MemoryStore::new(memory_dir);
+    if let Err(e) = store.load_from_disk() {
+        warn!("Failed to load memory from disk: {}", e);
+    }
+    let memory_store = Arc::new(Mutex::new(store));
+
+    // Build registry and register memory tool before Arc wrapping
+    let mut registry = build_registry();
+    registry.register_memory_tool(memory_store.clone());
+    let registry = Arc::new(registry);
 
     // Override token if provided via --token flag
     if let Some(token) = token_override {
@@ -384,7 +396,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
 
     info!("Starting IronHermes Telegram Gateway");
-    let runner = GatewayRunner::new(config, registry);
+    let mut runner = GatewayRunner::new(config, registry);
+    runner.set_memory_store(memory_store);
     runner.start().await
 }
 
