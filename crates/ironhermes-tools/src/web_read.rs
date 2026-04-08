@@ -524,9 +524,17 @@ impl Tool for WebReadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
-        let url = args["url"]
+        let raw_url = args["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
+
+        // Normalize URL: prepend https:// if no scheme is provided.
+        let url = if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
+            format!("https://{raw_url}")
+        } else {
+            raw_url.to_string()
+        };
+        let url = url.as_str();
 
         // SSRF validation before any fetch (D-16).
         validate_url_async(url).await?;
