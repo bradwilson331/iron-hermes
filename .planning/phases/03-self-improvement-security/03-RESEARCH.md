@@ -642,19 +642,19 @@ memory:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **MemoryStore thread safety model**
+1. **MemoryStore thread safety model** (RESOLVED: Arc<Mutex<MemoryStore>> — coarse-grained)
    - What we know: MemoryTool must be `Send + Sync` (Tool trait). Multiple agent sessions could theoretically run concurrently (Semaphore-bounded, default 8).
    - What's unclear: Should MemoryStore use `Arc<Mutex<MemoryStore>>` (coarse-grained) or make each method take `&self` with interior `Mutex` fields?
    - Recommendation: `Arc<Mutex<MemoryStore>>` — coarse-grained locking is simpler, and the file lock is the real bottleneck anyway. Fine-grained locking would not improve throughput.
 
-2. **PromptBuilder construction in handler.rs**
+2. **PromptBuilder construction in handler.rs** (RESOLVED: load once at GatewayMessageHandler::new() startup)
    - What we know: `handler.rs` constructs `PromptBuilder::new().load_context().build_system_message()` on every message (line 227-229). MemoryStore needs to be pre-constructed and its snapshot captured before the first build.
    - What's unclear: Should MemoryStore be loaded once when `GatewayMessageHandler` is constructed, or once per-session?
    - Recommendation: Load once when `GatewayMessageHandler::new()` is called (at startup). Memory snapshot is session-agnostic (same SOUL.md-style global state). This matches Python hermes-agent's pattern.
 
-3. **WriteFileTool atomic writes for context files**
+3. **WriteFileTool atomic writes for context files** (RESOLVED: yes, use atomic writes for all context file writes — SELF-06)
    - What we know: D-08 specifies atomic writes for memory files. D-02 says scanning applies to context files.
    - What's unclear: Should write_file/patch tools also use atomic writes when writing SOUL.md/AGENTS.md (not just scanning)?
    - Recommendation: Yes, use atomic writes for context files too — the failure mode of a partial write to SOUL.md (corrupting the identity) is severe.
