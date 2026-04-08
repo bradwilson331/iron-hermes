@@ -17,4 +17,5 @@ dirs = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
 async-trait = { workspace = true }

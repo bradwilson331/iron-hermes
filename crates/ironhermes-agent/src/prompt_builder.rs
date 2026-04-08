@@ -1,4 +1,4 @@
-use crate::context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
+use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
 use ironhermes_core::ChatMessage;
 use std::path::Path;
 use tracing::debug;
