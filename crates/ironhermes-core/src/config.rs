@@ -13,6 +13,7 @@ pub struct Config {
     pub gateway: GatewayConfig,
     pub cron: CronConfig,
     pub security: SecurityConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +144,25 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             redact_secrets: true,
+        }
+    }
+}
+
+/// Per-user inbound rate limiting configuration (D-22).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Maximum sustained messages per minute per user.
+    pub messages_per_minute: u32,
+    /// Maximum burst size (tokens available immediately).
+    pub burst_size: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            messages_per_minute: 10,
+            burst_size: 3,
         }
     }
 }

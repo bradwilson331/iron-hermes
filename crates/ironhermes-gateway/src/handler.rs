@@ -13,6 +13,7 @@ use ironhermes_tools::ToolRegistry;
 
 use crate::adapter::{MessageHandler, PlatformAdapter};
 use crate::multimodal::ProcessedAttachments;
+use crate::rate_limiter::PerUserRateLimiter;
 use crate::session::{SessionKey, SessionStore};
 use crate::stream_consumer::StreamConsumer;
 
@@ -46,6 +47,7 @@ pub struct GatewayMessageHandler {
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    rate_limiter: PerUserRateLimiter,
 }
 
 impl GatewayMessageHandler {
@@ -54,11 +56,16 @@ impl GatewayMessageHandler {
         session_store: Arc<RwLock<SessionStore>>,
         tool_registry: Arc<ToolRegistry>,
     ) -> Self {
+        let rate_limiter = PerUserRateLimiter::new(
+            config.rate_limit.messages_per_minute,
+            config.rate_limit.burst_size,
+        );
         Self {
             config,
             session_store,
             tool_registry,
             memory_store: None,
+            rate_limiter,
         }
     }
 
@@ -175,6 +182,11 @@ impl GatewayMessageHandler {
         cancel: CancellationToken,
         processed: ProcessedAttachments,
     ) -> Result<()> {
+        // D-20: Per-user rate limiting. D-21: Silent drop on excess.
+        if !self.rate_limiter.check_and_consume(&event.sender_id) {
+            return Ok(());
+        }
+
         if event.content.starts_with('/') {
             return self.handle_slash_command(event, adapter, cancel).await;
         }
