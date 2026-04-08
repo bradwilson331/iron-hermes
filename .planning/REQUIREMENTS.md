@@ -1,9 +1,10 @@
 # Requirements: IronHermes
 
 **Defined:** 2026-04-01
+**Updated:** 2026-04-08 (v1.1 requirements added)
 **Core Value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
 
-## v1 Requirements
+## v1.0 Requirements (Complete)
 
 ### Context Files
 
@@ -32,25 +33,71 @@
 
 ### Self-Improvement
 
-- [ ] **SELF-01**: Agent can read its own context files (SOUL.md, AGENTS.md) via existing read_file tool
-- [ ] **SELF-02**: Agent can edit its own context files via existing write_file/patch tools
-- [ ] **SELF-03**: Security scanning on all context file writes (injection detection, exfiltration patterns, invisible Unicode)
-- [ ] **SELF-04**: Memory subsystem: bounded declarative facts stored in MEMORY.md, loaded into context
-- [ ] **SELF-05**: Memory tool: agent can save, query, and forget facts via a dedicated memory tool
-- [ ] **SELF-06**: Atomic file I/O for all context/memory writes (temp file + rename, matching cron pattern)
+- [x] **SELF-01**: Agent can read its own context files (SOUL.md, AGENTS.md) via existing read_file tool
+- [x] **SELF-02**: Agent can edit its own context files via existing write_file/patch tools
+- [x] **SELF-03**: Security scanning on all context file writes (injection detection, exfiltration patterns, invisible Unicode)
+- [x] **SELF-04**: Memory subsystem: bounded declarative facts stored in MEMORY.md, loaded into context
+- [x] **SELF-05**: Memory tool: agent can save, query, and forget facts via a dedicated memory tool
+- [x] **SELF-06**: Atomic file I/O for all context/memory writes (temp file + rename, matching cron pattern)
 
 ### Web Scraping
 
-- [ ] **WEB-01**: web_read tool: fetch URL content via Firecrawl scrape API, return extracted text
-- [ ] **WEB-02**: SSRF protection: validate URLs before fetching (block private IPs, localhost, internal ranges)
-- [ ] **WEB-03**: Content truncation: cap extracted text to context-window-safe length (configurable, default 50K chars)
-- [ ] **WEB-04**: Local HTML fallback: scraper crate for content extraction when Firecrawl is unavailable
+- [x] **WEB-01**: web_read tool: fetch URL content via Firecrawl scrape API, return extracted text
+- [x] **WEB-02**: SSRF protection: validate URLs before fetching (block private IPs, localhost, internal ranges)
+- [x] **WEB-03**: Content truncation: cap extracted text to context-window-safe length (configurable, default 50K chars)
+- [x] **WEB-04**: Local HTML fallback: scraper crate for content extraction when Firecrawl is unavailable
 
 ### Security
 
-- [ ] **SEC-01**: Port url_safety.py SSRF validation from hermes-agent to Rust
-- [ ] **SEC-02**: Regex-based threat scanning for context file writes (prevent prompt injection via self-modification)
-- [ ] **SEC-03**: Rate limiting on Telegram message processing to prevent abuse
+- [x] **SEC-01**: Port url_safety.py SSRF validation from hermes-agent to Rust
+- [x] **SEC-02**: Regex-based threat scanning for context file writes (prevent prompt injection via self-modification)
+- [x] **SEC-03**: Rate limiting on Telegram message processing to prevent abuse
+
+## v1.1 Requirements
+
+Requirements for the Automation milestone. Each maps to roadmap phases.
+
+### Scheduled Tasks
+
+- [ ] **SCHED-01**: User can create scheduled tasks using natural language ("every morning at 9am") which the agent interprets to cron expressions
+- [ ] **SCHED-02**: User can pause, resume, and edit existing scheduled tasks without delete+recreate
+- [ ] **SCHED-03**: User can attach named skills to scheduled tasks for reliable, inspectable recurring jobs
+- [ ] **SCHED-04**: Scheduled task output routes to configured platform (Telegram, CLI, or webhook)
+
+### Event Hooks
+
+- [ ] **HOOK-01**: Agent lifecycle events (message received, tool called, response sent) are logged via a hook registry
+- [ ] **HOOK-02**: Guardrail hooks can intercept and block tool calls before dispatch (e.g., block terminal in untrusted contexts)
+- [ ] **HOOK-03**: Hook events can be forwarded to external HTTP endpoints via webhook delivery
+
+### Skills System
+
+- [ ] **SKILL-01**: Agent discovers skill documents from skills directories (~/.ironhermes/skills/, ~/.agents/skills/, project-level)
+- [ ] **SKILL-02**: Skills use progressive disclosure — catalog (name+description) loaded at session start, full content loaded only on activation
+- [ ] **SKILL-03**: Skill documents follow the agentskills.io open standard (SKILL.md with name/description frontmatter, Markdown body)
+- [ ] **SKILL-04**: Agent can list, view, and activate skills via a dedicated skills tool during conversation
+
+### Code Execution
+
+- [ ] **EXEC-01**: Agent can execute Python scripts in an isolated child process via an execute_code tool
+- [ ] **EXEC-02**: Python scripts can call agent tools (web_search, read_file, etc.) via JSON-RPC over a socket
+- [ ] **EXEC-03**: Child process environment has API keys and secrets stripped for safety
+- [ ] **EXEC-04**: Code execution enforces timeout (5 min), call limit (50), and stdout cap (50KB)
+
+### Subagent Delegation
+
+- [ ] **AGENT-01**: Agent can delegate tasks to child agents via a delegate_task tool with isolated context
+- [ ] **AGENT-02**: Parent agent specifies which tools the child agent can use via a filtered ToolRegistry
+- [ ] **AGENT-03**: Maximum 3 concurrent subagents enforced via semaphore
+- [ ] **AGENT-04**: Each subagent gets its own terminal session scope to prevent state bleed
+- [ ] **AGENT-05**: Recursive delegation is prevented — delegate_task is excluded from child agent toolsets
+
+### Batch Processing
+
+- [ ] **BATCH-01**: User can run batch prompt execution from JSONL input with semaphore-bounded parallel workers
+- [ ] **BATCH-02**: Batch output is in ShareGPT format (human/assistant/tool roles) for HuggingFace compatibility
+- [ ] **BATCH-03**: Batch jobs support checkpointing — survive restarts by tracking completed entries by content hash
+- [ ] **BATCH-04**: Automatic quality filtering discards trajectories with hallucinated tool names or missing reasoning
 
 ## v2 Requirements
 
@@ -90,6 +137,10 @@
 | Webhook mode for Telegram | Long polling is simpler and sufficient for single-instance deployment |
 | Database-backed memory | File-based memory matches hermes-agent pattern and is git-trackable |
 | JavaScript rendering for scraping | Firecrawl API handles JS server-side; no need for headless browser |
+| Per-prompt container images for batch | Enormous operational complexity (Docker daemon dependency) |
+| Discord/Slack delivery for scheduled tasks | Out of scope until Telegram is solid; delivery abstraction left open |
+| Persistent subagent state across sessions | Subagents are ephemeral work units; parent handles continuity |
+| Interactive subagent communication | Subagents receive a task and return a result; no mid-task steering |
 
 ## Traceability
 
@@ -111,25 +162,50 @@
 | TG-06 | Phase 2 | Complete |
 | TG-07 | Phase 2 | Complete |
 | TG-08 | Phase 2 | Complete |
-| SEC-01 | Phase 3 | Pending |
-| SEC-02 | Phase 3 | Pending |
-| SEC-03 | Phase 3 | Pending |
-| SELF-01 | Phase 3 | Pending |
-| SELF-02 | Phase 3 | Pending |
-| SELF-03 | Phase 3 | Pending |
-| SELF-04 | Phase 3 | Pending |
-| SELF-05 | Phase 3 | Pending |
-| SELF-06 | Phase 3 | Pending |
-| WEB-01 | Phase 4 | Pending |
-| WEB-02 | Phase 4 | Pending |
-| WEB-03 | Phase 4 | Pending |
-| WEB-04 | Phase 4 | Pending |
+| SEC-01 | Phase 3 | Complete |
+| SEC-02 | Phase 3 | Complete |
+| SEC-03 | Phase 3 | Complete |
+| SELF-01 | Phase 3 | Complete |
+| SELF-02 | Phase 3 | Complete |
+| SELF-03 | Phase 3 | Complete |
+| SELF-04 | Phase 3 | Complete |
+| SELF-05 | Phase 3 | Complete |
+| SELF-06 | Phase 3 | Complete |
+| WEB-01 | Phase 4 | Complete |
+| WEB-02 | Phase 4 | Complete |
+| WEB-03 | Phase 4 | Complete |
+| WEB-04 | Phase 4 | Complete |
+| SCHED-01 | — | Pending |
+| SCHED-02 | — | Pending |
+| SCHED-03 | — | Pending |
+| SCHED-04 | — | Pending |
+| HOOK-01 | — | Pending |
+| HOOK-02 | — | Pending |
+| HOOK-03 | — | Pending |
+| SKILL-01 | — | Pending |
+| SKILL-02 | — | Pending |
+| SKILL-03 | — | Pending |
+| SKILL-04 | — | Pending |
+| EXEC-01 | — | Pending |
+| EXEC-02 | — | Pending |
+| EXEC-03 | — | Pending |
+| EXEC-04 | — | Pending |
+| AGENT-01 | — | Pending |
+| AGENT-02 | — | Pending |
+| AGENT-03 | — | Pending |
+| AGENT-04 | — | Pending |
+| AGENT-05 | — | Pending |
+| BATCH-01 | — | Pending |
+| BATCH-02 | — | Pending |
+| BATCH-03 | — | Pending |
+| BATCH-04 | — | Pending |
 
 **Coverage:**
-- v1 requirements: 29 total
-- Mapped to phases: 29
-- Unmapped: 0
+- v1.0 requirements: 29 total (all complete)
+- v1.1 requirements: 23 total
+- Mapped to phases: 29 (v1.0) + 0 (v1.1, pending roadmap)
+- Unmapped: 23 (v1.1, awaiting roadmap creation)
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-01 after research synthesis*
+*Last updated: 2026-04-08 after v1.1 Automation milestone requirements defined*
