@@ -260,32 +260,49 @@ impl GatewayMessageHandler {
         // 6. Spawn StreamConsumer task
         let mut consumer = StreamConsumer::new(adapter.clone(), &event.chat_id, &placeholder_id);
         let consumer_handle = tokio::spawn(async move {
+            let mut tool_rx_open = true;
             loop {
-                tokio::select! {
-                    biased;
-                    msg = tool_rx.recv() => {
-                        match msg {
-                            Some(tool_name) => {
-                                consumer.tool_status(&tool_name);
-                                let _ = consumer.flush(false).await;
+                if tool_rx_open {
+                    tokio::select! {
+                        biased;
+                        msg = tool_rx.recv() => {
+                            match msg {
+                                Some(tool_name) => {
+                                    consumer.tool_status(&tool_name);
+                                    let _ = consumer.flush(false).await;
+                                }
+                                None => {
+                                    // tool_rx closed — stop polling it
+                                    tool_rx_open = false;
+                                }
                             }
-                            None => {
-                                // tool_rx closed — check stream_rx
+                        }
+                        chunk = stream_rx.recv() => {
+                            match chunk {
+                                Some(text) => {
+                                    consumer.clear_tool_status();
+                                    consumer.push(&text);
+                                    let _ = consumer.flush(false).await;
+                                }
+                                None => {
+                                    // stream_rx closed — do final flush
+                                    let _ = consumer.flush(true).await;
+                                    break;
+                                }
                             }
                         }
                     }
-                    chunk = stream_rx.recv() => {
-                        match chunk {
-                            Some(text) => {
-                                consumer.clear_tool_status();
-                                consumer.push(&text);
-                                let _ = consumer.flush(false).await;
-                            }
-                            None => {
-                                // stream_rx closed — do final flush
-                                let _ = consumer.flush(true).await;
-                                break;
-                            }
+                } else {
+                    // tool_rx closed — drain stream_rx only
+                    match stream_rx.recv().await {
+                        Some(text) => {
+                            consumer.clear_tool_status();
+                            consumer.push(&text);
+                            let _ = consumer.flush(false).await;
+                        }
+                        None => {
+                            let _ = consumer.flush(true).await;
+                            break;
                         }
                     }
                 }
