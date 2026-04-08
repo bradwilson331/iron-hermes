@@ -76,6 +76,7 @@ impl ToolRegistry {
     pub fn register_defaults(&mut self) {
         use crate::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
         use crate::terminal::TerminalTool;
+        use crate::web_read::WebReadTool;
         use crate::web_search::WebSearchTool;
 
         self.register(Box::new(TerminalTool));
@@ -84,6 +85,7 @@ impl ToolRegistry {
         self.register(Box::new(PatchFileTool));
         self.register(Box::new(SearchFilesTool));
         self.register(Box::new(WebSearchTool));
+        self.register(Box::new(WebReadTool));
     }
 
     /// Register the memory tool with a shared MemoryStore.
