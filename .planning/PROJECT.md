@@ -28,9 +28,11 @@ A working conversational AI agent with personality (context files) that operates
 ### Active
 
 <!-- Current scope. Building toward these. -->
-- [ ] Telegram gateway — long polling wired to agent loop, full conversational bot with tool use
-- [ ] Self-improvement loop — agent can modify its own context files, prompts, and behavior
-- [ ] Web scraping tools — page content reading, URL fetching beyond Firecrawl search
+- [ ] Scheduled tasks — extend cron with natural language scheduling, skill attachment, multi-platform delivery
+- [ ] Subagent delegation — delegate_task tool spawning child agents with isolated context and restricted toolsets
+- [ ] Code execution — execute_code tool for Python scripts calling Hermes tools via sandboxed RPC
+- [ ] Event hooks — gateway hooks (logging, alerts, webhooks) + plugin hooks (tool interception, guardrails)
+- [ ] Batch processing — parallel prompt execution generating ShareGPT-format trajectory data
 
 ### Out of Scope
 
@@ -67,5 +69,33 @@ A working conversational AI agent with personality (context files) that operates
 | Telegram first, other platforms later | Python hermes-agent's primary deployment is Telegram | -- Pending |
 | Context files over database for personality | Matches Python approach; files are git-trackable and agent-editable | -- Pending |
 
+## Current Milestone: v1.1 Automation
+
+**Goal:** Add automation and orchestration capabilities — scheduled tasks, subagent delegation, code execution, event hooks, and batch processing.
+
+**Target features:**
+- Scheduled Tasks — extend existing cron with natural language scheduling, skill attachment, multi-platform delivery
+- Subagent Delegation — delegate_task spawning child agents with isolated context (up to 3 concurrent)
+- Code Execution — execute_code for Python scripts calling Hermes tools via sandboxed RPC
+- Event Hooks — gateway + plugin hooks for logging, alerts, interception, guardrails
+- Batch Processing — parallel prompt execution with ShareGPT-format output
+
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd-complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
-*Last updated: 2026-04-01 after Phase 1 (Context File Loading) completion*
+*Last updated: 2026-04-08 after v1.0 completion, v1.1 Automation milestone started*
