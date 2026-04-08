@@ -20,6 +20,7 @@ tracing = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
 fs2 = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

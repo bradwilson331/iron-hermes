@@ -67,3 +67,5 @@ pdf-extract = "0.10"
 base64 = "0.22"
 # File locking
 fs2 = "0.4"
+# URL parsing
+url = "2"
