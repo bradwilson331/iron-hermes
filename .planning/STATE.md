@@ -20,7 +20,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-08)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram -- the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Milestone v1.1 — Automation (defining requirements)
+**Current focus:** Milestone v1.1 — Automation (6 features, defining requirements)
 
 ## Current Position
 
@@ -58,7 +58,7 @@ Recent decisions affecting current work:
 - [v1.0]: All 4 phases complete — context loading, Telegram gateway, self-improvement + security, web scraping
 - [v1.0]: Hand-rolled Telegram client, frozen-snapshot context, CancellationToken shutdown, channel-based dispatch
 - [v1.0]: Existing cron crate has file-based persistence and tick locking — v1.1 enhances this
-- [v1.1]: Scope limited to Automation features only — scheduled tasks, subagent delegation, code execution, event hooks, batch processing
+- [v1.1]: Scope: 6 features — scheduled tasks, event hooks, skills system, code execution, subagent delegation, batch processing
 
 ### Pending Todos
 

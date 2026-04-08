@@ -29,9 +29,10 @@ A working conversational AI agent with personality (context files) that operates
 
 <!-- Current scope. Building toward these. -->
 - [ ] Scheduled tasks — extend cron with natural language scheduling, skill attachment, multi-platform delivery
-- [ ] Subagent delegation — delegate_task tool spawning child agents with isolated context and restricted toolsets
-- [ ] Code execution — execute_code tool for Python scripts calling Hermes tools via sandboxed RPC
 - [ ] Event hooks — gateway hooks (logging, alerts, webhooks) + plugin hooks (tool interception, guardrails)
+- [ ] Skills system — on-demand knowledge documents with progressive disclosure, agentskills.io compatible
+- [ ] Code execution — execute_code tool for Python scripts calling Hermes tools via sandboxed RPC
+- [ ] Subagent delegation — delegate_task tool spawning child agents with isolated context and restricted toolsets
 - [ ] Batch processing — parallel prompt execution generating ShareGPT-format trajectory data
 
 ### Out of Scope
@@ -71,13 +72,14 @@ A working conversational AI agent with personality (context files) that operates
 
 ## Current Milestone: v1.1 Automation
 
-**Goal:** Add automation and orchestration capabilities — scheduled tasks, subagent delegation, code execution, event hooks, and batch processing.
+**Goal:** Add automation, orchestration, and knowledge capabilities — scheduled tasks, event hooks, skills system, code execution, subagent delegation, and batch processing.
 
 **Target features:**
 - Scheduled Tasks — extend existing cron with natural language scheduling, skill attachment, multi-platform delivery
-- Subagent Delegation — delegate_task spawning child agents with isolated context (up to 3 concurrent)
+- Event Hooks — gateway + plugin hooks for logging, alerts, tool interception, guardrails
+- Skills System — on-demand knowledge documents with progressive disclosure, agentskills.io compatible
 - Code Execution — execute_code for Python scripts calling Hermes tools via sandboxed RPC
-- Event Hooks — gateway + plugin hooks for logging, alerts, interception, guardrails
+- Subagent Delegation — delegate_task spawning child agents with isolated context (up to 3 concurrent)
 - Batch Processing — parallel prompt execution with ShareGPT-format output
 
 ## Evolution
@@ -98,4 +100,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-08 after v1.0 completion, v1.1 Automation milestone started*
+*Last updated: 2026-04-08 after v1.1 Automation milestone scope confirmed (6 features)*
