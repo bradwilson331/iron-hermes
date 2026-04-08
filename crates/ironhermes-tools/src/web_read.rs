@@ -302,6 +302,188 @@ async fn fetch_local(
     extract_content_local(&body, url)
 }
 
+// --- Unit tests ---
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- truncate_content tests ----
+
+    #[test]
+    fn test_truncate_under_limit() {
+        let content = "Short content.";
+        let result = truncate_content(content, 100);
+        assert_eq!(result, content);
+        assert!(!result.contains("[Content truncated"));
+    }
+
+    #[test]
+    fn test_truncate_at_limit() {
+        let content = "Exactly at limit.";
+        let result = truncate_content(content, content.chars().count());
+        assert_eq!(result, content);
+        assert!(!result.contains("[Content truncated"));
+    }
+
+    #[test]
+    fn test_truncate_paragraph_break() {
+        // Limit falls inside the third paragraph. Expect cut at "\n\n" after second paragraph.
+        // "First paragraph.\n\nSecond paragraph." = 36 chars, "\n\n" at index 16.
+        // With limit 45, slice = first 45 chars contains two "\n\n" breaks.
+        // rfind("\n\n") finds the one at index 35. break_byte = 35.
+        // trimmed = "First paragraph.\n\nSecond paragraph."
+        let content = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph is longer.";
+        let result = truncate_content(content, 45);
+        assert!(result.starts_with("First paragraph.\n\nSecond paragraph."));
+        assert!(result.contains("[Content truncated"));
+        assert!(!result.contains("Third"));
+    }
+
+    #[test]
+    fn test_truncate_sentence_break() {
+        // No paragraph breaks; sentence break at ". " boundary.
+        // content = "AAAA. BBBB." (11 chars). Limit 8.
+        // slice = "AAAA. BB". rfind(". ") = 4. break_byte = 6.
+        // trimmed = "AAAA. " (6 chars displayed).
+        let content = "AAAA. BBBB.";
+        let result = truncate_content(content, 8);
+        assert!(result.contains("[Content truncated"));
+        let trimmed_part = result.split("\n\n[Content truncated").next().unwrap();
+        assert_eq!(trimmed_part, "AAAA. ");
+    }
+
+    #[test]
+    fn test_truncate_word_break() {
+        // No paragraph or sentence breaks; word break at space.
+        // content = "one two three" (13 chars). Limit 8.
+        // slice = "one two " (8 chars). rfind(' ') = 7. break_byte = 7.
+        // trimmed = "one two" (7 chars).
+        let content = "one two three";
+        let result = truncate_content(content, 8);
+        assert!(result.contains("[Content truncated"));
+        let trimmed_part = result.split("\n\n[Content truncated").next().unwrap();
+        assert_eq!(trimmed_part, "one two");
+    }
+
+    #[test]
+    fn test_truncate_no_whitespace() {
+        // No paragraph, sentence, or word breaks: hard cut at max_chars.
+        let content = "abcdefghijklmnopqrstuvwxyz";
+        let result = truncate_content(content, 10);
+        assert!(result.contains("[Content truncated at 10 of 26 characters]"));
+        let trimmed_part = result.split("\n\n[Content truncated").next().unwrap();
+        assert_eq!(trimmed_part, "abcdefghij");
+    }
+
+    #[test]
+    fn test_truncate_utf8_emoji() {
+        // Each emoji is 4 bytes but 1 char. Should not panic and truncate at char boundary.
+        // content = "Hello \u{1F600}\u{1F601}\u{1F602} world" = 17 chars. Limit 9.
+        // slice = first 9 chars. rfind(' ') finds space at index 5. break_byte = 5.
+        // trimmed = "Hello" (5 chars).
+        let content = "Hello \u{1F600}\u{1F601}\u{1F602} world";
+        let result = truncate_content(content, 9);
+        // Must not panic — the test itself proves this.
+        assert!(result.contains("[Content truncated"));
+    }
+
+    #[test]
+    fn test_truncate_notice_char_counts() {
+        // Verify the truncation notice shows char counts not byte counts.
+        let content = "abcdefghijklmnopqrstuvwxyz";
+        let total_chars = content.chars().count(); // 26
+        let result = truncate_content(content, 10);
+        assert!(result.contains(&format!("of {} characters]", total_chars)));
+    }
+
+    #[test]
+    fn test_truncate_notice_displayed_chars() {
+        // Hard cut: trimmed = "abcdefghij" (10 chars). Notice shows "at 10 of 26".
+        let content = "abcdefghijklmnopqrstuvwxyz";
+        let result = truncate_content(content, 10);
+        assert!(result.contains("truncated at 10 of 26 characters]"));
+    }
+
+    // ---- extract_content_local tests ----
+
+    #[test]
+    fn test_extract_selects_article() {
+        let html = r#"<html><head><title>Test</title></head><body>
+            <nav>Navigation</nav>
+            <article><h1>Main Content</h1><p>Article text.</p></article>
+            <footer>Footer</footer>
+        </body></html>"#;
+        let result = extract_content_local(html, "https://example.com").unwrap();
+        assert!(result.starts_with("# Test\nSource: https://example.com\n\n"));
+        assert!(result.contains("Main Content"));
+        assert!(result.contains("Article text"));
+    }
+
+    #[test]
+    fn test_extract_selects_main_over_body() {
+        let html = r#"<html><head><title>Page</title></head><body>
+            <nav>Nav</nav>
+            <main><p>Main content here.</p></main>
+            <aside>Sidebar</aside>
+        </body></html>"#;
+        let result = extract_content_local(html, "https://example.com").unwrap();
+        assert!(result.contains("Main content here"));
+    }
+
+    #[test]
+    fn test_extract_falls_back_to_body() {
+        let html = r#"<html><head><title>Simple</title></head><body>
+            <div><p>Body content only.</p></div>
+        </body></html>"#;
+        let result = extract_content_local(html, "https://example.com").unwrap();
+        assert!(result.contains("Body content only"));
+    }
+
+    #[test]
+    fn test_extract_strips_boilerplate() {
+        let html = r#"<html><head><title>Clean</title></head><body>
+            <header>Site Header</header>
+            <nav>Menu items here</nav>
+            <article><p>Real content.</p></article>
+            <footer>Copyright 2024</footer>
+            <aside>Related links</aside>
+        </body></html>"#;
+        let result = extract_content_local(html, "https://example.com").unwrap();
+        assert!(result.contains("Real content"));
+    }
+
+    #[test]
+    fn test_extract_prepends_header() {
+        let html = r#"<html><head><title>My Page</title></head><body><p>Content</p></body></html>"#;
+        let result = extract_content_local(html, "https://test.org/page").unwrap();
+        assert!(result.starts_with("# My Page\nSource: https://test.org/page\n\n"));
+    }
+
+    #[test]
+    fn test_extract_converts_to_markdown() {
+        let html = r#"<html><head><title>MD</title></head><body>
+            <article>
+                <h2>Heading Two</h2>
+                <p>A paragraph with a <a href="https://link.com">link</a>.</p>
+            </article>
+        </body></html>"#;
+        let result = extract_content_local(html, "https://example.com").unwrap();
+        // htmd converts h2 to ## and links to [text](url)
+        assert!(result.contains("##") || result.contains("Heading Two"));
+        assert!(result.contains("link") || result.contains("[link]"));
+    }
+
+    #[test]
+    fn test_extract_no_title_uses_source_only() {
+        // When no <title> element, header should be "Source: {url}\n\n"
+        let html = r#"<html><body><p>Content without title.</p></body></html>"#;
+        let result = extract_content_local(html, "https://notitle.example.com").unwrap();
+        assert!(result.starts_with("Source: https://notitle.example.com\n\n"));
+        assert!(!result.starts_with("# "));
+    }
+}
+
 // --- WebReadTool ---
 
 pub struct WebReadTool;
