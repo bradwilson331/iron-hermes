@@ -175,37 +175,37 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | WEB-02 | Phase 4 | Complete |
 | WEB-03 | Phase 4 | Complete |
 | WEB-04 | Phase 4 | Complete |
-| SCHED-01 | — | Pending |
-| SCHED-02 | — | Pending |
-| SCHED-03 | — | Pending |
-| SCHED-04 | — | Pending |
-| HOOK-01 | — | Pending |
-| HOOK-02 | — | Pending |
-| HOOK-03 | — | Pending |
-| SKILL-01 | — | Pending |
-| SKILL-02 | — | Pending |
-| SKILL-03 | — | Pending |
-| SKILL-04 | — | Pending |
-| EXEC-01 | — | Pending |
-| EXEC-02 | — | Pending |
-| EXEC-03 | — | Pending |
-| EXEC-04 | — | Pending |
-| AGENT-01 | — | Pending |
-| AGENT-02 | — | Pending |
-| AGENT-03 | — | Pending |
-| AGENT-04 | — | Pending |
-| AGENT-05 | — | Pending |
-| BATCH-01 | — | Pending |
-| BATCH-02 | — | Pending |
-| BATCH-03 | — | Pending |
-| BATCH-04 | — | Pending |
+| SCHED-01 | Phase 5 | Pending |
+| SCHED-02 | Phase 5 | Pending |
+| SCHED-03 | Phase 5 | Pending |
+| SCHED-04 | Phase 5 | Pending |
+| HOOK-01 | Phase 6 | Pending |
+| HOOK-02 | Phase 6 | Pending |
+| HOOK-03 | Phase 6 | Pending |
+| SKILL-01 | Phase 7 | Pending |
+| SKILL-02 | Phase 7 | Pending |
+| SKILL-03 | Phase 7 | Pending |
+| SKILL-04 | Phase 7 | Pending |
+| EXEC-01 | Phase 8 | Pending |
+| EXEC-02 | Phase 8 | Pending |
+| EXEC-03 | Phase 8 | Pending |
+| EXEC-04 | Phase 8 | Pending |
+| AGENT-01 | Phase 9 | Pending |
+| AGENT-02 | Phase 9 | Pending |
+| AGENT-03 | Phase 9 | Pending |
+| AGENT-04 | Phase 9 | Pending |
+| AGENT-05 | Phase 9 | Pending |
+| BATCH-01 | Phase 10 | Pending |
+| BATCH-02 | Phase 10 | Pending |
+| BATCH-03 | Phase 10 | Pending |
+| BATCH-04 | Phase 10 | Pending |
 
 **Coverage:**
 - v1.0 requirements: 29 total (all complete)
 - v1.1 requirements: 23 total
-- Mapped to phases: 29 (v1.0) + 0 (v1.1, pending roadmap)
-- Unmapped: 23 (v1.1, awaiting roadmap creation)
+- Mapped to phases: 29 (v1.0) + 23 (v1.1)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-08 after v1.1 Automation milestone requirements defined*
+*Last updated: 2026-04-08 after v1.1 Automation roadmap created (Phases 5-10)*

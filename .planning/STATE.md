@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Automation
-status: Defining requirements
-stopped_at: Milestone v1.1 started
-last_updated: "2026-04-08T04:30:00.000Z"
+status: Ready to plan
+stopped_at: v1.1 roadmap created — Phases 5-10 defined, all 23 requirements mapped
+last_updated: "2026-04-08T00:00:00.000Z"
 progress:
-  total_phases: 0
+  total_phases: 6
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -19,19 +19,22 @@ progress:
 
 See: .planning/PROJECT.md (updated 2026-04-08)
 
-**Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram -- the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Milestone v1.1 — Automation (6 features, defining requirements)
+**Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
+**Current focus:** Phase 5 — Scheduled Tasks (v1.1 Automation milestone)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
+Phase: 5 of 10 (Scheduled Tasks — first v1.1 phase)
+Plan: 0 of ? in current phase
+Status: Ready to plan
+Last activity: 2026-04-08 — v1.1 Automation roadmap created (Phases 5-10, 23 requirements mapped)
+
+Progress: [░░░░░░░░░░] 0% (v1.1 not yet started)
 
 ## Performance Metrics
 
 **Velocity:**
-
-- Total plans completed: 0
+- Total plans completed: 0 (v1.1); 9 completed in v1.0
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -42,7 +45,6 @@ Plan: —
 | - | - | - | - |
 
 **Recent Trend:**
-
 - Last 5 plans: -
 - Trend: -
 
@@ -56,9 +58,10 @@ Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
 - [v1.0]: All 4 phases complete — context loading, Telegram gateway, self-improvement + security, web scraping
-- [v1.0]: Hand-rolled Telegram client, frozen-snapshot context, CancellationToken shutdown, channel-based dispatch
-- [v1.0]: Existing cron crate has file-based persistence and tick locking — v1.1 enhances this
-- [v1.1]: Scope: 6 features — scheduled tasks, event hooks, skills system, code execution, subagent delegation, batch processing
+- [v1.1]: Phase ordering: SCHED → HOOK → SKILL → EXEC → AGENT → BATCH (hooks early for observability of later features)
+- [v1.1]: New workspace crates: ironhermes-hooks (Phase 6), ironhermes-exec (Phase 8)
+- [v1.1]: Skills: SkillRegistry in ironhermes-core, SkillsTool in ironhermes-tools — no new crate deps
+- [v1.1]: delegate_task structurally excluded from child agent toolsets (recursion prevention)
 
 ### Pending Todos
 
@@ -66,12 +69,12 @@ None yet.
 
 ### Blockers/Concerns
 
-- Subagent delegation requires isolated context and toolset restriction — needs careful design around Arc<ToolRegistry>
-- Code execution (Python RPC) is a new security boundary — sandboxing is critical
-- Event hooks must not break existing gateway behavior
+- Phase 2 (Telegram Gateway) has 1 plan remaining (02-05: multimodal input) — confirm whether this must complete before v1.1 begins
+- Code execution (Python RPC) introduces a new security boundary — allowlist and secret stripping are critical
+- Subagent delegation needs careful design for Arc<ToolRegistry> filtering
 
 ## Session Continuity
 
-Last session: 2026-04-08T04:30:00.000Z
-Stopped at: Milestone v1.1 started — defining requirements
-Resume file: .planning/PROJECT.md
+Last session: 2026-04-08
+Stopped at: v1.1 Automation roadmap written — Phases 5-10 defined, all 23 v1.1 requirements mapped
+Resume file: None

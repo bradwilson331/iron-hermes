@@ -1,38 +1,19 @@
 # Roadmap: IronHermes
 
-## Overview
+## Milestones
 
-IronHermes is a Rust rewrite of hermes-agent that needs four capabilities wired up: context file loading (foundation), Telegram gateway (highest risk async work), self-improvement with security scanning (novel and security-critical), and web scraping tools (well-understood patterns). The roadmap is risk-ordered -- the hardest, most uncertain work ships earliest while respecting hard dependencies. Phase 1 is a low-risk dependency gate; Phase 2 tackles the async concurrency beast; Phase 3 handles the novel self-modification security problem; Phase 4 is the straightforward finish.
+- ✅ **v1.0 MVP** - Phases 1-4 (shipped 2026-04-08)
+- 🚧 **v1.1 Automation** - Phases 5-10 (in progress)
 
 ## Phases
 
-**Phase Numbering:**
-- Integer phases (1, 2, 3, 4): Planned milestone work
-- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
-
-Decimal phases appear between their surrounding integers in numeric order.
-
-**Strategy:** Risk-ordered. Hardest/most uncertain work earliest, respecting hard dependencies.
-
-- [ ] **Phase 1: Context File Loading** - Load SOUL.md, AGENTS.md, and project context into system prompt with priority assembly
-- [ ] **Phase 2: Telegram Gateway** - Wire long polling to agent loop with streaming, concurrency, and error recovery
-- [ ] **Phase 3: Self-Improvement + Security** - Agent can safely modify its own context files with security scanning and memory subsystem
-- [ ] **Phase 4: Web Scraping Tools** - Agent can fetch and read web page content via Firecrawl API with local fallback
-
-## Phase Details
+<details>
+<summary>✅ v1.0 MVP (Phases 1-4) - SHIPPED 2026-04-08</summary>
 
 ### Phase 1: Context File Loading
 **Goal**: Agent loads personality and project context files into the system prompt so every conversation reflects the configured identity and project awareness
-**Depends on**: Nothing (foundation phase -- blocks all other phases)
+**Depends on**: Nothing (foundation phase)
 **Requirements**: CTX-01, CTX-02, CTX-03, CTX-04, CTX-05
-**Risk**: LOW -- File I/O and string assembly. PromptBuilder skeleton already exists with `load_context_files()`. Straightforward port of hermes-agent's layered prompt pattern.
-**Mitigation**: Existing PromptBuilder has platform-hint scaffolding and path resolution. The work is wiring, not invention.
-**Key technical decisions**:
-  - SOUL.md loaded from `$IRONHERMES_HOME` (not working directory), matching hermes-agent
-  - Priority-based project context: `.hermes.md` > `AGENTS.md` > `CLAUDE.md` > `.cursorrules` (first match wins)
-  - Frozen-snapshot pattern: context files loaded once at session start, never mutated mid-session (preserves LLM prefix cache)
-  - Content truncation at 20K chars per file
-**Estimated complexity**: S
 **Success Criteria** (what must be TRUE):
   1. Running `cargo run --bin ironhermes` with a SOUL.md in IRONHERMES_HOME produces agent responses reflecting that personality
   2. AGENTS.md content appears in the system prompt after SOUL.md content
@@ -40,35 +21,23 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Context files are loaded once at session start and do not change if the underlying files are edited mid-session
   5. Assembly order is SOUL.md > project context > AGENTS.md, matching hermes-agent's prompt layering
 **Plans**: 2 plans
+
 Plans:
-- [ ] 01-01-PLAN.md — Context scanner + PromptBuilder rewrite with layered loading
-- [ ] 01-02-PLAN.md — CLI wiring + full build verification
+- [x] 01-01-PLAN.md — Context scanner + PromptBuilder rewrite with layered loading
+- [x] 01-02-PLAN.md — CLI wiring + full build verification
 
 ### Phase 2: Telegram Gateway
 **Goal**: A working Telegram bot that receives messages via long polling, runs them through the agent loop with tool use, streams responses back with progressive message editing, and handles multiple concurrent users reliably
-**Depends on**: Phase 1 (agent needs context/personality loaded before serving users)
+**Depends on**: Phase 1
 **Requirements**: TG-01, TG-02, TG-03, TG-04, TG-05, TG-06, TG-07, TG-08, ASYNC-01, ASYNC-02, ASYNC-03
-**Risk**: HIGH -- This is the most technically complex phase. Async wiring between polling, agent loop, and streaming message edits. Concurrency control across multiple chat sessions. Error recovery across network failures, Telegram API rate limits, and 409 conflicts. The existing TelegramAdapter has Bot API types but polling is not connected to the agent loop.
-**Mitigation**: Research doc provides complete architecture (channel-based bridge, StreamConsumer, BackoffState). hermes-agent's Python implementation is a proven reference. Existing TelegramAdapter is 90% complete for Bot API calls -- the gap is the wiring, not the Telegram client.
-**Key technical decisions**:
-  - Keep hand-rolled Telegram client (not teloxide/frankenstein) -- already works, zero new dependencies
-  - CancellationToken-based cooperative shutdown replacing AtomicBool + handle.abort()
-  - Arc<RwLock<SessionStore>> for safe session sharing across tokio tasks
-  - Arc<ToolRegistry> shared across concurrent agent runs
-  - Semaphore-bounded concurrency (default 4-8 concurrent agent runs)
-  - Supervisor pattern: JoinSet tracks active agent runs, drains on shutdown
-  - StreamConsumer with 300ms edit interval, cursor indicator, 4096-char overflow handling
-  - Exponential backoff with jitter (1s base, 60s cap) for polling failures
-  - 409 conflict detection (fatal after 5 retries)
-  - Channel-based message dispatch (mpsc) decoupling polling from processing
-**Estimated complexity**: L
 **Success Criteria** (what must be TRUE):
   1. Sending a message to the Telegram bot produces an agent response with tool use results in the same chat
-  2. Responses stream progressively -- the message is edited as LLM chunks arrive, with a cursor indicator during generation
+  2. Responses stream progressively — the message is edited as LLM chunks arrive, with a cursor indicator during generation
   3. Multiple users can chat with the bot simultaneously without blocking each other
   4. Bot reconnects automatically after network interruptions with exponential backoff
   5. Sending ctrl+c gracefully stops the bot, waiting for in-flight agent runs to complete before exiting
 **Plans**: 5 plans
+
 Plans:
 - [x] 02-01-PLAN.md — Async foundation: tokio-util dep, config extensions, trait redesign, TelegramAdapter refactor
 - [x] 02-02-PLAN.md — StreamConsumer + BackoffState utility modules with tests
@@ -78,27 +47,16 @@ Plans:
 
 ### Phase 3: Self-Improvement + Security
 **Goal**: Agent can safely read, edit, and extend its own context files (SOUL.md, AGENTS.md) and maintain a persistent memory of facts, with security scanning that prevents prompt injection or self-destructive modifications
-**Depends on**: Phase 2 (self-improvement is exercised through the Telegram gateway; security scanning patterns also apply to Telegram rate limiting)
+**Depends on**: Phase 2
 **Requirements**: SELF-01, SELF-02, SELF-03, SELF-04, SELF-05, SELF-06, SEC-01, SEC-02, SEC-03
-**Risk**: MEDIUM-HIGH -- Novel territory: the agent modifying its own prompt is powerful but dangerous. Security scanning correctness is critical -- false negatives allow prompt injection, false positives block legitimate edits. The frozen-snapshot pattern must be airtight to prevent mid-session prompt corruption. Memory subsystem is new code (MemoryStore with bounded entries, atomic writes, file locking).
-**Mitigation**: hermes-agent has a battle-tested implementation to port from. Regex-based threat patterns are language-agnostic. Atomic file I/O pattern (temp file + rename) already exists in the cron crate. Memory format (section-sign delimited entries with char limits) is simple and proven.
-**Key technical decisions**:
-  - Self-modification uses existing file tools (read_file, write_file, patch) -- no special API
-  - Security scanning via RegexSet: injection overrides, deception patterns, exfiltration attempts, invisible Unicode
-  - Frozen-snapshot pattern: disk writes are immediate but prompt only updates on next session start
-  - Memory subsystem: MEMORY.md with bounded char limit (2,200 chars), section-sign delimited entries
-  - Atomic file I/O: tempfile + std::fs::rename for crash-safe writes
-  - Dedicated memory tool with add/replace/remove actions
-  - SEC-01 (SSRF validation) built here because it is a prerequisite for Phase 4 web tools
-  - SEC-03 (Telegram rate limiting) protects the gateway built in Phase 2
-**Estimated complexity**: M
 **Success Criteria** (what must be TRUE):
   1. Agent can read its own SOUL.md via the read_file tool and describe its personality
   2. Agent can edit SOUL.md via write_file/patch and the change is reflected in the next session
   3. Writing content containing prompt injection patterns (e.g., "ignore previous instructions") to a context file is blocked with a warning
-  4. Agent can save facts to memory ("remember that I prefer Rust") and those facts appear in the system prompt on the next session
-  5. Memory entries respect the character limit -- adding beyond the cap fails gracefully or requires removing existing entries
+  4. Agent can save facts to memory and those facts appear in the system prompt on the next session
+  5. Memory entries respect the character limit — adding beyond the cap fails gracefully or requires removing existing entries
 **Plans**: 3 plans
+
 Plans:
 - [x] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
 - [x] 03-02-PLAN.md — Memory subsystem: MemoryStore, MemoryTool, PromptBuilder injection
@@ -106,74 +64,156 @@ Plans:
 
 ### Phase 4: Web Scraping Tools
 **Goal**: Agent can fetch and read web page content via a web_read tool, with SSRF protection and content truncation for context-window safety
-**Depends on**: Phase 3 (SEC-01 SSRF validation must exist before any URL fetching; SEC-02 scanning patterns reused for content safety)
+**Depends on**: Phase 3
 **Requirements**: WEB-01, WEB-02, WEB-03, WEB-04
-**Risk**: LOW -- Well-understood patterns. Firecrawl scrape API is nearly identical to the already-integrated search API. Local fallback with scraper crate is straightforward HTML parsing. SSRF protection is ported from hermes-agent's url_safety.py (already researched).
-**Mitigation**: API-first approach means most complexity is server-side. Local fallback is a ~50-line heuristic extractor. reqwest is already in the workspace.
-**Key technical decisions**:
-  - Firecrawl scrape API as primary backend (already have API key, search endpoint integrated)
-  - Local fallback: reqwest GET + scraper crate with semantic selector heuristic (article/main/role=main)
-  - SSRF validation runs before every fetch (resolve hostname, block private IPs, localhost, CGNAT, metadata endpoints)
-  - Content truncation at configurable limit (default 50K chars) with notice
-  - Single high-level tool (web_read) not fine-grained tools -- LLMs prefer fewer decision points
-  - Add gzip/brotli/deflate features to reqwest for compressed responses
-**Estimated complexity**: S
 **Success Criteria** (what must be TRUE):
   1. Agent can use the web_read tool to fetch a public URL and receive extracted text content
   2. Attempting to fetch a private/internal IP address (127.0.0.1, 10.x.x.x, 169.254.x.x) is blocked with a clear error
   3. Content longer than the configured limit is truncated with a notice indicating the truncation
   4. When Firecrawl is unavailable (no API key or service down), the local scraper fallback extracts readable content from static HTML pages
 **Plans**: 2 plans
+
 Plans:
-- [ ] 04-01-PLAN.md — Dependencies, config extension, and full WebReadTool implementation
-- [ ] 04-02-PLAN.md — Unit tests for truncation and local fallback extraction
+- [x] 04-01-PLAN.md — Dependencies, config extension, and full WebReadTool implementation
+- [x] 04-02-PLAN.md — Unit tests for truncation and local fallback extraction
+
+</details>
+
+### 🚧 v1.1 Automation (In Progress)
+
+**Milestone Goal:** Add automation, orchestration, and knowledge capabilities — scheduled tasks, event hooks, skills system, code execution, subagent delegation, and batch processing.
+
+#### Phase 5: Scheduled Tasks
+**Goal**: Users can schedule recurring tasks using natural language, attach skills to them, and receive output on their preferred platform
+**Depends on**: Phase 4 (stable agent loop, cron crate foundation exists)
+**Requirements**: SCHED-01, SCHED-02, SCHED-03, SCHED-04
+**Success Criteria** (what must be TRUE):
+  1. User can create a scheduled task with natural language like "every morning at 9am" and the agent correctly interprets it to a cron expression
+  2. User can pause, resume, or edit a scheduled task without deleting and recreating it
+  3. User can attach a named skill to a scheduled task so the task runs with skill-provided context and instructions
+  4. Scheduled task output is delivered to the configured platform (Telegram chat, CLI stdout, or webhook URL)
+**Plans**: TBD
+
+Plans:
+- [ ] 05-01-PLAN.md — TBD
+
+#### Phase 6: Event Hooks
+**Goal**: Agent lifecycle events are observable and interceptable — hooks log every significant event, guardrails can block tool calls, and events can be forwarded to external systems
+**Depends on**: Phase 5 (hooks provide observability for all subsequent phases)
+**Requirements**: HOOK-01, HOOK-02, HOOK-03
+**Success Criteria** (what must be TRUE):
+  1. Every message received, tool called, and response sent produces a structured log entry via the hook registry
+  2. A configured guardrail hook can intercept a tool call before dispatch and block it, returning a clear error to the agent
+  3. A configured webhook endpoint receives hook events as HTTP POST requests when events fire
+**Plans**: TBD
+
+Plans:
+- [ ] 06-01-PLAN.md — TBD
+
+#### Phase 7: Skills System
+**Goal**: Agent discovers, catalogs, and activates skill documents on demand — loading only what's needed via progressive disclosure
+**Depends on**: Phase 6 (hooks instrument skill activation events)
+**Requirements**: SKILL-01, SKILL-02, SKILL-03, SKILL-04
+**Success Criteria** (what must be TRUE):
+  1. Agent discovers skill directories from ~/.ironhermes/skills/ and ~/.agents/skills/ at startup and includes a compact catalog (names + descriptions only) in the system prompt
+  2. Full skill content is NOT loaded at startup — only the description is visible until the agent explicitly activates a skill
+  3. A skill document follows the agentskills.io format (SKILL.md with YAML frontmatter containing name and description) and is correctly parsed and cataloged
+  4. Agent can call the skills tool with list, view, or activate actions to browse and load skill content during a conversation
+**Plans**: TBD
+
+Plans:
+- [ ] 07-01-PLAN.md — TBD
+
+#### Phase 8: Code Execution
+**Goal**: Agent can execute Python scripts in an isolated child process, with sandboxed access to agent tools via JSON-RPC and enforced resource limits
+**Depends on**: Phase 7 (skills can provide Python scripting patterns; hooks instrument exec events)
+**Requirements**: EXEC-01, EXEC-02, EXEC-03, EXEC-04
+**Success Criteria** (what must be TRUE):
+  1. Agent can call execute_code with a Python script and receive the script's stdout as the tool result
+  2. A Python script running in the child process can call agent tools (e.g., web_search, read_file) via JSON-RPC and receive real results back
+  3. The child process environment has no API keys or secrets — environment variable stripping is verified by inspection
+  4. A script that runs longer than 5 minutes is killed and returns a timeout error; a script exceeding 50KB of output is truncated
+**Plans**: TBD
+
+Plans:
+- [ ] 08-01-PLAN.md — TBD
+
+#### Phase 9: Subagent Delegation
+**Goal**: Agent can delegate tasks to isolated child agents with restricted toolsets, enforcing concurrency limits and preventing recursive delegation
+**Depends on**: Phase 8 (code execution patterns inform child process isolation; exec crate reused)
+**Requirements**: AGENT-01, AGENT-02, AGENT-03, AGENT-04, AGENT-05
+**Success Criteria** (what must be TRUE):
+  1. Agent can call delegate_task with a task description and receive the child agent's final response as the tool result
+  2. Parent agent specifies allowed tools for the child and the child cannot call tools outside that list
+  3. Attempting to spawn more than 3 concurrent subagents blocks until a slot is available, with a clear message when the limit is hit
+  4. Each subagent operates in its own terminal session scope and cannot read or affect another subagent's terminal state
+  5. A child agent's toolset never includes delegate_task — recursive delegation is structurally impossible
+**Plans**: TBD
+
+Plans:
+- [ ] 09-01-PLAN.md — TBD
+
+#### Phase 10: Batch Processing
+**Goal**: User can run parallel batch prompt execution from JSONL input, producing ShareGPT-format trajectory data with checkpointing and quality filtering
+**Depends on**: Phase 9 (reuses stable agent loop and subagent concurrency patterns)
+**Requirements**: BATCH-01, BATCH-02, BATCH-03, BATCH-04
+**Success Criteria** (what must be TRUE):
+  1. User can run a batch job from a JSONL file and multiple prompts execute in parallel up to a configurable worker limit
+  2. Batch output is written in ShareGPT format (human/assistant/tool roles) that loads correctly into a HuggingFace dataset viewer
+  3. Restarting a batch job mid-run resumes from where it stopped — already-completed entries (identified by content hash) are not re-run
+  4. Trajectories where the agent hallucinated a tool name or produced a response with no reasoning steps are automatically filtered from output
+**Plans**: TBD
+
+Plans:
+- [ ] 10-01-PLAN.md — TBD
 
 ## Coverage
 
-### Requirement-to-Phase Mapping
+### v1.1 Requirement-to-Phase Mapping
 
 | Requirement | Phase | Category |
 |-------------|-------|----------|
-| CTX-01 | Phase 1 | Context Files |
-| CTX-02 | Phase 1 | Context Files |
-| CTX-03 | Phase 1 | Context Files |
-| CTX-04 | Phase 1 | Context Files |
-| CTX-05 | Phase 1 | Context Files |
-| TG-01 | Phase 2 | Telegram Gateway |
-| TG-02 | Phase 2 | Telegram Gateway |
-| TG-03 | Phase 2 | Telegram Gateway |
-| TG-04 | Phase 2 | Telegram Gateway |
-| TG-05 | Phase 2 | Telegram Gateway |
-| TG-06 | Phase 2 | Telegram Gateway |
-| TG-07 | Phase 2 | Telegram Gateway |
-| TG-08 | Phase 2 | Telegram Gateway |
-| ASYNC-01 | Phase 2 | Async Infrastructure |
-| ASYNC-02 | Phase 2 | Async Infrastructure |
-| ASYNC-03 | Phase 2 | Async Infrastructure |
-| SELF-01 | Phase 3 | Self-Improvement |
-| SELF-02 | Phase 3 | Self-Improvement |
-| SELF-03 | Phase 3 | Self-Improvement |
-| SELF-04 | Phase 3 | Self-Improvement |
-| SELF-05 | Phase 3 | Self-Improvement |
-| SELF-06 | Phase 3 | Self-Improvement |
-| SEC-01 | Phase 3 | Security |
-| SEC-02 | Phase 3 | Security |
-| SEC-03 | Phase 3 | Security |
-| WEB-01 | Phase 4 | Web Scraping |
-| WEB-02 | Phase 4 | Web Scraping |
-| WEB-03 | Phase 4 | Web Scraping |
-| WEB-04 | Phase 4 | Web Scraping |
+| SCHED-01 | Phase 5 | Scheduled Tasks |
+| SCHED-02 | Phase 5 | Scheduled Tasks |
+| SCHED-03 | Phase 5 | Scheduled Tasks |
+| SCHED-04 | Phase 5 | Scheduled Tasks |
+| HOOK-01 | Phase 6 | Event Hooks |
+| HOOK-02 | Phase 6 | Event Hooks |
+| HOOK-03 | Phase 6 | Event Hooks |
+| SKILL-01 | Phase 7 | Skills System |
+| SKILL-02 | Phase 7 | Skills System |
+| SKILL-03 | Phase 7 | Skills System |
+| SKILL-04 | Phase 7 | Skills System |
+| EXEC-01 | Phase 8 | Code Execution |
+| EXEC-02 | Phase 8 | Code Execution |
+| EXEC-03 | Phase 8 | Code Execution |
+| EXEC-04 | Phase 8 | Code Execution |
+| AGENT-01 | Phase 9 | Subagent Delegation |
+| AGENT-02 | Phase 9 | Subagent Delegation |
+| AGENT-03 | Phase 9 | Subagent Delegation |
+| AGENT-04 | Phase 9 | Subagent Delegation |
+| AGENT-05 | Phase 9 | Subagent Delegation |
+| BATCH-01 | Phase 10 | Batch Processing |
+| BATCH-02 | Phase 10 | Batch Processing |
+| BATCH-03 | Phase 10 | Batch Processing |
+| BATCH-04 | Phase 10 | Batch Processing |
 
-**Coverage: 29/29 v1 requirements mapped. No orphans. No duplicates.**
+**Coverage: 23/23 v1.1 requirements mapped. No orphans. No duplicates.**
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 > 2 > 3 > 4
+Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. Context File Loading | 0/2 | Planned    |  |
-| 2. Telegram Gateway | 4/5 | In Progress|  |
-| 3. Self-Improvement + Security | 3/3 | Complete | 2026-04-08 |
-| 4. Web Scraping Tools | 0/2 | Planned | - |
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. Context File Loading | v1.0 | 2/2 | Complete | 2026-04-08 |
+| 2. Telegram Gateway | v1.0 | 4/5 | In Progress | - |
+| 3. Self-Improvement + Security | v1.0 | 3/3 | Complete | 2026-04-08 |
+| 4. Web Scraping Tools | v1.0 | 2/2 | Complete | 2026-04-08 |
+| 5. Scheduled Tasks | v1.1 | 0/? | Not started | - |
+| 6. Event Hooks | v1.1 | 0/? | Not started | - |
+| 7. Skills System | v1.1 | 0/? | Not started | - |
+| 8. Code Execution | v1.1 | 0/? | Not started | - |
+| 9. Subagent Delegation | v1.1 | 0/? | Not started | - |
+| 10. Batch Processing | v1.1 | 0/? | Not started | - |
