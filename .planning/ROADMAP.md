@@ -72,8 +72,8 @@ Plans:
 Plans:
 - [x] 02-01-PLAN.md — Async foundation: tokio-util dep, config extensions, trait redesign, TelegramAdapter refactor
 - [x] 02-02-PLAN.md — StreamConsumer + BackoffState utility modules with tests
-- [ ] 02-03-PLAN.md — Core wiring: polling loop, channel dispatch, user queue, handler, runner
-- [ ] 02-04-PLAN.md — Slash commands (/start, /new, /clear, /help) and error recovery
+- [x] 02-03-PLAN.md — Core wiring: polling loop, channel dispatch, user queue, handler, runner
+- [x] 02-04-PLAN.md — Slash commands (/start, /new, /clear, /help) and error recovery
 - [ ] 02-05-PLAN.md — Multimodal input (images, PDFs, documents) + gateway CLI subcommand
 
 ### Phase 3: Self-Improvement + Security
@@ -98,7 +98,11 @@ Plans:
   3. Writing content containing prompt injection patterns (e.g., "ignore previous instructions") to a context file is blocked with a warning
   4. Agent can save facts to memory ("remember that I prefer Rust") and those facts appear in the system prompt on the next session
   5. Memory entries respect the character limit -- adding beyond the cap fails gracefully or requires removing existing entries
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
+- [ ] 03-02-PLAN.md — Memory subsystem: MemoryStore, MemoryTool, PromptBuilder injection
+- [ ] 03-03-PLAN.md — SSRF validator + per-user gateway rate limiting
 
 ### Phase 4: Web Scraping Tools
 **Goal**: Agent can fetch and read web page content via a web_read tool, with SSRF protection and content truncation for context-window safety
@@ -119,7 +123,11 @@ Plans:
   2. Attempting to fetch a private/internal IP address (127.0.0.1, 10.x.x.x, 169.254.x.x) is blocked with a clear error
   3. Content longer than the configured limit is truncated with a notice indicating the truncation
   4. When Firecrawl is unavailable (no API key or service down), the local scraper fallback extracts readable content from static HTML pages
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
+- [ ] 03-02-PLAN.md — Memory subsystem: MemoryStore, MemoryTool, PromptBuilder injection
+- [ ] 03-03-PLAN.md — SSRF validator + per-user gateway rate limiting
 
 ## Coverage
 
@@ -167,6 +175,6 @@ Phases execute in numeric order: 1 > 2 > 3 > 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Context File Loading | 0/2 | Planned    |  |
-| 2. Telegram Gateway | 2/5 | In Progress|  |
+| 2. Telegram Gateway | 4/5 | In Progress|  |
 | 3. Self-Improvement + Security | 0/TBD | Not started | - |
 | 4. Web Scraping Tools | 0/TBD | Not started | - |
