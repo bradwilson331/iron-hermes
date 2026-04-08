@@ -92,10 +92,12 @@ Plans:
   2. User can pause, resume, or edit a scheduled task without deleting and recreating it
   3. User can attach a named skill to a scheduled task so the task runs with skill-provided context and instructions
   4. Scheduled task output is delivered to the configured platform (Telegram chat, CLI stdout, or webhook URL)
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — TBD
+- [ ] 05-01-PLAN.md — Data model, ScheduleParsed enum, parse_schedule(), JobStore refactor
+- [ ] 05-02-PLAN.md — CronjobTool (agent tool) + cron prompt security scanner
+- [ ] 05-03-PLAN.md — Delivery routing, tick runner, gateway integration, CLI subcommands
 
 #### Phase 6: Event Hooks
 **Goal**: Agent lifecycle events are observable and interceptable — hooks log every significant event, guardrails can block tool calls, and events can be forwarded to external systems
@@ -105,7 +107,7 @@ Plans:
   1. Every message received, tool called, and response sent produces a structured log entry via the hook registry
   2. A configured guardrail hook can intercept a tool call before dispatch and block it, returning a clear error to the agent
   3. A configured webhook endpoint receives hook events as HTTP POST requests when events fire
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 06-01-PLAN.md — TBD
@@ -119,7 +121,7 @@ Plans:
   2. Full skill content is NOT loaded at startup — only the description is visible until the agent explicitly activates a skill
   3. A skill document follows the agentskills.io format (SKILL.md with YAML frontmatter containing name and description) and is correctly parsed and cataloged
   4. Agent can call the skills tool with list, view, or activate actions to browse and load skill content during a conversation
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 07-01-PLAN.md — TBD
@@ -133,7 +135,7 @@ Plans:
   2. A Python script running in the child process can call agent tools (e.g., web_search, read_file) via JSON-RPC and receive real results back
   3. The child process environment has no API keys or secrets — environment variable stripping is verified by inspection
   4. A script that runs longer than 5 minutes is killed and returns a timeout error; a script exceeding 50KB of output is truncated
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 08-01-PLAN.md — TBD
@@ -148,7 +150,7 @@ Plans:
   3. Attempting to spawn more than 3 concurrent subagents blocks until a slot is available, with a clear message when the limit is hit
   4. Each subagent operates in its own terminal session scope and cannot read or affect another subagent's terminal state
   5. A child agent's toolset never includes delegate_task — recursive delegation is structurally impossible
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 09-01-PLAN.md — TBD
@@ -162,7 +164,7 @@ Plans:
   2. Batch output is written in ShareGPT format (human/assistant/tool roles) that loads correctly into a HuggingFace dataset viewer
   3. Restarting a batch job mid-run resumes from where it stopped — already-completed entries (identified by content hash) are not re-run
   4. Trajectories where the agent hallucinated a tool name or produced a response with no reasoning steps are automatically filtered from output
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
 - [ ] 10-01-PLAN.md — TBD
