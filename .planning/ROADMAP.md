@@ -100,9 +100,9 @@ Plans:
   5. Memory entries respect the character limit -- adding beyond the cap fails gracefully or requires removing existing entries
 **Plans**: 3 plans
 Plans:
-- [ ] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
-- [ ] 03-02-PLAN.md — Memory subsystem: MemoryStore, MemoryTool, PromptBuilder injection
-- [ ] 03-03-PLAN.md — SSRF validator + per-user gateway rate limiting
+- [x] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
+- [x] 03-02-PLAN.md — Memory subsystem: MemoryStore, MemoryTool, PromptBuilder injection
+- [x] 03-03-PLAN.md — SSRF validator + per-user gateway rate limiting
 
 ### Phase 4: Web Scraping Tools
 **Goal**: Agent can fetch and read web page content via a web_read tool, with SSRF protection and content truncation for context-window safety
@@ -123,11 +123,7 @@ Plans:
   2. Attempting to fetch a private/internal IP address (127.0.0.1, 10.x.x.x, 169.254.x.x) is blocked with a clear error
   3. Content longer than the configured limit is truncated with a notice indicating the truncation
   4. When Firecrawl is unavailable (no API key or service down), the local scraper fallback extracts readable content from static HTML pages
-**Plans**: 3 plans
-Plans:
-- [ ] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
-- [ ] 03-02-PLAN.md — Memory subsystem: MemoryStore, MemoryTool, PromptBuilder injection
-- [ ] 03-03-PLAN.md — SSRF validator + per-user gateway rate limiting
+**Plans**: TBD
 
 ## Coverage
 
@@ -176,5 +172,5 @@ Phases execute in numeric order: 1 > 2 > 3 > 4
 |-------|----------------|--------|-----------|
 | 1. Context File Loading | 0/2 | Planned    |  |
 | 2. Telegram Gateway | 4/5 | In Progress|  |
-| 3. Self-Improvement + Security | 0/TBD | Not started | - |
+| 3. Self-Improvement + Security | 3/3 | Complete | 2026-04-08 |
 | 4. Web Scraping Tools | 0/TBD | Not started | - |
