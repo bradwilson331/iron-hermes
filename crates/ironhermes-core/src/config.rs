@@ -82,12 +82,21 @@ impl Default for TerminalConfig {
 #[serde(default)]
 pub struct WebConfig {
     pub backend: String,
+    /// User-Agent header for HTTP requests (D-12). Default: "IronHermes/1.0 (+bot)".
+    pub user_agent: String,
+    /// Maximum content length in characters before truncation (D-15). Default: 50,000.
+    pub max_content_chars: usize,
+    /// HTTP request timeout in seconds (D-04). Default: 30.
+    pub timeout_secs: u64,
 }
 
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
             backend: "firecrawl".to_string(),
+            user_agent: "IronHermes/1.0 (+bot)".to_string(),
+            max_content_chars: 50_000,
+            timeout_secs: 30,
         }
     }
 }
