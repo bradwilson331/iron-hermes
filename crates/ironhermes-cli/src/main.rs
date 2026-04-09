@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_core::{ChatMessage, Config, MemoryStore};
+use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
@@ -382,6 +383,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry();
     registry.register_memory_tool(memory_store.clone());
+
+    // Open cron job store and register the cronjob tool
+    let cron_dir = ironhermes_core::get_hermes_home().join("cron");
+    let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
+    registry.register_cronjob_tool(job_store.clone());
+
     let registry = Arc::new(registry);
 
     // Override token if provided via --token flag
@@ -398,6 +405,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     info!("Starting IronHermes Telegram Gateway");
     let mut runner = GatewayRunner::new(config, registry);
     runner.set_memory_store(memory_store);
+    runner.set_job_store(job_store);
     runner.start().await
 }
 

@@ -9,15 +9,19 @@ use tracing::debug;
 // Sub-modules
 // ---------------------------------------------------------------------------
 
+pub mod delivery;
 pub mod job;
 pub mod parser;
 pub mod scanner;
 pub mod store;
+pub mod tick;
 
+pub use delivery::*;
 pub use job::*;
 pub use parser::*;
 pub use scanner::scan_cron_prompt;
 pub use store::*;
+pub use tick::*;
 
 // ---------------------------------------------------------------------------
 // File-based tick lock

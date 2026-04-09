@@ -4,6 +4,7 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use ironhermes_core::{Config, MemoryStore};
+use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{error, info, warn};
 
@@ -22,6 +23,7 @@ pub struct GatewayRunner {
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    job_store: Option<Arc<Mutex<JobStore>>>,
     cancel: CancellationToken,
 }
 
@@ -32,6 +34,7 @@ impl GatewayRunner {
             session_store: Arc::new(RwLock::new(SessionStore::new())),
             tool_registry,
             memory_store: None,
+            job_store: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -39,6 +42,11 @@ impl GatewayRunner {
     /// Set the memory store for prompt injection and tool access.
     pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
         self.memory_store = Some(store);
+    }
+
+    /// Set the job store for cron tick task integration.
+    pub fn set_job_store(&mut self, store: Arc<Mutex<JobStore>>) {
+        self.job_store = Some(store);
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
@@ -336,7 +344,53 @@ impl GatewayRunner {
             }
         });
 
-        // --- 10. Run dispatch loop concurrently with shutdown signal ---
+        // --- 10. Cron tick task ---
+        if let Some(ref job_store) = self.job_store {
+            let tick_cancel = self.cancel.clone();
+            let job_store_tick = job_store.clone();
+            join_set.spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(60)
+                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = tick_cancel.cancelled() => {
+                            info!("Cron tick task shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            match ironhermes_cron::run_tick_check(&job_store_tick).await {
+                                Ok((due_jobs, result, _lock_guard)) => {
+                                    if result.jobs_run > 0 {
+                                        info!("Tick: {} jobs due", due_jobs.len());
+                                    }
+                                    for job in &due_jobs {
+                                        info!("Job due: {} ({})", job.name, job.id);
+                                        // Mark as run with placeholder output
+                                        // Full agent execution requires AgentLoop integration
+                                        // which involves building a fresh agent per job
+                                        if let Err(e) = ironhermes_cron::complete_job_run(
+                                            &job_store_tick, job,
+                                            "[Tick runner: agent execution pending full integration]",
+                                            true
+                                        ).await {
+                                            error!("Failed to complete job run: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Tick error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            info!("Cron tick task started (60s interval)");
+        }
+
+        // --- 11. Run dispatch loop concurrently with shutdown signal ---
         // dispatch_future processes messages; ctrl+c or cancel token stops everything.
         tokio::select! {
             _ = dispatch_future => {
