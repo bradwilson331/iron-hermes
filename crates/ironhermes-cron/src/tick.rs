@@ -47,7 +47,9 @@ pub async fn run_tick_check(
     }
 
     let (due_jobs, total_enabled) = {
-        let mut store_guard = store.lock().unwrap();
+        let mut store_guard = store
+            .lock()
+            .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
         let total_enabled = store_guard
             .list_jobs()
             .iter()
@@ -94,7 +96,9 @@ pub async fn complete_job_run(
 
     // Mark job run in store
     {
-        let mut store_guard = store.lock().unwrap();
+        let mut store_guard = store
+            .lock()
+            .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
         store_guard.mark_job_run(
             &job.id,
             output,

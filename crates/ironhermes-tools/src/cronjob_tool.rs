@@ -351,7 +351,8 @@ impl Tool for CronjobTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'action'"))?;
 
         let result = {
-            let mut store = self.store.lock().unwrap();
+            let mut store = self.store.lock()
+                .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
             match action {
                 "create" => handle_create(&mut store, &args),
                 "list" => handle_list(&store),

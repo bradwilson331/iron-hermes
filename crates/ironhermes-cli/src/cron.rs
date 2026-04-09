@@ -488,7 +488,11 @@ fn cmd_status() -> Result<()> {
 async fn cmd_tick() -> Result<()> {
     let store = Arc::new(Mutex::new(open_store()?));
 
-    let total = store.lock().unwrap().list_jobs().len();
+    let total = store
+        .lock()
+        .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?
+        .list_jobs()
+        .len();
     println!("{}", format!("Tick: checking {} jobs...", total).dimmed());
 
     let (due_jobs, result, _lock_guard) = run_tick_check(&store).await?;
