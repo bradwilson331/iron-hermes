@@ -76,6 +76,12 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 - [ ] **SKILL-02**: Skills use progressive disclosure — catalog (name+description) loaded at session start, full content loaded only on activation
 - [ ] **SKILL-03**: Skill documents follow the agentskills.io open standard (SKILL.md with name/description frontmatter, Markdown body)
 - [ ] **SKILL-04**: Agent can list, view, and activate skills via a dedicated skills tool during conversation
+- [ ] **SKILL-05**: Skills with a `platforms` frontmatter field are filtered at discovery time — skills listing platforms that do not match the current OS are skipped (agentskills.io spec + hermes-agent parity)
+- [ ] **SKILL-06**: Extended frontmatter fields are parsed and stored: `compatibility`, `allowed-tools`, and `metadata` (including `metadata.hermes.*` extensions) for hermes-agent backward compat
+- [ ] **SKILL-07**: SKILL.md name validation enforced at load time: lowercase alphanumeric + hyphens, 1-64 chars; description 1-1024 chars; directory name must match skill name (warn-but-load on mismatch)
+- [ ] **SKILL-08**: `SkillsConfig` section in `config.yaml` allows configuring custom scan paths beyond the three default directories
+- [ ] **SKILL-09**: Skills that declare required env vars via `metadata.hermes.config` prompt the user at first activation if those vars are absent (setup-needed flow)
+- [ ] **SKILL-13**: Slash-command integration — `/skill-name` in CLI chat activates the named skill directly, injecting its body before the next LLM call (backlog)
 
 ### Code Execution
 
@@ -104,9 +110,16 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 ### Self-Improvement (Advanced)
 
 - **SELF-07**: Version history for context files with rollback capability
-- **SELF-08**: Skills subsystem: procedural knowledge stored in SKILL.md directories
+- **SELF-07**: Version history for context files with rollback capability
+- **SELF-08**: Skills subsystem: procedural knowledge stored in SKILL.md directories; agent can create/edit/delete its own skills via a `skill_manage` tool (create, edit, patch, delete, write_file, remove_file actions — hermes-agent `skill_manager_tool.py` parity)
 - **SELF-09**: Session-end reflection: agent evaluates performance and optionally updates context
-- **SELF-10**: Skill auto-creation: agent saves multi-step procedures as reusable skills after 5+ tool calls
+- **SELF-10**: Skill auto-creation: agent saves multi-step procedures as reusable skills after 5+ tool calls; `skill_manage(action='create')` is the write mechanism
+
+### Skills Hub (Advanced)
+
+- **SKILL-10**: Skills Hub with multi-source registry — install skills from GitHub repos, local paths, and remote tarballs via `GitHubSource` adapter and hub lock file tracking provenance
+- **SKILL-11**: Update lifecycle — manifest-based hash tracking for installed skills; `install`, `update`, `remove` CLI subcommands; bundled-skill seeding on first run
+- **SKILL-12**: Trust levels (builtin / trusted / community / agent-created) and security scanning of externally-sourced skills (prompt injection, exfiltration, destructive command detection) before installation
 
 ### Web Scraping (Advanced)
 
@@ -186,6 +199,15 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | SKILL-02 | Phase 7 | Pending |
 | SKILL-03 | Phase 7 | Pending |
 | SKILL-04 | Phase 7 | Pending |
+| SKILL-05 | Phase 07.2 | Pending |
+| SKILL-06 | Phase 07.2 | Pending |
+| SKILL-07 | Phase 07.2 | Pending |
+| SKILL-08 | Phase 07.2 | Pending |
+| SKILL-09 | Phase 07.2 | Pending |
+| SKILL-10 | Phase v2 | Pending |
+| SKILL-11 | Phase v2 | Pending |
+| SKILL-12 | Phase v2 | Pending |
+| SKILL-13 | Backlog | Pending |
 | EXEC-01 | Phase 8 | Pending |
 | EXEC-02 | Phase 8 | Pending |
 | EXEC-03 | Phase 8 | Pending |
@@ -202,10 +224,11 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 
 **Coverage:**
 - v1.0 requirements: 29 total (all complete)
-- v1.1 requirements: 23 total
-- Mapped to phases: 29 (v1.0) + 23 (v1.1)
+- v1.1 requirements: 29 total (23 original + 6 new from Phase 07.1 gap analysis: SKILL-05..SKILL-09, SKILL-13)
+- v2 requirements: 3 new from Phase 07.1 gap analysis: SKILL-10, SKILL-11, SKILL-12
+- Mapped to phases: 29 (v1.0) + 29 (v1.1) + v2 additions
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-08 after v1.1 Automation roadmap created (Phases 5-10)*
+*Last updated: 2026-04-09 after Phase 07.1 gap analysis — appended SKILL-05..SKILL-13 (9 new requirements)*
