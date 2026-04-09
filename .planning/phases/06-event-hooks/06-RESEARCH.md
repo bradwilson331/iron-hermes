@@ -378,22 +378,25 @@ pub fn with_hook_registry(mut self, registry: Arc<HookRegistry>) -> Self {
 | A3 | `ironhermes-hooks` crate holds core types; `ToolRegistry` imports it (not reverse) | Architecture Patterns, Pitfall 4 | Circular dependency if dependency direction is reversed; cargo check catches this immediately |
 | A4 | Webhook delivery is best-effort (failures logged, not propagated) | Pattern 4, Pitfall 2 | If strict delivery guarantees are needed, a retry queue would be required — out of scope for this phase |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Webhook authentication**
+1. **Webhook authentication** (RESOLVED by D-08)
    - What we know: reqwest supports `Authorization` header
    - What's unclear: Is a shared secret / HMAC signature required on outbound webhook calls, or is plain POST to a URL sufficient for v1.1?
    - Recommendation: Start with plain POST + configurable `Authorization` header via env var (`IRONHERMES_WEBHOOK_SECRET`). HMAC signing is a v2 concern.
+   - **Resolution:** D-08 decided both static `Authorization` header and HMAC-SHA256 payload signing (`X-Signature` header) are supported per endpoint. Configured in hooks.toml.
 
-2. **Hook event persistence / replay**
+2. **Hook event persistence / replay** (RESOLVED by D-04, D-09)
    - What we know: ironhermes-cron saves job output to files; similar pattern possible for events
    - What's unclear: Should hook events be written to disk for replay/audit, or is logging-only sufficient?
    - Recommendation: Logging-only for this phase (HOOK-01 says "logged via a hook registry"). File persistence is a v2/OBS concern.
+   - **Resolution:** D-04 decided structured event log written to dedicated JSONL file (`~/.ironhermes/hooks/events.jsonl`). D-09 added persistent retry queue to disk for failed webhook deliveries that survives restarts.
 
-3. **Configuration for guardrail rules**
+3. **Configuration for guardrail rules** (RESOLVED by D-05)
    - What we know: The requirement says "e.g., block terminal in untrusted contexts"
    - What's unclear: Are guardrail rules defined in code (compiled-in) or in a config file (runtime)?
    - Recommendation: Compiled-in for this phase with a `BlocklistGuardrail` that takes a list of tool names to block. Config-file-driven rules are a v2 extension.
+   - **Resolution:** D-05 decided two-layer system: config-driven blocklist in hooks.toml for simple rules (tool name matching) + `GuardrailHook` trait for complex logic (arg inspection, rate limiting). Config blocklist checked first.
 
 ## Environment Availability
 
