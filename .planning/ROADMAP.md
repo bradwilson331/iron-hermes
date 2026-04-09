@@ -126,9 +126,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 07-01-PLAN.md — SkillRegistry: discovery, parsing, and catalog in ironhermes-core
-- [ ] 07-02-PLAN.md — SkillsTool: list/view/activate tool in ironhermes-tools
-- [ ] 07-03-PLAN.md — Wiring: PromptBuilder catalog, CLI/gateway registration, cron skill resolution
+- [x] 07-01-PLAN.md — SkillRegistry: discovery, parsing, and catalog in ironhermes-core
+- [x] 07-02-PLAN.md — SkillsTool: list/view/activate tool in ironhermes-tools
+- [x] 07-03-PLAN.md — Wiring: PromptBuilder catalog, CLI/gateway registration, cron skill resolution
 
 #### Phase 8: Code Execution
 **Goal**: Agent can execute Python scripts in an isolated child process, with sandboxed access to agent tools via JSON-RPC and enforced resource limits
@@ -219,7 +219,7 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 4. Web Scraping Tools | v1.0 | 2/2 | Complete | 2026-04-08 |
 | 5. Scheduled Tasks | v1.1 | 0/? | Not started | - |
 | 6. Event Hooks | v1.1 | 0/? | Not started | - |
-| 7. Skills System | v1.1 | 0/? | Not started | - |
+| 7. Skills System | v1.1 | 3/3 | Complete | 2026-04-09 |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/? | Not started | - |
 | 10. Batch Processing | v1.1 | 0/? | Not started | - |
