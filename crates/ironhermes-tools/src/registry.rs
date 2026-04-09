@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironhermes_core::{MemoryStore, ToolSchema};
+use ironhermes_cron::JobStore;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -93,6 +94,13 @@ impl ToolRegistry {
     pub fn register_memory_tool(&mut self, store: Arc<Mutex<MemoryStore>>) {
         use crate::memory_tool::MemoryTool;
         self.register(Box::new(MemoryTool::new(store)));
+    }
+
+    /// Register the cronjob tool with a shared JobStore.
+    /// Called separately from register_defaults() because it requires a JobStore instance.
+    pub fn register_cronjob_tool(&mut self, store: Arc<Mutex<JobStore>>) {
+        use crate::cronjob_tool::CronjobTool;
+        self.register(Box::new(CronjobTool::new(store)));
     }
 }
 

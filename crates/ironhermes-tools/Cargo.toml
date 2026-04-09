@@ -8,6 +8,7 @@ description = "Tool registry and implementations for IronHermes"
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-cron = { path = "../ironhermes-cron" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
