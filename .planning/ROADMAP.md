@@ -141,10 +141,10 @@ Plans:
   3. Cron-triggered agent runs fire `MessageReceived` / `ToolCalled` / `ResponseSent` hook events to the same registry as Telegram-triggered runs
   4. `ironhermes-cron` crate captures a `HookRegistry` handle in the tick task closure
   5. After landing, retroactive `/gsd-verify-work 05` produces Phase 05 VERIFICATION.md with all SCHED-01..04 marked satisfied
-**Plans**: TBD (single phase per user direction — combine AgentLoop wiring + hook capture in one plan if practical)
+**Plans**: 1 plan
 
 Plans:
-- [ ] 07.3-01-PLAN.md — TBD
+- [ ] 07.3-01-PLAN.md — Wave 0 test scaffolding + Wave 1 execute_cron_job helper extraction + real AgentLoop/HookRegistry wiring + Wave 2 workspace regression gate
 
 #### Phase 07.4: Hook Ordering & Duplicate Event Fixes
 **Goal**: Resolve the two "warning" severity integration issues from the v1.1 audit so hook event streams are accurate and single-source
