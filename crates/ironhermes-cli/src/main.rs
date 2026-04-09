@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config, MemoryStore};
+use ironhermes_core::{ChatMessage, Config, MemoryStore, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
@@ -226,8 +226,10 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .unwrap_or(config.agent.max_turns);
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let prompt_builder = PromptBuilder::new(client.model(), "cli")
+    let skill_registry = Arc::new(SkillRegistry::load(&cwd));
+    let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .load_context(&cwd);
+    prompt_builder.set_skill_registry(skill_registry.clone());
     let system_msg = prompt_builder.build_system_message();
 
     let messages = vec![system_msg, ChatMessage::user(prompt)];
@@ -268,8 +270,10 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let prompt_builder = PromptBuilder::new(client.model(), "cli")
+    let skill_registry = Arc::new(SkillRegistry::load(&cwd));
+    let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .load_context(&cwd);
+    prompt_builder.set_skill_registry(skill_registry);
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];
@@ -397,6 +401,11 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
 
+    // Discover skills and register the skills tool
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let skill_registry = Arc::new(SkillRegistry::load(&cwd));
+    registry.register_skills_tool(skill_registry.clone());
+
     // Load hooks config and wire guardrails (before Arc wrapping)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
 
@@ -460,6 +469,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let mut runner = GatewayRunner::new(config, registry);
     runner.set_memory_store(memory_store);
     runner.set_job_store(job_store);
+    runner.set_skill_registry(skill_registry);
     runner.set_hook_registry(hook_registry);
     runner.start().await
 }

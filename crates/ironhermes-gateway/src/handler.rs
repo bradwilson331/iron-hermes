@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryStore, MessageContent, MessageEvent, Platform, Role};
+use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryStore, MessageContent, MessageEvent, Platform, Role, SkillRegistry};
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_tools::ToolRegistry;
@@ -48,6 +48,7 @@ pub struct GatewayMessageHandler {
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
+    skill_registry: Option<Arc<SkillRegistry>>,
     rate_limiter: PerUserRateLimiter,
 }
 
@@ -67,6 +68,7 @@ impl GatewayMessageHandler {
             tool_registry,
             memory_store: None,
             hook_registry: None,
+            skill_registry: None,
             rate_limiter,
         }
     }
@@ -79,6 +81,11 @@ impl GatewayMessageHandler {
     /// Set the hook registry for event emission.
     pub fn set_hook_registry(&mut self, registry: Arc<ironhermes_hooks::HookRegistry>) {
         self.hook_registry = Some(registry);
+    }
+
+    /// Set the skill registry for catalog injection into the system prompt.
+    pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
+        self.skill_registry = Some(registry);
     }
 
     /// Dispatch a slash command to the appropriate handler (plan 04).
@@ -268,6 +275,9 @@ impl GatewayMessageHandler {
             .load_context(&cwd);
         if let Some(ref store) = self.memory_store {
             prompt_builder.set_memory_store(store.clone());
+        }
+        if let Some(ref registry) = self.skill_registry {
+            prompt_builder.set_skill_registry(registry.clone());
         }
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message

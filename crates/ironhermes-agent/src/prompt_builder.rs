@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
-use ironhermes_core::{ChatMessage, MemoryStore, MemoryTarget};
+use ironhermes_core::{ChatMessage, MemoryStore, MemoryTarget, SkillRegistry};
 use tracing::debug;
 
 const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Nous Research. You are helpful, harmless, and honest.
@@ -32,6 +32,7 @@ pub struct PromptBuilder {
     project_context: Option<String>,
     agents_md_content: Option<String>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    skill_registry: Option<Arc<SkillRegistry>>,
 }
 
 impl PromptBuilder {
@@ -43,12 +44,18 @@ impl PromptBuilder {
             project_context: None,
             agents_md_content: None,
             memory_store: None,
+            skill_registry: None,
         }
     }
 
     /// Set the memory store for prompt injection (D-12: uses frozen snapshot).
     pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
         self.memory_store = Some(store);
+    }
+
+    /// Set the skill registry for catalog injection into the system prompt.
+    pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
+        self.skill_registry = Some(registry);
     }
 
     /// Load all context files (SOUL.md, project context, AGENTS.md).
@@ -160,6 +167,17 @@ impl PromptBuilder {
         // 5. AGENTS.md from IRONHERMES_HOME
         if let Some(ref agents) = self.agents_md_content {
             parts.push(agents.clone());
+        }
+
+        // 5.5. Skill catalog (per D-04, D-05)
+        if let Some(ref registry) = self.skill_registry {
+            if !registry.list().is_empty() {
+                let catalog = registry.catalog_text();
+                parts.push(format!(
+                    "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
+                    catalog
+                ));
+            }
         }
 
         // 6. Memory snapshot (D-12: uses frozen snapshot, not live state)
@@ -338,5 +356,52 @@ mod tests {
 
         // Should fall back to default identity
         assert!(output.contains("IronHermes, an AI assistant"));
+    }
+
+    #[test]
+    fn test_build_with_skill_catalog() {
+        use ironhermes_core::SkillRegistry;
+
+        let dir = make_temp_dir();
+        let skill_dir = dir.path().join("skill-a");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: focus-mode\ndescription: Deep work skill\n---\nFocus on the task.",
+        )
+        .unwrap();
+
+        let registry = Arc::new(SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]));
+
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_skill_registry(registry);
+        let output = builder.build();
+
+        assert!(
+            output.contains("## Available Skills"),
+            "output must contain '## Available Skills': {output}"
+        );
+        assert!(
+            output.contains("focus-mode"),
+            "output must contain skill name: {output}"
+        );
+        assert!(
+            output.contains("Deep work skill"),
+            "output must contain skill description: {output}"
+        );
+        assert!(
+            output.contains("Use the skills tool to view or activate a skill before using it."),
+            "output must contain usage hint: {output}"
+        );
+    }
+
+    #[test]
+    fn test_build_without_skills_no_section() {
+        let builder = PromptBuilder::new("test-model", "cli");
+        let output = builder.build();
+        assert!(
+            !output.contains("Available Skills"),
+            "output must NOT contain 'Available Skills' when no registry set: {output}"
+        );
     }
 }

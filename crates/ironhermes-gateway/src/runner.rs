@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use ironhermes_core::{Config, MemoryStore};
+use ironhermes_core::{Config, MemoryStore, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{error, info, warn};
@@ -25,6 +25,7 @@ pub struct GatewayRunner {
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
     job_store: Option<Arc<Mutex<JobStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
+    skill_registry: Option<Arc<SkillRegistry>>,
     cancel: CancellationToken,
 }
 
@@ -37,6 +38,7 @@ impl GatewayRunner {
             memory_store: None,
             job_store: None,
             hook_registry: None,
+            skill_registry: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -54,6 +56,11 @@ impl GatewayRunner {
     /// Set the hook registry for event emission.
     pub fn set_hook_registry(&mut self, registry: Arc<ironhermes_hooks::HookRegistry>) {
         self.hook_registry = Some(registry);
+    }
+
+    /// Set the skill registry for catalog injection and cron skill resolution.
+    pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
+        self.skill_registry = Some(registry);
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
@@ -129,6 +136,9 @@ impl GatewayRunner {
         }
         if let Some(ref registry) = self.hook_registry {
             handler.set_hook_registry(registry.clone());
+        }
+        if let Some(ref registry) = self.skill_registry {
+            handler.set_skill_registry(registry.clone());
         }
         let handler = Arc::new(handler);
         let user_queue = Arc::new(UserQueueManager::new(
