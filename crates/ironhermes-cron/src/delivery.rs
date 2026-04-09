@@ -124,7 +124,9 @@ pub fn format_delivery_message(job_name: &str, output: &str) -> String {
     let header = format!("[Job: {}]\n", job_name);
 
     if output.len() > MAX_PLATFORM_OUTPUT {
-        let truncated = &output[..MAX_PLATFORM_OUTPUT];
+        // Use floor_char_boundary to avoid panicking on multi-byte UTF-8 chars
+        let safe_end = output.floor_char_boundary(MAX_PLATFORM_OUTPUT);
+        let truncated = &output[..safe_end];
         format!(
             "{}{}\n\n(truncated -- full output saved to file)",
             header, truncated
