@@ -11,10 +11,12 @@ use tracing::debug;
 
 pub mod job;
 pub mod parser;
+pub mod scanner;
 pub mod store;
 
 pub use job::*;
 pub use parser::*;
+pub use scanner::scan_cron_prompt;
 pub use store::*;
 
 // ---------------------------------------------------------------------------
