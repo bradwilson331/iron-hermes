@@ -10,6 +10,8 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
+mod cron;
+
 #[derive(Parser)]
 #[command(
     name = "ironhermes",
@@ -64,6 +66,11 @@ enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Manage scheduled tasks
+    Cron {
+        #[command(subcommand)]
+        command: cron::CronCommands,
+    },
 }
 
 #[tokio::main]
@@ -91,6 +98,7 @@ async fn main() -> Result<()> {
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat { ref message }) => run_chat(&cli, message.clone()).await,
         Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
+        Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
         None => {
             if let Some(ref prompt) = cli.execute {
                 run_single(&cli, prompt.clone()).await
