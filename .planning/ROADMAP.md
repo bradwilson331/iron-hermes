@@ -126,7 +126,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 07-01-PLAN.md — TBD
+- [ ] 07-01-PLAN.md — SkillRegistry: discovery, parsing, and catalog in ironhermes-core
+- [ ] 07-02-PLAN.md — SkillsTool: list/view/activate tool in ironhermes-tools
+- [ ] 07-03-PLAN.md — Wiring: PromptBuilder catalog, CLI/gateway registration, cron skill resolution
 
 #### Phase 8: Code Execution
 **Goal**: Agent can execute Python scripts in an isolated child process, with sandboxed access to agent tools via JSON-RPC and enforced resource limits
