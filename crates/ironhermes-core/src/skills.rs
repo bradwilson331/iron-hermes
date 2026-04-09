@@ -1,10 +1,55 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::constants::get_hermes_home;
+
+// =============================================================================
+// Validation (SKILL-07)
+// =============================================================================
+
+/// Agentskills.io name regex: lowercase alphanumeric + hyphens,
+/// no leading/trailing hyphens. Consecutive hyphens are rejected by a separate
+/// `contains("--")` check because `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` alone would
+/// allow `foo--bar`.
+///
+/// Source: agentskills.io specification; Python reference at
+/// `skill_manager_tool.py:102-116` (_validate_name).
+static SKILL_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+        .expect("SKILL_NAME_RE is a compile-time constant literal — regex must compile")
+});
+
+const SKILL_NAME_MIN_LEN: usize = 1;
+const SKILL_NAME_MAX_LEN: usize = 64;
+const SKILL_DESC_MIN_LEN: usize = 1;
+const SKILL_DESC_MAX_LEN: usize = 1024;
+
+/// Validate a skill name. Returns `Err(reason)` if invalid.
+///
+/// Strict rules (reject on failure):
+/// - Length 1..=64
+/// - Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+/// - Must not contain consecutive hyphens (`--`)
+fn validate_skill_name(name: &str) -> Result<(), &'static str> {
+    if name.len() < SKILL_NAME_MIN_LEN {
+        return Err("name is empty");
+    }
+    if name.len() > SKILL_NAME_MAX_LEN {
+        return Err("name exceeds 64 characters");
+    }
+    if name.contains("--") {
+        return Err("name contains consecutive hyphens");
+    }
+    if !SKILL_NAME_RE.is_match(name) {
+        return Err("name does not match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$");
+    }
+    Ok(())
+}
 
 // =============================================================================
 // SkillFrontmatter
@@ -82,6 +127,24 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
 
     // Parse the YAML
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_block).ok()?;
+
+    // SKILL-07 name validation (07.2 D-13, D-14, D-15): strict reject on name violations.
+    if let Err(reason) = validate_skill_name(&frontmatter.name) {
+        warn!(
+            "SkillRegistry: rejecting skill with invalid name {:?}: {}",
+            frontmatter.name, reason
+        );
+        return None;
+    }
+
+    // SKILL-07 description length check (D-14): WARN-BUT-LOAD — do not return None.
+    let desc_len = frontmatter.description.chars().count();
+    if !(SKILL_DESC_MIN_LEN..=SKILL_DESC_MAX_LEN).contains(&desc_len) {
+        warn!(
+            "SkillRegistry: skill {:?} has description length {} outside allowed range {}..={} (loading anyway)",
+            frontmatter.name, desc_len, SKILL_DESC_MIN_LEN, SKILL_DESC_MAX_LEN
+        );
+    }
 
     // Extract body: everything after the closing `\n---`
     let after_close = &after_open[close_pos + 4..]; // skip `\n---`
@@ -202,6 +265,19 @@ impl SkillRegistry {
                         continue;
                     }
                 };
+
+                // SKILL-07 dir-name-match check (D-13, D-15): warn-but-load on case-insensitive mismatch.
+                let dir_name = subdir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if !dir_name.is_empty() && dir_name != frontmatter.name.to_lowercase() {
+                    warn!(
+                        "SkillRegistry: skill {:?} at {:?} has directory name {:?} that does not match frontmatter name (loading anyway)",
+                        frontmatter.name, skill_md_path, dir_name
+                    );
+                }
 
                 // SKILL-05: Platform filter (07.2 D-05, D-06) — runs BEFORE dedup so a filtered
                 // skill does not reserve its name slot against a lower-priority path.
@@ -570,17 +646,21 @@ mod tests {
     fn test_find_returns_some_case_insensitive() {
         let dir = tempdir().unwrap();
         let skills_dir = dir.path().join("skills");
-        let skill_dir = skills_dir.join("MySkill");
+        // Subdir name is lowercase to match the spec-valid fixture name and
+        // avoid the SKILL-07 dir-name-match warn. The test still exercises
+        // case-insensitive LOOKUP via find("MySkill") / find("MYSKILL") below.
+        let skill_dir = skills_dir.join("myskill");
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(
             skill_dir.join("SKILL.md"),
-            make_skill_md("MySkill", "My skill", "Content"),
+            make_skill_md("myskill", "My skill", "Content"),
         )
         .unwrap();
 
         let registry = make_isolated_registry(&[skills_dir]);
-        assert!(registry.find("MySkill").is_some());
+        // Case-insensitive lookup: registry stores "myskill", find accepts any case.
         assert!(registry.find("myskill").is_some());
+        assert!(registry.find("MySkill").is_some());
         assert!(registry.find("MYSKILL").is_some());
     }
 
@@ -902,6 +982,155 @@ mod tests {
         assert_eq!(registry.list().len(), 1);
         let record = &registry.list()[0];
         assert!(record.platforms.is_none(), "Expected platforms to be None for minimal skill");
+    }
+
+    // -------------------------------------------------------------------------
+    // SKILL-07: Name and description validation tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_skill_name_valid() {
+        assert!(validate_skill_name("valid-skill").is_ok());
+        assert!(validate_skill_name("a").is_ok());             // length 1
+        assert!(validate_skill_name("a1b2-c3d4").is_ok());     // mixed
+        assert!(validate_skill_name(&"a".repeat(64)).is_ok()); // length 64
+    }
+
+    #[test]
+    fn test_validate_skill_name_invalid_regex() {
+        assert!(validate_skill_name("Uppercase").is_err());    // uppercase
+        assert!(validate_skill_name("under_score").is_err());  // underscore
+        assert!(validate_skill_name("-leading").is_err());     // leading hyphen
+        assert!(validate_skill_name("trailing-").is_err());    // trailing hyphen
+        assert!(validate_skill_name("spaces bad").is_err());   // space
+        assert!(validate_skill_name("dot.bad").is_err());      // period
+    }
+
+    #[test]
+    fn test_validate_skill_name_consecutive_hyphens() {
+        // The regex alone would accept "foo--bar"; the extra check catches it.
+        assert!(validate_skill_name("foo--bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_skill_name_length_boundaries() {
+        assert!(validate_skill_name("").is_err());                    // empty
+        assert!(validate_skill_name(&"a".repeat(65)).is_err());       // length 65
+        assert!(validate_skill_name(&"a".repeat(64)).is_ok());        // length 64 — accepted
+        assert!(validate_skill_name("a").is_ok());                    // length 1 — accepted
+    }
+
+    #[test]
+    fn test_parse_skill_md_rejects_invalid_name() {
+        // Uppercase name must be strict-rejected (returns None).
+        let content = "---\nname: Invalid Name\ndescription: desc\n---\nBody";
+        let result = parse_skill_md(content);
+        assert!(result.is_none(), "Expected None for invalid name but got Some");
+    }
+
+    #[test]
+    fn test_parse_skill_md_rejects_consecutive_hyphens() {
+        let content = "---\nname: foo--bar\ndescription: desc\n---\nBody";
+        let result = parse_skill_md(content);
+        assert!(result.is_none(), "Expected None for consecutive-hyphen name but got Some");
+    }
+
+    #[test]
+    fn test_parse_skill_md_description_too_long_warn_loads() {
+        // Description of 1025 chars: warn-but-load — must return Some.
+        let long_desc = "a".repeat(1025);
+        let content = format!("---\nname: skill-a\ndescription: {}\n---\nBody", long_desc);
+        let result = parse_skill_md(&content);
+        assert!(result.is_some(), "Expected Some (warn-but-load) but got None");
+        assert_eq!(result.unwrap().0.description.chars().count(), 1025);
+    }
+
+    #[test]
+    fn test_parse_skill_md_description_empty_warn_loads() {
+        // Empty description: warn-but-load — must return Some.
+        let content = "---\nname: skill-a\ndescription: \"\"\n---\nBody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some(), "Expected Some (warn-but-load) for empty description but got None");
+    }
+
+    #[test]
+    fn test_parse_skill_md_description_boundary_1024_loads_silently() {
+        // Exactly 1024 chars: inside the allowed range — must return Some.
+        let desc = "a".repeat(1024);
+        let content = format!("---\nname: skill-a\ndescription: {}\n---\nBody", desc);
+        let result = parse_skill_md(&content);
+        assert!(result.is_some(), "Expected Some for description of exactly 1024 chars");
+        assert_eq!(result.unwrap().0.description.chars().count(), 1024);
+    }
+
+    #[test]
+    fn test_registry_load_dir_name_mismatch_warn_loads() {
+        // Subdir name "different-dir" does not match frontmatter name "skill-a".
+        // Warn is emitted but the skill is still loaded.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("different-dir");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md("skill-a", "Skill A", "Body"),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1, "Expected skill to load despite dir-name mismatch");
+        assert!(registry.find("skill-a").is_some());
+    }
+
+    #[test]
+    fn test_registry_load_dir_name_case_insensitive_match_silent() {
+        // Subdir "MySkill" vs frontmatter name "myskill" — case-insensitive match, loads silently.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("MySkill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md("myskill", "My skill", "Body"),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1, "Expected skill to load with case-insensitive dir-name match");
+        assert!(registry.find("myskill").is_some());
+    }
+
+    #[test]
+    fn test_registry_load_skips_invalid_name_skill() {
+        // Frontmatter name "Skill-Caps" has uppercase — strict-rejected by parse_skill_md.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("Skill-Caps");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md("Skill-Caps", "Skill with uppercase name", "Body"),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert!(
+            registry.list().is_empty(),
+            "Expected empty registry for skill with invalid uppercase name"
+        );
+    }
+
+    #[test]
+    fn test_existing_phase7_names_still_load() {
+        // Sanity check: all fixture names from existing Phase 7 tests pass validation.
+        for name in &["skill-a", "my-skill", "alpha", "beta", "skill", "myskill", "no-platforms",
+                      "empty-platforms", "all-oses", "minimal", "freebsd-skill", "darwin-skill"] {
+            assert!(
+                validate_skill_name(name).is_ok(),
+                "Expected {:?} to pass validate_skill_name but it failed",
+                name
+            );
+        }
     }
 
     // -------------------------------------------------------------------------
