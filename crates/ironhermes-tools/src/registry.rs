@@ -145,6 +145,13 @@ impl ToolRegistry {
         use crate::cronjob_tool::CronjobTool;
         self.register(Box::new(CronjobTool::new(store)));
     }
+
+    /// Register the skills tool with a shared SkillRegistry.
+    /// Called separately from register_defaults() because it requires a SkillRegistry instance.
+    pub fn register_skills_tool(&mut self, registry: Arc<ironhermes_core::SkillRegistry>) {
+        use crate::skills_tool::SkillsTool;
+        self.register(Box::new(SkillsTool::new(registry)));
+    }
 }
 
 impl Default for ToolRegistry {
