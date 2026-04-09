@@ -4,14 +4,14 @@ milestone: v1.1
 milestone_name: Automation
 status: executing
 stopped_at: Phase 6 context gathered
-last_updated: "2026-04-09T03:06:10.044Z"
-last_activity: 2026-04-09 -- Phase 05 execution started
+last_updated: "2026-04-09T03:36:21.460Z"
+last_activity: 2026-04-09 -- Phase 06 execution started
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 3
+  total_plans: 6
   completed_plans: 3
-  percent: 100
+  percent: 50
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-08)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 05 — scheduled-tasks
+**Current focus:** Phase 06 — event-hooks
 
 ## Current Position
 
-Phase: 05 (scheduled-tasks) — EXECUTING
+Phase: 06 (event-hooks) — EXECUTING
 Plan: 1 of 3
-Status: Executing Phase 05
-Last activity: 2026-04-09 -- Phase 05 execution started
+Status: Executing Phase 06
+Last activity: 2026-04-09 -- Phase 06 execution started
 
 Progress: [░░░░░░░░░░] 0% (v1.1 not yet started)
 
