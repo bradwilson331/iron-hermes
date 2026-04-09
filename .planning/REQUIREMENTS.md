@@ -110,7 +110,6 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 ### Self-Improvement (Advanced)
 
 - **SELF-07**: Version history for context files with rollback capability
-- **SELF-07**: Version history for context files with rollback capability
 - **SELF-08**: Skills subsystem: procedural knowledge stored in SKILL.md directories; agent can create/edit/delete its own skills via a `skill_manage` tool (create, edit, patch, delete, write_file, remove_file actions — hermes-agent `skill_manager_tool.py` parity)
 - **SELF-09**: Session-end reflection: agent evaluates performance and optionally updates context
 - **SELF-10**: Skill auto-creation: agent saves multi-step procedures as reusable skills after 5+ tool calls; `skill_manage(action='create')` is the write mechanism
