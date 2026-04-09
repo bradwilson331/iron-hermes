@@ -70,6 +70,11 @@ pub fn acquire_tick_lock_at(dir: PathBuf) -> Result<Option<LockGuard>> {
             Ok(Some(LockGuard { path: lock_path }))
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Check if the lock holder is still alive; if not, remove the
+            // stale lock and retry once.
+            if let Some(guard) = try_recover_stale_lock(&lock_path)? {
+                return Ok(Some(guard));
+            }
             debug!("Tick lock already held: {}", lock_path.display());
             Ok(None)
         }
@@ -77,6 +82,68 @@ pub fn acquire_tick_lock_at(dir: PathBuf) -> Result<Option<LockGuard>> {
             format!("failed to acquire tick lock: {}", lock_path.display())
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stale lock recovery
+// ---------------------------------------------------------------------------
+
+/// Check whether the PID recorded in a lock file is still alive.
+/// If the process is dead, remove the stale lock and attempt to re-acquire.
+/// Returns `Some(guard)` on successful recovery, `None` if the holder is
+/// still alive or the lock file cannot be parsed.
+fn try_recover_stale_lock(lock_path: &std::path::Path) -> Result<Option<LockGuard>> {
+    let pid_str = match fs::read_to_string(lock_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None), // can't read — assume held
+    };
+
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return Ok(None), // can't parse — assume held
+    };
+
+    if is_process_alive(pid) {
+        return Ok(None);
+    }
+
+    debug!(
+        "Removing stale tick lock (PID {} is dead): {}",
+        pid,
+        lock_path.display()
+    );
+    let _ = fs::remove_file(lock_path);
+
+    // Retry acquisition once
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_path)
+    {
+        Ok(mut f) => {
+            let _ = io::Write::write_fmt(&mut f, format_args!("{}", std::process::id()));
+            debug!("Re-acquired tick lock after stale recovery: {}", lock_path.display());
+            Ok(Some(LockGuard {
+                path: lock_path.to_path_buf(),
+            }))
+        }
+        Err(_) => Ok(None), // someone else grabbed it between remove and retry
+    }
+}
+
+/// Platform-appropriate process liveness check.
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    // kill(pid, 0) checks existence without sending a signal.
+    // Returns 0 if the process exists and we have permission to signal it.
+    // Returns -1 with ESRCH if the process does not exist.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    // On non-Unix platforms, assume the process is alive (conservative).
+    true
 }
 
 // ---------------------------------------------------------------------------
