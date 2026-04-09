@@ -3,7 +3,7 @@
 ## Milestones
 
 - ✅ **v1.0 MVP** - Phases 1-4 (shipped 2026-04-08)
-- 🚧 **v1.1 Automation** - Phases 5-10 (in progress)
+- 🚧 **v1.1 Automation** - Phases 5-10 + subphases 07.1-07.5 (in progress)
 
 ## Phases
 
@@ -130,6 +130,51 @@ Plans:
 - [x] 07-02-PLAN.md — SkillsTool: list/view/activate tool in ironhermes-tools
 - [x] 07-03-PLAN.md — Wiring: PromptBuilder catalog, CLI/gateway registration, cron skill resolution
 
+#### Phase 07.3: Cron Tick Agent Execution + Hook Instrumentation
+**Goal**: Replace the cron tick-runner placeholder so scheduled jobs construct a real AgentLoop, execute with attached skill content, deliver actual LLM output, and fire hook lifecycle events for every cron-triggered run
+**Depends on**: Phase 7 (skill resolution already wired), Phase 6 (HookRegistry exists)
+**Requirements**: SCHED-01, SCHED-03, SCHED-04, HOOK-01
+**Gap Closure**: Closes v1.1 audit critical integrations #1 (runner.rs ↔ AgentLoop) and #2 (runner.rs ↔ HookRegistry), plus broken flows "scheduled job with skill executes and delivers output" and "HOOK-01 lifecycle events for cron-triggered runs"
+**Success Criteria** (what must be TRUE):
+  1. `gateway/runner.rs` tick task constructs an `AgentLoop`, passes real `full_input` (skill content + user prompt), and delivers the agent's real response through the existing delivery routing
+  2. A scheduled job with an attached skill produces an LLM response that reflects the skill content (integration test)
+  3. Cron-triggered agent runs fire `MessageReceived` / `ToolCalled` / `ResponseSent` hook events to the same registry as Telegram-triggered runs
+  4. `ironhermes-cron` crate captures a `HookRegistry` handle in the tick task closure
+  5. After landing, retroactive `/gsd-verify-work 05` produces Phase 05 VERIFICATION.md with all SCHED-01..04 marked satisfied
+**Plans**: TBD (single phase per user direction — combine AgentLoop wiring + hook capture in one plan if practical)
+
+Plans:
+- [ ] 07.3-01-PLAN.md — TBD
+
+#### Phase 07.4: Hook Ordering & Duplicate Event Fixes
+**Goal**: Resolve the two "warning" severity integration issues from the v1.1 audit so hook event streams are accurate and single-source
+**Depends on**: Phase 07.3
+**Requirements**: HOOK-01, HOOK-02 (correctness refinement, no new reqs)
+**Gap Closure**: Closes v1.1 audit integration warnings #3 (ToolCalled fires before guardrail dispatch) and #4 (duplicate MessageReceived/ResponseSent from gateway/handler.rs and agent_loop.rs)
+**Success Criteria** (what must be TRUE):
+  1. `agent_loop.rs` fires `ToolCalled` only after the guardrail chain has permitted the call; blocked tools never emit `tool_called` events
+  2. A single Telegram message produces exactly one `MessageReceived` and one `ResponseSent` event in JSONL logs and webhook deliveries (no duplicates)
+  3. Test coverage asserts event counts for a canonical Telegram round-trip
+**Plans**: TBD
+
+Plans:
+- [ ] 07.4-01-PLAN.md — TBD
+
+#### Phase 07.5: Skills System Housekeeping (SKILL-06 enforcement + traceability cleanup)
+**Goal**: Close 07.2 tech debt: enforce SKILL-06 `allowed_tools` at tool dispatch, relocate SKILL-09 to v2, and align ROADMAP/traceability with deferred scope decisions
+**Depends on**: Phase 07.2
+**Requirements**: SKILL-06 (enforcement)
+**Gap Closure**: Closes 07.2 tech debt items from v1.1 audit: `allowed_tools` parsed but not enforced; SKILL-09 still mapped to 07.2 in REQUIREMENTS.md; ROADMAP/phase-directory title still references "SKILL-05..09"
+**Success Criteria** (what must be TRUE):
+  1. Tool dispatch honors the active skill set's `allowed_tools` intersection — a tool not in the union of any active skill's allow-list is rejected with a clear error
+  2. Regression test: activating a skill with a restrictive `allowed_tools` list blocks other tool calls for the remainder of that agent turn
+  3. REQUIREMENTS.md: SKILL-09 is moved to the v2 section and the traceability table reflects it as a v2 requirement
+  4. SKILL-13 remains in the Backlog bucket in REQUIREMENTS.md with an explicit note
+**Plans**: TBD
+
+Plans:
+- [ ] 07.5-01-PLAN.md — TBD
+
 #### Phase 8: Code Execution
 **Goal**: Agent can execute Python scripts in an isolated child process, with sandboxed access to agent tools via JSON-RPC and enforced resource limits
 **Depends on**: Phase 7 (skills can provide Python scripting patterns; hooks instrument exec events)
@@ -217,9 +262,14 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 2. Telegram Gateway | v1.0 | 4/5 | In Progress | - |
 | 3. Self-Improvement + Security | v1.0 | 3/3 | Complete | 2026-04-08 |
 | 4. Web Scraping Tools | v1.0 | 2/2 | Complete | 2026-04-08 |
-| 5. Scheduled Tasks | v1.1 | 0/? | Not started | - |
-| 6. Event Hooks | v1.1 | 0/? | Not started | - |
+| 5. Scheduled Tasks | v1.1 | 3/3 | Gaps (see 07.3) | - |
+| 6. Event Hooks | v1.1 | 3/3 | Gaps (see 07.4) | - |
 | 7. Skills System | v1.1 | 3/3 | Complete | 2026-04-09 |
+| 07.1. Skills Gap Analysis | v1.1 | 1/1 | Complete | 2026-04-09 |
+| 07.2. Skills Spec Compliance | v1.1 | 4/4 | Complete | 2026-04-09 |
+| 07.3. Cron Tick Agent Exec + Hooks | v1.1 | 0/? | Not started (gap closure) | - |
+| 07.4. Hook Ordering & Dedup | v1.1 | 0/? | Not started (gap closure) | - |
+| 07.5. Skills Housekeeping | v1.1 | 0/? | Not started (gap closure) | - |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/? | Not started | - |
 | 10. Batch Processing | v1.1 | 0/? | Not started | - |

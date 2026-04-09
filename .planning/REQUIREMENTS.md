@@ -80,8 +80,9 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 - [ ] **SKILL-06**: Extended frontmatter fields are parsed and stored: `compatibility`, `allowed-tools`, and `metadata` (including `metadata.hermes.*` extensions) for hermes-agent backward compat
 - [ ] **SKILL-07**: SKILL.md name validation enforced at load time: lowercase alphanumeric + hyphens, 1-64 chars; description 1-1024 chars; directory name must match skill name (warn-but-load on mismatch)
 - [ ] **SKILL-08**: `SkillsConfig` section in `config.yaml` allows configuring custom scan paths beyond the three default directories
-- [ ] **SKILL-09**: Skills that declare required env vars via `metadata.hermes.config` prompt the user at first activation if those vars are absent (setup-needed flow)
 - [ ] **SKILL-13**: Slash-command integration — `/skill-name` in CLI chat activates the named skill directly, injecting its body before the next LLM call (backlog)
+
+> **SKILL-09** was moved to **v2 Requirements** during v1.1 gap closure (2026-04-09). It was explicitly deferred in Phase 07.2 per `07.2-CONTEXT.md D-01` and will not ship in v1.1.
 
 ### Code Execution
 
@@ -116,6 +117,7 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 
 ### Skills Hub (Advanced)
 
+- **SKILL-09**: Skills that declare required env vars via `metadata.hermes.config` prompt the user at first activation if those vars are absent (setup-needed flow) — _moved from v1.1 during gap closure (2026-04-09); deferred per Phase 07.2 decision D-01_
 - **SKILL-10**: Skills Hub with multi-source registry — install skills from GitHub repos, local paths, and remote tarballs via `GitHubSource` adapter and hub lock file tracking provenance
 - **SKILL-11**: Update lifecycle — manifest-based hash tracking for installed skills; `install`, `update`, `remove` CLI subcommands; bundled-skill seeding on first run
 - **SKILL-12**: Trust levels (builtin / trusted / community / agent-created) and security scanning of externally-sourced skills (prompt injection, exfiltration, destructive command detection) before installation
@@ -187,11 +189,11 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | WEB-02 | Phase 4 | Complete |
 | WEB-03 | Phase 4 | Complete |
 | WEB-04 | Phase 4 | Complete |
-| SCHED-01 | Phase 5 | Pending |
-| SCHED-02 | Phase 5 | Pending |
-| SCHED-03 | Phase 5 | Pending |
-| SCHED-04 | Phase 5 | Pending |
-| HOOK-01 | Phase 6 | Pending |
+| SCHED-01 | Phase 5 → 07.3 (gap closure) | Pending |
+| SCHED-02 | Phase 5 | Pending (verification pending) |
+| SCHED-03 | Phase 5 → 07.3 (gap closure) | Pending |
+| SCHED-04 | Phase 5 → 07.3 (gap closure) | Pending |
+| HOOK-01 | Phase 6 → 07.3 (cron tick gap) + 07.4 (ordering) | Pending |
 | HOOK-02 | Phase 6 | Pending |
 | HOOK-03 | Phase 6 | Pending |
 | SKILL-01 | Phase 7 | Pending |
@@ -199,10 +201,10 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | SKILL-03 | Phase 7 | Pending |
 | SKILL-04 | Phase 7 | Pending |
 | SKILL-05 | Phase 07.2 | Pending |
-| SKILL-06 | Phase 07.2 | Pending |
+| SKILL-06 | Phase 07.2 → 07.5 (enforcement) | Pending |
 | SKILL-07 | Phase 07.2 | Pending |
 | SKILL-08 | Phase 07.2 | Pending |
-| SKILL-09 | Phase 07.2 | Pending |
+| SKILL-09 | v2 (moved from 07.2 during gap closure 2026-04-09) | Deferred |
 | SKILL-10 | Phase v2 | Pending |
 | SKILL-11 | Phase v2 | Pending |
 | SKILL-12 | Phase v2 | Pending |
@@ -223,11 +225,11 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 
 **Coverage:**
 - v1.0 requirements: 29 total (all complete)
-- v1.1 requirements: 29 total (23 original + 6 new from Phase 07.1 gap analysis: SKILL-05..SKILL-09, SKILL-13)
-- v2 requirements: 3 new from Phase 07.1 gap analysis: SKILL-10, SKILL-11, SKILL-12
-- Mapped to phases: 29 (v1.0) + 29 (v1.1) + v2 additions
+- v1.1 requirements: 28 total (23 original + 5 from Phase 07.1 gap analysis: SKILL-05..SKILL-08, SKILL-13; SKILL-09 moved to v2 during v1.1 gap closure)
+- v2 requirements: 4 (SKILL-09 relocated + SKILL-10, SKILL-11, SKILL-12 from Phase 07.1)
+- Mapped to phases: 29 (v1.0) + 28 (v1.1) + v2 additions
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-09 after Phase 07.1 gap analysis — appended SKILL-05..SKILL-13 (9 new requirements)*
+*Last updated: 2026-04-09 after v1.1 milestone audit — added gap closure phases 07.3/07.4/07.5, relocated SKILL-09 to v2*
