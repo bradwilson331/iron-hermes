@@ -26,18 +26,13 @@ pub enum ScheduleParsed {
 // JobState
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
+    #[default]
     Scheduled,
     Paused,
     Completed,
-}
-
-impl Default for JobState {
-    fn default() -> Self {
-        JobState::Scheduled
-    }
 }
 
 pub fn default_job_state() -> JobState {
@@ -48,19 +43,10 @@ pub fn default_job_state() -> JobState {
 // RepeatConfig
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RepeatConfig {
     pub times: Option<u32>, // None = forever
     pub completed: u32,
-}
-
-impl Default for RepeatConfig {
-    fn default() -> Self {
-        RepeatConfig {
-            times: None,
-            completed: 0,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -176,10 +176,10 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
     let new_prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // Security scan on new prompt if being updated
-    if let Some(ref p) = new_prompt {
-        if let Err(e) = scan_cron_prompt(p) {
-            return json!({"status": "error", "message": e});
-        }
+    if let Some(ref p) = new_prompt
+        && let Err(e) = scan_cron_prompt(p)
+    {
+        return json!({"status": "error", "message": e});
     }
 
     // Parse schedule if provided

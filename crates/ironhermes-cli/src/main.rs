@@ -226,7 +226,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .unwrap_or(config.agent.max_turns);
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load(&cwd));
+    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry.clone());
@@ -270,7 +270,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load(&cwd));
+    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry);
@@ -403,7 +403,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     // Discover skills and register the skills tool
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load(&cwd));
+    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     registry.register_skills_tool(skill_registry.clone());
 
     // Load hooks config and wire guardrails (before Arc wrapping)

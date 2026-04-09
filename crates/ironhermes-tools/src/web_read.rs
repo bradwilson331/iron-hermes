@@ -127,11 +127,11 @@ fn extract_content_local(html: &str, url: &str) -> anyhow::Result<String> {
     // Find main content area by iterating selectors in priority order.
     let mut content_html = String::new();
     for &sel_str in CONTENT_SELECTORS {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            if let Some(el) = document.select(&sel).next() {
-                content_html = el.html();
-                break;
-            }
+        if let Ok(sel) = Selector::parse(sel_str)
+            && let Some(el) = document.select(&sel).next()
+        {
+            content_html = el.html();
+            break;
         }
     }
 
@@ -226,12 +226,11 @@ async fn fetch_with_firecrawl(url: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Firecrawl response missing markdown content"))?;
 
     // Check metadata for non-200 status codes.
-    if let Some(ref meta) = data.metadata {
-        if let Some(code) = meta.status_code {
-            if code >= 400 {
-                return Err(anyhow::anyhow!("Target page returned HTTP {}", code));
-            }
-        }
+    if let Some(ref meta) = data.metadata
+        && let Some(code) = meta.status_code
+        && code >= 400
+    {
+        return Err(anyhow::anyhow!("Target page returned HTTP {}", code));
     }
 
     let title = data

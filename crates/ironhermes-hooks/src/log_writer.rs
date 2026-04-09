@@ -21,14 +21,14 @@ pub fn create_jsonl_listener(path: Option<PathBuf>) -> HookListener {
 
     // Create parent directory eagerly so we surface errors at setup time,
     // not silently at first event.
-    if let Some(parent) = resolved_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!(
-                path = %resolved_path.display(),
-                error = %e,
-                "Failed to create hooks directory for events.jsonl"
-            );
-        }
+    if let Some(parent) = resolved_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            path = %resolved_path.display(),
+            error = %e,
+            "Failed to create hooks directory for events.jsonl"
+        );
     }
 
     Arc::new(move |event: HookEvent| {

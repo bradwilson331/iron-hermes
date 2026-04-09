@@ -6,6 +6,7 @@ use regex::Regex;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
+use crate::config::SkillsConfig;
 use crate::constants::get_hermes_home;
 
 // =============================================================================
@@ -199,24 +200,53 @@ pub struct SkillRegistry {
     skills: Vec<SkillRecord>,
 }
 
+/// Build the ordered list of skill search paths for a given cwd and SkillsConfig.
+///
+/// Defaults first (priority order), extras appended after (D-19).
+/// Exposed as `pub(crate)` so tests can pin the path construction logic.
+pub(crate) fn build_skill_search_paths(cwd: &Path, config: &SkillsConfig) -> Vec<PathBuf> {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let mut paths = vec![
+        cwd.join(".ironhermes/skills"),
+        get_hermes_home().join("skills"),
+        home.join(".agents/skills"),
+    ];
+    // D-19: extras appended AFTER defaults so first-path-wins preserves default priority.
+    paths.extend(config.extra_paths.iter().cloned());
+    paths
+}
+
 impl SkillRegistry {
-    /// Scan three priority-ordered paths for skill documents.
+    /// Scan three priority-ordered paths for skill documents (legacy, Config-unaware).
     ///
     /// Priority order (first-path-wins deduplication by lowercase name):
     /// 1. `cwd/.ironhermes/skills/`
     /// 2. `~/.ironhermes/skills/` (via get_hermes_home())
     /// 3. `~/.agents/skills/`
+    ///
+    /// This is a thin wrapper over [`Self::load_with_config`] using a default
+    /// `SkillsConfig` (enabled, no extra paths). Preserved for backward compat
+    /// with callers that do not have a `Config` handy (tests, simple tools).
     pub fn load(cwd: &Path) -> Self {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+        Self::load_with_config(cwd, &SkillsConfig::default())
+    }
 
-        let search_paths: Vec<PathBuf> = vec![
-            cwd.join(".ironhermes/skills"),
-            get_hermes_home().join("skills"),
-            home.join(".agents/skills"),
-        ];
+    /// Scan for skills using a user-supplied `SkillsConfig` (07.2 D-21).
+    ///
+    /// Behavior:
+    /// - `config.enabled == false` → returns an empty registry WITHOUT scanning.
+    /// - Otherwise, scans the 3 hardcoded defaults in priority order, then
+    ///   appends `config.extra_paths` at the end. First-path-wins dedup means
+    ///   defaults retain priority over extras (D-19).
+    pub fn load_with_config(cwd: &Path, config: &SkillsConfig) -> Self {
+        // SKILL-08 kill switch (D-20).
+        if !config.enabled {
+            return Self { skills: Vec::new() };
+        }
 
+        let search_paths = build_skill_search_paths(cwd, config);
         Self::load_with_paths(&search_paths)
     }
 
@@ -1156,5 +1186,86 @@ mod tests {
         assert!(body.contains("This is the body content."));
         assert!(!body.contains("name: my-skill"));
         assert!(!body.contains("description: desc"));
+    }
+
+    // -------------------------------------------------------------------------
+    // SKILL-08: SkillsConfig / load_with_config tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_with_config_disabled_returns_empty() {
+        // enabled: false → empty registry, no filesystem scan at all.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join(".ironhermes/skills/a-skill");
+        fs::create_dir_all(&skills_dir).unwrap();
+        fs::write(
+            skills_dir.join("SKILL.md"),
+            make_skill_md("a-skill", "Some skill", "body"),
+        )
+        .unwrap();
+
+        let config = SkillsConfig { enabled: false, extra_paths: vec![] };
+        let registry = SkillRegistry::load_with_config(dir.path(), &config);
+        assert!(
+            registry.list().is_empty(),
+            "enabled=false must return empty registry; got {} skill(s)",
+            registry.list().len()
+        );
+    }
+
+    #[test]
+    fn test_load_with_config_enabled_includes_extra_paths() {
+        // A skill placed only in an extra_path is discovered.
+        let cwd = tempdir().unwrap();
+        let extra = tempdir().unwrap();
+        let extra_skill_dir = extra.path().join("extra-skill");
+        fs::create_dir_all(&extra_skill_dir).unwrap();
+        fs::write(
+            extra_skill_dir.join("SKILL.md"),
+            make_skill_md("extra-skill", "Loaded from extra_paths", "body"),
+        )
+        .unwrap();
+
+        let config = SkillsConfig {
+            enabled: true,
+            extra_paths: vec![extra.path().to_path_buf()],
+        };
+        let registry = SkillRegistry::load_with_config(cwd.path(), &config);
+        assert!(
+            registry.find("extra-skill").is_some(),
+            "extra_paths skill should be discovered; registry has: {:?}",
+            registry.list().iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_load_with_config_extras_respect_dedup_default_priority() {
+        // Pins D-19: extras are appended AFTER defaults.
+        // Use build_skill_search_paths directly to test path construction.
+        let cwd = PathBuf::from("/test/cwd");
+        let config = SkillsConfig {
+            enabled: true,
+            extra_paths: vec![PathBuf::from("/extra/a"), PathBuf::from("/extra/b")],
+        };
+        let paths = build_skill_search_paths(&cwd, &config);
+        assert_eq!(paths.len(), 5, "3 defaults + 2 extras");
+        assert_eq!(paths[0], cwd.join(".ironhermes/skills"), "default 1 must be first");
+        assert_eq!(paths[3], PathBuf::from("/extra/a"), "extra a must be at index 3");
+        assert_eq!(paths[4], PathBuf::from("/extra/b"), "extra b must be at index 4");
+    }
+
+    #[test]
+    fn test_load_legacy_matches_default_config() {
+        // SkillRegistry::load(cwd) is identical to load_with_config(cwd, &default).
+        let cwd = tempdir().unwrap();
+        let registry_legacy = SkillRegistry::load(cwd.path());
+        let registry_config = SkillRegistry::load_with_config(cwd.path(), &SkillsConfig::default());
+
+        let names_legacy: Vec<&str> = registry_legacy.list().iter().map(|s| s.name.as_str()).collect();
+        let names_config: Vec<&str> = registry_config.list().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names_legacy, names_config,
+            "load() and load_with_config(default) must return identical skill lists"
+        );
     }
 }

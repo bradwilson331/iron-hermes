@@ -26,39 +26,39 @@ pub async fn process_attachments(
     msg: &TgMessage,
 ) -> Result<ProcessedAttachments> {
     // --- Photo ---
-    if let Some(ref photos) = msg.photo {
-        if let Some(largest) = photos.last() {
-            // Check file size if known
-            if let Some(size) = largest.file_size {
-                if size > MAX_FILE_SIZE {
-                    bail!("File too large (max 20MB). Please send a smaller image.");
-                }
-            }
-
-            info!(file_id = %largest.file_id, "Downloading photo from Telegram");
-            let tg_file = adapter.get_file(&largest.file_id).await?;
-            let file_path = tg_file
-                .file_path
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Telegram returned no file_path for photo"))?;
-
-            let bytes = adapter.download_file(file_path).await?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let data_uri = format!("data:image/jpeg;base64,{}", encoded);
-
-            return Ok(ProcessedAttachments {
-                image_data_uri: Some(data_uri),
-                text_prefix: None,
-            });
+    if let Some(ref photos) = msg.photo
+        && let Some(largest) = photos.last()
+    {
+        // Check file size if known
+        if let Some(size) = largest.file_size
+            && size > MAX_FILE_SIZE
+        {
+            bail!("File too large (max 20MB). Please send a smaller image.");
         }
+
+        info!(file_id = %largest.file_id, "Downloading photo from Telegram");
+        let tg_file = adapter.get_file(&largest.file_id).await?;
+        let file_path = tg_file
+            .file_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Telegram returned no file_path for photo"))?;
+
+        let bytes = adapter.download_file(file_path).await?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let data_uri = format!("data:image/jpeg;base64,{}", encoded);
+
+        return Ok(ProcessedAttachments {
+            image_data_uri: Some(data_uri),
+            text_prefix: None,
+        });
     }
 
     // --- Document ---
     if let Some(ref doc) = msg.document {
-        if let Some(size) = doc.file_size {
-            if size > MAX_FILE_SIZE {
-                bail!("File too large (max 20MB). Please send a smaller file.");
-            }
+        if let Some(size) = doc.file_size
+            && size > MAX_FILE_SIZE
+        {
+            bail!("File too large (max 20MB). Please send a smaller file.");
         }
 
         let mime = doc

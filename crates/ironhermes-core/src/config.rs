@@ -14,6 +14,8 @@ pub struct Config {
     pub cron: CronConfig,
     pub security: SecurityConfig,
     pub rate_limit: RateLimitConfig,
+    // SKILL-08: skills subsystem configuration (07.2 D-17, D-18)
+    pub skills: SkillsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +178,38 @@ impl Default for RateLimitConfig {
     }
 }
 
+// =============================================================================
+// SkillsConfig (SKILL-08)
+// =============================================================================
+
+/// Skills subsystem configuration (07.2 D-17, D-18, D-19, D-20).
+///
+/// Controls whether skills are loaded at all (`enabled`) and allows the user
+/// to declare additional scan paths beyond the three hardcoded defaults:
+/// 1. `<cwd>/.ironhermes/skills/`
+/// 2. `<hermes_home>/skills/` (typically `~/.ironhermes/skills/`)
+/// 3. `~/.agents/skills/`
+///
+/// `extra_paths` are appended AFTER the defaults so defaults retain priority
+/// via first-path-wins dedup (D-19).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Master enable switch. `false` → SkillRegistry returns empty without scanning (D-20).
+    pub enabled: bool,
+    /// Additional scan paths appended after the 3 defaults (D-19).
+    pub extra_paths: Vec<PathBuf>,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            extra_paths: Vec::new(),
+        }
+    }
+}
+
 impl Config {
     /// Load config from the IronHermes home directory.
     pub fn load() -> anyhow::Result<Self> {
@@ -244,5 +278,67 @@ impl Config {
     /// Get the .env file path.
     pub fn env_path() -> PathBuf {
         get_hermes_home().join(".env")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_skills_config_default() {
+        let default = SkillsConfig::default();
+        assert!(default.enabled);
+        assert!(default.extra_paths.is_empty());
+    }
+
+    #[test]
+    fn test_config_default_includes_skills() {
+        let config = Config::default();
+        assert!(config.skills.enabled);
+        assert!(config.skills.extra_paths.is_empty());
+    }
+
+    #[test]
+    fn test_config_parses_without_skills_section() {
+        // Backward compat (D-18): existing config.yaml files without a `skills:` section
+        // must parse unchanged via serde(default).
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert!(config.skills.enabled); // default applied
+        assert!(config.skills.extra_paths.is_empty());
+    }
+
+    #[test]
+    fn test_config_parses_with_skills_section() {
+        let yaml = r#"
+skills:
+  enabled: false
+  extra_paths:
+    - /tmp/custom-skills
+    - /opt/shared/skills
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert!(!config.skills.enabled);
+        assert_eq!(config.skills.extra_paths.len(), 2);
+        assert_eq!(config.skills.extra_paths[0], PathBuf::from("/tmp/custom-skills"));
+        assert_eq!(config.skills.extra_paths[1], PathBuf::from("/opt/shared/skills"));
+    }
+
+    #[test]
+    fn test_config_skills_round_trip() {
+        let mut original = Config::default();
+        original.skills.enabled = false;
+        original.skills.extra_paths = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+
+        let yaml = serde_yaml::to_string(&original).expect("serialize");
+        let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(parsed.skills.enabled, original.skills.enabled);
+        assert_eq!(parsed.skills.extra_paths, original.skills.extra_paths);
     }
 }

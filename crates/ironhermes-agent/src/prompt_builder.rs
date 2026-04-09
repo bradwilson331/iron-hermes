@@ -170,14 +170,14 @@ impl PromptBuilder {
         }
 
         // 5.5. Skill catalog (per D-04, D-05)
-        if let Some(ref registry) = self.skill_registry {
-            if !registry.list().is_empty() {
-                let catalog = registry.catalog_text();
-                parts.push(format!(
-                    "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
-                    catalog
-                ));
-            }
+        if let Some(ref registry) = self.skill_registry
+            && !registry.list().is_empty()
+        {
+            let catalog = registry.catalog_text();
+            parts.push(format!(
+                "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
+                catalog
+            ));
         }
 
         // 6. Memory snapshot (D-12: uses frozen snapshot, not live state)

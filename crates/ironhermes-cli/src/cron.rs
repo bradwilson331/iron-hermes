@@ -264,11 +264,11 @@ fn cmd_edit(
     let id = job.id.clone();
 
     // Security scan if prompt is being updated
-    if let Some(ref p) = prompt {
-        if let Err(e) = scan_cron_prompt(p) {
-            eprintln!("{}: {}", "Error".red().bold(), e);
-            return Err(anyhow!("Prompt blocked by security scanner"));
-        }
+    if let Some(ref p) = prompt
+        && let Err(e) = scan_cron_prompt(p)
+    {
+        eprintln!("{}: {}", "Error".red().bold(), e);
+        return Err(anyhow!("Prompt blocked by security scanner"));
     }
 
     // Parse new schedule if provided

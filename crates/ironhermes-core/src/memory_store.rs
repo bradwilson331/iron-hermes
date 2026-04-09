@@ -64,10 +64,8 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Creates a new MemoryStore. Creates memory_dir if it doesn't exist.
     pub fn new(memory_dir: PathBuf) -> Self {
-        if !memory_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&memory_dir) {
-                warn!("Failed to create memory directory {:?}: {}", memory_dir, e);
-            }
+        if !memory_dir.exists() && let Err(e) = std::fs::create_dir_all(&memory_dir) {
+            warn!("Failed to create memory directory {:?}: {}", memory_dir, e);
         }
         Self {
             entries: HashMap::new(),
@@ -133,7 +131,7 @@ impl MemoryStore {
 
             // Work with entries via get/get_mut to control borrow lifetimes
             {
-                let entries = self.entries.entry(target).or_insert_with(Vec::new);
+                let entries = self.entries.entry(target).or_default();
 
                 // Check for exact duplicate (D-14)
                 if entries.iter().any(|e| e == content) {
@@ -209,7 +207,7 @@ impl MemoryStore {
             }
 
             {
-                let entries = self.entries.entry(target).or_insert_with(Vec::new);
+                let entries = self.entries.entry(target).or_default();
 
                 // Find entries containing old_text (D-10)
                 let matches: Vec<usize> = entries
@@ -279,7 +277,7 @@ impl MemoryStore {
                 .map_err(|e| format!("{{\"error\": \"Failed to reload: {}\"}}", e))?;
 
             {
-                let entries = self.entries.entry(target).or_insert_with(Vec::new);
+                let entries = self.entries.entry(target).or_default();
 
                 let matches: Vec<usize> = entries
                     .iter()

@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock};
@@ -270,7 +269,7 @@ impl GatewayMessageHandler {
         };
 
         // 4. Build system message via PromptBuilder (loads SOUL.md + project context + memory)
-        let cwd = PathBuf::from(std::env::current_dir().unwrap_or_default());
+        let cwd = std::env::current_dir().unwrap_or_default();
         let mut prompt_builder = PromptBuilder::new(&model, "telegram")
             .load_context(&cwd);
         if let Some(ref store) = self.memory_store {
@@ -383,18 +382,18 @@ impl GatewayMessageHandler {
                 info!("Agent completed, turns_used={}", result.turns_used);
 
                 // Fire ResponseSent hook with real platform and chat_id
-                if let Some(ref registry) = self.hook_registry {
-                    if let Some(ref response) = result.final_response {
-                        let hook_event = ironhermes_hooks::HookEvent::new(
-                            &uuid::Uuid::new_v4().to_string(),
-                            ironhermes_hooks::HookEventKind::ResponseSent {
-                                platform: "telegram".to_string(),
-                                chat_id: event.chat_id.clone(),
-                                response_preview: ironhermes_hooks::event::preview(response, 200),
-                            },
-                        );
-                        registry.fire(hook_event);
-                    }
+                if let Some(ref registry) = self.hook_registry
+                    && let Some(ref response) = result.final_response
+                {
+                    let hook_event = ironhermes_hooks::HookEvent::new(
+                        &uuid::Uuid::new_v4().to_string(),
+                        ironhermes_hooks::HookEventKind::ResponseSent {
+                            platform: "telegram".to_string(),
+                            chat_id: event.chat_id.clone(),
+                            response_preview: ironhermes_hooks::event::preview(response, 200),
+                        },
+                    );
+                    registry.fire(hook_event);
                 }
 
                 // 11. Update session with agent's response messages

@@ -151,6 +151,7 @@ impl JobStore {
     }
 
     /// Create a new job, persist it, and return a clone of the created record.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_job(
         &mut self,
         name: impl Into<String>,
@@ -306,7 +307,7 @@ impl JobStore {
             .filter(|j| {
                 j.state == JobState::Scheduled
                     && j.enabled
-                    && j.next_run_at.map_or(false, |t| now >= t)
+                    && j.next_run_at.is_some_and(|t| now >= t)
             })
             .collect()
     }
@@ -361,11 +362,9 @@ impl JobStore {
         }
 
         // Check if repeat limit reached
-        if let Some(times) = job.repeat.times {
-            if job.repeat.completed >= times {
-                job.state = JobState::Completed;
-                job.next_run_at = None;
-            }
+        if job.repeat.times.is_some_and(|times| job.repeat.completed >= times) {
+            job.state = JobState::Completed;
+            job.next_run_at = None;
         }
 
         debug!("Job id={} ran at {}, next_run_at={:?}", id, now, job.next_run_at);

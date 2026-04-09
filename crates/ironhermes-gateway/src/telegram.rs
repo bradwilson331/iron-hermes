@@ -277,16 +277,16 @@ pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
     let mut attachments: Vec<Attachment> = Vec::new();
 
     // Include photo attachment metadata (actual download deferred to multimodal.rs)
-    if let Some(ref photos) = msg.photo {
-        if let Some(largest) = photos.last() {
-            attachments.push(Attachment {
-                filename: Some(format!("photo_{}.jpg", largest.file_id)),
-                mime_type: Some("image/jpeg".to_string()),
-                data: None,
-                url: None,
-                file_id: Some(largest.file_id.clone()),
-            });
-        }
+    if let Some(ref photos) = msg.photo
+        && let Some(largest) = photos.last()
+    {
+        attachments.push(Attachment {
+            filename: Some(format!("photo_{}.jpg", largest.file_id)),
+            mime_type: Some("image/jpeg".to_string()),
+            data: None,
+            url: None,
+            file_id: Some(largest.file_id.clone()),
+        });
     }
 
     // Include document attachment metadata

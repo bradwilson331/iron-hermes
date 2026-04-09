@@ -107,7 +107,7 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 /// Check whether an IPv4 address falls within the CGNAT range (100.64.0.0/10).
 fn is_cgnat(ip: Ipv4Addr) -> bool {
     let bits: u32 = ip.into();
-    bits >= CGNAT_START && bits <= CGNAT_END
+    (CGNAT_START..=CGNAT_END).contains(&bits)
 }
 
 #[cfg(test)]
