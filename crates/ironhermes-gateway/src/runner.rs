@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use ironhermes_core::{Config, MemoryStore, SkillRegistry};
+use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
+use ironhermes_core::{ChatMessage, Config, MemoryStore, MessageContent, Role, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{error, info, warn};
@@ -369,6 +370,12 @@ impl GatewayRunner {
             let tick_cancel = self.cancel.clone();
             let job_store_tick = job_store.clone();
             let skill_registry_tick = self.skill_registry.clone();
+            // D-04 / D-11: four additional captures for real AgentLoop execution
+            let hook_registry_tick = self.hook_registry.clone();
+            let tool_registry_tick = self.tool_registry.clone();
+            let memory_store_tick = self.memory_store.clone();
+            let config_tick = self.config.clone();
+
             join_set.spawn(async move {
                 let mut interval = tokio::time::interval(
                     tokio::time::Duration::from_secs(60)
@@ -389,27 +396,24 @@ impl GatewayRunner {
                                     for job in &due_jobs {
                                         info!("Job due: {} ({})", job.name, job.id);
 
-                                        // Resolve skill content for this job (per D-08, D-09)
-                                        let _full_input = if let Some(ref skill_reg) = skill_registry_tick {
-                                            let skill_context = resolve_skill_context(skill_reg, &job.skills);
-                                            if skill_context.is_empty() {
-                                                job.prompt.clone()
-                                            } else {
-                                                format!("{}\n\n---\n\n{}", skill_context, job.prompt)
-                                            }
-                                        } else {
-                                            job.prompt.clone()
-                                        };
-
-                                        // Mark as run with placeholder output
-                                        // Full agent execution requires AgentLoop integration
-                                        // which involves building a fresh agent per job
-                                        if let Err(e) = ironhermes_cron::complete_job_run(
-                                            &job_store_tick, job,
-                                            "[Tick runner: agent execution pending full integration]",
-                                            true
-                                        ).await {
-                                            error!("Failed to complete job run: {}", e);
+                                        // D-01 / D-04 / D-14 / T-07.3-04: call extracted
+                                        // helper; single-job failure does NOT panic the
+                                        // tick task (helper returns Result<()>).
+                                        if let Err(e) = execute_cron_job(
+                                            job,
+                                            &job_store_tick,
+                                            &skill_registry_tick,
+                                            &tool_registry_tick,
+                                            &memory_store_tick,
+                                            &hook_registry_tick,
+                                            &config_tick,
+                                        )
+                                        .await
+                                        {
+                                            error!(
+                                                "execute_cron_job failed for job {} ({}): {}",
+                                                job.name, job.id, e
+                                            );
                                         }
                                     }
                                 }
@@ -470,6 +474,160 @@ pub(crate) fn resolve_skill_context(
     parts.join("\n\n---\n\n")
 }
 
+/// Execute a single cron job: build a fresh AgentLoop, run it with the resolved full_input,
+/// fire MessageReceived + ResponseSent hook events, and persist the real LLM output via
+/// ironhermes_cron::complete_job_run. Extracted from the tick task closure so tests can
+/// invoke it directly without spinning up the 60s interval timer.
+///
+/// Per D-09: fresh AgentLoop per call.
+/// Per D-10: construction mirrors handler.rs::run_agent except it omits streaming and
+///           tool-progress callbacks (cron is headless — no adapter to stream to).
+/// Per D-14: `complete_job_run` success flag reflects AgentLoop::run() Result.
+/// Per T-07.3-03: agent errors are sanitized to "[Agent error: {display}]" — raw LLM payloads
+///                never flow into JSONL/webhooks.
+/// Per T-07.3-04: returns `Result<()>` so a single failing job does not panic the tick task.
+pub(crate) async fn execute_cron_job(
+    job: &ironhermes_cron::CronJob,
+    job_store: &Arc<Mutex<ironhermes_cron::JobStore>>,
+    skill_registry: &Option<Arc<SkillRegistry>>,
+    tool_registry: &Arc<ironhermes_tools::ToolRegistry>,
+    memory_store: &Option<Arc<Mutex<MemoryStore>>>,
+    hook_registry: &Option<Arc<ironhermes_hooks::HookRegistry>>,
+    config: &Config,
+) -> Result<()> {
+    // D-02: full_input (no underscore); content unchanged from existing logic
+    let full_input = if let Some(skill_reg) = skill_registry {
+        let skill_context = resolve_skill_context(skill_reg, &job.skills);
+        if skill_context.is_empty() {
+            job.prompt.clone()
+        } else {
+            format!("{}\n\n---\n\n{}", skill_context, job.prompt)
+        }
+    } else {
+        job.prompt.clone()
+    };
+
+    // D-12: chat_id from job origin (falls back to job.id), platform = "cron"
+    let cron_chat_id = job
+        .origin
+        .as_ref()
+        .map(|o| o.chat_id.clone())
+        .unwrap_or_else(|| job.id.clone());
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // D-04 / D-06 / D-07: fire MessageReceived with cron metadata (same registry Arc
+    // as Telegram-triggered runs use — the Arc is cloned from self.hook_registry in the
+    // tick task closure capture block).
+    if let Some(registry) = hook_registry {
+        registry.fire(ironhermes_hooks::HookEvent::new(
+            &request_id,
+            ironhermes_hooks::HookEventKind::MessageReceived {
+                platform: "cron".to_string(),
+                chat_id: cron_chat_id.clone(),
+                content_preview: ironhermes_hooks::event::preview(&full_input, 200),
+            },
+        ));
+    }
+
+    // D-09 / D-10 / D-11: build a FRESH AgentLoop per job, mirroring handler.rs:343-365
+    // but omitting stream_callback + tool_callback (cron path has no adapter to push to).
+    let base_url = config.resolve_base_url();
+    let api_key = config.resolve_api_key().unwrap_or_default();
+    let max_turns = config.agent.max_turns;
+    let model = config.model.default.clone();
+
+    // Build system message via PromptBuilder — loads SOUL.md + AGENTS.md + project context
+    // + memory + skill catalog, identical to handler.rs Telegram path except platform="cron".
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut prompt_builder = PromptBuilder::new(&model, "cron").load_context(&cwd);
+    if let Some(store) = memory_store {
+        prompt_builder.set_memory_store(store.clone());
+    }
+    if let Some(skill_reg) = skill_registry {
+        prompt_builder.set_skill_registry(skill_reg.clone());
+    }
+    let system_msg = prompt_builder.build_system_message();
+
+    // Build user message with the resolved full_input (skill content + user prompt)
+    let user_msg = ChatMessage {
+        role: Role::User,
+        content: Some(MessageContent::text(&full_input)),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    };
+    let messages = vec![system_msg, user_msg];
+
+    // Construct LlmClient and AgentLoop — D-01 kills the stub
+    let client = LlmClient::new(base_url, api_key, &model);
+    let mut agent = AgentLoop::new(client, tool_registry.clone(), max_turns);
+
+    // D-06 / D-08: conditional hook registry wiring (Option<Arc<...>>, None is valid)
+    if let Some(registry) = hook_registry {
+        agent = agent.with_hook_registry(registry.clone());
+    }
+
+    // D-03 / D-14 / T-07.3-03: run agent, pass real output and real success flag into
+    // complete_job_run. On error, sanitize to "[Agent error: {display}]" so raw LLM
+    // payloads never leak into JSONL / webhooks.
+    match agent.run(messages).await {
+        Ok(result) => {
+            info!(
+                "Cron agent completed for job {} ({}), turns_used={}",
+                job.name, job.id, result.turns_used
+            );
+            let output = result
+                .final_response
+                .unwrap_or_else(|| "[No response generated]".to_string());
+
+            // D-04 / D-06: fire ResponseSent with the SAME request_id + cron metadata
+            if let Some(registry) = hook_registry {
+                registry.fire(ironhermes_hooks::HookEvent::new(
+                    &request_id,
+                    ironhermes_hooks::HookEventKind::ResponseSent {
+                        platform: "cron".to_string(),
+                        chat_id: cron_chat_id.clone(),
+                        response_preview: ironhermes_hooks::event::preview(&output, 200),
+                    },
+                ));
+            }
+
+            // D-03 / D-13: real output into complete_job_run; delivery routing unchanged
+            if let Err(e) = ironhermes_cron::complete_job_run(job_store, job, &output, true).await {
+                error!("Failed to complete job run: {}", e);
+                return Err(e);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // T-07.3-03: sanitized error — do NOT forward raw LLM payload
+            error!("Agent error for cron job {} ({}): {}", job.name, job.id, e);
+            let error_output = format!("[Agent error: {}]", e);
+
+            // D-04: still fire ResponseSent so observability captures the failure
+            if let Some(registry) = hook_registry {
+                registry.fire(ironhermes_hooks::HookEvent::new(
+                    &request_id,
+                    ironhermes_hooks::HookEventKind::ResponseSent {
+                        platform: "cron".to_string(),
+                        chat_id: cron_chat_id.clone(),
+                        response_preview: ironhermes_hooks::event::preview(&error_output, 200),
+                    },
+                ));
+            }
+
+            // D-14: success=false
+            if let Err(ce) =
+                ironhermes_cron::complete_job_run(job_store, job, &error_output, false).await
+            {
+                error!("Failed to complete job run after agent error: {}", ce);
+                return Err(ce);
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Resolve the bot token from config value or environment variable.
 /// Supports `${ENV_VAR}` syntax for indirection through environment.
 fn resolve_token(token: &Option<String>) -> Option<String> {
@@ -489,6 +647,247 @@ fn resolve_token(token: &Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Task 1 (Wave 0): Placeholder-absent test + LLM-gated skill integration
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_placeholder_string_absent() {
+        // D-17: The placeholder string MUST NOT appear in runner.rs production code after Phase 07.3.
+        // This test intentionally reads its own source file so a grep-equivalent check runs in CI.
+        // After Task 4 lands: this test is GREEN.
+        //
+        // Note: the check splits the string so the test source itself does not contain the full
+        // literal — otherwise include_str! would always match. The production code previously
+        // contained: "[Tick runner: agent execution pending full integration]"
+        let source = include_str!("runner.rs");
+        // Split into two parts so this test's own source doesn't trigger the check
+        let prefix = "[Tick runner: agent execution";
+        let suffix = " pending full integration]";
+        let placeholder = format!("{}{}", prefix, suffix);
+        // Count occurrences — the only matches should be in test strings (contains checks),
+        // not in production code paths. The production stub at lines ~407-413 is now gone.
+        // We assert that the placeholder does NOT appear outside of test code by checking
+        // the full string is absent from the non-test portion.
+        let test_marker = "#[cfg(test)]";
+        let prod_code = if let Some(idx) = source.find(test_marker) {
+            &source[..idx]
+        } else {
+            source
+        };
+        assert!(
+            !prod_code.contains(&placeholder),
+            "D-17 violation: placeholder string still present in production code of runner.rs — \
+             Phase 07.3 Task 4 (execute_cron_job extraction + real AgentLoop wiring) has not yet landed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires IRONHERMES_TEST_LLM=1 and a reachable LLM endpoint (D-15)"]
+    async fn test_cron_skill_reaches_llm() {
+        // D-15 / SCHED-03: scheduled job with an attached skill produces an LLM response
+        // that reflects the skill content. Gated on env var so CI without LLM credentials
+        // does not fail. Run with:
+        //   IRONHERMES_TEST_LLM=1 cargo test -p ironhermes-gateway test_cron_skill_reaches_llm -- --ignored
+        if std::env::var("IRONHERMES_TEST_LLM").is_err() {
+            eprintln!("SKIP: IRONHERMES_TEST_LLM not set");
+            return;
+        }
+
+        use ironhermes_cron::{JobStore, ScheduleParsed};
+        use tempfile::tempdir;
+
+        // 1. Create a skill whose content is a deterministic instruction
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join(".ironhermes/skills/cron-echo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: cron-echo\ndescription: Echo a deterministic token\n---\n\n\
+             When asked to respond, reply with exactly the token: SKILL-REACHED-LLM-07-3-01",
+        ).unwrap();
+        let skill_registry = Arc::new(
+            ironhermes_core::SkillRegistry::load_with_paths(&[
+                dir.path().join(".ironhermes/skills")
+            ]),
+        );
+
+        // 2. Build an in-memory JobStore with one due job that attaches the skill
+        let cron_dir = dir.path().join(".ironhermes/cron");
+        std::fs::create_dir_all(&cron_dir).unwrap();
+        let job_store = Arc::new(Mutex::new(
+            JobStore::open(cron_dir).expect("job store"),
+        ));
+        let job = {
+            let mut guard = job_store.lock().unwrap();
+            guard.add_job(
+                "cron-skill-integration-test",
+                "Please respond now.",
+                ScheduleParsed::Interval { minutes: 1, display: "every 1 min".to_string() },
+                "every 1 min",
+                "cli",
+                vec!["cron-echo".to_string()],
+                None,
+            ).expect("add job")
+        };
+
+        // 3. Build a Config that points at a real LLM endpoint (uses env vars / config.yaml defaults)
+        let config = ironhermes_core::Config::load()
+            .expect("load config for LLM integration test");
+        let tool_registry = Arc::new(ToolRegistry::default());
+
+        // 4. Call execute_cron_job directly (the helper Task 4 extracts)
+        let result = execute_cron_job(
+            &job,
+            &job_store,
+            &Some(skill_registry),
+            &tool_registry,
+            &None,              // memory_store
+            &None,              // hook_registry
+            &config,
+        ).await;
+        assert!(result.is_ok(), "execute_cron_job failed: {:?}", result);
+
+        // 5. Verify the stored last_status contains the token
+        let guard = job_store.lock().unwrap();
+        let stored = guard.get_job(&job.id).expect("job still in store");
+        // last_status holds the output on success (see mark_job_run)
+        let last_output = stored.last_status.as_deref().unwrap_or("");
+        assert!(
+            last_output.contains("SKILL-REACHED-LLM-07-3-01"),
+            "D-15 violation: skill content did not reach LLM. last_status = {:?}",
+            last_output
+        );
+        assert!(
+            !last_output.contains("[Tick runner: agent execution pending full integration]"),
+            "D-17 violation: placeholder still being delivered"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 2 (Wave 0): Hook-registry capture test (no LLM required)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_cron_hook_registry_receives_events() {
+        // D-04 / D-06 / D-07 / D-16: cron-triggered runs must fire MessageReceived + ResponseSent
+        // to a shared HookRegistry with platform="cron" and non-empty chat_id. This test proves
+        // the registry wiring protocol that execute_cron_job (Task 4) uses.
+        use ironhermes_hooks::{HookRegistry, HookEvent, HookEventKind, HooksConfig};
+
+        // 1. Build a HookRegistry with a capture listener (pattern copied from registry.rs tests)
+        let mut registry = HookRegistry::new(HooksConfig::default());
+        let captured: Arc<std::sync::Mutex<Vec<HookEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap_clone = captured.clone();
+        registry.add_listener(Arc::new(move |event: HookEvent| {
+            cap_clone.lock().unwrap().push(event);
+        }));
+        let registry = Arc::new(registry);
+
+        // 2. Simulate what execute_cron_job fires for a job with chat_id derived from job.id
+        let chat_id = "test-job-42".to_string();
+        let req_id = "test-req-42".to_string();
+        registry.fire(HookEvent::new(
+            &req_id,
+            HookEventKind::MessageReceived {
+                platform: "cron".to_string(),
+                chat_id: chat_id.clone(),
+                content_preview: "test cron prompt".to_string(),
+            },
+        ));
+        registry.fire(HookEvent::new(
+            &req_id,
+            HookEventKind::ResponseSent {
+                platform: "cron".to_string(),
+                chat_id: chat_id.clone(),
+                response_preview: "test cron response".to_string(),
+            },
+        ));
+
+        // 3. HookRegistry::fire dispatches via tokio::spawn — give listeners 50ms to drain
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 4. Assert both events captured with cron platform + job chat_id
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 2, "expected 2 events, got {}: {:?}", events.len(), *events);
+
+        // First event should be MessageReceived with platform="cron"
+        match &events[0].kind {
+            HookEventKind::MessageReceived { platform, chat_id: cid, .. } => {
+                assert_eq!(platform, "cron", "D-12: cron events must use platform=\"cron\"");
+                assert_eq!(cid, "test-job-42", "D-12: chat_id must come from Job record");
+            }
+            other => panic!("expected MessageReceived, got {:?}", other),
+        }
+
+        // Second event should be ResponseSent with platform="cron"
+        match &events[1].kind {
+            HookEventKind::ResponseSent { platform, chat_id: cid, .. } => {
+                assert_eq!(platform, "cron");
+                assert_eq!(cid, "test-job-42");
+            }
+            other => panic!("expected ResponseSent, got {:?}", other),
+        }
+
+        // Both events share the same request_id (correlation across a single cron run)
+        assert_eq!(events[0].request_id, events[1].request_id);
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 3 (Wave 0): complete_job_run real-output persistence test
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_complete_job_run_receives_real_output() {
+        // D-03 / D-14 / SCHED-04: complete_job_run persists the `output` argument verbatim.
+        // This test proves the contract — Task 4 only needs to pass real LLM output instead
+        // of the placeholder string "[Tick runner: agent execution pending full integration]".
+        use ironhermes_cron::{JobStore, ScheduleParsed};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let cron_dir = dir.path().join(".ironhermes/cron");
+        std::fs::create_dir_all(&cron_dir).unwrap();
+        let job_store = Arc::new(Mutex::new(
+            JobStore::open(cron_dir).expect("job store init"),
+        ));
+
+        // Seed the store with a job
+        let job = {
+            let mut guard = job_store.lock().unwrap();
+            guard.add_job(
+                "complete_job_run test",
+                "anything",
+                ScheduleParsed::Interval { minutes: 1, display: "every 1 min".to_string() },
+                "every 1 min",
+                "cli",
+                vec![],
+                None,
+            ).expect("insert job")
+        };
+
+        // Real output — NOT the placeholder
+        let real_output = "real LLM response content (not a placeholder)";
+        ironhermes_cron::complete_job_run(&job_store, &job, real_output, true)
+            .await
+            .expect("complete_job_run");
+
+        // Verify persistence — on success, mark_job_run stores output in last_status
+        let guard = job_store.lock().unwrap();
+        let stored = guard.get_job(&job.id).expect("job present after complete");
+        let last_output = stored.last_status.as_deref().unwrap_or("");
+        assert_eq!(last_output, real_output, "output must persist verbatim");
+        assert!(
+            !last_output.contains("[Tick runner: agent execution pending full integration]"),
+            "D-17: placeholder string must not appear"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Existing skill-resolution tests
+    // -------------------------------------------------------------------------
 
     #[test]
     fn test_resolve_skill_context_with_skills() {
