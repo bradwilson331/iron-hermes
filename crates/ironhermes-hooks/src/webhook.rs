@@ -153,6 +153,7 @@ fn event_kind_name(event: &HookEvent) -> &str {
         HookEventKind::ToolCalled { .. } => "tool_called",
         HookEventKind::ToolCompleted { .. } => "tool_completed",
         HookEventKind::ResponseSent { .. } => "response_sent",
+        HookEventKind::SkillActivated { .. } => "skill_activated",
     }
 }
 

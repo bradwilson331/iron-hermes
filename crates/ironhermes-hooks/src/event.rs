@@ -41,6 +41,12 @@ pub enum HookEventKind {
         chat_id: String,
         response_preview: String,
     },
+    /// A skill was activated (loaded for use by agent or cron).
+    SkillActivated {
+        skill_name: String,
+        /// Source of activation: "tool" or "cron"
+        source: String,
+    },
 }
 
 /// A single observable event emitted by the agent at a lifecycle point.
@@ -129,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_four_event_kinds_serialize() {
+    fn test_all_event_kinds_serialize() {
         let kinds = vec![
             HookEventKind::MessageReceived {
                 platform: "telegram".to_string(),
@@ -150,6 +156,10 @@ mod tests {
                 platform: "telegram".to_string(),
                 chat_id: "1".to_string(),
                 response_preview: "done".to_string(),
+            },
+            HookEventKind::SkillActivated {
+                skill_name: "focus".to_string(),
+                source: "cron".to_string(),
             },
         ];
 

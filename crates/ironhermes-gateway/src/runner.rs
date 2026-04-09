@@ -368,6 +368,7 @@ impl GatewayRunner {
         if let Some(ref job_store) = self.job_store {
             let tick_cancel = self.cancel.clone();
             let job_store_tick = job_store.clone();
+            let skill_registry_tick = self.skill_registry.clone();
             join_set.spawn(async move {
                 let mut interval = tokio::time::interval(
                     tokio::time::Duration::from_secs(60)
@@ -387,6 +388,19 @@ impl GatewayRunner {
                                     }
                                     for job in &due_jobs {
                                         info!("Job due: {} ({})", job.name, job.id);
+
+                                        // Resolve skill content for this job (per D-08, D-09)
+                                        let _full_input = if let Some(ref skill_reg) = skill_registry_tick {
+                                            let skill_context = resolve_skill_context(skill_reg, &job.skills);
+                                            if skill_context.is_empty() {
+                                                job.prompt.clone()
+                                            } else {
+                                                format!("{}\n\n---\n\n{}", skill_context, job.prompt)
+                                            }
+                                        } else {
+                                            job.prompt.clone()
+                                        };
+
                                         // Mark as run with placeholder output
                                         // Full agent execution requires AgentLoop integration
                                         // which involves building a fresh agent per job
@@ -438,6 +452,24 @@ impl GatewayRunner {
     }
 }
 
+/// Resolve skill content for a cron job, prepending to the prompt.
+/// Returns the combined skill context string (empty if no skills found).
+/// Per D-08: skill content appears before the task prompt.
+/// Per D-09: missing skills produce a warning and are skipped.
+pub(crate) fn resolve_skill_context(
+    registry: &ironhermes_core::SkillRegistry,
+    skill_names: &[String],
+) -> String {
+    let mut parts = Vec::new();
+    for name in skill_names {
+        match registry.read_content(name) {
+            Some(content) => parts.push(format!("## Skill: {}\n\n{}", name, content)),
+            None => tracing::warn!(skill = %name, "Skill not found at tick time - skipping"),
+        }
+    }
+    parts.join("\n\n---\n\n")
+}
+
 /// Resolve the bot token from config value or environment variable.
 /// Supports `${ENV_VAR}` syntax for indirection through environment.
 fn resolve_token(token: &Option<String>) -> Option<String> {
@@ -452,4 +484,60 @@ fn resolve_token(token: &Option<String>) -> Option<String> {
     }
     // Fall back to TELEGRAM_BOT_TOKEN environment variable
     std::env::var("TELEGRAM_BOT_TOKEN").ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_skill_context_with_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".ironhermes/skills/test-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: A test\n---\nDo the thing.",
+        )
+        .unwrap();
+
+        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[
+            dir.path().join(".ironhermes/skills")
+        ]);
+        let result = resolve_skill_context(&registry, &["test-skill".to_string()]);
+        assert!(result.contains("## Skill: test-skill"), "result: {result}");
+        assert!(result.contains("Do the thing."), "result: {result}");
+    }
+
+    #[test]
+    fn test_resolve_skill_context_missing_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[
+            dir.path().join("no-skills-here")
+        ]);
+        let result = resolve_skill_context(&registry, &["nonexistent".to_string()]);
+        assert!(result.is_empty(), "result should be empty: {result}");
+    }
+
+    #[test]
+    fn test_resolve_skill_context_mixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("skills/real-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: real-skill\ndescription: Real\n---\nReal content.",
+        )
+        .unwrap();
+
+        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[
+            dir.path().join("skills")
+        ]);
+        let result = resolve_skill_context(
+            &registry,
+            &["real-skill".to_string(), "fake-skill".to_string()],
+        );
+        assert!(result.contains("Real content."), "result: {result}");
+        assert!(!result.contains("fake-skill"), "result: {result}");
+    }
 }
