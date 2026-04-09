@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Automation
 status: verifying
-stopped_at: Phase 7 context gathered
-last_updated: "2026-04-09T13:52:37.233Z"
+stopped_at: Phase 07.2 context gathered
+last_updated: "2026-04-09T15:41:54.464Z"
 last_activity: 2026-04-09
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 3
   total_plans: 9
   completed_plans: 9
@@ -66,6 +66,10 @@ Recent decisions affecting current work:
 - [v1.1]: Skills: SkillRegistry in ironhermes-core, SkillsTool in ironhermes-tools — no new crate deps
 - [v1.1]: delegate_task structurally excluded from child agent toolsets (recursion prevention)
 
+### Roadmap Evolution
+
+- Phase 07.2 inserted after Phase 7: Skills spec compliance (SKILL-05..09) — platforms filter, extended frontmatter, name validation, SkillsConfig, env-var setup flow (URGENT — closes v1.1 skills gaps identified in Phase 07.1 audit)
+
 ### Pending Todos
 
 None yet.
@@ -78,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-09T05:55:56.894Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-skills-system/07-CONTEXT.md
+Last session: 2026-04-09T15:41:54.462Z
+Stopped at: Phase 07.2 context gathered
+Resume file: .planning/phases/07.2-skills-spec-compliance-skill-05-09-platforms-filter-extended/07.2-CONTEXT.md
