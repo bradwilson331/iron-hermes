@@ -166,10 +166,12 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         }
     };
 
-    // Verify job exists first
-    if store.find_job(&job_id).is_none() {
-        return json!({"status": "error", "message": format!("Job not found: {}", job_id)});
-    }
+    // Resolve canonical ID (find_job matches by ID or name, but update_job
+    // only matches by ID)
+    let canonical_id = match store.find_job(&job_id) {
+        Some(j) => j.id.clone(),
+        None => return json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
+    };
 
     let new_prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
 
@@ -214,7 +216,7 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         skills,
     };
 
-    match store.update_job(&job_id, updates) {
+    match store.update_job(&canonical_id, updates) {
         Ok(job) => json!({"status": "updated", "job": job_to_json(&job)}),
         Err(e) => json!({"status": "error", "message": format!("Failed to update job: {}", e)}),
     }
@@ -228,8 +230,14 @@ fn handle_pause(store: &mut JobStore, args: &Value) -> Value {
         }
     };
 
-    match store.toggle_job(&job_id, false) {
-        Ok(()) => json!({"status": "paused", "job_id": job_id}),
+    // Resolve canonical ID (find_job matches by name too, toggle_job only by ID)
+    let canonical_id = match store.find_job(&job_id) {
+        Some(j) => j.id.clone(),
+        None => return json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
+    };
+
+    match store.toggle_job(&canonical_id, false) {
+        Ok(()) => json!({"status": "paused", "job_id": canonical_id}),
         Err(e) => json!({"status": "error", "message": format!("Failed to pause job: {}", e)}),
     }
 }
@@ -242,14 +250,20 @@ fn handle_resume(store: &mut JobStore, args: &Value) -> Value {
         }
     };
 
-    match store.toggle_job(&job_id, true) {
+    // Resolve canonical ID (find_job matches by name too, toggle_job only by ID)
+    let canonical_id = match store.find_job(&job_id) {
+        Some(j) => j.id.clone(),
+        None => return json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
+    };
+
+    match store.toggle_job(&canonical_id, true) {
         Ok(()) => {
             let next_run = store
-                .find_job(&job_id)
+                .find_job(&canonical_id)
                 .and_then(|j| j.next_run_at)
                 .map(|t| t.to_rfc3339())
                 .unwrap_or_default();
-            json!({"status": "resumed", "job_id": job_id, "next_run": next_run})
+            json!({"status": "resumed", "job_id": canonical_id, "next_run": next_run})
         }
         Err(e) => json!({"status": "error", "message": format!("Failed to resume job: {}", e)}),
     }
