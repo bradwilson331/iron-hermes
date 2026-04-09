@@ -10,6 +10,7 @@ description = "Agent loop and LLM client for IronHermes"
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-state = { path = "../ironhermes-state" }
+ironhermes-hooks = { path = "../ironhermes-hooks" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

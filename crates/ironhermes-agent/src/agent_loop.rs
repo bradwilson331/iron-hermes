@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
+use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_tools::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -53,6 +54,8 @@ pub struct AgentLoop {
     stream_callback: Option<StreamCallback>,
     tool_progress_callback: Option<ToolProgressCallback>,
     streaming: bool,
+    hook_registry: Option<Arc<HookRegistry>>,
+    request_id: String,
 }
 
 impl AgentLoop {
@@ -65,6 +68,8 @@ impl AgentLoop {
             stream_callback: None,
             tool_progress_callback: None,
             streaming: false,
+            hook_registry: None,
+            request_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -87,6 +92,19 @@ impl AgentLoop {
         self
     }
 
+    pub fn with_hook_registry(mut self, registry: Arc<HookRegistry>) -> Self {
+        self.hook_registry = Some(registry);
+        self
+    }
+
+    /// Fire a hook event fire-and-forget. No-op if no hook registry is configured.
+    fn fire_hook(&self, kind: HookEventKind) {
+        if let Some(ref registry) = self.hook_registry {
+            let event = HookEvent::new(&self.request_id, kind);
+            registry.fire(event);
+        }
+    }
+
     /// Run the agent loop with the given messages.
     ///
     /// The loop continues until:
@@ -106,6 +124,16 @@ impl AgentLoop {
         let mut final_response = None;
 
         info!(max_iterations = self.max_iterations, "Starting agent loop");
+
+        // Fire message_received hook (HOOK-01)
+        if let Some(last_user_msg) = messages.iter().rev().find(|m| m.role == ironhermes_core::Role::User) {
+            let content_text = last_user_msg.content_text().unwrap_or("");
+            self.fire_hook(HookEventKind::MessageReceived {
+                platform: "agent".to_string(),
+                chat_id: String::new(),
+                content_preview: ironhermes_hooks::event::preview(content_text, 200),
+            });
+        }
 
         loop {
             if turns_used >= self.max_iterations {
@@ -165,6 +193,15 @@ impl AgentLoop {
                     result,
                 ));
             }
+        }
+
+        // Fire response_sent hook (HOOK-01)
+        if let Some(ref response) = final_response {
+            self.fire_hook(HookEventKind::ResponseSent {
+                platform: "agent".to_string(),
+                chat_id: String::new(),
+                response_preview: ironhermes_hooks::event::preview(response, 200),
+            });
         }
 
         Ok(AgentResult {
@@ -276,6 +313,12 @@ impl AgentLoop {
 
         debug!(tool = %name, "Executing tool call");
 
+        // Fire tool_called hook (HOOK-01)
+        self.fire_hook(HookEventKind::ToolCalled {
+            tool_name: name.to_string(),
+            args_preview: ironhermes_hooks::event::preview(args_str, 200),
+        });
+
         let args: serde_json::Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
@@ -285,11 +328,29 @@ impl AgentLoop {
             }
         };
 
-        match self.registry.dispatch(name, args).await {
-            Ok(result) => result,
+        let tool_start = std::time::Instant::now();
+        let dispatch_result = self.registry.dispatch(name, args).await;
+        let duration_ms = tool_start.elapsed().as_millis() as u64;
+
+        match dispatch_result {
+            Ok(result) => {
+                self.fire_hook(HookEventKind::ToolCompleted {
+                    tool_name: name.to_string(),
+                    success: true,
+                    result_preview: ironhermes_hooks::event::preview(&result, 200),
+                    duration_ms,
+                });
+                result
+            }
             Err(e) => {
                 let err_msg = format!("Tool '{}' failed: {}", name, e);
                 warn!(%err_msg);
+                self.fire_hook(HookEventKind::ToolCompleted {
+                    tool_name: name.to_string(),
+                    success: false,
+                    result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
+                    duration_ms,
+                });
                 err_msg
             }
         }
