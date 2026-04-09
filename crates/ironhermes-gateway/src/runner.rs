@@ -24,6 +24,7 @@ pub struct GatewayRunner {
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
     job_store: Option<Arc<Mutex<JobStore>>>,
+    hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     cancel: CancellationToken,
 }
 
@@ -35,6 +36,7 @@ impl GatewayRunner {
             tool_registry,
             memory_store: None,
             job_store: None,
+            hook_registry: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -47,6 +49,11 @@ impl GatewayRunner {
     /// Set the job store for cron tick task integration.
     pub fn set_job_store(&mut self, store: Arc<Mutex<JobStore>>) {
         self.job_store = Some(store);
+    }
+
+    /// Set the hook registry for event emission.
+    pub fn set_hook_registry(&mut self, registry: Arc<ironhermes_hooks::HookRegistry>) {
+        self.hook_registry = Some(registry);
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
@@ -119,6 +126,9 @@ impl GatewayRunner {
         );
         if let Some(ref store) = self.memory_store {
             handler.set_memory_store(store.clone());
+        }
+        if let Some(ref registry) = self.hook_registry {
+            handler.set_hook_registry(registry.clone());
         }
         let handler = Arc::new(handler);
         let user_queue = Arc::new(UserQueueManager::new(

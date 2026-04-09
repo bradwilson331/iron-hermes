@@ -397,7 +397,53 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
 
+    // Load hooks config and wire guardrails (before Arc wrapping)
+    let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
+
+    // Register guardrails on ToolRegistry (per D-05) — must happen before Arc wrapping
+    if !hooks_config.blocked_tools.is_empty() {
+        registry.add_guardrail(Box::new(
+            ironhermes_hooks::BlocklistGuardrail::from_config(&hooks_config),
+        ));
+    }
+    registry.set_error_detail(hooks_config.error_detail.clone());
+
     let registry = Arc::new(registry);
+
+    // Build HookRegistry
+    let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
+
+    // Register JSONL event log listener (per D-04)
+    if hooks_config.event_log.enabled {
+        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
+        hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
+    }
+
+    // Create shared retry queue for webhook persistence (per D-09)
+    let retry_queue = std::sync::Arc::new(
+        ironhermes_hooks::RetryQueue::new(
+            ironhermes_hooks::RetryQueue::default_path()
+        ).expect("Failed to initialize webhook retry queue")
+    );
+
+    // Register webhook listeners (per D-08, D-09, D-10)
+    for endpoint in &hooks_config.webhooks {
+        hook_registry.add_listener(
+            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone())
+        );
+    }
+
+    let hook_registry = std::sync::Arc::new(hook_registry);
+
+    // Drain persistent retry queue from previous runs (per D-09)
+    let default_ttl = hooks_config.webhooks.first()
+        .and_then(|e| e.queue_ttl_hours)
+        .unwrap_or(24);
+    ironhermes_hooks::drain_retry_queue(
+        retry_queue.clone(),
+        &hooks_config.webhooks,
+        default_ttl,
+    ).await;
 
     // Override token if provided via --token flag
     if let Some(token) = token_override {
@@ -414,6 +460,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let mut runner = GatewayRunner::new(config, registry);
     runner.set_memory_store(memory_store);
     runner.set_job_store(job_store);
+    runner.set_hook_registry(hook_registry);
     runner.start().await
 }
 

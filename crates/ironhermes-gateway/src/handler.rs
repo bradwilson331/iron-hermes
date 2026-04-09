@@ -47,6 +47,7 @@ pub struct GatewayMessageHandler {
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     rate_limiter: PerUserRateLimiter,
 }
 
@@ -65,6 +66,7 @@ impl GatewayMessageHandler {
             session_store,
             tool_registry,
             memory_store: None,
+            hook_registry: None,
             rate_limiter,
         }
     }
@@ -72,6 +74,11 @@ impl GatewayMessageHandler {
     /// Set the memory store for prompt injection and tool access.
     pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
         self.memory_store = Some(store);
+    }
+
+    /// Set the hook registry for event emission.
+    pub fn set_hook_registry(&mut self, registry: Arc<ironhermes_hooks::HookRegistry>) {
+        self.hook_registry = Some(registry);
     }
 
     /// Dispatch a slash command to the appropriate handler (plan 04).
@@ -201,6 +208,20 @@ impl GatewayMessageHandler {
         cancel: CancellationToken,
         processed: ProcessedAttachments,
     ) -> Result<()> {
+        // Fire MessageReceived hook with real platform and chat_id
+        if let Some(ref registry) = self.hook_registry {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let hook_event = ironhermes_hooks::HookEvent::new(
+                &request_id,
+                ironhermes_hooks::HookEventKind::MessageReceived {
+                    platform: "telegram".to_string(),
+                    chat_id: event.chat_id.clone(),
+                    content_preview: ironhermes_hooks::event::preview(&event.content, 200),
+                },
+            );
+            registry.fire(hook_event);
+        }
+
         // 1. Send initial placeholder message; get message_id for StreamConsumer
         let placeholder = with_rate_limit_retry(|| {
             adapter.send_message(&event.chat_id, "\u{2588}", None)
@@ -326,9 +347,13 @@ impl GatewayMessageHandler {
             let _ = tool_tx_clone.try_send(name.to_string());
         });
 
-        let agent = AgentLoop::new(client, self.tool_registry.clone(), max_turns)
+        let mut agent = AgentLoop::new(client, self.tool_registry.clone(), max_turns)
             .with_streaming(stream_callback)
             .with_tool_progress(tool_callback);
+
+        if let Some(ref registry) = self.hook_registry {
+            agent = agent.with_hook_registry(registry.clone());
+        }
 
         // 8. Run agent with error recovery (D-18)
         let agent_result = agent.run(messages).await;
@@ -346,6 +371,22 @@ impl GatewayMessageHandler {
         match agent_result {
             Ok(result) => {
                 info!("Agent completed, turns_used={}", result.turns_used);
+
+                // Fire ResponseSent hook with real platform and chat_id
+                if let Some(ref registry) = self.hook_registry {
+                    if let Some(ref response) = result.final_response {
+                        let hook_event = ironhermes_hooks::HookEvent::new(
+                            &uuid::Uuid::new_v4().to_string(),
+                            ironhermes_hooks::HookEventKind::ResponseSent {
+                                platform: "telegram".to_string(),
+                                chat_id: event.chat_id.clone(),
+                                response_preview: ironhermes_hooks::event::preview(response, 200),
+                            },
+                        );
+                        registry.fire(hook_event);
+                    }
+                }
+
                 // 11. Update session with agent's response messages
                 let new_messages: Vec<ChatMessage> = result
                     .messages
