@@ -17,6 +17,17 @@ pub struct SkillFrontmatter {
     pub version: Option<String>,
     pub author: Option<String>,
     pub license: Option<String>,
+    // SKILL-06: Extended agentskills.io + hermes-agent backward-compat fields (07.2 D-08)
+    /// Plain-string environment hint from the agentskills.io spec (1-500 chars hint — not enforced in 07.2).
+    #[serde(default)]
+    pub compatibility: Option<String>,
+    /// Pre-approved tool list from the agentskills.io spec. Parsed but NOT enforced (07.2 D-10).
+    #[serde(default, rename = "allowed-tools")]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Opaque metadata blob storing arbitrary hermes-agent extensions (e.g. `metadata.hermes.tags`).
+    /// Stored as `serde_yaml::Value` per 07.2 D-09 for forward-compat without typed schema changes.
+    #[serde(default)]
+    pub metadata: Option<serde_yaml::Value>,
 }
 
 // =============================================================================
@@ -29,6 +40,10 @@ pub struct SkillRecord {
     pub description: String,
     /// Absolute path to the SKILL.md file.
     pub path: PathBuf,
+    // SKILL-06: mirror extended frontmatter for introspection without re-parse (07.2 D-11)
+    pub compatibility: Option<String>,
+    pub allowed_tools: Option<Vec<String>>,
+    pub metadata: Option<serde_yaml::Value>,
 }
 
 // =============================================================================
@@ -161,10 +176,21 @@ impl SkillRegistry {
                 }
 
                 seen_names.insert(name_lower);
+                let SkillFrontmatter {
+                    name,
+                    description,
+                    compatibility,
+                    allowed_tools,
+                    metadata,
+                    .. // version/author/license intentionally ignored here — not needed on SkillRecord
+                } = frontmatter;
                 skills.push(SkillRecord {
-                    name: frontmatter.name,
-                    description: frontmatter.description,
+                    name,
+                    description,
                     path: skill_md_path,
+                    compatibility,
+                    allowed_tools,
+                    metadata,
                 });
             }
         }
@@ -271,6 +297,100 @@ mod tests {
         assert_eq!(fm.version.as_deref(), Some("1.0"));
         assert_eq!(fm.author.as_deref(), Some("Alice"));
         assert_eq!(fm.license.as_deref(), Some("MIT"));
+    }
+
+    // -------------------------------------------------------------------------
+    // SKILL-06: Extended frontmatter field tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_skill_md_extended_frontmatter_all_fields() {
+        let content = "---\nname: my-skill\ndescription: A test skill\ncompatibility: \"macOS with zsh\"\nallowed-tools:\n  - terminal\n  - web_read\nmetadata:\n  hermes:\n    tags:\n      - devops\n      - ci\n    category: automation\n---\nBody content here.";
+        let result = parse_skill_md(content);
+        assert!(result.is_some(), "Expected Some but got None");
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.compatibility.as_deref(), Some("macOS with zsh"));
+        assert_eq!(
+            fm.allowed_tools.as_ref().unwrap(),
+            &vec!["terminal".to_string(), "web_read".to_string()]
+        );
+        assert!(fm.metadata.is_some());
+        let tags = fm
+            .metadata
+            .as_ref()
+            .unwrap()
+            .get("hermes")
+            .and_then(|h| h.get("tags"))
+            .and_then(|t| t.as_sequence())
+            .unwrap();
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_skill_md_extended_frontmatter_absent() {
+        let content = make_skill_md("my-skill", "desc", "");
+        let result = parse_skill_md(&content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert!(fm.compatibility.is_none());
+        assert!(fm.allowed_tools.is_none());
+        assert!(fm.metadata.is_none());
+    }
+
+    #[test]
+    fn test_registry_load_propagates_extended_fields_to_record() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("my-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = "---\nname: my-skill\ndescription: A test skill\ncompatibility: \"requires zsh\"\nallowed-tools:\n  - terminal\n  - web_read\nmetadata:\n  hermes:\n    tags:\n      - devops\n---\nBody content here.";
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        let record = &registry.list()[0];
+        assert_eq!(record.compatibility.as_deref(), Some("requires zsh"));
+        assert_eq!(
+            record.allowed_tools.as_ref().unwrap(),
+            &vec!["terminal".to_string(), "web_read".to_string()]
+        );
+        assert!(record.metadata.is_some());
+    }
+
+    #[test]
+    fn test_registry_load_absent_extended_fields_are_none_on_record() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("my-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md("my-skill", "desc", ""),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        let record = &registry.list()[0];
+        assert!(record.compatibility.is_none() && record.allowed_tools.is_none() && record.metadata.is_none());
+    }
+
+    #[test]
+    fn test_allowed_tools_kebab_case_rename() {
+        // Explicitly verify the serde rename works: kebab-case `allowed-tools:` key
+        // (NOT snake_case `allowed_tools:`) must deserialize into `allowed_tools`.
+        let content = "---\nname: my-skill\ndescription: desc\nallowed-tools:\n  - terminal\n  - web_read\n---\nBody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert!(
+            fm.allowed_tools.is_some(),
+            "allowed_tools should be populated from kebab-case 'allowed-tools:' key"
+        );
+        assert_eq!(
+            fm.allowed_tools.unwrap(),
+            vec!["terminal".to_string(), "web_read".to_string()]
+        );
     }
 
     // -------------------------------------------------------------------------
