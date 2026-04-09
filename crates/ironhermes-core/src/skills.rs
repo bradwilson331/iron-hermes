@@ -17,6 +17,9 @@ pub struct SkillFrontmatter {
     pub version: Option<String>,
     pub author: Option<String>,
     pub license: Option<String>,
+    // SKILL-05: platform filter — present means restrict to listed OSes (07.2 D-04)
+    #[serde(default)]
+    pub platforms: Option<Vec<String>>,
     // SKILL-06: Extended agentskills.io + hermes-agent backward-compat fields (07.2 D-08)
     /// Plain-string environment hint from the agentskills.io spec (1-500 chars hint — not enforced in 07.2).
     #[serde(default)]
@@ -40,6 +43,8 @@ pub struct SkillRecord {
     pub description: String,
     /// Absolute path to the SKILL.md file.
     pub path: PathBuf,
+    // SKILL-05: mirror of frontmatter.platforms for introspection (07.2 D-11)
+    pub platforms: Option<Vec<String>>,
     // SKILL-06: mirror extended frontmatter for introspection without re-parse (07.2 D-11)
     pub compatibility: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
@@ -89,6 +94,38 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
         .to_string();
 
     Some((frontmatter, body))
+}
+
+// =============================================================================
+// Platform filter (SKILL-05)
+// =============================================================================
+
+/// Returns true if the skill should be loaded on the current OS.
+///
+/// Strict no-alias mapping per 07.2 D-05:
+/// - "macos"   → matches cfg!(target_os = "macos")
+/// - "linux"   → matches cfg!(target_os = "linux")
+/// - "windows" → matches cfg!(target_os = "windows")
+///
+/// Any other platform string is UNKNOWN and treated as a non-match.
+/// A skill whose `platforms` list contains only unknown strings is filtered out on every OS.
+///
+/// Defaults (spec-compliant, backward compatible):
+/// - `None`         → load (no restriction)
+/// - `Some(vec![])` → load (empty list is treated as "no restriction" per spec)
+fn skill_matches_current_platform(platforms: Option<&Vec<String>>) -> bool {
+    let list = match platforms {
+        None => return true,
+        Some(list) if list.is_empty() => return true,
+        Some(list) => list,
+    };
+
+    list.iter().any(|p| match p.as_str() {
+        "macos"   => cfg!(target_os = "macos"),
+        "linux"   => cfg!(target_os = "linux"),
+        "windows" => cfg!(target_os = "windows"),
+        _ => false, // unknown / alias → non-match (no `darwin`, no `osx`, no `win32`)
+    })
 }
 
 // =============================================================================
@@ -166,6 +203,16 @@ impl SkillRegistry {
                     }
                 };
 
+                // SKILL-05: Platform filter (07.2 D-05, D-06) — runs BEFORE dedup so a filtered
+                // skill does not reserve its name slot against a lower-priority path.
+                if !skill_matches_current_platform(frontmatter.platforms.as_ref()) {
+                    debug!(
+                        "SkillRegistry: skipping {:?} — platforms {:?} do not include current OS",
+                        skill_md_path, frontmatter.platforms
+                    );
+                    continue;
+                }
+
                 let name_lower = frontmatter.name.to_lowercase();
                 if seen_names.contains(&name_lower) {
                     debug!(
@@ -179,6 +226,7 @@ impl SkillRegistry {
                 let SkillFrontmatter {
                     name,
                     description,
+                    platforms,
                     compatibility,
                     allowed_tools,
                     metadata,
@@ -188,6 +236,7 @@ impl SkillRegistry {
                     name,
                     description,
                     path: skill_md_path,
+                    platforms,
                     compatibility,
                     allowed_tools,
                     metadata,
@@ -540,6 +589,319 @@ mod tests {
         let dir = tempdir().unwrap();
         let registry = make_isolated_registry(&[dir.path().join("no-skills-here")]);
         assert!(registry.find("does-not-exist").is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // SKILL-05: Platform filter tests
+    // -------------------------------------------------------------------------
+
+    fn make_skill_md_with_platforms(name: &str, description: &str, platforms: &[&str]) -> String {
+        let platforms_yaml = if platforms.is_empty() {
+            "platforms: []\n".to_string()
+        } else {
+            let list = platforms
+                .iter()
+                .map(|p| format!("  - {}", p))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("platforms:\n{}\n", list)
+        };
+        format!(
+            "---\nname: {}\ndescription: {}\n{}---\nBody",
+            name, description, platforms_yaml
+        )
+    }
+
+    #[test]
+    fn test_platform_filter_no_field_loads() {
+        // Skill with no platforms field loads on every OS (backward compat)
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("no-platforms");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md("no-platforms", "No platforms field", ""),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(registry.list()[0].name, "no-platforms");
+    }
+
+    #[test]
+    fn test_platform_filter_empty_list_loads() {
+        // Skill with platforms: [] loads on every OS (spec default)
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("empty-platforms");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md_with_platforms("empty-platforms", "Empty platforms list", &[]),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(registry.list()[0].name, "empty-platforms");
+    }
+
+    #[test]
+    fn test_platform_filter_unknown_platform_skipped() {
+        // Skill with platforms: ["freebsd"] skipped on every OS (unknown string per D-05)
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        let skill_freebsd = skills_dir.join("freebsd-skill");
+        fs::create_dir_all(&skill_freebsd).unwrap();
+        fs::write(
+            skill_freebsd.join("SKILL.md"),
+            make_skill_md_with_platforms("freebsd-skill", "FreeBSD only", &["freebsd"]),
+        )
+        .unwrap();
+
+        // Also test darwin alias (strict no-alias per D-05 — "darwin" is NOT "macos")
+        let skill_darwin = skills_dir.join("darwin-skill");
+        fs::create_dir_all(&skill_darwin).unwrap();
+        fs::write(
+            skill_darwin.join("SKILL.md"),
+            make_skill_md_with_platforms("darwin-skill", "Darwin alias (invalid)", &["darwin"]),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "Expected 0 skills but got: {:?}",
+            registry.list().iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_platform_filter_all_three_oses_loads() {
+        // Skill with platforms: ["linux", "macos", "windows"] loads on every supported OS
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("all-oses");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md_with_platforms(
+                "all-oses",
+                "All supported OSes",
+                &["linux", "macos", "windows"],
+            ),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(registry.list()[0].name, "all-oses");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_platform_filter_current_os_macos() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        let macos_skill = skills_dir.join("macos-skill");
+        fs::create_dir_all(&macos_skill).unwrap();
+        fs::write(
+            macos_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("macos-skill", "macOS only", &["macos"]),
+        )
+        .unwrap();
+
+        let linux_skill = skills_dir.join("linux-skill");
+        fs::create_dir_all(&linux_skill).unwrap();
+        fs::write(
+            linux_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("linux-skill", "Linux only", &["linux"]),
+        )
+        .unwrap();
+
+        let windows_skill = skills_dir.join("windows-skill");
+        fs::create_dir_all(&windows_skill).unwrap();
+        fs::write(
+            windows_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("windows-skill", "Windows only", &["windows"]),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"macos-skill"), "macos-skill should load on macOS");
+        assert!(!names.contains(&"linux-skill"), "linux-skill should be skipped on macOS");
+        assert!(!names.contains(&"windows-skill"), "windows-skill should be skipped on macOS");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_platform_filter_current_os_linux() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        let macos_skill = skills_dir.join("macos-skill");
+        fs::create_dir_all(&macos_skill).unwrap();
+        fs::write(
+            macos_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("macos-skill", "macOS only", &["macos"]),
+        )
+        .unwrap();
+
+        let linux_skill = skills_dir.join("linux-skill");
+        fs::create_dir_all(&linux_skill).unwrap();
+        fs::write(
+            linux_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("linux-skill", "Linux only", &["linux"]),
+        )
+        .unwrap();
+
+        let windows_skill = skills_dir.join("windows-skill");
+        fs::create_dir_all(&windows_skill).unwrap();
+        fs::write(
+            windows_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("windows-skill", "Windows only", &["windows"]),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"linux-skill"), "linux-skill should load on Linux");
+        assert!(!names.contains(&"macos-skill"), "macos-skill should be skipped on Linux");
+        assert!(!names.contains(&"windows-skill"), "windows-skill should be skipped on Linux");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_platform_filter_current_os_windows() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        let macos_skill = skills_dir.join("macos-skill");
+        fs::create_dir_all(&macos_skill).unwrap();
+        fs::write(
+            macos_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("macos-skill", "macOS only", &["macos"]),
+        )
+        .unwrap();
+
+        let linux_skill = skills_dir.join("linux-skill");
+        fs::create_dir_all(&linux_skill).unwrap();
+        fs::write(
+            linux_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("linux-skill", "Linux only", &["linux"]),
+        )
+        .unwrap();
+
+        let windows_skill = skills_dir.join("windows-skill");
+        fs::create_dir_all(&windows_skill).unwrap();
+        fs::write(
+            windows_skill.join("SKILL.md"),
+            make_skill_md_with_platforms("windows-skill", "Windows only", &["windows"]),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"windows-skill"), "windows-skill should load on Windows");
+        assert!(!names.contains(&"macos-skill"), "macos-skill should be skipped on Windows");
+        assert!(!names.contains(&"linux-skill"), "linux-skill should be skipped on Windows");
+    }
+
+    #[test]
+    fn test_platform_filter_runs_before_dedup() {
+        // D-06 ordering: filter must run BEFORE dedup.
+        // A filtered-out skill in path_first must NOT reserve its name slot,
+        // allowing the same-named skill in path_second to load.
+        let dir = tempdir().unwrap();
+
+        // path_first: "my-skill" with a guaranteed non-match platform
+        let path_first = dir.path().join("skills-first");
+        let first_skill_dir = path_first.join("my-skill");
+        fs::create_dir_all(&first_skill_dir).unwrap();
+        fs::write(
+            first_skill_dir.join("SKILL.md"),
+            make_skill_md_with_platforms("my-skill", "filtered out", &["nonexistent-os"]),
+        )
+        .unwrap();
+
+        // path_second: "my-skill" with no platforms (loads on every OS)
+        let path_second = dir.path().join("skills-second");
+        let second_skill_dir = path_second.join("my-skill");
+        fs::create_dir_all(&second_skill_dir).unwrap();
+        fs::write(
+            second_skill_dir.join("SKILL.md"),
+            make_skill_md("my-skill", "should load", ""),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[path_first, path_second]);
+        let matches: Vec<_> = registry
+            .list()
+            .iter()
+            .filter(|s| s.name == "my-skill")
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "Expected exactly one my-skill, got: {:?}",
+            registry.list().iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            matches[0].description, "should load",
+            "Expected 'should load' skill but got: {}",
+            matches[0].description
+        );
+    }
+
+    #[test]
+    fn test_platforms_field_propagates_to_record() {
+        // platforms list should be mirrored on SkillRecord per D-11
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("all-oses");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md_with_platforms(
+                "all-oses",
+                "All supported OSes",
+                &["macos", "linux", "windows"],
+            ),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        let record = &registry.list()[0];
+        assert_eq!(
+            record.platforms.as_ref().unwrap(),
+            &vec!["macos".to_string(), "linux".to_string(), "windows".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_platforms_absent_is_none_on_record() {
+        // Minimal SKILL.md (no platforms field) → record.platforms is None
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("minimal");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            make_skill_md("minimal", "Minimal skill", ""),
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        let record = &registry.list()[0];
+        assert!(record.platforms.is_none(), "Expected platforms to be None for minimal skill");
     }
 
     // -------------------------------------------------------------------------
