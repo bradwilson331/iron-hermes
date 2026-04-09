@@ -73,6 +73,15 @@ pub fn is_silent(output: &str) -> bool {
 /// Uses atomic temp+rename write pattern.
 /// Returns the path that was written.
 pub fn save_job_output(job_id: &str, output: &str) -> Result<PathBuf> {
+    // Reject any job_id that could escape the output directory via path traversal
+    if job_id.contains('/')
+        || job_id.contains('\\')
+        || job_id.contains("..")
+        || job_id.is_empty()
+    {
+        anyhow::bail!("invalid job_id for filesystem use: {:?}", job_id);
+    }
+
     let home = ironhermes_core::get_hermes_home();
     let output_dir = home.join("cron").join("output").join(job_id);
 
