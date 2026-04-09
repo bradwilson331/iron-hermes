@@ -351,6 +351,8 @@ fn cmd_resume(job_id: String) -> Result<()> {
 // cmd_run
 // ---------------------------------------------------------------------------
 
+/// Note: `cmd_run` does NOT execute the job inline. It acknowledges the
+/// request — actual execution is deferred to the tick runner (gateway).
 fn cmd_run(job_id: String) -> Result<()> {
     let store = open_store()?;
 
@@ -359,14 +361,18 @@ fn cmd_run(job_id: String) -> Result<()> {
         .ok_or_else(|| anyhow!("Job not found: {}", job_id))?;
     let name = job.name.clone();
 
-    println!("{}", format!("Running job: {}", name).dimmed());
     println!(
         "{}",
         format!(
-            "Job triggered: {} (use gateway for full agent execution)",
+            "Job queued: {} — execution is deferred to the tick runner (gateway).",
             name
         )
         .yellow()
+    );
+    println!(
+        "{}",
+        "The job will run on the next tick cycle. Check `ironhermes cron status` for details."
+            .dimmed()
     );
 
     Ok(())

@@ -255,6 +255,10 @@ fn handle_resume(store: &mut JobStore, args: &Value) -> Value {
     }
 }
 
+/// Note: `run` acknowledges the request but does NOT execute the job inline.
+/// Execution is deferred to the next tick runner cycle. The status "queued"
+/// indicates the request was accepted; check `last_run_at` / `last_status`
+/// after the tick runner processes it.
 fn handle_run(store: &JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
@@ -264,7 +268,11 @@ fn handle_run(store: &JobStore, args: &Value) -> Value {
     };
 
     match store.find_job(&job_id) {
-        Some(_) => json!({"status": "triggered", "job_id": job_id}),
+        Some(job) => json!({
+            "status": "queued",
+            "job_id": job.id,
+            "message": "Job run request queued. Execution is deferred to the tick runner (gateway)."
+        }),
         None => json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
     }
 }
@@ -311,7 +319,7 @@ impl Tool for CronjobTool {
                     "action": {
                         "type": "string",
                         "enum": ["create", "list", "get", "update", "pause", "resume", "run", "remove"],
-                        "description": "Action to perform on scheduled tasks."
+                        "description": "Action to perform on scheduled tasks. Note: 'run' queues the job for the next tick runner cycle — it does not execute inline."
                     },
                     "job_id": {
                         "type": "string",
@@ -640,7 +648,7 @@ mod tests {
     // --- run ---
 
     #[tokio::test]
-    async fn test_run_triggers() {
+    async fn test_run_queues() {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
@@ -655,7 +663,8 @@ mod tests {
             .await
             .unwrap();
         let v = parse_response(&result);
-        assert_eq!(v["status"], "triggered");
+        assert_eq!(v["status"], "queued");
+        assert!(v["message"].as_str().unwrap().contains("deferred"));
     }
 
     // --- remove ---
