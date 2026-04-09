@@ -95,9 +95,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — Data model, ScheduleParsed enum, parse_schedule(), JobStore refactor
-- [ ] 05-02-PLAN.md — CronjobTool (agent tool) + cron prompt security scanner
-- [ ] 05-03-PLAN.md — Delivery routing, tick runner, gateway integration, CLI subcommands
+- [x] 05-01-PLAN.md — Data model, ScheduleParsed enum, parse_schedule(), JobStore refactor
+- [x] 05-02-PLAN.md — CronjobTool (agent tool) + cron prompt security scanner
+- [x] 05-03-PLAN.md — Delivery routing, tick runner, gateway integration, CLI subcommands
 
 #### Phase 6: Event Hooks
 **Goal**: Agent lifecycle events are observable and interceptable — hooks log every significant event, guardrails can block tool calls, and events can be forwarded to external systems
@@ -110,7 +110,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 06-01-PLAN.md — TBD
+- [ ] 06-01-PLAN.md — HookEvent model, HookRegistry, hooks.toml config, JSONL logging, AgentLoop wiring
+- [ ] 06-02-PLAN.md — GuardrailHook trait, BlocklistGuardrail, ToolRegistry intercept
+- [ ] 06-03-PLAN.md — WebhookDelivery with auth/retry, hot-reload, gateway/CLI integration
 
 #### Phase 7: Skills System
 **Goal**: Agent discovers, catalogs, and activates skill documents on demand — loading only what's needed via progressive disclosure
