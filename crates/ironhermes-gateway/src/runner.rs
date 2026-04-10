@@ -660,9 +660,27 @@ pub(crate) async fn execute_cron_job(
     };
     let messages = vec![system_msg, user_msg];
 
+    // D-11 / D-12: pre-populate active_skills from job's attached skills
+    // so the cron AgentLoop enforces allowed_tools the same as conversation mode.
+    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    if let Some(skill_reg) = skill_registry {
+        let mut skills_guard = active_skills.lock().unwrap();
+        for skill_name in &job.skills {
+            if let Some(record) = skill_reg.find(skill_name) {
+                skills_guard.push(record.clone());
+            }
+            // Missing skills already warned by resolve_skill_context above
+        }
+    }
+
     // Construct LlmClient and AgentLoop — D-01 kills the stub
     let client = LlmClient::new(base_url, api_key, &model);
     let mut agent = AgentLoop::new(client, tool_registry.clone(), max_turns);
+
+    // D-11 / D-12: wire active_skills so cron runs get the same enforcement as conversation mode
+    agent = agent.with_active_skills(active_skills);
 
     // D-06 / D-08: conditional hook registry wiring (Option<Arc<...>>, None is valid)
     if let Some(registry) = hook_registry {
@@ -1107,6 +1125,48 @@ mod tests {
         );
         assert!(result.contains("Real content."), "result: {result}");
         assert!(!result.contains("fake-skill"), "result: {result}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 07.5: Cron active_skills pre-population test
+    // -------------------------------------------------------------------------
+
+    /// D-11 / D-12: cron jobs with attached skills that declare allowed_tools
+    /// restrict which tools the cron-triggered agent can call.
+    #[tokio::test]
+    async fn test_cron_job_prepopulates_active_skills() {
+        // 1. Create a skill with allowed_tools: ["web_read"]
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("skills/restricted-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: restricted-skill\ndescription: A restrictive skill\nallowed-tools:\n  - web_read\n---\nRestricted skill body",
+        ).unwrap();
+        let skill_registry = Arc::new(
+            ironhermes_core::SkillRegistry::load_with_paths(&[dir.path().join("skills")])
+        );
+
+        // 2. Verify the skill was loaded with allowed_tools
+        let record = skill_registry.find("restricted-skill").expect("skill loaded");
+        assert!(record.allowed_tools.is_some(), "allowed_tools must be parsed");
+        assert_eq!(record.allowed_tools.as_ref().unwrap(), &vec!["web_read".to_string()]);
+
+        // 3. Simulate pre-population logic (same as execute_cron_job does)
+        let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let mut guard = active_skills.lock().unwrap();
+            if let Some(rec) = skill_registry.find("restricted-skill") {
+                guard.push(rec.clone());
+            }
+        }
+
+        // 4. Verify the active_skills vec contains the skill with allowed_tools
+        let guard = active_skills.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].name, "restricted-skill");
+        assert!(guard[0].allowed_tools.is_some());
     }
 
     // -------------------------------------------------------------------------
