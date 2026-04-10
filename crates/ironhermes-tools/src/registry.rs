@@ -243,6 +243,23 @@ impl ToolRegistry {
         self.register(Box::new(SkillsTool::new(registry, active_skills)));
     }
 
+    /// Register the delegate_task tool with a SubagentRunner, semaphore, and config.
+    ///
+    /// The `runner` implements the `SubagentRunner` trait (defined in delegate_task.rs)
+    /// and is typically constructed in ironhermes-agent to wrap AgentLoop::run().
+    pub fn register_delegate_task_tool(
+        &mut self,
+        runner: Arc<dyn crate::delegate_task::SubagentRunner>,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        memory_store: Option<Arc<Mutex<MemoryStore>>>,
+        config: ironhermes_core::SubagentConfig,
+    ) {
+        use crate::delegate_task::DelegateTaskTool;
+        self.register(Box::new(DelegateTaskTool::new(
+            runner, semaphore, memory_store, config,
+        )));
+    }
+
     /// Register the execute_code tool with a separate RPC dispatch registry.
     ///
     /// `rpc_registry` must contain ONLY D-07 safe tools (no terminal, no execute_code).
