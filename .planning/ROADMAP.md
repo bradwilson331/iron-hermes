@@ -164,7 +164,7 @@ Plans:
 **Goal**: Close 07.2 tech debt: enforce SKILL-06 `allowed_tools` at tool dispatch, relocate SKILL-09 to v2, and align ROADMAP/traceability with deferred scope decisions
 **Depends on**: Phase 07.2
 **Requirements**: SKILL-06 (enforcement)
-**Gap Closure**: Closes 07.2 tech debt items from v1.1 audit: `allowed_tools` parsed but not enforced; SKILL-09 still mapped to 07.2 in REQUIREMENTS.md; ROADMAP/phase-directory title still references "SKILL-05..09"
+**Gap Closure**: Closes 07.2 tech debt items from v1.1 audit: `allowed_tools` parsed but not enforced; SKILL-09 relocated to v2 in REQUIREMENTS.md; ROADMAP/traceability corrected (SKILL-05..08 scope)
 **Success Criteria** (what must be TRUE):
   1. Tool dispatch honors the active skill set's `allowed_tools` intersection — a tool not in the union of any active skill's allow-list is rejected with a clear error
   2. Regression test: activating a skill with a restrictive `allowed_tools` list blocks other tool calls for the remainder of that agent turn

@@ -70,7 +70,7 @@ Recent decisions affecting current work:
 
 ### Roadmap Evolution
 
-- Phase 07.2 inserted after Phase 7: Skills spec compliance (SKILL-05..09) — platforms filter, extended frontmatter, name validation, SkillsConfig, env-var setup flow (URGENT — closes v1.1 skills gaps identified in Phase 07.1 audit)
+- Phase 07.2 inserted after Phase 7: Skills spec compliance (SKILL-05..08) — platforms filter, extended frontmatter, name validation, SkillsConfig (URGENT — closes v1.1 skills gaps identified in Phase 07.1 audit; SKILL-09 deferred to v2 per D-01)
 
 ### Pending Todos
 
