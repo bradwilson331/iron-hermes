@@ -1281,4 +1281,171 @@ mod tests {
             "post-guardrail hook MUST be called for allowed tools"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 07.4-03: Cron path exactly-one event counts
+    //
+    // These tests prove that execute_cron_job fires MessageReceived exactly once
+    // and ResponseSent exactly once per job execution — even in the error path
+    // (D-04: ResponseSent fires on both success and failure branches).
+    //
+    // Strategy: point LlmClient at an unreachable URL so agent.run() fails fast.
+    // execute_cron_job still fires MessageReceived before agent.run() and
+    // ResponseSent in the Err arm. This proves exactly-one without a real LLM.
+    // -------------------------------------------------------------------------
+
+    /// D-04 / audit warning #4 (cron path): execute_cron_job must fire exactly
+    /// 1 MessageReceived and exactly 1 ResponseSent per cron job run — even when
+    /// the agent errors (LLM unreachable). The agent loop fires neither event
+    /// (Issue #4 fix). Only execute_cron_job fires them.
+    #[tokio::test]
+    async fn test_cron_path_fires_exactly_one_message_received_and_response_sent() {
+        use ironhermes_core::Config;
+        use ironhermes_core::config::{AgentConfig, ModelConfig};
+        use ironhermes_cron::{JobStore, ScheduleParsed};
+        use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry, HooksConfig};
+        use tempfile::TempDir;
+
+        // 1. Build a capturing HookRegistry
+        let mut hook_registry = HookRegistry::new(HooksConfig::default());
+        let captured: Arc<std::sync::Mutex<Vec<HookEventKind>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap_clone = captured.clone();
+        hook_registry.add_listener(Arc::new(move |event: HookEvent| {
+            cap_clone.lock().unwrap().push(event.kind);
+        }));
+        let hook_registry = Arc::new(hook_registry);
+
+        // 2. Create a real CronJob in a temp JobStore
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let mut raw_store = JobStore::open(cron_dir).expect("open jobstore");
+        let job = raw_store
+            .add_job(
+                "test-cron-07.4",
+                "Say hello",
+                ScheduleParsed::Interval {
+                    minutes: 60,
+                    display: "every 60m".to_string(),
+                },
+                "every 60m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add job");
+        let job_store = Arc::new(std::sync::Mutex::new(raw_store));
+
+        // 3. Build a Config pointing at an unreachable LLM (connection refused).
+        //    execute_cron_job will fire MessageReceived, then agent.run() fails,
+        //    then the Err arm fires ResponseSent. Total: 1 + 1 = 2 events.
+        let mut config = Config::default();
+        // Port 1 is privileged and always connection-refused
+        config.model = ModelConfig {
+            default: "test-model".to_string(),
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        config.agent = AgentConfig { max_turns: 1, ..Default::default() };
+
+        // 4. Call execute_cron_job — expect it to return Err (LLM unreachable),
+        //    but the hook events must still fire.
+        let tool_registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let _ = execute_cron_job(
+            &job,
+            &job_store,
+            &None, // no skill registry
+            &tool_registry,
+            &None, // no memory store
+            &Some(hook_registry),
+            &config,
+        )
+        .await;
+        // Give tokio::spawn listeners 50ms to drain
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 5. Assert exactly-one of each lifecycle event
+        let events = captured.lock().unwrap();
+        let msg_received_count = events
+            .iter()
+            .filter(|e| matches!(e, HookEventKind::MessageReceived { .. }))
+            .count();
+        let response_sent_count = events
+            .iter()
+            .filter(|e| matches!(e, HookEventKind::ResponseSent { .. }))
+            .count();
+
+        assert_eq!(
+            msg_received_count, 1,
+            "cron execute_cron_job must fire exactly 1 MessageReceived, got {msg_received_count}: \
+             duplicate would indicate agent_loop regression (audit warning #4)"
+        );
+        assert_eq!(
+            response_sent_count, 1,
+            "cron execute_cron_job must fire exactly 1 ResponseSent, got {response_sent_count}: \
+             missing would indicate D-04 regression (ResponseSent on error arm)"
+        );
+
+        // 6. Verify cron metadata on the events
+        match &events[0] {
+            HookEventKind::MessageReceived { platform, .. } => {
+                assert_eq!(platform, "cron", "MessageReceived must use platform=\"cron\"");
+            }
+            other => panic!("first event should be MessageReceived, got {:?}", other),
+        }
+        match &events[1] {
+            HookEventKind::ResponseSent { platform, .. } => {
+                assert_eq!(platform, "cron", "ResponseSent must use platform=\"cron\"");
+            }
+            other => panic!("second event should be ResponseSent, got {:?}", other),
+        }
+    }
+
+    /// Source-text regression guard for execute_cron_job hook fires.
+    ///
+    /// Counts the exact number of `registry.fire` calls in runner.rs that use
+    /// MessageReceived and ResponseSent, ensuring:
+    ///   - Exactly 1 MessageReceived fire (pre-agent, before agent.run())
+    ///   - Exactly 2 ResponseSent fires (one in Ok arm, one in Err arm — D-04)
+    ///
+    /// Any duplication or deletion would change these counts and fail CI.
+    /// The `concat!` trick prevents this test's own assertion strings from
+    /// matching the pattern they search for (same fix as agent_loop.rs test 5).
+    #[test]
+    fn test_runner_source_execute_cron_job_fires_events_exactly_as_expected() {
+        let src = include_str!("runner.rs");
+
+        // Locate execute_cron_job function body — take everything after its fn declaration.
+        // We find the function signature, then count fires only within that function.
+        let fn_marker = "pub(crate) async fn execute_cron_job(";
+        let fn_start = src.find(fn_marker).expect("execute_cron_job not found in runner.rs");
+        // The function ends before the next pub/pub(crate) fn or the resolve_token fn.
+        let after_fn = &src[fn_start..];
+        let end_marker = "\nfn resolve_token";
+        let fn_body = if let Some(end) = after_fn.find(end_marker) {
+            &after_fn[..end]
+        } else {
+            after_fn
+        };
+
+        // Count MessageReceived fires inside execute_cron_job
+        let msg_recv_pattern = concat!("HookEventKind::", "MessageReceived");
+        let msg_recv_count = fn_body.matches(msg_recv_pattern).count();
+
+        // Count ResponseSent fires inside execute_cron_job (one per branch: Ok + Err)
+        let resp_sent_pattern = concat!("HookEventKind::", "ResponseSent");
+        let resp_sent_count = fn_body.matches(resp_sent_pattern).count();
+
+        assert_eq!(
+            msg_recv_count, 1,
+            "execute_cron_job must contain exactly 1 MessageReceived fire, found {msg_recv_count}: \
+             adding more would create duplicate events"
+        );
+        assert_eq!(
+            resp_sent_count, 2,
+            "execute_cron_job must contain exactly 2 ResponseSent fires (Ok arm + Err arm), \
+             found {resp_sent_count}: D-04 requires ResponseSent fires on both success and failure"
+        );
+    }
 }
