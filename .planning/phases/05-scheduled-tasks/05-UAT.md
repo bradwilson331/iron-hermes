@@ -1,9 +1,9 @@
 ---
-status: complete
+status: diagnosed
 phase: 05-scheduled-tasks
 source: [05-01-SUMMARY.md, 05-02-SUMMARY.md, 05-03-SUMMARY.md]
 started: 2026-04-09T00:00:00Z
-updated: 2026-04-10T01:35:00Z
+updated: 2026-04-10T01:45:00Z
 ---
 
 ## Current Test
@@ -99,13 +99,33 @@ blocked: 0
   reason: "User reported: error: unrecognized subcommand 'get' — CLI only implements 9 subcommands (list, create, edit, pause, resume, run, remove, status, tick); get was not added despite UI-SPEC defining its output format"
   severity: major
   test: 7
-  artifacts: []  # Filled by diagnosis
-  missing: []    # Filled by diagnosis
+  root_cause: "The Get variant is absent from the CronCommands enum (and its dispatch arm in handle_cron_command) in crates/ironhermes-cli/src/cron.rs. Plan 05-03 scoped Task 2 to 9 subcommands and omitted `get` entirely despite UI-SPEC 05 line 182 specifying it — plan-authoring gap that propagated to implementation. The store/tool layers already support it: CronjobTool.handle_get uses JobStore.find_job(), which exists and is used by sibling CLI commands (edit/pause/resume/run/remove)."
+  artifacts:
+    - path: "crates/ironhermes-cli/src/cron.rs"
+      issue: "Missing Get { job_id: String } variant in CronCommands enum; missing dispatch arm in handle_cron_command; missing cmd_get(job_id) function that renders the multi-field output specified in UI-SPEC"
+  missing:
+    - "Get { job_id: String } variant on CronCommands with doc comment"
+    - "Match arm CronCommands::Get { job_id } => cmd_get(job_id).await in handle_cron_command"
+    - "cmd_get(job_id: String) -> Result<()> function that opens the store, calls find_job, returns error on None, otherwise renders per UI-SPEC line 182 (name header, id, schedule display, prompt, deliver, skills comma-joined, state/enabled status, created_at, next_run_at, last_run_at with 'never' fallbacks, using existing colored patterns from sibling commands)"
+    - "Unit test for cmd_get success and not-found paths"
 
-- truth: "Gateway tick task picks up jobs created/edited via CLI while running, and MissedTickBehavior::Skip suppresses burst execution on restart"
+- truth: "Gateway tick task picks up jobs created/edited via CLI while running, and gateway restart does not burst-fire recent-past jobs"
   status: failed
   reason: "User reported: restarting the gateway runs the jobs (burst), and the gateway does not watch jobs.json for updates — CLI-created jobs are invisible to the running gateway because GatewayRunner loads JobStore once at startup and holds a stale in-memory copy. CLI's independent JobStore writes are never re-read."
   severity: blocker
   test: 13
-  artifacts: []  # Filled by diagnosis
-  missing: []    # Filled by diagnosis
+  root_cause: "PRIMARY: GatewayRunner holds a single Arc<Mutex<JobStore>> created once in run_gateway() (cli/main.rs:401); the 60s tick closure in runner.rs reuses that same in-memory Vec<CronJob> on every tick and never re-reads jobs.json. Each CLI cron subcommand runs in a separate short-lived process that calls JobStore::new() (cli/cron.rs:550), mutates its own isolated copy, and writes to disk — so CLI writes are never observed by the running gateway's in-memory store. SECONDARY: get_due_jobs() (cron/store.rs:280-313) returns every enabled/scheduled job whose next_run_at <= now as long as it is within grace_seconds=3600 of now; on gateway restart the first tick fires every job whose next_run_at drifted into the recent past while the gateway was down. MissedTickBehavior::Skip only collapses tokio::time::Interval missed ticks — it has no effect on the persisted-state backlog."
+  artifacts:
+    - path: "crates/ironhermes-cron/src/store.rs"
+      issue: "No reload API; JobStore.open() is the only disk-read entry point. Also, get_due_jobs returns stale-but-within-grace jobs without any startup-burst guard."
+    - path: "crates/ironhermes-gateway/src/runner.rs"
+      issue: "Tick closure at runner.rs:369-427 uses a stale in-memory JobStore and must reload from disk before run_tick_check. Startup tick does not suppress backlog catch-up."
+    - path: "crates/ironhermes-cron/src/tick.rs"
+      issue: "run_tick_check(&Arc<Mutex<JobStore>>) calls list_jobs/get_due_jobs on in-memory state with no disk reload."
+  missing:
+    - "JobStore::reload(&mut self) -> Result<()> method that re-reads jobs.json into self.jobs (body is roughly open() minus the create_dir_all)"
+    - "Call store.reload()? at the top of each tick under the existing Mutex guard (inside run_tick_check or in the runner.rs tick closure before calling run_tick_check)"
+    - "Startup-burst guard: either a first-tick-after-boot flag in the runner that skips catch-up execution, or a boot-time pass that fast-forwards next_run_at for any scheduled job whose next_run_at <= now (independent of grace_seconds)"
+    - "Unit test: JobStore.reload picks up external jobs.json mutations without recreating the Arc handle"
+    - "Integration test: tick task observes a job written to jobs.json between ticks"
+    - "Integration test: gateway restart with a recent-past next_run_at does not burst-fire"
