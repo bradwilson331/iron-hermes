@@ -144,7 +144,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 07.3-01-PLAN.md — Wave 0 test scaffolding + Wave 1 execute_cron_job helper extraction + real AgentLoop/HookRegistry wiring + Wave 2 workspace regression gate
+- [x] 07.3-01-PLAN.md — Wave 0 test scaffolding + Wave 1 execute_cron_job helper extraction + real AgentLoop/HookRegistry wiring + Wave 2 workspace regression gate
 
 #### Phase 07.4: Hook Ordering & Duplicate Event Fixes
 **Goal**: Resolve the two "warning" severity integration issues from the v1.1 audit so hook event streams are accurate and single-source
@@ -267,7 +267,7 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 7. Skills System | v1.1 | 3/3 | Complete | 2026-04-09 |
 | 07.1. Skills Gap Analysis | v1.1 | 1/1 | Complete | 2026-04-09 |
 | 07.2. Skills Spec Compliance | v1.1 | 4/4 | Complete | 2026-04-09 |
-| 07.3. Cron Tick Agent Exec + Hooks | v1.1 | 0/? | Not started (gap closure) | - |
+| 07.3. Cron Tick Agent Exec + Hooks | v1.1 | 1/1 | Complete    | 2026-04-10 |
 | 07.4. Hook Ordering & Dedup | v1.1 | 0/? | Not started (gap closure) | - |
 | 07.5. Skills Housekeeping | v1.1 | 0/? | Not started (gap closure) | - |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
