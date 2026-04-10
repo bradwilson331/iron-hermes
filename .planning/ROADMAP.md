@@ -204,8 +204,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 09-01-PLAN.md — DelegateTaskTool core: SubagentConfig, TerminalTool CWD, MemoryTool read-only, child registry builder, Tool impl
-- [ ] 09-02-PLAN.md — CLI/gateway wiring: semaphore creation, registration, integration test
+- [x] 09-01-PLAN.md — DelegateTaskTool core: SubagentConfig, TerminalTool CWD, MemoryTool read-only, child registry builder, Tool impl
+- [x] 09-02-PLAN.md — CLI/gateway wiring: semaphore creation, registration, integration test
 
 #### Phase 10: Batch Processing
 **Goal**: User can run parallel batch prompt execution from JSONL input, producing ShareGPT-format trajectory data with checkpointing and quality filtering
@@ -219,7 +219,9 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 10-01-PLAN.md — TBD
+- [ ] 10-01-PLAN.md — BatchConfig, CLI subcommand skeleton, types, parallel runner, ShareGPT output, checkpointing
+- [ ] 10-02-PLAN.md — Quality filter pipeline (4 criteria), reject file routing, status/cancel/list commands
+
 
 ## Coverage
 
