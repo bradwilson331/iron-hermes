@@ -18,6 +18,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     // EXEC-01..04: code execution sandbox configuration
     pub exec: ExecConfig,
+    // AGENT-01..05: subagent delegation configuration
+    pub subagent: SubagentConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,32 @@ impl Default for ExecConfig {
     }
 }
 
+// =============================================================================
+// SubagentConfig (AGENT-01..05)
+// =============================================================================
+
+/// Subagent delegation configuration (D-08, D-09, D-16).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentConfig {
+    /// Timeout in seconds for each subagent execution. Default: 300 (5 minutes).
+    pub timeout_secs: u64,
+    /// Maximum concurrent subagents. Default: 3.
+    pub max_subagents: usize,
+    /// Maximum LLM iterations per subagent. Default: 10.
+    pub max_iterations: usize,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 300,
+            max_subagents: 3,
+            max_iterations: 10,
+        }
+    }
+}
+
 impl Config {
     /// Load config from the IronHermes home directory.
     pub fn load() -> anyhow::Result<Self> {
@@ -386,6 +414,35 @@ model:
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
         assert_eq!(config.exec.python_path, "python3");
         assert_eq!(config.exec.timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_subagent_config_default() {
+        let default = SubagentConfig::default();
+        assert_eq!(default.timeout_secs, 300);
+        assert_eq!(default.max_subagents, 3);
+        assert_eq!(default.max_iterations, 10);
+    }
+
+    #[test]
+    fn test_config_default_includes_subagent() {
+        let config = Config::default();
+        assert_eq!(config.subagent.timeout_secs, 300);
+        assert_eq!(config.subagent.max_subagents, 3);
+        assert_eq!(config.subagent.max_iterations, 10);
+    }
+
+    #[test]
+    fn test_config_parses_without_subagent_section() {
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.subagent.timeout_secs, 300);
+        assert_eq!(config.subagent.max_subagents, 3);
+        assert_eq!(config.subagent.max_iterations, 10);
     }
 
     #[test]

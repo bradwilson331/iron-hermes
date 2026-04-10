@@ -209,7 +209,7 @@ impl ToolRegistry {
         use crate::web_read::WebReadTool;
         use crate::web_search::WebSearchTool;
 
-        self.register(Box::new(TerminalTool));
+        self.register(Box::new(TerminalTool::new()));
         self.register(Box::new(ReadFileTool));
         self.register(Box::new(WriteFileTool));
         self.register(Box::new(PatchFileTool));

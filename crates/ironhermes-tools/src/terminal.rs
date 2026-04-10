@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use ironhermes_core::ToolSchema;
 use serde_json::json;
@@ -9,7 +11,19 @@ use crate::registry::Tool;
 
 const MAX_OUTPUT_LEN: usize = 50_000;
 
-pub struct TerminalTool;
+pub struct TerminalTool {
+    cwd: Option<PathBuf>,
+}
+
+impl TerminalTool {
+    pub fn new() -> Self {
+        Self { cwd: None }
+    }
+
+    pub fn with_cwd(cwd: PathBuf) -> Self {
+        Self { cwd: Some(cwd) }
+    }
+}
 
 #[async_trait]
 impl Tool for TerminalTool {
@@ -57,11 +71,12 @@ impl Tool for TerminalTool {
         debug!("Executing terminal command: {}", command);
 
         let fut = async {
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output()
-                .await?;
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(command);
+            if let Some(ref dir) = self.cwd {
+                cmd.current_dir(dir);
+            }
+            let output = cmd.output().await?;
 
             let mut combined = String::new();
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -100,5 +115,55 @@ impl Tool for TerminalTool {
         } else {
             Ok(result)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_terminal_new_no_cwd() {
+        let tool = TerminalTool::new();
+        assert!(tool.cwd.is_none());
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}))
+            .await
+            .unwrap();
+        assert!(result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_terminal_with_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a marker file in the temp dir
+        std::fs::write(dir.path().join("marker.txt"), "found-it").unwrap();
+        let tool = TerminalTool::with_cwd(dir.path().to_path_buf());
+        assert!(tool.cwd.is_some());
+        let result = tool
+            .execute(serde_json::json!({"command": "cat marker.txt"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("found-it"),
+            "should execute in specified CWD, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_terminal_with_cwd_pwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = TerminalTool::with_cwd(dir.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({"command": "pwd"}))
+            .await
+            .unwrap();
+        let expected = dir.path().canonicalize().unwrap();
+        let result_path = std::path::PathBuf::from(result.trim());
+        let result_canon = result_path.canonicalize().unwrap_or(result_path);
+        assert_eq!(
+            result_canon, expected,
+            "pwd should match CWD"
+        );
     }
 }

@@ -8,11 +8,16 @@ use crate::registry::Tool;
 
 pub struct MemoryTool {
     store: Arc<Mutex<MemoryStore>>,
+    read_only: bool,
 }
 
 impl MemoryTool {
     pub fn new(store: Arc<Mutex<MemoryStore>>) -> Self {
-        Self { store }
+        Self { store, read_only: false }
+    }
+
+    pub fn new_read_only(store: Arc<Mutex<MemoryStore>>) -> Self {
+        Self { store, read_only: true }
     }
 }
 
@@ -84,6 +89,13 @@ impl Tool for MemoryTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'target'"))?;
 
         let target = parse_target(target_str)?;
+
+        // Block write actions in read-only mode (D-12: subagent memory isolation)
+        if self.read_only && matches!(action, "add" | "replace" | "remove") {
+            return Ok(
+                "Error: memory is read-only in subagent context. Only query and get actions are available.".to_string()
+            );
+        }
 
         match action {
             "add" => {
@@ -223,6 +235,52 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Unknown action"));
+    }
+
+    #[test]
+    fn test_new_is_not_read_only() {
+        let (tool, _dir) = make_tool();
+        assert!(!tool.read_only, "default MemoryTool should not be read-only");
+    }
+
+    #[tokio::test]
+    async fn test_read_only_blocks_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem_dir = dir.path().join("memories");
+        let mut store = MemoryStore::new(mem_dir);
+        store.load_from_disk().unwrap();
+        let tool = MemoryTool::new_read_only(Arc::new(Mutex::new(store)));
+
+        let result = tool
+            .execute(json!({
+                "action": "add",
+                "target": "memory",
+                "content": "should fail"
+            }))
+            .await;
+        assert!(result.is_ok(), "read-only should return Ok with error message");
+        let output = result.unwrap();
+        assert!(output.contains("read-only"), "should mention read-only: {output}");
+    }
+
+    #[tokio::test]
+    async fn test_read_only_blocks_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem_dir = dir.path().join("memories");
+        let mut store = MemoryStore::new(mem_dir);
+        store.load_from_disk().unwrap();
+        let tool = MemoryTool::new_read_only(Arc::new(Mutex::new(store)));
+
+        let result = tool
+            .execute(json!({
+                "action": "remove",
+                "target": "memory",
+                "old_text": "anything"
+            }))
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("read-only"), "should mention read-only: {output}");
     }
 
     #[tokio::test]
