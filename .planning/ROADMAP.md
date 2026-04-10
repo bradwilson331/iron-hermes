@@ -173,8 +173,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 07.5-01-PLAN.md — Active skill tracking, SkillsTool deactivate, allowed_tools enforcement in execute_tool_call
-- [ ] 07.5-02-PLAN.md — Cron enforcement wiring + ROADMAP/REQUIREMENTS traceability cleanup
+- [x] 07.5-01-PLAN.md — Active skill tracking, SkillsTool deactivate, allowed_tools enforcement in execute_tool_call
+- [x] 07.5-02-PLAN.md — Cron enforcement wiring + ROADMAP/REQUIREMENTS traceability cleanup
 
 #### Phase 8: Code Execution
 **Goal**: Agent can execute Python scripts in an isolated child process, with sandboxed access to agent tools via JSON-RPC and enforced resource limits
@@ -270,7 +270,7 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 07.2. Skills Spec Compliance | v1.1 | 4/4 | Complete | 2026-04-09 |
 | 07.3. Cron Tick Agent Exec + Hooks | v1.1 | 1/1 | Complete    | 2026-04-10 |
 | 07.4. Hook Ordering & Dedup | v1.1 | 3/3 | Complete   | 2026-04-10 |
-| 07.5. Skills Housekeeping | v1.1 | 0/2 | Not started (gap closure) | - |
+| 07.5. Skills Housekeeping | v1.1 | 2/2 | Complete    | 2026-04-10 |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/? | Not started | - |
 | 10. Batch Processing | v1.1 | 0/? | Not started | - |
