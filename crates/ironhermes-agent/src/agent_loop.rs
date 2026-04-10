@@ -287,7 +287,20 @@ impl AgentLoop {
     }
 
     /// Execute a single tool call and return the result string.
+    ///
+    /// 07.4 D-05 ordering:
+    ///   1. Check guardrails FIRST (no execution yet).
+    ///   2. On Block: fire ToolCompleted{success:false, result_preview=<formatted block error>}.
+    ///      Do NOT fire ToolCalled. Return the formatted block error as the tool result so
+    ///      the LLM sees the same error string it saw pre-07.4.
+    ///   3. On Allow or Warn: fire ToolCalled, then call registry.execute_tool(), then fire
+    ///      ToolCompleted with success/failure based on the execution result.
+    ///
+    /// Warn counts as Allow for event firing (D-08): the tool executes and both hook events
+    /// fire. The tracing::warn! side-effect is owned by ToolRegistry::check_guardrails.
     async fn execute_tool_call(&self, tool_call: &ToolCall) -> String {
+        use ironhermes_hooks::GuardrailDecision;
+
         let name = &tool_call.function.name;
         let args_str = &tool_call.function.arguments;
 
@@ -302,9 +315,8 @@ impl AgentLoop {
 
         debug!(tool = %name, "Executing tool call");
 
-        // ToolCalled hook is fired AFTER guardrails permit — never for blocked tools.
-        // We pass it as a post-guardrail callback into dispatch_with_hook (Issue #3 fix).
-
+        // Parse args BEFORE firing any hook (pre-07.4 behavior: bad args short-circuits
+        // with the same error message and does NOT fire ToolCalled/ToolCompleted).
         let args: serde_json::Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
@@ -314,45 +326,363 @@ impl AgentLoop {
             }
         };
 
-        let hook_registry = self.hook_registry.clone();
-        let post_guardrail_hook = move |tool: &str, args_preview_str: &str| {
-            if let Some(ref registry) = hook_registry {
-                let event = ironhermes_hooks::HookEvent::new(
-                    &uuid::Uuid::new_v4().to_string(),
-                    HookEventKind::ToolCalled {
-                        tool_name: tool.to_string(),
-                        args_preview: ironhermes_hooks::event::preview(args_preview_str, 200),
-                    },
+        // D-05 Step 1: check guardrails WITHOUT executing the tool.
+        let decision = self.registry.check_guardrails(name, &args);
+
+        match decision {
+            GuardrailDecision::Block { reason } => {
+                // D-05 / D-07: do NOT fire ToolCalled. Format the error via the same
+                // format_guardrail_error path that ToolRegistry::dispatch uses, so the
+                // block error respects ErrorDetailLevel and looks identical to the
+                // pre-07.4 tool_result string that the LLM sees.
+                let err_msg = ironhermes_hooks::format_guardrail_error(
+                    name,
+                    &reason,
+                    "guardrail",
+                    self.registry.guardrail_error_detail(),
                 );
-                registry.fire(event);
-            }
-        };
+                warn!(tool = %name, "Tool blocked by guardrail: {}", err_msg);
 
-        let tool_start = std::time::Instant::now();
-        let dispatch_result = self.registry.dispatch_with_hook(name, args, Some(post_guardrail_hook)).await;
-        let duration_ms = tool_start.elapsed().as_millis() as u64;
-
-        match dispatch_result {
-            Ok(result) => {
-                self.fire_hook(HookEventKind::ToolCompleted {
-                    tool_name: name.to_string(),
-                    success: true,
-                    result_preview: ironhermes_hooks::event::preview(&result, 200),
-                    duration_ms,
-                });
-                result
-            }
-            Err(e) => {
-                let err_msg = format!("Tool '{}' failed: {}", name, e);
-                warn!(%err_msg);
+                // D-05 Step 2: fire ToolCompleted ONLY (no ToolCalled before it).
                 self.fire_hook(HookEventKind::ToolCompleted {
                     tool_name: name.to_string(),
                     success: false,
                     result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
-                    duration_ms,
+                    duration_ms: 0,
                 });
+
+                // Return the formatted error as the tool_result so the LLM sees the
+                // same error-shaped string it saw pre-07.4.
                 err_msg
             }
+            GuardrailDecision::Allow | GuardrailDecision::Warn { .. } => {
+                // D-05 Step 3: fire ToolCalled FIRST (this is the post-fix ordering).
+                // D-08: Warn counts as Allow for event firing — do not skip ToolCalled.
+                self.fire_hook(HookEventKind::ToolCalled {
+                    tool_name: name.to_string(),
+                    args_preview: ironhermes_hooks::event::preview(args_str, 200),
+                });
+
+                let tool_start = std::time::Instant::now();
+                let dispatch_result = self.registry.execute_tool(name, args).await;
+                let duration_ms = tool_start.elapsed().as_millis() as u64;
+
+                match dispatch_result {
+                    Ok(result) => {
+                        self.fire_hook(HookEventKind::ToolCompleted {
+                            tool_name: name.to_string(),
+                            success: true,
+                            result_preview: ironhermes_hooks::event::preview(&result, 200),
+                            duration_ms,
+                        });
+                        result
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Tool '{}' failed: {}", name, e);
+                        warn!(%err_msg);
+                        self.fire_hook(HookEventKind::ToolCompleted {
+                            tool_name: name.to_string(),
+                            success: false,
+                            result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
+                            duration_ms,
+                        });
+                        err_msg
+                    }
+                }
+            }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: hook ordering and duplicate-event prevention (07.4-02)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod hooks_ordering_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use ironhermes_core::ToolSchema;
+    use ironhermes_hooks::{
+        BlocklistGuardrail, GuardrailDecision, GuardrailHook, HookEvent, HookEventKind,
+        HookRegistry, HooksConfig,
+    };
+    use ironhermes_tools::{Tool, ToolRegistry};
+    use std::sync::{Arc, Mutex};
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn capture_registry() -> (Arc<HookRegistry>, Arc<Mutex<Vec<HookEvent>>>) {
+        let mut registry = HookRegistry::new(HooksConfig::default());
+        let captured: Arc<Mutex<Vec<HookEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        registry.add_listener(Arc::new(move |event: HookEvent| {
+            cap.lock().unwrap().push(event);
+        }));
+        (Arc::new(registry), captured)
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock tools
+    // -----------------------------------------------------------------------
+
+    struct OkMockTool;
+
+    #[async_trait]
+    impl Tool for OkMockTool {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "ok mock"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "mock",
+                "ok mock",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("mock result".to_string())
+        }
+    }
+
+    struct FailMockTool;
+
+    #[async_trait]
+    impl Tool for FailMockTool {
+        fn name(&self) -> &str {
+            "failmock"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "fail mock"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "failmock",
+                "fail mock",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!("boom"))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Warn guardrail
+    // -----------------------------------------------------------------------
+
+    struct WarnGuardrail;
+
+    impl GuardrailHook for WarnGuardrail {
+        fn check(&self, _name: &str, _args: &serde_json::Value) -> GuardrailDecision {
+            GuardrailDecision::Warn {
+                reason: "always warn".to_string(),
+            }
+        }
+        fn name(&self) -> &str {
+            "warn-always"
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    fn tool_call(name: &str) -> ToolCall {
+        ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: ironhermes_core::FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    fn build_agent(tool_registry: ToolRegistry, hook_registry: Arc<HookRegistry>) -> AgentLoop {
+        let client =
+            LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model");
+        AgentLoop::new(client, Arc::new(tool_registry), 4).with_hook_registry(hook_registry)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    /// D-05 / D-07 / audit warning #3: a blocked tool must emit zero ToolCalled
+    /// and exactly one ToolCompleted{success:false} whose result_preview contains
+    /// the block reason.
+    #[tokio::test]
+    async fn test_blocked_tool_no_tool_called_event() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        tool_registry
+            .add_guardrail(Box::new(BlocklistGuardrail::new(vec!["mock".to_string()])));
+
+        let (hook_registry, captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let events = captured.lock().unwrap();
+        let tool_called_count = events
+            .iter()
+            .filter(|e| matches!(e.kind, HookEventKind::ToolCalled { .. }))
+            .count();
+        let tool_completed: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HookEventKind::ToolCompleted {
+                    success,
+                    result_preview,
+                    ..
+                } => Some((*success, result_preview.clone())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tool_called_count, 0,
+            "blocked tool must not emit ToolCalled (audit warning #3)"
+        );
+        assert_eq!(
+            tool_completed.len(),
+            1,
+            "blocked tool must emit exactly one ToolCompleted"
+        );
+        assert_eq!(
+            tool_completed[0].0, false,
+            "blocked tool ToolCompleted must have success=false"
+        );
+        assert!(
+            tool_completed[0].1.contains("blocked")
+                || tool_completed[0].1.contains("security policy")
+                || tool_completed[0].1.contains("blocklist"),
+            "ToolCompleted.result_preview must contain block reason: {:?}",
+            tool_completed[0].1
+        );
+        assert!(
+            result.contains("blocked")
+                || result.contains("security policy")
+                || result.contains("blocklist"),
+            "tool_result returned to LLM must be the formatted block error: {result}"
+        );
+    }
+
+    /// Allowed tool fires ToolCalled then ToolCompleted{success:true} in order.
+    #[tokio::test]
+    async fn test_allowed_tool_fires_tool_called_then_tool_completed() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(result, "mock result");
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "expected ToolCalled + ToolCompleted, got {:?}",
+            *events
+        );
+        assert!(
+            matches!(events[0].kind, HookEventKind::ToolCalled { .. }),
+            "first event must be ToolCalled"
+        );
+        assert!(
+            matches!(
+                events[1].kind,
+                HookEventKind::ToolCompleted { success: true, .. }
+            ),
+            "second event must be ToolCompleted{{success:true}}"
+        );
+    }
+
+    /// D-08: warn counts as allow for event firing — ToolCalled + ToolCompleted both fire.
+    #[tokio::test]
+    async fn test_warn_guardrail_fires_tool_called_and_tool_completed() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        tool_registry.add_guardrail(Box::new(WarnGuardrail));
+        let (hook_registry, captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        let _ = agent.execute_tool_call(&tool_call("mock")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "warn must still emit ToolCalled + ToolCompleted"
+        );
+        assert!(matches!(events[0].kind, HookEventKind::ToolCalled { .. }));
+        assert!(matches!(
+            events[1].kind,
+            HookEventKind::ToolCompleted { success: true, .. }
+        ));
+    }
+
+    /// Execution errors on an allowed tool still emit ToolCalled + ToolCompleted{success:false}.
+    #[tokio::test]
+    async fn test_allowed_tool_execution_failure_still_fires_tool_called() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(FailMockTool));
+        let (hook_registry, captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        let _ = agent.execute_tool_call(&tool_call("failmock")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "failed allowed tool must still emit both events"
+        );
+        assert!(matches!(events[0].kind, HookEventKind::ToolCalled { .. }));
+        assert!(matches!(
+            events[1].kind,
+            HookEventKind::ToolCompleted { success: false, .. }
+        ));
+    }
+
+    /// D-01 / audit warning #4: agent_loop.rs must not fire MessageReceived or ResponseSent.
+    /// Uses include_str! as a compile-time regression guard — future edits that reintroduce
+    /// these forbidden fires will trip this test without needing a mock LlmClient.
+    ///
+    /// We search for the fire_hook call patterns specifically so the assertion strings
+    /// themselves (which mention the type names for documentation purposes) do not
+    /// cause false positives.
+    #[tokio::test]
+    async fn test_agent_loop_source_has_no_message_received_or_response_sent_fires() {
+        let src = include_str!("agent_loop.rs");
+        // Search for the actual fire_hook invocation patterns, not bare type references.
+        // The assertion strings below intentionally avoid containing these exact patterns.
+        let msg_rcvd_fire = concat!("fire_hook(HookEventKind::", "MessageReceived");
+        let resp_sent_fire = concat!("fire_hook(HookEventKind::", "ResponseSent");
+        assert!(
+            !src.contains(msg_rcvd_fire),
+            "agent_loop.rs must not call fire_hook for MessageReceived (D-01, audit warning #4)"
+        );
+        assert!(
+            !src.contains(resp_sent_fire),
+            "agent_loop.rs must not call fire_hook for ResponseSent (D-01, audit warning #4)"
+        );
     }
 }

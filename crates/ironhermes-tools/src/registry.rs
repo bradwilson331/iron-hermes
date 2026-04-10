@@ -75,6 +75,67 @@ impl ToolRegistry {
         self.dispatch_with_hook(name, args, None::<fn(&str, &str)>).await
     }
 
+    /// Check all registered guardrails for the given tool call WITHOUT executing the tool.
+    ///
+    /// Returns the first non-Allow decision (Block wins immediately), or Allow if all
+    /// guardrails pass. Warn decisions are returned as-is — the caller decides whether
+    /// to log or surface them.
+    ///
+    /// Used by agent_loop.rs to implement D-05 ordering:
+    ///   check_guardrails → (Block → ToolCompleted{false}) | (Allow|Warn → ToolCalled → execute_tool → ToolCompleted)
+    pub fn check_guardrails(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> ironhermes_hooks::GuardrailDecision {
+        for guardrail in &self.guardrails {
+            match guardrail.check(name, args) {
+                ironhermes_hooks::GuardrailDecision::Allow => {}
+                ironhermes_hooks::GuardrailDecision::Warn { reason } => {
+                    tracing::warn!(
+                        tool = %name,
+                        guardrail = %guardrail.name(),
+                        reason = %reason,
+                        "Guardrail warning (proceeding)"
+                    );
+                    return ironhermes_hooks::GuardrailDecision::Warn { reason };
+                }
+                ironhermes_hooks::GuardrailDecision::Block { reason } => {
+                    return ironhermes_hooks::GuardrailDecision::Block { reason };
+                }
+            }
+        }
+        ironhermes_hooks::GuardrailDecision::Allow
+    }
+
+    /// Execute a tool by name with the given args, WITHOUT running guardrail checks.
+    ///
+    /// Callers MUST call `check_guardrails` first and only call this on Allow/Warn.
+    /// This is the execution-only half of the D-05 split API.
+    pub async fn execute_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))?;
+
+        if !tool.is_available() {
+            return Err(anyhow::anyhow!("Tool '{}' is not available", name));
+        }
+
+        tool.execute(args).await
+    }
+
+    /// Return the configured error detail level for guardrail block messages.
+    /// Used by agent_loop.rs to format block errors with the same detail level
+    /// as dispatch_with_hook (preserves LLM-visible error format, T-07.4-06).
+    pub fn guardrail_error_detail(&self) -> &ironhermes_hooks::ErrorDetailLevel {
+        &self.error_detail
+    }
+
     /// Dispatch a tool call, optionally firing a hook after the guardrail chain permits
     /// but before the tool executes.
     ///
