@@ -7,7 +7,7 @@ use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_core::{ChatMessage, Config, MemoryStore, MessageContent, Role, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::adapter::PlatformAdapter;
 use crate::backoff::BackoffState;
@@ -381,6 +381,14 @@ impl GatewayRunner {
                     tokio::time::Duration::from_secs(60)
                 );
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                // UAT gap 2 / test 13: first-tick-after-boot burst guard.
+                // Fast-forward any stale scheduled jobs BEFORE the first real
+                // tick so a gateway restart doesn't burst-fire jobs whose
+                // next_run_at drifted into the recent past while the gateway
+                // was down.
+                let mut first_tick = true;
+
                 loop {
                     tokio::select! {
                         _ = tick_cancel.cancelled() => {
@@ -388,6 +396,30 @@ impl GatewayRunner {
                             break;
                         }
                         _ = interval.tick() => {
+                            if first_tick {
+                                first_tick = false;
+                                match fast_forward_backlog(&job_store_tick).await {
+                                    Ok(n) if n > 0 => {
+                                        info!(
+                                            "First-tick burst guard fast-forwarded {} job(s)",
+                                            n
+                                        );
+                                    }
+                                    Ok(_) => {
+                                        debug!("First-tick burst guard: no backlog");
+                                    }
+                                    Err(e) => {
+                                        error!("First-tick burst guard error: {}", e);
+                                        // Fall through — a failed burst guard is
+                                        // not a reason to skip future scheduling.
+                                    }
+                                }
+                                // Do NOT run run_tick_check on the first tick.
+                                // The next interval.tick() (60s later) will run
+                                // the normal path.
+                                continue;
+                            }
+
                             match ironhermes_cron::run_tick_check(&job_store_tick).await {
                                 Ok((due_jobs, result, _lock_guard)) => {
                                     if result.jobs_run > 0 {
@@ -472,6 +504,76 @@ pub(crate) fn resolve_skill_context(
         }
     }
     parts.join("\n\n---\n\n")
+}
+
+/// First-tick-after-boot burst guard (UAT gap 2, test 13).
+///
+/// On gateway restart, jobs whose `next_run_at` drifted into the past while
+/// the gateway was down would otherwise burst-fire on the first tick. This
+/// helper is called exactly once, before the first `run_tick_check`, and
+/// fast-forwards every Scheduled+enabled job whose `next_run_at <= now` by
+/// recomputing its next run time from `now`. The fast-forwarded jobs are NOT
+/// executed on the current tick — they'll fire on their natural next cadence.
+async fn fast_forward_backlog(
+    store: &Arc<Mutex<ironhermes_cron::JobStore>>,
+) -> Result<usize> {
+    use chrono::Utc;
+
+    let mut guard = store
+        .lock()
+        .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
+
+    // Reload from disk first so we fast-forward based on the latest persisted
+    // state (covers the case where the CLI was used to create jobs while the
+    // gateway was down).
+    guard.reload()?;
+
+    let now = Utc::now();
+    let mut forwarded = 0usize;
+    for job in guard.jobs.iter_mut() {
+        if job.state != ironhermes_cron::JobState::Scheduled || !job.enabled {
+            continue;
+        }
+        let Some(next_run_at) = job.next_run_at else {
+            continue;
+        };
+        if next_run_at > now {
+            continue; // future — leave alone
+        }
+        // Stale-on-boot: recompute from now
+        match ironhermes_cron::compute_next_run(&job.schedule, now) {
+            Ok(Some(new_next)) => {
+                info!(
+                    "First-tick burst guard: fast-forwarded job '{}' from {} to {}",
+                    job.name, next_run_at, new_next
+                );
+                job.next_run_at = Some(new_next);
+                forwarded += 1;
+            }
+            Ok(None) => {
+                // Once-kind job whose run_at is past — drop next_run_at so it
+                // doesn't fire. The job transitions naturally via mark_job_run
+                // on a subsequent manual run or stays dormant.
+                info!(
+                    "First-tick burst guard: dropped past-due once job '{}' (was {})",
+                    job.name, next_run_at
+                );
+                job.next_run_at = None;
+                forwarded += 1;
+            }
+            Err(e) => {
+                warn!(
+                    "First-tick burst guard: compute_next_run failed for '{}': {}",
+                    job.name, e
+                );
+            }
+        }
+    }
+
+    if forwarded > 0 {
+        guard.save()?;
+    }
+    Ok(forwarded)
 }
 
 /// Execute a single cron job: build a fresh AgentLoop, run it with the resolved full_input,
@@ -647,6 +749,73 @@ fn resolve_token(token: &Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Plan 05-05 Task 3: First-tick burst guard regression test
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn gateway_first_tick_suppresses_backlog() {
+        use chrono::{Duration, Utc};
+        use ironhermes_cron::{JobStore, ScheduleParsed};
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let mut raw_store = JobStore::open(cron_dir.clone()).expect("open");
+
+        // Seed an interval job with next_run_at in the recent past (simulating
+        // gateway downtime).
+        let past = Utc::now() - Duration::seconds(90);
+        let job = raw_store
+            .add_job(
+                "backlog-job",
+                "hi",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add");
+        // Backdate next_run_at to simulate drift
+        raw_store.jobs[0].next_run_at = Some(past);
+        raw_store.save().expect("save");
+
+        let store = Arc::new(Mutex::new(raw_store));
+
+        // Invoke the burst guard directly
+        let forwarded = fast_forward_backlog(&store).await.expect("guard");
+        assert_eq!(forwarded, 1, "expected 1 job fast-forwarded");
+
+        // Assert: next_run_at is now in the future (not in the past)
+        {
+            let guard = store.lock().unwrap();
+            let updated = guard.get_job(&job.id).expect("job still present");
+            let new_next = updated.next_run_at.expect("next_run_at present");
+            assert!(
+                new_next > Utc::now(),
+                "next_run_at should be in the future after fast-forward, got {}",
+                new_next
+            );
+        }
+
+        // Assert: the job is NOT returned by get_due_jobs after the guard runs
+        // (because its next_run_at is now in the future).
+        {
+            let mut guard = store.lock().unwrap();
+            let due = guard.get_due_jobs();
+            assert!(
+                due.is_empty(),
+                "expected no due jobs after first-tick burst guard, found {}",
+                due.len()
+            );
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Task 1 (Wave 0): Placeholder-absent test + LLM-gated skill integration
