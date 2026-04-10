@@ -55,7 +55,7 @@ Plans:
   3. Writing content containing prompt injection patterns (e.g., "ignore previous instructions") to a context file is blocked with a warning
   4. Agent can save facts to memory and those facts appear in the system prompt on the next session
   5. Memory entries respect the character limit — adding beyond the cap fails gracefully or requires removing existing entries
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
 - [x] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
@@ -92,7 +92,7 @@ Plans:
   2. User can pause, resume, or edit a scheduled task without deleting and recreating it
   3. User can attach a named skill to a scheduled task so the task runs with skill-provided context and instructions
   4. Scheduled task output is delivered to the configured platform (Telegram chat, CLI stdout, or webhook URL)
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
 - [x] 05-01-PLAN.md — Data model, ScheduleParsed enum, parse_schedule(), JobStore refactor
@@ -107,7 +107,7 @@ Plans:
   1. Every message received, tool called, and response sent produces a structured log entry via the hook registry
   2. A configured guardrail hook can intercept a tool call before dispatch and block it, returning a clear error to the agent
   3. A configured webhook endpoint receives hook events as HTTP POST requests when events fire
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
 - [ ] 06-01-PLAN.md — HookEvent model, HookRegistry, hooks.toml config, JSONL logging, AgentLoop wiring
@@ -123,7 +123,7 @@ Plans:
   2. Full skill content is NOT loaded at startup — only the description is visible until the agent explicitly activates a skill
   3. A skill document follows the agentskills.io format (SKILL.md with YAML frontmatter containing name and description) and is correctly parsed and cataloged
   4. Agent can call the skills tool with list, view, or activate actions to browse and load skill content during a conversation
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
 - [x] 07-01-PLAN.md — SkillRegistry: discovery, parsing, and catalog in ironhermes-core
@@ -201,10 +201,11 @@ Plans:
   3. Attempting to spawn more than 3 concurrent subagents blocks until a slot is available, with a clear message when the limit is hit
   4. Each subagent operates in its own terminal session scope and cannot read or affect another subagent's terminal state
   5. A child agent's toolset never includes delegate_task — recursive delegation is structurally impossible
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
-- [ ] 09-01-PLAN.md — TBD
+- [ ] 09-01-PLAN.md — DelegateTaskTool core: SubagentConfig, TerminalTool CWD, MemoryTool read-only, child registry builder, Tool impl
+- [ ] 09-02-PLAN.md — CLI/gateway wiring: semaphore creation, registration, integration test
 
 #### Phase 10: Batch Processing
 **Goal**: User can run parallel batch prompt execution from JSONL input, producing ShareGPT-format trajectory data with checkpointing and quality filtering
@@ -215,7 +216,7 @@ Plans:
   2. Batch output is written in ShareGPT format (human/assistant/tool roles) that loads correctly into a HuggingFace dataset viewer
   3. Restarting a batch job mid-run resumes from where it stopped — already-completed entries (identified by content hash) are not re-run
   4. Trajectories where the agent hallucinated a tool name or produced a response with no reasoning steps are automatically filtered from output
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
 - [ ] 10-01-PLAN.md — TBD
@@ -273,5 +274,5 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 07.4. Hook Ordering & Dedup | v1.1 | 3/3 | Complete   | 2026-04-10 |
 | 07.5. Skills Housekeeping | v1.1 | 2/2 | Complete    | 2026-04-10 |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
-| 9. Subagent Delegation | v1.1 | 0/? | Not started | - |
+| 9. Subagent Delegation | v1.1 | 0/2 | Planned | - |
 | 10. Batch Processing | v1.1 | 0/? | Not started | - |
