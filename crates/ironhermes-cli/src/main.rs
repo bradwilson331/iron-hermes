@@ -404,7 +404,9 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // Discover skills and register the skills tool
     let cwd = std::env::current_dir().unwrap_or_default();
     let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
-    registry.register_skills_tool(skill_registry.clone());
+    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    registry.register_skills_tool(skill_registry.clone(), active_skills);
 
     // Load hooks config and wire guardrails (before Arc wrapping)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();

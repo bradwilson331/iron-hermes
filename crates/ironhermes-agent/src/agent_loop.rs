@@ -56,6 +56,7 @@ pub struct AgentLoop {
     streaming: bool,
     hook_registry: Option<Arc<HookRegistry>>,
     request_id: String,
+    active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
 }
 
 impl AgentLoop {
@@ -70,7 +71,17 @@ impl AgentLoop {
             streaming: false,
             hook_registry: None,
             request_id: uuid::Uuid::new_v4().to_string(),
+            active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn with_active_skills(mut self, active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) -> Self {
+        self.active_skills = active_skills;
+        self
+    }
+
+    pub fn active_skills(&self) -> Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> {
+        self.active_skills.clone()
     }
 
     pub fn with_compression(mut self, context_length: usize, threshold: f64) -> Self {

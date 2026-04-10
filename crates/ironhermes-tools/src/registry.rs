@@ -232,11 +232,15 @@ impl ToolRegistry {
         self.register(Box::new(CronjobTool::new(store)));
     }
 
-    /// Register the skills tool with a shared SkillRegistry.
+    /// Register the skills tool with a shared SkillRegistry and active_skills tracker.
     /// Called separately from register_defaults() because it requires a SkillRegistry instance.
-    pub fn register_skills_tool(&mut self, registry: Arc<ironhermes_core::SkillRegistry>) {
+    pub fn register_skills_tool(
+        &mut self,
+        registry: Arc<ironhermes_core::SkillRegistry>,
+        active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    ) {
         use crate::skills_tool::SkillsTool;
-        self.register(Box::new(SkillsTool::new(registry)));
+        self.register(Box::new(SkillsTool::new(registry, active_skills)));
     }
 }
 
