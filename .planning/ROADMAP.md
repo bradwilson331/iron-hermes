@@ -158,7 +158,7 @@ Plans:
 **Plans**: TBD
 
 Plans:
-- [ ] 07.4-01-PLAN.md — TBD
+- [x] 07.4-01-PLAN.md — TBD
 
 #### Phase 07.5: Skills System Housekeeping (SKILL-06 enforcement + traceability cleanup)
 **Goal**: Close 07.2 tech debt: enforce SKILL-06 `allowed_tools` at tool dispatch, relocate SKILL-09 to v2, and align ROADMAP/traceability with deferred scope decisions
@@ -170,10 +170,11 @@ Plans:
   2. Regression test: activating a skill with a restrictive `allowed_tools` list blocks other tool calls for the remainder of that agent turn
   3. REQUIREMENTS.md: SKILL-09 is moved to the v2 section and the traceability table reflects it as a v2 requirement
   4. SKILL-13 remains in the Backlog bucket in REQUIREMENTS.md with an explicit note
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 07.5-01-PLAN.md — TBD
+- [ ] 07.5-01-PLAN.md — Active skill tracking, SkillsTool deactivate, allowed_tools enforcement in execute_tool_call
+- [ ] 07.5-02-PLAN.md — Cron enforcement wiring + ROADMAP/REQUIREMENTS traceability cleanup
 
 #### Phase 8: Code Execution
 **Goal**: Agent can execute Python scripts in an isolated child process, with sandboxed access to agent tools via JSON-RPC and enforced resource limits
@@ -268,8 +269,8 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 07.1. Skills Gap Analysis | v1.1 | 1/1 | Complete | 2026-04-09 |
 | 07.2. Skills Spec Compliance | v1.1 | 4/4 | Complete | 2026-04-09 |
 | 07.3. Cron Tick Agent Exec + Hooks | v1.1 | 1/1 | Complete    | 2026-04-10 |
-| 07.4. Hook Ordering & Dedup | v1.1 | 0/? | Not started (gap closure) | - |
-| 07.5. Skills Housekeeping | v1.1 | 0/? | Not started (gap closure) | - |
+| 07.4. Hook Ordering & Dedup | v1.1 | 3/3 | Complete   | 2026-04-10 |
+| 07.5. Skills Housekeeping | v1.1 | 0/2 | Not started (gap closure) | - |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/? | Not started | - |
 | 10. Batch Processing | v1.1 | 0/? | Not started | - |
