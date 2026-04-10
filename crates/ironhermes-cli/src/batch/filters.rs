@@ -43,18 +43,16 @@ pub fn filter_hallucinated_tools(result: &AgentResult, registry: &ToolRegistry) 
     None
 }
 
-/// D-12 criterion 2: Reject if result has zero tool calls AND no substantive text.
+/// D-12 criterion 2: Reject if result has zero tool calls.
+/// UAT fix: tool use is the primary signal of reasoning in batch agentic trajectories.
+/// Text-only responses (e.g. "How can I help?") are rejected regardless of length.
 pub fn filter_no_reasoning(result: &AgentResult) -> Option<String> {
     let has_tool_calls = result.messages.iter().any(|m| {
         m.tool_calls
             .as_ref()
             .is_some_and(|tc| !tc.is_empty())
     });
-    let has_text = result
-        .final_response
-        .as_ref()
-        .is_some_and(|r| r.trim().len() > 10);
-    if !has_tool_calls && !has_text {
+    if !has_tool_calls {
         return Some("no_reasoning_steps".to_string());
     }
     None
@@ -88,9 +86,10 @@ pub fn filter_error_only(result: &AgentResult) -> Option<String> {
 
 /// D-12 criterion 4: Detect secrets/credentials leaked in tool output.
 /// Uses SECRET_PATTERNS regex set -- distinct from context_scanner.rs THREAT_PATTERNS.
+/// UAT fix: also scans Role::Assistant messages where the model may echo secrets.
 pub fn filter_secrets_in_output(result: &AgentResult) -> Option<String> {
     for msg in &result.messages {
-        if msg.role == Role::Tool {
+        if msg.role == Role::Tool || msg.role == Role::Assistant {
             if let Some(text) = msg.content_text() {
                 if SECRET_PATTERNS.is_match(text) {
                     return Some("secrets_in_output".to_string());

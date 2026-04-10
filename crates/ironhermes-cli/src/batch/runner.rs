@@ -116,6 +116,9 @@ pub async fn cmd_run(
         .join("batch")
         .join("cancel");
 
+    // Clear stale cancel sentinel from previous run (UAT gap: resume blocked by leftover file)
+    let _ = std::fs::remove_file(&cancel_path);
+
     // Run record setup
     let run_id = Uuid::new_v4().to_string();
     let run_record = BatchRunRecord {
