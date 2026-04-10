@@ -482,6 +482,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn cron_sched(expr: &str) -> ScheduleParsed {
         ScheduleParsed::Cron {
             expr: expr.to_string(),
@@ -489,6 +490,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn once_sched_future() -> ScheduleParsed {
         let run_at = Utc::now() + Duration::hours(1);
         ScheduleParsed::Once {
