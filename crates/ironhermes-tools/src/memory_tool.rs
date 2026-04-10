@@ -43,38 +43,66 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Save, update, or remove persistent facts. Memory entries appear in your system prompt at the start of each session. Use 'memory' target for your personal notes and 'user' target for user profile information."
+        if self.read_only {
+            "Query persistent facts from memory. This is a read-only view; add/replace/remove are not available in subagent context. Memory facts are provided in the system prompt."
+        } else {
+            "Save, update, or remove persistent facts. Memory entries appear in your system prompt at the start of each session. Use 'memory' target for your personal notes and 'user' target for user profile information."
+        }
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
-            "memory",
-            self.description(),
-            json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["add", "replace", "remove"],
-                        "description": "Action to perform on memory."
+        if self.read_only {
+            // Read-only schema: no write actions available (D-12)
+            ToolSchema::new(
+                "memory",
+                self.description(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["get"],
+                            "description": "Action to perform on memory. Only 'get' is available in read-only subagent context."
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["memory", "user"],
+                            "description": "Which memory store to query. 'memory' for personal notes, 'user' for user profile."
+                        }
                     },
-                    "target": {
-                        "type": "string",
-                        "enum": ["memory", "user"],
-                        "description": "Which memory store to modify. 'memory' for personal notes (2200 char limit), 'user' for user profile (1375 char limit)."
+                    "required": ["action", "target"]
+                }),
+            )
+        } else {
+            ToolSchema::new(
+                "memory",
+                self.description(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "replace", "remove"],
+                            "description": "Action to perform on memory."
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["memory", "user"],
+                            "description": "Which memory store to modify. 'memory' for personal notes (2200 char limit), 'user' for user profile (1375 char limit)."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to add or replacement content for 'replace' action."
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "Unique substring identifying the entry to replace or remove. Required for 'replace' and 'remove' actions."
+                        }
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to add or replacement content for 'replace' action."
-                    },
-                    "old_text": {
-                        "type": "string",
-                        "description": "Unique substring identifying the entry to replace or remove. Required for 'replace' and 'remove' actions."
-                    }
-                },
-                "required": ["action", "target"]
-            }),
-        )
+                    "required": ["action", "target"]
+                }),
+            )
+        }
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
@@ -93,7 +121,7 @@ impl Tool for MemoryTool {
         // Block write actions in read-only mode (D-12: subagent memory isolation)
         if self.read_only && matches!(action, "add" | "replace" | "remove") {
             return Ok(
-                "Error: memory is read-only in subagent context. Only query and get actions are available.".to_string()
+                "Error: memory is read-only in subagent context. Memory facts are available in the system prompt; add/replace/remove actions are disabled.".to_string()
             );
         }
 
