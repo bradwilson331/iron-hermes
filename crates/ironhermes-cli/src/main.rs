@@ -408,6 +408,20 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         Arc::new(std::sync::Mutex::new(Vec::new()));
     registry.register_skills_tool(skill_registry.clone(), active_skills);
 
+    // Build RPC dispatch registry — only D-07 safe tools for sandbox (no terminal, no execute_code)
+    let mut rpc_registry = ToolRegistry::new();
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::WriteFileTool));
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::PatchFileTool));
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
+    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
+    rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
+    rpc_registry.register_memory_tool(memory_store.clone());
+    let rpc_registry = Arc::new(rpc_registry);
+
+    // Register execute_code tool with the RPC dispatch registry
+    registry.register_execute_code_tool(rpc_registry, config.exec.clone());
+
     // Load hooks config and wire guardrails (before Arc wrapping)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
 
