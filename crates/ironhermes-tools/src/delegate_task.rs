@@ -189,18 +189,17 @@ impl Tool for DelegateTaskTool {
         // Create isolated temp directory for child (D-10, D-13)
         let child_dir = tempfile::TempDir::new()?;
 
-        // Check semaphore availability for logging (D-15)
-        let waited = self.semaphore.available_permits() == 0;
-        if waited {
-            info!(
-                "Waiting for a subagent slot ({}/{} in use)",
-                self.config.max_subagents, self.config.max_subagents
-            );
-        }
-
-        // Acquire semaphore permit (D-14)
+        // Acquire semaphore permit (D-14), measuring actual wait time (D-15)
+        let acquire_start = std::time::Instant::now();
         let _permit = self.semaphore.acquire().await
             .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
+        let wait_duration = acquire_start.elapsed();
+        if wait_duration > std::time::Duration::from_millis(50) {
+            info!(
+                "Acquired subagent slot after waiting {}ms",
+                wait_duration.as_millis()
+            );
+        }
 
         // Build child registry (D-01..D-05)
         let child_registry = build_child_registry(
