@@ -150,6 +150,56 @@ impl JobStore {
         })
     }
 
+    /// Re-read `jobs.json` into `self.jobs` without recreating the handle.
+    ///
+    /// Preserves `self.path` and `self.grace_seconds`. Honors the same
+    /// format-fallback ladder as `open()` (new format -> legacy -> empty+warn).
+    /// Does not create the directory; the store must already be open.
+    pub fn reload(&mut self) -> Result<()> {
+        let jobs = if self.path.exists() {
+            let raw = fs::read_to_string(&self.path)
+                .with_context(|| format!("failed to read {}", self.path.display()))?;
+
+            if let Ok(jobs) = serde_json::from_str::<Vec<CronJob>>(&raw) {
+                debug!(
+                    "JobStore reloaded {} job(s) from {} (new format)",
+                    jobs.len(),
+                    self.path.display()
+                );
+                jobs
+            } else if let Ok(legacy_jobs) = serde_json::from_str::<Vec<LegacyCronJob>>(&raw) {
+                info!(
+                    "Reload: migrating {} legacy job(s) from {}",
+                    legacy_jobs.len(),
+                    self.path.display()
+                );
+                let jobs: Vec<CronJob> = legacy_jobs.into_iter().map(CronJob::from).collect();
+                // Persist migrated format so subsequent reloads take the fast path.
+                let tmp_path = self.path.with_extension("json.tmp");
+                let json = serde_json::to_string_pretty(&jobs).context("serialize migrated")?;
+                {
+                    let mut f = fs::File::create(&tmp_path)
+                        .with_context(|| format!("create tmp: {}", tmp_path.display()))?;
+                    f.write_all(json.as_bytes())?;
+                    f.flush()?;
+                }
+                fs::rename(&tmp_path, &self.path)?;
+                jobs
+            } else {
+                warn!(
+                    "Reload: could not parse {} as new or legacy format, keeping empty",
+                    self.path.display()
+                );
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        self.jobs = jobs;
+        Ok(())
+    }
+
     /// Create a new job, persist it, and return a clone of the created record.
     #[allow(clippy::too_many_arguments)]
     pub fn add_job(
@@ -734,6 +784,47 @@ mod tests {
         assert_eq!(store2.list_jobs().len(), 1);
         assert_eq!(store2.list_jobs()[0].id, job.id);
         assert_eq!(store2.list_jobs()[0].name, "daily-report");
+    }
+
+    #[test]
+    fn reload_picks_up_external_mutations() {
+        let (_dir, cron_dir) = tmp_store_dir();
+        let mut store = JobStore::open(cron_dir.clone()).expect("open");
+        let _original = add_interval_job(&mut store, "in-memory-job", 30);
+        assert_eq!(store.list_jobs().len(), 1);
+        assert_eq!(store.list_jobs()[0].name, "in-memory-job");
+
+        // Simulate an external writer (e.g. a CLI subcommand in a separate process)
+        // replacing jobs.json on disk. Note the snake_case tag/state values —
+        // CronJob serde uses #[serde(rename_all = "snake_case")].
+        let external_jobs = serde_json::json!([
+            {
+                "id": "ext-id-1",
+                "name": "external-job",
+                "prompt": "external",
+                "skills": [],
+                "schedule": { "kind": "interval", "minutes": 15, "display": "every 15m" },
+                "schedule_display": "every 15m",
+                "repeat": { "times": null, "completed": 0 },
+                "enabled": true,
+                "state": "scheduled",
+                "paused_at": null,
+                "paused_reason": null,
+                "deliver": "local",
+                "origin": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "next_run_at": "2030-01-01T00:00:00Z",
+                "last_run_at": null,
+                "last_status": null,
+                "last_error": null
+            }
+        ]);
+        fs::write(cron_dir.join("jobs.json"), external_jobs.to_string()).unwrap();
+
+        store.reload().expect("reload");
+        assert_eq!(store.list_jobs().len(), 1, "reload should replace in-memory jobs");
+        assert_eq!(store.list_jobs()[0].id, "ext-id-1");
+        assert_eq!(store.list_jobs()[0].name, "external-job");
     }
 
     #[test]
