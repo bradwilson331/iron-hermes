@@ -189,9 +189,10 @@ fn test_filter_no_reasoning_passes_with_tools() {
 }
 
 #[test]
-fn test_filter_no_reasoning_passes_with_text() {
+fn test_filter_no_reasoning_rejects_text_only() {
+    // UAT gap: text-only responses without tool calls must be rejected
     let result = mock_agent_result(vec![], Some("This is a substantive response".to_string()));
-    assert_eq!(filter_no_reasoning(&result), None);
+    assert_eq!(filter_no_reasoning(&result), Some("no_reasoning_steps".to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -335,4 +336,38 @@ fn test_batch_run_record_serialization() {
     assert!(json.contains("\"rejected\":2"));
     let parsed: BatchRunRecord = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.passed, 8);
+}
+
+// ---------------------------------------------------------------------------
+// UAT gap regression tests (Phase 10 Plan 03)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_filter_secrets_detects_in_assistant_text() {
+    // UAT gap: secrets filter must scan Role::Assistant messages, not just Role::Tool
+    let mut msg = ChatMessage::assistant("Found key: AKIAIOSFODNN7EXAMPLE in the config file");
+    msg.role = ironhermes_core::Role::Assistant;
+    let result = mock_agent_result(vec![msg], None);
+    assert_eq!(
+        filter_secrets_in_output(&result),
+        Some("secrets_in_output".to_string()),
+        "secrets filter should detect AWS key in assistant message"
+    );
+}
+
+#[test]
+fn test_run_filters_rejects_text_only_no_tools() {
+    // UAT gap: run_filters must reject text-only responses with no tool calls
+    let registry = registry_with("web_read");
+    let result = mock_agent_result(
+        vec![ChatMessage::user("hello")],
+        Some("I can help you with many things! Just ask me anything.".to_string()),
+    );
+    let quality = run_filters(&result, &registry);
+    assert!(!quality.passed, "text-only response with no tool calls should be rejected");
+    assert!(
+        quality.reasons.contains(&"no_reasoning_steps".to_string()),
+        "expected no_reasoning_steps in {:?}",
+        quality.reasons
+    );
 }
