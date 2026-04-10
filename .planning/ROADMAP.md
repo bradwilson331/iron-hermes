@@ -185,10 +185,11 @@ Plans:
   2. A Python script running in the child process can call agent tools (e.g., web_search, read_file) via JSON-RPC and receive real results back
   3. The child process environment has no API keys or secrets — environment variable stripping is verified by inspection
   4. A script that runs longer than 5 minutes is killed and returns a timeout error; a script exceeding 50KB of output is truncated
-**Plans**: 3 plans
+**Plans**: 2 plans
 
 Plans:
-- [ ] 08-01-PLAN.md — TBD
+- [ ] 08-01-PLAN.md — ironhermes-exec crate: sandbox, RPC server, hermes_tools.py, ExecConfig
+- [ ] 08-02-PLAN.md — ExecuteCodeTool, CLI/gateway wiring, integration tests
 
 #### Phase 9: Subagent Delegation
 **Goal**: Agent can delegate tasks to isolated child agents with restricted toolsets, enforcing concurrency limits and preventing recursive delegation
