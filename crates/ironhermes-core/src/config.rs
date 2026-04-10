@@ -20,6 +20,8 @@ pub struct Config {
     pub exec: ExecConfig,
     // AGENT-01..05: subagent delegation configuration
     pub subagent: SubagentConfig,
+    // BATCH-01..04: batch processing configuration
+    pub batch: BatchConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +267,32 @@ impl Default for SubagentConfig {
             timeout_secs: 300,
             max_subagents: 3,
             max_iterations: 10,
+        }
+    }
+}
+
+// =============================================================================
+// BatchConfig (BATCH-01..04)
+// =============================================================================
+
+/// Batch processing configuration (BATCH-01..04).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatchConfig {
+    /// Default worker concurrency. Default: 4.
+    pub workers: usize,
+    /// Default max agent iterations per prompt. Default: 20.
+    pub max_turns: usize,
+    /// Default output directory (relative to cwd). Default: "batch_output".
+    pub output_dir: String,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            workers: 4,
+            max_turns: 20,
+            output_dir: "batch_output".to_string(),
         }
     }
 }

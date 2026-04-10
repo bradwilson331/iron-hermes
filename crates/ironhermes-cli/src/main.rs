@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 mod cron;
+mod batch;
 
 #[derive(Parser)]
 #[command(
@@ -71,6 +72,11 @@ enum Commands {
         #[command(subcommand)]
         command: cron::CronCommands,
     },
+    /// Run batch prompt processing
+    Batch {
+        #[command(subcommand)]
+        command: batch::BatchCommands,
+    },
 }
 
 #[tokio::main]
@@ -99,6 +105,7 @@ async fn main() -> Result<()> {
         Some(Commands::Chat { ref message }) => run_chat(&cli, message.clone()).await,
         Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
+        Some(Commands::Batch { command }) => batch::handle_batch_command(command).await,
         None => {
             if let Some(ref prompt) = cli.execute {
                 run_single(&cli, prompt.clone()).await
