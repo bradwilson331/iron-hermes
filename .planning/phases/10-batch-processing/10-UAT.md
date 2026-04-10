@@ -1,5 +1,5 @@
 ---
-status: complete
+status: diagnosed
 phase: 10-batch-processing
 source: [10-01-SUMMARY.md, 10-02-SUMMARY.md, 10-03-SUMMARY.md]
 started: 2026-04-10T12:00:00Z
@@ -72,9 +72,15 @@ blocked: 0
   reason: "User reported: fail - ignores the cancel"
   severity: major
   test: 7
-  root_cause: ""
-  artifacts: []
-  missing: []
+  root_cause: "Two compounding issues: (1) runner.rs:120 unconditionally removes cancel sentinel at startup — races with cmd_cancel if issued quickly after run starts. (2) runner.rs:202-213 cancel check only runs at dispatch gate; while semaphore is fully acquired the loop blocks and never re-checks the file."
+  artifacts:
+    - path: "crates/ironhermes-cli/src/batch/runner.rs"
+      issue: "Line 120: unconditional remove_file races with cmd_cancel"
+    - path: "crates/ironhermes-cli/src/batch/runner.rs"
+      issue: "Lines 202-213: cancel check blocked while semaphore exhausted"
+  missing:
+    - "Guard stale-sentinel removal with timestamp check — only remove if file mtime < process start"
+    - "Use tokio::select! on semaphore acquire with periodic cancel_path.exists() polling"
   debug_session: ""
 
 - truth: "no_reasoning filter rejects low-quality responses without rejecting valid text-only answers"
@@ -82,7 +88,10 @@ blocked: 0
   reason: "User reported: pass on function is too strict, it now rejects prompts that would normally pass: no_reasoning_steps for 'why is the sky blue?'"
   severity: major
   test: 9
-  root_cause: ""
-  artifacts: []
-  missing: []
+  root_cause: "filters.rs:49-58 filter_no_reasoning requires tool calls unconditionally. Text-only responses are always rejected regardless of quality. Overcorrection from prior UAT fix — replaced content heuristic with structural requirement."
+  artifacts:
+    - path: "crates/ironhermes-cli/src/batch/filters.rs"
+      issue: "Lines 49-58: requires tool calls, no content-quality fallback"
+  missing:
+    - "Restore content fallback: pass if tool calls present OR assistant text >= 100 chars; reject only when both absent"
   debug_session: ""
