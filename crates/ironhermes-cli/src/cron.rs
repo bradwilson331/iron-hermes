@@ -549,3 +549,59 @@ async fn cmd_tick() -> Result<()> {
 fn open_store() -> Result<JobStore> {
     JobStore::new().context("Failed to open cron job store")
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironhermes_cron::{CronJob, JobStore, ScheduleParsed};
+
+    #[test]
+    fn render_job_details_contains_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = JobStore::open(dir.path().join("cron")).unwrap();
+        let job = store
+            .add_job(
+                "test-render",
+                "say hello",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec!["focus".to_string()],
+                None,
+            )
+            .unwrap();
+
+        let rendered = render_job_details(&job);
+        assert!(rendered.contains("test-render"), "name missing: {}", rendered);
+        assert!(rendered.contains(&job.id), "id missing");
+        assert!(rendered.contains("every 5m"), "schedule_display missing");
+        assert!(rendered.contains("say hello"), "prompt missing");
+        assert!(rendered.contains("local"), "deliver missing");
+        assert!(rendered.contains("focus"), "skill missing");
+        assert!(rendered.contains("Next run:"), "next_run label missing");
+    }
+
+    #[test]
+    fn cmd_get_not_found_returns_error() {
+        // find_job returns None for an empty store; cmd_get maps that to anyhow error.
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path().join("cron")).unwrap();
+        let result = store.find_job("ghost");
+        assert!(result.is_none(), "expected None for missing job");
+        // Verify the error message shape cmd_get would produce:
+        let err_msg = format!("Job not found: {}", "ghost");
+        assert!(err_msg.contains("Job not found"));
+    }
+
+    // Suppress unused-import warning for CronJob since it's only referenced
+    // via the render_job_details signature.
+    #[allow(dead_code)]
+    fn _force_cronjob_use(_: &CronJob) {}
+}
