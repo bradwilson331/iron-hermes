@@ -1,3 +1,4 @@
+// Phase 10 Plan 02 tests — filters + runner integration
 use super::types::*;
 use super::checkpoint::*;
 use super::sharegpt::*;
@@ -83,4 +84,255 @@ fn test_batch_entry_with_optional_fields() {
     let entry: BatchEntry = serde_json::from_str(json).unwrap();
     assert_eq!(entry.system.unwrap(), "Be concise");
     assert_eq!(entry.tools.unwrap(), vec!["web_read"]);
+}
+
+// =============================================================================
+// Filter tests
+// =============================================================================
+
+use ironhermes_agent::{AgentResult, AggregatedUsage};
+use ironhermes_core::{ChatMessage, FunctionCall, ToolCall};
+use ironhermes_tools::ToolRegistry;
+use super::filters::*;
+
+/// Build a minimal AgentResult for filter testing.
+fn mock_agent_result(messages: Vec<ChatMessage>, final_response: Option<String>) -> AgentResult {
+    AgentResult {
+        messages,
+        turns_used: 1,
+        finished_naturally: true,
+        final_response,
+        total_usage: AggregatedUsage::default(),
+    }
+}
+
+/// Build a minimal ToolRegistry with a single named tool.
+fn registry_with(tool_name: &'static str) -> ToolRegistry {
+    use async_trait::async_trait;
+    use ironhermes_core::ToolSchema;
+    use ironhermes_tools::Tool;
+
+    struct MockTool { name: &'static str }
+
+    #[async_trait]
+    impl Tool for MockTool {
+        fn name(&self) -> &str { self.name }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "mock" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(self.name, "mock", serde_json::json!({"type":"object","properties":{}}))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+    }
+
+    let mut r = ToolRegistry::new();
+    r.register(Box::new(MockTool { name: tool_name }));
+    r
+}
+
+fn make_tool_call(name: &str) -> ToolCall {
+    ToolCall {
+        id: "tc1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// filter_hallucinated_tools
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_filter_hallucinated_tools_detects_unknown() {
+    let registry = registry_with("web_read");
+    let msg = ChatMessage::assistant_tool_calls(vec![make_tool_call("fake_tool")]);
+    let result = mock_agent_result(vec![msg], None);
+    let rejection = filter_hallucinated_tools(&result, &registry);
+    assert_eq!(rejection, Some("hallucinated_tool:fake_tool".to_string()));
+}
+
+#[test]
+fn test_filter_hallucinated_tools_passes_known() {
+    let registry = registry_with("web_read");
+    let msg = ChatMessage::assistant_tool_calls(vec![make_tool_call("web_read")]);
+    let result = mock_agent_result(vec![msg], None);
+    let rejection = filter_hallucinated_tools(&result, &registry);
+    assert_eq!(rejection, None);
+}
+
+// ---------------------------------------------------------------------------
+// filter_no_reasoning
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_filter_no_reasoning_rejects_empty() {
+    let result = mock_agent_result(vec![], None);
+    assert_eq!(filter_no_reasoning(&result), Some("no_reasoning_steps".to_string()));
+}
+
+#[test]
+fn test_filter_no_reasoning_rejects_empty_response() {
+    let result = mock_agent_result(vec![ChatMessage::user("hi")], Some("".to_string()));
+    assert_eq!(filter_no_reasoning(&result), Some("no_reasoning_steps".to_string()));
+}
+
+#[test]
+fn test_filter_no_reasoning_passes_with_tools() {
+    let msg = ChatMessage::assistant_tool_calls(vec![make_tool_call("web_read")]);
+    let result = mock_agent_result(vec![msg], None);
+    assert_eq!(filter_no_reasoning(&result), None);
+}
+
+#[test]
+fn test_filter_no_reasoning_passes_with_text() {
+    let result = mock_agent_result(vec![], Some("This is a substantive response".to_string()));
+    assert_eq!(filter_no_reasoning(&result), None);
+}
+
+// ---------------------------------------------------------------------------
+// filter_error_only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_filter_error_only_rejects_all_errors() {
+    let msgs = vec![
+        ChatMessage::tool_result("tc1", "Error: something went wrong"),
+        ChatMessage::tool_result("tc2", "Error: another failure"),
+    ];
+    let result = mock_agent_result(msgs, None);
+    assert_eq!(filter_error_only(&result), Some("error_only_trajectory".to_string()));
+}
+
+#[test]
+fn test_filter_error_only_passes_mixed() {
+    let msgs = vec![
+        ChatMessage::tool_result("tc1", "Error: something went wrong"),
+        ChatMessage::tool_result("tc2", "Success: file read successfully"),
+    ];
+    let result = mock_agent_result(msgs, None);
+    assert_eq!(filter_error_only(&result), None);
+}
+
+#[test]
+fn test_filter_error_only_passes_no_tool_results() {
+    // No tool result messages — not an error-only trajectory
+    let result = mock_agent_result(vec![ChatMessage::user("hi")], None);
+    assert_eq!(filter_error_only(&result), None);
+}
+
+// ---------------------------------------------------------------------------
+// filter_secrets_in_output
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_filter_secrets_detects_api_key() {
+    let msgs = vec![ChatMessage::tool_result(
+        "tc1",
+        "Response: api_key=sk-live-abcdefghijklmnopqrstuvwxyz1234",
+    )];
+    let result = mock_agent_result(msgs, None);
+    assert_eq!(filter_secrets_in_output(&result), Some("secrets_in_output".to_string()));
+}
+
+#[test]
+fn test_filter_secrets_detects_bearer_jwt() {
+    let msgs = vec![ChatMessage::tool_result(
+        "tc1",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.signature",
+    )];
+    let result = mock_agent_result(msgs, None);
+    assert_eq!(filter_secrets_in_output(&result), Some("secrets_in_output".to_string()));
+}
+
+#[test]
+fn test_filter_secrets_detects_aws_key() {
+    let msgs = vec![ChatMessage::tool_result(
+        "tc1",
+        "Found key: AKIAIOSFODNN7EXAMPLE in config",
+    )];
+    let result = mock_agent_result(msgs, None);
+    assert_eq!(filter_secrets_in_output(&result), Some("secrets_in_output".to_string()));
+}
+
+#[test]
+fn test_filter_secrets_passes_clean_output() {
+    let msgs = vec![ChatMessage::tool_result("tc1", "File contents: hello world")];
+    let result = mock_agent_result(msgs, None);
+    assert_eq!(filter_secrets_in_output(&result), None);
+}
+
+// ---------------------------------------------------------------------------
+// run_filters
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_run_filters_collects_all_reasons() {
+    // AgentResult with no tool calls and empty final_response triggers no_reasoning.
+    // Also inject all-error tool results to also trigger error_only.
+    // But error_only requires Tool role messages, while no_reasoning checks tool_calls field.
+    // Craft a result that triggers BOTH: no tool_calls on assistant msg + all Tool results error.
+    let msgs = vec![
+        ChatMessage::tool_result("tc1", "Error: failed"),
+    ];
+    let result = mock_agent_result(msgs, None);
+    let registry = registry_with("web_read");
+    let quality = run_filters(&result, &registry);
+    assert!(!quality.passed);
+    // Should contain no_reasoning_steps (no tool_calls, empty final_response)
+    // AND error_only_trajectory (all tool results are errors)
+    assert!(quality.reasons.contains(&"no_reasoning_steps".to_string()), "expected no_reasoning_steps in {:?}", quality.reasons);
+    assert!(quality.reasons.contains(&"error_only_trajectory".to_string()), "expected error_only_trajectory in {:?}", quality.reasons);
+}
+
+#[test]
+fn test_run_filters_passes_clean_result() {
+    let registry = registry_with("web_read");
+    let msgs = vec![
+        ChatMessage::assistant_tool_calls(vec![make_tool_call("web_read")]),
+        ChatMessage::tool_result("tc1", "Page content: hello world"),
+    ];
+    let result = mock_agent_result(msgs, Some("I found the information you need.".to_string()));
+    let quality = run_filters(&result, &registry);
+    assert!(quality.passed, "expected passed=true, got reasons: {:?}", quality.reasons);
+    assert!(quality.reasons.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// runner tests (Task 2)
+// ---------------------------------------------------------------------------
+
+use super::runner::reject_file_path;
+use std::path::PathBuf;
+
+#[test]
+fn test_reject_file_path_derivation() {
+    let output = PathBuf::from("results/output.jsonl");
+    let reject = reject_file_path(&output);
+    assert_eq!(reject, PathBuf::from("results/output_rejected.jsonl"));
+}
+
+#[test]
+fn test_batch_run_record_serialization() {
+    let record = BatchRunRecord {
+        id: "abc123".to_string(),
+        input_file: "test.jsonl".to_string(),
+        output_file: "output.jsonl".to_string(),
+        total_entries: 10,
+        completed: 10,
+        passed: 8,
+        rejected: 2,
+        started_at: "2026-04-10T00:00:00Z".to_string(),
+        finished_at: Some("2026-04-10T00:05:00Z".to_string()),
+        status: "completed".to_string(),
+    };
+    let json = serde_json::to_string(&record).unwrap();
+    assert!(json.contains("\"passed\":8"));
+    assert!(json.contains("\"rejected\":2"));
+    let parsed: BatchRunRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.passed, 8);
 }

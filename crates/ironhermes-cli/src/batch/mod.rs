@@ -2,6 +2,7 @@ pub mod types;
 pub mod runner;
 pub mod checkpoint;
 pub mod sharegpt;
+pub mod filters;
 #[cfg(test)]
 mod tests;
 

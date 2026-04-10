@@ -13,8 +13,9 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use super::checkpoint::{load_checkpoint, prompt_hash, save_checkpoint};
+use super::filters;
 use super::sharegpt::messages_to_sharegpt;
-use super::types::{BatchEntry, BatchRunRecord, CheckpointEntry, QualityResult, TrajectoryLine, UsageInfo};
+use super::types::{BatchEntry, BatchRunRecord, CheckpointEntry, TrajectoryLine, UsageInfo};
 
 /// Run batch prompt execution from JSONL input (D-01).
 pub async fn cmd_run(
@@ -226,9 +227,16 @@ pub async fn cmd_run(
             }
             messages.push(ChatMessage::user(&entry.prompt));
 
-            let agent = AgentLoop::new(client, registry, max_turns);
+            let agent = AgentLoop::new(client, registry.clone(), max_turns);
             match agent.run(messages).await {
                 Ok(result) => {
+                    // Run quality filters (D-12, D-13)
+                    let quality = filters::run_filters(&result, &registry);
+                    let rejection_reason = if quality.passed {
+                        None
+                    } else {
+                        Some(quality.reasons.join("; "))
+                    };
                     let conversations = messages_to_sharegpt(&result.messages);
                     let trajectory = TrajectoryLine {
                         id: hash_clone.clone(),
@@ -239,12 +247,9 @@ pub async fn cmd_run(
                             completion_tokens: result.total_usage.completion_tokens,
                         },
                         turns: result.turns_used,
-                        quality: QualityResult {
-                            passed: true,
-                            reasons: vec![],
-                        },
+                        quality,
                         conversations,
-                        rejection_reason: None,
+                        rejection_reason,
                     };
                     let _ = tx.send((trajectory, hash_clone)).await;
                 }
@@ -399,6 +404,13 @@ pub async fn cmd_list() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Derive reject file path from output path: foo.jsonl -> foo_rejected.jsonl (D-11).
+pub fn reject_file_path(output: &std::path::Path) -> std::path::PathBuf {
+    let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+    let parent = output.parent().unwrap_or(std::path::Path::new("."));
+    parent.join(format!("{}_rejected.jsonl", stem))
 }
 
 // =============================================================================
