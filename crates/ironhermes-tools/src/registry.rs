@@ -72,6 +72,24 @@ impl ToolRegistry {
         name: &str,
         args: serde_json::Value,
     ) -> anyhow::Result<String> {
+        self.dispatch_with_hook(name, args, None::<fn(&str, &str)>).await
+    }
+
+    /// Dispatch a tool call, optionally firing a hook after the guardrail chain permits
+    /// but before the tool executes.
+    ///
+    /// The `post_guardrail_hook` closure is called with `(tool_name, args_str)` only when
+    /// every guardrail returns Allow or Warn — never when a guardrail blocks. This ensures
+    /// `ToolCalled` hook events are emitted only for permitted calls (HOOK-01 ordering fix).
+    pub async fn dispatch_with_hook<F>(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        post_guardrail_hook: Option<F>,
+    ) -> anyhow::Result<String>
+    where
+        F: FnOnce(&str, &str),
+    {
         let tool = self
             .tools
             .get(name)
@@ -106,6 +124,13 @@ impl ToolRegistry {
                     return Err(anyhow::anyhow!("{}", error_msg));
                 }
             }
+        }
+
+        // All guardrails passed — fire the post-guardrail hook before execution.
+        // This is where ToolCalled events should be emitted (after permit, before execute).
+        let args_str = args.to_string();
+        if let Some(hook) = post_guardrail_hook {
+            hook(name, &args_str);
         }
 
         tool.execute(args).await

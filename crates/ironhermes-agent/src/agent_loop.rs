@@ -125,15 +125,9 @@ impl AgentLoop {
 
         info!(max_iterations = self.max_iterations, "Starting agent loop");
 
-        // Fire message_received hook (HOOK-01)
-        if let Some(last_user_msg) = messages.iter().rev().find(|m| m.role == ironhermes_core::Role::User) {
-            let content_text = last_user_msg.content_text().unwrap_or("");
-            self.fire_hook(HookEventKind::MessageReceived {
-                platform: "agent".to_string(),
-                chat_id: String::new(),
-                content_preview: ironhermes_hooks::event::preview(content_text, 200),
-            });
-        }
+        // Note: MessageReceived is NOT fired here. It is fired by the platform layer
+        // (handler.rs for Telegram, runner.rs for cron) which knows the real platform
+        // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
         loop {
             if turns_used >= self.max_iterations {
@@ -195,14 +189,9 @@ impl AgentLoop {
             }
         }
 
-        // Fire response_sent hook (HOOK-01)
-        if let Some(ref response) = final_response {
-            self.fire_hook(HookEventKind::ResponseSent {
-                platform: "agent".to_string(),
-                chat_id: String::new(),
-                response_preview: ironhermes_hooks::event::preview(response, 200),
-            });
-        }
+        // Note: ResponseSent is NOT fired here. It is fired by the platform layer
+        // (handler.rs for Telegram, runner.rs for cron) which knows the real platform
+        // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
         Ok(AgentResult {
             messages,
@@ -313,11 +302,8 @@ impl AgentLoop {
 
         debug!(tool = %name, "Executing tool call");
 
-        // Fire tool_called hook (HOOK-01)
-        self.fire_hook(HookEventKind::ToolCalled {
-            tool_name: name.to_string(),
-            args_preview: ironhermes_hooks::event::preview(args_str, 200),
-        });
+        // ToolCalled hook is fired AFTER guardrails permit — never for blocked tools.
+        // We pass it as a post-guardrail callback into dispatch_with_hook (Issue #3 fix).
 
         let args: serde_json::Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
@@ -328,8 +314,22 @@ impl AgentLoop {
             }
         };
 
+        let hook_registry = self.hook_registry.clone();
+        let post_guardrail_hook = move |tool: &str, args_preview_str: &str| {
+            if let Some(ref registry) = hook_registry {
+                let event = ironhermes_hooks::HookEvent::new(
+                    &uuid::Uuid::new_v4().to_string(),
+                    HookEventKind::ToolCalled {
+                        tool_name: tool.to_string(),
+                        args_preview: ironhermes_hooks::event::preview(args_preview_str, 200),
+                    },
+                );
+                registry.fire(event);
+            }
+        };
+
         let tool_start = std::time::Instant::now();
-        let dispatch_result = self.registry.dispatch(name, args).await;
+        let dispatch_result = self.registry.dispatch_with_hook(name, args, Some(post_guardrail_hook)).await;
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
         match dispatch_result {
