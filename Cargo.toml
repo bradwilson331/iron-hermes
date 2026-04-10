@@ -8,6 +8,7 @@ members = [
     "crates/ironhermes-gateway",
     "crates/ironhermes-cron",
     "crates/ironhermes-hooks",
+    "crates/ironhermes-exec",
 ]
 resolver = "2"
 

@@ -16,6 +16,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     // SKILL-08: skills subsystem configuration (07.2 D-17, D-18)
     pub skills: SkillsConfig,
+    // EXEC-01..04: code execution sandbox configuration
+    pub exec: ExecConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +212,35 @@ impl Default for SkillsConfig {
     }
 }
 
+// =============================================================================
+// ExecConfig (EXEC-01..04)
+// =============================================================================
+
+/// Code execution sandbox configuration (D-03, D-12, D-13, D-14).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExecConfig {
+    /// Path to the Python interpreter. Default: "python3". (D-03)
+    pub python_path: String,
+    /// Timeout in seconds. Default: 300 (5 minutes). (D-12)
+    pub timeout_secs: u64,
+    /// Maximum RPC calls per execution. Default: 50. (D-13)
+    pub max_rpc_calls: u32,
+    /// Maximum stdout bytes before truncation. Default: 50000 (50KB). (D-14)
+    pub max_output_bytes: usize,
+}
+
+impl Default for ExecConfig {
+    fn default() -> Self {
+        Self {
+            python_path: "python3".to_string(),
+            timeout_secs: 300,
+            max_rpc_calls: 50,
+            max_output_bytes: 50_000,
+        }
+    }
+}
+
 impl Config {
     /// Load config from the IronHermes home directory.
     pub fn load() -> anyhow::Result<Self> {
@@ -327,6 +358,34 @@ skills:
         assert_eq!(config.skills.extra_paths.len(), 2);
         assert_eq!(config.skills.extra_paths[0], PathBuf::from("/tmp/custom-skills"));
         assert_eq!(config.skills.extra_paths[1], PathBuf::from("/opt/shared/skills"));
+    }
+
+    #[test]
+    fn test_exec_config_default() {
+        let default = ExecConfig::default();
+        assert_eq!(default.python_path, "python3");
+        assert_eq!(default.timeout_secs, 300);
+        assert_eq!(default.max_rpc_calls, 50);
+        assert_eq!(default.max_output_bytes, 50_000);
+    }
+
+    #[test]
+    fn test_config_default_includes_exec() {
+        let config = Config::default();
+        assert_eq!(config.exec.python_path, "python3");
+        assert_eq!(config.exec.timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_config_parses_without_exec_section() {
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.exec.python_path, "python3");
+        assert_eq!(config.exec.timeout_secs, 300);
     }
 
     #[test]
