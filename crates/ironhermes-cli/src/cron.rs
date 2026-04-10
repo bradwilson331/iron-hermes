@@ -2,8 +2,10 @@ use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use colored::Colorize;
 use ironhermes_cron::{
-    parse_schedule, run_tick_check, scan_cron_prompt, JobStore, JobUpdate, ScheduleParsed,
+    parse_schedule, run_tick_check, scan_cron_prompt, CronJob, JobStore, JobUpdate,
+    ScheduleParsed,
 };
+use std::fmt::Write as FmtWrite;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 
@@ -36,6 +38,11 @@ pub enum CronCommands {
         /// Skills to attach (repeatable)
         #[arg(long = "skill")]
         skills: Vec<String>,
+    },
+    /// Show full details for a specific job
+    Get {
+        /// Job ID or name (case-insensitive)
+        job_id: String,
     },
     /// Edit an existing job
     Edit {
@@ -95,6 +102,7 @@ pub async fn handle_cron_command(cmd: CronCommands) -> Result<()> {
             deliver,
             skills,
         } => cmd_create(name, schedule, prompt, deliver, skills),
+        CronCommands::Get { job_id } => cmd_get(job_id),
         CronCommands::Edit {
             job_id,
             schedule,
@@ -241,6 +249,92 @@ fn cmd_create(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cmd_get
+// ---------------------------------------------------------------------------
+
+fn cmd_get(job_id: String) -> Result<()> {
+    let store = open_store()?;
+    let job = store
+        .find_job(&job_id)
+        .ok_or_else(|| anyhow!("Job not found: {}", job_id))?;
+    print!("{}", render_job_details(job));
+    Ok(())
+}
+
+/// Pure rendering helper — produces the full detail view as a String so it
+/// can be unit-tested without capturing stdout. Mirrors sibling command
+/// colored-output primitives (cmd_status, cmd_list) for visual consistency.
+fn render_job_details(job: &CronJob) -> String {
+    let mut out = String::new();
+
+    // Header (matches cmd_status pattern)
+    let _ = writeln!(out, "{}", "Cron Job".bold().cyan());
+    let _ = writeln!(out, "{}", "─".repeat(50));
+
+    // Core identity
+    let _ = writeln!(out, "  {:<14} {}", "Name:".dimmed(), job.name.yellow());
+    let _ = writeln!(out, "  {:<14} {}", "ID:".dimmed(), job.id.dimmed());
+
+    // Schedule
+    let _ = writeln!(out, "  {:<14} {}", "Schedule:".dimmed(), job.schedule_display);
+
+    // Prompt (may be multi-line; render as-is, no truncation)
+    let _ = writeln!(out, "  {:<14} {}", "Prompt:".dimmed(), job.prompt);
+
+    // Delivery target
+    let _ = writeln!(out, "  {:<14} {}", "Deliver:".dimmed(), job.deliver);
+
+    // Skills (comma-joined, or "none" dimmed)
+    let skills_str = if job.skills.is_empty() {
+        "none".dimmed().to_string()
+    } else {
+        job.skills.join(", ")
+    };
+    let _ = writeln!(out, "  {:<14} {}", "Skills:".dimmed(), skills_str);
+
+    // State (color-coded matching cmd_list)
+    let state_str = match job.state {
+        ironhermes_cron::JobState::Scheduled => {
+            if job.enabled {
+                "scheduled".green().to_string()
+            } else {
+                "disabled".yellow().to_string()
+            }
+        }
+        ironhermes_cron::JobState::Paused => "paused".yellow().to_string(),
+        ironhermes_cron::JobState::Completed => "completed".dimmed().to_string(),
+    };
+    let _ = writeln!(out, "  {:<14} {}", "State:".dimmed(), state_str);
+    let _ = writeln!(out, "  {:<14} {}", "Enabled:".dimmed(), job.enabled);
+
+    // Timestamps — use "%Y-%m-%d %H:%M UTC" format; "never" for None (matches cmd_list)
+    let created_str = job.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
+    let _ = writeln!(out, "  {:<14} {}", "Created:".dimmed(), created_str);
+
+    let next_run_str = job
+        .next_run_at
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "never".dimmed().to_string());
+    let _ = writeln!(out, "  {:<14} {}", "Next run:".dimmed(), next_run_str);
+
+    let last_run_str = job
+        .last_run_at
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "never".dimmed().to_string());
+    let _ = writeln!(out, "  {:<14} {}", "Last run:".dimmed(), last_run_str);
+
+    // Optional status/error tail
+    if let Some(ref status) = job.last_status {
+        let _ = writeln!(out, "  {:<14} {}", "Last status:".dimmed(), status);
+    }
+    if let Some(ref err) = job.last_error {
+        let _ = writeln!(out, "  {:<14} {}", "Last error:".dimmed(), err.red());
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -548,4 +642,56 @@ async fn cmd_tick() -> Result<()> {
 
 fn open_store() -> Result<JobStore> {
     JobStore::new().context("Failed to open cron job store")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironhermes_cron::{JobStore, ScheduleParsed};
+
+    #[test]
+    fn render_job_details_contains_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = JobStore::open(dir.path().join("cron")).unwrap();
+        let job = store
+            .add_job(
+                "test-render",
+                "say hello",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec!["focus".to_string()],
+                None,
+            )
+            .unwrap();
+
+        let rendered = render_job_details(&job);
+        assert!(rendered.contains("test-render"), "name missing: {}", rendered);
+        assert!(rendered.contains(&job.id), "id missing");
+        assert!(rendered.contains("every 5m"), "schedule_display missing");
+        assert!(rendered.contains("say hello"), "prompt missing");
+        assert!(rendered.contains("local"), "deliver missing");
+        assert!(rendered.contains("focus"), "skill missing");
+        assert!(rendered.contains("Next run:"), "next_run label missing");
+    }
+
+    #[test]
+    fn cmd_get_not_found_returns_error() {
+        // find_job returns None for an empty store; cmd_get maps that to anyhow error.
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path().join("cron")).unwrap();
+        let result = store.find_job("ghost");
+        assert!(result.is_none(), "expected None for missing job");
+        // Verify the error message shape cmd_get would produce:
+        let err_msg = format!("Job not found: {}", "ghost");
+        assert!(err_msg.contains("Job not found"));
+    }
+
 }

@@ -32,3 +32,6 @@ rustyline = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 dotenvy = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
