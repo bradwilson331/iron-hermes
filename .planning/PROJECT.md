@@ -100,4 +100,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-08 after v1.1 Automation milestone scope confirmed (6 features)*
+*Last updated: 2026-04-09 — Phase 07.3 complete (cron tick now executes via real AgentLoop and fires MessageReceived/ResponseSent hooks, achieving parity with Telegram-triggered runs)*
