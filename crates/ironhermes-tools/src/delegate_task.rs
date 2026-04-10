@@ -110,6 +110,8 @@ pub fn build_child_registry(
                     registry.register(Box::new(
                         crate::memory_tool::MemoryTool::new_read_only(store.clone()),
                     ));
+                } else {
+                    tracing::warn!("memory tool requested but no MemoryStore available; skipping");
                 }
             }
 
