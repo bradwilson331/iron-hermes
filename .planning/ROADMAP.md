@@ -216,12 +216,13 @@ Plans:
   2. Batch output is written in ShareGPT format (human/assistant/tool roles) that loads correctly into a HuggingFace dataset viewer
   3. Restarting a batch job mid-run resumes from where it stopped — already-completed entries (identified by content hash) are not re-run
   4. Trajectories where the agent hallucinated a tool name or produced a response with no reasoning steps are automatically filtered from output
-**Plans**: 3 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 10-01-PLAN.md — BatchConfig, CLI subcommand skeleton, types, parallel runner, ShareGPT output, checkpointing
 - [x] 10-02-PLAN.md — Quality filter pipeline (4 criteria), reject file routing, status/cancel/list commands
-- [ ] 10-03-PLAN.md — Gap closure: cancel sentinel cleanup, no_reasoning filter tightening, secrets filter assistant scanning
+- [x] 10-03-PLAN.md — Gap closure: cancel sentinel cleanup, no_reasoning filter tightening, secrets filter assistant scanning
+- [ ] 10-04-PLAN.md — Gap closure: cancel sentinel race condition fix, no_reasoning content-length fallback
 
 
 ## Coverage
@@ -278,4 +279,4 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 07.5. Skills Housekeeping | v1.1 | 2/2 | Complete    | 2026-04-10 |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/2 | Planned | - |
-| 10. Batch Processing | v1.1 | 2/3 | Gap closure | - |
+| 10. Batch Processing | v1.1 | 3/4 | UAT Gaps   | 2026-04-10 |
