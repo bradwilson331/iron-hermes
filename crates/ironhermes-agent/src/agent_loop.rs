@@ -337,6 +337,55 @@ impl AgentLoop {
             }
         };
 
+        // SKILL-06 / D-04..D-09: enforce allowed_tools from active skills
+        {
+            let skills = self.active_skills.lock().unwrap_or_else(|e| e.into_inner());
+            // D-04: only enforce when at least one skill has allowed_tools
+            let restricting_skills: Vec<&ironhermes_core::SkillRecord> = skills
+                .iter()
+                .filter(|s| s.allowed_tools.is_some())
+                .collect();
+
+            if !restricting_skills.is_empty() {
+                // D-05: union of all allowed_tools lists
+                let mut allowed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                for skill in &restricting_skills {
+                    if let Some(ref tools) = skill.allowed_tools {
+                        for t in tools {
+                            allowed.insert(t.as_str());
+                        }
+                    }
+                }
+                // D-07: skills tool is always permitted
+                allowed.insert("skills");
+
+                if !allowed.contains(name.as_str()) {
+                    // D-09: actionable error message
+                    let mut allowed_list: Vec<&str> = allowed.into_iter().collect();
+                    allowed_list.sort();
+                    let err_msg = format!(
+                        "Tool '{}' is not permitted by the active skill set. Allowed tools: [{}]. \
+                         Activate a skill that permits '{}' or deactivate the restricting skill.",
+                        name,
+                        allowed_list.join(", "),
+                        name,
+                    );
+                    warn!(tool = %name, "Skill enforcement blocked tool call");
+
+                    // D-08: same pattern as guardrail block — fire ToolCompleted{success:false},
+                    // do NOT fire ToolCalled
+                    self.fire_hook(HookEventKind::ToolCompleted {
+                        tool_name: name.to_string(),
+                        success: false,
+                        result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
+                        duration_ms: 0,
+                    });
+
+                    return err_msg;
+                }
+            }
+        }
+
         // D-05 Step 1: check guardrails WITHOUT executing the tool.
         let decision = self.registry.check_guardrails(name, &args);
 
@@ -680,6 +729,148 @@ mod hooks_ordering_tests {
     /// We search for the fire_hook call patterns specifically so the assertion strings
     /// themselves (which mention the type names for documentation purposes) do not
     /// cause false positives.
+    // -----------------------------------------------------------------------
+    // Skill enforcement tests (SKILL-06 / 07.5-01 Task 2)
+    // -----------------------------------------------------------------------
+
+    fn make_skill_record(name: &str, allowed_tools: Option<Vec<&str>>) -> ironhermes_core::SkillRecord {
+        ironhermes_core::SkillRecord {
+            name: name.to_string(),
+            description: format!("{} skill", name),
+            path: std::path::PathBuf::from("/tmp/fake"),
+            platforms: None,
+            compatibility: None,
+            allowed_tools: allowed_tools.map(|v| v.into_iter().map(|s| s.to_string()).collect()),
+            metadata: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_skill_enforcement_blocks_unlisted_tool() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        // Pre-populate active_skills with a restrictive skill
+        {
+            let mut skills = agent.active_skills.lock().unwrap();
+            skills.push(make_skill_record("focus", Some(vec!["web_read"])));
+        }
+
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert!(
+            result.contains("not permitted by the active skill set"),
+            "blocked tool should get enforcement error, got: {result}"
+        );
+        assert!(
+            result.contains("Allowed tools"),
+            "error should list allowed tools, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_enforcement_allows_listed_tool() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        {
+            let mut skills = agent.active_skills.lock().unwrap();
+            skills.push(make_skill_record("focus", Some(vec!["mock"])));
+        }
+
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert_eq!(result, "mock result", "listed tool should execute normally");
+    }
+
+    #[tokio::test]
+    async fn test_skill_enforcement_inactive_means_all_allowed() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        // No active skills — everything is allowed
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert_eq!(result, "mock result", "no active skills = all tools allowed");
+    }
+
+    #[tokio::test]
+    async fn test_skill_enforcement_skills_tool_always_allowed() {
+        let mut tool_registry = ToolRegistry::new();
+        // Register a mock tool named "skills" to simulate the skills tool
+        struct SkillsMockTool;
+        #[async_trait]
+        impl Tool for SkillsMockTool {
+            fn name(&self) -> &str { "skills" }
+            fn toolset(&self) -> &str { "test" }
+            fn description(&self) -> &str { "mock skills" }
+            fn schema(&self) -> ToolSchema {
+                ToolSchema::new("skills", "mock skills", serde_json::json!({"type": "object", "properties": {}}))
+            }
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+                Ok("skills result".to_string())
+            }
+        }
+        tool_registry.register(Box::new(SkillsMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        {
+            let mut skills = agent.active_skills.lock().unwrap();
+            skills.push(make_skill_record("focus", Some(vec!["web_read"])));
+        }
+
+        let result = agent.execute_tool_call(&tool_call("skills")).await;
+        assert_eq!(result, "skills result", "skills tool must always be permitted (D-07)");
+    }
+
+    #[tokio::test]
+    async fn test_skill_enforcement_union_of_multiple_skills() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool)); // name = "mock"
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        {
+            let mut skills = agent.active_skills.lock().unwrap();
+            skills.push(make_skill_record("skill-a", Some(vec!["web_read"])));
+            skills.push(make_skill_record("skill-b", Some(vec!["memory"])));
+        }
+
+        // "mock" is not in the union {web_read, memory, skills} -> should be blocked
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert!(
+            result.contains("not permitted"),
+            "tool not in union should be blocked, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_enforcement_none_allowed_tools_ignored() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+
+        {
+            let mut skills = agent.active_skills.lock().unwrap();
+            // Skill with None allowed_tools — does not restrict (D-06)
+            skills.push(make_skill_record("non-restricting", None));
+            // Skill with Some allowed_tools — restricts to web_read only
+            skills.push(make_skill_record("restricting", Some(vec!["web_read"])));
+        }
+
+        // "mock" is not in allowed set -> blocked because the restricting skill is active
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert!(
+            result.contains("not permitted"),
+            "tool should be blocked when any skill restricts, got: {result}"
+        );
+    }
+
     #[tokio::test]
     async fn test_agent_loop_source_has_no_message_received_or_response_sent_fires() {
         let src = include_str!("agent_loop.rs");

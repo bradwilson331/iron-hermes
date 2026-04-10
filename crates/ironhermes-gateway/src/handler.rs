@@ -48,6 +48,7 @@ pub struct GatewayMessageHandler {
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
+    active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
     rate_limiter: PerUserRateLimiter,
 }
 
@@ -68,6 +69,7 @@ impl GatewayMessageHandler {
             memory_store: None,
             hook_registry: None,
             skill_registry: None,
+            active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             rate_limiter,
         }
     }
@@ -358,7 +360,8 @@ impl GatewayMessageHandler {
 
         let mut agent = AgentLoop::new(client, self.tool_registry.clone(), max_turns)
             .with_streaming(stream_callback)
-            .with_tool_progress(tool_callback);
+            .with_tool_progress(tool_callback)
+            .with_active_skills(self.active_skills.clone());
 
         if let Some(ref registry) = self.hook_registry {
             agent = agent.with_hook_registry(registry.clone());
