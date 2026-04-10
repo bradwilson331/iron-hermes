@@ -243,8 +243,8 @@ impl Tool for DelegateTaskTool {
             }
         };
 
-        if waited {
-            Ok(format!("[Waited for subagent slot]\n{}", response))
+        if wait_duration > std::time::Duration::from_millis(50) {
+            Ok(format!("[Waited {}ms for subagent slot]\n{}", wait_duration.as_millis(), response))
         } else {
             Ok(response)
         }
