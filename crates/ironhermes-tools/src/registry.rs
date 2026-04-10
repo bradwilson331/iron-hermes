@@ -242,6 +242,22 @@ impl ToolRegistry {
         use crate::skills_tool::SkillsTool;
         self.register(Box::new(SkillsTool::new(registry, active_skills)));
     }
+
+    /// Register the execute_code tool with a separate RPC dispatch registry.
+    ///
+    /// `rpc_registry` must contain ONLY D-07 safe tools (no terminal, no execute_code).
+    /// This is built separately from the main registry to structurally prevent recursion
+    /// and terminal access from sandboxed scripts.
+    ///
+    /// Called AFTER all other tools are registered but BEFORE wrapping in Arc.
+    pub fn register_execute_code_tool(
+        &mut self,
+        rpc_registry: Arc<ToolRegistry>,
+        config: ironhermes_core::ExecConfig,
+    ) {
+        use crate::execute_code::ExecuteCodeTool;
+        self.register(Box::new(ExecuteCodeTool::new(rpc_registry, config)));
+    }
 }
 
 impl Default for ToolRegistry {

@@ -10,6 +10,7 @@ description = "Tool registry and implementations for IronHermes"
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
+ironhermes-exec = { path = "../ironhermes-exec" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
