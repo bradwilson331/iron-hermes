@@ -110,7 +110,12 @@ impl Tool for TerminalTool {
                 .map_err(|_| anyhow::anyhow!("Command timed out after {}s", timeout_secs))??;
 
         if result.len() > MAX_OUTPUT_LEN {
-            let truncated = &result[..MAX_OUTPUT_LEN];
+            // Find the nearest char boundary at or before MAX_OUTPUT_LEN
+            let mut end = MAX_OUTPUT_LEN;
+            while !result.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = &result[..end];
             Ok(format!("{}\n[truncated]", truncated))
         } else {
             Ok(result)
