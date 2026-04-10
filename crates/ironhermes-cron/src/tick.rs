@@ -50,6 +50,12 @@ pub async fn run_tick_check(
         let mut store_guard = store
             .lock()
             .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
+        // Gap closure (UAT test 13): re-read jobs.json so CLI-created/edited
+        // jobs are observable within the gateway's long-running tick loop.
+        // Reload happens UNDER the existing tick-lock + store-mutex combo,
+        // so writers racing with readers are still serialized by the store
+        // mutex on this process and by the tick file-lock across processes.
+        store_guard.reload()?;
         let total_enabled = store_guard
             .list_jobs()
             .iter()
@@ -191,5 +197,78 @@ mod tests {
         let t = target.unwrap();
         assert_eq!(t.platform, "telegram");
         assert_eq!(t.chat_id, "99999");
+    }
+
+    #[tokio::test]
+    async fn tick_observes_external_job_writes() {
+        use crate::store::JobStore;
+        use chrono::{Duration, Utc};
+        use std::fs;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let store = Arc::new(Mutex::new(
+            JobStore::open(cron_dir.clone()).expect("open store"),
+        ));
+
+        // Force tick lock to a distinct location so this test doesn't stomp on a
+        // real hermes home. The tick lock uses get_hermes_home() — to isolate,
+        // set IRONHERMES_HOME for the duration of the test.
+        let original_home = std::env::var("IRONHERMES_HOME").ok();
+        // SAFETY: test harness, single-threaded tokio runtime
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", dir.path());
+        }
+
+        // First tick: empty store, no due jobs
+        let (due1, _result1, _lock1) = run_tick_check(&store).await.expect("first tick");
+        assert!(due1.is_empty(), "expected no due jobs on empty store");
+        drop(_lock1); // release the file lock before second tick
+
+        // External writer: drop a due job directly into jobs.json (bypassing save()).
+        // Note the snake_case serde tags (#[serde(rename_all = "snake_case")]).
+        let past = Utc::now() - Duration::seconds(30);
+        let past_str = past.to_rfc3339();
+        let external_json = format!(
+            r#"[{{
+                "id": "ext-due-1",
+                "name": "external-due",
+                "prompt": "hi",
+                "skills": [],
+                "schedule": {{ "kind": "interval", "minutes": 5, "display": "every 5m" }},
+                "schedule_display": "every 5m",
+                "repeat": {{ "times": null, "completed": 0 }},
+                "enabled": true,
+                "state": "scheduled",
+                "paused_at": null,
+                "paused_reason": null,
+                "deliver": "local",
+                "origin": null,
+                "created_at": "{past_ts}",
+                "next_run_at": "{past_ts}",
+                "last_run_at": null,
+                "last_status": null,
+                "last_error": null
+            }}]"#,
+            past_ts = past_str
+        );
+        fs::write(cron_dir.join("jobs.json"), external_json).expect("write external");
+
+        // Second tick: reload() inside run_tick_check picks up the external write
+        let (due2, _result2, _lock2) = run_tick_check(&store).await.expect("second tick");
+        assert_eq!(due2.len(), 1, "expected tick to observe external job");
+        assert_eq!(due2[0].id, "ext-due-1");
+        assert_eq!(due2[0].name, "external-due");
+
+        // Restore env var
+        // SAFETY: test harness, single-threaded tokio runtime
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+        }
     }
 }
