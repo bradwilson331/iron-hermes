@@ -551,6 +551,71 @@ mod tests {
     }
 
     #[test]
+    fn test_delegate_task_in_full_registry() {
+        // Integration test: verify delegate_task appears in a fully-populated registry
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+
+        let semaphore = Arc::new(Semaphore::new(3));
+        let config = SubagentConfig::default();
+        let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
+
+        registry.register_delegate_task_tool(runner, semaphore, None, config);
+
+        let tools = registry.list_tools();
+        assert!(
+            tools.contains(&"delegate_task"),
+            "delegate_task must be registered in full registry"
+        );
+        assert!(
+            tools.contains(&"terminal"),
+            "default tools must still be present"
+        );
+        assert!(
+            tools.contains(&"read_file"),
+            "default tools must still be present"
+        );
+    }
+
+    #[test]
+    fn test_no_recursive_delegation() {
+        // AGENT-05 end-to-end: when delegate_task is in the parent registry,
+        // the child registry built by build_child_registry never contains it.
+        let mut parent_registry = ToolRegistry::new();
+        parent_registry.register_defaults();
+        let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
+        parent_registry.register_delegate_task_tool(
+            runner,
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+        );
+        // Parent has delegate_task
+        assert!(parent_registry.list_tools().contains(&"delegate_task"));
+
+        // Child built from DEFAULT_SAFE_TOOLS must NOT have delegate_task
+        let child_tools: Vec<String> = DEFAULT_SAFE_TOOLS.iter().map(|s| s.to_string()).collect();
+        let child_registry =
+            build_child_registry(&child_tools, None, Path::new("/tmp")).unwrap();
+        assert!(
+            !child_registry.list_tools().contains(&"delegate_task"),
+            "AGENT-05: child registry must never contain delegate_task"
+        );
+
+        // Even if explicitly requested, delegate_task is stripped
+        let with_delegate: Vec<String> = vec![
+            "read_file".to_string(),
+            "delegate_task".to_string(),
+        ];
+        let child_registry2 =
+            build_child_registry(&with_delegate, None, Path::new("/tmp")).unwrap();
+        assert!(
+            !child_registry2.list_tools().contains(&"delegate_task"),
+            "AGENT-05: delegate_task must be stripped even when explicitly requested"
+        );
+    }
+
+    #[test]
     fn test_default_safe_tools_contents() {
         assert!(DEFAULT_SAFE_TOOLS.contains(&"read_file"));
         assert!(DEFAULT_SAFE_TOOLS.contains(&"write_file"));
