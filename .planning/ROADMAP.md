@@ -188,8 +188,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 08-01-PLAN.md — ironhermes-exec crate: sandbox, RPC server, hermes_tools.py, ExecConfig
-- [ ] 08-02-PLAN.md — ExecuteCodeTool, CLI/gateway wiring, integration tests
+- [x] 08-01-PLAN.md — ironhermes-exec crate: sandbox, RPC server, hermes_tools.py, ExecConfig
+- [x] 08-02-PLAN.md — ExecuteCodeTool, CLI/gateway wiring, integration tests
 
 #### Phase 9: Subagent Delegation
 **Goal**: Agent can delegate tasks to isolated child agents with restricted toolsets, enforcing concurrency limits and preventing recursive delegation
