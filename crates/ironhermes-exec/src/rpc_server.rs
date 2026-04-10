@@ -139,3 +139,158 @@ impl RpcServer {
         .to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::Sandbox;
+    use crate::{SandboxConfig, ToolDispatch};
+
+    /// Mock dispatch that returns predictable results for testing.
+    struct MockDispatch;
+
+    #[async_trait::async_trait]
+    impl ToolDispatch for MockDispatch {
+        async fn dispatch(
+            &self,
+            tool_name: &str,
+            _args: serde_json::Value,
+        ) -> anyhow::Result<String> {
+            match tool_name {
+                "read_file" => Ok("file contents".into()),
+                "web_search" => Ok("search results".into()),
+                _ => Ok("mock result".into()),
+            }
+        }
+    }
+
+    /// Mock dispatch that always returns errors.
+    struct ErrorDispatch;
+
+    #[async_trait::async_trait]
+    impl ToolDispatch for ErrorDispatch {
+        async fn dispatch(
+            &self,
+            _tool_name: &str,
+            _args: serde_json::Value,
+        ) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!("tool execution failed"))
+        }
+    }
+
+    fn test_config() -> SandboxConfig {
+        SandboxConfig {
+            python_path: "python3".into(),
+            timeout_secs: 30,
+            max_rpc_calls: 50,
+            max_output_bytes: 50_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_tool_call() {
+        let sandbox = Sandbox::new(test_config());
+        let dispatch: Arc<dyn ToolDispatch> = Arc::new(MockDispatch);
+
+        let script = r#"
+from hermes_tools import read_file
+result = read_file("/tmp/test.txt")
+print(result)
+"#;
+        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+
+        assert!(
+            result.stdout.contains("file contents"),
+            "stdout should contain 'file contents', got: {}",
+            result.stdout
+        );
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_call_limit() {
+        let config = SandboxConfig {
+            max_rpc_calls: 5,
+            ..test_config()
+        };
+        let sandbox = Sandbox::new(config);
+        let dispatch: Arc<dyn ToolDispatch> = Arc::new(MockDispatch);
+
+        let script = r#"
+from hermes_tools import web_search, HermesCallLimitError
+
+limit_hit = False
+for i in range(55):
+    try:
+        web_search("q")
+    except HermesCallLimitError:
+        limit_hit = True
+        break
+    except Exception as e:
+        pass
+
+if limit_hit:
+    print("limit hit")
+else:
+    print("limit NOT hit")
+"#;
+        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+
+        assert!(
+            result.stdout.contains("limit hit"),
+            "should detect call limit, got: {}",
+            result.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_error_handling() {
+        let sandbox = Sandbox::new(test_config());
+        let dispatch: Arc<dyn ToolDispatch> = Arc::new(ErrorDispatch);
+
+        let script = r#"
+from hermes_tools import read_file, HermesRpcError
+
+try:
+    read_file("/tmp/test.txt")
+    print("no error")
+except HermesRpcError as e:
+    print(f"caught error: {e}")
+"#;
+        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+
+        assert!(
+            result.stdout.contains("caught error"),
+            "should catch HermesRpcError, got: {}",
+            result.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_method() {
+        let sandbox = Sandbox::new(test_config());
+        let dispatch: Arc<dyn ToolDispatch> = Arc::new(MockDispatch);
+
+        let script = r#"
+from hermes_tools import _call, HermesRpcError
+
+try:
+    _call("execute_code", {})
+    print("no error")
+except HermesRpcError as e:
+    print(f"caught: {e}")
+"#;
+        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+
+        assert!(
+            result.stdout.contains("caught:"),
+            "should catch method not found error, got: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("not found") || result.stdout.contains("Method not found"),
+            "error should mention 'not found', got: {}",
+            result.stdout
+        );
+    }
+}
