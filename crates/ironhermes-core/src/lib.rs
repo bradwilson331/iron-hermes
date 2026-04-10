@@ -7,7 +7,7 @@ pub mod skills;
 pub mod ssrf;
 pub mod types;
 
-pub use config::{Config, ExecConfig, SubagentConfig};
+pub use config::{BatchConfig, Config, ExecConfig, SubagentConfig};
 pub use constants::*;
 pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
 pub use error::{HermesError, Result};
