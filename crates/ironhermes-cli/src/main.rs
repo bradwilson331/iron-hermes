@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
+use ironhermes_agent::{AgentLoop, AgentSubagentRunner, LlmClient, PromptBuilder};
 use ironhermes_core::{ChatMessage, Config, MemoryStore, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
@@ -220,7 +220,18 @@ fn print_check(name: &str, ok: bool) {
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let (client, config) = build_client(cli)?;
-    let registry = build_registry();
+    let mut registry = build_registry();
+
+    // Register delegate_task tool (AGENT-01..05)
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let subagent_runner = Arc::new(AgentSubagentRunner::new(client.clone()));
+    registry.register_delegate_task_tool(
+        subagent_runner,
+        subagent_semaphore,
+        None, // no memory store in single mode
+        config.subagent.clone(),
+    );
+
     let max_turns = cli
         .max_turns
         .unwrap_or(config.agent.max_turns);
@@ -266,7 +277,19 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     print_banner();
 
     let (client, config) = build_client(cli)?;
-    let registry = Arc::new(build_registry());
+    let mut registry = build_registry();
+
+    // Register delegate_task tool (AGENT-01..05)
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let subagent_runner = Arc::new(AgentSubagentRunner::new(client.clone()));
+    registry.register_delegate_task_tool(
+        subagent_runner,
+        subagent_semaphore,
+        None, // no memory store in chat mode
+        config.subagent.clone(),
+    );
+
+    let registry = Arc::new(registry);
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -421,6 +444,21 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     // Register execute_code tool with the RPC dispatch registry
     registry.register_execute_code_tool(rpc_registry, config.exec.clone());
+
+    // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let gateway_client = LlmClient::new(
+        config.resolve_base_url(),
+        config.resolve_api_key().unwrap_or_default(),
+        config.model.default.clone(),
+    );
+    let subagent_runner = Arc::new(AgentSubagentRunner::new(gateway_client));
+    registry.register_delegate_task_tool(
+        subagent_runner,
+        subagent_semaphore,
+        Some(memory_store.clone()),
+        config.subagent.clone(),
+    );
 
     // Load hooks config and wire guardrails (before Arc wrapping)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
