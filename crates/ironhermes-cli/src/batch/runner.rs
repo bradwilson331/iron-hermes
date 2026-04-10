@@ -116,8 +116,11 @@ pub async fn cmd_run(
         .join("batch")
         .join("cancel");
 
-    // Clear stale cancel sentinel from previous run (UAT gap: resume blocked by leftover file)
-    let _ = std::fs::remove_file(&cancel_path);
+    // Timestamp-guarded stale sentinel removal (Plan 04 fix 1):
+    // Only remove the sentinel if it predates process start — a fresh sentinel means
+    // cmd_cancel was issued concurrently and must be honored.
+    let run_start = std::time::SystemTime::now();
+    clean_stale_sentinel(&cancel_path, run_start);
 
     // Run record setup
     let run_id = Uuid::new_v4().to_string();
@@ -199,18 +202,38 @@ pub async fn cmd_run(
     let mut join_set: JoinSet<()> = JoinSet::new();
     let mut cancelled = false;
 
-    for (hash, entry) in pending {
-        // Check cancel sentinel (D-03)
+    'dispatch: for (hash, entry) in pending {
+        // Check cancel sentinel before attempting semaphore acquire (D-03)
         if cancel_path.exists() {
             println!(
                 "{} Cancel sentinel detected — stopping dispatch",
                 "Batch:".yellow()
             );
             cancelled = true;
-            break;
+            break 'dispatch;
         }
 
-        let permit = semaphore.clone().acquire_owned().await?;
+        // Plan 04 fix 2: select!-based cancel polling during semaphore acquire.
+        // If all worker slots are busy, the acquire would block indefinitely and
+        // the cancel sentinel check above would never run. Poll every 500ms so
+        // cancel is detected within 500ms even under full semaphore contention.
+        let permit = loop {
+            tokio::select! {
+                result = semaphore.clone().acquire_owned() => {
+                    break result?;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    if cancel_path.exists() {
+                        println!(
+                            "{} Cancel sentinel detected — stopping dispatch",
+                            "Batch:".yellow()
+                        );
+                        cancelled = true;
+                        break 'dispatch;
+                    }
+                }
+            }
+        };
         let tx = tx.clone();
         let client = LlmClient::new(base_url.clone(), api_key.clone(), model_name.clone());
         let registry = Arc::new({
@@ -407,6 +430,29 @@ pub async fn cmd_list() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Timestamp-guarded cancel sentinel cleanup (Plan 04 fix 1).
+///
+/// Removes the sentinel file only if its mtime predates `run_start`.
+/// A sentinel newer than `run_start` was created by a concurrent `cmd_cancel` and must be honored.
+/// If mtime is unreadable (some platforms) the file is removed to avoid stuck state.
+/// Extracted as a public fn so unit tests can call it directly without spawning a full run.
+pub fn clean_stale_sentinel(cancel_path: &std::path::Path, run_start: std::time::SystemTime) {
+    if cancel_path.exists() {
+        if let Ok(meta) = std::fs::metadata(cancel_path) {
+            if let Ok(mtime) = meta.modified() {
+                if mtime < run_start {
+                    // Stale sentinel from a previous run — safe to remove
+                    let _ = std::fs::remove_file(cancel_path);
+                }
+                // else: fresh sentinel (created after/at process start) — honor it, leave in place
+            } else {
+                // Cannot read mtime (some platforms) — remove to avoid stuck state
+                let _ = std::fs::remove_file(cancel_path);
+            }
+        }
+    }
 }
 
 /// Derive reject file path from output path: foo.jsonl -> foo_rejected.jsonl (D-11).

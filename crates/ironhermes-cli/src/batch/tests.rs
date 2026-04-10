@@ -1,4 +1,4 @@
-// Phase 10 Plan 02 tests — filters + runner integration
+// Phase 10 Plan 04 + Plan 02 tests — filters + runner integration
 use super::types::*;
 use super::checkpoint::*;
 use super::sharegpt::*;
@@ -369,5 +369,97 @@ fn test_run_filters_rejects_text_only_no_tools() {
         quality.reasons.contains(&"no_reasoning_steps".to_string()),
         "expected no_reasoning_steps in {:?}",
         quality.reasons
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 1 (Plan 04): cancel sentinel timestamp-guard regression tests
+// ---------------------------------------------------------------------------
+
+use super::runner::clean_stale_sentinel;
+
+#[test]
+fn test_stale_sentinel_removed_at_startup() {
+    // Create a cancel file with a backdate mtime (2 seconds in the past)
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = dir.path().join("cancel");
+    std::fs::write(&sentinel, "").unwrap();
+
+    // Backdate the file mtime by 2 seconds
+    let two_secs_ago = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(2))
+        .unwrap();
+    let file = std::fs::File::options().write(true).open(&sentinel).unwrap();
+    file.set_modified(two_secs_ago).unwrap();
+    drop(file);
+
+    // run_start is now (after the stale file)
+    let run_start = std::time::SystemTime::now();
+    clean_stale_sentinel(&sentinel, run_start);
+
+    assert!(!sentinel.exists(), "stale sentinel should have been removed");
+}
+
+#[test]
+fn test_fresh_sentinel_preserved_at_startup() {
+    // Create a cancel file with current mtime (fresh — created concurrently)
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = dir.path().join("cancel");
+    std::fs::write(&sentinel, "").unwrap();
+
+    // run_start is 2 seconds in the past — so the file appears newer
+    let run_start = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(2))
+        .unwrap();
+    clean_stale_sentinel(&sentinel, run_start);
+
+    assert!(sentinel.exists(), "fresh sentinel should NOT be removed");
+}
+
+// ---------------------------------------------------------------------------
+// Task 2 (Plan 04): filter_no_reasoning content-length fallback regression tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_filter_no_reasoning_passes_substantive_text() {
+    // A real text-only answer with >=100 chars in an assistant message should pass
+    let sky_answer = "The sky appears blue because of a phenomenon called Rayleigh scattering. \
+        When sunlight enters the atmosphere, it collides with gas molecules. \
+        Blue light has a shorter wavelength and scatters more than red light, \
+        which is why we see a blue sky during the day.";
+    assert!(sky_answer.len() >= 100, "test string must be >=100 chars");
+    let msg = ChatMessage::assistant(sky_answer);
+    let result = mock_agent_result(vec![msg], None);
+    assert_eq!(
+        filter_no_reasoning(&result),
+        None,
+        "substantive text-only answer should pass the no_reasoning filter"
+    );
+}
+
+#[test]
+fn test_filter_no_reasoning_passes_long_final_response() {
+    // No tool calls, but final_response is 150+ chars — should pass
+    let long_response = "The process of photosynthesis is how plants convert sunlight into food. \
+        Using chlorophyll in their leaves, plants absorb carbon dioxide from the air \
+        and water from the soil, then use solar energy to produce glucose and oxygen.";
+    assert!(long_response.len() >= 100, "test string must be >=100 chars");
+    let result = mock_agent_result(vec![], Some(long_response.to_string()));
+    assert_eq!(
+        filter_no_reasoning(&result),
+        None,
+        "long final_response without tool calls should pass"
+    );
+}
+
+#[test]
+fn test_filter_no_reasoning_rejects_short_text_no_tools() {
+    // Short assistant text, no tool calls — must be rejected
+    let msg = ChatMessage::assistant("Sure, I can help with that.");
+    let result = mock_agent_result(vec![msg], None);
+    assert_eq!(
+        filter_no_reasoning(&result),
+        Some("no_reasoning_steps".to_string()),
+        "short text-only response without tool calls should be rejected"
     );
 }

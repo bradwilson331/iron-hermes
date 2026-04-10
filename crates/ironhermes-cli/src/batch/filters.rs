@@ -43,19 +43,41 @@ pub fn filter_hallucinated_tools(result: &AgentResult, registry: &ToolRegistry) 
     None
 }
 
-/// D-12 criterion 2: Reject if result has zero tool calls.
-/// UAT fix: tool use is the primary signal of reasoning in batch agentic trajectories.
-/// Text-only responses (e.g. "How can I help?") are rejected regardless of length.
+/// D-12 criterion 2: Reject if result has no reasoning evidence.
+///
+/// Primary signal: tool calls present (agentic reasoning).
+/// Fallback signal (Plan 04 fix): substantive assistant text (>=100 chars) or a long
+/// final_response field. This restores quality-filter accuracy for text-only prompts
+/// (e.g. "why is the sky blue?") which produce real answers without tool use.
+///
+/// Short/empty text without tool calls is still rejected — those are trivial or error responses.
 pub fn filter_no_reasoning(result: &AgentResult) -> Option<String> {
     let has_tool_calls = result.messages.iter().any(|m| {
         m.tool_calls
             .as_ref()
             .is_some_and(|tc| !tc.is_empty())
     });
-    if !has_tool_calls {
-        return Some("no_reasoning_steps".to_string());
+    if has_tool_calls {
+        return None; // Tool usage = reasoning present
     }
-    None
+
+    // Fallback: accept if the assistant produced substantive text (>=100 chars)
+    let has_substantive_text = result.messages.iter().any(|m| {
+        m.role == ironhermes_core::Role::Assistant
+            && m.content_text().is_some_and(|t| t.len() >= 100)
+    });
+    if has_substantive_text {
+        return None;
+    }
+
+    // Also check the final_response field
+    if let Some(ref resp) = result.final_response {
+        if resp.len() >= 100 {
+            return None;
+        }
+    }
+
+    Some("no_reasoning_steps".to_string())
 }
 
 /// D-12 criterion 3: Reject if every tool call produced an error result.
