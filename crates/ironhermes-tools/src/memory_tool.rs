@@ -1,22 +1,22 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironhermes_core::{MemoryStore, MemoryTarget, ToolSchema};
+use ironhermes_core::{MemoryProvider, MemoryTarget, ToolSchema};
 use serde_json::json;
 
 use crate::registry::Tool;
 
 pub struct MemoryTool {
-    store: Arc<Mutex<MemoryStore>>,
+    store: Arc<Mutex<dyn MemoryProvider + Send>>,
     read_only: bool,
 }
 
 impl MemoryTool {
-    pub fn new(store: Arc<Mutex<MemoryStore>>) -> Self {
+    pub fn new(store: Arc<Mutex<dyn MemoryProvider + Send>>) -> Self {
         Self { store, read_only: false }
     }
 
-    pub fn new_read_only(store: Arc<Mutex<MemoryStore>>) -> Self {
+    pub fn new_read_only(store: Arc<Mutex<dyn MemoryProvider + Send>>) -> Self {
         Self { store, read_only: true }
     }
 }
@@ -172,14 +172,15 @@ impl Tool for MemoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironhermes_core::MemoryStore;
+    use ironhermes_core::{MemoryProvider, MemoryStore};
 
     fn make_tool() -> (MemoryTool, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let mem_dir = dir.path().join("memories");
         let mut store = MemoryStore::new(mem_dir);
         store.load_from_disk().unwrap();
-        let tool = MemoryTool::new(Arc::new(Mutex::new(store)));
+        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
+        let tool = MemoryTool::new(provider);
         (tool, dir)
     }
 
@@ -277,7 +278,8 @@ mod tests {
         let mem_dir = dir.path().join("memories");
         let mut store = MemoryStore::new(mem_dir);
         store.load_from_disk().unwrap();
-        let tool = MemoryTool::new_read_only(Arc::new(Mutex::new(store)));
+        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
+        let tool = MemoryTool::new_read_only(provider);
 
         let result = tool
             .execute(json!({
@@ -297,7 +299,8 @@ mod tests {
         let mem_dir = dir.path().join("memories");
         let mut store = MemoryStore::new(mem_dir);
         store.load_from_disk().unwrap();
-        let tool = MemoryTool::new_read_only(Arc::new(Mutex::new(store)));
+        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
+        let tool = MemoryTool::new_read_only(provider);
 
         let result = tool
             .execute(json!({

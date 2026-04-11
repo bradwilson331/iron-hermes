@@ -325,6 +325,11 @@ impl MemoryStore {
         })
     }
 
+    /// Returns a reference to the live entries map.
+    pub fn entries(&self) -> &HashMap<MemoryTarget, Vec<String>> {
+        &self.entries
+    }
+
     /// Returns the frozen snapshot value (D-12), not live entries.
     pub fn format_for_system_prompt(&self, target: MemoryTarget) -> Option<String> {
         self.snapshot.get(&target).cloned()
@@ -398,83 +403,6 @@ impl MemoryStore {
         lock_file.unlock().expect("Failed to release lock");
 
         result
-    }
-}
-
-// =============================================================================
-// MemoryProvider trait implementation for MemoryStore
-// =============================================================================
-
-use crate::memory_provider::{MemoryEntries, MemoryProvider, MemoryProviderConfig};
-use async_trait::async_trait;
-
-#[async_trait]
-impl MemoryProvider for MemoryStore {
-    // Lifecycle hooks -- file provider is trivially sync
-    async fn initialize(&mut self, _config: &MemoryProviderConfig) -> anyhow::Result<()> {
-        MemoryStore::load_from_disk(self)
-    }
-
-    async fn prefetch(&self, _session_id: &str) -> anyhow::Result<MemoryEntries> {
-        Ok(self.to_memory_entries())
-    }
-
-    async fn sync_turn(
-        &self,
-        _session_id: &str,
-        _entries: &MemoryEntries,
-    ) -> anyhow::Result<()> {
-        Ok(()) // File provider: disk is authoritative, mutations write directly
-    }
-
-    async fn on_session_end(
-        &self,
-        _session_id: &str,
-        _entries: &MemoryEntries,
-    ) -> anyhow::Result<()> {
-        Ok(()) // File provider: writes happen in-place via add/replace/remove
-    }
-
-    async fn shutdown(&mut self) -> anyhow::Result<()> {
-        Ok(()) // File provider: no resources to release
-    }
-
-    // Operational methods -- delegate to existing MemoryStore methods
-    fn load_from_disk(&mut self) -> anyhow::Result<()> {
-        MemoryStore::load_from_disk(self)
-    }
-
-    fn add(&mut self, target: MemoryTarget, content: &str) -> MemoryResult {
-        MemoryStore::add(self, target, content)
-    }
-
-    fn replace(
-        &mut self,
-        target: MemoryTarget,
-        old_text: &str,
-        new_content: &str,
-    ) -> MemoryResult {
-        MemoryStore::replace(self, target, old_text, new_content)
-    }
-
-    fn remove(&mut self, target: MemoryTarget, old_text: &str) -> MemoryResult {
-        MemoryStore::remove(self, target, old_text)
-    }
-
-    fn format_for_system_prompt(&self, target: MemoryTarget) -> Option<String> {
-        MemoryStore::format_for_system_prompt(self, target)
-    }
-
-    fn to_memory_entries(&self) -> MemoryEntries {
-        let mut map = HashMap::new();
-        for target in &[MemoryTarget::Memory, MemoryTarget::User] {
-            if let Some(entries) = self.entries.get(target) {
-                if !entries.is_empty() {
-                    map.insert(*target, entries.clone());
-                }
-            }
-        }
-        MemoryEntries { entries: map }
     }
 }
 

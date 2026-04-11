@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironhermes_core::{MemoryStore, SubagentConfig, ToolSchema};
+use ironhermes_core::{MemoryProvider, SubagentConfig, ToolSchema};
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -118,7 +118,7 @@ pub trait SubagentRunner: Send + Sync {
 pub struct DelegateTaskTool {
     runner: Arc<dyn SubagentRunner>,
     semaphore: Arc<Semaphore>,
-    memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     config: SubagentConfig,
     /// Parent's cancellation token for propagating interrupt to children (D-21).
     parent_cancel_token: Option<CancellationToken>,
@@ -130,7 +130,7 @@ impl DelegateTaskTool {
     pub fn new(
         runner: Arc<dyn SubagentRunner>,
         semaphore: Arc<Semaphore>,
-        memory_store: Option<Arc<Mutex<MemoryStore>>>,
+        memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
         config: SubagentConfig,
         parent_cancel_token: Option<CancellationToken>,
     ) -> Self {
@@ -322,7 +322,7 @@ impl DelegateTaskTool {
 /// - `memory` gets read-only mode (D-12)
 pub fn build_child_registry(
     allowed_tools: &[String],
-    memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     child_cwd: &Path,
 ) -> anyhow::Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
@@ -352,7 +352,7 @@ pub fn build_child_registry(
                         crate::memory_tool::MemoryTool::new_read_only(store.clone()),
                     ));
                 } else {
-                    tracing::warn!("memory tool requested but no MemoryStore available; skipping");
+                    tracing::warn!("memory tool requested but no MemoryProvider available; skipping");
                 }
             }
 
@@ -679,10 +679,11 @@ mod tests {
 
     #[test]
     fn test_build_child_registry_memory_is_read_only() {
+        use ironhermes_core::MemoryStore;
         let mem_dir = tempfile::tempdir().unwrap();
         let mut store = MemoryStore::new(mem_dir.path().join("memories"));
         store.load_from_disk().unwrap();
-        let store = Arc::new(Mutex::new(store));
+        let store: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
 
         let registry = build_child_registry(
             &["memory".to_string()],

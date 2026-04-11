@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironhermes_core::{MemoryStore, ToolSchema};
+use ironhermes_core::{MemoryProvider, ToolSchema};
 use ironhermes_cron::JobStore;
 
 #[async_trait]
@@ -220,9 +220,9 @@ impl ToolRegistry {
         self.register(Box::new(WebReadTool));
     }
 
-    /// Register the memory tool with a shared MemoryStore.
-    /// Called separately from register_defaults() because it requires a MemoryStore instance.
-    pub fn register_memory_tool(&mut self, store: Arc<Mutex<MemoryStore>>) {
+    /// Register the memory tool with a shared MemoryProvider.
+    /// Called separately from register_defaults() because it requires a MemoryProvider instance.
+    pub fn register_memory_tool(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
         use crate::memory_tool::MemoryTool;
         self.register(Box::new(MemoryTool::new(store)));
     }
@@ -253,7 +253,7 @@ impl ToolRegistry {
         &mut self,
         runner: Arc<dyn crate::delegate_task::SubagentRunner>,
         semaphore: Arc<tokio::sync::Semaphore>,
-        memory_store: Option<Arc<Mutex<MemoryStore>>>,
+        memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
         config: ironhermes_core::SubagentConfig,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         progress_callback: Option<crate::delegate_task::SubagentProgressCallback>,
