@@ -27,9 +27,21 @@ A working conversational AI agent with personality (context files) that operates
 
 ### Active
 
-<!-- Next milestone scope. -->
+<!-- Current scope for v2.0: Intelligence & Identity -->
 
-(None yet — run `/gsd-new-milestone` to define v2 scope)
+- [ ] Persistent memory (MEMORY.md/USER.md bounded stores, memory tool with add/replace/remove, substring matching, capacity management, security scanning)
+- [ ] Memory provider trait with SQLite, Grafeo (graph DB), and DuckDB backends; single-provider selection, lifecycle hooks
+- [ ] Session storage (SQLite state.db, WAL mode, sessions/messages tables, FTS5 full-text search, schema migrations, write contention handling, session lineage, session_search tool)
+- [ ] Context compression (dual system: gateway hygiene at 85%, agent ContextEngine at 50%; pluggable ContextEngine trait, structured summaries, iterative re-compression)
+- [ ] Prompt caching (Anthropic cache_control breakpoints, system_and_3 strategy, cached/ephemeral separation)
+- [ ] Prompt assembly (10-layer system prompt builder matching hermes-agent: SOUL.md identity, tool-aware guidance, memory snapshots, skills index, context files, timestamps, platform hints)
+- [ ] Context file loading (.hermes.md > AGENTS.md > CLAUDE.md > .cursorrules priority chain, progressive subdirectory discovery, security scanning, truncation)
+- [ ] SOUL.md personality system (durable identity from HERMES_HOME, default fallback, /personality session overlays)
+- [ ] Skill framework (SKILL.md format, category-based discovery, progressive disclosure, conditional activation, env var/config requirements, credential file mounting, security scanning, Skills Hub)
+- [ ] Slash command integration (SKILL-13 backlog from v1.1)
+- [ ] Tool registry improvements (toolset management, check functions, setup wizard integration)
+- [ ] CLI feature parity (execute_code, hooks, guardrails available in CLI mode)
+- [ ] Configuration/setup wizard improvements
 
 ### Out of Scope
 
@@ -70,12 +82,24 @@ A working conversational AI agent with personality (context files) that operates
 | Skills in ironhermes-core, SkillsTool in ironhermes-tools | No new crate deps needed | ✓ Good |
 | Pattern-based env exclusion for exec sandbox | Forward compatible with new env vars | ✓ Good |
 | delegate_task excluded from child toolsets | Structural recursion prevention | ✓ Good |
-| Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit for v2 |
+| Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit — v2 brings CLI parity |
 
-## Current State
+## Current Milestone: v2.0 Intelligence & Identity
 
-**Shipped:** v1.1 Automation (2026-04-11)
-**Next:** Planning v2 — run `/gsd-new-milestone` to begin
+**Goal:** Give the agent persistent memory, session continuity, a customizable identity, context management, and a complete skill/tool framework — faithful to hermes-agent's architecture.
+
+**Target features:**
+- Persistent memory (MEMORY.md/USER.md) with memory providers (SQLite, Grafeo, DuckDB)
+- Session storage with SQLite + FTS5 search + session lineage
+- Context compression (dual system) + prompt caching (Anthropic breakpoints)
+- Full 10-layer prompt assembly with cached/ephemeral separation
+- Context files (.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules) with progressive discovery
+- SOUL.md personality system with /personality overlays
+- Skill framework (SKILL.md format, discovery, conditional activation, env vars, security, Hub)
+- Slash commands (SKILL-13), tool registry improvements, CLI feature parity
+- Configuration/setup wizard improvements
+
+**Architectural constraint:** All implementation must align to hermes-agent's architecture (see hermes-agent Architecture docs). Port faithfully, deviate only with documented rationale.
 
 ## Evolution
 
@@ -95,4 +119,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-11 after v1.1 milestone*
+*Last updated: 2026-04-11 after v2.0 milestone start*
