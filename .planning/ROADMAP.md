@@ -219,7 +219,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 10.1-01-PLAN.md — Wire shared active_skills Arc through runner/handler + regression tests
+- [x] 10.1-01-PLAN.md — Wire shared active_skills Arc through runner/handler + regression tests
 
 #### Phase 10: Batch Processing
 **Goal**: User can run parallel batch prompt execution from JSONL input, producing ShareGPT-format trajectory data with checkpointing and quality filtering
@@ -294,4 +294,4 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/2 | Planned | - |
 | 10. Batch Processing | v1.1 | 4/4 | Complete   | 2026-04-10 |
-| 10.1. Gateway active_skills Fix | v1.1 | 0/1 | Planned | - |
+| 10.1. Gateway active_skills Fix | v1.1 | 1/1 | Complete    | 2026-04-11 |
