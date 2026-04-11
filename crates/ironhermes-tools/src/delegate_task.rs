@@ -28,6 +28,41 @@ const DEFAULT_SAFE_TOOLS: &[&str] = &[
     "memory",
 ];
 
+/// Structured summary instructions appended to child system prompts (D-10).
+const STRUCTURED_SUMMARY_INSTRUCTIONS: &str =
+    "\n\nWhen you complete the task, provide a structured summary with these sections:\n\
+     - **Actions Taken**: What you did step by step\n\
+     - **Files Modified**: Any files created or changed (with paths)\n\
+     - **Findings**: Key results or information discovered\n\
+     - **Issues Encountered**: Any problems or blockers (or 'None')";
+
+/// Maps toolset group names to individual tool names (D-01).
+pub fn resolve_toolset_tools(toolset: &str) -> anyhow::Result<Vec<&'static str>> {
+    match toolset {
+        "terminal" => Ok(vec!["terminal"]),
+        "file" => Ok(vec!["read_file", "write_file", "patch", "search_files"]),
+        "web" => Ok(vec!["web_search", "web_read"]),
+        other => anyhow::bail!(
+            "Unknown toolset group: {}. Valid groups: terminal, file, web",
+            other
+        ),
+    }
+}
+
+/// Resolves a list of toolset group names to a deduplicated list of individual tool names.
+pub fn resolve_toolsets(toolsets: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut tools: Vec<String> = Vec::new();
+    for ts in toolsets {
+        let resolved = resolve_toolset_tools(ts)?;
+        for t in resolved {
+            if !tools.contains(&t.to_string()) {
+                tools.push(t.to_string());
+            }
+        }
+    }
+    Ok(tools)
+}
+
 /// Trait abstracting the child agent loop execution.
 ///
 /// Defined here (in ironhermes-tools) to avoid a circular dependency:
@@ -38,11 +73,15 @@ const DEFAULT_SAFE_TOOLS: &[&str] = &[
 pub trait SubagentRunner: Send + Sync {
     /// Run a child agent with the given registry, system prompt, and max iterations.
     /// Returns the final text response (or None if the agent produced no text).
+    ///
+    /// `model_override` allows routing the child to a different LLM model (D-23).
+    /// When None, the child uses the parent's model.
     async fn run_child(
         &self,
         registry: Arc<ToolRegistry>,
         system_prompt: String,
         max_iterations: usize,
+        model_override: Option<&str>,
     ) -> anyhow::Result<Option<String>>;
 }
 
@@ -67,6 +106,14 @@ impl DelegateTaskTool {
             memory_store,
             config,
         }
+    }
+}
+
+impl DelegateTaskTool {
+    /// Batch execution mode: spawn parallel child agents for multiple tasks (D-05).
+    /// Fully implemented in Task 2 — stub for compilation.
+    async fn execute_batch(&self, _tasks_val: &serde_json::Value) -> anyhow::Result<String> {
+        anyhow::bail!("Batch mode not yet implemented")
     }
 }
 
@@ -161,6 +208,24 @@ impl Tool for DelegateTaskTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional list of tool names the child agent may use. Defaults to safe tools: read_file, write_file, patch, search_files, web_search, web_read, memory."
+                    },
+                    "toolsets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Toolset groups for the child agent: 'terminal', 'file', 'web'. Takes precedence over allowed_tools."
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "goal": { "type": "string", "description": "Task description for the child agent." },
+                                "context": { "type": "string", "description": "Additional context for the child agent." },
+                                "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." }
+                            },
+                            "required": ["goal"]
+                        },
+                        "description": "Array of tasks for parallel batch execution. Max 3 tasks. Mutually exclusive with 'task' param."
                     }
                 },
                 "required": ["task"]
@@ -169,11 +234,29 @@ impl Tool for DelegateTaskTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        // Detect mode: batch (tasks array) vs single (task string)
+        if let Some(tasks_val) = args.get("tasks") {
+            return self.execute_batch(tasks_val).await;
+        }
+
         let task = args["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: task"))?;
 
-        let allowed_tools: Vec<String> = if let Some(tools) = args.get("allowed_tools") {
+        // Resolve tools: toolsets > allowed_tools > config.default_toolsets (D-01)
+        let allowed_tools: Vec<String> = if let Some(toolsets) = args.get("toolsets") {
+            let ts: Vec<String> = toolsets
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("toolsets must be an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .ok_or_else(|| anyhow::anyhow!("toolsets entries must be strings"))
+                        .map(|s| s.to_string())
+                })
+                .collect::<anyhow::Result<Vec<String>>>()?;
+            resolve_toolsets(&ts)?
+        } else if let Some(tools) = args.get("allowed_tools") {
             tools
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("allowed_tools must be an array"))?
@@ -185,7 +268,8 @@ impl Tool for DelegateTaskTool {
                 })
                 .collect::<anyhow::Result<Vec<String>>>()?
         } else {
-            DEFAULT_SAFE_TOOLS.iter().map(|s| s.to_string()).collect()
+            // D-01 default: resolve from config.default_toolsets
+            resolve_toolsets(&self.config.default_toolsets)?
         };
 
         // Create isolated temp directory for child (D-10, D-13)
@@ -210,19 +294,20 @@ impl Tool for DelegateTaskTool {
             child_dir.path(),
         )?;
 
-        // Build system prompt
+        // Build system prompt with structured summary instructions (D-10)
         let system_prompt = format!(
-            "You are a focused assistant. Complete the following task:\n\n{}",
-            task
+            "You are a focused assistant. Complete the following task:\n\n{}{}",
+            task, STRUCTURED_SUMMARY_INSTRUCTIONS
         );
 
-        // Run child agent with timeout (D-08)
+        // Run child agent with timeout (D-08) and model override (D-23)
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.timeout_secs),
             self.runner.run_child(
                 Arc::new(child_registry),
                 system_prompt,
                 self.config.max_iterations,
+                self.config.model.as_deref(),
             ),
         )
         .await;
@@ -391,6 +476,7 @@ mod tests {
             _registry: Arc<ToolRegistry>,
             _system_prompt: String,
             _max_iterations: usize,
+            _model_override: Option<&str>,
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("mock child response".to_string()))
         }
@@ -497,6 +583,7 @@ mod tests {
                 _registry: Arc<ToolRegistry>,
                 _system_prompt: String,
                 _max_iterations: usize,
+                _model_override: Option<&str>,
             ) -> anyhow::Result<Option<String>> {
                 tokio::time::sleep(Duration::from_secs(999)).await;
                 Ok(Some("should not reach".to_string()))
@@ -509,8 +596,7 @@ mod tests {
             None,
             SubagentConfig {
                 timeout_secs: 1,
-                max_subagents: 3,
-                max_iterations: 10,
+                ..SubagentConfig::default()
             },
         );
 
@@ -532,6 +618,7 @@ mod tests {
                 _registry: Arc<ToolRegistry>,
                 _system_prompt: String,
                 _max_iterations: usize,
+                _model_override: Option<&str>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(None)
             }

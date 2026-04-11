@@ -252,7 +252,7 @@ impl Default for ExecConfig {
 // SubagentConfig (AGENT-01..05)
 // =============================================================================
 
-/// Subagent delegation configuration (D-08, D-09, D-16).
+/// Subagent delegation configuration (D-08, D-09, D-16, D-25).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubagentConfig {
@@ -262,6 +262,16 @@ pub struct SubagentConfig {
     pub max_subagents: usize,
     /// Maximum LLM iterations per subagent. Default: 10.
     pub max_iterations: usize,
+    /// Default toolset groups for child agents (D-01). Default: ["terminal", "file", "web"].
+    pub default_toolsets: Vec<String>,
+    /// Optional model override for subagents (D-23). None = use parent's model.
+    pub model: Option<String>,
+    /// Optional provider override for subagents (D-23). None = use parent's provider.
+    pub provider: Option<String>,
+    /// Optional custom API base URL for subagents (D-23). None = use parent's.
+    pub base_url: Option<String>,
+    /// Optional custom API key for subagents (D-23). None = use parent's.
+    pub api_key: Option<String>,
 }
 
 impl Default for SubagentConfig {
@@ -270,6 +280,11 @@ impl Default for SubagentConfig {
             timeout_secs: 300,
             max_subagents: 3,
             max_iterations: 10,
+            default_toolsets: vec!["terminal".into(), "file".into(), "web".into()],
+            model: None,
+            provider: None,
+            base_url: None,
+            api_key: None,
         }
     }
 }

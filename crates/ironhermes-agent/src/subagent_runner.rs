@@ -17,14 +17,36 @@ use crate::agent_loop::AgentLoop;
 /// Concrete `SubagentRunner` that spawns child `AgentLoop` instances.
 ///
 /// Holds a cloneable `LlmClient` so each child agent gets its own loop
-/// without sharing mutable state with the parent.
+/// without sharing mutable state with the parent. Supports model override
+/// (D-23/D-24) via optional override fields.
 pub struct AgentSubagentRunner {
+    /// Parent's client, used when no model override is specified.
     client: LlmClient,
+    /// Parent's base URL, used as fallback when model override is active.
+    parent_base_url: String,
+    /// Parent's API key, used as fallback when model override is active.
+    parent_api_key: String,
+    /// Optional override base URL from SubagentConfig (D-23).
+    override_base_url: Option<String>,
+    /// Optional override API key from SubagentConfig (D-23).
+    override_api_key: Option<String>,
 }
 
 impl AgentSubagentRunner {
-    pub fn new(client: LlmClient) -> Self {
-        Self { client }
+    pub fn new(
+        client: LlmClient,
+        parent_base_url: String,
+        parent_api_key: String,
+        override_base_url: Option<String>,
+        override_api_key: Option<String>,
+    ) -> Self {
+        Self {
+            client,
+            parent_base_url,
+            parent_api_key,
+            override_base_url,
+            override_api_key,
+        }
     }
 }
 
@@ -35,8 +57,20 @@ impl SubagentRunner for AgentSubagentRunner {
         registry: Arc<ToolRegistry>,
         system_prompt: String,
         max_iterations: usize,
+        model_override: Option<&str>,
     ) -> anyhow::Result<Option<String>> {
-        let agent = AgentLoop::new(self.client.clone(), registry, max_iterations);
+        // D-23/D-24: construct child client with model override if specified
+        let child_client = if let Some(model) = model_override {
+            let base = self.override_base_url.as_deref()
+                .unwrap_or(&self.parent_base_url);
+            let key = self.override_api_key.as_deref()
+                .unwrap_or(&self.parent_api_key);
+            LlmClient::new(base, key, model)
+        } else {
+            self.client.clone()
+        };
+
+        let agent = AgentLoop::new(child_client, registry, max_iterations);
 
         let messages = vec![
             ChatMessage::system(&system_prompt),

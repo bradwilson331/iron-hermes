@@ -231,7 +231,13 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    let subagent_runner = Arc::new(AgentSubagentRunner::new(client.clone()));
+    let subagent_runner = Arc::new(AgentSubagentRunner::new(
+        client.clone(),
+        config.resolve_base_url(),
+        config.resolve_api_key().unwrap_or_default(),
+        config.subagent.base_url.clone(),
+        config.subagent.api_key.clone(),
+    ));
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
@@ -288,7 +294,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    let subagent_runner = Arc::new(AgentSubagentRunner::new(client.clone()));
+    let subagent_runner = Arc::new(AgentSubagentRunner::new(
+        client.clone(),
+        config.resolve_base_url(),
+        config.resolve_api_key().unwrap_or_default(),
+        config.subagent.base_url.clone(),
+        config.subagent.api_key.clone(),
+    ));
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
@@ -459,7 +471,13 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         config.resolve_api_key().unwrap_or_default(),
         config.model.default.clone(),
     );
-    let subagent_runner = Arc::new(AgentSubagentRunner::new(gateway_client));
+    let subagent_runner = Arc::new(AgentSubagentRunner::new(
+        gateway_client,
+        config.resolve_base_url(),
+        config.resolve_api_key().unwrap_or_default(),
+        config.subagent.base_url.clone(),
+        config.subagent.api_key.clone(),
+    ));
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
