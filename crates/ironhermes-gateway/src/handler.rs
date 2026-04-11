@@ -89,6 +89,13 @@ impl GatewayMessageHandler {
         self.skill_registry = Some(registry);
     }
 
+    /// Set the shared active skills tracker. Must be the same Arc given to SkillsTool
+    /// so that skill activations reach AgentLoop enforcement.
+    /// NOTE: global-shared across all users — would need per-session isolation for multi-user support (per D-06).
+    pub fn set_active_skills(&mut self, skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) {
+        self.active_skills = skills;
+    }
+
     /// Dispatch a slash command to the appropriate handler (plan 04).
     async fn handle_slash_command(
         &self,

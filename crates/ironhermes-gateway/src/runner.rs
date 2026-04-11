@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config, MemoryStore, MessageContent, Role, SkillRegistry};
+use ironhermes_core::{ChatMessage, Config, MemoryStore, MessageContent, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{debug, error, info, warn};
@@ -27,6 +27,7 @@ pub struct GatewayRunner {
     job_store: Option<Arc<Mutex<JobStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
+    active_skills: Option<Arc<std::sync::Mutex<Vec<SkillRecord>>>>,
     cancel: CancellationToken,
 }
 
@@ -40,6 +41,7 @@ impl GatewayRunner {
             job_store: None,
             hook_registry: None,
             skill_registry: None,
+            active_skills: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -62,6 +64,11 @@ impl GatewayRunner {
     /// Set the skill registry for catalog injection and cron skill resolution.
     pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
         self.skill_registry = Some(registry);
+    }
+
+    /// Set the shared active skills tracker. Passed to GatewayMessageHandler in start().
+    pub fn set_active_skills(&mut self, skills: Arc<std::sync::Mutex<Vec<SkillRecord>>>) {
+        self.active_skills = Some(skills);
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
@@ -140,6 +147,9 @@ impl GatewayRunner {
         }
         if let Some(ref registry) = self.skill_registry {
             handler.set_skill_registry(registry.clone());
+        }
+        if let Some(ref skills) = self.active_skills {
+            handler.set_active_skills(skills.clone());
         }
         let handler = Arc::new(handler);
         let user_queue = Arc::new(UserQueueManager::new(
