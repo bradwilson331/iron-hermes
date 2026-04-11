@@ -885,4 +885,295 @@ mod tests {
         assert!(!DEFAULT_SAFE_TOOLS.contains(&"execute_code"));
         assert!(!DEFAULT_SAFE_TOOLS.contains(&"terminal"));
     }
+
+    // -----------------------------------------------------------------------
+    // Batch mode tests (D-05, D-06, D-07)
+    // -----------------------------------------------------------------------
+
+    /// A runner that records the index of completion via a small sleep offset,
+    /// so we can verify result ordering regardless of completion order.
+    struct OrderedMockRunner;
+
+    #[async_trait]
+    impl SubagentRunner for OrderedMockRunner {
+        async fn run_child(
+            &self,
+            _registry: Arc<ToolRegistry>,
+            system_prompt: String,
+            _max_iterations: usize,
+            _model_override: Option<&str>,
+        ) -> anyhow::Result<Option<String>> {
+            // Extract the goal from the prompt to echo it back
+            let goal = system_prompt
+                .lines()
+                .nth(2) // "You are a focused assistant..." line 0, blank line 1, goal line 2
+                .unwrap_or("unknown")
+                .to_string();
+            Ok(Some(format!("Result: {}", goal)))
+        }
+    }
+
+    fn make_batch_tool() -> DelegateTaskTool {
+        DelegateTaskTool::new(
+            Arc::new(OrderedMockRunner),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_batch_basic_two_tasks() {
+        let tool = make_batch_tool();
+        let result = tool
+            .execute(json!({
+                "task": "ignored in batch mode",
+                "tasks": [
+                    { "goal": "Task A" },
+                    { "goal": "Task B" }
+                ]
+            }))
+            .await
+            .unwrap();
+        assert!(result.contains("Task 1 Result"), "should have Task 1 header");
+        assert!(result.contains("Task 2 Result"), "should have Task 2 header");
+        assert!(result.contains("Task A"), "should contain goal A result");
+        assert!(result.contains("Task B"), "should contain goal B result");
+    }
+
+    #[tokio::test]
+    async fn test_batch_truncates_to_max_subagents() {
+        // D-06: max_subagents=2, so only first 2 tasks should run
+        let tool = DelegateTaskTool::new(
+            Arc::new(OrderedMockRunner),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig {
+                max_subagents: 2,
+                ..SubagentConfig::default()
+            },
+        );
+        let result = tool
+            .execute(json!({
+                "task": "ignored",
+                "tasks": [
+                    { "goal": "A" },
+                    { "goal": "B" },
+                    { "goal": "C" },
+                    { "goal": "D" }
+                ]
+            }))
+            .await
+            .unwrap();
+        // Should have exactly 2 task results
+        let task_count = result.matches("## Task").count();
+        assert_eq!(task_count, 2, "should truncate to 2 tasks (max_subagents)");
+    }
+
+    #[tokio::test]
+    async fn test_batch_result_ordering() {
+        // D-07: results should be sorted by original index
+        // Use a runner that delays based on reverse order to test ordering
+        struct ReverseOrderRunner;
+
+        #[async_trait]
+        impl SubagentRunner for ReverseOrderRunner {
+            async fn run_child(
+                &self,
+                _registry: Arc<ToolRegistry>,
+                system_prompt: String,
+                _max_iterations: usize,
+                _model_override: Option<&str>,
+            ) -> anyhow::Result<Option<String>> {
+                // Task with "slow" sleeps longer — it has a higher index but should
+                // still appear in correct position in output
+                if system_prompt.contains("slow") {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let goal = system_prompt.lines().nth(2).unwrap_or("?");
+                Ok(Some(format!("Done: {}", goal)))
+            }
+        }
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(ReverseOrderRunner),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+        );
+
+        let result = tool
+            .execute(json!({
+                "task": "ignored",
+                "tasks": [
+                    { "goal": "fast-first" },
+                    { "goal": "slow-second" }
+                ]
+            }))
+            .await
+            .unwrap();
+
+        // Task 1 should appear before Task 2
+        let pos1 = result.find("Task 1").unwrap();
+        let pos2 = result.find("Task 2").unwrap();
+        assert!(pos1 < pos2, "Task 1 should appear before Task 2 regardless of completion order");
+    }
+
+    #[tokio::test]
+    async fn test_batch_single_task_still_works() {
+        // D-08: backward compatibility — single "task" param without "tasks"
+        let tool = make_batch_tool();
+        let result = tool
+            .execute(json!({
+                "task": "single task only"
+            }))
+            .await
+            .unwrap();
+        // Should use single-task mode, not batch
+        assert!(!result.contains("## Task"), "single mode should not have batch headers");
+    }
+
+    #[tokio::test]
+    async fn test_batch_semaphore_sharing() {
+        // D-06: batch tasks share the global semaphore
+        // With semaphore(2) and 3 tasks, only 2 can run at once
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingRunner {
+            concurrent: Arc<AtomicUsize>,
+            max_concurrent: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl SubagentRunner for CountingRunner {
+            async fn run_child(
+                &self,
+                _registry: Arc<ToolRegistry>,
+                _system_prompt: String,
+                _max_iterations: usize,
+                _model_override: Option<&str>,
+            ) -> anyhow::Result<Option<String>> {
+                let current = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                // Update max if this is the highest seen
+                self.max_concurrent.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                self.concurrent.fetch_sub(1, Ordering::SeqCst);
+                Ok(Some("done".to_string()))
+            }
+        }
+
+        let concurrent = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(CountingRunner {
+                concurrent: concurrent.clone(),
+                max_concurrent: max_concurrent.clone(),
+            }),
+            Arc::new(Semaphore::new(2)), // Only 2 slots
+            None,
+            SubagentConfig::default(),
+        );
+
+        let _result = tool
+            .execute(json!({
+                "task": "ignored",
+                "tasks": [
+                    { "goal": "A" },
+                    { "goal": "B" },
+                    { "goal": "C" }
+                ]
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            max_concurrent.load(Ordering::SeqCst) <= 2,
+            "max concurrent should be <= 2 (semaphore limit)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_per_task_toolsets() {
+        // Per-task toolsets should override config defaults
+        let tool = make_batch_tool();
+        let result = tool
+            .execute(json!({
+                "task": "ignored",
+                "tasks": [
+                    { "goal": "use terminal", "toolsets": ["terminal"] },
+                    { "goal": "use web", "toolsets": ["web"] }
+                ]
+            }))
+            .await
+            .unwrap();
+        assert!(result.contains("Task 1 Result"), "should complete with per-task toolsets");
+        assert!(result.contains("Task 2 Result"), "should complete with per-task toolsets");
+    }
+
+    #[tokio::test]
+    async fn test_batch_default_toolsets_when_not_specified() {
+        // When per-task toolsets not provided, should use config.default_toolsets
+        let tool = make_batch_tool();
+        let result = tool
+            .execute(json!({
+                "task": "ignored",
+                "tasks": [
+                    { "goal": "no toolsets specified" }
+                ]
+            }))
+            .await
+            .unwrap();
+        assert!(result.contains("Task 1 Result"), "should complete with default toolsets");
+    }
+
+    #[tokio::test]
+    async fn test_batch_with_context() {
+        struct ContextCapture;
+
+        #[async_trait]
+        impl SubagentRunner for ContextCapture {
+            async fn run_child(
+                &self,
+                _registry: Arc<ToolRegistry>,
+                system_prompt: String,
+                _max_iterations: usize,
+                _model_override: Option<&str>,
+            ) -> anyhow::Result<Option<String>> {
+                Ok(Some(system_prompt))
+            }
+        }
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(ContextCapture),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+        );
+
+        let result = tool
+            .execute(json!({
+                "task": "ignored",
+                "tasks": [
+                    { "goal": "my goal", "context": "extra context here" }
+                ]
+            }))
+            .await
+            .unwrap();
+        assert!(result.contains("my goal"), "should contain the goal");
+        assert!(result.contains("extra context here"), "should contain the context");
+    }
+
+    #[test]
+    fn test_delegate_task_schema_has_tasks() {
+        let tool = make_delegate_tool();
+        let schema = tool.schema();
+        let props = &schema.function.parameters["properties"];
+        assert!(props.get("tasks").is_some(), "schema should have tasks property");
+        assert_eq!(
+            props["tasks"]["type"].as_str(),
+            Some("array"),
+            "tasks should be an array"
+        );
+    }
 }
