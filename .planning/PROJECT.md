@@ -30,7 +30,8 @@ A working conversational AI agent with personality (context files) that operates
 <!-- Current scope for v2.0: Intelligence & Identity -->
 
 - [ ] Persistent memory (MEMORY.md/USER.md bounded stores, memory tool with add/replace/remove, substring matching, capacity management, security scanning)
-- [ ] Memory provider trait with SQLite, Grafeo (graph DB), and DuckDB backends; single-provider selection, lifecycle hooks
+- [x] Memory provider trait with pluggable backend abstraction, lifecycle hooks, and config-driven factory — Validated in Phase 11: Memory Provider Trait
+- [ ] Memory provider backends: SQLite, Grafeo (graph DB), and DuckDB; single-provider selection
 - [ ] Session storage (SQLite state.db, WAL mode, sessions/messages tables, FTS5 full-text search, schema migrations, write contention handling, session lineage, session_search tool)
 - [ ] Context compression (dual system: gateway hygiene at 85%, agent ContextEngine at 50%; pluggable ContextEngine trait, structured summaries, iterative re-compression)
 - [ ] Prompt caching (Anthropic cache_control breakpoints, system_and_3 strategy, cached/ephemeral separation)
@@ -119,4 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-11 after v2.0 milestone start*
+*Last updated: 2026-04-11 after Phase 11 (Memory Provider Trait) complete*
