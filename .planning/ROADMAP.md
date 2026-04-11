@@ -207,6 +207,20 @@ Plans:
 - [x] 09-01-PLAN.md — DelegateTaskTool core: SubagentConfig, TerminalTool CWD, MemoryTool read-only, child registry builder, Tool impl
 - [x] 09-02-PLAN.md — CLI/gateway wiring: semaphore creation, registration, integration test
 
+#### Phase 10.1: Gateway active_skills Wiring Fix
+**Goal**: Fix the active_skills Arc mismatch so skill activation via the skills tool in Telegram conversations correctly feeds into AgentLoop's allowed_tools enforcement
+**Depends on**: Phase 07.5 (allowed_tools enforcement exists), Phase 10 (latest phase)
+**Requirements**: SKILL-06 (enforcement completeness)
+**Gap Closure**: Closes v1.1 audit integration finding: SkillsTool and GatewayMessageHandler hold different active_skills Arc allocations; activated skills never reach AgentLoop enforcement
+**Success Criteria** (what must be TRUE):
+  1. `GatewayMessageHandler` receives the same `Arc<Mutex<Vec<SkillRecord>>>` as `SkillsTool` — a single shared allocation
+  2. Activating a skill via the skills tool in a Telegram conversation causes subsequent tool calls to be checked against that skill's `allowed_tools`
+  3. Regression test: activate skill with restrictive allowed_tools via handler path, verify enforcement fires
+**Plans**: TBD
+
+Plans:
+- [ ] 10.1-01-PLAN.md — TBD
+
 #### Phase 10: Batch Processing
 **Goal**: User can run parallel batch prompt execution from JSONL input, producing ShareGPT-format trajectory data with checkpointing and quality filtering
 **Depends on**: Phase 9 (reuses stable agent loop and subagent concurrency patterns)
@@ -222,7 +236,7 @@ Plans:
 - [x] 10-01-PLAN.md — BatchConfig, CLI subcommand skeleton, types, parallel runner, ShareGPT output, checkpointing
 - [x] 10-02-PLAN.md — Quality filter pipeline (4 criteria), reject file routing, status/cancel/list commands
 - [x] 10-03-PLAN.md — Gap closure: cancel sentinel cleanup, no_reasoning filter tightening, secrets filter assistant scanning
-- [ ] 10-04-PLAN.md — Gap closure: cancel sentinel race condition fix, no_reasoning content-length fallback
+- [x] 10-04-PLAN.md — Gap closure: cancel sentinel race condition fix, no_reasoning content-length fallback
 
 
 ## Coverage
@@ -279,4 +293,5 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 07.5. Skills Housekeeping | v1.1 | 2/2 | Complete    | 2026-04-10 |
 | 8. Code Execution | v1.1 | 0/? | Not started | - |
 | 9. Subagent Delegation | v1.1 | 0/2 | Planned | - |
-| 10. Batch Processing | v1.1 | 3/4 | UAT Gaps   | 2026-04-10 |
+| 10. Batch Processing | v1.1 | 4/4 | Complete   | 2026-04-10 |
+| 10.1. Gateway active_skills Fix | v1.1 | 0/1 | Not started | - |

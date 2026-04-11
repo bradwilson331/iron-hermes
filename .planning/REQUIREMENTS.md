@@ -121,6 +121,26 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 - **SKILL-10**: Skills Hub with multi-source registry — install skills from GitHub repos, local paths, and remote tarballs via `GitHubSource` adapter and hub lock file tracking provenance
 - **SKILL-11**: Update lifecycle — manifest-based hash tracking for installed skills; `install`, `update`, `remove` CLI subcommands; bundled-skill seeding on first run
 - **SKILL-12**: Trust levels (builtin / trusted / community / agent-created) and security scanning of externally-sourced skills (prompt injection, exfiltration, destructive command detection) before installation
+- **SKILL-14**: Skills with `fallback_for_toolsets`, `requires_toolsets`, `fallback_for_tools`, or `requires_tools` in `metadata.hermes` are conditionally shown/hidden based on the current session's available tools and toolsets — a skill with `fallback_for_toolsets: [web]` is hidden when the web toolset is active, shown when it's missing; `requires_toolsets` is the inverse; tool-level variants check individual tool names instead of toolset groups
+- **SKILL-15**: Skills declaring `metadata.hermes.config` entries have their resolved values (from `skills.config` in config.yaml) injected into the skill's context when activated — config entries specify `key`, `description`, `default`, and `prompt`; CLI `config show` displays configured skill settings
+- **SKILL-16**: `skill_view(name, path)` supports Level 2 progressive disclosure — when a relative path is provided, the tool returns the content of that file from the skill's directory instead of the main SKILL.md; skill directories may contain `references/`, `templates/`, `scripts/`, and `assets/` subdirectories accessible this way
+
+### Tools & Toolsets (Advanced)
+
+- **TOOL-01**: Toolset enable/disable at runtime — `--toolsets "web,terminal"` CLI flag filters which toolsets are registered; platform presets (e.g., `hermes-cli`, `hermes-telegram`) define default toolset combinations per adapter
+- **TOOL-02**: Process management tool — `process` tool with actions: `list` (show running background processes), `poll` (check status), `wait` (block until done), `log` (full output), `kill` (terminate), `write` (send input); integrates with terminal tool's `background=true` mode
+- **TOOL-03**: Terminal backend trait — abstract `TerminalBackend` trait over execution environments; `terminal.backend` config selects `local` (default), `docker`, or `ssh`; backend-specific config nested under `terminal.*`
+- **TOOL-04**: Docker terminal backend — execute commands in isolated containers with security hardening: read-only root filesystem, dropped Linux capabilities, no privilege escalation, PID limits, namespace isolation; configurable image, CPU, memory, disk, and persistence
+- **TOOL-05**: SSH terminal backend — execute commands on a remote server via SSH for sandboxing; credentials from `terminal.ssh_host`, `terminal.ssh_user`, `terminal.ssh_key` config or env vars
+- **TOOL-06**: `send_message` tool — agent-initiated outbound message delivery to a configured platform (Telegram chat, webhook URL); reuses existing cron delivery routing infrastructure
+- **TOOL-07**: `session_search` tool — search across past conversation sessions by keyword, returning matching messages with session ID, timestamp, and surrounding context; operates on SessionStore history
+- **TOOL-08**: MCP server integration — dynamically load tools from MCP servers configured in `config.yaml`; each MCP server's tools appear as a `mcp-<server>` toolset in the registry with standard Tool trait wrappers
+
+### Browser Automation
+
+- **BROWSE-01**: `ironhermes browser install` CLI subcommand downloads Chrome for Testing (CfT) from Google's automation builds API, extracts to `~/.ironhermes/browser/chrome-for-testing/{version}/`, and verifies the binary — platform auto-detected (mac-arm64, linux64, win64)
+- **BROWSE-02**: Browser tool with 7 actions — `navigate(url)`, `snapshot()` (page text for LLM), `screenshot()` (base64 PNG for vision), `click(selector)`, `type(selector, text)`, `evaluate(js)`, `wait(selector)` — driven via CDP using chromiumoxide against the managed CfT Chrome
+- **BROWSE-03**: Browser instance lifecycle managed via `Arc<Mutex<Option<Browser>>>` — lazily launched on first tool call with `--headless=new --no-sandbox --disable-gpu`, cleaned up on agent shutdown via CancellationToken
 
 ### Web Scraping (Advanced)
 
@@ -155,6 +175,10 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | Discord/Slack delivery for scheduled tasks | Out of scope until Telegram is solid; delivery abstraction left open |
 | Persistent subagent state across sessions | Subagents are ephemeral work units; parent handles continuity |
 | Interactive subagent communication | Subagents receive a task and return a result; no mid-task steering |
+| Browser automation tools | ~~Out of scope~~ → moved to v2 as BROWSE-01..03 (built-in Chrome for Testing + chromiumoxide CDP) |
+| Media tools (vision, image gen, TTS) | Provider-specific integrations; not core agent capability; add per-provider when needed |
+| Home Assistant / RL training integrations | Vertical integrations for specific use cases; not core agent infrastructure |
+| Singularity/Modal/Daytona terminal backends | Niche cloud/HPC backends; docker + ssh cover primary sandboxing use cases |
 
 ## Traceability
 
@@ -201,13 +225,27 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | SKILL-03 | Phase 7 | Pending |
 | SKILL-04 | Phase 7 | Pending |
 | SKILL-05 | Phase 07.2 | Pending |
-| SKILL-06 | Phase 07.2 → 07.5 (enforcement) | Pending |
+| SKILL-06 | Phase 07.2 → 07.5 (enforcement) → 10.1 (gateway wiring fix) | Pending |
 | SKILL-07 | Phase 07.2 | Pending |
 | SKILL-08 | Phase 07.2 | Pending |
 | SKILL-09 | v2 (moved from 07.2 during gap closure 2026-04-09) | Deferred |
 | SKILL-10 | Phase v2 | Pending |
 | SKILL-11 | Phase v2 | Pending |
 | SKILL-12 | Phase v2 | Pending |
+| SKILL-14 | Phase v2 | Pending |
+| SKILL-15 | Phase v2 | Pending |
+| SKILL-16 | Phase v2 | Pending |
+| TOOL-01 | Phase v2 | Pending |
+| TOOL-02 | Phase v2 | Pending |
+| TOOL-03 | Phase v2 | Pending |
+| TOOL-04 | Phase v2 | Pending |
+| TOOL-05 | Phase v2 | Pending |
+| TOOL-06 | Phase v2 | Pending |
+| TOOL-07 | Phase v2 | Pending |
+| TOOL-08 | Phase v2 | Pending |
+| BROWSE-01 | Phase v2 | Pending |
+| BROWSE-02 | Phase v2 | Pending |
+| BROWSE-03 | Phase v2 | Pending |
 | SKILL-13 | Backlog | Pending |
 | EXEC-01 | Phase 8 | Pending |
 | EXEC-02 | Phase 8 | Pending |
@@ -226,10 +264,10 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 **Coverage:**
 - v1.0 requirements: 29 total (all complete)
 - v1.1 requirements: 28 total (23 original + 5 from Phase 07.1 gap analysis: SKILL-05..SKILL-08, SKILL-13; SKILL-09 moved to v2 during v1.1 gap closure)
-- v2 requirements: 4 (SKILL-09 relocated + SKILL-10, SKILL-11, SKILL-12 from Phase 07.1)
+- v2 requirements: 18 (SKILL-09 relocated + SKILL-10..12 from Phase 07.1 + SKILL-14..16 from skills gap analysis + TOOL-01..08 from tools & toolsets gap analysis + BROWSE-01..03 from browser automation)
 - Mapped to phases: 29 (v1.0) + 28 (v1.1) + v2 additions
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-09 after v1.1 milestone audit — added gap closure phases 07.3/07.4/07.5, relocated SKILL-09 to v2*
+*Last updated: 2026-04-10 — added SKILL-14..16, TOOL-01..08, BROWSE-01..03 to v2 from hermes spec gap analysis; browser moved from Out of Scope to v2 (built-in CfT + chromiumoxide)*
