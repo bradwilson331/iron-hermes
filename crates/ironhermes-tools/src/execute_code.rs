@@ -109,6 +109,7 @@ impl Tool for ExecuteCodeTool {
             timeout_secs: self.config.timeout_secs,
             max_rpc_calls: self.config.max_rpc_calls,
             max_output_bytes: self.config.max_output_bytes,
+            max_stderr_bytes: self.config.max_stderr_bytes,
         };
 
         let sandbox = Sandbox::new(sandbox_config);
