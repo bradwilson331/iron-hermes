@@ -245,6 +245,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         None, // no memory store in single mode
         config.subagent.clone(),
         None, // no cancel token in single mode
+        None, // no progress callback in single mode
     );
 
     let max_turns = cli
@@ -304,12 +305,44 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         config.subagent.api_key.clone(),
     ));
     let chat_cancel_token = CancellationToken::new();
+
+    // D-19: CLI tree-view progress callback for subagent tool calls
+    let subagent_progress: ironhermes_tools::delegate_task::SubagentProgressCallback =
+        Arc::new(|index, event| {
+            use ironhermes_tools::delegate_task::SubagentProgress;
+            match event {
+                SubagentProgress::Started { task_summary } => {
+                    eprintln!(
+                        "  {} {}",
+                        format!("[subagent-{}]", index + 1).cyan().dimmed(),
+                        task_summary.dimmed(),
+                    );
+                }
+                SubagentProgress::ToolCall { tool_name } => {
+                    eprintln!(
+                        "  {} {} {}",
+                        format!("[subagent-{}]", index + 1).cyan().dimmed(),
+                        "Running:".dimmed(),
+                        tool_name.yellow().dimmed(),
+                    );
+                }
+                SubagentProgress::Completed => {
+                    eprintln!(
+                        "  {} {}",
+                        format!("[subagent-{}]", index + 1).cyan().dimmed(),
+                        "Done.".dimmed(),
+                    );
+                }
+            }
+        });
+
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
         None, // no memory store in chat mode
         config.subagent.clone(),
         Some(chat_cancel_token.clone()),
+        Some(subagent_progress),
     );
 
     let registry = Arc::new(registry);
@@ -489,6 +522,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         Some(memory_store.clone()),
         config.subagent.clone(),
         Some(gateway_cancel_token.clone()),
+        None, // D-20: gateway uses tracing::info only, no stderr progress
     );
 
     // Load hooks config and wire guardrails (before Arc wrapping)

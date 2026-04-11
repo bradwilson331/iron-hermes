@@ -254,11 +254,16 @@ impl ToolRegistry {
         memory_store: Option<Arc<Mutex<MemoryStore>>>,
         config: ironhermes_core::SubagentConfig,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
+        progress_callback: Option<crate::delegate_task::SubagentProgressCallback>,
     ) {
         use crate::delegate_task::DelegateTaskTool;
-        self.register(Box::new(DelegateTaskTool::new(
+        let mut tool = DelegateTaskTool::new(
             runner, semaphore, memory_store, config, cancel_token,
-        )));
+        );
+        if let Some(cb) = progress_callback {
+            tool = tool.with_progress_callback(cb);
+        }
+        self.register(Box::new(tool));
     }
 
     /// Register the execute_code tool with a separate RPC dispatch registry.

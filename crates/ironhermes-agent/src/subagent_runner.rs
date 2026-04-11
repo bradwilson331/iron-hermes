@@ -60,6 +60,7 @@ impl SubagentRunner for AgentSubagentRunner {
         max_iterations: usize,
         model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
+        tool_progress: Option<ironhermes_tools::delegate_task::ChildToolProgressCallback>,
     ) -> anyhow::Result<Option<String>> {
         // D-23/D-24: construct child client with model override if specified
         let child_client = if let Some(model) = model_override {
@@ -76,6 +77,10 @@ impl SubagentRunner for AgentSubagentRunner {
         // D-21: Forward cancel token to child AgentLoop
         if let Some(token) = cancel_token {
             agent = agent.with_cancellation_token(token);
+        }
+        // D-19: Forward tool progress callback to child AgentLoop
+        if let Some(cb) = tool_progress {
+            agent = agent.with_tool_progress(cb);
         }
 
         let messages = vec![

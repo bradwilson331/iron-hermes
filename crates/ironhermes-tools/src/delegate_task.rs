@@ -19,6 +19,25 @@ use tokio_util::sync::CancellationToken;
 
 use crate::registry::{Tool, ToolRegistry};
 
+/// Progress events emitted by subagent execution (D-19).
+#[derive(Debug, Clone)]
+pub enum SubagentProgress {
+    /// Child agent started working on a task.
+    Started { task_summary: String },
+    /// Child agent is executing a tool call.
+    ToolCall { tool_name: String },
+    /// Child agent completed its task.
+    Completed,
+}
+
+/// Callback for subagent progress events.
+/// Parameters: (subagent_index: usize, event: SubagentProgress)
+pub type SubagentProgressCallback = Arc<dyn Fn(usize, SubagentProgress) + Send + Sync>;
+
+/// Callback for per-tool-call progress in child agents (D-19).
+/// Parameters: (tool_name, args_preview)
+pub type ChildToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync + 'static>;
+
 /// Default tools available to subagents when no explicit allowlist is provided (D-02).
 const DEFAULT_SAFE_TOOLS: &[&str] = &[
     "read_file",
@@ -81,6 +100,9 @@ pub trait SubagentRunner: Send + Sync {
     ///
     /// `cancel_token` enables cooperative cancellation (D-21). When the token
     /// is cancelled, the child agent loop should return early.
+    ///
+    /// `tool_progress` enables per-tool-call progress callbacks (D-19).
+    /// The callback receives (tool_name, args_preview) for each tool execution.
     async fn run_child(
         &self,
         registry: Arc<ToolRegistry>,
@@ -88,6 +110,7 @@ pub trait SubagentRunner: Send + Sync {
         max_iterations: usize,
         model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
+        tool_progress: Option<ChildToolProgressCallback>,
     ) -> anyhow::Result<Option<String>>;
 }
 
@@ -99,6 +122,8 @@ pub struct DelegateTaskTool {
     config: SubagentConfig,
     /// Parent's cancellation token for propagating interrupt to children (D-21).
     parent_cancel_token: Option<CancellationToken>,
+    /// Optional progress callback for subagent events (D-19).
+    progress_callback: Option<SubagentProgressCallback>,
 }
 
 impl DelegateTaskTool {
@@ -115,7 +140,14 @@ impl DelegateTaskTool {
             memory_store,
             config,
             parent_cancel_token,
+            progress_callback: None,
         }
+    }
+
+    /// Set a progress callback for subagent events (D-19).
+    pub fn with_progress_callback(mut self, cb: SubagentProgressCallback) -> Self {
+        self.progress_callback = Some(cb);
+        self
     }
 }
 
@@ -180,7 +212,23 @@ impl DelegateTaskTool {
                 None
             };
 
+            // D-19: Create per-child tool progress callback
+            let progress_cb = self.progress_callback.clone();
+            let child_tool_progress: Option<ChildToolProgressCallback> =
+                progress_cb.as_ref().map(|cb| {
+                    let cb = cb.clone();
+                    Box::new(move |tool_name: &str, _args: &str| {
+                        cb(index, SubagentProgress::ToolCall { tool_name: tool_name.to_string() });
+                    }) as ChildToolProgressCallback
+                });
+
             let handle = tokio::spawn(async move {
+                // D-19: Emit Started progress event
+                if let Some(ref cb) = progress_cb {
+                    let summary = if goal.len() > 50 { &goal[..50] } else { &goal };
+                    cb(index, SubagentProgress::Started { task_summary: summary.to_string() });
+                }
+
                 // Each task gets its own temp dir for isolation
                 let child_dir = tempfile::TempDir::new()?;
 
@@ -211,6 +259,7 @@ impl DelegateTaskTool {
                         config.max_iterations,
                         config.model.as_deref(),
                         child_cancel_token,
+                        child_tool_progress,
                     ),
                 )
                 .await;
@@ -220,6 +269,11 @@ impl DelegateTaskTool {
                     Ok(Err(e)) => format!("Error: {}", e),
                     Err(_) => format!("Subagent timed out after {}s", config.timeout_secs),
                 };
+
+                // D-19: Emit Completed progress event
+                if let Some(ref cb) = progress_cb {
+                    cb(index, SubagentProgress::Completed);
+                }
 
                 Ok::<(usize, String), anyhow::Error>((index, response))
             });
@@ -450,6 +504,21 @@ impl Tool for DelegateTaskTool {
             None
         };
 
+        // D-19: Emit Started progress event
+        if let Some(ref cb) = self.progress_callback {
+            let summary = if task.len() > 50 { &task[..50] } else { task };
+            cb(0, SubagentProgress::Started { task_summary: summary.to_string() });
+        }
+
+        // D-19: Create per-child tool progress callback that routes through progress_callback
+        let child_tool_progress: Option<ChildToolProgressCallback> =
+            self.progress_callback.as_ref().map(|cb| {
+                let cb = cb.clone();
+                Box::new(move |tool_name: &str, _args: &str| {
+                    cb(0, SubagentProgress::ToolCall { tool_name: tool_name.to_string() });
+                }) as ChildToolProgressCallback
+            });
+
         // Run child agent with timeout (D-08) and model override (D-23)
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.timeout_secs),
@@ -459,9 +528,15 @@ impl Tool for DelegateTaskTool {
                 self.config.max_iterations,
                 self.config.model.as_deref(),
                 child_cancel_token,
+                child_tool_progress,
             ),
         )
         .await;
+
+        // D-19: Emit Completed progress event
+        if let Some(ref cb) = self.progress_callback {
+            cb(0, SubagentProgress::Completed);
+        }
 
         // _permit drops here, releasing the semaphore slot
         // child_dir (TempDir) drops here, cleaning up the temp directory (D-13)
@@ -629,6 +704,7 @@ mod tests {
             _max_iterations: usize,
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
+            _tool_progress: Option<ChildToolProgressCallback>,
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("mock child response".to_string()))
         }
@@ -738,6 +814,7 @@ mod tests {
                 _max_iterations: usize,
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 tokio::time::sleep(Duration::from_secs(999)).await;
                 Ok(Some("should not reach".to_string()))
@@ -775,6 +852,7 @@ mod tests {
                 _max_iterations: usize,
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(None)
             }
@@ -805,7 +883,7 @@ mod tests {
         let config = SubagentConfig::default();
         let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
 
-        registry.register_delegate_task_tool(runner, semaphore, None, config, None);
+        registry.register_delegate_task_tool(runner, semaphore, None, config, None, None);
 
         let tools = registry.list_tools();
         assert!(
@@ -834,6 +912,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
             None,
         );
         // Parent has delegate_task
@@ -942,6 +1021,7 @@ mod tests {
                 _max_iterations: usize,
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 // Return the system prompt so we can inspect it
                 Ok(Some(system_prompt))
@@ -980,6 +1060,7 @@ mod tests {
                 _max_iterations: usize,
                 model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(Some(format!("model={}", model_override.unwrap_or("none"))))
             }
@@ -1065,6 +1146,7 @@ mod tests {
             _max_iterations: usize,
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
+            _tool_progress: Option<ChildToolProgressCallback>,
         ) -> anyhow::Result<Option<String>> {
             // Extract the goal from the prompt to echo it back
             let goal = system_prompt
@@ -1150,6 +1232,7 @@ mod tests {
                 _max_iterations: usize,
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 // Task with "slow" sleeps longer — it has a higher index but should
                 // still appear in correct position in output
@@ -1220,6 +1303,7 @@ mod tests {
                 _max_iterations: usize,
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 let current = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
                 // Update max if this is the highest seen
@@ -1309,6 +1393,7 @@ mod tests {
                 _max_iterations: usize,
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(Some(system_prompt))
             }
