@@ -1,264 +1,283 @@
-# Domain Pitfalls
+# Pitfalls Research
 
-**Domain:** Rust AI agent — adding subagent delegation, code execution (Python RPC), event hooks, and batch processing to existing async system
-**Researched:** 2026-04-07
-**Confidence:** HIGH (grounded in IronHermes codebase analysis + established patterns in tokio/async Rust)
+**Domain:** Rust AI agent — adding persistent memory, session storage (SQLite/FTS5), context compression, prompt caching, context files, SOUL.md, skill framework, and memory provider backends (SQLite, Grafeo, DuckDB) to an existing async Rust system
+**Researched:** 2026-04-11
+**Confidence:** HIGH (grounded in IronHermes codebase analysis, official Anthropic docs, duckdb-rs issues, hermes-agent architecture docs, FTS5 SQLite forum threads)
 
 ---
 
 ## Critical Pitfalls
 
-Mistakes that cause rewrites, security breaches, or cascading system failures.
+Mistakes that cause rewrites, API rejections, data corruption, or security breaches.
 
 ---
 
-### Pitfall 1: Subagent Infinite Recursion (Delegation Cycle)
+### Pitfall 1: Orphaned tool_result Blocks After Context Compression
 
-**What goes wrong:** A subagent spawned by `delegate_task` is given the full parent toolset including `delegate_task` itself. It spawns a child, which spawns a child, creating an unbounded tree of processes and LLM API calls until the host OOMs or the API rate limiter cuts the connection.
+**What goes wrong:** The context compressor drops an assistant message that contains a `tool_use` block, but the subsequent user message containing the paired `tool_result` block remains. The Anthropic API validates the full message sequence on every call and returns HTTP 400 ("unexpected tool_use_id in tool_result") when a `tool_result` references a `tool_use` ID that no longer exists earlier in the history. The agent session is permanently broken — the error repeats on every subsequent turn.
 
-**Why it happens:** The parent agent's `ToolRegistry` is cloned or shared with the child without stripping orchestration tools. The child has no awareness it is a child.
+**Why it happens:** The existing `ContextCompressor::drop_middle_messages` in `ironhermes-agent/src/context_compressor.rs` operates on individual message indices without treating `(assistant tool_use) + (user tool_result)` as an atomic unit. Any slice boundary that falls between the two halves of a tool pair produces orphaned `tool_result` blocks. This is the most frequently reported compaction bug across Claude Code and other Anthropic API consumers in 2025-2026 (confirmed in anthropics/claude-code#8484, anthropics/claude-code#14173, openclaw issues#29103, #3462, #40305).
 
-**Consequences:** Runaway LLM API costs (each tree level doubles calls), process table exhaustion, OOM kill of the main process, lost in-flight Telegram responses.
+**How to avoid:**
+- Before dropping any slice of messages, scan both the candidate drop region AND the messages immediately after it for `tool_result` blocks whose `tool_call_id` matches a `tool_use` in the drop region.
+- Drop the `tool_use` message AND its corresponding `tool_result` message atomically, or keep both.
+- Never split across a tool pair boundary. When selecting `tail_start`, advance it forward past any `tool_result` at `messages[tail_start]` whose paired `tool_use` was in the dropped range.
+- Add a pre-flight validation function that walks the final message list and asserts every `tool_result.tool_call_id` has a matching `tool_use` earlier in the list. Call it after every compression pass in debug builds.
 
-**Prevention:**
-- The `delegate_task` tool MUST pass a restricted `ToolRegistry` to child `AgentLoop` instances — one that explicitly excludes `delegate_task` and any other orchestration-level tools.
-- Enforce a hard depth limit (max depth = 1 for v1.1; no grandchildren). Pass a `depth: u32` through the child context and reject `delegate_task` calls at depth >= 1.
-- Cap concurrent subagents system-wide with a `Semaphore` (start at 3 as specified). Acquisition must happen before spawning.
+**Warning signs:** HTTP 400 responses from the LLM API mid-session. "tool_use_id" appearing in error messages. Sessions that survive one turn after compression then fail permanently on the next.
 
-**Detection:** Child processes that themselves make LLM calls with tool lists containing `delegate_task`. Log the restricted tool list at child spawn time.
-
-**Phase:** Subagent Delegation phase. This is the first design decision to get right before any code is written.
-
----
-
-### Pitfall 2: Python Sandbox Escape via RPC Tool Forwarding
-
-**What goes wrong:** The Python code execution sandbox calls Hermes tools via RPC. Those tools include `terminal`, `write_file`, and `patch` — tools that can modify the filesystem, execute arbitrary shell commands, and reach the network. A malicious or LLM-hallucinated Python script calls `rpc.terminal("rm -rf /")` and the RPC server forwards it without checking whether the caller is allowed to invoke that tool in that context.
-
-**Why it happens:** RPC tool dispatch re-uses the parent `ToolRegistry` which was built for a trusted agent context. The Python sandbox is not a trusted agent context.
-
-**Consequences:** Arbitrary command execution on the host, filesystem destruction, exfiltration of credentials in `~/.ironhermes/`, bypassing of all SSRF protections (since `terminal` can run `curl` directly).
-
-**Prevention:**
-- The Python RPC server MUST expose a separate, minimal tool registry — `read_file` (read-only paths only), `web_search`, `web_read`. Explicitly block `terminal`, `write_file`, `patch`, `delegate_task`, all memory tools.
-- Validate every RPC tool call against an allowlist before dispatch, not just at registry construction. Defense in depth.
-- Run the Python interpreter with restricted OS permissions: no network namespace access (or SSRF-validated egress only), read-only bind mounts except a temp scratch dir, `rlimit` on CPU and memory.
-- The existing SSRF guard in `ironhermes-core/src/ssrf.rs` must be applied to all URLs originating from RPC calls, not just from web_read/web_search tools.
-
-**Detection:** Any RPC call to `terminal`, `write_file`, `patch` should be logged as a security event and rejected with an explicit error, not silently dropped.
-
-**Phase:** Code Execution phase. The RPC tool allowlist must be defined before the RPC server accepts any connections.
+**Phase to address:** Context Compression phase. This is the first design constraint for `ContextCompressor` — write the atomicity invariant before implementing the new dual-system (gateway hygiene at 85%, agent ContextEngine at 50%).
 
 ---
 
-### Pitfall 3: Subagent Process Leaks on Parent Cancellation
+### Pitfall 2: System Prompt Mutation Destroys Cache Stability
 
-**What goes wrong:** A subagent is spawned as a child `tokio::process::Child` or a separate `tokio::task`. The parent task is cancelled (Telegram timeout, user sends /reset, graceful shutdown). The child process keeps running, consuming CPU, making LLM API calls, and holding open file handles — indefinitely, because it has no cancellation signal.
+**What goes wrong:** Prompt caching on Anthropic's API works by matching a hash of the exact prefix up to a `cache_control` breakpoint. If the system prompt changes between turns — even by a single character — every request is a cache miss. The project pays full input token costs on every message, negating the purpose of caching entirely.
 
-**Why it happens:** `tokio::spawn` returns a `JoinHandle` that, when dropped, detaches the task (does not abort it). `tokio::process::Child`, when dropped, does not kill the child process. Both are "fire and forget" by default.
+**Why it happens:** The current `PromptBuilder::build()` in `ironhermes-agent/src/prompt_builder.rs` is called per-session (frozen at `load_context` time), which is correct. The danger arises in v2.0 when adding the 10-layer prompt including timestamps, memory snapshots, skills catalog, and platform hints. Developers commonly inject a `Current time: {timestamp}` line or include per-user dynamic data inside the cached section. Any of these invalidates the cache on every request. Confirmed Anthropic doc pitfall: cache breakpoints must be placed on the last block whose content is identical across all requests.
 
-**Consequences:** Ghost subagent processes accumulate across sessions. On shutdown, the main process exits but subagents keep calling the LLM API. Costs accrue invisibly.
+**How to avoid:**
+- The system prompt must be structured as: `[static layers] → cache_control breakpoint → [dynamic layers]`. Static layers: SOUL.md identity, tool-use guidance, AGENTS.md, skill catalog, MEMORY.md/USER.md snapshot (these are frozen at session start). Dynamic layers after the breakpoint: current timestamp, session-specific context, per-turn injections.
+- Memory snapshots are frozen at `load_from_disk()` time (the `MemoryStore::snapshot` field already does this — preserve that invariant through v2). Since they do not change mid-session, they are safe to include before the breakpoint.
+- Do NOT add a `cache_control` breakpoint on any block that contains a timestamp, user ID, or per-turn context.
+- Tool definitions change the entire cache hierarchy (tools → system → messages). If the toolset changes between session setup and mid-session (e.g. skill activation adds tools), the tools-level cache is busted. Accept this cost at skill activation time; do not mutate tools silently per-turn.
+- Verify cache hits by checking `cache_read_input_tokens > 0` in the API response. A zero value means caching is silently failing.
 
-**Prevention:**
-- Track all subagent `JoinHandle`s in a `JoinSet` owned by the parent task. When the parent's `CancellationToken` fires, call `join_set.abort_all()` before returning.
-- For OS-level child processes (Python interpreter), use `tokio::process::Command::kill_on_drop(true)` so the `Child` handle automatically sends SIGKILL on drop.
-- The existing gateway uses `JoinSet` + `CancellationToken` (from Phase 1 research). The subagent spawner must follow the same pattern, not invent its own.
-- Register all subagent semaphore permits with RAII guards so the Semaphore slot is released even if the task panics.
+**Warning signs:** `cache_read_input_tokens` always 0 in API responses. Token costs not decreasing after first turn in a session. Timestamps, user IDs, or dynamic content appearing before a `cache_control` marker.
 
-**Detection:** Monitor active subagent count via an `AtomicU32` counter incremented on spawn, decremented in a `Drop` impl. Alert if count exceeds the configured maximum after a session ends.
-
-**Phase:** Subagent Delegation phase.
-
----
-
-### Pitfall 4: Hook Ordering Deadlock (Recursive Hook Invocation)
-
-**What goes wrong:** A `pre_tool` hook is registered that itself calls a tool (e.g., a logging hook that writes to a file via the `write_file` tool). The `write_file` tool fires its own `pre_tool` hook. If the hook system holds a lock while dispatching hooks, the second hook invocation deadlocks on the same lock.
-
-**Why it happens:** Hook registries are natural candidates for `Arc<Mutex<Vec<Hook>>>`. Calling hooks while holding that mutex, then having a hook re-enter the tool dispatch path, creates a lock cycle. Even without explicit locks, async re-entrancy via `tokio::sync::Mutex` produces the same result if the hook awaits anything that re-acquires the same mutex.
-
-**Consequences:** Silent deadlock. The agent loop hangs indefinitely. No error is returned. The Telegram user sees a bot that never responds. The parent session's timeout eventually kills the run, but the deadlock cause is invisible in logs.
-
-**Prevention:**
-- Snapshot the hook list before calling hooks: `let hooks = self.hooks.read().clone()` (using `RwLock`, not `Mutex`). Release the lock before invoking any hook. Never hold the registry lock across an async await point.
-- Define a strict hook execution context: hooks MUST NOT call tools directly. Hooks receive read-only event data and return an `Action` enum (`Allow`, `Block(reason)`, `Modify(new_args)`). Side effects (logging, webhooks) must be dispatched to a background channel, not executed inline.
-- Mark the hook trait with a `#[must_not_recurse]` convention (not a Rust primitive, but a code review rule). Document it prominently.
-- Reentrancy guard: track the current tool being dispatched in a `thread_local!` or task-local. If a hook attempts to invoke the same tool, return an error immediately.
-
-**Detection:** Add a `hook_depth: AtomicU32` counter. If depth exceeds 2, log an error and short-circuit rather than deadlocking.
-
-**Phase:** Event Hooks phase.
+**Phase to address:** Prompt Caching + Prompt Assembly phases, which must be designed together. The 10-layer assembly order decision must account for cache stability from the start.
 
 ---
 
-### Pitfall 5: Batch Processing Memory Pressure from Concurrent Message History
+### Pitfall 3: Gateway In-Memory SessionStore Not Migrated — Dual State Split
 
-**What goes wrong:** Batch processing runs N prompts in parallel. Each prompt instantiates an `AgentLoop` with its own `Vec<ChatMessage>` conversation history. A conversation history can grow to tens of thousands of tokens (the existing `ContextCompressor` targets a configurable limit). With N=20 parallel batch items, peak memory usage is `N * max_context_size * bytes_per_token`. At 128K token contexts and 4 bytes/token, 20 parallel runs consume ~10GB of heap.
+**What goes wrong:** The gateway keeps `GatewaySession` (with its `Vec<ChatMessage>`) in the in-memory `SessionStore` in `ironhermes-gateway/src/session.rs`. The new `StateStore` in `ironhermes-state/src/lib.rs` keeps a separate SQLite-backed session record. If v2.0 adds persistent session storage without migrating the gateway's in-memory store, there are two authoritative sources for conversation state: the gateway's `HashMap` and the SQLite `messages` table. After a restart, the gateway loses all in-memory sessions but the SQLite store has the history — and nothing reconciles them. The `session_search` tool will return results from SQLite sessions that the gateway has no matching in-memory state for.
 
-**Why it happens:** The batch runner treats each item as independent and maxes out the concurrency limit. Context compression runs per-session but does not account for system-wide memory pressure. The `ContextCompressor` in `ironhermes-agent` compresses within a session but does not signal back-pressure to the batch scheduler.
+**Why it happens:** Both stores exist in the codebase right now and serve different purposes. The migration step is easy to defer because everything works — until a restart, or until session_search returns a session ID the gateway doesn't know about.
 
-**Consequences:** OOM kill of the main process, killing all in-flight batch items and producing no output for any of them. On a 16GB server, this happens well before N=20.
+**How to avoid:**
+- Define a migration contract: on startup, the gateway loads all non-expired SQLite sessions and reconstructs in-memory state (or, preferably, makes the in-memory store a write-through cache backed by SQLite). The `StateStore` becomes the source of truth; `SessionStore` becomes a performance layer.
+- Add a `session_id` field to `GatewaySession` that matches the `StateStore` UUID — this field already exists (`session_id: String`) but must be written to SQLite on creation, not lazily.
+- Every `add_message` call to `GatewaySession` must also call `StateStore::add_message`. Use a wrapper type that enforces this invariant rather than two separate calls at each call site.
 
-**Prevention:**
-- Batch concurrency must have a second limit: not just "max N parallel" but "max M tokens in flight across all parallel runs." Implement a `TokenBudgetSemaphore` that acquires `estimated_tokens` permits before starting each batch item.
-- Default batch concurrency to 4 (conservative) not the full N. Make it configurable. Document the memory math in the config comments.
-- Batch items should use aggressive context compression settings: smaller `max_tokens` limit than interactive sessions, tool result truncation at a lower threshold.
-- Stream batch results to disk (ShareGPT JSONL, one object per line) as each item completes rather than accumulating all results in memory before writing.
-- Use a `tokio::sync::Semaphore` for the batch concurrency cap, not `FuturesUnordered` with all items submitted at once.
+**Warning signs:** Sessions that exist in `session_search` results but the gateway has no memory of. Empty message history after agent restart. `GatewaySession::session_id` UUIDs that do not appear in `SELECT id FROM sessions`.
 
-**Detection:** Log `rss_bytes` (from `/proc/self/status` on Linux or `task_info` on macOS) at each batch item start. If RSS exceeds 80% of available memory, stop accepting new batch items and drain existing ones.
-
-**Phase:** Batch Processing phase.
+**Phase to address:** Session Storage phase. The migration architecture must be specified before implementing the StateStore integration into the gateway.
 
 ---
 
-## Moderate Pitfalls
+### Pitfall 4: FTS5 Trigger Drift — Index Becomes Stale or Corrupt
+
+**What goes wrong:** The `messages_fts` content table is maintained by three triggers (INSERT, UPDATE, DELETE on `messages`). If any write path bypasses these triggers — bulk imports, direct SQLite writes during migration, `REPLACE INTO` without `PRAGMA recursive_triggers=ON`, or schema migrations that backfill rows — the FTS5 index becomes out of sync with the `messages` table. Queries return wrong results or no results. Running `INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')` then reports corruption (confirmed SQLite forum thread on FTS5 extra _fts_docsize rows).
+
+**Why it happens:** The triggers defined in `FTS_SQL` in `ironhermes-state/src/lib.rs` only fire for DML through the normal SQLite path. Any code that:
+- Runs `INSERT OR REPLACE` (which fires DELETE then INSERT, but only if `PRAGMA recursive_triggers=1`)
+- Imports rows directly via `rusqlite::Connection::execute_batch` during migration
+- Rebuilds the table from the Python hermes-agent's state.db import
+- Uses `UPDATE OR REPLACE` semantics
+
+will silently break FTS5 consistency.
+
+**How to avoid:**
+- Never INSERT rows into `messages` outside the `StateStore::add_message` method. All migration code must go through the same method.
+- After any bulk migration, run `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` to rebuild the index from the content table.
+- Add an integrity check to the `StateStore` test suite: after every insert, verify `SELECT COUNT(*) FROM messages` equals `SELECT COUNT(*) FROM messages_fts`.
+- Set `PRAGMA recursive_triggers=ON` at connection open time as a precaution.
+- The `FTS_SQL` block checks for FTS table existence before creating it (`fts_exists` check) — preserve this pattern in schema migrations.
+
+**Warning signs:** `session_search` returning 0 results for text that is visibly present in `get_messages` output. SQLite integrity-check returning "database disk image is malformed" for `messages_fts`.
+
+**Phase to address:** Session Storage phase (schema migration design) and any phase that bulk-imports data from Python hermes-agent history.
 
 ---
 
-### Pitfall 6: Python RPC Channel Deadlock (Blocking stdin/stdout)
+### Pitfall 5: DuckDB Connection Non-Send + Tokio Runtime Blocking
 
-**What goes wrong:** The Python RPC protocol uses stdin/stdout for communication (common pattern for subprocess IPC). The Rust parent writes a request to the child's stdin, then blocks waiting for a response on stdout. Meanwhile, the Python process writes a large result to stdout, fills the OS pipe buffer (typically 64KB on Linux), and blocks waiting for the parent to drain it. Both sides are blocked — classic pipe deadlock.
+**What goes wrong:** `duckdb::Connection` wraps internal state in a `RefCell`, which is `!Send`. It cannot be stored in an `Arc`, shared across tokio tasks, or moved into `spawn_blocking` closures without unsafe code. If a developer naively stores a `Connection` in a shared `MemoryProvider` struct and passes that struct across `.await` boundaries or into tokio tasks, compilation fails or (worse) the unsafe workaround is reached for and causes undefined behavior. Additionally, DuckDB's C++ engine performs synchronous disk I/O — calling it directly in an async context blocks the tokio executor thread, degrading latency for all concurrent Telegram users.
 
-**Why it happens:** Naive `child.stdin.write_all()` followed by `child.stdout.read_to_end()` in sequence, without concurrent reading.
+**Why it happens:** DuckDB was designed for analytical workloads, not embedded use in async OLTP-style applications. The Rust binding exposes the synchronous C API directly. The `!Send` constraint surfaces immediately in practice.
 
-**Prevention:**
-- Use `tokio::io::AsyncWriteExt` for stdin and `tokio::io::AsyncReadExt` for stdout, with both running concurrently via `tokio::join!`. Never read and write the same child's pipes sequentially.
-- Alternatively, use Unix domain sockets or a named pipe instead of stdin/stdout for RPC — avoids the pipe buffer limit entirely and is easier to frame messages on.
-- Set explicit size limits on Python tool output before it reaches the RPC response (the Python side truncates, the Rust side has a fallback max read size).
-- Add a `timeout` on the RPC call (the existing `terminal.rs` uses `tokio::time::timeout` — use the same pattern).
+**How to avoid:**
+- Use `async-duckdb` (crates.io) as the adapter layer. It wraps `duckdb::Connection` on a dedicated background thread and exposes async methods safe for tokio, eliminating both the `!Send` problem and the blocking executor problem.
+- Alternatively, follow the channel-based pattern: one background thread owns the single DuckDB connection; all memory provider operations are sent via `mpsc` channel and results returned via oneshot channel. This is essentially what `async-duckdb` implements.
+- The `MemoryProvider` trait must be `Send + Sync + 'static` for use in Arc. Design the DuckDB backend to implement this via an internal channel handle, not by exposing `Connection` directly.
+- DuckDB is column-oriented and optimized for analytical scans. Single-row writes (inserting one memory fact at a time) are slower than SQLite for this pattern. Batch writes when possible. For the memory provider workload (read at session start, write occasionally), the latency difference is acceptable, but do not use DuckDB as a substitute for the message-per-message `StateStore` role.
 
-**Phase:** Code Execution phase.
+**Warning signs:** Compile errors: "dyn MemoryProvider cannot be shared between threads safely" or "the trait `Send` is not implemented for `duckdb::Connection`". Tokio task spawn failures. Executor thread stalls under concurrent user load.
 
----
-
-### Pitfall 7: Hook Side Effects Breaking Tool Result Consistency
-
-**What goes wrong:** A `post_tool` hook modifies tool output (e.g., a guardrails hook redacts PII from `read_file` output). The modified output is appended to the conversation history. The LLM sees redacted content and hallucinates what the missing sections contained. Worse, a subsequent `read_file` call returns the real content (hooks only fire in the agent loop, not in raw file access), creating inconsistency the LLM cannot reconcile.
-
-**Why it happens:** Hooks that modify tool results are treating symptoms rather than root causes. The LLM's context now contains a lie about what the file contains.
-
-**Prevention:**
-- `post_tool` hooks should return `Observe(modified_output)` only for logging/telemetry — the modified output goes to the hook caller, not to the conversation history.
-- For guardrail use cases, prefer `pre_tool` hooks that block the call entirely (`Block(reason)`) rather than `post_tool` hooks that quietly alter results.
-- If output modification is truly required, document it explicitly in the tool result: prepend `[GUARDRAIL: sections redacted]` so the LLM knows the result is partial.
-
-**Phase:** Event Hooks phase.
+**Phase to address:** Memory Provider Trait phase. The trait signature (including `Send + Sync` bounds) must be locked in before implementing any backend.
 
 ---
 
-### Pitfall 8: Subagent Context Inheritance Leaking Sensitive State
+### Pitfall 6: Grafeo GDB Not a Drop-in Replacement for SQL Patterns
 
-**What goes wrong:** The parent agent's conversation history (which may contain API keys, user PII, internal tool results) is passed verbatim to the child agent as its starting context. The child's task requires none of this information. If the child is a future `delegate_task` call used in batch processing, that history ends up in ShareGPT training data.
+**What goes wrong:** Grafeo is a graph database with a string-based query API (`db.execute("INSERT (:Person {name: 'X'})")`) that returns `serde_json::Value`. There are no typed result structs, no prepared statements equivalent to rusqlite's parameter binding, and no row-mapping closures. Developers who model the Grafeo backend after the SQLite `MemoryStore` patterns (file-locked writes, delimiter-separated entries, row queries) will find none of those primitives apply. Memory facts stored as nodes with edges require a graph query to retrieve, not a `SELECT * FROM` pattern.
 
-**Why it happens:** It is convenient to give the child "full context" to explain why it is doing what it is doing. The implementation copies or references the parent's `Vec<ChatMessage>`.
+**Why it happens:** Grafeo is a young crate (MSRV 1.91.1, early 2026 active development). Its Rust API surface is minimal — essentially `GrafeoDB::new_in_memory()` / `GrafeoDB::open(path)` and `db.execute(query_string) -> Result<Value>`. There is no explicit async interface; all operations are synchronous. The `Send + Sync` status of `GrafeoDB` is not explicitly documented and must be verified before crossing async boundaries.
 
-**Prevention:**
-- Child agents receive ONLY the task description and the minimal facts needed to complete it — not the parent's conversation history.
-- Construct the child's initial messages from scratch: a system prompt (derived from the parent's SOUL.md config, not the parent's accumulated messages) plus a single user message describing the task.
-- Before any messages enter ShareGPT batch output, run a secrets scan (the existing `context_scanner.rs` patterns) to detect API keys, tokens, and credentials.
+**How to avoid:**
+- The `MemoryProvider` trait's Grafeo backend must own a `GrafeoDB` instance wrapped in `Arc<Mutex<GrafeoDB>>` with all calls dispatched through `tokio::task::spawn_blocking` — same bridge pattern as rusqlite.
+- Model memory facts as nodes with a `content` property: `INSERT (:Memory {content: '...', target: 'memory', ts: ...})`. Retrieval uses `MATCH (m:Memory {target: 'memory'}) RETURN m`. Test this query shape against the actual Grafeo version in use — query syntax compatibility between GQL/Cypher varies by minor version.
+- Do not rely on Grafeo's string-based query API for injection safety. Interpolating user-supplied content directly into query strings is SQL injection at the graph layer. All user-facing content must be passed as property map parameters, not string-interpolated into the query body. Verify the Grafeo API exposes parameterized queries before trusting it for user content.
+- The Grafeo backend is strictly for the `MemoryProvider` trait, not for `StateStore`. Session message history stays in SQLite.
 
-**Phase:** Subagent Delegation phase; also relevant to Batch Processing phase.
+**Warning signs:** Compilation errors about `GrafeoDB` not being `Send`. Runtime panics on `execute()` with graph query strings that contain unescaped content. Tests that pass in memory mode but fail in persistent mode (different storage path behavior).
 
----
-
-### Pitfall 9: Cron Scheduler Interaction with Subagent Concurrency Limit
-
-**What goes wrong:** The existing cron scheduler fires tasks at scheduled intervals. If a cron task uses `delegate_task`, it competes for the same subagent `Semaphore` slots as interactive user sessions. A cron burst (e.g., 5 tasks firing simultaneously at the top of the hour) exhausts all 3 subagent slots, blocking interactive users from getting responses for the duration of those tasks.
-
-**Why it happens:** The cron scheduler and the gateway handler share the same subagent concurrency pool without priority differentiation.
-
-**Prevention:**
-- Maintain separate semaphore pools for interactive (user-initiated) and background (cron-initiated) subagents. Interactive pool: 3 slots. Background pool: 1 slot (expandable via config).
-- Cron tasks that spawn subagents should use a lower-priority acquisition path: check if interactive slots are available before consuming background slots, and add jitter to cron firing times to prevent burst clustering.
-- Add a `task_source: TaskSource` enum (`Interactive | Cron | Batch`) to the subagent context so resource accounting can distinguish usage.
-
-**Phase:** Subagent Delegation phase; interacts with existing Cron crate.
+**Phase to address:** Memory Provider Trait phase, Grafeo backend sub-phase. Spike a working `GrafeoDB::open` + round-trip query before committing to the Grafeo backend in the trait design.
 
 ---
 
-### Pitfall 10: Batch Processing Writing to Same Output File Concurrently
+### Pitfall 7: SOUL.md / Context File Injection Not Scanned at Load Time
 
-**What goes wrong:** Multiple batch items complete around the same time and all attempt to append to the same JSONL output file. Without coordination, partial writes interleave and produce malformed JSON lines. On macOS, `O_APPEND` provides atomic appends only up to `PIPE_BUF` bytes (~512 bytes); larger writes are not atomic.
+**What goes wrong:** SOUL.md defines the agent's identity and is injected directly into the system prompt. If a file fetched from the internet (a shared skill, a downloaded SOUL.md template, or a maliciously modified project context file) contains prompt injection payloads, they execute with system-prompt-level authority. The "soul-evil" attack class (documented February 2026, 400+ malicious packages found on skill registries) specifically targets this vector: an attacker replaces or modifies SOUL.md to redirect agent behavior — exfiltrating env vars, leaking API keys via URL parameters, or changing persona entirely.
 
-**Why it happens:** Naive `OpenOptions::new().append(true).open(path)` from multiple `tokio::task`s without a serialization primitive.
+**Why it happens:** The existing `PromptBuilder::load_soul_md()` already calls `scan_context_content()` before inclusion (confirmed in codebase). The risk increases in v2.0 because the skill framework adds a new attack surface: SKILL.md files are loaded from directories, potentially downloaded from Skills Hub or installed by users. If skill bodies are injected into the system prompt without scanning (for conditional activation display or catalog), they become injection vectors.
 
-**Prevention:**
-- Serialize all output writes through a single `tokio::sync::mpsc` channel consumed by a dedicated writer task. Batch items send completed `TrajectoryRecord` values to the channel; the writer task appends them one at a time.
-- This also enables clean shutdown: drain the channel before closing the file, ensuring no records are lost when the batch completes.
+**How to avoid:**
+- Every file loaded into the system prompt — SOUL.md, AGENTS.md, .hermes.md, CLAUDE.md, .cursorrules, SKILL.md body, USER.md, MEMORY.md — must pass through `scan_context_content()` before inclusion. This is non-negotiable.
+- For SKILL.md files specifically: scan both frontmatter fields (name, description, compatibility) and the Markdown body. The description field is used as the LLM's skill activation trigger — it is a privileged injection point if not scanned.
+- Skills loaded from the Skills Hub or any external source should be treated as untrusted until scanned. Present a visual warning to the user for externally sourced skills.
+- The `context_scanner` must handle Unicode homoglyphs, right-to-left override characters, and multi-language injection patterns (Korean, Chinese, Japanese injection has been confirmed in wild samples).
 
-**Phase:** Batch Processing phase.
+**Warning signs:** SOUL.md or SKILL.md files that include phrases like "ignore previous instructions", "you are now", "your new primary directive", "export $ANTHROPIC_API_KEY". Skills from external sources that activate under unexpected conditions.
 
----
-
-## Minor Pitfalls
-
----
-
-### Pitfall 11: Subagent Tool Result Size Amplification
-
-**What goes wrong:** A subagent calls `web_read` on a large page, gets 50K characters back, includes it in its response to the parent. The parent appends this as a tool result in its own conversation history. Token count spikes suddenly. Context compressor runs, drops earlier conversation turns, loses important context. The parent's next LLM call is expensive and low-quality.
-
-**Prevention:** Cap subagent response length (max 4K characters by default). Subagents should summarize their findings, not return raw tool output verbatim. Enforce this in the `delegate_task` tool's response extraction logic.
-
-**Phase:** Subagent Delegation phase.
+**Phase to address:** Skill Framework phase (SKILL.md loading) and SOUL.md personality phase. Security scanning must be in place before external skill installation is supported.
 
 ---
 
-### Pitfall 12: Hook Registration Order Producing Non-Deterministic Behavior
+### Pitfall 8: Blocking StateStore Calls Inside Async Gateway Handlers
 
-**What goes wrong:** Two hooks both handle `pre_tool` for `write_file`. Hook A validates the path is within allowed directories. Hook B logs the write attempt. If Hook B runs before Hook A and A blocks the call, B has already logged a write that never happened. In the other order, logging correctly reflects only allowed writes.
+**What goes wrong:** `StateStore` wraps `rusqlite::Connection`, which is synchronous. Every call to `add_message`, `create_session`, `search_messages` performs blocking I/O. If these are called directly inside tokio async handlers (e.g., in `ironhermes-gateway/src/handler.rs`), they block the tokio executor thread for the duration of the SQLite write. Under concurrent Telegram users, this serializes all message handling through a single blocked thread, causing latency spikes and potential handler timeouts.
 
-**Prevention:** Define an explicit priority field on hooks (`priority: i32`, lower runs first). Security/validation hooks always run before observability/logging hooks. Document the convention. Use a `BTreeMap<i32, Vec<Hook>>` for ordered dispatch.
+**Why it happens:** `rusqlite` provides no async API. The pattern of calling sync code in async context is trivially easy to write and works correctly in single-user tests. The problem only manifests under concurrency.
 
-**Phase:** Event Hooks phase.
+**How to avoid:**
+- All `StateStore` calls from async code must go through `tokio::task::spawn_blocking`. The `StateStore` itself should be wrapped in a struct that provides async methods delegating to `spawn_blocking`.
+- Alternatively, adopt `tokio-rusqlite` which wraps the connection on a dedicated background thread with an async call interface.
+- The `StateStore` instance is not `Clone` (it holds a `Connection`). Wrap it in `Arc<Mutex<StateStore>>` for sharing across gateway sessions, but Mutex contention under load is a secondary concern — `spawn_blocking` eliminates the executor-blocking problem first.
+- WAL mode (already set in `SCHEMA_SQL`) allows concurrent readers with one writer. Still, writes from multiple concurrent users will queue at the `Mutex` level — this is acceptable for v2.0 single-operator deployment.
 
----
+**Warning signs:** Telegram response latency increasing proportionally with concurrent user count. Tokio runtime warnings about "blocking in async context". Profiling showing gateway handler tasks spending most time inside SQLite calls.
 
-### Pitfall 13: Python Interpreter Startup Latency on Every `execute_code` Call
-
-**What goes wrong:** Each `execute_code` call spawns a fresh Python interpreter, which takes 200-400ms for startup before the script executes. For short scripts called in a tight agent loop, this overhead dominates. The user perceives the agent as slow.
-
-**Prevention:** Keep a warm Python interpreter process alive as a daemon with a simple request/response loop (the RPC server itself serves this purpose if it stays running between calls rather than exiting). Use a pool of 1-2 warm interpreters with a short idle timeout (30 seconds) before shutdown. This is more complex than spawn-per-call but necessary for acceptable latency.
-
-**Phase:** Code Execution phase.
+**Phase to address:** Session Storage phase, specifically the gateway integration design.
 
 ---
 
-### Pitfall 14: Event Hook Panics Crashing the Agent Loop
+## Technical Debt Patterns
 
-**What goes wrong:** A user-registered hook (or a buggy built-in hook) panics during dispatch. Because hooks are called inside the agent loop task, the panic propagates, kills the task, and the Telegram user gets no response. Worse, a `JoinHandle` propagating a panic can take down a larger scope if not caught.
-
-**Prevention:** Wrap each hook call in `std::panic::catch_unwind` (for sync hooks) or a `tokio::task::spawn` with panic catching (for async hooks). Log the panic, mark the hook as errored, and continue dispatching remaining hooks. A single hook failure should never abort the agent run. Consider automatically disabling hooks that panic more than 3 times.
-
-**Phase:** Event Hooks phase.
+| Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
+|----------|-------------------|----------------|-----------------|
+| Single `Arc<Mutex<StateStore>>` for all users | Simple to implement | Mutex contention under multi-user load; all writes serialized | Acceptable for v2.0 single-operator deployment; revisit if multi-user |
+| MemoryStore snapshot stays frozen for entire session | Correct cache stability | Memory updates mid-session not visible until next session | Never change — this is the documented D-12 invariant; mid-session mutations defeat caching |
+| Grafeo backend using `Arc<Mutex<GrafeoDB>>` with `spawn_blocking` | Works correctly | Per-query thread context switch overhead | Acceptable; Grafeo is not high-frequency |
+| DuckDB backend using `async-duckdb` single connection pool | Simplest async-safe approach | Analytical queries on large datasets will serialize | Acceptable for v2.0; DuckDB memory provider is for structured retrieval not bulk analytics |
+| Skip `session_search` integration in CLI for v2 | Faster CLI parity | CLI users cannot search session history | Acceptable as deferred feature if CLI parity scope is constrained |
+| FTS5 integrity check only in test builds | No runtime overhead | Silent FTS drift undetectable in production | Never — add a startup integrity check at minimum |
 
 ---
 
-## Phase-Specific Warnings
+## Integration Gotchas
 
-| Phase Topic | Likely Pitfall | Mitigation |
-|-------------|---------------|------------|
-| Subagent Delegation | Infinite recursion via `delegate_task` in child toolset | Strip orchestration tools from child registry; enforce depth=1 |
-| Subagent Delegation | Process leak when parent cancelled | `kill_on_drop(true)` + `JoinSet::abort_all()` on parent cancel |
-| Subagent Delegation | Cron competing for interactive subagent slots | Separate semaphore pools per task source |
-| Subagent Delegation | Parent context leaking to child (PII, keys) | Build child context from scratch; never copy parent message history |
-| Code Execution (Python RPC) | Sandbox escape via RPC tool forwarding to `terminal` | Strict RPC allowlist; never expose `terminal`, `write_file`, `patch` |
-| Code Execution (Python RPC) | Pipe deadlock on large outputs | Concurrent stdin write + stdout read via `tokio::join!` |
-| Code Execution (Python RPC) | Startup latency per call | Warm interpreter daemon with idle timeout |
-| Event Hooks | Deadlock from hook re-entering tool dispatch | Snapshot hook list before calling; never hold registry lock across await |
-| Event Hooks | Hook output modification breaking LLM consistency | Prefer `Block` over silent `Modify`; label any modifications in tool result |
-| Event Hooks | Hook panics killing agent loop | Wrap in `catch_unwind`; isolate per-hook failures |
-| Event Hooks | Non-deterministic hook ordering | Priority field on hooks; security before observability |
-| Batch Processing | OOM from N parallel contexts | `TokenBudgetSemaphore`; default concurrency=4; stream results to disk |
-| Batch Processing | Concurrent JSONL output corruption | Single writer task consuming mpsc channel |
-| Batch Processing | Sensitive data in ShareGPT output | Pre-export secrets scan using `context_scanner.rs` patterns |
-| Integration (all) | New features bypassing existing SSRF guard | Route all URL-originating calls through `ironhermes-core::ssrf` regardless of source |
+| Integration | Common Mistake | Correct Approach |
+|-------------|----------------|------------------|
+| Anthropic cache_control | Placing breakpoint on last system block which includes memory snapshot | Memory snapshot is frozen at session start — safe to cache. Timestamp/user-id injections must go after the breakpoint |
+| Anthropic cache_control | Not checking `cache_read_input_tokens` in response | Verify cache hits by asserting `cache_read_input_tokens > 0` after first turn; silent miss = paying full price |
+| Anthropic cache_control | Using more than 4 breakpoints | Hard API limit; if using automatic caching + explicit breakpoints, auto-caching consumes one slot — stay at 3 explicit |
+| duckdb-rs | Storing `Connection` in shared struct across async boundary | `Connection` is `!Send`; use `async-duckdb` or channel-based single-thread pattern |
+| duckdb-rs `try_clone()` | Creating cloned connections that each try to lock the file | `try_clone()` creates independent connections to the same DB; safe for multi-threaded read but watch write contention |
+| Grafeo `execute()` | String-interpolating user content into query strings | Graph query injection is real; use parameterized property maps, not string concat |
+| Grafeo persistent mode | Opening same file from multiple processes | ACID transactions guarantee consistency within a process; cross-process behavior depends on Grafeo's lock model (not fully documented) — keep to single process |
+| FTS5 content table | Calling `VACUUM` without rebuilding FTS index after bulk deletes | `VACUUM` on an FTS5 content table with external content can corrupt the index; run `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` after any bulk operation |
+| rusqlite + tokio | Calling `StateStore` methods directly in async functions | Blocks executor thread; wrap in `spawn_blocking` or use `tokio-rusqlite` |
+| MemoryProvider trait | Defining `async fn` methods on trait for `dyn` dispatch | `async fn` in traits is not object-safe without `Box<dyn Future>` return or the `async-trait` macro; use `async-trait` crate for v2.0 |
+
+---
+
+## Performance Traps
+
+| Trap | Symptoms | Prevention | When It Breaks |
+|------|----------|------------|----------------|
+| Per-message StateStore writes blocking async handler | Telegram response latency spikes under 2+ concurrent users | `spawn_blocking` wrapper for all StateStore calls | At 2+ concurrent users |
+| FTS5 `MATCH` query on unoptimized index | `search_messages` queries taking >100ms | Run `INSERT INTO messages_fts(messages_fts) VALUES('optimize')` periodically; WAL checkpoint every 50 writes (match hermes-agent pattern) | After ~10,000 messages |
+| Grafeo `execute()` full graph scan | Memory retrieval latency increases with fact count | Index nodes with labels; use `MATCH (m:Memory {target: '...'}) RETURN m` with label pushdown, not open graph scans | After ~1,000 facts |
+| ContextCompressor triggering too frequently | LLM called for every user message to re-summarize | Compression thresholds (85%/50%) are percentages of context window — ensure `context_length` passed to constructors matches the actual model's context window, not a default | Immediately if context_length is wrong |
+| DuckDB per-row writes via `async-duckdb` | Memory provider writes slower than SQLite | Batch memory writes; DuckDB shines on bulk analytics, not singleton inserts | At >10 facts/second write rate |
+
+---
+
+## Security Mistakes
+
+| Mistake | Risk | Prevention |
+|---------|------|------------|
+| Including user-supplied content in Grafeo/DuckDB query strings | Graph/SQL injection; agent executing attacker-controlled queries | Parameterize all queries; never string-interpolate content from memory facts, user messages, or context files |
+| SKILL.md body injected into system prompt without scanning | System-prompt-level prompt injection from malicious skill | Scan all SKILL.md content with `scan_context_content` before injection; skills from external sources flagged as untrusted |
+| SOUL.md loaded from user-specified path without validation | Remote file inclusion; persona hijack | Only load SOUL.md from `HERMES_HOME`; if path is user-configurable, SSRF-validate the path and scan the content |
+| Session lineage (parent_session_id) accepting user-supplied values | Session confusion; exfiltration of another user's session history via fabricated lineage | Generate `parent_session_id` server-side only; never accept from tool call arguments |
+| Memory snapshot not frozen — live MemoryStore used in prompt | Agent-injected memory visible immediately in same turn | The `snapshot` field in `MemoryStore` is frozen at `load_from_disk()` time; `format_for_system_prompt` returns the frozen snapshot, not live entries. This invariant must be preserved in all v2.0 memory provider backends |
+
+---
+
+## "Looks Done But Isn't" Checklist
+
+- [ ] **Context compression:** Tool call/result pairs validated as atomic units before any drop — verify with a test that produces an assistant message with `tool_calls` followed immediately by a `tool_result` user message, then compresses, and confirms both are either kept or both dropped
+- [ ] **Prompt caching:** `cache_read_input_tokens` is non-zero on the second turn of a session with a static system prompt — if it is 0, the cache is silently not working
+- [ ] **FTS5 sync:** After 100 messages inserted via `StateStore::add_message`, `SELECT COUNT(*) FROM messages_fts` equals `SELECT COUNT(*) FROM messages` — verify in integration test
+- [ ] **StateStore async bridge:** A load test with 5 simulated concurrent Telegram users shows no executor thread stalls — verify tokio runtime stays responsive throughout
+- [ ] **SOUL.md scanning:** A SOUL.md file containing "ignore previous instructions" is blocked before inclusion in system prompt — verify `scan_context_content` returns a `[BLOCKED:...]` marker
+- [ ] **MemoryProvider trait object safety:** `Box<dyn MemoryProvider>` compiles and can be stored in an Arc — verify at compile time with a test instantiation of each backend
+- [ ] **Grafeo backend:** A round-trip test (write fact → query all facts → verify content) passes against a persistent (not in-memory) Grafeo database — in-memory tests mask file-open errors
+- [ ] **DuckDB backend:** The `async-duckdb` connection is initialized from a `spawn_blocking`-safe context and all calls from async code compile without `unsafe` — verify no `RefCell`/`!Send` workarounds
+
+---
+
+## Recovery Strategies
+
+| Pitfall | Recovery Cost | Recovery Steps |
+|---------|---------------|----------------|
+| Orphaned tool_result breaks session | MEDIUM | Delete the orphaned `tool_result` message from the SQLite `messages` table for that session; run `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` to resync FTS; restart session |
+| FTS5 index corrupt | LOW | `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` rebuilds from content table; no data loss, only downtime |
+| Cache_control on mutable block — all turns pay full price | LOW | Move `cache_control` to stable block, restart session; costs stop accumulating |
+| DuckDB Connection !Send compilation failure | MEDIUM | Add `async-duckdb` dependency, refactor backend to use `Client` instead of raw `Connection`; interface remains same |
+| GatewaySession / StateStore split state after restart | HIGH | Implement write-through: `GatewaySession::add_message` writes to both in-memory Vec and StateStore atomically; on startup, load active sessions from SQLite into memory |
+| Grafeo query returning wrong results after content injection | HIGH | Switch to parameterized property maps; audit all existing Grafeo query strings for interpolated content; rebuild Grafeo database from MemoryStore MEMORY.md source of truth |
+
+---
+
+## Pitfall-to-Phase Mapping
+
+| Pitfall | Prevention Phase | Verification |
+|---------|------------------|--------------|
+| Orphaned tool_result after compression | Context Compression | Test: compress a conversation containing tool pairs; assert no orphaned tool_results in result |
+| System prompt mutation breaks cache | Prompt Caching + Prompt Assembly | Test: two consecutive API calls with same static system prompt; assert `cache_read_input_tokens > 0` on second call |
+| Gateway/StateStore dual state split | Session Storage | Test: restart gateway mid-session; assert messages recoverable from SQLite and session resumes correctly |
+| FTS5 trigger drift | Session Storage (schema) | Test: insert 10 messages, assert FTS count matches messages count; bulk migrate, assert FTS rebuild works |
+| DuckDB !Send in async context | Memory Provider Trait | Compile-time: `Box<dyn MemoryProvider>: Send + Sync` assertion in test module |
+| Grafeo non-parameterized queries | Memory Provider (Grafeo backend) | Security test: insert fact with injection payload; assert query string is not interpolated |
+| SOUL.md / SKILL.md injection | Skill Framework + SOUL.md phase | Test: load SKILL.md with "ignore previous instructions" in body; assert `[BLOCKED:]` in scan result before prompt inclusion |
+| Blocking StateStore in async handlers | Session Storage (gateway integration) | Load test: 5 concurrent users; assert tokio executor thread not blocked; verify with `tokio-console` |
+
+---
 
 ## Sources
 
-- IronHermes codebase direct analysis: `agent_loop.rs`, `terminal.rs`, `ssrf.rs`, `context_scanner.rs`, `runner.rs` — HIGH confidence
-- Previous IronHermes research (SUMMARY.md, async-patterns.md) — HIGH confidence (grounded in codebase)
-- Tokio documentation on `JoinSet`, `CancellationToken`, `Semaphore`, pipe deadlock patterns — HIGH confidence (stable APIs)
-- OS pipe buffer behavior (Linux 64KB `PIPE_BUF`) — HIGH confidence (POSIX spec)
-- Python interpreter startup latency benchmarks — MEDIUM confidence (varies by system, Python version, import graph)
+- Anthropic Prompt Caching documentation (official): https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+- anthropics/claude-code#8484, #14173 — Compaction corrupts tool_use/tool_result pairs (confirmed 2025-2026)
+- openclaw issues #29103, #3462, #40305 — Orphaned tool_result after compaction (confirmed 2025-2026)
+- duckdb/duckdb-rs#378 — Multiple connections and thread safety limitations
+- async-duckdb crate: https://docs.rs/async-duckdb
+- tokio-rusqlite crate: https://docs.rs/tokio-rusqlite
+- SQLite FTS5 forum: trigger sync issues, REPLACE and recursive_triggers, _fts_docsize orphan rows: https://sqlite.org/forum/info/da59bf102d7a7951740bd01c4942b1119512a86bfa1b11d4f762056c8eb7fc4e
+- FTS5 external content + VACUUM interaction: https://sqlite.work/optimizing-fts5-external-content-tables-and-vacuum-interactions/
+- Grafeo GitHub: https://github.com/GrafeoDB/grafeo
+- Grafeo DEV.to overview: https://dev.to/alanwest/grafeo-an-embeddable-graph-database-in-rust-that-actually-makes-sense-1nik
+- hermes-agent session storage architecture: https://hermes-agent.nousresearch.com/docs/developer-guide/session-storage
+- hermes-agent architecture (single-select plugin pattern): https://hermes-agent.nousresearch.com/docs/developer-guide/architecture
+- Soul-Evil attack class and SOUL.md as attack surface: https://dev.to/tomleelive/the-soul-evil-attack-how-malicious-personas-hijack-ai-agents-and-how-to-stop-them-48ae
+- OWASP Agentic Skills Top 10: https://owasp.org/www-project-agentic-skills-top-10/
+- SKILL.md to shell access threat modeling: https://snyk.io/articles/skill-md-shell-access/
+- IronHermes codebase: `crates/ironhermes-state/src/lib.rs`, `crates/ironhermes-gateway/src/session.rs`, `crates/ironhermes-agent/src/context_compressor.rs`, `crates/ironhermes-agent/src/prompt_builder.rs`, `crates/ironhermes-core/src/memory_store.rs`
+
+---
+
+*Pitfalls research for: IronHermes v2.0 Intelligence & Identity milestone*
+*Researched: 2026-04-11*
