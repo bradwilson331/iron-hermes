@@ -182,13 +182,111 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated by roadmapper) | | |
+| MEM-01 | Phase 17 | Pending |
+| MEM-02 | Phase 17 | Pending |
+| MEM-03 | Phase 17 | Pending |
+| MEM-04 | Phase 17 | Pending |
+| MEM-05 | Phase 17 | Pending |
+| MEM-06 | Phase 15 | Pending |
+| MEM-07 | Phase 11 | Pending |
+| MEM-08 | Phase 11 | Pending |
+| MEM-09 | Phase 17 | Pending |
+| MEM-10 | Phase 17 | Pending |
+| MEM-11 | Phase 17 | Pending |
+| MEM-12 | Phase 11 | Pending |
+| MEM-13 | Phase 17 | Pending |
+| SESS-01 | Phase 13 | Pending |
+| SESS-02 | Phase 13 | Pending |
+| SESS-03 | Phase 13 | Pending |
+| SESS-04 | Phase 13 | Pending |
+| SESS-05 | Phase 13 | Pending |
+| SESS-06 | Phase 13 | Pending |
+| SESS-07 | Phase 13 | Pending |
+| SESS-08 | Phase 13 | Pending |
+| SESS-09 | Phase 13 | Pending |
+| SESS-10 | Phase 13 | Pending |
+| SESS-11 | Phase 13 | Pending |
+| PRMT-01 | Phase 15 | Pending |
+| PRMT-02 | Phase 15 | Pending |
+| PRMT-03 | Phase 15 | Pending |
+| PRMT-04 | Phase 15 | Pending |
+| PRMT-05 | Phase 15 | Pending |
+| PRMT-06 | Phase 15 | Pending |
+| PRMT-07 | Phase 15 | Pending |
+| PRMT-08 | Phase 16 | Pending |
+| PRMT-09 | Phase 16 | Pending |
+| PRMT-10 | Phase 18 | Pending |
+| PRMT-11 | Phase 18 | Pending |
+| PRMT-12 | Phase 18 | Pending |
+| PRMT-13 | Phase 18 | Pending |
+| PRMT-14 | Phase 18 | Pending |
+| PRMT-15 | Phase 18 | Pending |
+| PRMT-16 | Phase 18 | Pending |
+| CTX-01 | Phase 14 | Pending |
+| CTX-02 | Phase 14 | Pending |
+| CTX-03 | Phase 14 | Pending |
+| CTX-04 | Phase 14 | Pending |
+| CTX-05 | Phase 14 | Pending |
+| CTX-06 | Phase 14 | Pending |
+| CTX-07 | Phase 14 | Pending |
+| SKILL-01 | Phase 19 | Pending |
+| SKILL-02 | Phase 19 | Pending |
+| SKILL-03 | Phase 19 | Pending |
+| SKILL-04 | Phase 19 | Pending |
+| SKILL-05 | Phase 19 | Pending |
+| SKILL-06 | Phase 19 | Pending |
+| SKILL-07 | Phase 19 | Pending |
+| SKILL-08 | Phase 19 | Pending |
+| SKILL-09 | Phase 19 | Pending |
+| SKILL-10 | Phase 19 | Pending |
+| SKILL-11 | Phase 19 | Pending |
+| SKILL-12 | Phase 20 | Pending |
+| SKILL-13 | Phase 20 | Pending |
+| SKILL-14 | Phase 20 | Pending |
+| TOOL-01 | Phase 20 | Pending |
+| TOOL-02 | Phase 20 | Pending |
+| TOOL-03 | Phase 20 | Pending |
+| TOOL-04 | Phase 20 | Pending |
+| TOOL-05 | Phase 20 | Pending |
+| PROV-01 | Phase 12 | Pending |
+| PROV-02 | Phase 12 | Pending |
+| PROV-03 | Phase 12 | Pending |
+| PROV-04 | Phase 12 | Pending |
+| PROV-05 | Phase 12 | Pending |
+| PROV-06 | Phase 12 | Pending |
+| PROV-07 | Phase 12 | Pending |
+| PROV-08 | Phase 12 | Pending |
+| PROV-09 | Phase 12 | Pending |
+| PROV-10 | Phase 12 | Pending |
+| GW-01 | Phase 21 | Pending |
+| GW-02 | Phase 21 | Pending |
+| GW-03 | Phase 21 | Pending |
+| GW-04 | Phase 21 | Pending |
+| GW-05 | Phase 21 | Pending |
+| GW-06 | Phase 21 | Pending |
+| GW-07 | Phase 21 | Pending |
+| GW-08 | Phase 21 | Pending |
+| GW-09 | Phase 21 | Pending |
+| GW-10 | Phase 21 | Pending |
+| GW-11 | Phase 21 | Pending |
+| CLI-01 | Phase 22 | Pending |
+| CLI-02 | Phase 22 | Pending |
+| CLI-03 | Phase 22 | Pending |
+| CLI-04 | Phase 22 | Pending |
+| CLI-05 | Phase 22 | Pending |
+| CLI-06 | Phase 22 | Pending |
+| CLI-07 | Phase 22 | Pending |
+| CLI-08 | Phase 22 | Pending |
+| CFG-01 | Phase 23 | Pending |
+| CFG-02 | Phase 23 | Pending |
+| CFG-03 | Phase 23 | Pending |
+| CFG-04 | Phase 23 | Pending |
 
 **Coverage:**
-- v2.0 requirements: 74 total
-- Mapped to phases: 0
-- Unmapped: 74
+- v2.0 requirements: 99 total
+- Mapped to phases: 99
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-11 after initial definition*
+*Last updated: 2026-04-11 after roadmap creation (v2.0 phases 11-23)*
