@@ -111,9 +111,121 @@ impl DelegateTaskTool {
 
 impl DelegateTaskTool {
     /// Batch execution mode: spawn parallel child agents for multiple tasks (D-05).
-    /// Fully implemented in Task 2 — stub for compilation.
-    async fn execute_batch(&self, _tasks_val: &serde_json::Value) -> anyhow::Result<String> {
-        anyhow::bail!("Batch mode not yet implemented")
+    ///
+    /// Tasks are truncated to `config.max_subagents` (D-06), spawned as tokio tasks
+    /// sharing the global semaphore, and results are sorted by original index (D-07).
+    async fn execute_batch(&self, tasks_val: &serde_json::Value) -> anyhow::Result<String> {
+        let tasks_array = tasks_val
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("tasks must be an array"))?;
+
+        // D-06: truncate to max_subagents (default 3)
+        let max_batch = self.config.max_subagents;
+        let tasks: Vec<_> = tasks_array.iter().take(max_batch).collect();
+        if tasks_array.len() > max_batch {
+            tracing::warn!(
+                "Batch truncated from {} to {} tasks (max_subagents limit)",
+                tasks_array.len(),
+                max_batch
+            );
+        }
+
+        // Spawn tokio tasks for parallel execution
+        let mut handles = Vec::new();
+        for (index, task_obj) in tasks.iter().enumerate() {
+            let goal = task_obj["goal"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("tasks[{}].goal must be a string", index))?
+                .to_string();
+            let context = task_obj
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Resolve toolsets: per-task override or config default (D-01)
+            let toolsets: Vec<String> = if let Some(ts) = task_obj.get("toolsets") {
+                let arr = ts
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("tasks[{}].toolsets must be an array", index))?;
+                arr.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            } else {
+                self.config.default_toolsets.clone()
+            };
+            let allowed_tools = resolve_toolsets(&toolsets)?;
+
+            let runner = self.runner.clone();
+            let semaphore = self.semaphore.clone();
+            let memory_store = self.memory_store.clone();
+            let config = self.config.clone();
+
+            let handle = tokio::spawn(async move {
+                // Each task gets its own temp dir for isolation
+                let child_dir = tempfile::TempDir::new()?;
+
+                // Acquire semaphore (shared across all batch tasks + single tasks)
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
+
+                let child_registry =
+                    build_child_registry(&allowed_tools, memory_store, child_dir.path())?;
+
+                let mut system_prompt = format!(
+                    "You are a focused assistant. Complete the following task:\n\n{}",
+                    goal
+                );
+                if !context.is_empty() {
+                    system_prompt.push_str(&format!("\n\nContext:\n{}", context));
+                }
+                // Append structured summary instructions (D-10)
+                system_prompt.push_str(STRUCTURED_SUMMARY_INSTRUCTIONS);
+
+                let result = tokio::time::timeout(
+                    Duration::from_secs(config.timeout_secs),
+                    runner.run_child(
+                        Arc::new(child_registry),
+                        system_prompt,
+                        config.max_iterations,
+                        config.model.as_deref(),
+                    ),
+                )
+                .await;
+
+                let response = match result {
+                    Ok(Ok(resp)) => resp.unwrap_or_else(|| "(no response)".to_string()),
+                    Ok(Err(e)) => format!("Error: {}", e),
+                    Err(_) => format!("Subagent timed out after {}s", config.timeout_secs),
+                };
+
+                Ok::<(usize, String), anyhow::Error>((index, response))
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results and sort by index (D-07)
+        let mut results: Vec<(usize, String)> = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(Ok((idx, response))) => results.push((idx, response)),
+                Ok(Err(e)) => results.push((results.len(), format!("Error: {}", e))),
+                Err(e) => results.push((results.len(), format!("Task panicked: {}", e))),
+            }
+        }
+        results.sort_by_key(|(idx, _)| *idx);
+
+        // Format batch results as numbered sections
+        let output = results
+            .iter()
+            .map(|(idx, resp)| format!("## Task {} Result\n\n{}", idx + 1, resp))
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+
+        Ok(output)
     }
 }
 
