@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use ironhermes_core::ChatMessage;
 use ironhermes_tools::delegate_task::SubagentRunner;
 use ironhermes_tools::ToolRegistry;
+use tokio_util::sync::CancellationToken;
 
 use crate::client::LlmClient;
 use crate::agent_loop::AgentLoop;
@@ -58,6 +59,7 @@ impl SubagentRunner for AgentSubagentRunner {
         system_prompt: String,
         max_iterations: usize,
         model_override: Option<&str>,
+        cancel_token: Option<CancellationToken>,
     ) -> anyhow::Result<Option<String>> {
         // D-23/D-24: construct child client with model override if specified
         let child_client = if let Some(model) = model_override {
@@ -70,7 +72,11 @@ impl SubagentRunner for AgentSubagentRunner {
             self.client.clone()
         };
 
-        let agent = AgentLoop::new(child_client, registry, max_iterations);
+        let mut agent = AgentLoop::new(child_client, registry, max_iterations);
+        // D-21: Forward cancel token to child AgentLoop
+        if let Some(token) = cancel_token {
+            agent = agent.with_cancellation_token(token);
+        }
 
         let messages = vec![
             ChatMessage::system(&system_prompt),

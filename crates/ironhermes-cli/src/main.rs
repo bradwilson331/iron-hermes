@@ -8,6 +8,7 @@ use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 mod cron;
@@ -243,6 +244,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         subagent_semaphore,
         None, // no memory store in single mode
         config.subagent.clone(),
+        None, // no cancel token in single mode
     );
 
     let max_turns = cli
@@ -301,11 +303,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         config.subagent.base_url.clone(),
         config.subagent.api_key.clone(),
     ));
+    let chat_cancel_token = CancellationToken::new();
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
         None, // no memory store in chat mode
         config.subagent.clone(),
+        Some(chat_cancel_token.clone()),
     );
 
     let registry = Arc::new(registry);
@@ -478,11 +482,13 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         config.subagent.base_url.clone(),
         config.subagent.api_key.clone(),
     ));
+    let gateway_cancel_token = CancellationToken::new();
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
         Some(memory_store.clone()),
         config.subagent.clone(),
+        Some(gateway_cancel_token.clone()),
     );
 
     // Load hooks config and wire guardrails (before Arc wrapping)

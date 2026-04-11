@@ -15,6 +15,8 @@ use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::info;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::registry::{Tool, ToolRegistry};
 
 /// Default tools available to subagents when no explicit allowlist is provided (D-02).
@@ -76,12 +78,16 @@ pub trait SubagentRunner: Send + Sync {
     ///
     /// `model_override` allows routing the child to a different LLM model (D-23).
     /// When None, the child uses the parent's model.
+    ///
+    /// `cancel_token` enables cooperative cancellation (D-21). When the token
+    /// is cancelled, the child agent loop should return early.
     async fn run_child(
         &self,
         registry: Arc<ToolRegistry>,
         system_prompt: String,
         max_iterations: usize,
         model_override: Option<&str>,
+        cancel_token: Option<CancellationToken>,
     ) -> anyhow::Result<Option<String>>;
 }
 
@@ -91,6 +97,8 @@ pub struct DelegateTaskTool {
     semaphore: Arc<Semaphore>,
     memory_store: Option<Arc<Mutex<MemoryStore>>>,
     config: SubagentConfig,
+    /// Parent's cancellation token for propagating interrupt to children (D-21).
+    parent_cancel_token: Option<CancellationToken>,
 }
 
 impl DelegateTaskTool {
@@ -99,12 +107,14 @@ impl DelegateTaskTool {
         semaphore: Arc<Semaphore>,
         memory_store: Option<Arc<Mutex<MemoryStore>>>,
         config: SubagentConfig,
+        parent_cancel_token: Option<CancellationToken>,
     ) -> Self {
         Self {
             runner,
             semaphore,
             memory_store,
             config,
+            parent_cancel_token,
         }
     }
 }
@@ -114,7 +124,7 @@ impl DelegateTaskTool {
     ///
     /// Tasks are truncated to `config.max_subagents` (D-06), spawned as tokio tasks
     /// sharing the global semaphore, and results are sorted by original index (D-07).
-    async fn execute_batch(&self, tasks_val: &serde_json::Value) -> anyhow::Result<String> {
+    async fn execute_batch(&self, tasks_val: &serde_json::Value, detach: bool) -> anyhow::Result<String> {
         let tasks_array = tasks_val
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("tasks must be an array"))?;
@@ -161,6 +171,15 @@ impl DelegateTaskTool {
             let memory_store = self.memory_store.clone();
             let config = self.config.clone();
 
+            // D-21/D-22: Create child cancel token based on detach flag
+            let child_cancel_token = if detach {
+                None
+            } else if let Some(ref parent_token) = self.parent_cancel_token {
+                Some(parent_token.child_token())
+            } else {
+                None
+            };
+
             let handle = tokio::spawn(async move {
                 // Each task gets its own temp dir for isolation
                 let child_dir = tempfile::TempDir::new()?;
@@ -191,6 +210,7 @@ impl DelegateTaskTool {
                         system_prompt,
                         config.max_iterations,
                         config.model.as_deref(),
+                        child_cancel_token,
                     ),
                 )
                 .await;
@@ -338,6 +358,11 @@ impl Tool for DelegateTaskTool {
                             "required": ["goal"]
                         },
                         "description": "Array of tasks for parallel batch execution. Max 3 tasks. Mutually exclusive with 'task' param."
+                    },
+                    "detach": {
+                        "type": "boolean",
+                        "description": "If true, child survives parent interrupt. Default: false.",
+                        "default": false
                     }
                 },
                 "required": ["task"]
@@ -348,7 +373,8 @@ impl Tool for DelegateTaskTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         // Detect mode: batch (tasks array) vs single (task string)
         if let Some(tasks_val) = args.get("tasks") {
-            return self.execute_batch(tasks_val).await;
+            let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
+            return self.execute_batch(tasks_val, detach).await;
         }
 
         let task = args["task"]
@@ -412,6 +438,18 @@ impl Tool for DelegateTaskTool {
             task, STRUCTURED_SUMMARY_INSTRUCTIONS
         );
 
+        // D-21/D-22: Create child cancel token based on detach flag
+        let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
+        let child_cancel_token = if detach {
+            // D-22: independent token — parent interrupt does not cancel this child
+            None
+        } else if let Some(ref parent_token) = self.parent_cancel_token {
+            // D-21: child token derived from parent — cancelling parent cascades
+            Some(parent_token.child_token())
+        } else {
+            None
+        };
+
         // Run child agent with timeout (D-08) and model override (D-23)
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.timeout_secs),
@@ -420,6 +458,7 @@ impl Tool for DelegateTaskTool {
                 system_prompt,
                 self.config.max_iterations,
                 self.config.model.as_deref(),
+                child_cancel_token,
             ),
         )
         .await;
@@ -589,6 +628,7 @@ mod tests {
             _system_prompt: String,
             _max_iterations: usize,
             _model_override: Option<&str>,
+            _cancel_token: Option<CancellationToken>,
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("mock child response".to_string()))
         }
@@ -600,6 +640,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         )
     }
 
@@ -696,6 +737,7 @@ mod tests {
                 _system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 tokio::time::sleep(Duration::from_secs(999)).await;
                 Ok(Some("should not reach".to_string()))
@@ -710,6 +752,7 @@ mod tests {
                 timeout_secs: 1,
                 ..SubagentConfig::default()
             },
+            None,
         );
 
         let result = tool
@@ -731,6 +774,7 @@ mod tests {
                 _system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(None)
             }
@@ -741,6 +785,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         );
 
         let result = tool
@@ -760,7 +805,7 @@ mod tests {
         let config = SubagentConfig::default();
         let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
 
-        registry.register_delegate_task_tool(runner, semaphore, None, config);
+        registry.register_delegate_task_tool(runner, semaphore, None, config, None);
 
         let tools = registry.list_tools();
         assert!(
@@ -789,6 +834,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         );
         // Parent has delegate_task
         assert!(parent_registry.list_tools().contains(&"delegate_task"));
@@ -895,6 +941,7 @@ mod tests {
                 system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 // Return the system prompt so we can inspect it
                 Ok(Some(system_prompt))
@@ -906,6 +953,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         );
 
         let result = tool.execute(json!({"task": "test task"})).await.unwrap();
@@ -931,6 +979,7 @@ mod tests {
                 _system_prompt: String,
                 _max_iterations: usize,
                 model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(Some(format!("model={}", model_override.unwrap_or("none"))))
             }
@@ -944,6 +993,7 @@ mod tests {
                 model: Some("google/gemini-flash".to_string()),
                 ..SubagentConfig::default()
             },
+            None,
         );
 
         let result = tool.execute(json!({"task": "test"})).await.unwrap();
@@ -1014,6 +1064,7 @@ mod tests {
             system_prompt: String,
             _max_iterations: usize,
             _model_override: Option<&str>,
+            _cancel_token: Option<CancellationToken>,
         ) -> anyhow::Result<Option<String>> {
             // Extract the goal from the prompt to echo it back
             let goal = system_prompt
@@ -1031,6 +1082,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         )
     }
 
@@ -1064,6 +1116,7 @@ mod tests {
                 max_subagents: 2,
                 ..SubagentConfig::default()
             },
+            None,
         );
         let result = tool
             .execute(json!({
@@ -1096,6 +1149,7 @@ mod tests {
                 system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 // Task with "slow" sleeps longer — it has a higher index but should
                 // still appear in correct position in output
@@ -1112,6 +1166,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         );
 
         let result = tool
@@ -1164,6 +1219,7 @@ mod tests {
                 _system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 let current = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
                 // Update max if this is the highest seen
@@ -1185,6 +1241,7 @@ mod tests {
             Arc::new(Semaphore::new(2)), // Only 2 slots
             None,
             SubagentConfig::default(),
+            None,
         );
 
         let _result = tool
@@ -1251,6 +1308,7 @@ mod tests {
                 system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<Option<String>> {
                 Ok(Some(system_prompt))
             }
@@ -1261,6 +1319,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig::default(),
+            None,
         );
 
         let result = tool

@@ -4,6 +4,7 @@ use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_tools::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::client::{LlmClient, StreamEvent, ToolCallDelta};
@@ -57,6 +58,9 @@ pub struct AgentLoop {
     hook_registry: Option<Arc<HookRegistry>>,
     request_id: String,
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    /// Optional cancellation token for cooperative shutdown (D-21).
+    /// When cancelled, the loop returns early with "Cancelled by parent".
+    cancel_token: Option<CancellationToken>,
 }
 
 impl AgentLoop {
@@ -72,7 +76,15 @@ impl AgentLoop {
             hook_registry: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cancel_token: None,
         }
+    }
+
+    /// Set a cancellation token for cooperative shutdown (D-21).
+    /// When the token is cancelled, the agent loop returns early.
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
+        self
     }
 
     pub fn with_active_skills(mut self, active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) -> Self {
@@ -141,6 +153,20 @@ impl AgentLoop {
         // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
         loop {
+            // D-21: Check cancellation token before each iteration
+            if let Some(ref token) = self.cancel_token {
+                if token.is_cancelled() {
+                    info!(turns = turns_used, "Agent loop cancelled by parent");
+                    return Ok(AgentResult {
+                        messages,
+                        turns_used,
+                        finished_naturally: false,
+                        final_response: Some("Cancelled by parent".to_string()),
+                        total_usage,
+                    });
+                }
+            }
+
             if turns_used >= self.max_iterations {
                 warn!(turns = turns_used, "Max iterations reached");
                 break;
@@ -155,8 +181,28 @@ impl AgentLoop {
             turns_used += 1;
             debug!(turn = turns_used, messages = messages.len(), "Agent loop turn");
 
-            // Call LLM
-            let (assistant_message, usage) = if self.streaming {
+            // Call LLM, with cancellation support via tokio::select!
+            let (assistant_message, usage) = if let Some(ref token) = self.cancel_token {
+                tokio::select! {
+                    result = async {
+                        if self.streaming {
+                            self.call_llm_streaming(&messages, tools_option.as_deref()).await
+                        } else {
+                            self.call_llm(&messages, tools_option.as_deref()).await
+                        }
+                    } => result?,
+                    _ = token.cancelled() => {
+                        info!(turns = turns_used, "Agent loop cancelled during LLM call");
+                        return Ok(AgentResult {
+                            messages,
+                            turns_used,
+                            finished_naturally: false,
+                            final_response: Some("Cancelled by parent".to_string()),
+                            total_usage,
+                        });
+                    }
+                }
+            } else if self.streaming {
                 self.call_llm_streaming(&messages, tools_option.as_deref())
                     .await?
             } else {
@@ -869,6 +915,41 @@ mod hooks_ordering_tests {
             result.contains("not permitted"),
             "tool should be blocked when any skill restricts, got: {result}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CancellationToken tests (09-04 Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_loop_with_cancellation_token_sets_token() {
+        use tokio_util::sync::CancellationToken;
+        let client =
+            LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model");
+        let registry = Arc::new(ToolRegistry::new());
+        let token = CancellationToken::new();
+        let agent = AgentLoop::new(client, registry, 4)
+            .with_cancellation_token(token.clone());
+        // Verify the token is set (it exists on the struct)
+        assert!(agent.cancel_token.is_some(), "cancel_token should be set after with_cancellation_token");
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_run_returns_early_when_cancelled_before_first_iteration() {
+        use tokio_util::sync::CancellationToken;
+        let client =
+            LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model");
+        let registry = Arc::new(ToolRegistry::new());
+        let token = CancellationToken::new();
+        // Cancel BEFORE run
+        token.cancel();
+        let agent = AgentLoop::new(client, registry, 4)
+            .with_cancellation_token(token);
+        let messages = vec![ChatMessage::user("hello")];
+        let result = agent.run(messages).await.unwrap();
+        assert!(!result.finished_naturally, "should not finish naturally when cancelled");
+        assert_eq!(result.final_response.as_deref(), Some("Cancelled by parent"));
+        assert_eq!(result.turns_used, 0, "should use 0 turns when cancelled before first iteration");
     }
 
     #[tokio::test]

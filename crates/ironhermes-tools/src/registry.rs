@@ -253,10 +253,11 @@ impl ToolRegistry {
         semaphore: Arc<tokio::sync::Semaphore>,
         memory_store: Option<Arc<Mutex<MemoryStore>>>,
         config: ironhermes_core::SubagentConfig,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
     ) {
         use crate::delegate_task::DelegateTaskTool;
         self.register(Box::new(DelegateTaskTool::new(
-            runner, semaphore, memory_store, config,
+            runner, semaphore, memory_store, config, cancel_token,
         )));
     }
 

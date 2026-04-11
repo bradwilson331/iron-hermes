@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
