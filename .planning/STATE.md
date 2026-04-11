@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Intelligence & Identity
 status: executing
-stopped_at: Completed 12-02-PLAN.md
-last_updated: "2026-04-11T20:00:33.690Z"
+stopped_at: Completed 12-04-PLAN.md
+last_updated: "2026-04-11T20:41:56.588Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 13
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
-  percent: 83
+  completed_plans: 6
+  percent: 100
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 12 (provider-resolution) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -53,6 +53,7 @@ Progress: [░░░░░░░░░░] 0%
 
 *Updated after each plan completion*
 | Phase 12 P02 | 8 | 2 tasks | 3 files |
+| Phase 12 P04 | 35 | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -66,6 +67,7 @@ Recent decisions affecting current work:
 - v2.0: Memory providers scoped to SQLite, Grafeo, DuckDB only (not all 8 Python backends)
 - v2.0: Frozen-snapshot pattern — system prompt built once at session start, mid-session writes take effect next session
 - [Phase 12]: AnyClient uses enum dispatch (not trait objects) for zero-cost multi-provider abstraction
+- [Phase 12]: AgentLoop.client changed from LlmClient to AnyClient; resolve_base_url/resolve_api_key deleted
 
 ### Pending Todos
 
@@ -77,6 +79,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T20:00:33.688Z
-Stopped at: Completed 12-02-PLAN.md
+Last session: 2026-04-11T20:41:56.586Z
+Stopped at: Completed 12-04-PLAN.md
 Resume file: None
