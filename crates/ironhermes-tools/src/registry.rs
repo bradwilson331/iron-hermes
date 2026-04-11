@@ -88,6 +88,7 @@ impl ToolRegistry {
         name: &str,
         args: &serde_json::Value,
     ) -> ironhermes_hooks::GuardrailDecision {
+        let mut last_warn = None;
         for guardrail in &self.guardrails {
             match guardrail.check(name, args) {
                 ironhermes_hooks::GuardrailDecision::Allow => {}
@@ -98,14 +99,15 @@ impl ToolRegistry {
                         reason = %reason,
                         "Guardrail warning (proceeding)"
                     );
-                    return ironhermes_hooks::GuardrailDecision::Warn { reason };
+                    last_warn = Some(ironhermes_hooks::GuardrailDecision::Warn { reason });
+                    // Continue -- a later guardrail might Block
                 }
                 ironhermes_hooks::GuardrailDecision::Block { reason } => {
                     return ironhermes_hooks::GuardrailDecision::Block { reason };
                 }
             }
         }
-        ironhermes_hooks::GuardrailDecision::Allow
+        last_warn.unwrap_or(ironhermes_hooks::GuardrailDecision::Allow)
     }
 
     /// Execute a tool by name with the given args, WITHOUT running guardrail checks.
