@@ -86,10 +86,10 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 
 ### Code Execution
 
-- [ ] **EXEC-01**: Agent can execute Python scripts in an isolated child process via an execute_code tool
-- [ ] **EXEC-02**: Python scripts can call agent tools (web_search, read_file, etc.) via JSON-RPC over a socket
-- [ ] **EXEC-03**: Child process environment has API keys and secrets stripped for safety
-- [ ] **EXEC-04**: Code execution enforces timeout (5 min), call limit (50), and stdout cap (50KB)
+- [x] **EXEC-01**: Agent can execute Python scripts in an isolated child process via an execute_code tool
+- [x] **EXEC-02**: Python scripts can call agent tools (web_search, read_file, etc.) via JSON-RPC over a socket
+- [x] **EXEC-03**: Child process environment has API keys and secrets stripped for safety
+- [x] **EXEC-04**: Code execution enforces timeout (5 min), call limit (50), and stdout cap (50KB)
 
 ### Subagent Delegation
 
@@ -247,10 +247,10 @@ Requirements for the Automation milestone. Each maps to roadmap phases.
 | BROWSE-02 | Phase v2 | Pending |
 | BROWSE-03 | Phase v2 | Pending |
 | SKILL-13 | Backlog | Pending |
-| EXEC-01 | Phase 8 | Pending |
-| EXEC-02 | Phase 8 | Pending |
-| EXEC-03 | Phase 8 | Pending |
-| EXEC-04 | Phase 8 | Pending |
+| EXEC-01 | Phase 8 | Complete |
+| EXEC-02 | Phase 8 | Complete |
+| EXEC-03 | Phase 8 | Complete |
+| EXEC-04 | Phase 8 | Complete |
 | AGENT-01 | Phase 9 | Pending |
 | AGENT-02 | Phase 9 | Pending |
 | AGENT-03 | Phase 9 | Pending |

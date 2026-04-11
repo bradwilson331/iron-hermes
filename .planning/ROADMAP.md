@@ -190,7 +190,7 @@ Plans:
 Plans:
 - [x] 08-01-PLAN.md — ironhermes-exec crate: sandbox, RPC server, hermes_tools.py, ExecConfig
 - [x] 08-02-PLAN.md — ExecuteCodeTool, CLI/gateway wiring, integration tests
-- [ ] 08-03-PLAN.md — Gap closure: hermes_tools.py signatures, stderr cap, kill strategy, env stripping, SandboxResult fields
+- [x] 08-03-PLAN.md — Gap closure: hermes_tools.py signatures, stderr cap, kill strategy, env stripping, SandboxResult fields
 - [ ] 08-04-PLAN.md — Gap closure: JSON response format, cancellation token support
 
 #### Phase 9: Subagent Delegation
