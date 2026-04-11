@@ -3,11 +3,13 @@
 > **Audit trail only.** Do not use as input to planning, research, or execution agents.
 > Decisions are captured in CONTEXT.md — this log preserves the alternatives considered.
 
-**Date:** 2026-04-10
+**Date:** 2026-04-10 (initial), 2026-04-11 (gap review update)
 **Phase:** 09-subagent-delegation
-**Areas discussed:** Tool filtering strategy, Subagent lifecycle & result format, Session & terminal isolation, Concurrency & queueing
+**Areas discussed:** Tool filtering strategy, Subagent lifecycle & result format, Session & terminal isolation, Concurrency & queueing, Batch API, Blocked tools, Progress display, Interrupt propagation, Model override, Config namespace, Credential inheritance, Toolset naming, Memory access
 
 ---
+
+## Initial Discussion (2026-04-10)
 
 ## Tool Filtering Strategy
 
@@ -85,7 +87,7 @@
 | You decide | Claude picks | |
 
 **User's choice:** Final text response only
-**Notes:** Matches AGENT-01 requirement language
+**Notes:** Matches AGENT-01 requirement language. **Superseded** in gap review — see Gap 7 below.
 
 ---
 
@@ -142,7 +144,7 @@
 | No memory access | Strip memory entirely | |
 
 **User's choice:** Read-only memory access
-**Notes:** Prevents subagent from corrupting parent's memory
+**Notes:** Prevents subagent from corrupting parent's memory. **Superseded** in gap review — see Gap 11 below.
 
 ---
 
@@ -190,14 +192,160 @@
 
 ---
 
+## Gap Review Session (2026-04-11)
+
+User provided detailed subagent delegation requirements spec. 11 gaps identified against existing context. All resolved below.
+
+---
+
+## Gap 1: Batch API
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Add batch mode now | delegate_task accepts single or batch (tasks array). Concurrent execution, result ordering by index, truncate to 3. | ✓ |
+| Single-task only | Phase 9 only supports single goal. Batch deferred. | |
+| Simplified batch | Support tasks array but without tree-view progress display. | |
+
+**User's choice:** Add batch mode now
+**Notes:** Full batch API with tasks array, concurrent execution, result ordering by task index.
+
+---
+
+## Gap 2: Blocked Tools
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Full block list | Block all 5: delegate_task, clarify, memory (read+write), execute_code, send_message. | ✓ |
+| Block with read-only memory | Block 4, allow memory reads but not writes. | |
+| Minimal blocks | Only block delegate_task and clarify. | |
+
+**User's choice:** Full block list
+**Notes:** Changed from original (read-only memory) to fully blocked. Subagent works only with goal/context fields.
+
+---
+
+## Gap 3: Progress Display
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Full tree-view | CLI shows real-time tree of tool calls per subagent with per-task completion lines. Gateway batches progress. | ✓ |
+| Simple status lines | Just show 'Subagent 1/3 running...' / 'Subagent 1/3 complete'. | |
+| Defer progress UI | No special progress display in Phase 9. | |
+
+**User's choice:** Full tree-view
+**Notes:** Real-time CLI tree-view showing per-subagent tool calls. Gateway mode batches progress to parent callback.
+
+---
+
+## Gap 4: Interrupt Propagation
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Yes, propagate | Interrupting parent cancels all children via CancellationToken. | |
+| No, let children finish | Children run to completion even if parent interrupted. | |
+| Configurable | Default propagate, but allow 'detach' flag to let specific children survive. | ✓ |
+
+**User's choice:** Configurable
+**Notes:** Default propagate via CancellationToken (Phase 8 pattern). Optional `detach: true` flag per task.
+
+---
+
+## Gap 5: Model Override
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Full model override | delegation.model, delegation.provider, delegation.base_url, delegation.api_key in config.yaml. | ✓ |
+| Model name only | delegation.model only, reuse parent's provider/API key. | |
+| Same as parent | No override. Subagents always use parent's model. | |
+
+**User's choice:** Full model override
+**Notes:** Complete model/provider override including custom endpoint support.
+
+---
+
+## Gap 6: Max Iterations Default
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| 50 turns (spec) | Matches user spec. Allows complex multi-step tasks. | ✓ |
+| 25 turns (middle) | Compromise between safety and capability. | |
+| 10 turns (existing) | Conservative. Forces tightly scoped subagents. | |
+
+**User's choice:** 50 turns (spec)
+**Notes:** Changed from original (10 turns) to 50. Per-task max_iterations param can still override.
+
+---
+
+## Gap 7: Result Format
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Structured summary | System prompt instructs child to return structured output: actions taken, files modified, issues found. | ✓ |
+| Plain final_response | Return child's last message as-is. | |
+| Structured with fallback | Request structured format, accept plain text if child doesn't comply. | |
+
+**User's choice:** Structured summary
+**Notes:** Changed from original (plain final_response) to structured summary with defined sections. Supersedes initial decision.
+
+---
+
+## Gap 8: Config Namespace
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Top-level delegation: | delegation.max_iterations, delegation.default_toolsets, delegation.model, etc. | ✓ |
+| Keep agent.subagent_* | agent.subagent_timeout, agent.max_subagents, etc. Nested under agent config. | |
+
+**User's choice:** Top-level delegation:
+**Notes:** Changed from agent.subagent_* to top-level delegation: section.
+
+---
+
+## Gap 9: Credential Inheritance
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Document explicitly | Add decision: subagents inherit parent's LlmClient config, credential pool, key rotation. | ✓ |
+| Implicit | Don't document — implementation detail. | |
+
+**User's choice:** Document explicitly
+**Notes:** Added as D-24 in CONTEXT.md.
+
+---
+
+## Gap 10: Toolset Naming
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Named groups | Toolset groups (terminal, file, web) mapping to tool bundles. | ✓ |
+| Individual tools | Exact tool names. More precise but verbose. | |
+| Both | Named groups as shorthand, also accept individual names. | |
+
+**User's choice:** Named groups
+**Notes:** Changed from individual tool names to named toolset groups. Cleaner API matching user spec.
+
+---
+
+## Gap 11: Memory Access
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Fully blocked | No memory reads or writes. Subagent works only with goal/context fields. | ✓ |
+| Read-only allowed | Can read MEMORY.md facts but not write. | |
+
+**User's choice:** Fully blocked
+**Notes:** Changed from original (read-only) to fully blocked. Memory is in the always-blocked list. Supersedes initial decision.
+
+---
+
 ## Claude's Discretion
 
-- Whether DelegateTaskTool lives in ironhermes-tools or needs a new crate
-- System prompt format for child agent
-- How "waiting for slot" message is surfaced
+- DelegateTaskTool crate location
+- System prompt format details
+- "Waiting for slot" message surfacing method
 - Temp directory naming convention
-- Whether child's LlmClient reuses parent's or creates new
-- Number of plans
+- Tree-view rendering details
+- LlmClient reuse strategy
 
 ## Deferred Ideas
 
