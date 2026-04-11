@@ -5,8 +5,8 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryProvider, MessageContent, MessageEvent, Platform, Role, SkillRegistry};
-use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
+use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryProvider, MessageContent, MessageEvent, Platform, ProviderResolver, Role, SkillRegistry};
+use ironhermes_agent::{AgentLoop, AnyClient, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_tools::ToolRegistry;
 
@@ -43,6 +43,7 @@ where
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
     config: Config,
+    resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
@@ -55,6 +56,7 @@ pub struct GatewayMessageHandler {
 impl GatewayMessageHandler {
     pub fn new(
         config: Config,
+        resolver: ProviderResolver,
         session_store: Arc<RwLock<SessionStore>>,
         tool_registry: Arc<ToolRegistry>,
     ) -> Self {
@@ -64,6 +66,7 @@ impl GatewayMessageHandler {
         );
         Self {
             config,
+            resolver,
             session_store,
             tool_registry,
             memory_store: None,
@@ -348,12 +351,10 @@ impl GatewayMessageHandler {
             }
         });
 
-        // 7. Build AgentLoop
-        let base_url = self.config.resolve_base_url();
-        let api_key = self.config.resolve_api_key().unwrap_or_default();
+        // 7. Build AgentLoop via ProviderResolver
         let max_turns = self.config.agent.max_turns;
 
-        let client = ironhermes_agent::AnyClient::ChatCompletions(LlmClient::new(base_url, api_key, &model));
+        let client = build_main_client(&self.resolver)?;
 
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
@@ -369,6 +370,14 @@ impl GatewayMessageHandler {
             .with_streaming(stream_callback)
             .with_tool_progress(tool_callback)
             .with_active_skills(self.active_skills.clone());
+
+        // Wire fallback for main agent path
+        let main_endpoint = self.resolver.resolve_for_main();
+        if let Some(fb_name) = main_endpoint.fallback_providers.first() {
+            if let Ok(fb_client) = build_provider_client(&self.resolver, fb_name, &main_endpoint.default_model) {
+                agent = agent.with_fallback(fb_client);
+            }
+        }
 
         if let Some(ref registry) = self.hook_registry {
             agent = agent.with_hook_registry(registry.clone());
@@ -465,9 +474,10 @@ mod tests {
 
     fn make_handler() -> GatewayMessageHandler {
         let config = Config::default();
+        let resolver = ProviderResolver::build(&config).unwrap();
         let session_store = Arc::new(RwLock::new(crate::session::SessionStore::new()));
         let tool_registry = Arc::new(ToolRegistry::new());
-        GatewayMessageHandler::new(config, session_store, tool_registry)
+        GatewayMessageHandler::new(config, resolver, session_store, tool_registry)
     }
 
     fn make_skill_record(name: &str, allowed_tools: Option<Vec<String>>) -> SkillRecord {
@@ -517,10 +527,12 @@ mod tests {
         }
 
         // Create AgentLoop with the shared Arc (same one handler would pass after fix)
-        let client = ironhermes_agent::LlmClient::new(
-            "http://localhost:0".to_string(),
-            "test-key".to_string(),
-            "test-model",
+        let client = ironhermes_agent::AnyClient::ChatCompletions(
+            ironhermes_agent::LlmClient::new(
+                "http://localhost:0".to_string(),
+                "test-key".to_string(),
+                "test-model",
+            ),
         );
         let tool_registry = Arc::new(ToolRegistry::new());
         let loop_instance = ironhermes_agent::AgentLoop::new(client, tool_registry, 4)

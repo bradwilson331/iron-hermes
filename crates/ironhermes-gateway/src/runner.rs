@@ -3,8 +3,8 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config, MemoryProvider, MessageContent, Role, SkillRecord, SkillRegistry};
+use ironhermes_agent::{AgentLoop, AnyClient, LlmClient, PromptBuilder, build_main_client};
+use ironhermes_core::{ChatMessage, Config, MemoryProvider, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{debug, error, info, warn};
@@ -21,6 +21,7 @@ use crate::user_queue::UserQueueManager;
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
 pub struct GatewayRunner {
     config: Config,
+    resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
@@ -32,9 +33,10 @@ pub struct GatewayRunner {
 }
 
 impl GatewayRunner {
-    pub fn new(config: Config, tool_registry: Arc<ToolRegistry>) -> Self {
+    pub fn new(config: Config, resolver: ProviderResolver, tool_registry: Arc<ToolRegistry>) -> Self {
         Self {
             config,
+            resolver,
             session_store: Arc::new(RwLock::new(SessionStore::new())),
             tool_registry,
             memory_store: None,
@@ -136,6 +138,7 @@ impl GatewayRunner {
         // --- 6. Create handler and queue manager ---
         let mut handler = GatewayMessageHandler::new(
             self.config.clone(),
+            self.resolver.clone(),
             self.session_store.clone(),
             self.tool_registry.clone(),
         );
@@ -641,16 +644,15 @@ pub(crate) async fn execute_cron_job(
         ));
     }
 
-    // D-09 / D-10 / D-11: build a FRESH AgentLoop per job, mirroring handler.rs:343-365
+    // D-09 / D-10 / D-11: build a FRESH AgentLoop per job, mirroring handler.rs
     // but omitting stream_callback + tool_callback (cron path has no adapter to push to).
-    let base_url = config.resolve_base_url();
-    let api_key = config.resolve_api_key().unwrap_or_default();
+    let resolver = ProviderResolver::build(config)?;
     let max_turns = config.agent.max_turns;
-    let model = config.model.default.clone();
 
     // Build system message via PromptBuilder — loads SOUL.md + AGENTS.md + project context
     // + memory + skill catalog, identical to handler.rs Telegram path except platform="cron".
     let cwd = std::env::current_dir().unwrap_or_default();
+    let model = resolver.resolve_for_main().default_model.clone();
     let mut prompt_builder = PromptBuilder::new(&model, "cron").load_context(&cwd);
     if let Some(store) = memory_store {
         prompt_builder.set_memory_store(store.clone());
@@ -685,8 +687,8 @@ pub(crate) async fn execute_cron_job(
         }
     }
 
-    // Construct client and AgentLoop via AnyClient wrapper
-    let client = ironhermes_agent::AnyClient::ChatCompletions(LlmClient::new(base_url, api_key, &model));
+    // Construct client via ProviderResolver — D-12: cron uses fixed provider, NO fallback
+    let client = build_main_client(&resolver)?;
     let mut agent = AgentLoop::new(client, tool_registry.clone(), max_turns);
 
     // D-11 / D-12: wire active_skills so cron runs get the same enforcement as conversation mode

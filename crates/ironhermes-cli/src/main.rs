@@ -601,7 +601,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
 
     info!("Starting IronHermes Telegram Gateway");
-    let mut runner = GatewayRunner::new(config, registry);
+    let mut runner = GatewayRunner::new(config, resolver, registry);
     runner.set_memory_store(memory_store);
     runner.set_job_store(job_store);
     runner.set_skill_registry(skill_registry);

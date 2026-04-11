@@ -435,32 +435,6 @@ impl Config {
         Ok(())
     }
 
-    /// Resolve the API base URL from config or environment.
-    pub fn resolve_base_url(&self) -> String {
-        if let Some(ref url) = self.model.base_url {
-            return url.clone();
-        }
-        if let Ok(url) = std::env::var("OPENAI_BASE_URL") {
-            return url;
-        }
-        crate::constants::OPENROUTER_BASE_URL.to_string()
-    }
-
-    /// Resolve the API key from config or environment.
-    pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(ref key) = self.model.api_key {
-            return Some(key.clone());
-        }
-        // Try provider-specific keys first
-        match self.model.provider.as_str() {
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
-            "openai" => std::env::var("OPENAI_API_KEY").ok(),
-            _ => std::env::var("OPENROUTER_API_KEY")
-                .or_else(|_| std::env::var("OPENAI_API_KEY"))
-                .ok(),
-        }
-    }
-
     /// Get the config file path.
     pub fn config_path() -> PathBuf {
         get_hermes_home().join("config.yaml")
