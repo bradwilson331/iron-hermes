@@ -100,6 +100,45 @@ pub fn format_entries_for_prompt(entries: &MemoryEntries, target: MemoryTarget) 
 }
 
 // =============================================================================
+// build_memory_provider factory (D-09, D-10)
+// =============================================================================
+
+use crate::config::MemoryConfig;
+use crate::memory_store::MemoryStore;
+
+const MEMORIES_DIR: &str = "memories";
+
+/// Build a memory provider from configuration.
+///
+/// Currently only "file" is available. Future providers (sqlite, grafeo, duckdb)
+/// require feature flags. Unknown provider names cause a hard error at startup (D-09).
+pub fn build_memory_provider(
+    config: &MemoryConfig,
+) -> anyhow::Result<Box<dyn MemoryProvider + Send>> {
+    match config.provider.as_str() {
+        "file" => {
+            let memory_dir = crate::constants::get_hermes_home().join(MEMORIES_DIR);
+            Ok(Box::new(MemoryStore::new(memory_dir)))
+        }
+        "sqlite" | "grafeo" | "duckdb" => {
+            anyhow::bail!(
+                "Memory provider '{}' is not available in this build. \
+                 It requires the '{}' feature flag. Available providers: file.",
+                config.provider,
+                config.provider
+            )
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown memory provider '{}'. Available providers: file. \
+                 Future providers (sqlite, grafeo, duckdb) require feature flags.",
+                other
+            )
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -271,6 +310,93 @@ mod tests {
         let provider: Box<dyn MemoryProvider + Send> = Box::new(MockProvider::new());
         // Just proving construction compiles is the test
         assert!(provider.format_for_system_prompt(MemoryTarget::Memory).is_none());
+    }
+
+    // ---- build_memory_provider factory tests ----
+
+    #[test]
+    fn test_build_memory_provider_file_returns_ok() {
+        let config = crate::config::MemoryConfig {
+            provider: "file".to_string(),
+        };
+        let result = super::build_memory_provider(&config);
+        assert!(result.is_ok(), "file provider should build: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_build_memory_provider_unknown_returns_error() {
+        let config = crate::config::MemoryConfig {
+            provider: "unknown".to_string(),
+        };
+        let result = super::build_memory_provider(&config);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(
+            err.contains("Unknown memory provider 'unknown'"),
+            "Error should mention unknown: {}",
+            err
+        );
+        assert!(err.contains("Available providers: file"), "Error should list providers: {}", err);
+    }
+
+    #[test]
+    fn test_build_memory_provider_sqlite_returns_feature_flag_error() {
+        let config = crate::config::MemoryConfig {
+            provider: "sqlite".to_string(),
+        };
+        let result = super::build_memory_provider(&config);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(err.contains("feature flag"), "Error should mention feature flag: {}", err);
+    }
+
+    // ---- MemoryStore as MemoryProvider tests ----
+
+    #[test]
+    fn test_memory_store_implements_memory_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem_dir = dir.path().join("memories");
+        let mut store = crate::memory_store::MemoryStore::new(mem_dir);
+
+        // Use trait methods
+        let provider: &mut dyn MemoryProvider = &mut store;
+        provider.load_from_disk().unwrap();
+        let result = provider.add(MemoryTarget::Memory, "test fact");
+        assert!(result.is_ok());
+
+        let entries = provider.to_memory_entries();
+        assert!(entries.entries.contains_key(&MemoryTarget::Memory));
+        assert_eq!(entries.entries[&MemoryTarget::Memory], vec!["test fact"]);
+    }
+
+    #[test]
+    fn test_arc_mutex_coercion_and_operations() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mem_dir = dir.path().join("memories");
+        let store = crate::memory_store::MemoryStore::new(mem_dir);
+
+        // Coerce Arc<Mutex<MemoryStore>> to Arc<Mutex<dyn MemoryProvider + Send>>
+        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
+
+        // Operate through trait object behind Arc<Mutex<>>
+        {
+            let mut p = provider.lock().unwrap();
+            p.load_from_disk().unwrap();
+            let result = p.add(MemoryTarget::Memory, "arc test");
+            assert!(result.is_ok());
+        }
+        {
+            let mut p = provider.lock().unwrap();
+            let result = p.replace(MemoryTarget::Memory, "arc test", "arc updated");
+            assert!(result.is_ok());
+        }
+        {
+            let mut p = provider.lock().unwrap();
+            let result = p.remove(MemoryTarget::Memory, "arc updated");
+            assert!(result.is_ok());
+        }
     }
 
     #[test]

@@ -8,12 +8,13 @@ pub mod skills;
 pub mod ssrf;
 pub mod types;
 
-pub use config::{BatchConfig, Config, ExecConfig, SubagentConfig};
+pub use config::{BatchConfig, Config, ExecConfig, MemoryConfig, SubagentConfig};
 pub use constants::*;
 pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
 pub use error::{HermesError, Result};
 pub use memory_provider::{
-    format_entries_for_prompt, MemoryEntries, MemoryProvider, MemoryProviderConfig,
+    build_memory_provider, format_entries_for_prompt, MemoryEntries, MemoryProvider,
+    MemoryProviderConfig,
 };
 pub use memory_store::{MemoryResult, MemoryStore, MemoryTarget};
 pub use skills::{SkillRecord, SkillRegistry};

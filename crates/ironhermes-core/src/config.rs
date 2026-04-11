@@ -22,6 +22,8 @@ pub struct Config {
     pub subagent: SubagentConfig,
     // BATCH-01..04: batch processing configuration
     pub batch: BatchConfig,
+    // MEM-12: memory provider configuration
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +317,26 @@ impl Default for BatchConfig {
     }
 }
 
+// =============================================================================
+// MemoryConfig (MEM-12)
+// =============================================================================
+
+/// Memory provider configuration (D-08, D-10).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Provider name. Default: "file". Future: "sqlite", "grafeo", "duckdb".
+    pub provider: String,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            provider: "file".to_string(),
+        }
+    }
+}
+
 impl Config {
     /// Load config from the IronHermes home directory.
     pub fn load() -> anyhow::Result<Self> {
@@ -524,6 +546,39 @@ subagent:
         assert!(config.subagent.provider.is_none());
         assert!(config.subagent.base_url.is_none());
         assert!(config.subagent.api_key.is_none());
+    }
+
+    #[test]
+    fn test_memory_config_default() {
+        let default = MemoryConfig::default();
+        assert_eq!(default.provider, "file");
+    }
+
+    #[test]
+    fn test_config_default_includes_memory() {
+        let config = Config::default();
+        assert_eq!(config.memory.provider, "file");
+    }
+
+    #[test]
+    fn test_config_parses_without_memory_section() {
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.memory.provider, "file");
+    }
+
+    #[test]
+    fn test_config_parses_with_memory_section() {
+        let yaml = r#"
+memory:
+  provider: "sqlite"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.memory.provider, "sqlite");
     }
 
     #[test]
