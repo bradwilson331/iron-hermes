@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::rpc_server::RpcServer;
@@ -29,6 +30,8 @@ pub struct SandboxResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// D-39: true when execution was interrupted by user cancellation.
+    pub interrupted: bool,
     /// Number of RPC tool calls made during execution (D-25).
     pub tool_calls_made: u32,
     /// Wall-clock execution duration in seconds (D-25).
@@ -53,12 +56,14 @@ impl Sandbox {
     /// 2. Starts a UDS RPC server for tool calls
     /// 3. Spawns Python with pattern-based env stripping (D-35..D-37)
     /// 4. Enforces timeout via SIGTERM -> 5s -> SIGKILL on process group (D-31..D-34)
-    /// 5. Truncates stdout at max_output_bytes, stderr at max_stderr_bytes (D-28..D-30)
-    /// 6. Reports tool_calls_made and duration_seconds (D-25)
+    /// 5. Races child completion against timeout AND optional cancellation (D-38)
+    /// 6. Truncates stdout at max_output_bytes, stderr at max_stderr_bytes (D-28..D-30)
+    /// 7. Reports tool_calls_made and duration_seconds (D-25)
     pub async fn run(
         &self,
         script: &str,
         tool_dispatch: Arc<dyn ToolDispatch>,
+        cancel: Option<CancellationToken>,
     ) -> anyhow::Result<SandboxResult> {
         let dir = tempfile::TempDir::new()?;
 
@@ -121,34 +126,55 @@ impl Sandbox {
         let mut stdout_handle = child.stdout.take().expect("stdout piped");
         let mut stderr_handle = child.stderr.take().expect("stderr piped");
 
-        // Drain stdout and stderr concurrently, then wait for child
+        // Race child completion against timeout and optional cancellation (D-38)
         let timeout_duration = Duration::from_secs(self.config.timeout_secs);
 
-        let result = tokio::time::timeout(timeout_duration, async {
-            let stdout_task = tokio::spawn(async move {
-                let mut buf = Vec::new();
-                stdout_handle.read_to_end(&mut buf).await.ok();
-                buf
-            });
-            let stderr_task = tokio::spawn(async move {
-                let mut buf = Vec::new();
-                stderr_handle.read_to_end(&mut buf).await.ok();
-                buf
-            });
+        enum Outcome {
+            Completed(Result<std::process::ExitStatus, std::io::Error>, Vec<u8>, Vec<u8>),
+            TimedOut,
+            Interrupted,
+        }
 
-            let status = child.wait().await;
-            let stdout_bytes = stdout_task.await.unwrap_or_default();
-            let stderr_bytes = stderr_task.await.unwrap_or_default();
+        let outcome = tokio::select! {
+            result = async {
+                let stdout_task = tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    stdout_handle.read_to_end(&mut buf).await.ok();
+                    buf
+                });
+                let stderr_task = tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    stderr_handle.read_to_end(&mut buf).await.ok();
+                    buf
+                });
 
-            (status, stdout_bytes, stderr_bytes)
-        })
-        .await;
+                let status = child.wait().await;
+                let stdout_bytes = stdout_task.await.unwrap_or_default();
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+
+                (status, stdout_bytes, stderr_bytes)
+            } => {
+                let (status, stdout_bytes, stderr_bytes) = result;
+                Outcome::Completed(status, stdout_bytes, stderr_bytes)
+            }
+            _ = tokio::time::sleep(timeout_duration) => {
+                Outcome::TimedOut
+            }
+            _ = async {
+                match &cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                Outcome::Interrupted
+            }
+        };
 
         // Abort the RPC server regardless of outcome
         rpc_handle.abort();
 
-        match result {
-            Ok((status, stdout_bytes, stderr_bytes)) => {
+        match outcome {
+            Outcome::Completed(status, stdout_bytes, stderr_bytes) => {
                 let status = status?;
                 let stdout = self.maybe_truncate(String::from_utf8_lossy(&stdout_bytes).into_owned());
                 let stderr = self.maybe_truncate_stderr(String::from_utf8_lossy(&stderr_bytes).into_owned());
@@ -158,11 +184,12 @@ impl Sandbox {
                     stderr,
                     exit_code: status.code(),
                     timed_out: false,
+                    interrupted: false,
                     tool_calls_made: call_count.load(Ordering::SeqCst),
                     duration_seconds: start.elapsed().as_secs_f64(),
                 })
             }
-            Err(_elapsed) => {
+            Outcome::TimedOut => {
                 warn!("Sandbox timeout after {}s", self.config.timeout_secs);
                 // D-31: SIGTERM -> 5s grace -> SIGKILL on process group
                 if let Some(pid) = child_pid {
@@ -180,6 +207,25 @@ impl Sandbox {
                     ),
                     exit_code: None,
                     timed_out: true,
+                    interrupted: false,
+                    tool_calls_made: call_count.load(Ordering::SeqCst),
+                    duration_seconds: start.elapsed().as_secs_f64(),
+                })
+            }
+            Outcome::Interrupted => {
+                warn!("Sandbox interrupted by user cancellation");
+                // D-39: Kill process group immediately (SIGKILL, no grace period)
+                if let Some(pid) = child_pid {
+                    let pgid = pid as i32;
+                    unsafe { libc::killpg(pgid, libc::SIGKILL); }
+                }
+
+                Ok(SandboxResult {
+                    stdout: String::new(),
+                    stderr: "[execution interrupted -- user sent a new message]".into(),
+                    exit_code: None,
+                    timed_out: false,
+                    interrupted: true,
                     tool_calls_made: call_count.load(Ordering::SeqCst),
                     duration_seconds: start.elapsed().as_secs_f64(),
                 })
@@ -277,7 +323,7 @@ mod tests {
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let result = sandbox
-            .run(r#"print("hello world")"#, dispatch)
+            .run(r#"print("hello world")"#, dispatch, None)
             .await
             .expect("should succeed");
 
@@ -305,7 +351,7 @@ import os
 env = dict(os.environ)
 print(repr(env))
 "#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         let output = &result.stdout;
 
@@ -358,7 +404,7 @@ print(repr(env))
         // Wrap the entire test in a 5-second timeout to ensure it doesn't hang
         let test_result = tokio::time::timeout(Duration::from_secs(10), async {
             sandbox
-                .run("import time; time.sleep(999)", dispatch)
+                .run("import time; time.sleep(999)", dispatch, None)
                 .await
                 .expect("should succeed even on timeout")
         })
@@ -378,7 +424,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"print("A" * 60000)"#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         // stdout should be truncated: 100 bytes + truncation notice
         let notice = "\n[truncated: output exceeded limit]";
@@ -399,7 +445,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"import sys; sys.stderr.write("err msg")"#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         assert!(
             result.stderr.contains("err msg"),
@@ -414,7 +460,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"import sys; sys.exit(42)"#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         assert_eq!(result.exit_code, Some(42));
     }
@@ -430,7 +476,7 @@ print(repr(env))
 
         // Write >100 bytes to stderr
         let script = r#"import sys; sys.stderr.write("X" * 60000)"#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         let notice = "\n[stderr truncated at 10KB]";
         assert!(
@@ -451,7 +497,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let result = sandbox
-            .run(r#"import time; time.sleep(0.1); print("done")"#, dispatch)
+            .run(r#"import time; time.sleep(0.1); print("done")"#, dispatch, None)
             .await
             .expect("should succeed");
 

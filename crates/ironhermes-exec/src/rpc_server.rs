@@ -202,7 +202,7 @@ from hermes_tools import read_file
 result = read_file("/tmp/test.txt")
 print(result)
 "#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         assert!(
             result.stdout.contains("file contents"),
@@ -239,7 +239,7 @@ if limit_hit:
 else:
     print("limit NOT hit")
 "#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         assert!(
             result.stdout.contains("limit hit"),
@@ -262,7 +262,7 @@ try:
 except HermesRpcError as e:
     print(f"caught error: {e}")
 "#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         assert!(
             result.stdout.contains("caught error"),
@@ -285,7 +285,7 @@ try:
 except HermesRpcError as e:
     print(f"caught: {e}")
 "#;
-        let result = sandbox.run(script, dispatch).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
 
         assert!(
             result.stdout.contains("caught:"),

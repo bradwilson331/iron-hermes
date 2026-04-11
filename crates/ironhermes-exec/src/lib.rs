@@ -7,6 +7,9 @@ pub mod sandbox;
 pub use rpc_server::RpcServer;
 pub use sandbox::{Sandbox, SandboxResult};
 
+/// Re-export CancellationToken for callers that need to pass one to Sandbox::run.
+pub use tokio_util::sync::CancellationToken;
+
 /// Embedded Python helper module that scripts import for tool access.
 pub const HERMES_TOOLS_PY: &str = include_str!("hermes_tools.py");
 
