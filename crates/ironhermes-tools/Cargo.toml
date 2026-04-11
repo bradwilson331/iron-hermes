@@ -25,6 +25,7 @@ regex = { workspace = true }
 chrono = { workspace = true }
 scraper = { workspace = true }
 htmd = { workspace = true }
+tokio-util = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]

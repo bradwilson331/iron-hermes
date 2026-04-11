@@ -273,7 +273,7 @@ impl ToolRegistry {
         config: ironhermes_core::ExecConfig,
     ) {
         use crate::execute_code::ExecuteCodeTool;
-        self.register(Box::new(ExecuteCodeTool::new(rpc_registry, config)));
+        self.register(Box::new(ExecuteCodeTool::new(rpc_registry, config, None)));
     }
 }
 

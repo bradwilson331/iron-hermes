@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironhermes_core::{ExecConfig, ToolSchema};
-use ironhermes_exec::{Sandbox, SandboxConfig, ToolDispatch};
+use ironhermes_exec::{CancellationToken, Sandbox, SandboxConfig, ToolDispatch};
 use serde_json::json;
 use tracing::debug;
 
@@ -48,6 +48,12 @@ pub struct ExecuteCodeTool {
     rpc_registry: Arc<ToolRegistry>,
     /// Execution configuration (python path, timeout, limits).
     config: ExecConfig,
+    /// Cancellation token — when triggered (e.g., by user sending a new message),
+    /// the running sandbox child process is killed immediately.
+    /// Integration: The gateway/handler creates a CancellationToken per tool execution
+    /// and triggers it when a new message arrives from the same user.
+    /// TODO: Wire CancellationToken creation in gateway handler (Phase 8 follow-up).
+    cancel_token: Option<CancellationToken>,
 }
 
 impl ExecuteCodeTool {
@@ -55,10 +61,16 @@ impl ExecuteCodeTool {
     ///
     /// `rpc_registry` must contain ONLY D-07 safe tools (no terminal, no execute_code).
     /// `config` provides python path, timeout, call limit, and output cap.
-    pub fn new(rpc_registry: Arc<ToolRegistry>, config: ExecConfig) -> Self {
+    /// `cancel_token` is optionally provided by the gateway to support user interruption (D-40).
+    pub fn new(
+        rpc_registry: Arc<ToolRegistry>,
+        config: ExecConfig,
+        cancel_token: Option<CancellationToken>,
+    ) -> Self {
         Self {
             rpc_registry,
             config,
+            cancel_token,
         }
     }
 }
@@ -119,30 +131,33 @@ impl Tool for ExecuteCodeTool {
             registry: Arc::clone(&self.rpc_registry),
         });
 
-        let result = sandbox.run(code, dispatch).await?;
+        let result = sandbox.run(code, dispatch, self.cancel_token.clone()).await?;
 
-        // Format result per D-15: separate stdout/stderr/exit_code sections
-        let mut output = String::new();
+        // D-25..D-27: Structured JSON response format
+        let status = if result.interrupted {
+            "interrupted"
+        } else if result.timed_out {
+            "timeout"
+        } else if result.exit_code == Some(0) {
+            "success"
+        } else {
+            "error"
+        };
 
-        if result.timed_out {
-            output.push_str(&format!(
-                "[timed out after {}s]\n",
-                self.config.timeout_secs
-            ));
+        let mut response = json!({
+            "status": status,
+            "output": result.stdout,
+            "exit_code": result.exit_code.unwrap_or(-1),
+            "tool_calls_made": result.tool_calls_made,
+            "duration_seconds": result.duration_seconds,
+        });
+
+        // D-30: include stderr when non-empty (truncation already handled by sandbox)
+        if !result.stderr.is_empty() {
+            response["stderr"] = serde_json::Value::String(result.stderr);
         }
 
-        output.push_str("[stdout]\n");
-        output.push_str(&result.stdout);
-        output.push_str("\n[stderr]\n");
-        output.push_str(&result.stderr);
-
-        let exit_code = result
-            .exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        output.push_str(&format!("\n[exit_code: {}]", exit_code));
-
-        Ok(output)
+        Ok(response.to_string())
     }
 }
 
@@ -154,15 +169,20 @@ mod tests {
     async fn test_execute_code_tool_basic() {
         let rpc_registry = Arc::new(ToolRegistry::new());
         let config = ExecConfig::default();
-        let tool = ExecuteCodeTool::new(rpc_registry, config);
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
 
         let result = tool
             .execute(json!({"code": "print('hello from python')"}))
             .await
             .unwrap();
-        assert!(result.contains("[stdout]"));
-        assert!(result.contains("hello from python"));
-        assert!(result.contains("[exit_code: 0]"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .expect("response should be valid JSON");
+        assert_eq!(parsed["status"], "success");
+        assert!(parsed["output"].as_str().unwrap().contains("hello from python"));
+        assert_eq!(parsed["exit_code"], 0);
+        assert!(parsed["duration_seconds"].as_f64().unwrap() >= 0.0);
+        assert_eq!(parsed["tool_calls_made"], 0);
     }
 
     #[tokio::test]
@@ -172,7 +192,7 @@ mod tests {
         rpc_registry.register_defaults();
         let rpc_registry = Arc::new(rpc_registry);
         let config = ExecConfig::default();
-        let tool = ExecuteCodeTool::new(rpc_registry, config);
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
 
         // Write a temp file, then have Python read it via hermes_tools
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -182,8 +202,12 @@ mod tests {
             tmp.path().display()
         );
         let result = tool.execute(json!({"code": script})).await.unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .expect("response should be valid JSON");
+        assert_eq!(parsed["status"], "success");
         assert!(
-            result.contains("test content from rust"),
+            parsed["output"].as_str().unwrap().contains("test content from rust"),
             "RPC read_file should return file content, got: {}",
             result
         );
@@ -194,7 +218,7 @@ mod tests {
         let rpc_registry = Arc::new(ToolRegistry::new());
         let mut config = ExecConfig::default();
         config.timeout_secs = 2;
-        let tool = ExecuteCodeTool::new(rpc_registry, config);
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -204,39 +228,38 @@ mod tests {
         .expect("test must complete within 10s")
         .unwrap();
 
-        assert!(
-            result.contains("[timed out"),
-            "should contain timeout notice, got: {}",
-            result
-        );
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .expect("response should be valid JSON");
+        assert_eq!(parsed["status"], "timeout");
+        assert!(parsed["stderr"].as_str().unwrap().contains("timed out"));
     }
 
     #[tokio::test]
     async fn test_execute_code_result_format() {
         let rpc_registry = Arc::new(ToolRegistry::new());
         let config = ExecConfig::default();
-        let tool = ExecuteCodeTool::new(rpc_registry, config);
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
 
         let result = tool
             .execute(json!({"code": "import sys; print('out'); sys.stderr.write('err')"}))
             .await
             .unwrap();
-        assert!(result.contains("[stdout]"), "missing [stdout] section");
-        assert!(result.contains("out"), "missing stdout content");
-        assert!(result.contains("[stderr]"), "missing [stderr] section");
-        assert!(result.contains("err"), "missing stderr content");
-        assert!(
-            result.contains("[exit_code: 0]"),
-            "missing exit_code, got: {}",
-            result
-        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .expect("response should be valid JSON");
+        assert_eq!(parsed["status"], "success");
+        assert!(parsed["output"].as_str().unwrap().contains("out"), "missing stdout content");
+        assert_eq!(parsed["stderr"], "err", "missing stderr content");
+        assert_eq!(parsed["exit_code"], 0);
+        assert!(parsed.get("tool_calls_made").is_some(), "missing tool_calls_made");
+        assert!(parsed.get("duration_seconds").is_some(), "missing duration_seconds");
     }
 
     #[tokio::test]
     async fn test_execute_code_missing_code_param() {
         let rpc_registry = Arc::new(ToolRegistry::new());
         let config = ExecConfig::default();
-        let tool = ExecuteCodeTool::new(rpc_registry, config);
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
 
         let result = tool.execute(json!({})).await;
         assert!(result.is_err(), "should error on missing code param");
