@@ -1,11 +1,14 @@
 ---
 phase: 09-subagent-delegation
-reviewed: 2026-04-10T18:15:00Z
+reviewed: 2026-04-11T12:00:00Z
 depth: standard
-files_reviewed: 11
+files_reviewed: 14
 files_reviewed_list:
+  - crates/ironhermes-agent/Cargo.toml
+  - crates/ironhermes-agent/src/agent_loop.rs
   - crates/ironhermes-agent/src/lib.rs
   - crates/ironhermes-agent/src/subagent_runner.rs
+  - crates/ironhermes-cli/Cargo.toml
   - crates/ironhermes-cli/src/main.rs
   - crates/ironhermes-core/src/config.rs
   - crates/ironhermes-core/src/lib.rs
@@ -16,8 +19,8 @@ files_reviewed_list:
   - crates/ironhermes-tools/src/registry.rs
   - crates/ironhermes-tools/src/terminal.rs
 findings:
-  critical: 1
-  warning: 4
+  critical: 2
+  warning: 3
   info: 2
   total: 7
 status: issues_found
@@ -25,127 +28,132 @@ status: issues_found
 
 # Phase 9: Code Review Report
 
-**Reviewed:** 2026-04-10T18:15:00Z
+**Reviewed:** 2026-04-11T12:00:00Z
 **Depth:** standard
-**Files Reviewed:** 11
+**Files Reviewed:** 14
 **Status:** issues_found
 
 ## Summary
 
-Phase 09 implements subagent delegation with a well-structured dependency-inversion pattern (SubagentRunner trait) to avoid circular crate dependencies. The core security requirements are met: recursive delegation is structurally prevented (AGENT-05), memory is read-only for children, terminal CWD is isolated, and concurrency is semaphore-controlled.
+Reviewed the subagent delegation subsystem spanning ironhermes-agent, ironhermes-tools, ironhermes-cli, and ironhermes-core. The architecture is well-designed: dependency inversion via the SubagentRunner trait avoids circular crate dependencies, recursive delegation is structurally prevented (AGENT-05), memory is properly read-only for children with a separate schema, terminal CWD is isolated, and concurrency is semaphore-controlled with elapsed-time logging.
 
-The review identified one critical issue (string truncation at a non-char-boundary causing a panic), several warnings around edge cases in concurrency logging and memory-tool schema inconsistency, and minor info items.
+Several issues from the prior review (2026-04-10) have been fixed: terminal.rs char-boundary truncation is now safe, the read-only memory schema is properly restricted, and semaphore wait logging uses elapsed time instead of a racy flag. Two new critical issues remain: unsafe byte-offset string slicing in three locations that can panic on multi-byte UTF-8 input from LLM-generated content. Three warnings cover a schema/validation mismatch, batch error indexing, and a guardrail check inconsistency.
 
 ## Critical Issues
 
-### CR-01: String truncation at non-char-boundary causes panic
+### CR-01: Unsafe string slice at byte offset panics on multi-byte UTF-8
 
-**File:** `crates/ironhermes-tools/src/terminal.rs:113-114`
-**Issue:** The output truncation `&result[..MAX_OUTPUT_LEN]` slices by byte index, not by character boundary. If the output contains multi-byte UTF-8 characters (common in international output, emoji, or binary-like data), slicing at byte 50000 may land in the middle of a multi-byte character, causing a panic at runtime.
+**File:** `crates/ironhermes-agent/src/agent_loop.rs:366`
+**Issue:** The expression `&args_str[..100]` slices a `String` at byte offset 100 for the tool progress preview. If `args_str` contains multi-byte UTF-8 characters (CJK text, emoji, accented characters in LLM-generated tool arguments) and byte 100 falls in the middle of a multi-byte sequence, this panics with "byte index 100 is not a char boundary." The terminal.rs truncation was already fixed with `is_char_boundary` but this location was missed.
 **Fix:**
 ```rust
-if result.len() > MAX_OUTPUT_LEN {
-    // Find the nearest char boundary at or before MAX_OUTPUT_LEN
-    let mut end = MAX_OUTPUT_LEN;
-    while !result.is_char_boundary(end) {
+let preview = if args_str.len() > 100 {
+    let mut end = 100;
+    while !args_str.is_char_boundary(end) {
         end -= 1;
     }
-    let truncated = &result[..end];
-    Ok(format!("{}\n[truncated]", truncated))
+    format!("{}...", &args_str[..end])
 } else {
-    Ok(result)
-}
+    args_str.clone()
+};
 ```
+
+### CR-02: Unsafe string slice at byte offset panics on multi-byte UTF-8 (two more locations)
+
+**File:** `crates/ironhermes-tools/src/delegate_task.rs:228` and `crates/ironhermes-tools/src/delegate_task.rs:509`
+**Issue:** Both `&goal[..50]` (line 228, batch mode progress callback) and `&task[..50]` (line 509, single mode progress callback) slice at byte offset 50. Since task descriptions originate from LLM output, non-ASCII content is expected. If byte 50 falls mid-character, this panics at runtime.
+**Fix:** Apply the same `is_char_boundary` pattern used in terminal.rs:
+```rust
+let summary = if goal.len() > 50 {
+    let mut end = 50;
+    while !goal.is_char_boundary(end) {
+        end -= 1;
+    }
+    &goal[..end]
+} else {
+    &goal
+};
+```
+Apply to both line 228 (`goal`) and line 509 (`task`).
 
 ## Warnings
 
-### WR-01: Semaphore "waited" flag is racy and may produce incorrect log messages
+### WR-01: Schema declares "task" as required but batch mode uses "tasks" without it
 
-**File:** `crates/ironhermes-tools/src/delegate_task.rs:193-199`
-**Issue:** The `waited` flag is computed by checking `available_permits() == 0` before `acquire().await`. Between the check and the acquire, other tasks may release or acquire permits, so the flag can be wrong in both directions: (1) permits were 0 but one freed before acquire completed (false positive -- "waited" message prepended when no wait occurred), or (2) permits were >0 but another task grabbed the last one before this acquire (false negative -- no message when there was a wait). This is a cosmetic issue only (no correctness impact), but it could confuse operators reviewing logs.
-**Fix:** Remove the "waited" flag entirely and instead measure actual wait time:
+**File:** `crates/ironhermes-tools/src/delegate_task.rs:422`
+**Issue:** The JSON schema specifies `"required": ["task"]`, but the `execute()` method (line 429) first checks for a `tasks` array for batch mode. When the LLM sends `{"tasks": [...]}` without a `"task"` field, strict schema validation by LLM providers would reject the call before it reaches execute(). The schema does not express the task/tasks mutual exclusivity.
+**Fix:** Remove `"task"` from `required` and validate in `execute()`:
 ```rust
-let start = std::time::Instant::now();
-let _permit = self.semaphore.acquire().await
-    .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
-let wait_duration = start.elapsed();
-let waited = wait_duration > Duration::from_millis(50);
-if waited {
-    info!(
-        "Acquired subagent slot after waiting {}ms",
-        wait_duration.as_millis()
-    );
+// In schema():
+// Remove: "required": ["task"]
+// Add: "required": []
+
+// At top of execute():
+if args.get("tasks").is_none() && args.get("task").is_none() {
+    anyhow::bail!("Either 'task' (single mode) or 'tasks' (batch mode) is required");
 }
 ```
 
-### WR-02: Memory tool schema advertises write actions in read-only mode
+### WR-02: Batch error collection uses wrong index for failed/panicked tasks
 
-**File:** `crates/ironhermes-tools/src/memory_tool.rs:49-78`
-**Issue:** When `MemoryTool::new_read_only()` is used, the tool schema still advertises `"add"`, `"replace"`, and `"remove"` as valid actions in the `enum`. The child agent's LLM will see these as valid options, attempt them, and get a runtime error string. This wastes LLM turns and tokens. The schema should reflect the actual capabilities.
-**Fix:** Override `schema()` to return a read-only variant when `self.read_only` is true, or define a separate schema that only lists available actions. A simpler approach: adjust the description when read-only:
+**File:** `crates/ironhermes-tools/src/delegate_task.rs:289-290`
+**Issue:** When a spawned batch task returns `Err` or panics, the index is computed as `results.len()` instead of the actual task index. Since results arrive in non-deterministic order, `results.len()` does not correspond to the original task index. This causes incorrect "Task N Result" numbering in the output and can produce duplicate indices that break the sort-by-index guarantee (D-07).
+**Fix:** Use `enumerate()` on the handles to track expected indices:
 ```rust
-fn description(&self) -> &str {
-    if self.read_only {
-        "Query persistent facts from memory. This is a read-only view; add/replace/remove are not available in subagent context."
-    } else {
-        "Save, update, or remove persistent facts..."
+for (expected_idx, handle) in handles.into_iter().enumerate() {
+    match handle.await {
+        Ok(Ok((idx, response))) => results.push((idx, response)),
+        Ok(Err(e)) => results.push((expected_idx, format!("Error: {}", e))),
+        Err(e) => results.push((expected_idx, format!("Task panicked: {}", e))),
     }
 }
 ```
-Additionally, consider filtering the `enum` values in the schema when read-only.
 
-### WR-03: Child subagent has no hook registry -- tool events are silently lost
+### WR-03: Guardrail check_guardrails() returns early on Warn, missing later Block decisions
 
-**File:** `crates/ironhermes-agent/src/subagent_runner.rs:39`
-**Issue:** `AgentSubagentRunner::run_child()` creates a child `AgentLoop` without calling `.with_hook_registry()`. This means any tool calls made by the child agent will not emit `ToolCalled` or `ToolCompleted` hook events. For operators using webhook listeners or JSONL event logs (Phase 7 features), child agent activity is invisible. This was noted as acceptable in the plan but is worth tracking.
-**Fix:** Pass an `Option<Arc<HookRegistry>>` through the `SubagentRunner` trait and `AgentSubagentRunner`, and chain `.with_hook_registry()` when available:
+**File:** `crates/ironhermes-tools/src/registry.rs:91-109`
+**Issue:** `check_guardrails()` returns immediately when it encounters a `Warn` decision (line 100-101), without checking remaining guardrails. In contrast, `dispatch_with_hook()` (lines 166-188) continues iterating on `Warn`. If guardrail A returns `Warn` and guardrail B returns `Block`, `check_guardrails()` returns `Warn` (missing the block), while `dispatch_with_hook()` correctly returns `Block`. Since `agent_loop.rs` uses the split API (`check_guardrails` + `execute_tool`), a Block from a later guardrail can be bypassed.
+**Fix:** Make `check_guardrails` continue iterating on `Warn`, matching `dispatch_with_hook` behavior:
 ```rust
-pub trait SubagentRunner: Send + Sync {
-    async fn run_child(
-        &self,
-        registry: Arc<ToolRegistry>,
-        system_prompt: String,
-        max_iterations: usize,
-        hook_registry: Option<Arc<HookRegistry>>,
-    ) -> anyhow::Result<Option<String>>;
-}
-```
-
-### WR-04: Missing `memory` tool silently ignored when no MemoryStore provided
-
-**File:** `crates/ironhermes-tools/src/delegate_task.rs:108-114`
-**Issue:** When `"memory"` is in the allowed_tools list but `memory_store` is `None` (as in CLI chat and single modes), the memory tool is silently not registered. The child agent's LLM will be told it can use "memory" (via the task or default safe tools list) but the tool won't exist, causing dispatch errors. This happens in `run_single()` and `run_chat()` where `memory_store` is `None`.
-**Fix:** Either skip `"memory"` from `DEFAULT_SAFE_TOOLS` when `memory_store` is `None` at the call site, or emit a warning log in `build_child_registry`:
-```rust
-"memory" => {
-    if let Some(ref store) = memory_store {
-        registry.register(Box::new(
-            crate::memory_tool::MemoryTool::new_read_only(store.clone()),
-        ));
-    } else {
-        tracing::warn!("memory tool requested but no MemoryStore available; skipping");
+pub fn check_guardrails(&self, name: &str, args: &serde_json::Value) -> GuardrailDecision {
+    let mut last_warn = None;
+    for guardrail in &self.guardrails {
+        match guardrail.check(name, args) {
+            GuardrailDecision::Allow => {}
+            GuardrailDecision::Warn { reason } => {
+                tracing::warn!(
+                    tool = %name,
+                    guardrail = %guardrail.name(),
+                    reason = %reason,
+                    "Guardrail warning (proceeding)"
+                );
+                last_warn = Some(GuardrailDecision::Warn { reason });
+                // Continue -- a later guardrail might Block
+            }
+            GuardrailDecision::Block { reason } => {
+                return GuardrailDecision::Block { reason };
+            }
+        }
     }
+    last_warn.unwrap_or(GuardrailDecision::Allow)
 }
 ```
 
 ## Info
 
-### IN-01: MemoryTool description does not mention read capabilities
+### IN-01: Memory tool "get" action in read-only schema has no execute() handler
 
-**File:** `crates/ironhermes-tools/src/memory_tool.rs:136-139`
-**Issue:** The `execute()` match for unknown actions says `"Valid actions: add, replace, remove"` but there is no read/query action implemented. The schema `enum` only lists `["add", "replace", "remove"]`. The read-only error message references "query and get actions" that do not exist in the tool. Memory content is injected into the system prompt, not queried via tool calls -- the error message is misleading.
-**Fix:** Update the read-only error message to accurately reflect how memory works:
-```rust
-"Error: memory is read-only in subagent context. Memory facts are available in the system prompt; add/replace/remove actions are disabled."
-```
+**File:** `crates/ironhermes-tools/src/memory_tool.rs:58` and `crates/ironhermes-tools/src/memory_tool.rs:128-168`
+**Issue:** The read-only schema (line 58) declares `"enum": ["get"]` as the only valid action, but `execute()` has no match arm for `"get"`. A subagent calling `{"action": "get", "target": "memory"}` falls through to the catch-all (line 164), returning an error about unknown action. The schema advertises a capability the implementation does not support. Memory content is injected via system prompt, so this is low-impact, but the schema is misleading.
+**Fix:** Either add a `"get"` match arm that returns the current memory contents, or change the read-only schema description to clarify that memory is read via system prompt only and remove the `"get"` enum value.
 
-### IN-02: Unused import potential in ironhermes-core/src/lib.rs
+### IN-02: `resolve_api_key().unwrap_or_default()` silently produces empty API key
 
-**File:** `crates/ironhermes-core/src/lib.rs:10`
-**Issue:** `SubagentConfig` is re-exported from the crate root alongside `Config` and `ExecConfig`. This is consistent with the existing pattern and correct. No issue -- this is a positive observation confirming the export is properly structured.
+**File:** `crates/ironhermes-cli/src/main.rs:239` and `crates/ironhermes-cli/src/main.rs:303`
+**Issue:** When constructing `AgentSubagentRunner`, `config.resolve_api_key().unwrap_or_default()` converts a missing API key to an empty string. Subagent child clients will be constructed with an empty key, leading to opaque authentication failures from the LLM provider rather than a clear error at setup time. This only affects subagent calls (the parent client fails properly via `.context()` on line 607), so impact is limited to the delegation path.
 
 ---
 
-_Reviewed: 2026-04-10T18:15:00Z_
+_Reviewed: 2026-04-11T12:00:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
