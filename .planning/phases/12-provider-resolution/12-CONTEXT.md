@@ -24,7 +24,7 @@ A single shared runtime resolver maps (provider, model) to (api_mode, api_key, b
 ### API mode routing
 - **D-07:** `ApiMode` enum with three variants: `ChatCompletions`, `CodexResponses`, `AnthropicMessages`. `ResolvedEndpoint` includes the `ApiMode` and `build_client()` returns the right client type for the mode.
 - **D-08:** Anthropic adapter lives in `ironhermes-agent` crate alongside `LlmClient`. `AnthropicClient` as a parallel implementation to `LlmClient`, both behind a common trait or enum dispatch. Keeps format conversion close to where requests are made.
-- **D-09:** Anthropic native path supports full refreshable credentials — prefer Claude Code credential files with refreshable auth, preflight refresh before API calls, retry once on 401 after rebuilding client. Port hermes-agent's credential resolution pattern per PROV-05.
+- **D-09:** Anthropic native path supports credential discovery — read Claude Code credential files (`~/.claude/credentials.json` → `oauth.accessToken`) and env var (`ANTHROPIC_API_KEY`). Credential is resolved once at startup. **OAuth token refresh (preflight expiry check, refresh POST, retry-on-401 with rebuilt client) is deferred to a follow-on phase** — the refresh endpoint URL/body format requires additional research. Port hermes-agent's credential discovery (not refresh) pattern per PROV-05.
 - **D-10:** Codex Responses API mode: define `CodexResponses` variant in `ApiMode` enum, wire up resolution so config can select it, but actual Responses API client implementation is deferred — returns an error if selected at runtime. Keeps the abstraction complete without blocking on a rarely-used path.
 
 ### Fallback & error recovery
@@ -108,7 +108,7 @@ A single shared runtime resolver maps (provider, model) to (api_mode, api_key, b
 <deferred>
 ## Deferred Ideas
 
-None — discussion stayed within phase scope.
+- **OAuth credential refresh for Anthropic** — D-09 originally required preflight expiry check, OAuth refresh POST, and retry-on-401 with rebuilt client. Deferred because the refresh endpoint URL/body format is unknown and requires research against Claude Code source or Anthropic docs. Should be implemented in a follow-on phase once the refresh mechanism is documented.
 
 ### Reviewed Todos (not folded)
 - "Add setup wizard and config scaffolding for gateway testing" — belongs in Phase 23 (Configuration & Setup Wizard), not provider resolution scope.
