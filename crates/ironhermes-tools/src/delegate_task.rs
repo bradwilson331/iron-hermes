@@ -225,7 +225,15 @@ impl DelegateTaskTool {
             let handle = tokio::spawn(async move {
                 // D-19: Emit Started progress event
                 if let Some(ref cb) = progress_cb {
-                    let summary = if goal.len() > 50 { &goal[..50] } else { &goal };
+                    let summary = if goal.len() > 50 {
+                        let mut end = 50;
+                        while !goal.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &goal[..end]
+                    } else {
+                        &goal
+                    };
                     cb(index, SubagentProgress::Started { task_summary: summary.to_string() });
                 }
 
@@ -506,7 +514,15 @@ impl Tool for DelegateTaskTool {
 
         // D-19: Emit Started progress event
         if let Some(ref cb) = self.progress_callback {
-            let summary = if task.len() > 50 { &task[..50] } else { task };
+            let summary = if task.len() > 50 {
+                let mut end = 50;
+                while !task.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &task[..end]
+            } else {
+                task
+            };
             cb(0, SubagentProgress::Started { task_summary: summary.to_string() });
         }
 
