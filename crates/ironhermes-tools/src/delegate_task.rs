@@ -291,11 +291,11 @@ impl DelegateTaskTool {
 
         // Collect results and sort by index (D-07)
         let mut results: Vec<(usize, String)> = Vec::new();
-        for handle in handles {
+        for (expected_idx, handle) in handles.into_iter().enumerate() {
             match handle.await {
                 Ok(Ok((idx, response))) => results.push((idx, response)),
-                Ok(Err(e)) => results.push((results.len(), format!("Error: {}", e))),
-                Err(e) => results.push((results.len(), format!("Task panicked: {}", e))),
+                Ok(Err(e)) => results.push((expected_idx, format!("Error: {}", e))),
+                Err(e) => results.push((expected_idx, format!("Task panicked: {}", e))),
             }
         }
         results.sort_by_key(|(idx, _)| *idx);
