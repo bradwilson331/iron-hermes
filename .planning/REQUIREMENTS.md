@@ -94,10 +94,10 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 ### Provider Resolution
 
 - [ ] **PROV-01**: Shared runtime resolver serves CLI, gateway, cron, ACP, and auxiliary calls — maps (provider, model) to (api_mode, api_key, base_url)
-- [ ] **PROV-02**: Three API modes supported: chat_completions (OpenAI-compatible), codex_responses (Codex/Responses API), anthropic_messages (native Anthropic Messages API)
+- [x] **PROV-02**: Three API modes supported: chat_completions (OpenAI-compatible), codex_responses (Codex/Responses API), anthropic_messages (native Anthropic Messages API)
 - [ ] **PROV-03**: Resolution precedence: explicit request > config.yaml > environment variables > provider defaults
 - [ ] **PROV-04**: API keys scoped to their provider's base URL — prevents leaking wrong key to wrong endpoint
-- [ ] **PROV-05**: Native Anthropic path uses anthropic_adapter for message format conversion with refreshable credential support
+- [x] **PROV-05**: Native Anthropic path uses anthropic_adapter for message format conversion with refreshable credential support
 - [ ] **PROV-06**: Auxiliary model routing: vision, compression, session search, skills hub, MCP helper tasks can use separate provider/model from main conversational model
 - [ ] **PROV-07**: Fallback model switching: on primary model failure (429/5xx/401), try configured fallback_providers in order with credential refresh
 - [ ] **PROV-08**: Named custom providers configurable in config.yaml for any OpenAI-compatible endpoint
@@ -249,10 +249,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TOOL-04 | Phase 20 | Pending |
 | TOOL-05 | Phase 20 | Pending |
 | PROV-01 | Phase 12 | Pending |
-| PROV-02 | Phase 12 | Pending |
+| PROV-02 | Phase 12 | Complete |
 | PROV-03 | Phase 12 | Pending |
 | PROV-04 | Phase 12 | Pending |
-| PROV-05 | Phase 12 | Pending |
+| PROV-05 | Phase 12 | Complete |
 | PROV-06 | Phase 12 | Pending |
 | PROV-07 | Phase 12 | Pending |
 | PROV-08 | Phase 12 | Pending |
