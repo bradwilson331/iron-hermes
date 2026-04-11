@@ -457,7 +457,7 @@ memory:
 | A3 | `initialize` called before wrapping in `Arc<Mutex<>>` to avoid `MutexGuard` across await | Common Pitfalls #2 | Medium — if provider must be wrapped first, use `tokio::sync::Mutex` instead |
 | A4 | `MemoryStore::entries` access via a new getter method is the right refactor path | Common Pitfalls #3 | Low — alternative is to restructure `prefetch` to re-read from disk |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `format_for_system_prompt` move to the trait or become a free function?**
    - What we know: `PromptBuilder` currently calls it on `&MemoryStore`; after migration it
@@ -465,14 +465,14 @@ memory:
    - What's unclear: Whether future network-backed providers need custom prompt formatting
      (they might surface different metadata).
    - Recommendation: Make it a standalone function `format_entries_for_prompt(entries: &MemoryEntries, target: MemoryTarget) -> Option<String>` operating on `MemoryEntries`. Keeps the trait minimal.
+   - **RESOLVED:** Both approaches used. `format_for_system_prompt` added as a trait method (for PromptBuilder compatibility through `dyn MemoryProvider`), AND `format_entries_for_prompt` provided as a standalone free function (for use with `MemoryEntries` directly). The trait is not minimal but IS complete — enables full call-site migration.
 
 2. **`std::sync::Mutex` or `tokio::sync::Mutex` for the shared provider?**
    - What we know: Current codebase uses `std::sync::Mutex` for `MemoryStore`. The async
      hooks should not be held under a lock across an await point.
    - What's unclear: If `sync_turn` / `on_session_end` need to be called while the lock
      is still held (to pass entries), this becomes `MutexGuard + await = compile error`.
-   - Recommendation: Take a snapshot of entries outside the lock, drop the lock, then
-     call the async hooks. This is the same frozen-snapshot pattern already in use.
+   - **RESOLVED:** Retain `std::sync::Mutex` (existing pattern). Lifecycle hooks (async) are called before wrapping in Arc<Mutex<>> (initialize at startup) or after extracting entries snapshot outside the lock (sync_turn, on_session_end). Operational methods (add/replace/remove/format_for_system_prompt) are sync and work fine under std::sync::Mutex.
 
 ## Environment Availability
 
