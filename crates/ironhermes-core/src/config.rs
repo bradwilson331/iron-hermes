@@ -3,6 +3,61 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// =============================================================================
+// Provider configuration types (PROV-01..PROV-08, Phase 12)
+// =============================================================================
+
+/// Wire protocol mode for a provider endpoint (D-07).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiMode {
+    ChatCompletions,
+    AnthropicMessages,
+    CodexResponses,
+}
+
+/// Per-provider override configuration (used in the `providers:` map).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub api_mode: Option<ApiMode>,
+    pub default_model: Option<String>,
+    pub fallback_providers: Vec<String>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            api_key: None,
+            api_mode: None,
+            default_model: None,
+            fallback_providers: vec![],
+        }
+    }
+}
+
+/// Custom (user-defined) provider configuration (used in `custom_providers:` list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomProviderConfig {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub api_mode: Option<ApiMode>,
+    pub default_model: Option<String>,
+}
+
+/// Model role configuration (used in `model.roles:` map).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoleConfig {
+    /// Provider name or "main" to inherit the main provider.
+    pub provider: String,
+    /// Model to use; None = use the provider's default_model.
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -24,6 +79,11 @@ pub struct Config {
     pub batch: BatchConfig,
     // MEM-12: memory provider selection
     pub memory: MemoryConfig,
+    // PROV-08: provider resolution configuration (Phase 12)
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+    #[serde(default)]
+    pub custom_providers: Vec<CustomProviderConfig>,
 }
 
 // =============================================================================
@@ -56,6 +116,9 @@ pub struct ModelConfig {
     pub vision_model: Option<String>,
     pub max_tokens: Option<usize>,
     pub context_length: Option<usize>,
+    /// Auxiliary model role assignments (PROV-06, Phase 12).
+    #[serde(default)]
+    pub roles: HashMap<String, ModelRoleConfig>,
 }
 
 impl Default for ModelConfig {
@@ -68,6 +131,7 @@ impl Default for ModelConfig {
             vision_model: None,
             max_tokens: None,
             context_length: None,
+            roles: HashMap::new(),
         }
     }
 }
@@ -559,5 +623,72 @@ subagent:
 
         assert_eq!(parsed.skills.enabled, original.skills.enabled);
         assert_eq!(parsed.skills.extra_paths, original.skills.extra_paths);
+    }
+
+    // =========================================================================
+    // Provider / roles backward-compat tests (Phase 12, Task 2)
+    // =========================================================================
+
+    #[test]
+    fn test_config_parses_without_providers_section() {
+        // Backward compat: existing config.yaml files without providers/custom_providers/roles
+        // must deserialise to empty maps/vecs via serde(default).
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert!(config.providers.is_empty(), "providers should default to empty map");
+        assert!(config.custom_providers.is_empty(), "custom_providers should default to empty vec");
+        assert!(config.model.roles.is_empty(), "model.roles should default to empty map");
+    }
+
+    #[test]
+    fn test_config_parses_full_provider_section() {
+        let yaml = r#"
+providers:
+  openrouter:
+    api_mode: chat_completions
+    fallback_providers: ["anthropic"]
+custom_providers:
+  - name: "local-llama"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    default_model: "llama3"
+model:
+  default: "anthropic/claude-sonnet-4"
+  provider: "openrouter"
+  roles:
+    vision:
+      provider: openrouter
+      model: "openai/gpt-4o"
+    compression:
+      provider: main
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+
+        // providers map
+        assert!(config.providers.contains_key("openrouter"));
+        let or = &config.providers["openrouter"];
+        assert_eq!(or.api_mode, Some(ApiMode::ChatCompletions));
+        assert_eq!(or.fallback_providers, vec!["anthropic".to_string()]);
+
+        // custom_providers list
+        assert_eq!(config.custom_providers.len(), 1);
+        let local = &config.custom_providers[0];
+        assert_eq!(local.name, "local-llama");
+        assert_eq!(local.base_url, "http://localhost:11434/v1");
+        assert_eq!(local.api_key.as_deref(), Some("ollama"));
+        assert_eq!(local.default_model.as_deref(), Some("llama3"));
+
+        // model.roles
+        assert_eq!(config.model.roles.len(), 2);
+        let vision = &config.model.roles["vision"];
+        assert_eq!(vision.provider, "openrouter");
+        assert_eq!(vision.model.as_deref(), Some("openai/gpt-4o"));
+        let compression = &config.model.roles["compression"];
+        assert_eq!(compression.provider, "main");
+        assert!(compression.model.is_none());
     }
 }
