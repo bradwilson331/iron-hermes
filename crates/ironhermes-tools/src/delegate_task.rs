@@ -616,6 +616,173 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Toolset resolution tests (D-01)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_toolset_terminal() {
+        let tools = resolve_toolset_tools("terminal").unwrap();
+        assert_eq!(tools, vec!["terminal"]);
+    }
+
+    #[test]
+    fn test_resolve_toolset_file() {
+        let tools = resolve_toolset_tools("file").unwrap();
+        assert_eq!(tools, vec!["read_file", "write_file", "patch", "search_files"]);
+    }
+
+    #[test]
+    fn test_resolve_toolset_web() {
+        let tools = resolve_toolset_tools("web").unwrap();
+        assert_eq!(tools, vec!["web_search", "web_read"]);
+    }
+
+    #[test]
+    fn test_resolve_toolset_unknown_errors() {
+        let result = resolve_toolset_tools("unknown");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown toolset group"));
+    }
+
+    #[test]
+    fn test_resolve_toolsets_union() {
+        let tools = resolve_toolsets(&["terminal".into(), "file".into()]).unwrap();
+        assert!(tools.contains(&"terminal".to_string()));
+        assert!(tools.contains(&"read_file".to_string()));
+        assert!(tools.contains(&"write_file".to_string()));
+        assert!(tools.contains(&"patch".to_string()));
+        assert!(tools.contains(&"search_files".to_string()));
+        assert_eq!(tools.len(), 5, "should be deduplicated union");
+    }
+
+    #[test]
+    fn test_resolve_toolsets_deduplicates() {
+        // Requesting "file" twice should not produce duplicates
+        let tools = resolve_toolsets(&["file".into(), "file".into()]).unwrap();
+        assert_eq!(tools.len(), 4, "should not have duplicate tools");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema tests for toolsets and model override
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_delegate_task_schema_has_toolsets() {
+        let tool = make_delegate_tool();
+        let schema = tool.schema();
+        let props = &schema.function.parameters["properties"];
+        assert!(props.get("toolsets").is_some(), "schema should have toolsets");
+        assert_eq!(
+            props["toolsets"]["type"].as_str(),
+            Some("array"),
+            "toolsets should be an array"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Structured summary prompt test (D-10)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delegate_task_structured_summary_prompt() {
+        struct PromptCapture;
+
+        #[async_trait]
+        impl SubagentRunner for PromptCapture {
+            async fn run_child(
+                &self,
+                _registry: Arc<ToolRegistry>,
+                system_prompt: String,
+                _max_iterations: usize,
+                _model_override: Option<&str>,
+            ) -> anyhow::Result<Option<String>> {
+                // Return the system prompt so we can inspect it
+                Ok(Some(system_prompt))
+            }
+        }
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(PromptCapture),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+        );
+
+        let result = tool.execute(json!({"task": "test task"})).await.unwrap();
+        assert!(result.contains("Actions Taken"), "prompt should contain Actions Taken");
+        assert!(result.contains("Files Modified"), "prompt should contain Files Modified");
+        assert!(result.contains("Findings"), "prompt should contain Findings");
+        assert!(result.contains("Issues Encountered"), "prompt should contain Issues Encountered");
+    }
+
+    // -----------------------------------------------------------------------
+    // Model override test (D-23)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delegate_task_passes_model_override() {
+        struct ModelCapture;
+
+        #[async_trait]
+        impl SubagentRunner for ModelCapture {
+            async fn run_child(
+                &self,
+                _registry: Arc<ToolRegistry>,
+                _system_prompt: String,
+                _max_iterations: usize,
+                model_override: Option<&str>,
+            ) -> anyhow::Result<Option<String>> {
+                Ok(Some(format!("model={}", model_override.unwrap_or("none"))))
+            }
+        }
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(ModelCapture),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig {
+                model: Some("google/gemini-flash".to_string()),
+                ..SubagentConfig::default()
+            },
+        );
+
+        let result = tool.execute(json!({"task": "test"})).await.unwrap();
+        assert_eq!(result, "model=google/gemini-flash");
+    }
+
+    // -----------------------------------------------------------------------
+    // Toolsets param execution test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delegate_task_execute_with_toolsets() {
+        let tool = make_delegate_tool();
+        let result = tool
+            .execute(json!({
+                "task": "Do file work",
+                "toolsets": ["file"]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result, "mock child response");
+    }
+
+    #[tokio::test]
+    async fn test_delegate_task_execute_toolsets_precedence() {
+        // When toolsets is provided, it should be used (not allowed_tools or defaults)
+        // This test verifies it doesn't error — the toolset resolves to valid tools
+        let tool = make_delegate_tool();
+        let result = tool
+            .execute(json!({
+                "task": "Do work",
+                "toolsets": ["terminal"],
+                "allowed_tools": ["bogus_tool"]  // would error if used
+            }))
+            .await;
+        assert!(result.is_ok(), "toolsets should take precedence over allowed_tools");
+    }
+
     #[test]
     fn test_default_safe_tools_contents() {
         assert!(DEFAULT_SAFE_TOOLS.contains(&"read_file"));

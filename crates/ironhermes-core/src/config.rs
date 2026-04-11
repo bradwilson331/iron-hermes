@@ -477,6 +477,41 @@ model:
     }
 
     #[test]
+    fn test_subagent_config_default_includes_new_fields() {
+        let default = SubagentConfig::default();
+        assert_eq!(
+            default.default_toolsets,
+            vec!["terminal".to_string(), "file".to_string(), "web".to_string()],
+            "default_toolsets should be [terminal, file, web]"
+        );
+        assert!(default.model.is_none(), "model should default to None");
+        assert!(default.provider.is_none(), "provider should default to None");
+        assert!(default.base_url.is_none(), "base_url should default to None");
+        assert!(default.api_key.is_none(), "api_key should default to None");
+    }
+
+    #[test]
+    fn test_subagent_config_backward_compat_parse() {
+        // Only timeout_secs in YAML — all new fields should get defaults
+        let yaml = r#"
+subagent:
+  timeout_secs: 600
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.subagent.timeout_secs, 600);
+        assert_eq!(config.subagent.max_subagents, 3);
+        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(
+            config.subagent.default_toolsets,
+            vec!["terminal".to_string(), "file".to_string(), "web".to_string()]
+        );
+        assert!(config.subagent.model.is_none());
+        assert!(config.subagent.provider.is_none());
+        assert!(config.subagent.base_url.is_none());
+        assert!(config.subagent.api_key.is_none());
+    }
+
+    #[test]
     fn test_config_skills_round_trip() {
         let mut original = Config::default();
         original.skills.enabled = false;
