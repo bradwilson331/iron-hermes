@@ -363,7 +363,11 @@ impl AgentLoop {
 
         if let Some(ref cb) = self.tool_progress_callback {
             let preview = if args_str.len() > 100 {
-                format!("{}...", &args_str[..100])
+                let mut end = 100;
+                while !args_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &args_str[..end])
             } else {
                 args_str.clone()
             };
