@@ -93,6 +93,14 @@ impl AnyClient {
         }
     }
 
+    /// Get the model name from the inner client.
+    pub fn model(&self) -> &str {
+        match self {
+            Self::ChatCompletions(c) => c.model(),
+            Self::AnthropicMessages(c) => c.model(),
+        }
+    }
+
     /// Streaming chat completion — delegates to the inner client.
     pub async fn chat_completion_stream(
         &self,

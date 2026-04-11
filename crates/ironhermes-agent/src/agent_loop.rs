@@ -2,12 +2,14 @@ use anyhow::{Context, Result};
 use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_tools::ToolRegistry;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::client::{LlmClient, StreamEvent, ToolCallDelta};
+use crate::any_client::AnyClient;
+use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::ContextCompressor;
 
 /// Result of an agent loop execution.
@@ -48,7 +50,7 @@ pub type ToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 /// The main agent loop that orchestrates LLM calls and tool execution.
 pub struct AgentLoop {
-    client: LlmClient,
+    client: AnyClient,
     registry: Arc<ToolRegistry>,
     max_iterations: usize,
     compressor: Option<Mutex<ContextCompressor>>,
@@ -61,10 +63,19 @@ pub struct AgentLoop {
     /// Optional cancellation token for cooperative shutdown (D-21).
     /// When cancelled, the loop returns early with "Cancelled by parent".
     cancel_token: Option<CancellationToken>,
+    /// Shared iteration budget counter (PROV-09, PROV-10).
+    /// Tracks total turns across parent + child agents.
+    /// None = use local turns_used only (backward compat).
+    budget: Option<Arc<AtomicUsize>>,
+    /// Fallback client to swap to on qualifying errors (PROV-07).
+    /// Set via with_fallback(). None = no fallback available.
+    fallback_client: Option<AnyClient>,
+    /// Whether fallback has already been activated (one-shot per D-11).
+    fallback_activated: bool,
 }
 
 impl AgentLoop {
-    pub fn new(client: LlmClient, registry: Arc<ToolRegistry>, max_iterations: usize) -> Self {
+    pub fn new(client: AnyClient, registry: Arc<ToolRegistry>, max_iterations: usize) -> Self {
         Self {
             client,
             registry,
@@ -77,6 +88,9 @@ impl AgentLoop {
             request_id: uuid::Uuid::new_v4().to_string(),
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             cancel_token: None,
+            budget: None,
+            fallback_client: None,
+            fallback_activated: false,
         }
     }
 
@@ -120,6 +134,68 @@ impl AgentLoop {
         self
     }
 
+    /// Set a shared iteration budget counter (PROV-09, PROV-10).
+    /// When set, the budget is incremented per turn and checked for hard stop at 100%.
+    pub fn with_budget(mut self, budget: Arc<AtomicUsize>) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Get the budget counter for sharing with child agents (PROV-10).
+    pub fn budget(&self) -> Option<Arc<AtomicUsize>> {
+        self.budget.clone()
+    }
+
+    /// Set a fallback client for one-shot provider switching (PROV-07).
+    /// When the primary client fails with 429/5xx/401, the fallback client
+    /// is swapped in and retries reset. Only fires once per agent run.
+    pub fn with_fallback(mut self, client: AnyClient) -> Self {
+        self.fallback_client = Some(client);
+        self
+    }
+
+    /// Check budget threshold and return system prompt injection if needed.
+    /// Returns None if below 70%, Some(message) at 70%+ and 90%+.
+    fn check_budget_threshold(&self) -> Option<&'static str> {
+        let budget = match &self.budget {
+            Some(b) => b,
+            None => return None,
+        };
+        let used = budget.load(Ordering::SeqCst);
+        let pct = if self.max_iterations > 0 {
+            used * 100 / self.max_iterations
+        } else {
+            0
+        };
+        match pct {
+            100.. => None, // hard stop handled separately
+            90..=99 => Some("[Warning] You are at 90% of your iteration budget. Respond to the user now with a summary of your progress. Do not start new tool calls."),
+            70..=89 => Some("[Caution] You are at 70% of your iteration budget. Consolidate your work and avoid unnecessary tool calls."),
+            _ => None,
+        }
+    }
+
+    /// Classify an error for fallback decision-making.
+    /// Returns (should_retry, should_fallback).
+    fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
+        let err_str = err.to_string();
+        if err_str.contains("status: 429")
+            || err_str.contains("status: 500")
+            || err_str.contains("status: 502")
+            || err_str.contains("status: 503")
+            || err_str.contains("status: 504")
+        {
+            return (true, true);
+        }
+        if err_str.contains("status: 401")
+            || err_str.contains("status: 403")
+            || err_str.contains("status: 404")
+        {
+            return (false, true);
+        }
+        (true, false)
+    }
+
     /// Fire a hook event fire-and-forget. No-op if no hook registry is configured.
     fn fire_hook(&self, kind: HookEventKind) {
         if let Some(ref registry) = self.hook_registry {
@@ -134,7 +210,7 @@ impl AgentLoop {
     /// - The LLM produces a response with no tool calls (natural completion)
     /// - Max iterations are reached
     /// - An unrecoverable error occurs
-    pub async fn run(&self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
+    pub async fn run(&mut self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
         let tool_schemas = self.registry.get_definitions(None);
         let tools_option = if tool_schemas.is_empty() {
             None
@@ -172,6 +248,15 @@ impl AgentLoop {
                 break;
             }
 
+            // PROV-09: Check shared budget hard stop at 100%
+            if let Some(ref budget) = self.budget {
+                let used = budget.load(Ordering::SeqCst);
+                if used >= self.max_iterations {
+                    warn!(budget_used = used, max = self.max_iterations, "Shared budget exhausted");
+                    break;
+                }
+            }
+
             // Check for context compression
             if let Some(ref compressor) = self.compressor {
                 let mut comp = compressor.lock().await;
@@ -179,34 +264,76 @@ impl AgentLoop {
             }
 
             turns_used += 1;
+            // Increment shared budget counter if present (PROV-09, PROV-10)
+            if let Some(ref budget) = self.budget {
+                budget.fetch_add(1, Ordering::SeqCst);
+            }
             debug!(turn = turns_used, messages = messages.len(), "Agent loop turn");
 
-            // Call LLM, with cancellation support via tokio::select!
-            let (assistant_message, usage) = if let Some(ref token) = self.cancel_token {
-                tokio::select! {
-                    result = async {
-                        if self.streaming {
-                            self.call_llm_streaming(&messages, tools_option.as_deref()).await
-                        } else {
-                            self.call_llm(&messages, tools_option.as_deref()).await
+            // PROV-09: Inject budget threshold message if needed
+            if let Some(injection) = self.check_budget_threshold() {
+                messages.push(ChatMessage::system(injection));
+            }
+
+            // Call LLM with retry and fallback support
+            const MAX_RETRIES: usize = 3;
+            let mut retry_count = 0;
+
+            let (assistant_message, usage) = loop {
+                let llm_result = if let Some(ref token) = self.cancel_token {
+                    tokio::select! {
+                        result = async {
+                            if self.streaming {
+                                self.call_llm_streaming(&messages, tools_option.as_deref()).await
+                            } else {
+                                self.call_llm(&messages, tools_option.as_deref()).await
+                            }
+                        } => result,
+                        _ = token.cancelled() => {
+                            info!(turns = turns_used, "Agent loop cancelled during LLM call");
+                            return Ok(AgentResult {
+                                messages,
+                                turns_used,
+                                finished_naturally: false,
+                                final_response: Some("Cancelled by parent".to_string()),
+                                total_usage,
+                            });
                         }
-                    } => result?,
-                    _ = token.cancelled() => {
-                        info!(turns = turns_used, "Agent loop cancelled during LLM call");
-                        return Ok(AgentResult {
-                            messages,
-                            turns_used,
-                            finished_naturally: false,
-                            final_response: Some("Cancelled by parent".to_string()),
-                            total_usage,
-                        });
+                    }
+                } else if self.streaming {
+                    self.call_llm_streaming(&messages, tools_option.as_deref()).await
+                } else {
+                    self.call_llm(&messages, tools_option.as_deref()).await
+                };
+
+                match llm_result {
+                    Ok(result) => break result,
+                    Err(err) => {
+                        let (should_retry, should_fallback) = Self::classify_llm_error(&err);
+
+                        // Try fallback if available and not already activated (PROV-07, D-11)
+                        if should_fallback && !self.fallback_activated {
+                            if let Some(fallback) = self.fallback_client.take() {
+                                warn!("Primary LLM failed, activating fallback provider: {err}");
+                                self.client = fallback;
+                                self.fallback_activated = true;
+                                retry_count = 0;
+                                continue;
+                            }
+                        }
+
+                        // Retry transient errors with backoff
+                        if should_retry && retry_count < MAX_RETRIES {
+                            retry_count += 1;
+                            warn!(retry = retry_count, "LLM call failed, retrying: {err}");
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500 * retry_count as u64)).await;
+                            continue;
+                        }
+
+                        // Exhausted retries and fallback
+                        return Err(err);
                     }
                 }
-            } else if self.streaming {
-                self.call_llm_streaming(&messages, tools_option.as_deref())
-                    .await?
-            } else {
-                self.call_llm(&messages, tools_option.as_deref()).await?
             };
 
             if let Some(ref usage) = usage {
@@ -621,8 +748,9 @@ mod hooks_ordering_tests {
     }
 
     fn build_agent(tool_registry: ToolRegistry, hook_registry: Arc<HookRegistry>) -> AgentLoop {
-        let client =
-            LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model");
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
         AgentLoop::new(client, Arc::new(tool_registry), 4).with_hook_registry(hook_registry)
     }
 
@@ -928,8 +1056,9 @@ mod hooks_ordering_tests {
     #[test]
     fn test_agent_loop_with_cancellation_token_sets_token() {
         use tokio_util::sync::CancellationToken;
-        let client =
-            LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model");
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
         let registry = Arc::new(ToolRegistry::new());
         let token = CancellationToken::new();
         let agent = AgentLoop::new(client, registry, 4)
@@ -941,13 +1070,14 @@ mod hooks_ordering_tests {
     #[tokio::test]
     async fn test_agent_loop_run_returns_early_when_cancelled_before_first_iteration() {
         use tokio_util::sync::CancellationToken;
-        let client =
-            LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model");
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
         let registry = Arc::new(ToolRegistry::new());
         let token = CancellationToken::new();
         // Cancel BEFORE run
         token.cancel();
-        let agent = AgentLoop::new(client, registry, 4)
+        let mut agent = AgentLoop::new(client, registry, 4)
             .with_cancellation_token(token);
         let messages = vec![ChatMessage::user("hello")];
         let result = agent.run(messages).await.unwrap();
@@ -971,5 +1101,151 @@ mod hooks_ordering_tests {
             !src.contains(resp_sent_fire),
             "agent_loop.rs must not call fire_hook for ResponseSent (D-01, audit warning #4)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: iteration budget (12-03 PROV-09, PROV-10)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    fn make_agent(max_iterations: usize) -> AgentLoop {
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "test"),
+        );
+        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        AgentLoop::new(client, registry, max_iterations)
+    }
+
+    #[test]
+    fn test_budget_threshold_below_70() {
+        let budget = Arc::new(AtomicUsize::new(5));
+        let agent = make_agent(10).with_budget(budget);
+        // 5/10 = 50% — below 70%
+        assert_eq!(agent.check_budget_threshold(), None);
+    }
+
+    #[test]
+    fn test_budget_threshold_at_70() {
+        let budget = Arc::new(AtomicUsize::new(7));
+        let agent = make_agent(10).with_budget(budget);
+        let result = agent.check_budget_threshold();
+        assert!(result.is_some(), "expected Some at 70%");
+        assert!(result.unwrap().contains("[Caution]"), "expected [Caution] at 70%");
+    }
+
+    #[test]
+    fn test_budget_threshold_at_90() {
+        let budget = Arc::new(AtomicUsize::new(9));
+        let agent = make_agent(10).with_budget(budget);
+        let result = agent.check_budget_threshold();
+        assert!(result.is_some(), "expected Some at 90%");
+        assert!(result.unwrap().contains("[Warning]"), "expected [Warning] at 90%");
+    }
+
+    #[test]
+    fn test_shared_budget_increment() {
+        let budget = Arc::new(AtomicUsize::new(0));
+        let parent_budget = budget.clone();
+        let child_budget = budget.clone();
+        for _ in 0..5 {
+            parent_budget.fetch_add(1, Ordering::SeqCst);
+        }
+        for _ in 0..3 {
+            child_budget.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(budget.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn test_budget_getter_returns_arc() {
+        let budget = Arc::new(AtomicUsize::new(0));
+        let agent = make_agent(10).with_budget(budget.clone());
+        let retrieved = agent.budget();
+        assert!(retrieved.is_some(), "budget() should return Some after with_budget");
+        retrieved.unwrap().fetch_add(1, Ordering::SeqCst);
+        assert_eq!(budget.load(Ordering::SeqCst), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: one-shot fallback (12-03 PROV-07, D-11)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn test_fallback_state_initial() {
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "test"),
+        );
+        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let agent = AgentLoop::new(client, registry, 10);
+        assert!(!agent.fallback_activated, "fallback_activated should start false");
+        assert!(agent.fallback_client.is_none(), "fallback_client should start None");
+    }
+
+    #[test]
+    fn test_classify_429_error() {
+        let err = anyhow!("HTTP request failed with status: 429 Too Many Requests");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "429 should be retryable");
+        assert!(should_fallback, "429 should trigger fallback");
+    }
+
+    #[test]
+    fn test_classify_401_error() {
+        let err = anyhow!("HTTP request failed with status: 401 Unauthorized");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(!should_retry, "401 should not be retried");
+        assert!(should_fallback, "401 should trigger fallback");
+    }
+
+    #[test]
+    fn test_classify_other_error() {
+        let err = anyhow!("Connection refused: failed to connect to LLM");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "generic errors should be retryable");
+        assert!(!should_fallback, "generic errors should not trigger fallback");
+    }
+
+    #[test]
+    fn test_fallback_activated_prevents_refire() {
+        let primary = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://primary".to_string(), "key1".to_string(), "model1"),
+        );
+        let fallback = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://fallback".to_string(), "key2".to_string(), "model2"),
+        );
+        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let mut agent = AgentLoop::new(primary, registry, 10).with_fallback(fallback);
+
+        assert!(!agent.fallback_activated);
+        assert!(agent.fallback_client.is_some());
+
+        // Manually activate fallback (as the run() loop would)
+        if let Some(fb) = agent.fallback_client.take() {
+            agent.client = fb;
+            agent.fallback_activated = true;
+        }
+
+        assert!(agent.fallback_activated);
+        assert!(agent.fallback_client.is_none(), "take() should leave None — one-shot guarantee");
+    }
+
+    #[test]
+    fn test_classify_500_error() {
+        let err = anyhow!("HTTP request failed with status: 500 Internal Server Error");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "500 should be retryable");
+        assert!(should_fallback, "500 should trigger fallback");
     }
 }

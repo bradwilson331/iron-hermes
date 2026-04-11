@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, LlmClient};
-use ironhermes_core::{ChatMessage, Config};
+use ironhermes_agent::{AgentLoop, build_main_client};
+use ironhermes_core::{ChatMessage, Config, ProviderResolver};
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -62,12 +62,10 @@ pub async fn cmd_run(
     let worker_count = workers.unwrap_or(config.batch.workers).max(1);
     let max_turns = config.batch.max_turns;
 
-    // Resolve model
+    // Resolve model and build provider resolver
     let model_name = model.unwrap_or_else(|| config.model.default.clone());
-    let base_url = config.resolve_base_url();
-    let api_key = config
-        .resolve_api_key()
-        .context("No API key configured. Set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY.")?;
+    let resolver = ProviderResolver::build(&config)
+        .context("Failed to build provider resolver")?;
 
     // Read all entries from input JSONL
     let input_file = tokio::fs::File::open(&input)
@@ -235,7 +233,7 @@ pub async fn cmd_run(
             }
         };
         let tx = tx.clone();
-        let client = LlmClient::new(base_url.clone(), api_key.clone(), model_name.clone());
+        let client = build_main_client(&resolver)?;
         let registry = Arc::new({
             let mut r = ToolRegistry::new();
             r.register_defaults();
@@ -253,7 +251,7 @@ pub async fn cmd_run(
             }
             messages.push(ChatMessage::user(&entry.prompt));
 
-            let agent = AgentLoop::new(client, registry.clone(), max_turns);
+            let mut agent = AgentLoop::new(client, registry.clone(), max_turns);
             match agent.run(messages).await {
                 Ok(result) => {
                     // Run quality filters (D-12, D-13)

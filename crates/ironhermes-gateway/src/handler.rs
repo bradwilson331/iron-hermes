@@ -353,7 +353,7 @@ impl GatewayMessageHandler {
         let api_key = self.config.resolve_api_key().unwrap_or_default();
         let max_turns = self.config.agent.max_turns;
 
-        let client = LlmClient::new(base_url, api_key, &model);
+        let client = ironhermes_agent::AnyClient::ChatCompletions(LlmClient::new(base_url, api_key, &model));
 
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {

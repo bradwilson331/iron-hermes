@@ -685,8 +685,8 @@ pub(crate) async fn execute_cron_job(
         }
     }
 
-    // Construct LlmClient and AgentLoop — D-01 kills the stub
-    let client = LlmClient::new(base_url, api_key, &model);
+    // Construct client and AgentLoop via AnyClient wrapper
+    let client = ironhermes_agent::AnyClient::ChatCompletions(LlmClient::new(base_url, api_key, &model));
     let mut agent = AgentLoop::new(client, tool_registry.clone(), max_turns);
 
     // D-11 / D-12: wire active_skills so cron runs get the same enforcement as conversation mode

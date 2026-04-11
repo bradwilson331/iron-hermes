@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, AgentSubagentRunner, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config, MemoryProvider, MemoryStore, SkillRegistry, build_memory_provider};
+use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PromptBuilder, build_client as build_provider_client, build_main_client};
+use ironhermes_core::{ChatMessage, Config, MemoryProvider, MemoryStore, ProviderResolver, SkillRegistry, build_memory_provider};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -227,17 +228,16 @@ fn print_check(name: &str, ok: bool) {
 
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
-    let (client, config) = build_client(cli)?;
+    let (client, config, resolver) = build_client(cli)?;
+    let budget = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let subagent_runner = Arc::new(AgentSubagentRunner::new(
         client.clone(),
-        config.resolve_base_url(),
-        config.resolve_api_key().unwrap_or_default(),
-        config.subagent.base_url.clone(),
-        config.subagent.api_key.clone(),
+        resolver.clone(),
+        Some(budget.clone()),
     ));
     registry.register_delegate_task_tool(
         subagent_runner,
@@ -261,7 +261,8 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let messages = vec![system_msg, ChatMessage::user(prompt)];
 
-    let agent = AgentLoop::new(client, Arc::new(registry), max_turns)
+    let mut agent = AgentLoop::new(client, Arc::new(registry), max_turns)
+        .with_budget(budget)
         .with_compression(128_000, config.agent.context_compression)
         .with_streaming(Box::new(|delta| {
             print!("{}", delta);
@@ -270,6 +271,14 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .with_tool_progress(Box::new(|name, args| {
             eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
         }));
+
+    // Wire fallback from resolver
+    let main_endpoint = resolver.resolve_for_main();
+    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
+        if let Ok(fb_client) = build_provider_client(&resolver, fb_name, &main_endpoint.default_model) {
+            agent = agent.with_fallback(fb_client);
+        }
+    }
 
     let result = agent.run(messages).await?;
 
@@ -292,17 +301,16 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     print_banner();
 
-    let (client, config) = build_client(cli)?;
+    let (client, config, resolver) = build_client(cli)?;
+    let budget = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let subagent_runner = Arc::new(AgentSubagentRunner::new(
         client.clone(),
-        config.resolve_base_url(),
-        config.resolve_api_key().unwrap_or_default(),
-        config.subagent.base_url.clone(),
-        config.subagent.api_key.clone(),
+        resolver.clone(),
+        Some(budget.clone()),
     ));
     let chat_cancel_token = CancellationToken::new();
 
@@ -364,7 +372,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     if let Some(msg) = initial_message {
         messages.push(ChatMessage::user(&msg));
         println!("{} {}", "You:".bold().green(), msg);
-        let response = run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config).await?;
+        let response = run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget).await?;
         if let Some(text) = response {
             println!();
             println!("{} {}", "Hermes:".bold().cyan(), text);
@@ -407,7 +415,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 messages.push(ChatMessage::user(&input));
 
                 let response =
-                    run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config).await?;
+                    run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget).await?;
                 if let Some(_text) = response {
                     // If we were streaming, just add a newline
                     println!();
@@ -433,13 +441,16 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
 /// Run one agent turn (may involve multiple tool calls).
 async fn run_agent_turn(
-    client: &LlmClient,
+    client: &AnyClient,
     registry: Arc<ToolRegistry>,
     messages: &mut Vec<ChatMessage>,
     max_turns: usize,
     config: &Config,
+    resolver: &ProviderResolver,
+    budget: &Arc<AtomicUsize>,
 ) -> Result<Option<String>> {
-    let agent = AgentLoop::new(client.clone(), registry, max_turns)
+    let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
+        .with_budget(budget.clone())
         .with_compression(128_000, config.agent.context_compression)
         .with_streaming(Box::new(|delta| {
             print!("{}", delta);
@@ -449,6 +460,14 @@ async fn run_agent_turn(
             eprint!("\r{} {}...", "Running:".dimmed(), name.yellow());
             io::stderr().flush().ok();
         }));
+
+    // Wire fallback from resolver
+    let main_endpoint = resolver.resolve_for_main();
+    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
+        if let Ok(fb_client) = build_provider_client(resolver, fb_name, &main_endpoint.default_model) {
+            agent = agent.with_fallback(fb_client);
+        }
+    }
 
     // Pass a clone of messages so agent can work with them
     let result = agent.run(messages.clone()).await?;
@@ -461,7 +480,7 @@ async fn run_agent_turn(
 
 /// Start the Telegram gateway bot.
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
-    let (_, mut config) = build_client(cli)?;
+    let (_, mut config, resolver) = build_client(cli)?;
 
     // Validate provider config — hard error on unknown/unavailable provider (D-09)
     let _ = build_memory_provider(&config.memory)?;
@@ -506,17 +525,11 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    let gateway_client = LlmClient::new(
-        config.resolve_base_url(),
-        config.resolve_api_key().unwrap_or_default(),
-        config.model.default.clone(),
-    );
+    let gateway_client = build_main_client(&resolver)?;
     let subagent_runner = Arc::new(AgentSubagentRunner::new(
         gateway_client,
-        config.resolve_base_url(),
-        config.resolve_api_key().unwrap_or_default(),
-        config.subagent.base_url.clone(),
-        config.subagent.api_key.clone(),
+        resolver.clone(),
+        None, // gateway budget wired per-request in handler
     ));
     let gateway_cancel_token = CancellationToken::new();
     registry.register_delegate_task_tool(
@@ -597,21 +610,21 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     runner.start().await
 }
 
-fn build_client(cli: &Cli) -> Result<(LlmClient, Config)> {
+fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
     let config = Config::load().unwrap_or_default();
+    let resolver = ProviderResolver::build(&config)?;
 
-    let model = cli
-        .model
-        .as_deref()
-        .unwrap_or(&config.model.default);
-    let base_url = config.resolve_base_url();
-    let api_key = config
-        .resolve_api_key()
-        .context("No API key configured. Set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY.")?;
+    // If user specified a model override, build client with that model
+    let client = if let Some(ref model) = cli.model {
+        let provider = cli.provider.as_deref().unwrap_or(resolver.main_provider());
+        build_provider_client(&resolver, provider, model)?
+    } else {
+        build_main_client(&resolver)?
+    };
 
-    info!(model = %model, base_url = %base_url, "Initializing LLM client");
+    info!(model = %client.model(), provider = %resolver.main_provider(), "Initializing LLM client via ProviderResolver");
 
-    Ok((LlmClient::new(base_url, api_key, model), config))
+    Ok((client, config, resolver))
 }
 
 fn build_registry() -> ToolRegistry {
