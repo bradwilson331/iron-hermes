@@ -20,7 +20,7 @@
   3. Project-level context files from the working directory are discovered and loaded using the priority chain
   4. Context files are loaded once at session start and do not change if the underlying files are edited mid-session
   5. Assembly order is SOUL.md > project context > AGENTS.md, matching hermes-agent's prompt layering
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 01-01-PLAN.md — Context scanner + PromptBuilder rewrite with layered loading
@@ -55,7 +55,7 @@ Plans:
   3. Writing content containing prompt injection patterns (e.g., "ignore previous instructions") to a context file is blocked with a warning
   4. Agent can save facts to memory and those facts appear in the system prompt on the next session
   5. Memory entries respect the character limit — adding beyond the cap fails gracefully or requires removing existing entries
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 03-01-PLAN.md — Core surgery: move context_scanner to core + file tool scanning integration
@@ -71,7 +71,7 @@ Plans:
   2. Attempting to fetch a private/internal IP address (127.0.0.1, 10.x.x.x, 169.254.x.x) is blocked with a clear error
   3. Content longer than the configured limit is truncated with a notice indicating the truncation
   4. When Firecrawl is unavailable (no API key or service down), the local scraper fallback extracts readable content from static HTML pages
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 04-01-PLAN.md — Dependencies, config extension, and full WebReadTool implementation
@@ -92,7 +92,7 @@ Plans:
   2. User can pause, resume, or edit a scheduled task without deleting and recreating it
   3. User can attach a named skill to a scheduled task so the task runs with skill-provided context and instructions
   4. Scheduled task output is delivered to the configured platform (Telegram chat, CLI stdout, or webhook URL)
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 05-01-PLAN.md — Data model, ScheduleParsed enum, parse_schedule(), JobStore refactor
@@ -107,7 +107,7 @@ Plans:
   1. Every message received, tool called, and response sent produces a structured log entry via the hook registry
   2. A configured guardrail hook can intercept a tool call before dispatch and block it, returning a clear error to the agent
   3. A configured webhook endpoint receives hook events as HTTP POST requests when events fire
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [ ] 06-01-PLAN.md — HookEvent model, HookRegistry, hooks.toml config, JSONL logging, AgentLoop wiring
@@ -123,7 +123,7 @@ Plans:
   2. Full skill content is NOT loaded at startup — only the description is visible until the agent explicitly activates a skill
   3. A skill document follows the agentskills.io format (SKILL.md with YAML frontmatter containing name and description) and is correctly parsed and cataloged
   4. Agent can call the skills tool with list, view, or activate actions to browse and load skill content during a conversation
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 07-01-PLAN.md — SkillRegistry: discovery, parsing, and catalog in ironhermes-core
@@ -170,7 +170,7 @@ Plans:
   2. Regression test: activating a skill with a restrictive `allowed_tools` list blocks other tool calls for the remainder of that agent turn
   3. REQUIREMENTS.md: SKILL-09 is moved to the v2 section and the traceability table reflects it as a v2 requirement
   4. SKILL-13 remains in the Backlog bucket in REQUIREMENTS.md with an explicit note
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 07.5-01-PLAN.md — Active skill tracking, SkillsTool deactivate, allowed_tools enforcement in execute_tool_call
@@ -185,11 +185,13 @@ Plans:
   2. A Python script running in the child process can call agent tools (e.g., web_search, read_file) via JSON-RPC and receive real results back
   3. The child process environment has no API keys or secrets — environment variable stripping is verified by inspection
   4. A script that runs longer than 5 minutes is killed and returns a timeout error; a script exceeding 50KB of output is truncated
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 08-01-PLAN.md — ironhermes-exec crate: sandbox, RPC server, hermes_tools.py, ExecConfig
 - [x] 08-02-PLAN.md — ExecuteCodeTool, CLI/gateway wiring, integration tests
+- [ ] 08-03-PLAN.md — Gap closure: hermes_tools.py signatures, stderr cap, kill strategy, env stripping, SandboxResult fields
+- [ ] 08-04-PLAN.md — Gap closure: JSON response format, cancellation token support
 
 #### Phase 9: Subagent Delegation
 **Goal**: Agent can delegate tasks to isolated child agents with restricted toolsets, enforcing concurrency limits and preventing recursive delegation
@@ -201,7 +203,7 @@ Plans:
   3. Attempting to spawn more than 3 concurrent subagents blocks until a slot is available, with a clear message when the limit is hit
   4. Each subagent operates in its own terminal session scope and cannot read or affect another subagent's terminal state
   5. A child agent's toolset never includes delegate_task — recursive delegation is structurally impossible
-**Plans**: 2 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 09-01-PLAN.md — DelegateTaskTool core: SubagentConfig, TerminalTool CWD, MemoryTool read-only, child registry builder, Tool impl
@@ -291,7 +293,7 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9 → 10
 | 07.3. Cron Tick Agent Exec + Hooks | v1.1 | 1/1 | Complete    | 2026-04-10 |
 | 07.4. Hook Ordering & Dedup | v1.1 | 3/3 | Complete   | 2026-04-10 |
 | 07.5. Skills Housekeeping | v1.1 | 2/2 | Complete    | 2026-04-10 |
-| 8. Code Execution | v1.1 | 0/? | Not started | - |
+| 8. Code Execution | v1.1 | 2/4 | Gap closure | - |
 | 9. Subagent Delegation | v1.1 | 0/2 | Planned | - |
 | 10. Batch Processing | v1.1 | 4/4 | Complete   | 2026-04-10 |
 | 10.1. Gateway active_skills Fix | v1.1 | 1/1 | Complete    | 2026-04-11 |
