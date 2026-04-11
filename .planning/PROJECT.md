@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A Rust rewrite of [hermes-agent](https://github.com/NousResearch/hermes-agent), the self-improving AI agent by Nous Research. IronHermes is the foundation codebase going forward, replacing the Python original with a single-binary, high-performance agent that runs as a CLI tool and Telegram bot.
+A Rust rewrite of [hermes-agent](https://github.com/NousResearch/hermes-agent), the self-improving AI agent by Nous Research. IronHermes is a single-binary, high-performance conversational AI agent that runs as a CLI tool and Telegram bot — with automation capabilities including scheduled tasks, event hooks, a skills system, Python code execution, subagent delegation, and batch processing.
 
 ## Core Value
 
@@ -12,28 +12,24 @@ A working conversational AI agent with personality (context files) that operates
 
 ### Validated
 
-<!-- Shipped and confirmed valuable. -->
-
-- [x] Cargo workspace with modular crate architecture (core, state, tools, agent, cli, gateway, cron)
-- [x] OpenAI-compatible chat completions client with streaming SSE support
-- [x] Tool registry with trait-based dispatch (terminal, read_file, write_file, patch, search_files, web_search)
-- [x] Agent loop: LLM call -> tool extraction -> dispatch -> append results -> repeat
-- [x] SQLite state store with WAL mode and FTS5 search for session persistence
-- [x] Interactive CLI with rustyline, slash commands, streaming output
-- [x] Cron job scheduler with file-based persistence and tick locking
-- [x] Context compression (token estimation, tool result pruning, middle message dropping)
-- [x] Telegram adapter skeleton (Bot API types, send/edit/delete/reactions)
-- [x] Context file loading — SOUL.md, AGENTS.md loaded into system prompt with priority chain, security scanning, and truncation. Validated in Phase 1: Context File Loading
+- ✓ Context file loading (SOUL.md, AGENTS.md, project context) with priority chain assembly — v1.0
+- ✓ Telegram gateway with streaming, concurrent users, graceful shutdown, error recovery — v1.0
+- ✓ Self-improvement: agent reads/edits own context files with injection scanning — v1.0
+- ✓ Memory subsystem with bounded facts in MEMORY.md — v1.0
+- ✓ Web scraping via Firecrawl + local fallback with SSRF protection — v1.0
+- ✓ Security: SSRF validation, threat scanning, gateway rate limiting — v1.0
+- ✓ Scheduled tasks with natural language parsing, skill attachment, multi-platform delivery — v1.1
+- ✓ Event hooks with lifecycle logging, guardrail tool interception, webhook forwarding — v1.1
+- ✓ Skills system with progressive disclosure, agentskills.io compatibility, allowed_tools enforcement — v1.1
+- ✓ Code execution sandbox with Python RPC tool bridge, env stripping, resource limits — v1.1
+- ✓ Subagent delegation with isolated context, concurrency control, batch mode, cancellation — v1.1
+- ✓ Batch processing with parallel ShareGPT output, checkpointing, quality filtering — v1.1
 
 ### Active
 
-<!-- Current scope. Building toward these. -->
-- [ ] Scheduled tasks — extend cron with natural language scheduling, skill attachment, multi-platform delivery
-- [ ] Event hooks — gateway hooks (logging, alerts, webhooks) + plugin hooks (tool interception, guardrails)
-- [ ] Skills system — on-demand knowledge documents with progressive disclosure, agentskills.io compatible
-- [ ] Code execution — execute_code tool for Python scripts calling Hermes tools via sandboxed RPC
-- [ ] Subagent delegation — delegate_task tool spawning child agents with isolated context and restricted toolsets
-- [ ] Batch processing — parallel prompt execution generating ShareGPT-format trajectory data
+<!-- Next milestone scope. -->
+
+(None yet — run `/gsd-new-milestone` to define v2 scope)
 
 ### Out of Scope
 
@@ -44,12 +40,12 @@ A working conversational AI agent with personality (context files) that operates
 
 ## Context
 
-- Ported from a ~277K line Python project; core architecture maps 1:1 but Rust version is ~4,250 lines
-- The Python hermes-agent has working Telegram, Discord, Slack gateways — IronHermes needs to reach Telegram parity first
-- PromptBuilder fully wired: loads SOUL.md from IRONHERMES_HOME, discovers project context via priority chain, scans for injection, assembles in correct order
-- TelegramAdapter has Bot API types and message methods but polling isn't connected to the agent loop
+- Ported from a ~277K line Python project; Rust version is ~360K lines across 7 workspace crates
+- v1.0 shipped 2026-04-08: core agent loop, Telegram gateway, self-improvement, web scraping
+- v1.1 shipped 2026-04-11: scheduled tasks, event hooks, skills, code execution, subagents, batch processing
+- 382+ workspace tests passing
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
-- 31 tests passing across cron and agent crates (20 in agent after Phase 1); state, tools, CLI, and gateway lack test coverage
+- Tech stack: Rust 2024 edition, tokio async, SQLite (rusqlite), OpenAI-compatible LLM API
 
 ## Constraints
 
@@ -64,23 +60,22 @@ A working conversational AI agent with personality (context files) that operates
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Cargo workspace with 7 crates | Mirrors Python module structure, enables independent compilation and testing | -- Pending |
-| anyhow for all error handling | Speed of development over typed errors; HermesError enum exists but unused | -- Pending |
-| In-memory SessionStore for gateway | Simple start; can migrate to SQLite StateStore later | -- Pending |
-| Telegram first, other platforms later | Python hermes-agent's primary deployment is Telegram | -- Pending |
-| Context files over database for personality | Matches Python approach; files are git-trackable and agent-editable | -- Pending |
+| Cargo workspace with 7 crates | Mirrors Python module structure, enables independent compilation and testing | ✓ Good |
+| anyhow for all error handling | Speed of development over typed errors; HermesError enum exists but unused | ✓ Good |
+| In-memory SessionStore for gateway | Simple start; can migrate to SQLite StateStore later | ✓ Good |
+| Telegram first, other platforms later | Python hermes-agent's primary deployment is Telegram | ✓ Good |
+| Context files over database for personality | Matches Python approach; files are git-trackable and agent-editable | ✓ Good |
+| Phase ordering SCHED → HOOK → SKILL → EXEC → AGENT → BATCH | Hooks early for observability of later features | ✓ Good |
+| New crates: ironhermes-hooks, ironhermes-exec | Clean separation of concerns for hooks and code execution | ✓ Good |
+| Skills in ironhermes-core, SkillsTool in ironhermes-tools | No new crate deps needed | ✓ Good |
+| Pattern-based env exclusion for exec sandbox | Forward compatible with new env vars | ✓ Good |
+| delegate_task excluded from child toolsets | Structural recursion prevention | ✓ Good |
+| Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit for v2 |
 
-## Current Milestone: v1.1 Automation
+## Current State
 
-**Goal:** Add automation, orchestration, and knowledge capabilities — scheduled tasks, event hooks, skills system, code execution, subagent delegation, and batch processing.
-
-**Target features:**
-- Scheduled Tasks — extend existing cron with natural language scheduling, skill attachment, multi-platform delivery
-- Event Hooks — gateway + plugin hooks for logging, alerts, tool interception, guardrails
-- Skills System — on-demand knowledge documents with progressive disclosure, agentskills.io compatible
-- Code Execution — execute_code for Python scripts calling Hermes tools via sandboxed RPC
-- Subagent Delegation — delegate_task spawning child agents with isolated context (up to 3 concurrent)
-- Batch Processing — parallel prompt execution with ShareGPT-format output
+**Shipped:** v1.1 Automation (2026-04-11)
+**Next:** Planning v2 — run `/gsd-new-milestone` to begin
 
 ## Evolution
 
@@ -100,4 +95,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-11 — Phase 10.1 complete (fixed active_skills Arc wiring so skill activation via SkillsTool in Telegram conversations correctly feeds into AgentLoop's allowed_tools enforcement, closing SKILL-06 gap)*
+*Last updated: 2026-04-11 after v1.1 milestone*

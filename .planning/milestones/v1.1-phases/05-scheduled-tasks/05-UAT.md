@@ -1,9 +1,9 @@
 ---
-status: diagnosed
+status: resolved
 phase: 05-scheduled-tasks
-source: [05-01-SUMMARY.md, 05-02-SUMMARY.md, 05-03-SUMMARY.md]
+source: [05-01-SUMMARY.md, 05-02-SUMMARY.md, 05-03-SUMMARY.md, 05-04-SUMMARY.md, 05-05-SUMMARY.md]
 started: 2026-04-09T00:00:00Z
-updated: 2026-04-10T01:45:00Z
+updated: 2026-04-09T23:00:00Z
 ---
 
 ## Current Test
@@ -40,9 +40,8 @@ result: pass
 
 ### 7. cron get — Specific Job
 expected: `ironhermes cron get test-interval` (case-insensitive name lookup) returns the job's full details — prompt, schedule, state, next_run, last_run, last_status, repeat config, origin (None for CLI-created jobs).
-result: issue
-reported: "error: unrecognized subcommand 'get'. cron --help shows only: list, create, edit, pause, resume, run, remove, status, tick — no get command exists in CLI despite UI-SPEC line 182 defining its output contract"
-severity: major
+result: pass
+resolved_by: 05-04 (Get variant, cmd_get, render_job_details helper + 2 unit tests)
 
 ### 8. cron pause — Disable Job
 expected: `ironhermes cron pause test-interval` transitions state to Paused, sets paused_at, and the job no longer appears as "Scheduled" in `cron list` (shows paused/disabled state in yellow). The job is skipped by the tick task.
@@ -66,9 +65,8 @@ result: pass
 
 ### 13. Gateway Tick Task — 60s Detection
 expected: With a job scheduled to run within the next 1–2 minutes (e.g. backdate next_run_at via `cron edit` or create with `every 1m`), let the gateway run for >60 seconds. The tick task acquires the tick lock, detects the due job, writes an output file under `~/.ironhermes/cron/output/{job_id}/`, and the job's last_run/last_status are updated. No concurrent-tick errors. Burst suppression (MissedTickBehavior::Skip) means restarting the gateway doesn't immediately fire all missed ticks.
-result: issue
-reported: "Gateway restart runs jobs (fast-forward/burst), and gateway does not watch jobs.json for updates — CLI-created jobs are invisible to the running gateway because it holds a stale in-memory JobStore from startup"
-severity: blocker
+result: pass
+resolved_by: 05-05 (JobStore::reload wired into run_tick_check under mutex + fast_forward_backlog first-tick burst guard in runner.rs + 3 new tests: reload_picks_up_external_mutations, tick_observes_external_job_writes, gateway_first_tick_suppresses_backlog)
 
 ### 14. cron remove — Delete Job
 expected: `ironhermes cron remove test-cron` removes the job from JobStore. `cron list` no longer shows it. Output directory under `~/.ironhermes/cron/output/{job_id}/` is preserved (audit trail).
@@ -86,8 +84,8 @@ reason: No legacy jobs.json file available to migrate (user had no pre-existing 
 ## Summary
 
 total: 16
-passed: 13
-issues: 2
+passed: 15
+issues: 0
 pending: 0
 skipped: 1
 blocked: 0
@@ -95,7 +93,9 @@ blocked: 0
 ## Gaps
 
 - truth: "`ironhermes cron get {id}` returns full job details per UI-SPEC line 182"
-  status: failed
+  status: resolved
+  resolved_by: 05-04
+  resolved_at: 2026-04-09T23:00:00Z
   reason: "User reported: error: unrecognized subcommand 'get' — CLI only implements 9 subcommands (list, create, edit, pause, resume, run, remove, status, tick); get was not added despite UI-SPEC defining its output format"
   severity: major
   test: 7
@@ -110,7 +110,9 @@ blocked: 0
     - "Unit test for cmd_get success and not-found paths"
 
 - truth: "Gateway tick task picks up jobs created/edited via CLI while running, and gateway restart does not burst-fire recent-past jobs"
-  status: failed
+  status: resolved
+  resolved_by: 05-05
+  resolved_at: 2026-04-09T23:00:00Z
   reason: "User reported: restarting the gateway runs the jobs (burst), and the gateway does not watch jobs.json for updates — CLI-created jobs are invisible to the running gateway because GatewayRunner loads JobStore once at startup and holds a stale in-memory copy. CLI's independent JobStore writes are never re-read."
   severity: blocker
   test: 13
