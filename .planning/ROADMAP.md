@@ -36,7 +36,7 @@
 
 </details>
 
-### 🚧 v2.0 Intelligence & Identity (In Progress)
+### v2.0 Intelligence & Identity (In Progress)
 
 **Milestone Goal:** Give the agent persistent memory, session continuity, a customizable identity, context management, and a complete skill/tool framework — faithful to hermes-agent's architecture.
 
@@ -65,7 +65,10 @@
   2. The default file-based MemoryStore implements MemoryProvider and all existing memory behavior is preserved
   3. Config accepts a single provider selection and the system rejects attempts to activate more than one external provider simultaneously
   4. Existing tests pass with no behavioral regression
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 11-01-PLAN.md — Define MemoryProvider trait, types, config extension, and provider factory
+- [ ] 11-02-PLAN.md — Verify workspace integration and add round-trip integration tests
 
 ### Phase 12: Provider Resolution
 **Goal**: A single shared runtime resolver maps (provider, model) to (api_mode, api_key, base_url) for every call site in the system
@@ -229,7 +232,7 @@
 | 9. Subagent Delegation | v1.1 | 4/4 | Complete | 2026-04-11 |
 | 10. Batch Processing | v1.1 | 4/4 | Complete | 2026-04-10 |
 | 10.1. Gateway active_skills Fix | v1.1 | 1/1 | Complete | 2026-04-11 |
-| 11. Memory Provider Trait | v2.0 | 0/TBD | Not started | - |
+| 11. Memory Provider Trait | v2.0 | 0/2 | Not started | - |
 | 12. Provider Resolution | v2.0 | 0/TBD | Not started | - |
 | 13. Session Storage | v2.0 | 0/TBD | Not started | - |
 | 14. Context Files & SOUL.md | v2.0 | 0/TBD | Not started | - |
