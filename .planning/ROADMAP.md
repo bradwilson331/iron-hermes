@@ -80,7 +80,12 @@ Plans:
   3. Fallback provider chain kicks in automatically on 429/5xx/401 errors and tries configured fallback_providers in order
   4. Iteration budget (2-tier: 70% caution, 90% warning, 100% stop) is enforced and shared between parent and child agents
   5. Custom named providers configurable in config.yaml route to correct endpoint with correct scoped API key
-**Plans**: TBD
+**Plans:** 4 plans
+Plans:
+- [ ] 12-01-PLAN.md — ProviderResolver, ApiMode, ResolvedEndpoint types and Config extension
+- [ ] 12-02-PLAN.md — AnthropicClient, message format adapter, AnyClient enum dispatch
+- [ ] 12-03-PLAN.md — Shared iteration budget and one-shot fallback provider switching
+- [ ] 12-04-PLAN.md — Call-site migration to ProviderResolver, remove old resolution methods
 
 ### Phase 13: Session Storage
 **Goal**: All session data is durably persisted in SQLite and recoverable across restarts, with full-text search and lineage tracking
@@ -233,7 +238,7 @@ Plans:
 | 10. Batch Processing | v1.1 | 4/4 | Complete | 2026-04-10 |
 | 10.1. Gateway active_skills Fix | v1.1 | 1/1 | Complete | 2026-04-11 |
 | 11. Memory Provider Trait | v2.0 | 2/2 | Complete    | 2026-04-11 |
-| 12. Provider Resolution | v2.0 | 0/TBD | Not started | - |
+| 12. Provider Resolution | v2.0 | 0/4 | Planned | - |
 | 13. Session Storage | v2.0 | 0/TBD | Not started | - |
 | 14. Context Files & SOUL.md | v2.0 | 0/TBD | Not started | - |
 | 15. 10-Layer Prompt Assembly | v2.0 | 0/TBD | Not started | - |
