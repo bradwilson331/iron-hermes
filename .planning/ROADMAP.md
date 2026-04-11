@@ -208,6 +208,8 @@ Plans:
 Plans:
 - [x] 09-01-PLAN.md — DelegateTaskTool core: SubagentConfig, TerminalTool CWD, MemoryTool read-only, child registry builder, Tool impl
 - [x] 09-02-PLAN.md — CLI/gateway wiring: semaphore creation, registration, integration test
+- [ ] 09-03-PLAN.md — Batch delegation mode, toolset groups, model override, expanded config
+- [ ] 09-04-PLAN.md — CancellationToken propagation, detach flag, CLI tree-view progress
 
 #### Phase 10.1: Gateway active_skills Wiring Fix
 **Goal**: Fix the active_skills Arc mismatch so skill activation via the skills tool in Telegram conversations correctly feeds into AgentLoop's allowed_tools enforcement
