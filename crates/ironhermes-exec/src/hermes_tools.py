@@ -85,24 +85,40 @@ def write_file(path, content):
     return _call("write_file", {"path": path, "content": content})
 
 
-def patch(path, diff):
-    """Apply a patch/diff to a file."""
-    return _call("patch", {"path": path, "diff": diff})
+def patch(path, old_string, new_string, replace_all=False):
+    """Replace occurrences of old_string with new_string in a file."""
+    return _call("patch", {
+        "path": path,
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": replace_all,
+    })
 
 
-def search_files(pattern, path="."):
+def search_files(pattern, path=".", file_glob=None, limit=None):
     """Search for files matching a pattern."""
-    return _call("search_files", {"pattern": pattern, "path": path})
+    params = {"pattern": pattern, "path": path}
+    if file_glob is not None:
+        params["file_glob"] = file_glob
+    if limit is not None:
+        params["limit"] = limit
+    return _call("search_files", params)
 
 
-def web_search(query):
+def web_search(query, limit=10):
     """Search the web and return results."""
-    return _call("web_search", {"query": query})
+    return _call("web_search", {"query": query, "limit": limit})
 
 
-def web_read(url):
-    """Read content from a URL."""
-    return _call("web_read", {"url": url})
+def web_read(urls):
+    """Read content from one or more URLs.
+
+    Args:
+        urls: A single URL string or a list of URL strings.
+    """
+    if isinstance(urls, str):
+        return _call("web_read", {"url": urls})
+    return _call("web_read", {"urls": urls})
 
 
 def memory(action, **kwargs):
