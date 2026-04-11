@@ -427,12 +427,17 @@ impl Tool for DelegateTaskTool {
                         "default": false
                     }
                 },
-                "required": ["task"]
+                "required": []
             }),
         )
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        // Validate: either "task" or "tasks" must be present (mutually exclusive modes)
+        if args.get("tasks").is_none() && args.get("task").is_none() {
+            anyhow::bail!("Either 'task' (single mode) or 'tasks' (batch mode) is required");
+        }
+
         // Detect mode: batch (tasks array) vs single (task string)
         if let Some(tasks_val) = args.get("tasks") {
             let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
