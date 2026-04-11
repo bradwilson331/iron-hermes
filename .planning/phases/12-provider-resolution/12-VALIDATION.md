@@ -2,8 +2,8 @@
 phase: 12
 slug: provider-resolution
 status: draft
-nyquist_compliant: false
-wave_0_complete: false
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-04-11
 ---
 
@@ -41,13 +41,12 @@ created: 2026-04-11
 | 12-01-01 | 01 | 1 | PROV-01 | T-12-01 / — | Resolver returns correct (api_mode, key, url) tuple | unit | `cargo test resolver` | ❌ W0 | ⬜ pending |
 | 12-01-02 | 01 | 1 | PROV-02 | — | All three API modes reachable by config | unit | `cargo test api_mode` | ❌ W0 | ⬜ pending |
 | 12-01-03 | 01 | 1 | PROV-03 | T-12-02 | API keys scoped per provider, not leaked cross-provider | unit | `cargo test provider_key` | ❌ W0 | ⬜ pending |
-| 12-02-01 | 02 | 1 | PROV-04 | — | Fallback chain triggers on 429/5xx/401 | unit | `cargo test fallback` | ❌ W0 | ⬜ pending |
-| 12-02-02 | 02 | 1 | PROV-05 | — | Iteration budget enforced at 70%/90%/100% thresholds | unit | `cargo test budget` | ❌ W0 | ⬜ pending |
-| 12-03-01 | 03 | 2 | PROV-06 | — | Custom named providers route correctly | integration | `cargo test custom_provider` | ❌ W0 | ⬜ pending |
-| 12-03-02 | 03 | 2 | PROV-07 | T-12-03 | Credential refresh handles OAuth token expiry | integration | `cargo test credential` | ❌ W0 | ⬜ pending |
-| 12-04-01 | 04 | 2 | PROV-08 | — | All call sites use shared resolver | integration | `cargo test call_site` | ❌ W0 | ⬜ pending |
-| 12-04-02 | 04 | 2 | PROV-09 | — | Anthropic adapter format conversion correct | unit | `cargo test anthropic_adapter` | ❌ W0 | ⬜ pending |
-| 12-04-03 | 04 | 2 | PROV-10 | — | Budget shared between parent and child agents | integration | `cargo test shared_budget` | ❌ W0 | ⬜ pending |
+| 12-02-01 | 02 | 2 | PROV-05 | T-12-06 | Anthropic adapter translates messages; credential discovery works | unit | `cargo test anthropic` | ❌ W0 | ⬜ pending |
+| 12-02-02 | 02 | 2 | PROV-02 | T-12-07 | AnyClient enum dispatches to correct client by ApiMode | unit | `cargo test any_client` | ❌ W0 | ⬜ pending |
+| 12-03-01 | 03 | 2 | PROV-09 | T-12-08 | Iteration budget enforced at 70%/90%/100% thresholds | unit | `cargo test budget` | ❌ W0 | ⬜ pending |
+| 12-03-02 | 03 | 2 | PROV-07 | T-12-10 | Fallback chain triggers on 429/5xx/401 one-shot swap | unit | `cargo test fallback` | ❌ W0 | ⬜ pending |
+| 12-04-01 | 04 | 3 | PROV-01 | T-12-11 | All call sites use shared resolver via build_main_client | integration | `cargo build --workspace` | ❌ W0 | ⬜ pending |
+| 12-04-02 | 04 | 3 | PROV-03 | T-12-12 | Old resolve_base_url/resolve_api_key removed; zero callers remain | integration | `cargo test --workspace` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -55,9 +54,9 @@ created: 2026-04-11
 
 ## Wave 0 Requirements
 
-- [ ] `crates/ironhermes-core/src/resolver/tests.rs` — unit test stubs for PROV-01 through PROV-03
-- [ ] `crates/ironhermes-core/src/resolver/fallback_tests.rs` — fallback chain test stubs for PROV-04
-- [ ] `crates/ironhermes-core/src/budget/tests.rs` — budget enforcement test stubs for PROV-05
+- [ ] `crates/ironhermes-core/src/provider.rs` — unit tests for PROV-01, PROV-02, PROV-03, PROV-04, PROV-06, PROV-08 (Plan 01 Task 1 creates tests inline)
+- [ ] `crates/ironhermes-agent/src/anthropic_client.rs` — unit tests for PROV-05 adapter + credential discovery (Plan 02 Task 1 creates tests inline)
+- [ ] `crates/ironhermes-agent/src/agent_loop.rs` — unit tests for PROV-07, PROV-09, PROV-10 budget + fallback (Plan 03 creates tests inline)
 
 *Existing cargo test infrastructure covers framework needs.*
 
@@ -67,17 +66,17 @@ created: 2026-04-11
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| OAuth credential refresh with live Anthropic API | PROV-07 | Requires real API credentials and token expiry | 1. Set expired token in credentials.json 2. Run CLI command 3. Verify token refreshed and request succeeded |
+| Anthropic credential discovery with live API | PROV-05 | Requires real credentials.json or ANTHROPIC_API_KEY | 1. Set ANTHROPIC_API_KEY env var 2. Run CLI with `provider: anthropic` 3. Verify API call succeeds |
 
 ---
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 30s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 30s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved

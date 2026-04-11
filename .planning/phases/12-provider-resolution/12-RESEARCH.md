@@ -22,7 +22,7 @@
 **API mode routing**
 - D-07: `ApiMode` enum: `ChatCompletions`, `CodexResponses`, `AnthropicMessages`. `ResolvedEndpoint` includes `ApiMode`, `build_client()` returns right client type.
 - D-08: Anthropic adapter lives in `ironhermes-agent` crate alongside `LlmClient`. `AnthropicClient` as parallel implementation, both behind common trait or enum dispatch.
-- D-09: Anthropic native path: prefer Claude Code credential files with refreshable auth, preflight refresh before API calls, retry once on 401 after rebuilding client.
+- D-09: Anthropic native path: credential discovery only — read `~/.claude/credentials.json` → `oauth.accessToken`, fall back to `ANTHROPIC_API_KEY` env var. Credential resolved once at startup. OAuth token refresh deferred to follow-on phase.
 - D-10: `CodexResponses` variant defined and config-wired, but returns an error if selected at runtime. Stub-only.
 
 **Fallback & error recovery**
@@ -58,7 +58,7 @@ None — discussion stayed within phase scope. Setup wizard deferred to Phase 23
 | PROV-02 | Three API modes: chat_completions, codex_responses, anthropic_messages | ApiMode enum + client dispatch pattern |
 | PROV-03 | Resolution precedence: explicit request > config.yaml > env vars > provider defaults | Lookup table built at startup, immutable at runtime |
 | PROV-04 | API keys scoped to provider's base URL | Key stored inside ResolvedEndpoint, not exposed separately |
-| PROV-05 | Anthropic adapter + refreshable credential support | Claude Code credentials.json oauth field; AnthropicClient with preflight refresh |
+| PROV-05 | Anthropic adapter + credential discovery | Claude Code credentials.json oauth.accessToken; ANTHROPIC_API_KEY env var; credential resolved once at startup (refresh deferred) |
 | PROV-06 | Auxiliary model routing with own provider/model chain | model.roles: config section; role-keyed resolution in ProviderResolver |
 | PROV-07 | Fallback model switching on 429/5xx/401 | One-shot fallback in AgentLoop; fallback_providers: list in provider config |
 | PROV-08 | Named custom providers configurable in config.yaml | custom_providers: list or providers: map in Config |
@@ -293,14 +293,14 @@ model:
 
 ### Pattern 7: Anthropic Credential File Resolution
 
-**What:** Claude Code stores OAuth tokens in `~/.claude/credentials.json` under key `oauth`. This is a JSON object with `accessToken`, `refreshToken`, `expiresAt` (timestamp). Preflight: check `expiresAt`, refresh if expired, then use `accessToken` as Bearer token.
+**What:** Claude Code stores OAuth tokens in `~/.claude/credentials.json` under key `oauth`. This is a JSON object with `accessToken`, `refreshToken`, `expiresAt` (timestamp). For this phase, only `accessToken` is read at startup (D-09 narrowed scope).
 
 **Discovery order for Anthropic auth** (per D-09) [VERIFIED: credentials.json structure confirmed via direct file check]:
 1. `config.yaml` explicit `api_key` for anthropic provider
 2. `ANTHROPIC_API_KEY` environment variable
-3. `~/.claude/credentials.json` → `oauth.accessToken` (with refresh logic)
+3. `~/.claude/credentials.json` → `oauth.accessToken` (read once at startup, no refresh)
 
-**Refresh mechanism:** [ASSUMED — pattern from hermes-agent] POST to Anthropic's OAuth refresh endpoint with `refreshToken`. On 401 during API call, rebuild client with refreshed token and retry once.
+**Refresh mechanism:** DEFERRED to follow-on phase. The refresh endpoint URL/body format requires additional research. For this phase, credential is resolved once at startup — if the token is expired, the API call will fail and the user must re-authenticate via Claude Code.
 
 ### Anti-Patterns to Avoid
 
@@ -459,29 +459,24 @@ let child_budget = budget.clone();  // Same underlying counter
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
 | A1 | Anthropic Messages API requires alternating user/assistant turns | Common Pitfalls #1 | Adapter may not need merge logic; extra code is harmless but unnecessary |
-| A2 | Anthropic credential refresh endpoint accepts refreshToken via POST | Pattern 7 | Refresh mechanism needs a different implementation; ANTHROPIC_API_KEY fallback still works |
+| A2 | Anthropic credential refresh endpoint accepts refreshToken via POST | Pattern 7 | DEFERRED — refresh not implemented this phase; discovery-only per D-09 |
 | A3 | `AnyClient` enum dispatch is preferred over Box<dyn trait> | Pattern 2 | Trait object approach would require different signature changes; both work |
 | A4 | Budget injection is prepended to system message content (string concat) | Pattern 5 | May need to modify PromptBuilder instead if system message is structured |
 | A5 | Fallback trigger on "None choices" / "missing content" from LLM is via pattern match on `AgentResult` fields | Common Pitfalls #5 | Trigger detection logic differs; does not affect fallback mechanism correctness |
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Anthropic OAuth refresh endpoint**
-   - What we know: credentials.json has `oauth.refreshToken` [VERIFIED: keys present]
-   - What's unclear: The exact refresh endpoint URL and request body format used by Claude Code's OAuth flow
-   - Recommendation: Start with `ANTHROPIC_API_KEY` env var path first (always works); add credential file path in the same wave but mark as discoverable at runtime. If refresh fails, fall back to env var.
+1. **Anthropic OAuth refresh endpoint** [RESOLVED — DEFERRED]
+   - D-09 narrowed to credential discovery only. OAuth token refresh (preflight expiry check, refresh POST, retry-on-401) deferred to a follow-on phase. The refresh endpoint URL/body format will be researched when that phase is planned.
+   - For this phase: read `oauth.accessToken` from `~/.claude/credentials.json` at startup; fall back to `ANTHROPIC_API_KEY` env var.
 
-2. **SubagentConfig migration scope**
-   - What we know: `SubagentConfig` has `base_url`, `api_key`, `provider` fields (currently used in `AgentSubagentRunner`)
-   - What's unclear: Whether these fields should be removed from `SubagentConfig` entirely or kept as an override mechanism that feeds into the resolver
-   - Recommendation: Keep `SubagentConfig.provider: Option<String>` as a way to route subagents to a named provider. Remove raw `base_url`/`api_key` fields. The named provider is then resolved via `ProviderResolver`.
+2. **SubagentConfig migration scope** [RESOLVED]
+   - Decision: Keep `SubagentConfig.provider: Option<String>` as override mechanism. Remove raw `base_url`/`api_key` fields. Named provider resolved via `ProviderResolver`. Implemented in Plan 04.
 
-3. **Cron ACP call sites**
-   - What we know: CLI, gateway, cron, batch are covered (all in CONTEXT.md)
-   - What's unclear: ACP (crates/ironhermes-agent/... or separate?) — not yet implemented, mentioned in PROV-01 requirements
-   - Recommendation: ACP is Phase 22 scope; PROV-01 can be satisfied by wiring CLI/gateway/cron/batch for now with a note that ACP will use the same resolver when implemented.
+3. **Cron ACP call sites** [RESOLVED]
+   - ACP is Phase 22 scope. PROV-01 satisfied by wiring CLI/gateway/cron/batch in this phase. ACP will use the same `ProviderResolver` when implemented.
 
 ---
 
