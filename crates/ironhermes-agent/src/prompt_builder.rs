@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
-use ironhermes_core::{ChatMessage, MemoryStore, MemoryTarget, SkillRegistry};
+use ironhermes_core::{ChatMessage, MemoryProvider, MemoryTarget, SkillRegistry};
 use tracing::debug;
 
 const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Nous Research. You are helpful, harmless, and honest.
@@ -31,7 +31,7 @@ pub struct PromptBuilder {
     soul_content: Option<String>,
     project_context: Option<String>,
     agents_md_content: Option<String>,
-    memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     skill_registry: Option<Arc<SkillRegistry>>,
 }
 
@@ -49,7 +49,7 @@ impl PromptBuilder {
     }
 
     /// Set the memory store for prompt injection (D-12: uses frozen snapshot).
-    pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
+    pub fn set_memory_store(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
         self.memory_store = Some(store);
     }
 

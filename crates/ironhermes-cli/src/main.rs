@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, AgentSubagentRunner, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config, MemoryStore, SkillRegistry};
+use ironhermes_core::{ChatMessage, Config, MemoryProvider, MemoryStore, SkillRegistry, build_memory_provider};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
@@ -463,13 +463,16 @@ async fn run_agent_turn(
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config) = build_client(cli)?;
 
+    // Validate provider config — hard error on unknown/unavailable provider (D-09)
+    let _ = build_memory_provider(&config.memory)?;
+
     // Create MemoryStore and load from disk
     let memory_dir = ironhermes_core::get_hermes_home().join("memories");
     let mut store = MemoryStore::new(memory_dir);
     if let Err(e) = store.load_from_disk() {
         warn!("Failed to load memory from disk: {}", e);
     }
-    let memory_store = Arc::new(Mutex::new(store));
+    let memory_store: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
 
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry();

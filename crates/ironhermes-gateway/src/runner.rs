@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
-use ironhermes_core::{ChatMessage, Config, MemoryStore, MessageContent, Role, SkillRecord, SkillRegistry};
+use ironhermes_core::{ChatMessage, Config, MemoryProvider, MessageContent, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{debug, error, info, warn};
@@ -23,7 +23,7 @@ pub struct GatewayRunner {
     config: Config,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
-    memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     job_store: Option<Arc<Mutex<JobStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
@@ -47,7 +47,7 @@ impl GatewayRunner {
     }
 
     /// Set the memory store for prompt injection and tool access.
-    pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
+    pub fn set_memory_store(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
         self.memory_store = Some(store);
     }
 
@@ -603,7 +603,7 @@ pub(crate) async fn execute_cron_job(
     job_store: &Arc<Mutex<ironhermes_cron::JobStore>>,
     skill_registry: &Option<Arc<SkillRegistry>>,
     tool_registry: &Arc<ironhermes_tools::ToolRegistry>,
-    memory_store: &Option<Arc<Mutex<MemoryStore>>>,
+    memory_store: &Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     hook_registry: &Option<Arc<ironhermes_hooks::HookRegistry>>,
     config: &Config,
 ) -> Result<()> {

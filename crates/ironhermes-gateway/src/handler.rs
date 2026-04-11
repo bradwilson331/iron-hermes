@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryStore, MessageContent, MessageEvent, Platform, Role, SkillRegistry};
+use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryProvider, MessageContent, MessageEvent, Platform, Role, SkillRegistry};
 use ironhermes_agent::{AgentLoop, LlmClient, PromptBuilder};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_tools::ToolRegistry;
@@ -45,7 +45,7 @@ pub struct GatewayMessageHandler {
     config: Config,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
-    memory_store: Option<Arc<Mutex<MemoryStore>>>,
+    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
@@ -75,7 +75,7 @@ impl GatewayMessageHandler {
     }
 
     /// Set the memory store for prompt injection and tool access.
-    pub fn set_memory_store(&mut self, store: Arc<Mutex<MemoryStore>>) {
+    pub fn set_memory_store(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
         self.memory_store = Some(store);
     }
 
