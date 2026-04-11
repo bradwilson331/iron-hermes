@@ -220,7 +220,7 @@ impl Default for SkillsConfig {
 // ExecConfig (EXEC-01..04)
 // =============================================================================
 
-/// Code execution sandbox configuration (D-03, D-12, D-13, D-14).
+/// Code execution sandbox configuration (D-03, D-12, D-13, D-14, D-29).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecConfig {
@@ -232,6 +232,8 @@ pub struct ExecConfig {
     pub max_rpc_calls: u32,
     /// Maximum stdout bytes before truncation. Default: 50000 (50KB). (D-14)
     pub max_output_bytes: usize,
+    /// Maximum stderr bytes before truncation. Default: 10240 (10KB). (D-29)
+    pub max_stderr_bytes: usize,
 }
 
 impl Default for ExecConfig {
@@ -241,6 +243,7 @@ impl Default for ExecConfig {
             timeout_secs: 300,
             max_rpc_calls: 50,
             max_output_bytes: 50_000,
+            max_stderr_bytes: 10_240,
         }
     }
 }

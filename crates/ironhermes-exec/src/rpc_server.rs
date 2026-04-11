@@ -32,16 +32,20 @@ pub struct RpcServer {
 
 impl RpcServer {
     /// Create a new RPC server bound to the given `UnixListener`.
+    ///
+    /// `call_count` is a shared atomic counter that tracks how many tool calls
+    /// have been made — shared with `Sandbox::run()` for `SandboxResult.tool_calls_made`.
     pub fn new(
         listener: UnixListener,
         dispatch: Arc<dyn ToolDispatch>,
         max_calls: u32,
+        call_count: Arc<AtomicU32>,
     ) -> Self {
         Self {
             listener,
             dispatch,
             max_calls,
-            call_count: Arc::new(AtomicU32::new(0)),
+            call_count,
         }
     }
 
@@ -184,6 +188,7 @@ mod tests {
             timeout_secs: 30,
             max_rpc_calls: 50,
             max_output_bytes: 50_000,
+            max_stderr_bytes: 10_240,
         }
     }
 

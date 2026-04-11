@@ -41,6 +41,8 @@ pub struct SandboxConfig {
     pub max_rpc_calls: u32,
     /// Maximum stdout bytes before truncation. Default: 50,000 (50 KB).
     pub max_output_bytes: usize,
+    /// Maximum stderr bytes before truncation. Default: 10,240 (10 KB). (D-29)
+    pub max_stderr_bytes: usize,
 }
 
 impl Default for SandboxConfig {
@@ -50,6 +52,7 @@ impl Default for SandboxConfig {
             timeout_secs: 300,
             max_rpc_calls: 50,
             max_output_bytes: 50_000,
+            max_stderr_bytes: 10_240,
         }
     }
 }

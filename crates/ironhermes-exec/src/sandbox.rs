@@ -1,5 +1,6 @@
 /// Sandbox child-process orchestration with env stripping and timeout.
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,10 @@ pub struct SandboxResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// Number of RPC tool calls made during execution (D-25).
+    pub tool_calls_made: u32,
+    /// Wall-clock execution duration in seconds (D-25).
+    pub duration_seconds: f64,
 }
 
 /// Sandbox that spawns Python child processes in an isolated environment
@@ -61,8 +66,11 @@ impl Sandbox {
         // dropped before dir so the socket file is released before dir cleanup.
         let listener = tokio::net::UnixListener::bind(&socket_path)?;
 
+        // Create shared call counter for RPC server and SandboxResult
+        let call_count = Arc::new(AtomicU32::new(0));
+
         // Create and spawn RPC server
-        let rpc_server = RpcServer::new(listener, tool_dispatch, self.config.max_rpc_calls);
+        let rpc_server = RpcServer::new(listener, tool_dispatch, self.config.max_rpc_calls, Arc::clone(&call_count));
         let rpc_handle = tokio::spawn(async move {
             if let Err(e) = rpc_server.serve().await {
                 debug!("RPC server ended: {}", e);
@@ -131,6 +139,8 @@ impl Sandbox {
                     stderr,
                     exit_code: status.code(),
                     timed_out: false,
+                    tool_calls_made: call_count.load(Ordering::SeqCst),
+                    duration_seconds: 0.0, // wired properly in Task 3
                 })
             }
             Err(_elapsed) => {
@@ -147,6 +157,8 @@ impl Sandbox {
                     ),
                     exit_code: None,
                     timed_out: true,
+                    tool_calls_made: call_count.load(Ordering::SeqCst),
+                    duration_seconds: 0.0, // wired properly in Task 3
                 })
             }
         }
@@ -191,6 +203,7 @@ mod tests {
             timeout_secs: 30,
             max_rpc_calls: 50,
             max_output_bytes: 50_000,
+            max_stderr_bytes: 10_240,
         }
     }
 

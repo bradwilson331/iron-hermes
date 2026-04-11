@@ -12,6 +12,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 tempfile = "3"
+libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
