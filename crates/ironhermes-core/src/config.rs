@@ -142,6 +142,10 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub context_compression: f64,
     pub tool_delay_secs: f64,
+    /// Custom personality presets (D-09, Phase 15 Plan 02).
+    /// Merged into PersonalityRegistry at config load time with highest precedence.
+    #[serde(default)]
+    pub personalities: HashMap<String, String>,
 }
 
 impl Default for AgentConfig {
@@ -150,6 +154,7 @@ impl Default for AgentConfig {
             max_turns: DEFAULT_MAX_ITERATIONS,
             context_compression: 0.5,
             tool_delay_secs: 1.0,
+            personalities: HashMap::new(),
         }
     }
 }

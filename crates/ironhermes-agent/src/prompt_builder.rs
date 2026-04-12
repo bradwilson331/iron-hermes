@@ -1016,4 +1016,60 @@ mod tests {
         assert!(durable.contains("You are a custom soul."), "SOUL.md must appear in durable part: {durable}");
         assert!(!durable.contains("IronHermes, an AI assistant"), "default identity must NOT appear when SOUL.md loaded: {durable}");
     }
+
+    // ── Phase 15 Plan 02: PersonalityRegistry overlay tests ──────────────────
+
+    #[test]
+    fn test_personality_overlay() {
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_overlay("Respond like a pirate".to_string());
+
+        // Overlay should appear in build() combined output
+        let combined = builder.build();
+        assert!(
+            combined.contains("Respond like a pirate"),
+            "build() must contain overlay text: {combined}"
+        );
+
+        // Overlay should appear in ephemeral part of build_split()
+        let (_durable, ephemeral) = builder.build_split();
+        assert!(
+            ephemeral.contains("Respond like a pirate"),
+            "ephemeral part must contain overlay text: {ephemeral}"
+        );
+
+        // After clear_overlay(), overlay must be gone from ephemeral
+        builder.clear_overlay();
+        let (_durable2, ephemeral2) = builder.build_split();
+        assert!(
+            !ephemeral2.contains("Respond like a pirate"),
+            "ephemeral must NOT contain overlay after clear_overlay(): {ephemeral2}"
+        );
+    }
+
+    #[test]
+    fn test_personality_overlay_in_timestamp() {
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_overlay("Respond like a surfer dude".to_string());
+
+        let combined = builder.build();
+        assert!(
+            combined.contains("Active personality:"),
+            "build() must contain 'Active personality:' in timestamp block when overlay set: {combined}"
+        );
+        assert!(
+            combined.contains("Respond like a surfer dude"),
+            "build() must contain overlay text in timestamp block: {combined}"
+        );
+    }
+
+    #[test]
+    fn test_personality_overlay_absent_by_default() {
+        let builder = PromptBuilder::new("test-model", "cli");
+        let combined = builder.build();
+        assert!(
+            !combined.contains("Active personality:"),
+            "build() must NOT contain 'Active personality:' when no overlay set: {combined}"
+        );
+    }
 }
