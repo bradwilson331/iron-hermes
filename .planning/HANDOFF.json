@@ -1,35 +1,31 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-12T00:00:00Z",
+  "timestamp": "2026-04-12T23:03:16.990Z",
   "phase": "18",
   "phase_name": "context-compression",
   "phase_dir": ".planning/phases/18-context-compression",
-  "plan": 3,
+  "plan": "18-05",
   "task": 1,
   "total_tasks": 1,
   "status": "paused",
   "completed_tasks": [
-    {"id": 1, "plan": "18-01", "name": "Task 1: ContextEngine trait + LocalPruningEngine", "status": "done", "commit": "5458dc0"},
-    {"id": 2, "plan": "18-01", "name": "Task 2: Phase 18 config keys + ContextCompressor setters", "status": "done", "commit": "a9e7570"},
-    {"id": 3, "plan": "18-07", "name": "Task 1: PromptSlot::SystemMessage insertion + shift", "status": "done", "commit": "e902706"},
-    {"id": 4, "plan": "18-02", "name": "Tasks 1+2: tool_pair module + LocalPruningEngine wiring", "status": "done", "commit": "e9514fe"}
+    {"id": "18-01", "name": "ContextEngine trait + LocalPruningEngine + Phase 18 config keys", "status": "done", "commit": "a9e7570"},
+    {"id": "18-07", "name": "PromptSlot::SystemMessage = 2 durable slot", "status": "done", "commit": "e902706"},
+    {"id": "18-02", "name": "Tool-pair atomicity + orphan invariant", "status": "done", "commit": "e9514fe"},
+    {"id": "18-03", "name": "SummarizingEngine with pinned [CONTEXT HISTORY]", "status": "done", "commit": "9618d54"},
+    {"id": "18-04", "name": "Awaitable hooks + memory flush handler", "status": "done", "commit": "78f870e"}
   ],
   "remaining_tasks": [
-    {"id": 5, "plan": "18-03", "name": "SummarizingEngine (aux-model summarization, HISTORY_SENTINEL)", "wave": 3, "depends_on": ["18-01", "18-02"]},
-    {"id": 6, "plan": "18-04", "name": "HookRegistry::fire_awaitable + ContextPreCompress hook + memory flush", "wave": 3, "depends_on": ["18-01"]},
-    {"id": 7, "plan": "18-05", "name": "PressureTracker (85%-of-threshold warning, cooldown)", "wave": 4, "depends_on": ["18-01", "18-04"]},
-    {"id": 8, "plan": "18-06", "name": "agent_loop + gateway handler wiring + engine_factory", "wave": 5, "depends_on": ["18-02", "18-03", "18-04", "18-05"]}
+    {"id": "18-05", "wave": 4, "name": "Three-channel pressure warning (tracing + hook + system msg) at 85% of engine threshold, per-session cooldown", "status": "not_started"},
+    {"id": "18-06", "wave": 5, "name": "engine_factory + wire agent_loop (50%) and gateway handler (85%); aux-model routing fallback", "status": "not_started"}
   ],
   "blockers": [],
   "human_actions_pending": [],
   "decisions": [
-    {"decision": "Apply adaptive shift BEFORE ContextCompressor::compress, check orphan invariant AFTER", "rationale": "Keeps pairs intact through pruning; invariant catches any remaining break and returns ContextError::OrphanedToolPair per T-18-02", "phase": "18", "plan": "18-02"},
-    {"decision": "LocalPruningEngine gained with_tool_pair_shift(n) builder (default 500)", "rationale": "Plan 18-02 needs configurable D-15 threshold; defers Config wiring to Plan 18-06", "phase": "18", "plan": "18-02"},
-    {"decision": "PromptBuilder uses with_system_message(impl Into<String>) setter, not a Config reference", "rationale": "PromptBuilder does not hold Config today; callers pass config.agent.system_message.clone() at build time. Matches existing with_provider / with_context_length pattern", "phase": "18", "plan": "18-07"},
-    {"decision": "ChatMessage.role is Role enum (System/User/Assistant/Tool), not String", "rationale": "18-02 plan pseudocode used string comparison; tool_pair module uses Role variants instead. Note for 18-03 executor: use Role::* rather than role string", "phase": "18", "plan": "18-02"},
-    {"decision": "AgentConfig kept legacy context_compression: f64 field; added new compression_threshold: f32 alongside", "rationale": "Preserve backward compat with existing Phase 17 configs; Plan 18-06 will pick which field agent_loop reads", "phase": "18", "plan": "18-01"}
+    {"decision": "Backfilled SUMMARY.md for 18-01, 18-02, 18-07 from existing commits before running Wave 3", "rationale": "Prior runs paused after commits but before summary creation; plan-index treated plans as incomplete", "phase": "18"},
+    {"decision": "Ran Wave 3 sequentially, not in parallel", "rationale": "18-03 and 18-04 both modify context_engine.rs, summarizing_engine.rs, lib.rs — files_modified overlap requires sequential execution per safety net", "phase": "18"}
   ],
   "uncommitted_files": [],
-  "next_action": "Resume with /gsd-execute-phase 18 --wave 3 to run Plans 18-03 (SummarizingEngine) and 18-04 (ContextPreCompress hook) in parallel. Both depend only on 18-01 / 18-02 which are complete.",
-  "context_notes": "Phase 18 Wave 1 and Wave 2 are complete (4 plans committed this session). Wave 3 has 2 parallel plans. ChatMessage uses Role enum not strings — correct the 18-02 plan pseudocode mental model when reading 18-03. ContextCompressor::compute_protect_start is the canonical boundary-math helper. LocalPruningEngine now runs adaptive-shift + orphan-invariant; engines added later should follow the same pattern. STATE.md still says phase 17 executing — update to 18 before or during next execute-phase run. Pre-existing clippy errors unrelated to Phase 18 exist in ProviderConfig (derivable_impls) and memory_store (manual_is_multiple_of); Phase 18 code itself is clippy-clean."
+  "next_action": "Run /gsd-execute-phase 18 --wave 4 to ship plan 18-05 (pressure warning), then --wave 5 for 18-06 (engine_factory + wiring). Or /gsd-execute-phase 18 to complete both remaining waves plus phase verification.",
+  "context_notes": "Phase 18 context-compression. Waves 1-3 complete (5/7 plans). HEAD = 78f870e on develop. All tests green (130 agent + 36 hooks). Pre-existing clippy lints in ironhermes-core (3) are unrelated to Phase 18 — separate cleanup. Worktree recovery note from 18-03 executor: if `git reset --soft` to expected base leaves working-tree files missing, restore via `git checkout HEAD -- <paths>`."
 }
