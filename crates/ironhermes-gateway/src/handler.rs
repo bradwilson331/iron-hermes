@@ -268,16 +268,17 @@ impl GatewayMessageHandler {
         let model = self.config.model.default.clone();
         let key = SessionKey::new(Platform::Telegram, &event.chat_id)
             .with_user(&event.sender_id);
+        let source = key.platform.to_string();
 
         // Build user message content — incorporate multimodal data
         let user_message = build_user_message(event, processed);
 
         let mut session_messages = {
             let mut store = self.session_store.write().await;
-            let session = store.get_or_create(key.clone(), &model);
-            // Add user message
-            session.add_message(user_message);
-            session.messages.clone()
+            let _session = store.get_or_create(key.clone(), &model, &source);
+            // Add user message via write-through (persists to SQLite)
+            store.add_message_to_session(&key, user_message);
+            store.get(&key).map(|s| s.messages.clone()).unwrap_or_default()
         };
 
         // 4. Build system message via PromptBuilder (loads SOUL.md + project context + memory)
@@ -415,7 +416,7 @@ impl GatewayMessageHandler {
                     registry.fire(hook_event);
                 }
 
-                // 11. Update session with agent's response messages
+                // 11. Update session with agent's response messages (write-through to SQLite)
                 let new_messages: Vec<ChatMessage> = result
                     .messages
                     .into_iter()
@@ -423,10 +424,8 @@ impl GatewayMessageHandler {
                     .collect();
                 if !new_messages.is_empty() {
                     let mut store = self.session_store.write().await;
-                    if let Some(session) = store.get_mut(&key) {
-                        for msg in new_messages {
-                            session.add_message(msg);
-                        }
+                    for msg in new_messages {
+                        store.add_message_to_session(&key, msg);
                     }
                 }
             }
@@ -475,7 +474,10 @@ mod tests {
     fn make_handler() -> GatewayMessageHandler {
         let config = Config::default();
         let resolver = ProviderResolver::build(&config).unwrap();
-        let session_store = Arc::new(RwLock::new(crate::session::SessionStore::new()));
+        let state_store = Arc::new(std::sync::Mutex::new(
+            ironhermes_state::StateStore::new(":memory:").expect("in-memory StateStore"),
+        ));
+        let session_store = Arc::new(RwLock::new(crate::session::SessionStore::new(state_store)));
         let tool_registry = Arc::new(ToolRegistry::new());
         GatewayMessageHandler::new(config, resolver, session_store, tool_registry)
     }

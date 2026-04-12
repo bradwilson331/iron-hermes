@@ -37,7 +37,12 @@ impl GatewayRunner {
         Self {
             config,
             resolver,
-            session_store: Arc::new(RwLock::new(SessionStore::new())),
+            // TODO(13-03 Task 2): wire StateStore::open_default() here
+            session_store: Arc::new(RwLock::new(SessionStore::new(
+                Arc::new(Mutex::new(
+                    ironhermes_state::StateStore::open_default().expect("failed to open state.db for gateway")
+                ))
+            ))),
             tool_registry,
             memory_store: None,
             job_store: None,

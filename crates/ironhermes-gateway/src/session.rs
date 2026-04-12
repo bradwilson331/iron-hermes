@@ -1,7 +1,10 @@
+use std::sync::{Arc, Mutex};
+
 use ironhermes_core::{ChatMessage, Platform};
+use ironhermes_state::StateStore;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Unique key for a gateway session (platform + chat_id + optional user_id).
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -78,22 +81,65 @@ impl GatewaySession {
     }
 }
 
-/// In-memory session store for the gateway.
-#[derive(Debug, Default)]
+/// Write-through session cache: SQLite persistence via StateStore + in-memory HashMap for fast access.
+/// Per D-01: every create/add_message writes to SQLite immediately.
+/// Per D-02: on restart, fresh session starts — old data is query-only via StateStore.
 pub struct SessionStore {
+    state: Arc<Mutex<StateStore>>,
     sessions: HashMap<String, GatewaySession>,
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(state: Arc<Mutex<StateStore>>) -> Self {
+        Self {
+            state,
+            sessions: HashMap::new(),
+        }
     }
 
-    pub fn get_or_create(&mut self, key: SessionKey, model: &str) -> &mut GatewaySession {
+    /// Get or create a session for the given key. On creation, writes through to SQLite.
+    pub fn get_or_create(&mut self, key: SessionKey, model: &str, source: &str) -> &mut GatewaySession {
         let string_key = key.to_string_key();
-        self.sessions
-            .entry(string_key)
-            .or_insert_with(|| GatewaySession::new(key, model))
+        if !self.sessions.contains_key(&string_key) {
+            let session = GatewaySession::new(key.clone(), model);
+            // Write-through: persist to SQLite immediately
+            if let Ok(mut state) = self.state.lock() {
+                if let Err(e) = state.create_session(
+                    &session.session_id,
+                    source,
+                    Some(model),
+                    None, // system_prompt set later
+                    None, // no parent
+                ) {
+                    warn!("Failed to persist session to SQLite: {e}");
+                }
+            }
+            self.sessions.insert(string_key.clone(), session);
+        }
+        self.sessions.get_mut(&string_key).unwrap()
+    }
+
+    /// Add a message to both the in-memory cache and SQLite.
+    /// Per D-01: write-through on every message.
+    pub fn add_message_to_session(&mut self, key: &SessionKey, msg: ChatMessage) -> bool {
+        let string_key = key.to_string_key();
+        if let Some(session) = self.sessions.get_mut(&string_key) {
+            // Write-through to SQLite
+            if let Ok(mut state) = self.state.lock() {
+                if let Err(e) = state.add_message(&session.session_id, &msg) {
+                    warn!("Failed to persist message to SQLite: {e}");
+                }
+            }
+            session.add_message(msg);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get a reference to the underlying StateStore (for direct queries, WAL checkpoint, etc.)
+    pub fn state_store(&self) -> &Arc<Mutex<StateStore>> {
+        &self.state
     }
 
     pub fn get(&self, key: &SessionKey) -> Option<&GatewaySession> {
@@ -117,10 +163,25 @@ impl SessionStore {
     }
 
     /// Remove all sessions that have been inactive longer than `timeout_hours`.
+    /// Also ends expired sessions in SQLite.
     pub fn expire_stale(&mut self, timeout_hours: u64) {
         let before = self.sessions.len();
         let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
-        self.sessions.retain(|_, session| session.updated_at > cutoff);
+        let expired_keys: Vec<String> = self.sessions
+            .iter()
+            .filter(|(_, session)| session.updated_at < cutoff)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in &expired_keys {
+            if let Some(session) = self.sessions.remove(key) {
+                // End session in SQLite
+                if let Ok(mut state) = self.state.lock() {
+                    let _ = state.end_session(&session.session_id, "expired");
+                }
+            }
+        }
+
         let evicted = before - self.sessions.len();
         if evicted > 0 {
             debug!("Evicted {} stale session(s)", evicted);
