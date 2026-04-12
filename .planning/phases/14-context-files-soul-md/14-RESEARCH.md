@@ -446,21 +446,18 @@ fn home_dir() -> Option<PathBuf> {
 **Deprecated/outdated:**
 - Lowercase candidate group entries (`agents.md`, `claude.md`) in `load_project_context`: must be removed per D-08 [VERIFIED: prompt_builder.rs lines 109-114]
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **list_directory tool exists?**
+1. **list_directory tool exists?** — RESOLVED: No ListDirectoryTool exists. Plan 02 Task 2 uses verified tool names from file_tools.rs (read_file, write_file, patch, search_files). list_directory excluded from allowlist.
    - What we know: `file_tools.rs` contains ReadFileTool, WriteFileTool, PatchFileTool, SearchFilesTool. No `ListDirectoryTool` was found.
-   - What's unclear: Is `list_directory` a planned tool name, or does a different tool name cover directory listing?
    - Recommendation: Audit `file_tools.rs` and `ToolRegistry` for all registered file-access tools before hardcoding the tool name allowlist in the discovery trigger. Use the actual registered names.
 
-2. **Path argument extraction for search_files**
+2. **Path argument extraction for search_files** — RESOLVED: search_files included in FILE_ACCESS_TOOLS allowlist in Plan 02 Task 2. Treated as file-access tool for discovery purposes.
    - What we know: `search_files` takes a `path` arg (optional, defaults to "."). It is plausibly a file-access tool.
-   - What's unclear: D-05 says "file-access tools" — does search_files count? It doesn't touch individual files.
    - Recommendation: Treat `search_files` as a file-access tool for discovery purposes (it accesses file system content). Include it in the trigger set.
 
-3. **Subagent construction path**
+3. **Subagent construction path** — RESOLVED: subagent_runner.rs listed in read_first for Plan 01 Task 2. Executor will read it before implementing skip_context_files plumbing.
    - What we know: `subagent_runner.rs` exists in the agent crate. `skip_context_files` needs to be set when running subagents (D-10).
-   - What's unclear: Whether `subagent_runner.rs` constructs its own `PromptBuilder` or reuses the parent's system message.
    - Recommendation: Read `subagent_runner.rs` before implementing the `skip_context_files` plumbing to understand the construction site.
 
 ## Environment Availability
