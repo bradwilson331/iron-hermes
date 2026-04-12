@@ -43,7 +43,7 @@
 - [x] **Phase 11: Memory Provider Trait** — Pluggable memory backend abstraction with lifecycle hooks (completed 2026-04-11)
 - [x] **Phase 12: Provider Resolution** — Unified runtime resolver for CLI, gateway, cron, and ACP with multi-API-mode support (completed 2026-04-11)
 - [x] **Phase 13: Session Storage** — SQLite StateStore with WAL, FTS5 full-text search, lineage, and migrations (completed 2026-04-12)
-- [ ] **Phase 14: Context Files & SOUL.md** — Priority-chain context file loading with SOUL.md identity and security scanning
+- [x] **Phase 14: Context Files & SOUL.md** — Priority-chain context file loading with SOUL.md identity and security scanning (completed 2026-04-12)
 - [ ] **Phase 15: 10-Layer Prompt Assembly** — Full hermes-agent prompt builder with frozen memory snapshots and personality overlays
 - [ ] **Phase 16: Prompt Caching** — Anthropic cache_control breakpoints with system_and_3 strategy
 - [ ] **Phase 17: Memory Tools & External Providers** — Memory tool (add/replace/remove), capacity tracking, SQLite/Grafeo/DuckDB backends, session search
@@ -112,22 +112,26 @@ Plans:
   2. As the agent navigates into subdirectories, new context files are discovered and injected into tool results (each directory checked at most once, up to 5 parent directories)
   3. All context files are security scanned for injection patterns; files over 20,000 characters are truncated using the 70/20 head/tail ratio with a truncation marker
   4. .hermes.md YAML frontmatter is stripped before injection
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
-- [ ] 14-01-PLAN.md — ContextLoader module + PromptBuilder priority chain, git-root walk, frontmatter stripping, skip_context_files
-- [ ] 14-02-PLAN.md — SubdirDiscovery module + AgentLoop wiring for progressive subdirectory context injection
+- [x] 14-01-PLAN.md — ContextLoader module + PromptBuilder priority chain, git-root walk, frontmatter stripping, skip_context_files
+- [x] 14-02-PLAN.md — SubdirDiscovery module + AgentLoop wiring for progressive subdirectory context injection
 
 ### Phase 15: 10-Layer Prompt Assembly
-**Goal**: The system prompt is assembled in 10 ordered layers matching hermes-agent, with frozen memory snapshots and session-level personality overlays
+**Goal**: The system prompt is assembled in 9 ordered slots matching hermes-agent, with frozen memory snapshots and session-level personality overlays
 **Depends on**: Phase 12, Phase 13, Phase 14
 **Requirements**: PRMT-01, PRMT-02, PRMT-03, PRMT-04, PRMT-05, PRMT-06, PRMT-07, MEM-06
 **Success Criteria** (what must be TRUE):
-  1. System prompt assembles layers 1-10 in order: SOUL.md identity, tool-aware guidance, optional provider block, optional system message, frozen MEMORY snapshot, frozen USER snapshot, skills index, context files, timestamp/session, platform hint
+  1. System prompt assembles 9 slots in order: Identity, ToolGuidance, Memory, Skills, ContextFiles, Timestamp, PlatformHints, SessionOverlay, UserMessage
   2. Memory snapshots are frozen at session start — mid-session memory writes persist to disk but do not alter the active prompt for that session
   3. SOUL.md loads from HERMES_HOME with a 20K char cap and security scan; falls back to DEFAULT_AGENT_IDENTITY when absent; subagent delegation skips SOUL.md and uses default identity
   4. /personality command applies a session-level overlay (selecting a built-in or custom preset) without modifying SOUL.md on disk
-  5. Layers 1-8 are stable across turns; layers 9-10 (timestamp/session, platform hint) are ephemeral — this separation is maintained for prompt caching correctness
-**Plans**: TBD
+  5. Slots 1-5 are durable (stable across turns); slots 6-9 are ephemeral — this separation is maintained for prompt caching correctness
+**Plans:** 3 plans
+Plans:
+- [ ] 15-01-PLAN.md — PromptSlot enum, BTreeMap migration, build_split() durable/ephemeral split
+- [ ] 15-02-PLAN.md — PersonalityRegistry with 14 built-in presets + custom loading, config extension
+- [ ] 15-03-PLAN.md — CONTEXT_CANDIDATES update, subdirectory truncation cap, call site migration
 
 ### Phase 16: Prompt Caching
 **Goal**: Anthropic Claude API calls use cache_control breakpoints so the stable system prompt prefix is reused across turns
@@ -247,8 +251,8 @@ Plans:
 | 11. Memory Provider Trait | v2.0 | 2/2 | Complete    | 2026-04-11 |
 | 12. Provider Resolution | v2.0 | 4/4 | Complete   | 2026-04-11 |
 | 13. Session Storage | v2.0 | 3/3 | Complete   | 2026-04-12 |
-| 14. Context Files & SOUL.md | v2.0 | 0/2 | Planning complete | - |
-| 15. 10-Layer Prompt Assembly | v2.0 | 0/TBD | Not started | - |
+| 14. Context Files & SOUL.md | v2.0 | 2/2 | Complete   | 2026-04-12 |
+| 15. 10-Layer Prompt Assembly | v2.0 | 0/3 | Planned | - |
 | 16. Prompt Caching | v2.0 | 0/TBD | Not started | - |
 | 17. Memory Tools & External Providers | v2.0 | 0/TBD | Not started | - |
 | 18. Context Compression | v2.0 | 0/TBD | Not started | - |
