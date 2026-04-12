@@ -35,9 +35,9 @@ A working conversational AI agent with personality (context files) that operates
 - [ ] Session storage (SQLite state.db, WAL mode, sessions/messages tables, FTS5 full-text search, schema migrations, write contention handling, session lineage, session_search tool)
 - [ ] Context compression (dual system: gateway hygiene at 85%, agent ContextEngine at 50%; pluggable ContextEngine trait, structured summaries, iterative re-compression)
 - [ ] Prompt caching (Anthropic cache_control breakpoints, system_and_3 strategy, cached/ephemeral separation)
-- [ ] Prompt assembly (10-layer system prompt builder matching hermes-agent: SOUL.md identity, tool-aware guidance, memory snapshots, skills index, context files, timestamps, platform hints)
-- [ ] Context file loading (.hermes.md > AGENTS.md > CLAUDE.md > .cursorrules priority chain, progressive subdirectory discovery, security scanning, truncation)
-- [ ] SOUL.md personality system (durable identity from HERMES_HOME, default fallback, /personality session overlays)
+- [x] Prompt assembly (10-layer system prompt builder matching hermes-agent: SOUL.md identity, tool-aware guidance, memory snapshots, skills index, context files, timestamps, platform hints) — Validated in Phase 15: 10-Layer Prompt Assembly
+- [x] Context file loading (.hermes.md > HERMES.md > AGENTS.md > CLAUDE.md > .cursorrules priority chain, .cursor/rules/*.mdc fallback, progressive subdirectory discovery with 8K cap, security scanning, truncation) — Validated in Phase 15: 10-Layer Prompt Assembly
+- [x] SOUL.md personality system (durable identity from HERMES_HOME, default fallback, /personality session overlays, 14 built-in presets, custom preset loading) — Validated in Phase 15: 10-Layer Prompt Assembly
 - [ ] Skill framework (SKILL.md format, category-based discovery, progressive disclosure, conditional activation, env var/config requirements, credential file mounting, security scanning, Skills Hub)
 - [ ] Slash command integration (SKILL-13 backlog from v1.1)
 - [ ] Tool registry improvements (toolset management, check functions, setup wizard integration)
@@ -120,4 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-11 after Phase 11 (Memory Provider Trait) complete*
+*Last updated: 2026-04-12 after Phase 15 (10-Layer Prompt Assembly) complete*
