@@ -56,7 +56,8 @@ pub struct MemoryStore {
     /// Live entries keyed by target -- disk-authoritative for mutations.
     entries: HashMap<MemoryTarget, Vec<String>>,
     /// Frozen snapshot captured at load_from_disk(), never mutated after (D-12).
-    snapshot: HashMap<MemoryTarget, String>,
+    /// Stores raw entries (not pre-formatted) so capacity header can be computed lazily.
+    snapshot: HashMap<MemoryTarget, Vec<String>>,
     /// Directory where MEMORY.md and USER.md live.
     memory_dir: PathBuf,
 }
@@ -90,16 +91,9 @@ impl MemoryStore {
                         .filter(|s| !s.is_empty())
                         .collect()
                 };
-                // Capture frozen snapshot for prompt injection
+                // Capture frozen snapshot for prompt injection (store raw entries, D-12)
                 if !entries.is_empty() {
-                    let header = match target {
-                        MemoryTarget::Memory => "## Memory",
-                        MemoryTarget::User => "## User Profile",
-                    };
-                    self.snapshot.insert(
-                        *target,
-                        format!("{}\n\n{}", header, entries.join("\n")),
-                    );
+                    self.snapshot.insert(*target, entries.clone());
                 }
                 self.entries.insert(*target, entries);
             } else {
@@ -331,8 +325,27 @@ impl MemoryStore {
     }
 
     /// Returns the frozen snapshot value (D-12), not live entries.
+    /// Computes capacity header lazily from snapshot entries per D-13.
     pub fn format_for_system_prompt(&self, target: MemoryTarget) -> Option<String> {
-        self.snapshot.get(&target).cloned()
+        let entries = self.snapshot.get(&target)?;
+        if entries.is_empty() {
+            return None;
+        }
+        let used = char_count(entries, ENTRY_DELIMITER);
+        let limit = target.char_limit();
+        let pct = used * 100 / limit;
+        let label = match target {
+            MemoryTarget::Memory => "Memory",
+            MemoryTarget::User => "User Profile",
+        };
+        Some(format!(
+            "## {} ({}% -- {}/{} chars)\n\n{}",
+            label,
+            pct,
+            format_with_commas(used),
+            format_with_commas(limit),
+            entries.join("\n")
+        ))
     }
 
     // =========================================================================
@@ -404,6 +417,21 @@ impl MemoryStore {
 
         result
     }
+}
+
+/// Format a number with thousands separators (e.g. 2200 -> "2,200").
+fn format_with_commas(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let len = bytes.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(b as char);
+    }
+    result
 }
 
 /// Total chars including delimiters between entries.
@@ -566,9 +594,56 @@ mod tests {
         let prompt = store.format_for_system_prompt(MemoryTarget::Memory);
         assert!(prompt.is_some());
         let prompt = prompt.unwrap();
-        assert!(prompt.contains("## Memory"));
+        // Capacity header format per D-13
+        assert!(prompt.starts_with("## Memory ("), "Expected capacity header, got: {}", prompt);
+        assert!(prompt.contains("% -- "), "Expected percentage format: {}", prompt);
+        assert!(prompt.contains("/2,200 chars)"), "Expected char limit: {}", prompt);
         assert!(prompt.contains("fact one"));
         assert!(prompt.contains("fact two"));
+    }
+
+    #[test]
+    fn test_format_for_system_prompt_user_profile_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem_dir = dir.path().join("memories");
+        let mut store = MemoryStore::new(mem_dir);
+
+        std::fs::write(
+            store.memory_dir.join("USER.md"),
+            "user pref",
+        )
+        .unwrap();
+        store.load_from_disk().unwrap();
+
+        let prompt = store.format_for_system_prompt(MemoryTarget::User);
+        assert!(prompt.is_some());
+        let prompt = prompt.unwrap();
+        assert!(prompt.starts_with("## User Profile ("), "Expected User Profile header, got: {}", prompt);
+        assert!(prompt.contains("/1,375 chars)"), "Expected user char limit: {}", prompt);
+        assert!(prompt.contains("user pref"));
+    }
+
+    #[test]
+    fn test_capacity_header_percentage_calculation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem_dir = dir.path().join("memories");
+        let mut store = MemoryStore::new(mem_dir);
+
+        // "abc" (3) + "\n§\n" (4 bytes) + "def" (3) = 10 chars
+        // pct = 10 * 100 / 2200 = 0
+        std::fs::write(
+            store.memory_dir.join("MEMORY.md"),
+            "abc\n\u{00a7}\ndef",
+        )
+        .unwrap();
+        store.load_from_disk().unwrap();
+
+        let prompt = store.format_for_system_prompt(MemoryTarget::Memory).unwrap();
+        assert!(
+            prompt.contains("0% -- 10/2,200 chars)"),
+            "Expected exact capacity numbers in header, got: {}",
+            prompt
+        );
     }
 
     #[test]
