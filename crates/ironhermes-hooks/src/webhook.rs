@@ -154,6 +154,8 @@ fn event_kind_name(event: &HookEvent) -> &str {
         HookEventKind::ToolCompleted { .. } => "tool_completed",
         HookEventKind::ResponseSent { .. } => "response_sent",
         HookEventKind::SkillActivated { .. } => "skill_activated",
+        HookEventKind::ContextPreCompress { .. } => "context_pre_compress",
+        HookEventKind::ContextPressure { .. } => "context_pressure",
     }
 }
 

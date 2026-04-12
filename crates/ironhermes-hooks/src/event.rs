@@ -47,6 +47,29 @@ pub enum HookEventKind {
         /// Source of activation: "tool" or "cron"
         source: String,
     },
+    /// Fired BEFORE destructive compression pruning (Phase 18 D-20/D-21).
+    ///
+    /// Subscribers (e.g., memory flush handlers) may perform async work here;
+    /// the dispatching engine awaits completion via
+    /// [`HookRegistry::fire_awaitable`] before continuing.
+    ContextPreCompress {
+        session_id: String,
+        estimated_tokens: usize,
+        threshold: f32,
+        /// "soft" | "hard" (see `CompressionMode`).
+        mode: String,
+        /// Optional pruned range `(start, end)` in the message list.
+        pruned_range: Option<(usize, usize)>,
+    },
+    /// Fired when context pressure crosses 85% of the engine's threshold
+    /// (Phase 18 D-23/D-24). Fire-and-forget observability event.
+    ContextPressure {
+        session_id: String,
+        estimated_tokens: usize,
+        threshold: f32,
+        percent_used: f32,
+        mode: String,
+    },
 }
 
 /// A single observable event emitted by the agent at a lifecycle point.

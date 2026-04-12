@@ -1,13 +1,22 @@
 use crate::config::HooksConfig;
 use crate::event::HookEvent;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 
 /// A hook listener is a thread-safe, cloneable callback that receives HookEvents.
 pub type HookListener = Arc<dyn Fn(HookEvent) + Send + Sync>;
 
+/// Async-aware listener for awaitable dispatch (Phase 18 D-20).
+///
+/// Returns a boxed future; the registry awaits completion of all async
+/// listeners in [`HookRegistry::fire_awaitable`], guaranteeing that memory
+/// flush / sync operations complete before destructive compression proceeds.
+pub type AsyncHookListener = Arc<dyn Fn(HookEvent) -> BoxFuture<'static, ()> + Send + Sync>;
+
 /// Registry of hook listeners. Events are dispatched fire-and-forget via tokio::spawn.
 pub struct HookRegistry {
     listeners: Vec<HookListener>,
+    async_listeners: Vec<AsyncHookListener>,
     config: HooksConfig,
 }
 
@@ -16,6 +25,7 @@ impl HookRegistry {
     pub fn new(config: HooksConfig) -> Self {
         Self {
             listeners: Vec::new(),
+            async_listeners: Vec::new(),
             config,
         }
     }
@@ -23,6 +33,11 @@ impl HookRegistry {
     /// Register a listener. Listeners are called in registration order.
     pub fn add_listener(&mut self, listener: HookListener) {
         self.listeners.push(listener);
+    }
+
+    /// Register an async listener invoked by [`Self::fire_awaitable`].
+    pub fn add_async_listener(&mut self, listener: AsyncHookListener) {
+        self.async_listeners.push(listener);
     }
 
     /// Fire an event to all registered listeners.
@@ -37,6 +52,28 @@ impl HookRegistry {
                 listener(event);
             });
         }
+    }
+
+    /// Fire an event and await completion of all async listeners (Phase 18 D-20).
+    ///
+    /// - Sync listeners: spawned fire-and-forget (existing semantics).
+    /// - Async listeners: invoked concurrently via `join_all` and awaited.
+    pub async fn fire_awaitable(&self, event: HookEvent) {
+        // Preserve existing fire-and-forget semantics for sync listeners.
+        for listener in &self.listeners {
+            let listener = Arc::clone(listener);
+            let event = event.clone();
+            tokio::spawn(async move {
+                listener(event);
+            });
+        }
+        // Collect futures and await concurrently.
+        let futs: Vec<BoxFuture<'static, ()>> = self
+            .async_listeners
+            .iter()
+            .map(|l| l(event.clone()))
+            .collect();
+        futures::future::join_all(futs).await;
     }
 
     /// Access the hooks configuration (used by guardrails, webhooks, etc.).
@@ -125,5 +162,103 @@ mod tests {
         cfg.blocked_tools = vec!["terminal".to_string()];
         let registry = HookRegistry::new(cfg);
         assert_eq!(registry.config().blocked_tools, vec!["terminal"]);
+    }
+
+    // ── Phase 18 Plan 04: fire_awaitable + ContextPreCompress/Pressure ──────
+
+    fn make_pre_compress_event() -> HookEvent {
+        HookEvent::new(
+            "req-pc",
+            HookEventKind::ContextPreCompress {
+                session_id: "sess-1".into(),
+                estimated_tokens: 1000,
+                threshold: 0.5,
+                mode: "hard".into(),
+                pruned_range: None,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn fire_awaitable_awaits_all_handlers() {
+        let mut registry = HookRegistry::new(HooksConfig::default());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..3 {
+            let c = Arc::clone(&counter);
+            registry.add_async_listener(Arc::new(move |_event| {
+                let c = Arc::clone(&c);
+                Box::pin(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            }));
+        }
+
+        registry.fire_awaitable(make_pre_compress_event()).await;
+        // Immediately after await: all handlers must have completed.
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn fire_awaitable_with_no_listeners_completes() {
+        let registry = HookRegistry::new(HooksConfig::default());
+        // Should neither panic nor hang.
+        registry.fire_awaitable(make_pre_compress_event()).await;
+    }
+
+    #[tokio::test]
+    async fn fire_awaitable_handlers_run_concurrently() {
+        let mut registry = HookRegistry::new(HooksConfig::default());
+        for _ in 0..3 {
+            registry.add_async_listener(Arc::new(|_event| {
+                Box::pin(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                })
+            }));
+        }
+
+        let start = std::time::Instant::now();
+        registry.fire_awaitable(make_pre_compress_event()).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(120),
+            "handlers should run concurrently, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn context_pre_compress_event_kind() {
+        let e = HookEvent::new(
+            "r",
+            HookEventKind::ContextPreCompress {
+                session_id: "s".into(),
+                estimated_tokens: 10,
+                threshold: 0.5,
+                mode: "hard".into(),
+                pruned_range: Some((3, 7)),
+            },
+        );
+        assert!(matches!(
+            e.kind,
+            HookEventKind::ContextPreCompress { .. }
+        ));
+    }
+
+    #[test]
+    fn context_pressure_event_kind() {
+        let e = HookEvent::new(
+            "r",
+            HookEventKind::ContextPressure {
+                session_id: "s".into(),
+                estimated_tokens: 10,
+                threshold: 0.5,
+                percent_used: 0.425,
+                mode: "soft".into(),
+            },
+        );
+        assert!(matches!(e.kind, HookEventKind::ContextPressure { .. }));
     }
 }
