@@ -25,17 +25,17 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 
 ### Session Storage
 
-- [ ] **SESS-01**: StateStore (SQLite + WAL mode) is wired as source of truth for session persistence across CLI, gateway, and ACP
+- [x] **SESS-01**: StateStore (SQLite + WAL mode) is wired as source of truth for session persistence across CLI, gateway, and ACP
 - [ ] **SESS-02**: In-memory SessionStore acts as write-through cache; on restart, sessions recover from SQLite
-- [ ] **SESS-03**: Session lineage tracks parent_session_id chains when context compression triggers session splits
-- [ ] **SESS-04**: User can name sessions with unique titles and resolve sessions by title
-- [ ] **SESS-05**: FTS5 full-text search supports keyword, phrase, boolean, and prefix queries with automatic input sanitization
-- [ ] **SESS-06**: Search results include FTS5-generated snippets with match markers and 1-message context window
-- [ ] **SESS-07**: Search supports filtering by source (cli/telegram/etc.), role, and date range
+- [x] **SESS-03**: Session lineage tracks parent_session_id chains when context compression triggers session splits
+- [x] **SESS-04**: User can name sessions with unique titles and resolve sessions by title
+- [x] **SESS-05**: FTS5 full-text search supports keyword, phrase, boolean, and prefix queries with automatic input sanitization
+- [x] **SESS-06**: Search results include FTS5-generated snippets with match markers and 1-message context window
+- [x] **SESS-07**: Search supports filtering by source (cli/telegram/etc.), role, and date range
 - [ ] **SESS-08**: Sessions can be exported (single or bulk with source filter) as structured data
 - [ ] **SESS-09**: Old ended sessions can be pruned by age and optional source filter
-- [ ] **SESS-10**: Schema migrations run sequentially on init with idempotent ALTER TABLE operations
-- [ ] **SESS-11**: Write contention handled with short SQLite timeout, application-level retry with random jitter, and periodic WAL checkpoints
+- [x] **SESS-10**: Schema migrations run sequentially on init with idempotent ALTER TABLE operations
+- [x] **SESS-11**: Write contention handled with short SQLite timeout, application-level retry with random jitter, and periodic WAL checkpoints
 
 ### Prompt Assembly
 
@@ -195,17 +195,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MEM-11 | Phase 17 | Pending |
 | MEM-12 | Phase 11 | Pending |
 | MEM-13 | Phase 17 | Pending |
-| SESS-01 | Phase 13 | Pending |
+| SESS-01 | Phase 13 | Complete |
 | SESS-02 | Phase 13 | Pending |
-| SESS-03 | Phase 13 | Pending |
-| SESS-04 | Phase 13 | Pending |
-| SESS-05 | Phase 13 | Pending |
-| SESS-06 | Phase 13 | Pending |
-| SESS-07 | Phase 13 | Pending |
+| SESS-03 | Phase 13 | Complete |
+| SESS-04 | Phase 13 | Complete |
+| SESS-05 | Phase 13 | Complete |
+| SESS-06 | Phase 13 | Complete |
+| SESS-07 | Phase 13 | Complete |
 | SESS-08 | Phase 13 | Pending |
 | SESS-09 | Phase 13 | Pending |
-| SESS-10 | Phase 13 | Pending |
-| SESS-11 | Phase 13 | Pending |
+| SESS-10 | Phase 13 | Complete |
+| SESS-11 | Phase 13 | Complete |
 | PRMT-01 | Phase 15 | Pending |
 | PRMT-02 | Phase 15 | Pending |
 | PRMT-03 | Phase 15 | Pending |
