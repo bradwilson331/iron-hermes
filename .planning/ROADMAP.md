@@ -97,7 +97,11 @@ Plans:
   3. Search results can be filtered by source (cli/telegram), role, and date range; old sessions can be exported or pruned by age
   4. Context compression triggering a session split records parent_session_id so lineage can be traced
   5. Schema migrations run sequentially on init; write contention is handled with retry+jitter and periodic WAL checkpoints
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 13-01-PLAN.md — Extend StateStore: busy_timeout, retry, v7 migration, lineage, title lookup, SearchFilter, FTS5 snippet search, sanitization
+- [ ] 13-02-PLAN.md — Add export/prune methods and comprehensive integration tests for SESS-01 through SESS-11
+- [ ] 13-03-PLAN.md — Wire write-through SessionStore, WAL checkpoint timer, CLI session persistence
 
 ### Phase 14: Context Files & SOUL.md
 **Goal**: The agent loads its project context and identity from the filesystem using hermes-agent's priority chain, with security scanning and truncation
@@ -239,7 +243,7 @@ Plans:
 | 10.1. Gateway active_skills Fix | v1.1 | 1/1 | Complete | 2026-04-11 |
 | 11. Memory Provider Trait | v2.0 | 2/2 | Complete    | 2026-04-11 |
 | 12. Provider Resolution | v2.0 | 4/4 | Complete   | 2026-04-11 |
-| 13. Session Storage | v2.0 | 0/TBD | Not started | - |
+| 13. Session Storage | v2.0 | 0/3 | Planning complete | - |
 | 14. Context Files & SOUL.md | v2.0 | 0/TBD | Not started | - |
 | 15. 10-Layer Prompt Assembly | v2.0 | 0/TBD | Not started | - |
 | 16. Prompt Caching | v2.0 | 0/TBD | Not started | - |
