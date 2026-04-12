@@ -39,7 +39,7 @@ pub type Result<T, E = StateError> = std::result::Result<T, E>;
 // Schema version
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode=WAL;
@@ -181,6 +181,8 @@ impl StateStore {
         let conn = Connection::open(path)
             .with_context(|| format!("open SQLite database at {}", path.display()))?;
 
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+
         let mut store = Self { conn };
         store.init_schema()?;
         Ok(store)
@@ -278,6 +280,16 @@ impl StateStore {
             self.conn
                 .execute("UPDATE schema_version SET version = 6", [])?;
         }
+        if current < 7 {
+            // v7: Add composite indexes for search filtering
+            let _ = self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+                 CREATE INDEX IF NOT EXISTS idx_sessions_source_started ON sessions(source, started_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);",
+            );
+            self.conn
+                .execute("UPDATE schema_version SET version = 7", [])?;
+        }
         Ok(())
     }
 
@@ -292,15 +304,16 @@ impl StateStore {
         source: &str,
         model: Option<&str>,
         system_prompt: Option<&str>,
+        parent_session_id: Option<&str>,
     ) -> Result<()> {
         let now = unix_now();
         self.conn.execute(
             "INSERT OR IGNORE INTO sessions \
-             (id, source, model, system_prompt, started_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, source, model, system_prompt, now],
+             (id, source, model, system_prompt, parent_session_id, started_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, source, model, system_prompt, parent_session_id, now],
         )?;
-        debug!("created session {id} source={source}");
+        debug!("created session {id} source={source} parent={parent_session_id:?}");
         Ok(())
     }
 
@@ -481,6 +494,57 @@ impl StateStore {
             params![title, id],
         )?;
         Ok(())
+    }
+
+    /// Look up a single session by its unique title.
+    pub fn get_session_by_title(&self, title: &str) -> Result<Option<Session>> {
+        self.conn
+            .query_row(
+                "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
+                 started_at, ended_at, end_reason, message_count, tool_call_count, \
+                 input_tokens, output_tokens, title \
+                 FROM sessions WHERE title = ?1",
+                params![title],
+                session_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Run a passive WAL checkpoint to keep the WAL file from growing unbounded.
+    pub fn wal_checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retry wrapper
+// ---------------------------------------------------------------------------
+
+/// Retry a closure up to 3 times on `SQLITE_BUSY`, with deterministic jitter
+/// (50 ms, then 125 ms). No `rand` dependency required.
+fn with_busy_retry<T, F: FnMut() -> Result<T>>(mut f: F) -> Result<T> {
+    for attempt in 0u32..3 {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(ref e) if is_busy(e) && attempt < 2 => {
+                let jitter_ms = 50 + (attempt as u64 * 75); // 50ms, 125ms
+                std::thread::sleep(std::time::Duration::from_millis(jitter_ms));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    f() // final attempt — propagate error
+}
+
+/// Check whether a [`StateError`] is a `SQLITE_BUSY` error.
+fn is_busy(e: &StateError) -> bool {
+    if let StateError::Sqlite(sq) = e {
+        matches!(sq.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy))
+    } else {
+        false
     }
 }
 
