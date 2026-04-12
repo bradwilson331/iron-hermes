@@ -7,6 +7,7 @@ pub mod prompt_builder;
 pub mod personality;
 pub mod subdir_discovery;
 pub mod context_compressor;
+pub mod context_engine;
 pub mod subagent_runner;
 pub mod anthropic_client;
 pub mod any_client;

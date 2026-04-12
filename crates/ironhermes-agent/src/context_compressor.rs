@@ -192,6 +192,20 @@ impl ContextCompressor {
     pub fn compression_count(&self) -> usize {
         self.compression_count
     }
+
+    pub fn with_protect(mut self, first_n: usize, last_tokens: usize) -> Self {
+        self.protect_first_n = first_n;
+        self.protect_last_tokens = last_tokens;
+        self
+    }
+
+    pub fn protect_first_n(&self) -> usize {
+        self.protect_first_n
+    }
+
+    pub fn protect_last_tokens(&self) -> usize {
+        self.protect_last_tokens
+    }
 }
 
 #[cfg(test)]
