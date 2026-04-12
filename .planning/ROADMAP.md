@@ -44,7 +44,7 @@
 - [x] **Phase 12: Provider Resolution** — Unified runtime resolver for CLI, gateway, cron, and ACP with multi-API-mode support (completed 2026-04-11)
 - [x] **Phase 13: Session Storage** — SQLite StateStore with WAL, FTS5 full-text search, lineage, and migrations (completed 2026-04-12)
 - [x] **Phase 14: Context Files & SOUL.md** — Priority-chain context file loading with SOUL.md identity and security scanning (completed 2026-04-12)
-- [ ] **Phase 15: 10-Layer Prompt Assembly** — Full hermes-agent prompt builder with frozen memory snapshots and personality overlays
+- [x] **Phase 15: 10-Layer Prompt Assembly** — Full hermes-agent prompt builder with frozen memory snapshots and personality overlays (completed 2026-04-12)
 - [ ] **Phase 16: Prompt Caching** — Anthropic cache_control breakpoints with system_and_3 strategy
 - [ ] **Phase 17: Memory Tools & External Providers** — Memory tool (add/replace/remove), capacity tracking, SQLite/Grafeo/DuckDB backends, session search
 - [ ] **Phase 18: Context Compression** — Dual compression system (agent at 50%, gateway at 85%) with pluggable ContextEngine trait
@@ -127,11 +127,11 @@ Plans:
   3. SOUL.md loads from HERMES_HOME with a 20K char cap and security scan; falls back to DEFAULT_AGENT_IDENTITY when absent; subagent delegation skips SOUL.md and uses default identity
   4. /personality command applies a session-level overlay (selecting a built-in or custom preset) without modifying SOUL.md on disk
   5. Slots 1-5 are durable (stable across turns); slots 6-9 are ephemeral — this separation is maintained for prompt caching correctness
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 Plans:
-- [ ] 15-01-PLAN.md — PromptSlot enum, BTreeMap migration, build_split() durable/ephemeral split
-- [ ] 15-02-PLAN.md — PersonalityRegistry with 14 built-in presets + custom loading, config extension
-- [ ] 15-03-PLAN.md — CONTEXT_CANDIDATES update, subdirectory truncation cap, call site migration
+- [x] 15-01-PLAN.md — PromptSlot enum, BTreeMap migration, build_split() durable/ephemeral split
+- [x] 15-02-PLAN.md — PersonalityRegistry with 14 built-in presets + custom loading, config extension
+- [x] 15-03-PLAN.md — CONTEXT_CANDIDATES update, subdirectory truncation cap, call site migration
 
 ### Phase 16: Prompt Caching
 **Goal**: Anthropic Claude API calls use cache_control breakpoints so the stable system prompt prefix is reused across turns
@@ -252,7 +252,7 @@ Plans:
 | 12. Provider Resolution | v2.0 | 4/4 | Complete   | 2026-04-11 |
 | 13. Session Storage | v2.0 | 3/3 | Complete   | 2026-04-12 |
 | 14. Context Files & SOUL.md | v2.0 | 2/2 | Complete   | 2026-04-12 |
-| 15. 10-Layer Prompt Assembly | v2.0 | 0/3 | Planned | - |
+| 15. 10-Layer Prompt Assembly | v2.0 | 3/3 | Complete    | 2026-04-12 |
 | 16. Prompt Caching | v2.0 | 0/TBD | Not started | - |
 | 17. Memory Tools & External Providers | v2.0 | 0/TBD | Not started | - |
 | 18. Context Compression | v2.0 | 0/TBD | Not started | - |
