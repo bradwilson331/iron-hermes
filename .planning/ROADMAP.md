@@ -45,7 +45,7 @@
 - [x] **Phase 13: Session Storage** — SQLite StateStore with WAL, FTS5 full-text search, lineage, and migrations (completed 2026-04-12)
 - [x] **Phase 14: Context Files & SOUL.md** — Priority-chain context file loading with SOUL.md identity and security scanning (completed 2026-04-12)
 - [x] **Phase 15: 10-Layer Prompt Assembly** — Full hermes-agent prompt builder with frozen memory snapshots and personality overlays (completed 2026-04-12)
-- [ ] **Phase 16: Prompt Caching** — Anthropic cache_control breakpoints with system_and_3 strategy
+- [ ] **Phase 16: Prompt Caching** — DEFERRED (Anthropic blocking non-Anthropic clients)
 - [ ] **Phase 17: Memory Tools & External Providers** — Memory tool (add/replace/remove), capacity tracking, SQLite/Grafeo/DuckDB backends, session search
 - [ ] **Phase 18: Context Compression** — Dual compression system (agent at 50%, gateway at 85%) with pluggable ContextEngine trait
 - [ ] **Phase 19: Skills Framework** — SKILL.md format, category discovery, conditional activation, env vars, credentials, security, and Hub
@@ -140,7 +140,7 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. Anthropic models automatically receive cache_control breakpoints placed using the system_and_3 strategy (system prompt + last 3 non-system messages)
   2. Prompt caching activates automatically for Anthropic Claude models and respects the configured TTL (5m or 1h); non-Anthropic providers are unaffected
-**Plans**: TBD
+**Plans**: DEFERRED — Anthropic blocking non-Anthropic clients from cache_control
 
 ### Phase 17: Memory Tools & External Providers
 **Goal**: The agent can manage persistent memory entries via tool calls, and optional SQLite/Grafeo/DuckDB backends are available for richer memory storage
@@ -152,7 +152,13 @@ Plans:
   3. Memory entries are rejected if they match security scanning patterns (injection/exfiltration)
   4. SQLite memory provider stores and retrieves facts with FTS5 search; Grafeo and DuckDB providers are available as feature-gated build options
   5. Agent can search past conversations using the session_search tool, which queries the FTS5 index on the StateStore
-**Plans**: TBD
+**Plans:** 5 plans
+Plans:
+- [ ] 17-01-PLAN.md — Memory tool UX: capacity headers in snapshots, human-readable response format
+- [ ] 17-02-PLAN.md — session_search tool and agent loop interception
+- [ ] 17-03-PLAN.md — Provider infrastructure, factory relocation, SQLite memory provider
+- [ ] 17-04-PLAN.md — Grafeo graph database memory provider
+- [ ] 17-05-PLAN.md — DuckDB columnar memory provider with thread bridge
 
 ### Phase 18: Context Compression
 **Goal**: The agent manages context window pressure through dual-mode compression that preserves tool pairs and protects critical message boundaries
@@ -253,8 +259,8 @@ Plans:
 | 13. Session Storage | v2.0 | 3/3 | Complete   | 2026-04-12 |
 | 14. Context Files & SOUL.md | v2.0 | 2/2 | Complete   | 2026-04-12 |
 | 15. 10-Layer Prompt Assembly | v2.0 | 3/3 | Complete    | 2026-04-12 |
-| 16. Prompt Caching | v2.0 | 0/TBD | Not started | - |
-| 17. Memory Tools & External Providers | v2.0 | 0/TBD | Not started | - |
+| 16. Prompt Caching | v2.0 | 0/TBD | Deferred | - |
+| 17. Memory Tools & External Providers | v2.0 | 0/5 | Planned | - |
 | 18. Context Compression | v2.0 | 0/TBD | Not started | - |
 | 19. Skills Framework | v2.0 | 0/TBD | Not started | - |
 | 20. Tool Registry & Slash Commands | v2.0 | 0/TBD | Not started | - |
