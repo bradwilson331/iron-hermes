@@ -9,11 +9,11 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 
 ### Memory
 
-- [ ] **MEM-01**: Agent can add, replace, and remove entries in bounded MEMORY.md store (2200 char limit) via memory tool
-- [ ] **MEM-02**: Agent can add, replace, and remove entries in bounded USER.md store (1375 char limit) via memory tool
-- [ ] **MEM-03**: Memory tool supports substring matching for replace/remove operations (old_text identifies target entry)
-- [ ] **MEM-04**: Memory stores display capacity usage in system prompt header (e.g., "67% — 1,474/2,200 chars")
-- [ ] **MEM-05**: Memory entries are security scanned for injection/exfiltration patterns before acceptance
+- [x] **MEM-01**: Agent can add, replace, and remove entries in bounded MEMORY.md store (2200 char limit) via memory tool
+- [x] **MEM-02**: Agent can add, replace, and remove entries in bounded USER.md store (1375 char limit) via memory tool
+- [x] **MEM-03**: Memory tool supports substring matching for replace/remove operations (old_text identifies target entry)
+- [x] **MEM-04**: Memory stores display capacity usage in system prompt header (e.g., "67% — 1,474/2,200 chars")
+- [x] **MEM-05**: Memory entries are security scanned for injection/exfiltration patterns before acceptance
 - [ ] **MEM-06**: Memory snapshots are frozen at session start and injected into system prompt — mid-session writes persist to disk but do not mutate the active prompt
 - [ ] **MEM-07**: MemoryProvider trait defines lifecycle hooks (initialize, prefetch, sync_turn, on_session_end, shutdown) with Send + Sync + 'static bounds
 - [ ] **MEM-08**: Built-in file-based MemoryStore implements MemoryProvider as the default backend
@@ -182,11 +182,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MEM-01 | Phase 17 | Pending |
-| MEM-02 | Phase 17 | Pending |
-| MEM-03 | Phase 17 | Pending |
-| MEM-04 | Phase 17 | Pending |
-| MEM-05 | Phase 17 | Pending |
+| MEM-01 | Phase 17 | Complete |
+| MEM-02 | Phase 17 | Complete |
+| MEM-03 | Phase 17 | Complete |
+| MEM-04 | Phase 17 | Complete |
+| MEM-05 | Phase 17 | Complete |
 | MEM-06 | Phase 15 | Pending |
 | MEM-07 | Phase 11 | Pending |
 | MEM-08 | Phase 11 | Pending |
