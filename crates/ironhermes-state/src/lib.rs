@@ -155,9 +155,54 @@ pub struct SearchResult {
     pub session_id: String,
     pub role: String,
     pub content: Option<String>,
+    /// FTS5-generated snippet with <<match>> markers. Only present when query is FTS.
+    pub snippet: Option<String>,
+    /// The message immediately before the match in the same session.
+    pub context_before: Option<String>,
+    /// The message immediately after the match in the same session.
+    pub context_after: Option<String>,
     pub timestamp: f64,
     pub session_source: Option<String>,
     pub session_title: Option<String>,
+}
+
+/// Composable search filter for full-text and metadata queries.
+#[derive(Debug, Clone)]
+pub struct SearchFilter {
+    /// FTS5 query string. None = no full-text filter (metadata-only query).
+    pub query: Option<String>,
+    /// Filter by session source (e.g., "cli", "telegram").
+    pub source: Option<String>,
+    /// Filter by message role (e.g., "user", "assistant").
+    pub role: Option<String>,
+    /// Only messages after this unix timestamp.
+    pub after: Option<f64>,
+    /// Only messages before this unix timestamp.
+    pub before: Option<f64>,
+    /// Maximum number of results (default 20).
+    pub limit: usize,
+    /// If true, pass query directly to FTS5 without sanitization.
+    pub raw: bool,
+}
+
+impl Default for SearchFilter {
+    fn default() -> Self {
+        Self {
+            query: None,
+            source: None,
+            role: None,
+            after: None,
+            before: None,
+            limit: 20,
+            raw: false,
+        }
+    }
+}
+
+impl SearchFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -438,30 +483,135 @@ impl StateStore {
         }
     }
 
-    /// Full-text search across message content.
-    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.session_id, m.role, m.content, m.timestamp, \
-             s.source, s.title \
-             FROM messages_fts f \
-             JOIN messages m ON m.id = f.rowid \
-             JOIN sessions s ON s.id = m.session_id \
-             WHERE messages_fts MATCH ?1 \
-             ORDER BY rank \
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![query, limit as i64], |r| {
+    /// Full-text and metadata search across messages.
+    ///
+    /// When `filter.query` is `Some`, uses FTS5 with `snippet()` for match
+    /// highlighting.  When `None`, performs a metadata-only query.
+    pub fn search_messages(&self, filter: &SearchFilter) -> Result<Vec<SearchResult>> {
+        let use_fts = filter.query.is_some();
+        let query_text = if let Some(ref q) = filter.query {
+            let sanitized = if filter.raw {
+                q.clone()
+            } else {
+                sanitize_fts_query(q)
+            };
+            if sanitized.is_empty() {
+                return Ok(vec![]);
+            }
+            Some(sanitized)
+        } else {
+            None
+        };
+
+        // Build dynamic WHERE clauses
+        let mut conditions: Vec<String> = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut param_idx = 1usize;
+
+        // Base query depends on whether FTS is used
+        let base_select = if use_fts {
+            "SELECT m.id, m.session_id, m.role, m.content, \
+             snippet(messages_fts, 0, '<<', '>>', '...', 32) AS snip, \
+             m.timestamp, s.source, s.title \
+             FROM messages_fts \
+             JOIN messages m ON m.id = messages_fts.rowid \
+             JOIN sessions s ON s.id = m.session_id"
+                .to_string()
+        } else {
+            "SELECT m.id, m.session_id, m.role, m.content, \
+             NULL AS snip, \
+             m.timestamp, s.source, s.title \
+             FROM messages m \
+             JOIN sessions s ON s.id = m.session_id"
+                .to_string()
+        };
+
+        if let Some(ref qt) = query_text {
+            conditions.push(format!("messages_fts MATCH ?{param_idx}"));
+            param_values.push(Box::new(qt.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref src) = filter.source {
+            conditions.push(format!("s.source = ?{param_idx}"));
+            param_values.push(Box::new(src.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref role) = filter.role {
+            conditions.push(format!("m.role = ?{param_idx}"));
+            param_values.push(Box::new(role.clone()));
+            param_idx += 1;
+        }
+        if let Some(after) = filter.after {
+            conditions.push(format!("m.timestamp >= ?{param_idx}"));
+            param_values.push(Box::new(after));
+            param_idx += 1;
+        }
+        if let Some(before) = filter.before {
+            conditions.push(format!("m.timestamp <= ?{param_idx}"));
+            param_values.push(Box::new(before));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let order = if use_fts {
+            "ORDER BY messages_fts.rank"
+        } else {
+            "ORDER BY m.timestamp DESC"
+        };
+        let sql = format!("{base_select}{where_clause} {order} LIMIT ?{param_idx}");
+        param_values.push(Box::new(filter.limit as i64));
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
             Ok(SearchResult {
                 message_id: r.get(0)?,
                 session_id: r.get(1)?,
                 role: r.get(2)?,
                 content: r.get(3)?,
-                timestamp: r.get(4)?,
-                session_source: r.get(5)?,
-                session_title: r.get(6)?,
+                snippet: r.get(4)?,
+                context_before: None,
+                context_after: None,
+                timestamp: r.get(5)?,
+                session_source: r.get(6)?,
+                session_title: r.get(7)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+
+        let mut results: Vec<SearchResult> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Populate context_before and context_after (1 message each).
+        for result in &mut results {
+            result.context_before = self
+                .conn
+                .query_row(
+                    "SELECT content FROM messages WHERE session_id = ?1 AND timestamp < ?2 \
+                     ORDER BY timestamp DESC LIMIT 1",
+                    params![result.session_id, result.timestamp],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            result.context_after = self
+                .conn
+                .query_row(
+                    "SELECT content FROM messages WHERE session_id = ?1 AND timestamp > ?2 \
+                     ORDER BY timestamp ASC LIMIT 1",
+                    params![result.session_id, result.timestamp],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+        }
+
+        Ok(results)
     }
 
     // -----------------------------------------------------------------------
@@ -516,6 +666,33 @@ impl StateStore {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FTS5 sanitization
+// ---------------------------------------------------------------------------
+
+/// Strip FTS5 special operators from user input to prevent query parse errors.
+/// Pass `raw: true` in [`SearchFilter`] to bypass this.
+pub fn sanitize_fts_query(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '*' | '^' | '"' | '(' | ')' | '-' | '{' | '}' | ':' => result.push(' '),
+            _ => result.push(ch),
+        }
+    }
+    // Remove FTS5 boolean keywords
+    let result = result
+        .split_whitespace()
+        .filter(|w| !matches!(w.to_uppercase().as_str(), "AND" | "OR" | "NOT" | "NEAR"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if result.trim().is_empty() {
+        String::new()
+    } else {
+        result
     }
 }
 
