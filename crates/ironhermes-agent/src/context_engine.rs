@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use ironhermes_core::ChatMessage;
+use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub struct LocalPruningEngine {
     protect_first_n: usize,
     protect_last_tokens: usize,
     tool_pair_shift_tokens: usize,
+    hook_registry: Option<Arc<HookRegistry>>,
+    session_id: Option<String>,
 }
 
 impl LocalPruningEngine {
@@ -66,6 +70,8 @@ impl LocalPruningEngine {
             protect_first_n: 3,
             protect_last_tokens,
             tool_pair_shift_tokens: 500,
+            hook_registry: None,
+            session_id: None,
         }
     }
 
@@ -80,6 +86,18 @@ impl LocalPruningEngine {
         self.tool_pair_shift_tokens = n;
         self
     }
+
+    /// Phase 18 D-20: attach a hook registry + session id so `compress` fires
+    /// `context:pre_compress` and awaits handler completion before pruning.
+    pub fn with_hooks(
+        mut self,
+        registry: Arc<HookRegistry>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.hook_registry = Some(registry);
+        self.session_id = Some(session_id.into());
+        self
+    }
 }
 
 #[async_trait]
@@ -90,6 +108,31 @@ impl ContextEngine for LocalPruningEngine {
         _stats: ContextStats,
     ) -> Result<CompressionOutcome, ContextError> {
         let before = crate::context_compressor::estimate_messages_tokens(messages);
+
+        // Phase 18 D-20: fire context:pre_compress BEFORE destructive pruning and
+        // await async handler completion (e.g. memory flush) via fire_awaitable.
+        // Threshold gate: only emit when we would actually compress.
+        let would_compress =
+            (before as f32 / self.context_length.max(1) as f32) >= self.threshold;
+        if would_compress {
+            if let (Some(reg), Some(sid)) = (&self.hook_registry, &self.session_id) {
+                let event = HookEvent::new(
+                    "req-compress",
+                    HookEventKind::ContextPreCompress {
+                        session_id: sid.clone(),
+                        estimated_tokens: before,
+                        threshold: self.threshold,
+                        mode: "hard".into(),
+                        pruned_range: None,
+                    },
+                );
+                reg.fire_awaitable(event).await;
+            } else {
+                tracing::debug!(
+                    "no pre_compress handler registered, proceeding without memory flush"
+                );
+            }
+        }
 
         // Phase 18 D-15: apply adaptive shift for pairs straddling the protect boundary
         // BEFORE delegating to ContextCompressor, so the underlying pruner never splits
@@ -254,6 +297,93 @@ mod tests {
         let _ = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
         // Pair still co-located and invariant holds.
         assert!(crate::tool_pair::check_orphan_invariant(&msgs).is_ok());
+    }
+
+    // ── Phase 18 Plan 04: pre_compress hook emission ────────────────────────
+
+    #[tokio::test]
+    async fn pre_compress_hook_event() {
+        use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry, HooksConfig};
+        use std::sync::Mutex as StdMutex;
+
+        let mut registry = HookRegistry::new(HooksConfig::default());
+        let captured: Arc<StdMutex<Vec<HookEvent>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        registry.add_async_listener(Arc::new(move |event: HookEvent| {
+            let cap = Arc::clone(&cap);
+            Box::pin(async move {
+                cap.lock().unwrap().push(event);
+            })
+        }));
+        let reg = Arc::new(registry);
+
+        let engine = LocalPruningEngine::new(1000, 0.5)
+            .with_hooks(Arc::clone(&reg), "sess-hook-1");
+
+        let mut msgs = build_large_message_vec(30);
+        let _ = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
+
+        let events = captured.lock().unwrap();
+        let pre: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.kind, HookEventKind::ContextPreCompress { .. }))
+            .collect();
+        assert_eq!(pre.len(), 1, "exactly one ContextPreCompress event");
+        if let HookEventKind::ContextPreCompress {
+            session_id, mode, ..
+        } = &pre[0].kind
+        {
+            assert_eq!(session_id, "sess-hook-1");
+            assert_eq!(mode, "hard");
+        } else {
+            panic!("expected ContextPreCompress");
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_flush_before_prune() {
+        use ironhermes_hooks::{HookEvent, HookRegistry, HooksConfig};
+        use std::sync::Mutex as StdMutex;
+
+        // Shared ordered log: handler pushes "flushed" first, then the engine
+        // (instrumented below) pushes "pruned" after the delegated compress.
+        let log: Arc<StdMutex<Vec<&'static str>>> = Arc::new(StdMutex::new(Vec::new()));
+
+        let mut registry = HookRegistry::new(HooksConfig::default());
+        let log_h = Arc::clone(&log);
+        registry.add_async_listener(Arc::new(move |_event: HookEvent| {
+            let log_h = Arc::clone(&log_h);
+            Box::pin(async move {
+                // Simulate work so we can distinguish ordering even without sleeps.
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                log_h.lock().unwrap().push("flushed");
+            })
+        }));
+        let reg = Arc::new(registry);
+
+        let engine = LocalPruningEngine::new(1000, 0.5)
+            .with_hooks(Arc::clone(&reg), "sess-order");
+
+        let mut msgs = build_large_message_vec(30);
+        let _ = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
+        log.lock().unwrap().push("pruned");
+
+        let final_log = log.lock().unwrap().clone();
+        assert_eq!(
+            final_log,
+            vec!["flushed", "pruned"],
+            "handler must complete before compress returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_compress_no_hook_registered_proceeds() {
+        // No hook registry attached → compress should proceed without error.
+        let engine = LocalPruningEngine::new(1000, 0.5);
+        let mut msgs = build_large_message_vec(30);
+        let out = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
+        assert!(out.compressed || !out.compressed); // just assert Ok was returned
     }
 
     #[test]

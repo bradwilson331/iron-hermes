@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use ironhermes_core::{ChatMessage, MessageContent, Role};
+use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use std::sync::Arc;
 
 use crate::any_client::AnyClient;
@@ -105,6 +106,8 @@ pub struct SummarizingEngine {
     tool_pair_shift_tokens: usize,
     summarizer: Arc<dyn SummarizationClient>,
     fallback: LocalPruningEngine,
+    hook_registry: Option<Arc<HookRegistry>>,
+    session_id: Option<String>,
 }
 
 impl SummarizingEngine {
@@ -122,7 +125,21 @@ impl SummarizingEngine {
             tool_pair_shift_tokens: 500,
             summarizer,
             fallback: LocalPruningEngine::new(context_length, threshold),
+            hook_registry: None,
+            session_id: None,
         }
+    }
+
+    /// Phase 18 D-20: attach a hook registry + session id so `compress` fires
+    /// `context:pre_compress` and awaits handler completion before pruning.
+    pub fn with_hooks(
+        mut self,
+        registry: Arc<HookRegistry>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.hook_registry = Some(registry);
+        self.session_id = Some(session_id.into());
+        self
     }
 
     pub fn with_protect(mut self, first_n: usize, last_tokens: usize) -> Self {
@@ -194,6 +211,25 @@ impl ContextEngine for SummarizingEngine {
         let pct = before as f32 / self.context_length.max(1) as f32;
         if pct < self.threshold {
             return Ok(CompressionOutcome::default());
+        }
+
+        // Phase 18 D-20: fire context:pre_compress BEFORE destructive pruning.
+        if let (Some(reg), Some(sid)) = (&self.hook_registry, &self.session_id) {
+            let event = HookEvent::new(
+                "req-compress",
+                HookEventKind::ContextPreCompress {
+                    session_id: sid.clone(),
+                    estimated_tokens: before,
+                    threshold: self.threshold,
+                    mode: "soft".into(),
+                    pruned_range: None,
+                },
+            );
+            reg.fire_awaitable(event).await;
+        } else {
+            tracing::debug!(
+                "no pre_compress handler registered, proceeding without memory flush"
+            );
         }
 
         // Apply adaptive shift pre-prune (D-15) — same as LocalPruningEngine.
