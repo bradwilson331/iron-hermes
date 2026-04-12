@@ -32,8 +32,8 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [x] **SESS-05**: FTS5 full-text search supports keyword, phrase, boolean, and prefix queries with automatic input sanitization
 - [x] **SESS-06**: Search results include FTS5-generated snippets with match markers and 1-message context window
 - [x] **SESS-07**: Search supports filtering by source (cli/telegram/etc.), role, and date range
-- [ ] **SESS-08**: Sessions can be exported (single or bulk with source filter) as structured data
-- [ ] **SESS-09**: Old ended sessions can be pruned by age and optional source filter
+- [x] **SESS-08**: Sessions can be exported (single or bulk with source filter) as structured data
+- [x] **SESS-09**: Old ended sessions can be pruned by age and optional source filter
 - [x] **SESS-10**: Schema migrations run sequentially on init with idempotent ALTER TABLE operations
 - [x] **SESS-11**: Write contention handled with short SQLite timeout, application-level retry with random jitter, and periodic WAL checkpoints
 
@@ -202,8 +202,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SESS-05 | Phase 13 | Complete |
 | SESS-06 | Phase 13 | Complete |
 | SESS-07 | Phase 13 | Complete |
-| SESS-08 | Phase 13 | Pending |
-| SESS-09 | Phase 13 | Pending |
+| SESS-08 | Phase 13 | Complete |
+| SESS-09 | Phase 13 | Complete |
 | SESS-10 | Phase 13 | Complete |
 | SESS-11 | Phase 13 | Complete |
 | PRMT-01 | Phase 15 | Pending |
