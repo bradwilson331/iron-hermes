@@ -35,9 +35,26 @@ Restructure the system prompt into an ordered slot-based assembly using a `Promp
 - **D-13:** Slot 7 (PlatformHints): Platform-specific formatting guidance (cli/telegram/discord/slack). Already implemented in current PromptBuilder — moves from current position to ephemeral slot 7.
 - **D-14:** Slot 2 (ToolGuidance): Includes model identity and provider context (model name, provider name, known context window size). Folds the "provider block" concept into tool guidance.
 
+### Subagent prompt building
+- **D-15:** Subagents get Identity (DEFAULT_AGENT_IDENTITY) + ToolGuidance only — slots 3-8 are skipped entirely. Subagents know nothing from the parent conversation; their only context comes from the goal and context fields passed via delegate_task. No SOUL.md, no memory, no skills, no project context, no personality overlay.
+- **D-16:** Blocked tools for subagents: delegation, clarify, memory, send_message, execute_code. This is already implemented in Phase 9 — PromptBuilder just needs to respect skip_context_files to skip slots 3-8.
+
+### Config system_message
+- **D-17:** No separate `agent.system_message` config key. hermes-agent uses SOUL.md for durable identity and AGENTS.md/project context files for project instructions. There is no third config-driven instruction slot. The SessionOverlay slot (8) is exclusively for /personality overlays.
+
+### Additional context file details (from hermes-agent reference)
+- **D-18:** `HERMES.md` is also a valid context file name alongside `.hermes.md` — add to the priority chain candidates.
+- **D-19:** `.cursor/rules/*.mdc` rule modules are supported in addition to `.cursorrules`.
+- **D-20:** Subdirectory discovery truncation cap is **8,000 chars** per file (not 20,000 like startup context files).
+- **D-21:** Context files assembled under a `# Project Context` header. SOUL.md content inserted directly without wrapper text (already captured in D-11 from Phase 14, confirmed here).
+
+### Build API migration
+- **D-22:** Add `build_split() -> (String, String)` as the new primary method returning `(durable, ephemeral)`.
+- **D-23:** Refactor existing `build() -> String` to call `build_split()` internally and join the two parts. No breaking change — `build()` remains as a convenience method for callers that don't need the split.
+- **D-24:** Agent loop checks if the LLM adapter supports multi-block system prompts; if so, passes the split parts separately. Otherwise, concatenates via `build()`. This prepares for Phase 16's cache_control breakpoint placement.
+
 ### Claude's Discretion
 - Exact text content of each of the 14 built-in personality presets
-- How PromptBuilder migration is structured (incremental refactor of current `build()` vs clean rewrite)
 - Whether PromptSlot::UserMessage (slot 9) is populated by PromptBuilder or by callers
 - Internal API for populating individual slots (setter methods vs builder pattern)
 - How /personality command integrates with the slash command system (Phase 20 scope, but the overlay mechanism is Phase 15)
@@ -54,7 +71,11 @@ Restructure the system prompt into an ordered slot-based assembly using a `Promp
 - `.planning/REQUIREMENTS.md` — PRMT-01 (layer ordering — note: user overrode to 9-slot model), PRMT-02 (cached/ephemeral separation), PRMT-03 (SOUL.md from HERMES_HOME), PRMT-04 (SOUL.md security scan + 20K cap), PRMT-05 (skip_context_files for subagents), PRMT-06 (/personality session overlay), PRMT-07 (built-in + custom presets), MEM-06 (frozen memory snapshots)
 
 ### hermes-agent architecture (user-provided during discussion)
-- User provided hermes-agent personality/prompt documentation during discussion. Key reference: 9-slot PromptSlot enum (Identity, ToolGuidance, Memory, Skills, ContextFiles | CACHE BREAK | Timestamp, PlatformHints, SessionOverlay, UserMessage). 14 built-in personalities. Custom presets in `agent.personalities` config namespace. SOUL.md injected raw as slot 1, no wrapper.
+- **Prompt stack & PromptSlot enum:** 9-slot ordering (Identity, ToolGuidance, Memory, Skills, ContextFiles | CACHE BREAK | Timestamp, PlatformHints, SessionOverlay, UserMessage). Cache breakpoint after slot 5. `build_split()` returns `(durable, ephemeral)`, `build()` joins them.
+- **Personality system:** 14 built-in presets (helpful, concise, technical, creative, teacher, kawaii, catgirl, pirate, shakespeare, surfer, noir, uwu, philosopher, hype). Custom presets in `agent.personalities` config namespace. /personality is session-level overlay in ephemeral slot 8.
+- **SOUL.md:** Injected raw as slot 1, no wrapper. For durable identity/voice only. Hermes seeds a default SOUL.md if absent. Security scanned + truncated at 20K chars.
+- **Context files:** Priority chain .hermes.md/HERMES.md > AGENTS.md > CLAUDE.md > .cursorrules > .cursor/rules/*.mdc. Subdirectory discovery truncation at 8,000 chars. Assembled under `# Project Context` header.
+- **Subagent delegation:** Subagents get DEFAULT_AGENT_IDENTITY + ToolGuidance only. Fresh conversation, zero parent context. Blocked tools: delegation, clarify, memory, send_message, execute_code. Max concurrency 3, depth limit 2.
 
 ### Existing implementation (primary code references)
 - `crates/ironhermes-agent/src/prompt_builder.rs` — Current PromptBuilder with `build()` method assembling identity, platform hint, tool guidance, project context, AGENTS.md, skills catalog, memory snapshots. Needs restructuring to PromptSlot/BTreeMap pattern.

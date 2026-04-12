@@ -5,7 +5,7 @@
 
 **Date:** 2026-04-12
 **Phase:** 15-10-layer-prompt-assembly
-**Areas discussed:** Personality overlays, Layer content details, Cached vs ephemeral split
+**Areas discussed:** Personality overlays, Layer content details, Cached vs ephemeral split, Subagent prompts, Config system_message, Build API migration
 
 ---
 
@@ -89,10 +89,53 @@
 
 ---
 
+## Subagent prompts (Round 2)
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Identity + ToolGuidance only | Subagents get DEFAULT_AGENT_IDENTITY + tool guidance. Minimal focused prompt. | ✓ |
+| Identity + ToolGuidance + Memory | Also include frozen memory snapshot. | |
+| All durable except ContextFiles | Identity, ToolGuidance, Memory, Skills. | |
+| You decide | Claude's discretion | |
+
+**User's choice:** Identity + ToolGuidance only (confirmed by hermes-agent delegation docs)
+**Notes:** User provided comprehensive hermes-agent subagent documentation. Subagents know nothing from parent conversation — fresh context from goal/context fields only. Blocked tools: delegation, clarify, memory, send_message, execute_code. Max concurrency 3, depth limit 2.
+
+---
+
+## Config system_message (Round 2)
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Yes, in SessionOverlay slot | agent.system_message in config.yaml for persistent custom instructions | |
+| No, use SOUL.md instead | Custom instructions belong in SOUL.md or AGENTS.md | ✓ |
+| You decide | Claude's discretion | |
+
+**User's choice:** No separate system_message config (confirmed by hermes-agent context file docs)
+**Notes:** User provided hermes-agent context file documentation. No `agent.system_message` key exists in hermes-agent. SOUL.md is for identity, AGENTS.md for project instructions. Also confirmed: HERMES.md is a valid context file name, .cursor/rules/*.mdc supported, subdirectory truncation at 8,000 chars.
+
+---
+
+## Build API migration (Round 2)
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Clean break | Change build() to return (String, String). Update all callers. | |
+| Struct return type | Return SystemPrompt struct with .durable/.ephemeral/.combined() | |
+| You decide | Claude's discretion | |
+
+**User's choice:** User provided migration checklist from hermes-agent reference:
+1. Add `build_split() -> (String, String)` as new primary method
+2. Refactor `build() -> String` to call `build_split()` and join (backwards-compatible)
+3. Agent loop checks if LLM adapter supports multi-block system prompts; if so, passes split parts separately
+
+**Notes:** No breaking change — build() remains as convenience. build_split() is the canonical new method.
+
+---
+
 ## Claude's Discretion
 
 - Exact text content of each of the 14 built-in personality presets
-- PromptBuilder migration strategy (incremental vs clean rewrite)
 - Whether PromptSlot::UserMessage is populated by PromptBuilder or callers
 - Internal API for populating individual slots
 - Personality preset loading timing (eager vs lazy)
