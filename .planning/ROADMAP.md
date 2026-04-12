@@ -112,7 +112,10 @@ Plans:
   2. As the agent navigates into subdirectories, new context files are discovered and injected into tool results (each directory checked at most once, up to 5 parent directories)
   3. All context files are security scanned for injection patterns; files over 20,000 characters are truncated using the 70/20 head/tail ratio with a truncation marker
   4. .hermes.md YAML frontmatter is stripped before injection
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 14-01-PLAN.md — ContextLoader module + PromptBuilder priority chain, git-root walk, frontmatter stripping, skip_context_files
+- [ ] 14-02-PLAN.md — SubdirDiscovery module + AgentLoop wiring for progressive subdirectory context injection
 
 ### Phase 15: 10-Layer Prompt Assembly
 **Goal**: The system prompt is assembled in 10 ordered layers matching hermes-agent, with frozen memory snapshots and session-level personality overlays
@@ -244,7 +247,7 @@ Plans:
 | 11. Memory Provider Trait | v2.0 | 2/2 | Complete    | 2026-04-11 |
 | 12. Provider Resolution | v2.0 | 4/4 | Complete   | 2026-04-11 |
 | 13. Session Storage | v2.0 | 3/3 | Complete   | 2026-04-12 |
-| 14. Context Files & SOUL.md | v2.0 | 0/TBD | Not started | - |
+| 14. Context Files & SOUL.md | v2.0 | 0/2 | Planning complete | - |
 | 15. 10-Layer Prompt Assembly | v2.0 | 0/TBD | Not started | - |
 | 16. Prompt Caching | v2.0 | 0/TBD | Not started | - |
 | 17. Memory Tools & External Providers | v2.0 | 0/TBD | Not started | - |
