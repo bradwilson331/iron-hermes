@@ -293,6 +293,36 @@ impl PromptBuilder {
             }
         }
 
+        // D-19: .cursor/rules/*.mdc as final fallback (glob expansion doesn't fit candidates array).
+        // Security: scan_context_content() applied to each .mdc file. Per T-15-06.
+        let mdc_dir = cwd.join(".cursor").join("rules");
+        if mdc_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&mdc_dir) {
+                let mut mdc_parts: Vec<String> = Vec::new();
+                let mut entry_paths: Vec<std::path::PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("mdc"))
+                    .collect();
+                // Sort for deterministic ordering
+                entry_paths.sort();
+                for path in entry_paths {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if !content.trim().is_empty() {
+                            let fname = path.file_name().unwrap().to_string_lossy().into_owned();
+                            let scanned = scan_context_content(&content, &fname);
+                            let truncated = truncate_content(&scanned, &fname, CONTEXT_FILE_MAX_CHARS);
+                            debug!("Loaded .cursor/rules/{}", fname);
+                            mdc_parts.push(truncated);
+                        }
+                    }
+                }
+                if !mdc_parts.is_empty() {
+                    return Some(format!("## .cursor/rules\n\n{}", mdc_parts.join("\n\n")));
+                }
+            }
+        }
+
         None
     }
 

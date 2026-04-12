@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 /// Case-sensitive priority chain for project context files.
-/// Order: .hermes.md > AGENTS.md > CLAUDE.md > .cursorrules
-/// No lowercase variants, no HERMES.md. Per D-08.
-pub const CONTEXT_CANDIDATES: &[&str] = &[".hermes.md", "AGENTS.md", "CLAUDE.md", ".cursorrules"];
+/// Order: .hermes.md > HERMES.md > AGENTS.md > CLAUDE.md > .cursorrules
+/// HERMES.md goes immediately after .hermes.md (both hermes-specific). Per D-18.
+pub const CONTEXT_CANDIDATES: &[&str] = &[".hermes.md", "HERMES.md", "AGENTS.md", "CLAUDE.md", ".cursorrules"];
 
 /// Walk upward from `start` looking for a `.git` directory or file (supports worktrees).
 /// Stops at $HOME — does not traverse above it.
@@ -183,15 +183,22 @@ mod tests {
     #[test]
     fn test_context_candidates_case_sensitive() {
         assert!(CONTEXT_CANDIDATES.contains(&".hermes.md"));
+        assert!(CONTEXT_CANDIDATES.contains(&"HERMES.md"));
         assert!(CONTEXT_CANDIDATES.contains(&"AGENTS.md"));
         assert!(CONTEXT_CANDIDATES.contains(&"CLAUDE.md"));
         assert!(CONTEXT_CANDIDATES.contains(&".cursorrules"));
-        assert_eq!(CONTEXT_CANDIDATES.len(), 4);
+        assert_eq!(CONTEXT_CANDIDATES.len(), 5);
 
-        // Must NOT contain lowercase variants or HERMES.md
+        // Must NOT contain lowercase variants
         assert!(!CONTEXT_CANDIDATES.contains(&"agents.md"));
         assert!(!CONTEXT_CANDIDATES.contains(&"claude.md"));
-        assert!(!CONTEXT_CANDIDATES.contains(&"HERMES.md"));
         assert!(!CONTEXT_CANDIDATES.contains(&".HERMES.md"));
+    }
+
+    #[test]
+    fn test_hermes_md_in_candidates() {
+        // HERMES.md must be at index 1 (immediately after .hermes.md). Per D-18.
+        assert_eq!(CONTEXT_CANDIDATES[0], ".hermes.md");
+        assert_eq!(CONTEXT_CANDIDATES[1], "HERMES.md");
     }
 }
