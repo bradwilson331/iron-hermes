@@ -27,27 +27,28 @@ const TOOL_USE_GUIDANCE: &str = r#"When you need to use tools:
 5. Report results clearly to the user"#;
 
 /// Ordered slots for the 9-layer prompt assembly model.
-/// BTreeMap ordering uses the discriminant values (1-9).
-/// Slots 1-5 are durable (stable across turns, cacheable).
-/// Slots 6-9 are ephemeral (regenerated per turn).
-/// Per D-01, D-03, D-04.
+/// BTreeMap ordering uses the discriminant values (1-10).
+/// Slots 1-6 are durable (stable across turns, cacheable).
+/// Slots 7-10 are ephemeral (regenerated per turn).
+/// Phase 18 D-01/D-02 inserted SystemMessage at slot 2; downstream slots shifted by +1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PromptSlot {
     Identity       = 1,
-    ToolGuidance   = 2,
-    Memory         = 3,
-    Skills         = 4,
-    ContextFiles   = 5,
-    Timestamp      = 6,
-    PlatformHints  = 7,
-    SessionOverlay = 8,
-    UserMessage    = 9,
+    SystemMessage  = 2,
+    ToolGuidance   = 3,
+    Memory         = 4,
+    Skills         = 5,
+    ContextFiles   = 6,
+    Timestamp      = 7,
+    PlatformHints  = 8,
+    SessionOverlay = 9,
+    UserMessage    = 10,
 }
 
 impl PromptSlot {
-    /// Returns true for ephemeral slots (6-9) that are regenerated per turn.
-    /// Cache breakpoint is between slot 5 (ContextFiles) and slot 6 (Timestamp). Per D-04.
+    /// Returns true for ephemeral slots (>= Timestamp) that are regenerated per turn.
+    /// Cache breakpoint is between slot 6 (ContextFiles) and slot 7 (Timestamp). Per D-04.
     pub fn is_ephemeral(self) -> bool {
         self >= PromptSlot::Timestamp
     }
@@ -137,6 +138,23 @@ impl PromptBuilder {
     /// Set the skill registry for catalog injection into the system prompt.
     pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
         self.skill_registry = Some(registry);
+    }
+
+    /// Phase 18 D-01/D-02: populate the SystemMessage slot from `config.agent.system_message`.
+    /// Empty input is ignored (slot omitted). Content is security-scanned and capped at 20K chars.
+    pub fn with_system_message(mut self, msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        if msg.trim().is_empty() {
+            return self;
+        }
+        let scanned = scan_context_content(&msg, "agent.system_message");
+        if scanned.starts_with("[BLOCKED:") {
+            debug!("agent.system_message blocked by security scan, slot omitted");
+            return self;
+        }
+        let capped: String = scanned.chars().take(20_000).collect();
+        self.set_slot(PromptSlot::SystemMessage, capped);
+        self
     }
 
     /// Insert a slot only if content is non-empty after trimming.
@@ -377,8 +395,8 @@ impl PromptBuilder {
     }
 
     /// Build the split (durable, ephemeral) prompt parts.
-    /// Durable = slots 1-5; Ephemeral = slots 6-9 (minus UserMessage slot 9).
-    /// Per D-05, D-22.
+    /// Durable = slots <= ContextFiles; Ephemeral = slots >= Timestamp (minus UserMessage).
+    /// Per D-05, D-22 (Phase 15) and D-01/D-02 (Phase 18).
     pub fn build_split(&self) -> (String, String) {
         let mut slots = self.slots.clone();
 
@@ -434,7 +452,7 @@ impl PromptBuilder {
 
         for (slot, content) in &slots {
             if *slot == PromptSlot::UserMessage {
-                continue; // slot 9 not managed by PromptBuilder
+                continue; // UserMessage slot not managed by PromptBuilder
             }
             if slot.is_ephemeral() {
                 ephemeral.push(content.clone());
@@ -1101,5 +1119,53 @@ mod tests {
             !combined.contains("Active personality:"),
             "build() must NOT contain 'Active personality:' when no overlay set: {combined}"
         );
+    }
+
+    // ── Phase 18 Plan 07: SystemMessage slot tests ───────────────────────────
+
+    #[test]
+    fn prompt_slot_system_message() {
+        assert_eq!(PromptSlot::SystemMessage as u8, 2);
+        assert_eq!(PromptSlot::ToolGuidance as u8, 3);
+        assert_eq!(PromptSlot::ContextFiles as u8, 6);
+        assert_eq!(PromptSlot::UserMessage as u8, 10);
+    }
+
+    #[test]
+    fn is_ephemeral_boundary_updated() {
+        assert!(!PromptSlot::Identity.is_ephemeral());
+        assert!(!PromptSlot::SystemMessage.is_ephemeral());
+        assert!(!PromptSlot::ContextFiles.is_ephemeral());
+        assert!(PromptSlot::Timestamp.is_ephemeral());
+        assert!(PromptSlot::UserMessage.is_ephemeral());
+    }
+
+    #[test]
+    fn system_message_slot_populated_when_configured() {
+        let builder = PromptBuilder::new("test-model", "cli")
+            .skip_context_files()
+            .with_system_message("You are an admin agent");
+        let (durable, _ephemeral) = builder.build_split();
+        assert!(
+            durable.contains("You are an admin agent"),
+            "system_message must appear in durable segment: {durable}"
+        );
+        let id_pos = durable.find("IronHermes, an AI assistant").unwrap();
+        let sys_pos = durable.find("You are an admin agent").unwrap();
+        let tool_pos = durable.find("When you need to use tools").unwrap();
+        assert!(id_pos < sys_pos, "SystemMessage must follow Identity");
+        assert!(sys_pos < tool_pos, "SystemMessage must precede ToolGuidance");
+    }
+
+    #[test]
+    fn system_message_slot_omitted_when_empty() {
+        let builder = PromptBuilder::new("test-model", "cli")
+            .skip_context_files()
+            .with_system_message("");
+        assert!(!builder.slots.contains_key(&PromptSlot::SystemMessage));
+        let (durable, _ephemeral) = builder.build_split();
+        // No extra block beyond default identity + tool guidance
+        assert!(durable.contains("IronHermes, an AI assistant"));
+        assert!(durable.contains("When you need to use tools"));
     }
 }
