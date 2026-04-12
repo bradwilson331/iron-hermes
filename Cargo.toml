@@ -11,6 +11,7 @@ members = [
     "crates/ironhermes-exec",
     "providers/memory-sqlite",
     "providers/memory-grafeo",
+    "providers/memory-duckdb",
 ]
 resolver = "2"
 

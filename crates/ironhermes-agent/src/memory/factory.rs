@@ -28,6 +28,12 @@ pub fn build_memory_provider(
                  Rebuild with: cargo build --features memory-sqlite"
             );
         }
+        #[cfg(feature = "memory-duckdb")]
+        "duckdb" => {
+            let db_path = get_hermes_home().join("memory_duckdb.db");
+            let provider = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
+            Ok(Arc::new(Mutex::new(provider)))
+        }
         #[cfg(not(feature = "memory-duckdb"))]
         "duckdb" => {
             anyhow::bail!(
@@ -50,10 +56,11 @@ pub fn build_memory_provider(
         }
         other => {
             anyhow::bail!(
-                "Unknown memory provider '{}'. Available providers: file{}{}",
+                "Unknown memory provider '{}'. Available providers: file{}{}{}",
                 other,
                 if cfg!(feature = "memory-sqlite") { ", sqlite" } else { "" },
-                if cfg!(feature = "memory-grafeo") { ", grafeo" } else { "" }
+                if cfg!(feature = "memory-grafeo") { ", grafeo" } else { "" },
+                if cfg!(feature = "memory-duckdb") { ", duckdb" } else { "" }
             );
         }
     }
