@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Intelligence & Identity
 status: executing
-stopped_at: Completed 17-02-PLAN.md
-last_updated: "2026-04-12T18:12:05.603Z"
+stopped_at: Completed 17-03-PLAN.md
+last_updated: "2026-04-12T18:18:22.161Z"
 last_activity: 2026-04-12
 progress:
   total_phases: 13
   completed_phases: 5
   total_plans: 19
-  completed_plans: 16
-  percent: 84
+  completed_plans: 17
+  percent: 89
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 17 (memory-tools-external-providers) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-04-12
 
@@ -60,6 +60,7 @@ Progress: [██████████] 100%
 | Phase 13 P03 | 5 | 2 tasks | 4 files |
 | Phase 17 P01 | 8 | 2 tasks | 2 files |
 | Phase 17 P02 | 4 | 2 tasks | 3 files |
+| Phase 17 P03 | 4 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 17]: Error transformation in MemoryTool: blocked -> content_rejected envelope; capacity_exceeded -> D-15 envelope with suggestion field
 - [Phase 17]: Single-pass marker conversion for <<match>> -> >>>match<<< avoids chained String::replace double-substitution
 - [Phase 17]: session_search schema only added to LLM tool list when state_store is configured — acts as subagent safety gate
+- [Phase 17]: Mutex<Connection> wraps rusqlite::Connection to satisfy Sync bound on MemoryProvider trait
+- [Phase 17]: Factory in ironhermes-agent returns Arc<Mutex<dyn MemoryProvider>> vs Box<dyn> in core for MemoryTool compatibility
 
 ### Pending Todos
 
@@ -93,6 +96,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-12T18:12:05.601Z
-Stopped at: Completed 17-02-PLAN.md
+Last session: 2026-04-12T18:18:17.273Z
+Stopped at: Completed 17-03-PLAN.md
 Resume file: None

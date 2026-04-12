@@ -17,7 +17,7 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [ ] **MEM-06**: Memory snapshots are frozen at session start and injected into system prompt — mid-session writes persist to disk but do not mutate the active prompt
 - [ ] **MEM-07**: MemoryProvider trait defines lifecycle hooks (initialize, prefetch, sync_turn, on_session_end, shutdown) with Send + Sync + 'static bounds
 - [ ] **MEM-08**: Built-in file-based MemoryStore implements MemoryProvider as the default backend
-- [ ] **MEM-09**: SQLite memory provider stores facts with FTS5 search capability
+- [x] **MEM-09**: SQLite memory provider stores facts with FTS5 search capability
 - [ ] **MEM-10**: Grafeo graph database memory provider stores facts as nodes/edges with relationship queries (feature-gated build)
 - [ ] **MEM-11**: DuckDB memory provider stores facts with analytical query capability (feature-gated build, async bridge for !Send Connection)
 - [ ] **MEM-12**: Only one external memory provider can be active at a time — single-provider selection via config
@@ -190,7 +190,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MEM-06 | Phase 15 | Pending |
 | MEM-07 | Phase 11 | Pending |
 | MEM-08 | Phase 11 | Pending |
-| MEM-09 | Phase 17 | Pending |
+| MEM-09 | Phase 17 | Complete |
 | MEM-10 | Phase 17 | Pending |
 | MEM-11 | Phase 17 | Pending |
 | MEM-12 | Phase 11 | Pending |
