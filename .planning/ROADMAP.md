@@ -42,7 +42,7 @@
 
 - [x] **Phase 11: Memory Provider Trait** — Pluggable memory backend abstraction with lifecycle hooks (completed 2026-04-11)
 - [x] **Phase 12: Provider Resolution** — Unified runtime resolver for CLI, gateway, cron, and ACP with multi-API-mode support (completed 2026-04-11)
-- [ ] **Phase 13: Session Storage** — SQLite StateStore with WAL, FTS5 full-text search, lineage, and migrations
+- [x] **Phase 13: Session Storage** — SQLite StateStore with WAL, FTS5 full-text search, lineage, and migrations (completed 2026-04-12)
 - [ ] **Phase 14: Context Files & SOUL.md** — Priority-chain context file loading with SOUL.md identity and security scanning
 - [ ] **Phase 15: 10-Layer Prompt Assembly** — Full hermes-agent prompt builder with frozen memory snapshots and personality overlays
 - [ ] **Phase 16: Prompt Caching** — Anthropic cache_control breakpoints with system_and_3 strategy
@@ -97,11 +97,11 @@ Plans:
   3. Search results can be filtered by source (cli/telegram), role, and date range; old sessions can be exported or pruned by age
   4. Context compression triggering a session split records parent_session_id so lineage can be traced
   5. Schema migrations run sequentially on init; write contention is handled with retry+jitter and periodic WAL checkpoints
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 Plans:
 - [x] 13-01-PLAN.md — Extend StateStore: busy_timeout, retry, v7 migration, lineage, title lookup, SearchFilter, FTS5 snippet search, sanitization
 - [x] 13-02-PLAN.md — Add export/prune methods and comprehensive integration tests for SESS-01 through SESS-11
-- [ ] 13-03-PLAN.md — Wire write-through SessionStore, WAL checkpoint timer, CLI session persistence
+- [x] 13-03-PLAN.md — Wire write-through SessionStore, WAL checkpoint timer, CLI session persistence
 
 ### Phase 14: Context Files & SOUL.md
 **Goal**: The agent loads its project context and identity from the filesystem using hermes-agent's priority chain, with security scanning and truncation
@@ -243,7 +243,7 @@ Plans:
 | 10.1. Gateway active_skills Fix | v1.1 | 1/1 | Complete | 2026-04-11 |
 | 11. Memory Provider Trait | v2.0 | 2/2 | Complete    | 2026-04-11 |
 | 12. Provider Resolution | v2.0 | 4/4 | Complete   | 2026-04-11 |
-| 13. Session Storage | v2.0 | 2/3 | In Progress|  |
+| 13. Session Storage | v2.0 | 3/3 | Complete   | 2026-04-12 |
 | 14. Context Files & SOUL.md | v2.0 | 0/TBD | Not started | - |
 | 15. 10-Layer Prompt Assembly | v2.0 | 0/TBD | Not started | - |
 | 16. Prompt Caching | v2.0 | 0/TBD | Not started | - |

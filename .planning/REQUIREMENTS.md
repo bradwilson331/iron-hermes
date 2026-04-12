@@ -26,7 +26,7 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 ### Session Storage
 
 - [x] **SESS-01**: StateStore (SQLite + WAL mode) is wired as source of truth for session persistence across CLI, gateway, and ACP
-- [ ] **SESS-02**: In-memory SessionStore acts as write-through cache; on restart, sessions recover from SQLite
+- [x] **SESS-02**: In-memory SessionStore acts as write-through cache; on restart, sessions recover from SQLite
 - [x] **SESS-03**: Session lineage tracks parent_session_id chains when context compression triggers session splits
 - [x] **SESS-04**: User can name sessions with unique titles and resolve sessions by title
 - [x] **SESS-05**: FTS5 full-text search supports keyword, phrase, boolean, and prefix queries with automatic input sanitization
@@ -196,7 +196,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MEM-12 | Phase 11 | Pending |
 | MEM-13 | Phase 17 | Pending |
 | SESS-01 | Phase 13 | Complete |
-| SESS-02 | Phase 13 | Pending |
+| SESS-02 | Phase 13 | Complete |
 | SESS-03 | Phase 13 | Complete |
 | SESS-04 | Phase 13 | Complete |
 | SESS-05 | Phase 13 | Complete |
