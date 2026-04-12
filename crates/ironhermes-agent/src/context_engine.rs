@@ -4,6 +4,8 @@ use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use std::sync::Arc;
 use thiserror::Error;
 
+use crate::pressure_warning::PressureTracker;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionMode {
     Soft,
@@ -59,6 +61,7 @@ pub struct LocalPruningEngine {
     tool_pair_shift_tokens: usize,
     hook_registry: Option<Arc<HookRegistry>>,
     session_id: Option<String>,
+    pressure_tracker: Option<Arc<PressureTracker>>,
 }
 
 impl LocalPruningEngine {
@@ -72,6 +75,7 @@ impl LocalPruningEngine {
             tool_pair_shift_tokens: 500,
             hook_registry: None,
             session_id: None,
+            pressure_tracker: None,
         }
     }
 
@@ -98,6 +102,13 @@ impl LocalPruningEngine {
         self.session_id = Some(session_id.into());
         self
     }
+
+    /// Phase 18 D-23/D-24: attach a `PressureTracker` to enable three-channel
+    /// pressure warnings at 85% of the compression threshold.
+    pub fn with_pressure_tracker(mut self, tracker: Arc<PressureTracker>) -> Self {
+        self.pressure_tracker = Some(tracker);
+        self
+    }
 }
 
 #[async_trait]
@@ -108,6 +119,25 @@ impl ContextEngine for LocalPruningEngine {
         _stats: ContextStats,
     ) -> Result<CompressionOutcome, ContextError> {
         let before = crate::context_compressor::estimate_messages_tokens(messages);
+
+        // Phase 18 D-23/D-24: emit pressure warning at 85% of compression threshold.
+        let mut pressure_warning_fired = false;
+        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
+            let mode_str = match self.mode() {
+                CompressionMode::Soft => "soft",
+                CompressionMode::Hard => "hard",
+            };
+            pressure_warning_fired = tracker
+                .check_and_maybe_emit(
+                    sid,
+                    self.threshold,
+                    before,
+                    self.context_length,
+                    mode_str,
+                    self.hook_registry.as_deref(),
+                )
+                .await;
+        }
 
         // Phase 18 D-20: fire context:pre_compress BEFORE destructive pruning and
         // await async handler completion (e.g. memory flush) via fire_awaitable.
@@ -170,7 +200,7 @@ impl ContextEngine for LocalPruningEngine {
             compressed,
             tokens_freed: before.saturating_sub(after),
             new_summary: None,
-            pressure_warning_fired: false,
+            pressure_warning_fired,
         })
     }
 

@@ -19,6 +19,7 @@ use crate::context_engine::{
     CompressionMode, CompressionOutcome, ContextEngine, ContextError, ContextStats,
     LocalPruningEngine,
 };
+use crate::pressure_warning::PressureTracker;
 use crate::tool_pair;
 
 /// Sentinel prefix for the pinned history segment (D-17).
@@ -108,6 +109,7 @@ pub struct SummarizingEngine {
     fallback: LocalPruningEngine,
     hook_registry: Option<Arc<HookRegistry>>,
     session_id: Option<String>,
+    pressure_tracker: Option<Arc<PressureTracker>>,
 }
 
 impl SummarizingEngine {
@@ -127,6 +129,7 @@ impl SummarizingEngine {
             fallback: LocalPruningEngine::new(context_length, threshold),
             hook_registry: None,
             session_id: None,
+            pressure_tracker: None,
         }
     }
 
@@ -139,6 +142,13 @@ impl SummarizingEngine {
     ) -> Self {
         self.hook_registry = Some(registry);
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Phase 18 D-23/D-24: attach a `PressureTracker` to enable three-channel
+    /// pressure warnings at 85% of the compression threshold.
+    pub fn with_pressure_tracker(mut self, tracker: Arc<PressureTracker>) -> Self {
+        self.pressure_tracker = Some(tracker);
         self
     }
 
@@ -209,6 +219,26 @@ impl ContextEngine for SummarizingEngine {
 
         let before = estimate_messages_tokens(messages);
         let pct = before as f32 / self.context_length.max(1) as f32;
+
+        // Phase 18 D-23/D-24: emit pressure warning at 85% of compression threshold.
+        let mut pressure_warning_fired = false;
+        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
+            let mode_str = match self.mode() {
+                CompressionMode::Soft => "soft",
+                CompressionMode::Hard => "hard",
+            };
+            pressure_warning_fired = tracker
+                .check_and_maybe_emit(
+                    sid,
+                    self.threshold,
+                    before,
+                    self.context_length,
+                    mode_str,
+                    self.hook_registry.as_deref(),
+                )
+                .await;
+        }
+
         if pct < self.threshold {
             return Ok(CompressionOutcome::default());
         }
@@ -343,7 +373,7 @@ impl ContextEngine for SummarizingEngine {
             compressed: true,
             tokens_freed: before.saturating_sub(after),
             new_summary: Some(new_summary),
-            pressure_warning_fired: false,
+            pressure_warning_fired,
         })
     }
 

@@ -1,31 +1,49 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-12T23:03:16.990Z",
-  "phase": "18",
-  "phase_name": "context-compression",
-  "phase_dir": ".planning/phases/18-context-compression",
-  "plan": "18-05",
-  "task": 1,
-  "total_tasks": 1,
+  "timestamp": "2026-04-03T02:52:35.978Z",
+  "phase": "02",
+  "phase_name": "telegram-gateway",
+  "phase_dir": ".planning/phases/02-telegram-gateway",
+  "plan": 5,
+  "task": 2,
+  "total_tasks": 2,
   "status": "paused",
   "completed_tasks": [
-    {"id": "18-01", "name": "ContextEngine trait + LocalPruningEngine + Phase 18 config keys", "status": "done", "commit": "a9e7570"},
-    {"id": "18-07", "name": "PromptSlot::SystemMessage = 2 durable slot", "status": "done", "commit": "e902706"},
-    {"id": "18-02", "name": "Tool-pair atomicity + orphan invariant", "status": "done", "commit": "e9514fe"},
-    {"id": "18-03", "name": "SummarizingEngine with pinned [CONTEXT HISTORY]", "status": "done", "commit": "9618d54"},
-    {"id": "18-04", "name": "Awaitable hooks + memory flush handler", "status": "done", "commit": "78f870e"}
+    {"id": 1, "plan": "02-01", "name": "Async foundation: tokio-util, config, trait redesign, TelegramAdapter", "status": "done", "commit": "49eeba0"},
+    {"id": 2, "plan": "02-02", "name": "StreamConsumer + BackoffState utility modules", "status": "done", "commit": "04caa6b"},
+    {"id": 3, "plan": "02-03", "name": "Core wiring: polling, dispatch, user queue, handler, runner", "status": "done", "commit": "03b3460"},
+    {"id": 4, "plan": "02-04", "name": "Slash commands and error recovery", "status": "done", "commit": "6c9197b"},
+    {"id": 5, "plan": "02-05", "name": "Multimodal input + gateway CLI subcommand", "status": "done", "commit": "26f8ac9"},
+    {"id": 6, "plan": "02-05-task2", "name": "End-to-end Telegram bot smoke test", "status": "in_progress", "progress": "Bot fully functional: receives messages, dispatches, runs agent loop with tool use, streams edits to Telegram. Two streaming completion bugs fixed this session. Needs human smoke test to confirm cursor removal works."}
   ],
   "remaining_tasks": [
-    {"id": "18-05", "wave": 4, "name": "Three-channel pressure warning (tracing + hook + system msg) at 85% of engine threshold, per-session cooldown", "status": "not_started"},
-    {"id": "18-06", "wave": 5, "name": "engine_factory + wire agent_loop (50%) and gateway handler (85%); aux-model routing fallback", "status": "not_started"}
+    {"id": 6, "name": "Human smoke test — verify streaming completes cleanly (cursor removed)", "status": "blocked"}
   ],
-  "blockers": [],
-  "human_actions_pending": [],
+  "blockers": [
+    {
+      "description": "Need human to run smoke test to confirm streaming completion fix works. Two bugs were fixed: (1) handler didn't drop agent before channels so cloned senders kept consumer alive, (2) SSE parser didn't exit on finish_reason — hung waiting for [DONE] that OpenRouter may never send.",
+      "type": "human_action",
+      "workaround": "Run RUST_LOG=debug cargo run -- gateway, send a message, verify cursor disappears after response completes"
+    }
+  ],
+  "human_actions_pending": [
+    {"action": "Run 'RUST_LOG=debug cargo run -- gateway', send a Telegram message, verify the cursor disappears when response finishes", "context": "Two streaming bugs were fixed — need to confirm the fix works end-to-end", "blocking": true}
+  ],
   "decisions": [
-    {"decision": "Backfilled SUMMARY.md for 18-01, 18-02, 18-07 from existing commits before running Wave 3", "rationale": "Prior runs paused after commits but before summary creation; plan-index treated plans as incomplete", "phase": "18"},
-    {"decision": "Ran Wave 3 sequentially, not in parallel", "rationale": "18-03 and 18-04 both modify context_engine.rs, summarizing_engine.rs, lib.rs — files_modified overlap requires sequential execution per safety net", "phase": "18"}
+    {"decision": "Keep hand-rolled Telegram client (no teloxide)", "rationale": "Already 90% complete, zero new deps", "phase": "02"},
+    {"decision": "CancellationToken over AtomicBool for shutdown", "rationale": "Cooperative shutdown propagates to all subtasks cleanly", "phase": "02"},
+    {"decision": "dispatch_future must run in tokio::select! with shutdown signal", "rationale": "Bug fix: was defined but only awaited after ctrl+c, so dispatch never ran", "phase": "02"},
+    {"decision": "Handler must use config.resolve_api_key() not config.model.api_key", "rationale": "Bug fix: env var resolution was bypassed, giving empty API key", "phase": "02"},
+    {"decision": "Default model updated to anthropic/claude-sonnet-4", "rationale": "Old versioned name was stale", "phase": "02"},
+    {"decision": "drop(agent) before drop(stream_tx) in handler", "rationale": "agent.run(&self) borrows — agent stays alive, its callback closures hold cloned channel senders, preventing consumer from receiving None", "phase": "02"},
+    {"decision": "SSE parser returns immediately on finish_reason", "rationale": "OpenRouter may not send [DONE] marker and keeps connection alive; finish_reason is authoritative signal that stream is complete", "phase": "02"},
+    {"decision": "60s chunk timeout on SSE byte_stream reads", "rationale": "Safety net — if stream stalls without sending finish_reason or closing, eventual timeout prevents indefinite hang", "phase": "02"},
+    {"decision": "Process usage before finish_reason in SSE parser", "rationale": "Some providers send usage in same chunk as finish_reason; early return on finish_reason would miss it otherwise", "phase": "02"}
   ],
-  "uncommitted_files": [],
-  "next_action": "Run /gsd-execute-phase 18 --wave 4 to ship plan 18-05 (pressure warning), then --wave 5 for 18-06 (engine_factory + wiring). Or /gsd-execute-phase 18 to complete both remaining waves plus phase verification.",
-  "context_notes": "Phase 18 context-compression. Waves 1-3 complete (5/7 plans). HEAD = 78f870e on develop. All tests green (130 agent + 36 hooks). Pre-existing clippy lints in ironhermes-core (3) are unrelated to Phase 18 — separate cleanup. Worktree recovery note from 18-03 executor: if `git reset --soft` to expected base leaves working-tree files missing, restore via `git checkout HEAD -- <paths>`."
+  "uncommitted_files": [
+    "crates/ironhermes-agent/src/client.rs",
+    "crates/ironhermes-gateway/src/handler.rs"
+  ],
+  "next_action": "Run RUST_LOG=debug cargo run -- gateway, send a message via Telegram, confirm the cursor disappears after the response completes. If it works, commit the fixes and mark Phase 02 complete. If it still hangs, add more debug logging around flush(true) in stream_consumer.rs to trace whether the final edit is actually sent.",
+  "context_notes": "All 5 plans are code-complete with 55 tests passing. The streaming hang was a two-layer bug. Layer 1: handler dropped channels but not the agent — since run(&self) borrows, the agent's callback closures held cloned senders alive, so the consumer channel never closed. Layer 2: SSE parser sent Done on finish_reason but continued looping waiting for [DONE] — OpenRouter keeps connections alive without [DONE], so byte_stream.next() hung forever, keeping tx alive, so the agent loop's rx.recv() also hung. Both are now fixed but untested."
 }

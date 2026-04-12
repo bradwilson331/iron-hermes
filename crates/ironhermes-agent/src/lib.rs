@@ -11,6 +11,7 @@ pub mod context_engine;
 pub mod tool_pair;
 pub mod summarizing_engine;
 pub mod memory_flush_handler;
+pub mod pressure_warning;
 pub mod subagent_runner;
 pub mod anthropic_client;
 pub mod any_client;
