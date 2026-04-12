@@ -35,6 +35,12 @@ pub fn build_memory_provider(
                  Rebuild with: cargo build --features memory-duckdb"
             );
         }
+        #[cfg(feature = "memory-grafeo")]
+        "grafeo" => {
+            let db_path = get_hermes_home().join("memory_graph");
+            let provider = memory_grafeo::GrafeoMemoryProvider::new(&db_path)?;
+            Ok(Arc::new(Mutex::new(provider)))
+        }
         #[cfg(not(feature = "memory-grafeo"))]
         "grafeo" => {
             anyhow::bail!(
@@ -44,9 +50,10 @@ pub fn build_memory_provider(
         }
         other => {
             anyhow::bail!(
-                "Unknown memory provider '{}'. Available providers: file{}",
+                "Unknown memory provider '{}'. Available providers: file{}{}",
                 other,
-                if cfg!(feature = "memory-sqlite") { ", sqlite" } else { "" }
+                if cfg!(feature = "memory-sqlite") { ", sqlite" } else { "" },
+                if cfg!(feature = "memory-grafeo") { ", grafeo" } else { "" }
             );
         }
     }

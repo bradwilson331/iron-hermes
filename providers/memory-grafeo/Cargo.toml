@@ -1,0 +1,19 @@
+[package]
+name = "memory-grafeo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Grafeo graph database memory provider for IronHermes"
+
+[dependencies]
+ironhermes-core = { path = "../../crates/ironhermes-core" }
+grafeo = "0.5"
+grafeo-common = "0.5"
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }
