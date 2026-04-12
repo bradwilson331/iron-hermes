@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
+use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -76,6 +77,9 @@ pub struct AgentLoop {
     /// Progressive subdirectory context discovery (CTX-03/CTX-04).
     /// When set, file-access tools trigger context file discovery.
     subdir_discovery: Option<Arc<std::sync::Mutex<SubdirDiscovery>>>,
+    /// Optional StateStore for session_search tool interception (D-07).
+    /// When set, session_search calls are handled directly without registry dispatch.
+    state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
 }
 
 impl AgentLoop {
@@ -96,6 +100,7 @@ impl AgentLoop {
             fallback_client: None,
             fallback_activated: false,
             subdir_discovery: None,
+            state_store: None,
         }
     }
 
@@ -118,6 +123,13 @@ impl AgentLoop {
     /// Set subdirectory discovery for progressive context injection (CTX-03/CTX-04).
     pub fn with_subdir_discovery(mut self, discovery: Arc<std::sync::Mutex<SubdirDiscovery>>) -> Self {
         self.subdir_discovery = Some(discovery);
+        self
+    }
+
+    /// Set the StateStore for session_search tool interception (D-07).
+    /// When set, session_search calls are intercepted before registry dispatch.
+    pub fn with_state_store(mut self, store: Arc<std::sync::Mutex<StateStore>>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -222,7 +234,12 @@ impl AgentLoop {
     /// - Max iterations are reached
     /// - An unrecoverable error occurs
     pub async fn run(&mut self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
-        let tool_schemas = self.registry.get_definitions(None);
+        let mut tool_schemas = self.registry.get_definitions(None);
+        // D-07: Add session_search schema when state_store is configured.
+        // Not added in subagent context (subagents should not search sessions).
+        if self.state_store.is_some() {
+            tool_schemas.push(crate::session_search::session_search_schema());
+        }
         let tools_option = if tool_schemas.is_empty() {
             None
         } else {
@@ -610,6 +627,28 @@ impl AgentLoop {
                     tool_name: name.to_string(),
                     args_preview: ironhermes_hooks::event::preview(args_str, 200),
                 });
+
+                // D-07: Intercept session_search before registry dispatch.
+                // StateStore uses sync rusqlite; wrap in spawn_blocking to avoid blocking tokio.
+                if name == "session_search" {
+                    if let Some(ref state) = self.state_store {
+                        let state_clone = state.clone();
+                        let args_clone = args.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            let store = state_clone.lock().unwrap();
+                            crate::session_search::handle_session_search(&args_clone, &store)
+                        })
+                        .await;
+                        return match result {
+                            Ok(s) => s,
+                            Err(e) => format!(
+                                r#"{{"error":"internal","reason":"{}"}}"#,
+                                e.to_string().replace('"', "'")
+                            ),
+                        };
+                    }
+                    return r#"{"error":"unavailable","reason":"state store not configured"}"#.to_string();
+                }
 
                 // Save path for subdirectory discovery before args is moved
                 let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
