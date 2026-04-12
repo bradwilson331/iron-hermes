@@ -1,49 +1,35 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-03T02:52:35.978Z",
-  "phase": "02",
-  "phase_name": "telegram-gateway",
-  "phase_dir": ".planning/phases/02-telegram-gateway",
-  "plan": 5,
-  "task": 2,
-  "total_tasks": 2,
+  "timestamp": "2026-04-12T00:00:00Z",
+  "phase": "18",
+  "phase_name": "context-compression",
+  "phase_dir": ".planning/phases/18-context-compression",
+  "plan": 3,
+  "task": 1,
+  "total_tasks": 1,
   "status": "paused",
   "completed_tasks": [
-    {"id": 1, "plan": "02-01", "name": "Async foundation: tokio-util, config, trait redesign, TelegramAdapter", "status": "done", "commit": "49eeba0"},
-    {"id": 2, "plan": "02-02", "name": "StreamConsumer + BackoffState utility modules", "status": "done", "commit": "04caa6b"},
-    {"id": 3, "plan": "02-03", "name": "Core wiring: polling, dispatch, user queue, handler, runner", "status": "done", "commit": "03b3460"},
-    {"id": 4, "plan": "02-04", "name": "Slash commands and error recovery", "status": "done", "commit": "6c9197b"},
-    {"id": 5, "plan": "02-05", "name": "Multimodal input + gateway CLI subcommand", "status": "done", "commit": "26f8ac9"},
-    {"id": 6, "plan": "02-05-task2", "name": "End-to-end Telegram bot smoke test", "status": "in_progress", "progress": "Bot fully functional: receives messages, dispatches, runs agent loop with tool use, streams edits to Telegram. Two streaming completion bugs fixed this session. Needs human smoke test to confirm cursor removal works."}
+    {"id": 1, "plan": "18-01", "name": "Task 1: ContextEngine trait + LocalPruningEngine", "status": "done", "commit": "5458dc0"},
+    {"id": 2, "plan": "18-01", "name": "Task 2: Phase 18 config keys + ContextCompressor setters", "status": "done", "commit": "a9e7570"},
+    {"id": 3, "plan": "18-07", "name": "Task 1: PromptSlot::SystemMessage insertion + shift", "status": "done", "commit": "e902706"},
+    {"id": 4, "plan": "18-02", "name": "Tasks 1+2: tool_pair module + LocalPruningEngine wiring", "status": "done", "commit": "e9514fe"}
   ],
   "remaining_tasks": [
-    {"id": 6, "name": "Human smoke test — verify streaming completes cleanly (cursor removed)", "status": "blocked"}
+    {"id": 5, "plan": "18-03", "name": "SummarizingEngine (aux-model summarization, HISTORY_SENTINEL)", "wave": 3, "depends_on": ["18-01", "18-02"]},
+    {"id": 6, "plan": "18-04", "name": "HookRegistry::fire_awaitable + ContextPreCompress hook + memory flush", "wave": 3, "depends_on": ["18-01"]},
+    {"id": 7, "plan": "18-05", "name": "PressureTracker (85%-of-threshold warning, cooldown)", "wave": 4, "depends_on": ["18-01", "18-04"]},
+    {"id": 8, "plan": "18-06", "name": "agent_loop + gateway handler wiring + engine_factory", "wave": 5, "depends_on": ["18-02", "18-03", "18-04", "18-05"]}
   ],
-  "blockers": [
-    {
-      "description": "Need human to run smoke test to confirm streaming completion fix works. Two bugs were fixed: (1) handler didn't drop agent before channels so cloned senders kept consumer alive, (2) SSE parser didn't exit on finish_reason — hung waiting for [DONE] that OpenRouter may never send.",
-      "type": "human_action",
-      "workaround": "Run RUST_LOG=debug cargo run -- gateway, send a message, verify cursor disappears after response completes"
-    }
-  ],
-  "human_actions_pending": [
-    {"action": "Run 'RUST_LOG=debug cargo run -- gateway', send a Telegram message, verify the cursor disappears when response finishes", "context": "Two streaming bugs were fixed — need to confirm the fix works end-to-end", "blocking": true}
-  ],
+  "blockers": [],
+  "human_actions_pending": [],
   "decisions": [
-    {"decision": "Keep hand-rolled Telegram client (no teloxide)", "rationale": "Already 90% complete, zero new deps", "phase": "02"},
-    {"decision": "CancellationToken over AtomicBool for shutdown", "rationale": "Cooperative shutdown propagates to all subtasks cleanly", "phase": "02"},
-    {"decision": "dispatch_future must run in tokio::select! with shutdown signal", "rationale": "Bug fix: was defined but only awaited after ctrl+c, so dispatch never ran", "phase": "02"},
-    {"decision": "Handler must use config.resolve_api_key() not config.model.api_key", "rationale": "Bug fix: env var resolution was bypassed, giving empty API key", "phase": "02"},
-    {"decision": "Default model updated to anthropic/claude-sonnet-4", "rationale": "Old versioned name was stale", "phase": "02"},
-    {"decision": "drop(agent) before drop(stream_tx) in handler", "rationale": "agent.run(&self) borrows — agent stays alive, its callback closures hold cloned channel senders, preventing consumer from receiving None", "phase": "02"},
-    {"decision": "SSE parser returns immediately on finish_reason", "rationale": "OpenRouter may not send [DONE] marker and keeps connection alive; finish_reason is authoritative signal that stream is complete", "phase": "02"},
-    {"decision": "60s chunk timeout on SSE byte_stream reads", "rationale": "Safety net — if stream stalls without sending finish_reason or closing, eventual timeout prevents indefinite hang", "phase": "02"},
-    {"decision": "Process usage before finish_reason in SSE parser", "rationale": "Some providers send usage in same chunk as finish_reason; early return on finish_reason would miss it otherwise", "phase": "02"}
+    {"decision": "Apply adaptive shift BEFORE ContextCompressor::compress, check orphan invariant AFTER", "rationale": "Keeps pairs intact through pruning; invariant catches any remaining break and returns ContextError::OrphanedToolPair per T-18-02", "phase": "18", "plan": "18-02"},
+    {"decision": "LocalPruningEngine gained with_tool_pair_shift(n) builder (default 500)", "rationale": "Plan 18-02 needs configurable D-15 threshold; defers Config wiring to Plan 18-06", "phase": "18", "plan": "18-02"},
+    {"decision": "PromptBuilder uses with_system_message(impl Into<String>) setter, not a Config reference", "rationale": "PromptBuilder does not hold Config today; callers pass config.agent.system_message.clone() at build time. Matches existing with_provider / with_context_length pattern", "phase": "18", "plan": "18-07"},
+    {"decision": "ChatMessage.role is Role enum (System/User/Assistant/Tool), not String", "rationale": "18-02 plan pseudocode used string comparison; tool_pair module uses Role variants instead. Note for 18-03 executor: use Role::* rather than role string", "phase": "18", "plan": "18-02"},
+    {"decision": "AgentConfig kept legacy context_compression: f64 field; added new compression_threshold: f32 alongside", "rationale": "Preserve backward compat with existing Phase 17 configs; Plan 18-06 will pick which field agent_loop reads", "phase": "18", "plan": "18-01"}
   ],
-  "uncommitted_files": [
-    "crates/ironhermes-agent/src/client.rs",
-    "crates/ironhermes-gateway/src/handler.rs"
-  ],
-  "next_action": "Run RUST_LOG=debug cargo run -- gateway, send a message via Telegram, confirm the cursor disappears after the response completes. If it works, commit the fixes and mark Phase 02 complete. If it still hangs, add more debug logging around flush(true) in stream_consumer.rs to trace whether the final edit is actually sent.",
-  "context_notes": "All 5 plans are code-complete with 55 tests passing. The streaming hang was a two-layer bug. Layer 1: handler dropped channels but not the agent — since run(&self) borrows, the agent's callback closures held cloned senders alive, so the consumer channel never closed. Layer 2: SSE parser sent Done on finish_reason but continued looping waiting for [DONE] — OpenRouter keeps connections alive without [DONE], so byte_stream.next() hung forever, keeping tx alive, so the agent loop's rx.recv() also hung. Both are now fixed but untested."
+  "uncommitted_files": [],
+  "next_action": "Resume with /gsd-execute-phase 18 --wave 3 to run Plans 18-03 (SummarizingEngine) and 18-04 (ContextPreCompress hook) in parallel. Both depend only on 18-01 / 18-02 which are complete.",
+  "context_notes": "Phase 18 Wave 1 and Wave 2 are complete (4 plans committed this session). Wave 3 has 2 parallel plans. ChatMessage uses Role enum not strings — correct the 18-02 plan pseudocode mental model when reading 18-03. ContextCompressor::compute_protect_start is the canonical boundary-math helper. LocalPruningEngine now runs adaptive-shift + orphan-invariant; engines added later should follow the same pattern. STATE.md still says phase 17 executing — update to 18 before or during next execute-phase run. Pre-existing clippy errors unrelated to Phase 18 exist in ProviderConfig (derivable_impls) and memory_store (manual_is_multiple_of); Phase 18 code itself is clippy-clean."
 }
