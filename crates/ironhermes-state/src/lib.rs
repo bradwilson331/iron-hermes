@@ -205,6 +205,13 @@ impl SearchFilter {
     }
 }
 
+/// JSON export envelope for a session and its messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionExport {
+    pub session: Session,
+    pub messages: Vec<StoredMessage>,
+}
+
 // ---------------------------------------------------------------------------
 // StateStore
 // ---------------------------------------------------------------------------
@@ -666,6 +673,69 @@ impl StateStore {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Export & Prune
+    // -----------------------------------------------------------------------
+
+    /// Export a single session with all its messages as a structured object.
+    pub fn export_session(&self, session_id: &str) -> Result<SessionExport> {
+        let session = self
+            .get_session(session_id)?
+            .ok_or_else(|| StateError::SessionNotFound(session_id.to_string()))?;
+        let messages = self.get_messages(session_id)?;
+        Ok(SessionExport { session, messages })
+    }
+
+    /// Export multiple sessions, optionally filtered by source.
+    /// Returns a Vec of SessionExport (each with session metadata + messages).
+    pub fn export_sessions(&self, source: Option<&str>) -> Result<Vec<SessionExport>> {
+        let sessions = self.list_sessions(source, usize::MAX)?;
+        let mut exports = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let messages = self.get_messages(&session.id)?;
+            exports.push(SessionExport { session, messages });
+        }
+        Ok(exports)
+    }
+
+    /// Delete ended sessions older than `older_than_days` and their messages.
+    /// Only prunes sessions where `ended_at IS NOT NULL`.
+    /// Returns the count of deleted sessions.
+    pub fn prune_sessions(&mut self, older_than_days: u32, source: Option<&str>) -> Result<usize> {
+        let cutoff = unix_now() - (older_than_days as f64 * 86400.0);
+
+        // Build the session selection subquery
+        let (session_sql, delete_sql) = if source.is_some() {
+            (
+                "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?1 AND source = ?2",
+                "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?1 AND source = ?2",
+            )
+        } else {
+            (
+                "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?1",
+                "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?1",
+            )
+        };
+
+        // Delete messages first (no CASCADE in schema)
+        let msg_sql = format!("DELETE FROM messages WHERE session_id IN ({session_sql})");
+        if let Some(src) = source {
+            self.conn.execute(&msg_sql, params![cutoff, src])?;
+        } else {
+            self.conn.execute(&msg_sql, params![cutoff])?;
+        }
+
+        // Delete sessions
+        let deleted = if let Some(src) = source {
+            self.conn.execute(delete_sql, params![cutoff, src])?
+        } else {
+            self.conn.execute(delete_sql, params![cutoff])?
+        };
+
+        debug!("pruned {deleted} ended session(s) older than {older_than_days} days");
+        Ok(deleted)
     }
 }
 
