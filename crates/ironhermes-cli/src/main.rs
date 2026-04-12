@@ -229,6 +229,13 @@ fn print_check(name: &str, ok: bool) {
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let (client, config, resolver) = build_client(cli)?;
+
+    // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
+    let mut state_store = ironhermes_state::StateStore::open_default()
+        .context("failed to open state.db for CLI")?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
+        .context("failed to create CLI session")?;
     let budget = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
@@ -259,7 +266,10 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     prompt_builder.set_skill_registry(skill_registry.clone());
     let system_msg = prompt_builder.build_system_message();
 
-    let messages = vec![system_msg, ChatMessage::user(prompt)];
+    let user_msg = ChatMessage::user(prompt);
+    state_store.add_message(&session_id, &user_msg)
+        .context("failed to persist user message")?;
+    let messages = vec![system_msg, user_msg];
 
     let mut agent = AgentLoop::new(client, Arc::new(registry), max_turns)
         .with_budget(budget)
@@ -282,6 +292,15 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let result = agent.run(messages).await?;
 
+    // Persist assistant response messages to SQLite
+    for msg in &result.messages {
+        if msg.role == ironhermes_core::Role::Assistant {
+            let _ = state_store.add_message(&session_id, msg);
+        }
+    }
+    state_store.end_session(&session_id, "completed")
+        .context("failed to end CLI session")?;
+
     // Ensure newline after streaming
     println!();
 
@@ -302,6 +321,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     print_banner();
 
     let (client, config, resolver) = build_client(cli)?;
+
+    // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
+    let mut state_store = ironhermes_state::StateStore::open_default()
+        .context("failed to open state.db for CLI")?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
+        .context("failed to create CLI session")?;
     let budget = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
@@ -370,10 +396,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
     // Handle initial message if provided
     if let Some(msg) = initial_message {
-        messages.push(ChatMessage::user(&msg));
+        let user_msg = ChatMessage::user(&msg);
+        let _ = state_store.add_message(&session_id, &user_msg);
+        messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
         let response = run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget).await?;
-        if let Some(text) = response {
+        // Persist assistant response
+        if let Some(ref text) = response {
+            let assistant_msg = ChatMessage::assistant(text);
+            let _ = state_store.add_message(&session_id, &assistant_msg);
             println!();
             println!("{} {}", "Hermes:".bold().cyan(), text);
         }
@@ -412,11 +443,16 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 }
 
                 let _ = rl.add_history_entry(&input);
-                messages.push(ChatMessage::user(&input));
+                let user_msg = ChatMessage::user(&input);
+                let _ = state_store.add_message(&session_id, &user_msg);
+                messages.push(user_msg);
 
                 let response =
                     run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget).await?;
-                if let Some(_text) = response {
+                // Persist assistant response
+                if let Some(ref text) = response {
+                    let assistant_msg = ChatMessage::assistant(text);
+                    let _ = state_store.add_message(&session_id, &assistant_msg);
                     // If we were streaming, just add a newline
                     println!();
                 }
@@ -435,6 +471,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             }
         }
     }
+
+    state_store.end_session(&session_id, "completed")
+        .context("failed to end CLI session")?;
 
     Ok(())
 }

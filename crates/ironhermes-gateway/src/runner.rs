@@ -23,6 +23,7 @@ pub struct GatewayRunner {
     config: Config,
     resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
+    state_store: Arc<Mutex<ironhermes_state::StateStore>>,
     tool_registry: Arc<ToolRegistry>,
     memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     job_store: Option<Arc<Mutex<JobStore>>>,
@@ -34,15 +35,16 @@ pub struct GatewayRunner {
 
 impl GatewayRunner {
     pub fn new(config: Config, resolver: ProviderResolver, tool_registry: Arc<ToolRegistry>) -> Self {
+        // Per D-03: all sources share a single state.db
+        // Per D-11: gateway uses its own Connection instance via StateStore::open_default()
+        let state_store = Arc::new(Mutex::new(
+            ironhermes_state::StateStore::open_default().expect("failed to open state.db for gateway")
+        ));
         Self {
             config,
             resolver,
-            // TODO(13-03 Task 2): wire StateStore::open_default() here
-            session_store: Arc::new(RwLock::new(SessionStore::new(
-                Arc::new(Mutex::new(
-                    ironhermes_state::StateStore::open_default().expect("failed to open state.db for gateway")
-                ))
-            ))),
+            session_store: Arc::new(RwLock::new(SessionStore::new(Arc::clone(&state_store)))),
+            state_store,
             tool_registry,
             memory_store: None,
             job_store: None,
@@ -367,7 +369,30 @@ impl GatewayRunner {
             }
         };
 
-        // --- 9. Session cleanup task ---
+        // --- 9a. WAL checkpoint timer (every 5 minutes, PASSIVE mode, non-blocking) ---
+        let wal_cancel = self.cancel.clone();
+        let state_wal = Arc::clone(&self.state_store);
+        join_set.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                tokio::select! {
+                    _ = wal_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let s = Arc::clone(&state_wal);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(store) = s.lock() {
+                                if let Err(e) = store.wal_checkpoint() {
+                                    warn!("WAL checkpoint failed: {e}");
+                                }
+                            }
+                        }).await;
+                    }
+                }
+            }
+        });
+
+        // --- 9b. Session cleanup task ---
         let cleanup_cancel = self.cancel.clone();
         let session_store_cleanup = self.session_store.clone();
         join_set.spawn(async move {
