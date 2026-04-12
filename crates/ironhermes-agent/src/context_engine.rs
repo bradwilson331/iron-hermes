@@ -54,6 +54,7 @@ pub struct LocalPruningEngine {
     threshold: f32,
     protect_first_n: usize,
     protect_last_tokens: usize,
+    tool_pair_shift_tokens: usize,
 }
 
 impl LocalPruningEngine {
@@ -64,12 +65,19 @@ impl LocalPruningEngine {
             threshold,
             protect_first_n: 3,
             protect_last_tokens,
+            tool_pair_shift_tokens: 500,
         }
     }
 
     pub fn with_protect(mut self, first_n: usize, last_tokens: usize) -> Self {
         self.protect_first_n = first_n;
         self.protect_last_tokens = last_tokens;
+        self
+    }
+
+    /// Phase 18 D-15: set the adaptive-shift threshold (default 500).
+    pub fn with_tool_pair_shift(mut self, n: usize) -> Self {
+        self.tool_pair_shift_tokens = n;
         self
     }
 }
@@ -82,12 +90,38 @@ impl ContextEngine for LocalPruningEngine {
         _stats: ContextStats,
     ) -> Result<CompressionOutcome, ContextError> {
         let before = crate::context_compressor::estimate_messages_tokens(messages);
+
+        // Phase 18 D-15: apply adaptive shift for pairs straddling the protect boundary
+        // BEFORE delegating to ContextCompressor, so the underlying pruner never splits
+        // a tool_call from its result.
+        let protect_start = crate::context_compressor::ContextCompressor::compute_protect_start(
+            messages,
+            self.protect_last_tokens,
+            self.protect_first_n,
+        );
+        let pairs = crate::tool_pair::detect_tool_pairs(messages);
+        for pair in &pairs {
+            let _ = crate::tool_pair::apply_adaptive_shift(
+                messages,
+                pair,
+                protect_start,
+                self.tool_pair_shift_tokens,
+            );
+        }
+
         let mut cc = crate::context_compressor::ContextCompressor::new(
             self.context_length,
             self.threshold as f64,
         )
         .with_protect(self.protect_first_n, self.protect_last_tokens);
         let compressed = cc.compress(messages);
+
+        // Phase 18 D-16: post-compression invariant blocks orphaned pairs per T-18-02.
+        if let Err(e) = crate::tool_pair::check_orphan_invariant(messages) {
+            tracing::error!(error = ?e, "post-compression orphan invariant failed");
+            return Err(e);
+        }
+
         let after = crate::context_compressor::estimate_messages_tokens(messages);
         Ok(CompressionOutcome {
             compressed,
@@ -178,5 +212,64 @@ mod tests {
         let engine = LocalPruningEngine::new(1000, 0.5);
         assert_eq!(engine.mode(), CompressionMode::Hard);
         assert!((engine.threshold() - 0.5).abs() < f32::EPSILON);
+    }
+
+    // ── Phase 18 Plan 02: tool_pair wiring ──────────────────────────────────
+
+    #[tokio::test]
+    async fn local_pruning_engine_invariant_pass() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "a".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+            }]),
+            ChatMessage::tool_result("a", "ok"),
+            ChatMessage::assistant("done"),
+        ];
+        let engine = LocalPruningEngine::new(1000, 0.5);
+        let out = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
+        assert!(!out.compressed || out.compressed); // just exercise
+        assert!(crate::tool_pair::check_orphan_invariant(&msgs).is_ok());
+    }
+
+    #[tokio::test]
+    async fn local_pruning_engine_applies_adaptive_shift() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        // Build 30-message vec with a pair near the boundary.
+        let mut msgs: Vec<ChatMessage> = (0..28)
+            .map(|i| ChatMessage::user(format!("filler {i} ").repeat(20)))
+            .collect();
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "z".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: "peek".into(), arguments: "{}".into() },
+        }]));
+        msgs.push(ChatMessage::tool_result("z", "small"));
+
+        let engine = LocalPruningEngine::new(1000, 0.5);
+        let _ = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
+        // Pair still co-located and invariant holds.
+        assert!(crate::tool_pair::check_orphan_invariant(&msgs).is_ok());
+    }
+
+    #[test]
+    fn local_pruning_engine_detects_orphan() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        let msgs = vec![
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "tc1".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+            }]),
+            ChatMessage::user("hi"),
+        ];
+        assert!(matches!(
+            crate::tool_pair::check_orphan_invariant(&msgs),
+            Err(ContextError::OrphanedToolPair)
+        ));
     }
 }

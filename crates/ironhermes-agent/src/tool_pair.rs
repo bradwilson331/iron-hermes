@@ -1,0 +1,255 @@
+// Phase 18 Plan 02: tool-pair atomicity primitives (D-14, D-15, D-16).
+//
+// Pure functions used by `LocalPruningEngine` (and future engines) to (a) detect
+// assistant↔tool-result pairings including parallel tool_calls, (b) apply the
+// adaptive shift rule so a pair straddling the protect boundary is either
+// expanded-in or prose-summarized, and (c) enforce the post-compression
+// invariant that every `tool_calls[i].id` has a matching `tool.tool_call_id`
+// and vice-versa. A violation returns `ContextError::OrphanedToolPair` to
+// block the LLM API 400 failure mode called out in T-18-02.
+
+use crate::context_compressor::estimate_message_tokens;
+use crate::context_engine::ContextError;
+use ironhermes_core::{ChatMessage, MessageContent, Role};
+
+#[derive(Debug, Clone)]
+pub struct ToolPair {
+    pub assistant_idx: usize,
+    pub tool_result_indices: Vec<usize>,
+    pub tool_call_ids: Vec<String>,
+}
+
+/// Detect every assistant/tool_result pairing, including parallel tool_calls
+/// produced by a single assistant message.
+pub fn detect_tool_pairs(messages: &[ChatMessage]) -> Vec<ToolPair> {
+    let mut pairs = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        let Some(calls) = msg.tool_calls.as_ref() else {
+            continue;
+        };
+        if calls.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = calls.iter().map(|c| c.id.clone()).collect();
+        let mut found: Vec<usize> = Vec::with_capacity(ids.len());
+        for j in (i + 1)..messages.len() {
+            let m = &messages[j];
+            if m.role != Role::Tool {
+                continue;
+            }
+            if let Some(ref tcid) = m.tool_call_id
+                && ids.contains(tcid)
+            {
+                found.push(j);
+            }
+            if found.len() == ids.len() {
+                break;
+            }
+        }
+        if !found.is_empty() {
+            pairs.push(ToolPair {
+                assistant_idx: i,
+                tool_result_indices: found,
+                tool_call_ids: ids,
+            });
+        }
+    }
+    pairs
+}
+
+/// Apply the D-15 adaptive shift for a single pair straddling `protect_start`.
+/// Returns the possibly-adjusted protect boundary. When the tool_result body is
+/// large the content is rewritten in place to a prose summary instead.
+pub fn apply_adaptive_shift(
+    messages: &mut [ChatMessage],
+    pair: &ToolPair,
+    protect_start: usize,
+    shift_threshold_tokens: usize,
+) -> usize {
+    let straddles = pair.assistant_idx < protect_start
+        && pair
+            .tool_result_indices
+            .iter()
+            .any(|&idx| idx >= protect_start);
+    if !straddles {
+        return protect_start;
+    }
+    let body_tokens: usize = pair
+        .tool_result_indices
+        .iter()
+        .map(|&idx| estimate_message_tokens(&messages[idx]))
+        .sum();
+    if body_tokens <= shift_threshold_tokens {
+        return pair.assistant_idx;
+    }
+    for &idx in &pair.tool_result_indices {
+        let (name, args_preview, orig_tokens) = {
+            let tc = messages[pair.assistant_idx]
+                .tool_calls
+                .as_ref()
+                .and_then(|v| {
+                    v.iter()
+                        .find(|c| Some(&c.id) == messages[idx].tool_call_id.as_ref())
+                });
+            let name = tc
+                .map(|c| c.function.name.clone())
+                .unwrap_or_else(|| "<unknown>".into());
+            let args_full = tc
+                .map(|c| c.function.arguments.clone())
+                .unwrap_or_default();
+            let args_preview = if args_full.len() > 80 {
+                format!("{}…", &args_full[..80])
+            } else {
+                args_full
+            };
+            (name, args_preview, estimate_message_tokens(&messages[idx]))
+        };
+        let prose = format!(
+            "[Tool result summarized] Agent called {} with args {} and received output of ~{} tokens.",
+            name, args_preview, orig_tokens
+        );
+        messages[idx].content = Some(MessageContent::Text(prose));
+    }
+    protect_start
+}
+
+/// Post-compression invariant (D-16): every assistant tool_call id must have a
+/// subsequent matching tool message, and every tool message must refer to a
+/// preceding assistant tool_call.
+pub fn check_orphan_invariant(messages: &[ChatMessage]) -> Result<(), ContextError> {
+    use std::collections::HashSet;
+    let mut unmatched_calls: HashSet<String> = HashSet::new();
+    for msg in messages {
+        match msg.role {
+            Role::Assistant => {
+                if let Some(ref calls) = msg.tool_calls {
+                    for c in calls {
+                        unmatched_calls.insert(c.id.clone());
+                    }
+                }
+            }
+            Role::Tool => match msg.tool_call_id.as_ref() {
+                Some(id) if unmatched_calls.contains(id) => {
+                    unmatched_calls.remove(id);
+                }
+                _ => return Err(ContextError::OrphanedToolPair),
+            },
+            _ => {}
+        }
+    }
+    if !unmatched_calls.is_empty() {
+        return Err(ContextError::OrphanedToolPair);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironhermes_core::{FunctionCall, ToolCall};
+
+    fn tc(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: name.into(),
+                arguments: args.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn tool_pair_detection() {
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_tool_calls(vec![tc("tc1", "fn_a", "{}"), tc("tc2", "fn_b", "{}")]),
+            ChatMessage::tool_result("tc1", "r1"),
+            ChatMessage::tool_result("tc2", "r2"),
+            ChatMessage::assistant("done"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].assistant_idx, 2);
+        assert_eq!(pairs[0].tool_result_indices, vec![3, 4]);
+        assert_eq!(pairs[0].tool_call_ids, vec!["tc1", "tc2"]);
+    }
+
+    #[test]
+    fn tool_pair_detection_no_calls() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("a"),
+        ];
+        assert!(detect_tool_pairs(&msgs).is_empty());
+    }
+
+    #[test]
+    fn adaptive_shift_forward() {
+        // Pair straddles boundary; tool_result body is small.
+        let mut msgs = vec![
+            ChatMessage::assistant_tool_calls(vec![tc("x1", "fn", "{}")]),
+            ChatMessage::tool_result("x1", "tiny"),
+        ];
+        let pair = detect_tool_pairs(&msgs).remove(0);
+        let new_start = apply_adaptive_shift(&mut msgs, &pair, 1, 500);
+        assert_eq!(new_start, 0, "small pair should expand protect boundary");
+        // Content preserved (no backward summarization)
+        assert_eq!(msgs[1].content_text(), Some("tiny"));
+    }
+
+    #[test]
+    fn adaptive_shift_backward() {
+        let big_body = "x".repeat(4_000); // ~1000+ estimated tokens
+        let mut msgs = vec![
+            ChatMessage::assistant_tool_calls(vec![tc("b1", "big_fn", "{\"a\":1}")]),
+            ChatMessage::tool_result("b1", big_body.clone()),
+        ];
+        let pair = detect_tool_pairs(&msgs).remove(0);
+        let new_start = apply_adaptive_shift(&mut msgs, &pair, 1, 500);
+        assert_eq!(new_start, 1, "large pair keeps boundary, content rewritten");
+        let text = msgs[1].content_text().unwrap_or("");
+        assert!(text.starts_with("[Tool result summarized] Agent called big_fn"));
+        assert!(!text.contains(&big_body));
+    }
+
+    #[test]
+    fn orphaned_pair_rejection() {
+        let msgs = vec![
+            ChatMessage::assistant_tool_calls(vec![tc("tc1", "fn", "{}")]),
+            ChatMessage::user("hi"),
+        ];
+        assert!(matches!(
+            check_orphan_invariant(&msgs),
+            Err(ContextError::OrphanedToolPair)
+        ));
+    }
+
+    #[test]
+    fn orphaned_pair_reverse() {
+        let msgs = vec![
+            ChatMessage::tool_result("tc1", "r"),
+            ChatMessage::user("hi"),
+        ];
+        assert!(matches!(
+            check_orphan_invariant(&msgs),
+            Err(ContextError::OrphanedToolPair)
+        ));
+    }
+
+    #[test]
+    fn orphan_invariant_passes_clean_list() {
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_tool_calls(vec![tc("ok", "fn", "{}")]),
+            ChatMessage::tool_result("ok", "result"),
+            ChatMessage::assistant("done"),
+        ];
+        assert!(check_orphan_invariant(&msgs).is_ok());
+    }
+}

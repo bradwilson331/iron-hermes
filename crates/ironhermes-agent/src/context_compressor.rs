@@ -193,6 +193,33 @@ impl ContextCompressor {
         self.compression_count
     }
 
+    /// Phase 18 D-15: compute the index where the protected tail segment begins.
+    /// Walks from end-of-vec accumulating message tokens until `protect_last_tokens`
+    /// would be exceeded. Floored at `protect_first_n`. Exposed for `tool_pair`
+    /// adaptive shift math; callers use it to decide whether a tool pair straddles
+    /// the boundary.
+    pub fn compute_protect_start(
+        messages: &[ChatMessage],
+        protect_last_tokens: usize,
+        protect_first_n: usize,
+    ) -> usize {
+        let total = messages.len();
+        if total <= protect_first_n {
+            return total;
+        }
+        let mut tail_tokens = 0;
+        let mut tail_start = total;
+        for i in (0..total).rev() {
+            let msg_tokens = estimate_message_tokens(&messages[i]);
+            if tail_tokens + msg_tokens > protect_last_tokens {
+                break;
+            }
+            tail_tokens += msg_tokens;
+            tail_start = i;
+        }
+        tail_start.max(protect_first_n)
+    }
+
     pub fn with_protect(mut self, first_n: usize, last_tokens: usize) -> Self {
         self.protect_first_n = first_n;
         self.protect_last_tokens = last_tokens;
