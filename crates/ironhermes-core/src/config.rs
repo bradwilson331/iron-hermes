@@ -79,12 +79,43 @@ pub struct Config {
     pub batch: BatchConfig,
     // MEM-12: memory provider selection
     pub memory: MemoryConfig,
+    // PRMT-12..16 (Phase 18): context compression configuration
+    pub compression: CompressionConfig,
     // PROV-08: provider resolution configuration (Phase 12)
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub custom_providers: Vec<CustomProviderConfig>,
 }
+
+// =============================================================================
+// CompressionConfig (PRMT-12..16, Phase 18)
+// =============================================================================
+
+/// Context compression tuning (D-02, D-10, D-11, D-15, D-26).
+// T-18-06: if renaming later, add serde(alias)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompressionConfig {
+    pub protect_last_tokens: usize,
+    pub tool_pair_shift_tokens: usize,
+    pub protect_first_n: usize,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            protect_last_tokens: 20_000,
+            tool_pair_shift_tokens: 500,
+            protect_first_n: 3,
+        }
+    }
+}
+
+fn default_agent_engine() -> String { "summarizing".to_string() }
+fn default_agent_threshold() -> f32 { 0.5 }
+fn default_gateway_engine() -> String { "local_prune".to_string() }
+fn default_gateway_threshold() -> f32 { 0.85 }
 
 // =============================================================================
 // MemoryConfig (MEM-12)
@@ -146,6 +177,15 @@ pub struct AgentConfig {
     /// Merged into PersonalityRegistry at config load time with highest precedence.
     #[serde(default)]
     pub personalities: HashMap<String, String>,
+    /// PRMT-11 (Phase 18): optional system-message slot content; empty = omitted.
+    #[serde(default)]
+    pub system_message: String,
+    /// PRMT-12 (Phase 18): engine selection — "summarizing" (default) or "local_prune".
+    #[serde(default = "default_agent_engine")]
+    pub context_engine: String,
+    /// PRMT-14 (Phase 18): fraction of context_length at which agent loop compresses.
+    #[serde(default = "default_agent_threshold")]
+    pub compression_threshold: f32,
 }
 
 impl Default for AgentConfig {
@@ -155,6 +195,9 @@ impl Default for AgentConfig {
             context_compression: 0.5,
             tool_delay_secs: 1.0,
             personalities: HashMap::new(),
+            system_message: String::new(),
+            context_engine: default_agent_engine(),
+            compression_threshold: default_agent_threshold(),
         }
     }
 }
@@ -200,10 +243,26 @@ impl Default for WebConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayConfig {
     pub platforms: HashMap<String, PlatformGatewayConfig>,
+    /// PRMT-12 (Phase 18): gateway engine selection — typically "local_prune".
+    #[serde(default = "default_gateway_engine")]
+    pub context_engine: String,
+    /// PRMT-14 (Phase 18): per-turn hygiene threshold (default 0.85).
+    #[serde(default = "default_gateway_threshold")]
+    pub compression_threshold: f32,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            platforms: HashMap::new(),
+            context_engine: default_gateway_engine(),
+            compression_threshold: default_gateway_threshold(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -621,6 +680,38 @@ model:
         assert!(config.providers.is_empty(), "providers should default to empty map");
         assert!(config.custom_providers.is_empty(), "custom_providers should default to empty vec");
         assert!(config.model.roles.is_empty(), "model.roles should default to empty map");
+    }
+
+    // =========================================================================
+    // CompressionConfig / Phase 18 keys
+    // =========================================================================
+
+    #[test]
+    fn config_compression_defaults() {
+        let c = Config::default();
+        assert_eq!(c.agent.compression_threshold, 0.5_f32);
+        assert_eq!(c.gateway.compression_threshold, 0.85_f32);
+        assert_eq!(c.compression.protect_last_tokens, 20_000);
+        assert_eq!(c.compression.tool_pair_shift_tokens, 500);
+        assert_eq!(c.compression.protect_first_n, 3);
+        assert_eq!(c.agent.context_engine, "summarizing");
+        assert_eq!(c.gateway.context_engine, "local_prune");
+        assert_eq!(c.agent.system_message, "");
+    }
+
+    #[test]
+    fn config_context_engine_selection() {
+        let yaml = r#"
+agent:
+  context_engine: "local_prune"
+  compression_threshold: 0.6
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(c.agent.context_engine, "local_prune");
+        assert!((c.agent.compression_threshold - 0.6_f32).abs() < 1e-6);
+        // Unspecified gateway still defaults
+        assert_eq!(c.gateway.context_engine, "local_prune");
+        assert_eq!(c.gateway.compression_threshold, 0.85_f32);
     }
 
     #[test]

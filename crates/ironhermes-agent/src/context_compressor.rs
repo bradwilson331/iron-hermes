@@ -225,4 +225,11 @@ mod tests {
         let short_messages = vec![ChatMessage::user("hi")];
         assert!(!compressor.should_compress(&short_messages));
     }
+
+    #[test]
+    fn context_compressor_custom_protect() {
+        let cc = ContextCompressor::new(10_000, 0.5).with_protect(5, 4_000);
+        assert_eq!(cc.protect_first_n(), 5);
+        assert_eq!(cc.protect_last_tokens(), 4_000);
+    }
 }
