@@ -9,6 +9,7 @@ pub mod subdir_discovery;
 pub mod context_compressor;
 pub mod context_engine;
 pub mod tool_pair;
+pub mod summarizing_engine;
 pub mod subagent_runner;
 pub mod anthropic_client;
 pub mod any_client;
