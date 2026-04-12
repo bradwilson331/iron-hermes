@@ -1,5 +1,6 @@
 pub mod client;
 pub mod agent_loop;
+pub mod context_loader;
 pub mod prompt_builder;
 pub mod context_compressor;
 pub mod subagent_runner;
