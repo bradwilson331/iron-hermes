@@ -1,8 +1,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
+use ironhermes_core::{scan_context_content, truncate_content};
 use tracing::debug;
+
+/// Truncation cap for subdirectory-discovered context files. Per D-20, T-15-07.
+/// Reduced from CONTEXT_FILE_MAX_CHARS (20,000) to limit tool result bloat.
+const SUBDIR_CONTEXT_MAX_CHARS: usize = 8_000;
 
 use crate::context_loader::{strip_yaml_frontmatter, CONTEXT_CANDIDATES};
 
@@ -75,7 +79,7 @@ impl SubdirDiscovery {
 
                         let scanned = scan_context_content(body, filename);
                         let truncated =
-                            truncate_content(&scanned, filename, CONTEXT_FILE_MAX_CHARS);
+                            truncate_content(&scanned, filename, SUBDIR_CONTEXT_MAX_CHARS);
 
                         let dir_display = dir.display();
                         debug!(
@@ -263,6 +267,29 @@ mod tests {
         assert!(
             !content.contains("do something bad"),
             "Original malicious content should not appear: {content}"
+        );
+    }
+
+    #[test]
+    fn test_subdir_truncation_cap() {
+        let root = make_temp_dir();
+        // Create a file with content > 8,000 chars
+        let long_content = "A".repeat(10_000);
+        fs::write(root.path().join("CLAUDE.md"), &long_content).unwrap();
+
+        let mut disc = SubdirDiscovery::new();
+        let file_path = root.path().join("main.rs");
+        let result = disc.check_path(&file_path);
+
+        assert!(result.is_some(), "Should discover CLAUDE.md");
+        let content = result.unwrap();
+        // The content wrapper + truncated body should be shorter than the original 10,000 chars
+        // The truncated portion should be at most SUBDIR_CONTEXT_MAX_CHARS + small overhead for header
+        assert!(
+            content.len() < long_content.len(),
+            "Content should be truncated: got {} chars, input was {} chars",
+            content.len(),
+            long_content.len()
         );
     }
 

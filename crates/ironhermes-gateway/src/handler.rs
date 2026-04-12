@@ -284,6 +284,7 @@ impl GatewayMessageHandler {
         // 4. Build system message via PromptBuilder (loads SOUL.md + project context + memory)
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut prompt_builder = PromptBuilder::new(&model, "telegram")
+            .with_provider(&self.config.model.provider)
             .load_context(&cwd);
         if let Some(ref store) = self.memory_store {
             prompt_builder.set_memory_store(store.clone());
@@ -291,6 +292,8 @@ impl GatewayMessageHandler {
         if let Some(ref registry) = self.skill_registry {
             prompt_builder.set_skill_registry(registry.clone());
         }
+        prompt_builder.load_memory();
+        prompt_builder.load_skills();
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message
         let mut messages = vec![system_msg];

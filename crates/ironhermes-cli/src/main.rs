@@ -262,8 +262,11 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
+        .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry.clone());
+    prompt_builder.load_memory();
+    prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
 
     let user_msg = ChatMessage::user(prompt);
@@ -385,8 +388,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
+        .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry);
+    prompt_builder.load_memory();
+    prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];
