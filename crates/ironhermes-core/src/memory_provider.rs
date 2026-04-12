@@ -132,6 +132,7 @@ impl MemoryProvider for MemoryStore {
 // =============================================================================
 
 /// Build a memory provider from config. Hard error on unknown/unavailable provider (D-09).
+#[deprecated(note = "Use ironhermes_agent::memory::factory::build_memory_provider instead")]
 pub fn build_memory_provider(
     config: &crate::config::MemoryConfig,
 ) -> anyhow::Result<Box<dyn MemoryProvider + Send>> {

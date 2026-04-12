@@ -1,0 +1,18 @@
+[package]
+name = "memory-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite memory provider for IronHermes with FTS5 search"
+
+[dependencies]
+ironhermes-core = { path = "../../crates/ironhermes-core" }
+rusqlite = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }

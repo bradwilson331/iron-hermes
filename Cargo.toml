@@ -9,6 +9,7 @@ members = [
     "crates/ironhermes-cron",
     "crates/ironhermes-hooks",
     "crates/ironhermes-exec",
+    "providers/memory-sqlite",
 ]
 resolver = "2"
 
