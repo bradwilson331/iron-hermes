@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use crate::any_client::AnyClient;
 use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::ContextCompressor;
+use crate::subdir_discovery::SubdirDiscovery;
 
 /// Result of an agent loop execution.
 #[derive(Debug)]
@@ -72,6 +73,9 @@ pub struct AgentLoop {
     fallback_client: Option<AnyClient>,
     /// Whether fallback has already been activated (one-shot per D-11).
     fallback_activated: bool,
+    /// Progressive subdirectory context discovery (CTX-03/CTX-04).
+    /// When set, file-access tools trigger context file discovery.
+    subdir_discovery: Option<Arc<std::sync::Mutex<SubdirDiscovery>>>,
 }
 
 impl AgentLoop {
@@ -91,6 +95,7 @@ impl AgentLoop {
             budget: None,
             fallback_client: None,
             fallback_activated: false,
+            subdir_discovery: None,
         }
     }
 
@@ -108,6 +113,12 @@ impl AgentLoop {
 
     pub fn active_skills(&self) -> Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> {
         self.active_skills.clone()
+    }
+
+    /// Set subdirectory discovery for progressive context injection (CTX-03/CTX-04).
+    pub fn with_subdir_discovery(mut self, discovery: Arc<std::sync::Mutex<SubdirDiscovery>>) -> Self {
+        self.subdir_discovery = Some(discovery);
+        self
     }
 
     pub fn with_compression(mut self, context_length: usize, threshold: f64) -> Self {
@@ -600,6 +611,9 @@ impl AgentLoop {
                     args_preview: ironhermes_hooks::event::preview(args_str, 200),
                 });
 
+                // Save path for subdirectory discovery before args is moved
+                let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
+
                 let tool_start = std::time::Instant::now();
                 let dispatch_result = self.registry.execute_tool(name, args).await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
@@ -612,7 +626,24 @@ impl AgentLoop {
                             result_preview: ironhermes_hooks::event::preview(&result, 200),
                             duration_ms,
                         });
-                        result
+
+                        // CTX-03/CTX-04: progressive subdirectory discovery for file-access tools
+                        let mut final_result = result;
+                        const FILE_ACCESS_TOOLS: &[&str] = &["read_file", "write_file", "patch", "search_files"];
+                        if FILE_ACCESS_TOOLS.contains(&name.as_str()) {
+                            if let Some(ref disc) = self.subdir_discovery {
+                                if let Some(ref path_str) = tool_path_arg {
+                                    let path = std::path::Path::new(path_str);
+                                    if let Ok(mut discovery) = disc.lock() {
+                                        if let Some(ctx) = discovery.check_path(path) {
+                                            debug!(tool = %name, path = %path_str, "Subdirectory context discovered");
+                                            final_result.push_str(&ctx);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        final_result
                     }
                     Err(e) => {
                         let err_msg = format!("Tool '{}' failed: {}", name, e);
