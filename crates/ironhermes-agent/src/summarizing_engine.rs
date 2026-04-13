@@ -276,6 +276,12 @@ impl ContextEngine for SummarizingEngine {
             );
         }
 
+        // Snapshot the caller's vec BEFORE any mutation so we can roll back
+        // atomically if any later step (adaptive shift, prune, invariant check)
+        // returns Err. Without this, a corrupted vec could be forwarded to the
+        // LLM after `?` propagates an error.
+        let snapshot = messages.clone();
+
         // Apply adaptive shift pre-prune (D-15) — same as LocalPruningEngine.
         let protect_start = crate::context_compressor::ContextCompressor::compute_protect_start(
             messages,
@@ -392,8 +398,18 @@ impl ContextEngine for SummarizingEngine {
 
         *messages = new_messages;
 
-        // D-16 invariant check.
-        tool_pair::check_orphan_invariant(messages)?;
+        // D-16 invariant check. Roll back the caller's vec on failure so a
+        // corrupted (orphaned tool_use) message list is never forwarded to the
+        // LLM after `?` propagates the error.
+        if let Err(e) = tool_pair::check_orphan_invariant(messages) {
+            *messages = snapshot;
+            tracing::warn!(
+                error = ?e,
+                reason = "rollback",
+                "summarizing_engine: compress failed, messages restored"
+            );
+            return Err(e);
+        }
 
         let after = estimate_messages_tokens(messages);
         tracing::info!(
@@ -600,6 +616,55 @@ mod tests {
             .expect("fallback returns Ok");
         assert!(outcome.compressed, "LocalPruningEngine fallback compressed");
         assert!(tool_pair::check_orphan_invariant(&msgs).is_ok());
+    }
+
+    /// Phase 18 atomic-rollback fix: when `check_orphan_invariant` rejects the
+    /// post-compression vec, the caller's `messages` MUST be restored to its
+    /// pre-call snapshot. Constructed input contains an orphan tool_call that
+    /// the invariant will reject after the prune+pin step.
+    #[tokio::test]
+    async fn compress_rolls_back_on_orphan_invariant_failure() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary body".into())]);
+        let engine = SummarizingEngine::new(1000, 0.5, mock);
+
+        // Filler to push us above threshold.
+        let mut msgs: Vec<ChatMessage> = (0..28)
+            .map(|i| ChatMessage::user(format!("filler {i} ").repeat(20)))
+            .collect();
+        // Append orphan assistant tool_call (no matching tool_result anywhere).
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "orphan-id".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+        }]));
+        let snapshot = msgs.clone();
+
+        let err = engine
+            .compress(&mut msgs, make_stats())
+            .await
+            .expect_err("orphan must surface as Err");
+        assert!(matches!(err, ContextError::OrphanedToolPair));
+
+        assert_eq!(
+            msgs.len(),
+            snapshot.len(),
+            "rollback restored original length"
+        );
+        for (a, b) in msgs.iter().zip(snapshot.iter()) {
+            assert_eq!(a.content_text(), b.content_text());
+            assert_eq!(
+                a.tool_calls.as_ref().map(|v| v.len()),
+                b.tool_calls.as_ref().map(|v| v.len())
+            );
+        }
+        // Must NOT contain a [CONTEXT HISTORY] pin — that would mean the
+        // mutated state leaked through.
+        assert!(
+            msgs.iter()
+                .all(|m| m.name.as_deref() != Some(HISTORY_NAME)),
+            "no pinned history segment in restored vec"
+        );
     }
 
     #[test]

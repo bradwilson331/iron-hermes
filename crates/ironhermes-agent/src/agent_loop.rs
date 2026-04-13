@@ -296,6 +296,11 @@ impl AgentLoop {
             }
         }
 
+        // Belt-and-suspenders: snapshot caller's vec before invoking the engine
+        // so that any future engine implementation that mutates `messages` and
+        // then returns Err cannot leak a corrupted vec to the LLM.
+        let pre_compress_snapshot = messages.clone();
+
         let estimated = estimate_messages_tokens(messages);
         let ratio = estimated as f32 / self.context_length.max(1) as f32;
         let threshold = engine.threshold();
@@ -318,7 +323,13 @@ impl AgentLoop {
                     );
                 }
                 Ok(_) => {}
-                Err(e) => tracing::error!(error = ?e, "context compression failed"),
+                Err(e) => {
+                    *messages = pre_compress_snapshot;
+                    tracing::error!(
+                        error = ?e,
+                        "pre_chat_compress: compression failed, rolled back to pre-compress state"
+                    );
+                }
             }
         } else {
             debug!(ratio, threshold, "context compression check");
@@ -1554,6 +1565,55 @@ mod plan_18_06_tests {
 
         // Transient is one-shot — subsequent drain returns None.
         assert!(tracker.take_transient("sess-test").is_none());
+    }
+
+    /// Belt-and-suspenders rollback: a faulty engine that mutates `messages`
+    /// AND returns Err must not leak corruption to the caller. The agent loop
+    /// snapshots the pre-compress vec and restores it on Err.
+    #[tokio::test]
+    async fn pre_chat_compress_rolls_back_on_engine_error() {
+        struct CorruptingEngine;
+        #[async_trait]
+        impl ContextEngine for CorruptingEngine {
+            async fn compress(
+                &self,
+                messages: &mut Vec<ChatMessage>,
+                _stats: ContextStats,
+            ) -> Result<CompressionOutcome, ContextError> {
+                // Mutate then fail — exactly the bug class the snapshot guards.
+                messages.clear();
+                messages.push(ChatMessage::system("CORRUPTED"));
+                Err(ContextError::OrphanedToolPair)
+            }
+            fn threshold(&self) -> f32 {
+                0.0 // always above threshold so compress() runs
+            }
+            fn mode(&self) -> CompressionMode {
+                CompressionMode::Hard
+            }
+        }
+
+        let engine: Arc<dyn ContextEngine> = Arc::new(CorruptingEngine);
+        let mut agent = make_agent_with_engine(engine, 100);
+        let mut messages = filler_messages(5);
+        let snapshot = messages.clone();
+
+        agent.pre_chat_compress(&mut messages).await;
+
+        assert_eq!(
+            messages.len(),
+            snapshot.len(),
+            "messages restored after engine returned Err"
+        );
+        for (a, b) in messages.iter().zip(snapshot.iter()) {
+            assert_eq!(a.content_text(), b.content_text());
+        }
+        assert!(
+            messages.iter().all(|m| {
+                m.content_text().map(|t| t != "CORRUPTED").unwrap_or(true)
+            }),
+            "corruption sentinel must not appear in restored vec"
+        );
     }
 
     /// Compression fires BEFORE any client call — since pre_chat_compress returns

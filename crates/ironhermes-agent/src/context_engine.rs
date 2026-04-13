@@ -190,6 +190,12 @@ impl ContextEngine for LocalPruningEngine {
             }
         }
 
+        // Snapshot the caller's vec BEFORE any mutation so we can roll back
+        // atomically if the post-compression invariant check fails. Without
+        // this, a corrupted (orphaned tool_use) vec would be forwarded to the
+        // LLM after `?` propagates the error.
+        let snapshot = messages.clone();
+
         // Phase 18 D-15: apply adaptive shift for pairs straddling the protect boundary
         // BEFORE delegating to ContextCompressor, so the underlying pruner never splits
         // a tool_call from its result.
@@ -216,8 +222,15 @@ impl ContextEngine for LocalPruningEngine {
         let compressed = cc.compress(messages);
 
         // Phase 18 D-16: post-compression invariant blocks orphaned pairs per T-18-02.
+        // On failure restore the pre-compression snapshot so the caller never
+        // ships a half-mutated vec to the LLM.
         if let Err(e) = crate::tool_pair::check_orphan_invariant(messages) {
-            tracing::error!(error = ?e, "post-compression orphan invariant failed");
+            *messages = snapshot;
+            tracing::warn!(
+                error = ?e,
+                reason = "rollback",
+                "local_pruning_engine: compress failed, messages restored"
+            );
             return Err(e);
         }
 
@@ -471,6 +484,48 @@ mod tests {
         let mut msgs = build_large_message_vec(30);
         let out = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
         assert!(out.compressed || !out.compressed); // just assert Ok was returned
+    }
+
+    /// Phase 18 atomic-rollback fix: when `check_orphan_invariant` rejects the
+    /// post-compression vec, the caller's `messages` MUST be restored to its
+    /// pre-call snapshot so a corrupted (orphaned tool_use) vec is never
+    /// forwarded to the LLM.
+    #[tokio::test]
+    async fn local_pruning_rolls_back_on_orphan() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        // Seed a vec that already contains an orphan plus enough filler to
+        // push us above the compression threshold so compress() actually runs.
+        let mut msgs: Vec<ChatMessage> = (0..28)
+            .map(|i| ChatMessage::user(format!("filler {i} ").repeat(20)))
+            .collect();
+        // Append an assistant tool_call WITHOUT a matching tool_result — the
+        // post-compression invariant will reject this vec, forcing rollback.
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "orphan-id".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+        }]));
+        let snapshot = msgs.clone();
+
+        let engine = LocalPruningEngine::new(1000, 0.5);
+        let err = engine
+            .compress(&mut msgs, make_stats(0))
+            .await
+            .expect_err("orphan must surface as Err");
+        assert!(matches!(err, ContextError::OrphanedToolPair));
+
+        assert_eq!(
+            msgs.len(),
+            snapshot.len(),
+            "rollback restored original length"
+        );
+        for (a, b) in msgs.iter().zip(snapshot.iter()) {
+            assert_eq!(a.content_text(), b.content_text());
+            assert_eq!(
+                a.tool_calls.as_ref().map(|v| v.len()),
+                b.tool_calls.as_ref().map(|v| v.len())
+            );
+        }
     }
 
     #[test]
