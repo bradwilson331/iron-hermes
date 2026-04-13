@@ -282,21 +282,33 @@ impl ContextEngine for SummarizingEngine {
         // LLM after `?` propagates an error.
         let snapshot = messages.clone();
 
-        // Apply adaptive shift pre-prune (D-15) — same as LocalPruningEngine.
-        let protect_start = crate::context_compressor::ContextCompressor::compute_protect_start(
-            messages,
-            self.protect_last_tokens,
-            self.protect_first_n,
-        );
+        // Phase 18 Plan 10 fix: apply_adaptive_shift returns the adjusted
+        // protect boundary. Previously we discarded it and used the stale
+        // `protect_start` as prune_end, which cut through tool_use/tool_result
+        // pairs — every live compression attempt rolled back with
+        // OrphanedToolPair (2026-04-13 UAT). Fold each pair's return value
+        // into the minimum (most protective) boundary so we honor every pair
+        // that asks to be kept whole.
+        let initial_protect_start =
+            crate::context_compressor::ContextCompressor::compute_protect_start(
+                messages,
+                self.protect_last_tokens,
+                self.protect_first_n,
+            );
         let pairs = tool_pair::detect_tool_pairs(messages);
+        let mut effective_protect_start = initial_protect_start;
         for pair in &pairs {
-            let _ = tool_pair::apply_adaptive_shift(
+            let adjusted = tool_pair::apply_adaptive_shift(
                 messages,
                 pair,
-                protect_start,
+                initial_protect_start,
                 self.tool_pair_shift_tokens,
             );
+            if adjusted < effective_protect_start {
+                effective_protect_start = adjusted;
+            }
         }
+        let protect_start = effective_protect_start;
 
         // Locate prior pinned history segment (if any) for iterative re-compression.
         let history_idx = locate_history_segment(messages);
@@ -320,7 +332,44 @@ impl ContextEngine for SummarizingEngine {
             return Ok(CompressionOutcome::default());
         }
         let prune_start = self.protect_first_n;
-        let prune_end = protect_start;
+        let mut prune_end = protect_start;
+
+        // Phase 18 Plan 10 pair-atomicity guard: ensure no detected pair is
+        // split across [prune_start..prune_end]. If a pair straddles the
+        // boundary, pull prune_end BACK to exclude the assistant tool_call
+        // so the whole pair stays live (user policy: pair-crossing guard
+        // prefers keeping the pair live to maximizing recovery).
+        let pairs_after_shift = tool_pair::detect_tool_pairs(messages);
+        for pair in &pairs_after_shift {
+            let asst_in = pair.assistant_idx >= prune_start && pair.assistant_idx < prune_end;
+            let any_result_in = pair
+                .tool_result_indices
+                .iter()
+                .any(|&i| i >= prune_start && i < prune_end);
+            let all_results_in = pair
+                .tool_result_indices
+                .iter()
+                .all(|&i| i >= prune_start && i < prune_end);
+            let fully_in = asst_in && all_results_in;
+            let fully_out = !asst_in && !any_result_in;
+            if fully_in || fully_out {
+                continue;
+            }
+            // Split detected — pull prune_end back to before the assistant
+            // so both the assistant tool_call and every tool_result stay live.
+            if pair.assistant_idx < prune_end {
+                prune_end = pair.assistant_idx;
+            }
+        }
+        if prune_end <= prune_start {
+            tracing::warn!(
+                prune_start,
+                prune_end,
+                reason = "pair_atomicity_collapsed_range",
+                "summarizing_engine: compression requested but guard collapsed prune range to no-op — logic stall"
+            );
+            return Ok(CompressionOutcome::default());
+        }
 
         let pruned_blocks: Vec<ChatMessage> = messages[prune_start..prune_end]
             .iter()
@@ -406,6 +455,7 @@ impl ContextEngine for SummarizingEngine {
             tracing::warn!(
                 error = ?e,
                 reason = "rollback",
+                outcome = "rolled_back",
                 "summarizing_engine: compress failed, messages restored"
             );
             return Err(e);
@@ -415,7 +465,12 @@ impl ContextEngine for SummarizingEngine {
         tracing::info!(
             before_tokens = before,
             after_tokens = after,
+            tokens_freed = before.saturating_sub(after),
             compression_count = stats.compression_count + 1,
+            prune_start,
+            prune_end,
+            pair_count = pairs.len(),
+            outcome = "compressed",
             "summarizing_engine: compressed"
         );
         Ok(CompressionOutcome {
@@ -1038,17 +1093,18 @@ mod tests {
         let protect_last = 400;
         let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
 
-        let mut msgs = Vec::new();
-        msgs.push(ChatMessage::system("sys"));
-        msgs.push(ChatMessage::user("u1"));
-        msgs.push(ChatMessage::assistant("a1"));
-        // Pair A — fully prunable (early)
-        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
-            id: "pA".into(),
-            call_type: "function".into(),
-            function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
-        }]));
-        msgs.push(ChatMessage::tool_result("pA", "r_a"));
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("u1"),
+            ChatMessage::assistant("a1"),
+            // Pair A — fully prunable (early)
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "pA".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+            }]),
+            ChatMessage::tool_result("pA", "r_a"),
+        ];
         // middle filler to build size
         for i in 0..30 {
             msgs.push(ChatMessage::user(format!("midfill {i} ").repeat(20)));
