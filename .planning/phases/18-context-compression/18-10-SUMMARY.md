@@ -111,3 +111,67 @@ Pass criteria on the live re-run:
   - `42eb073` test(18-10): pin UAT orphan defect in apply_adaptive_shift
   - `4eade57` fix(18-10): apply adaptive shift return value; enforce tool-pair atomicity across prune boundary
   - `a45e511` test(18-10): regression matrix for parallel tool_calls, boundary edges, back-to-back pairs
+
+## Post-ship fix: front-straddle (2026-04-13T05:18 UAT regression)
+
+### Bug
+
+The post-ship live UAT at 2026-04-13T05:18 reproduced a *new* failure
+mode the original 18-10 guard did not cover: the very first tool-calling
+turn places the assistant at index 2 (inside the front-protected
+`protect_first_n=3` region) while its tool_result lands at index 3+
+(inside the prune range). The guard only handled BACK-straddle by
+pulling `prune_end` back to `pair.assistant_idx`. With
+`assistant_idx=2 < prune_start=3`, the pull-back collapsed the range
+(`prune_end=2 < prune_start=3`) and every compression attempt logged
+`reason="pair_atomicity_collapsed_range"` and returned a no-op —
+identical user symptom to the pre-18-10 OrphanedToolPair (token usage
+grew unbounded, no compression ever landed).
+
+### Fix
+
+Distinguish straddle direction in the guard loop:
+
+| Case | Condition | Adjustment |
+|------|-----------|------------|
+| Back-straddle | `asst_in && !all_results_in` | `prune_end = min(prune_end, asst_idx)` (unchanged) |
+| Front-straddle | `!asst_in && asst_idx < prune_start && any_result_in` | `prune_start = max(prune_start, max(tool_result_idx) + 1)` |
+
+Invariant preserved: `prune_start` only increases, `prune_end` only
+decreases. Required mutating `prune_start` (was previously immutable).
+The collapsed-range warn path still triggers if both adjustments meet
+in the middle (no prunable region survives).
+
+The `kept_before / kept_after` slicing math, history-segment offset
+arithmetic, and `pin_idx` clamp downstream of the guard were already
+written against the (mutable) `prune_start` value so no further changes
+were needed.
+
+### New tests
+
+Added 2 RED-then-GREEN tests reproducing the live UAT shape (single
+web_read pair, `before_tokens ≈ 64555`, `protect_first_n=3`,
+`protect_last=100`):
+
+- `compress_ok_front_straddle_asst_in_protect_first_n_single_result`
+- `compress_ok_front_straddle_parallel_tool_calls`
+
+Both include `assert_pair_front_straddles` which verifies the fixture
+actually places the assistant inside `protect_first_n` and at least one
+tool_result in `[protect_first_n, protect_start)` — guards against
+silent false-GREEN from a miscounted fixture (same anti-mocking pattern
+as `assert_pair_straddles`).
+
+Test count: **162 → 164 passing, 0 failing.**
+
+### Commits
+
+- `b123179` test(18-10): reproduce front-straddle guard bug from live UAT 2026-04-13T05:18 (RED)
+- `28caf61` fix(18-10): handle front-straddle pairs by pushing prune_start past tool_results (GREEN)
+- (this) docs(18-10): document post-ship front-straddle fix
+
+### Clippy delta
+
+`cargo clippy -p ironhermes-agent --all-targets`: 2 pre-existing logic-bug
+errors in `context_engine.rs` (lines 378, 486 — `assert!(x || !x)` test
+scaffolding) plus baseline warnings. **0 new errors introduced.**
