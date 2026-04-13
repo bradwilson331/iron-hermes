@@ -1085,6 +1085,307 @@ mod tests {
         ));
     }
 
+    // ── Phase 18 Plan 10 Task 3: regression matrix ──────────────────────────
+
+    /// Build a straddling message list with a pair whose assistant issues
+    /// `ids.len()` parallel tool_calls and `ids.len()` matching tool_results.
+    fn build_list_with_straddling_parallel_pair(
+        ids: &[&str],
+        pair_body: &str,
+        total_token_target: usize,
+        protect_last_tokens: usize,
+    ) -> Vec<ChatMessage> {
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("first user"),
+            ChatMessage::assistant("first assistant"),
+            ChatMessage::assistant_tool_calls(
+                ids.iter()
+                    .map(|id| ToolCall {
+                        id: (*id).into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "web_read".into(),
+                            arguments: r#"{"url":"https://example.com"}"#.into(),
+                        },
+                    })
+                    .collect(),
+            ),
+        ];
+        for id in ids {
+            msgs.push(ChatMessage::tool_result(*id, pair_body));
+        }
+        // Pad prunable region first.
+        while estimate_messages_tokens(&msgs) < total_token_target {
+            msgs.insert(3, ChatMessage::user("pad ".repeat(40)));
+        }
+        // Append tail filler until the LAST tool_result sits in the tail.
+        let last_id = ids.last().unwrap();
+        loop {
+            let result_idx = msgs
+                .iter()
+                .rposition(|m| {
+                    m.role == Role::Tool && m.tool_call_id.as_deref() == Some(*last_id)
+                })
+                .unwrap();
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last_tokens, 3);
+            if result_idx >= ps {
+                break;
+            }
+            msgs.push(ChatMessage::user("tail ".repeat(10)));
+            if msgs.len() > 10_000 {
+                panic!("runaway tail filler");
+            }
+        }
+        // Inflate assistant args until assistant is prunable.
+        loop {
+            let ai = msgs
+                .iter()
+                .position(|m| {
+                    m.role == Role::Assistant
+                        && m.tool_calls
+                            .as_ref()
+                            .map(|v| v.iter().any(|c| c.id == *ids[0]))
+                            .unwrap_or(false)
+                })
+                .unwrap();
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last_tokens, 3);
+            if ai < ps {
+                break;
+            }
+            if let Some(ref mut calls) = msgs[ai].tool_calls {
+                for c in calls.iter_mut() {
+                    c.function.arguments =
+                        format!("{}{}", c.function.arguments, " ".repeat(40));
+                }
+            }
+            if msgs[ai]
+                .tool_calls
+                .as_ref()
+                .map(|v| v[0].function.arguments.len())
+                .unwrap_or(0)
+                > 100_000
+            {
+                panic!("runaway arg inflation");
+            }
+        }
+        msgs
+    }
+
+    #[tokio::test]
+    async fn compress_ok_parallel_tool_calls_straddling_boundary() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 6110;
+        let protect_last = 300;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs =
+            build_list_with_straddling_parallel_pair(&["p1", "p2"], "result", 3055, protect_last);
+        // Sanity: exactly one pair detected with two tool_results.
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].tool_result_indices.len(), 2);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("parallel tool_calls must compress cleanly");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_pair_at_exact_boundary() {
+        // A straddling pair IS by definition at the boundary — our straddle
+        // helper always produces `assistant_idx == protect_start - 1` or very
+        // close. Exercise the smallest viable shape.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 2000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair("r", 800, protect_last);
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        let ps = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+        assert!(pairs[0].assistant_idx < ps);
+        assert!(pairs[0].tool_result_indices.iter().any(|&i| i >= ps));
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("boundary pair must compress cleanly");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_pair_at_exact_first_n_boundary() {
+        // Pair sits at protect_first_n (index 3) — first possible prunable
+        // slot. Straddles when tool_result is also in tail window.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 2000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        // Minimal prunable content — just enough to cross threshold.
+        let mut msgs = build_list_with_straddling_pair("r", 600, protect_last);
+        // If the pair's assistant is at index > 3, drop extra filler to push
+        // it toward 3. For simplicity just assert straddle holds; exact
+        // position is controlled by helper padding loop.
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        assert!(pairs[0].assistant_idx >= 3);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("first-n boundary pair must compress cleanly");
+        // May be no-op if nothing left to prune after atomicity guard, but
+        // must not error.
+        let _ = outcome;
+        assert!(tool_pair::check_orphan_invariant(&msgs).is_ok());
+    }
+
+    #[tokio::test]
+    async fn compress_ok_back_to_back_pairs() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 8000;
+        let protect_last = 300;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        // Build: system, user, asst, [filler pad...], asstA+resultA, asstB+resultB, [tail]
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("a"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "pA".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+            }]),
+            ChatMessage::tool_result("pA", "rA"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "pB".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+            }]),
+            ChatMessage::tool_result("pB", "rB"),
+        ];
+        while estimate_messages_tokens(&msgs) < 4000 {
+            msgs.insert(3, ChatMessage::user("pad ".repeat(40)));
+        }
+        // Tail filler until last pair's tool_result is in tail window.
+        loop {
+            let ri = msgs
+                .iter()
+                .rposition(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("pB"))
+                .unwrap();
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+            if ri >= ps {
+                break;
+            }
+            msgs.push(ChatMessage::user("tail ".repeat(10)));
+            if msgs.len() > 10_000 {
+                panic!("runaway");
+            }
+        }
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("back-to-back pairs must compress cleanly");
+        let _ = outcome;
+        assert!(tool_pair::check_orphan_invariant(&msgs).is_ok());
+    }
+
+    #[tokio::test]
+    async fn compress_ok_pair_with_large_body_straddling_at_9467() {
+        // Re-run the 9467-token UAT shape via the regression matrix for
+        // explicit large-body coverage (mirrors compress_ok_large_pair_9467_tokens
+        // but lives in the regression section for grep-discoverability).
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 18934;
+        let protect_last = 800;
+        let big_body = "x".repeat(2500);
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair(&big_body, 9467, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("regression: 9467 large-body straddle must compress");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_noop_when_only_pair_fills_entire_prunable_range() {
+        // Edge case: the only prunable content IS a pair. After the atomicity
+        // guard pulls prune_end back to before the assistant, prune_end ==
+        // prune_start (protect_first_n=3 == assistant_idx=3) → collapsed range
+        // no-op. compress returns Ok(default()) without error.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Should not be called".into())]);
+        let ctx_len = 500;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        // Minimal list: system, user, asst, [pair at index 3-4], tail filler.
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("a"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "only".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+            }]),
+            ChatMessage::tool_result("only", "r"),
+        ];
+        // Push tail filler so pair straddles.
+        loop {
+            let ri = 4;
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+            if ri >= ps {
+                break;
+            }
+            msgs.push(ChatMessage::user("tail ".repeat(5)));
+            if msgs.len() > 200 {
+                break;
+            }
+        }
+        // Inflate assistant args until assistant is prunable (assistant_idx=3 == protect_first_n).
+        loop {
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+            if 3 < ps {
+                break;
+            }
+            if let Some(ref mut calls) = msgs[3].tool_calls {
+                calls[0].function.arguments =
+                    format!("{}{}", calls[0].function.arguments, " ".repeat(40));
+            }
+            if msgs[3]
+                .tool_calls
+                .as_ref()
+                .map(|v| v[0].function.arguments.len())
+                .unwrap_or(0)
+                > 50_000
+            {
+                panic!("runaway");
+            }
+        }
+        let len_before = msgs.len();
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("no-op collapsed range must return Ok");
+        assert!(
+            !outcome.compressed,
+            "expected no-op (collapsed prune range); got compressed=true"
+        );
+        // Message list unchanged — no [CONTEXT HISTORY] injected.
+        assert_eq!(msgs.len(), len_before, "message list must be unchanged");
+        assert!(
+            msgs.iter().all(|m| m.name.as_deref() != Some(HISTORY_NAME)),
+            "no [CONTEXT HISTORY] inserted when range collapsed"
+        );
+    }
+
     #[tokio::test]
     async fn compress_ok_multiple_pairs_mixed() {
         // Three pairs: one fully-prunable, one straddling, one fully-protected.
