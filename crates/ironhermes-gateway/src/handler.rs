@@ -446,6 +446,17 @@ impl GatewayMessageHandler {
             agent = agent.with_hook_registry(registry.clone());
         }
 
+        // Phase 18 Plan 09: wire agent-side context compression (honors
+        // config.agent.context_engine + config.agent.compression_threshold).
+        let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
+        agent = ironhermes_agent::attach_context_engine(
+            agent,
+            &self.config,
+            &self.resolver,
+            &session_id_str,
+            self.hook_registry.clone(),
+        );
+
         // 8. Run agent with error recovery (D-18)
         let agent_result = agent.run(messages).await;
 
@@ -683,6 +694,39 @@ mod tests {
         let fired2 = handler2.maybe_compress_gateway(&mut msgs2).await;
         assert!(!fired2, "hygiene must not fire below 0.85 threshold");
         assert_eq!(calls2.load(AtomicOrdering::SeqCst), 0, "no compress call below threshold");
+    }
+
+    // ── Phase 18 Plan 09: UAT gap closure — agent engine wiring ────────────
+
+    /// Verifies that the gateway handler wires the agent-side context engine
+    /// via `attach_context_engine` using its own config/resolver, so
+    /// `config.agent.compression_threshold` is honored at runtime.
+    #[tokio::test]
+    async fn gateway_handler_attaches_agent_engine() {
+        let handler = make_handler();
+        let client = ironhermes_agent::AnyClient::ChatCompletions(
+            ironhermes_agent::LlmClient::new(
+                "http://localhost:0".to_string(),
+                "k".to_string(),
+                "test-model",
+            ),
+        );
+        let max_turns = handler.config.agent.max_turns;
+        let agent = ironhermes_agent::AgentLoop::new(
+            client,
+            handler.tool_registry.clone(),
+            max_turns,
+        );
+        let agent = ironhermes_agent::attach_context_engine(
+            agent,
+            &handler.config,
+            &handler.resolver,
+            "sess-gw",
+            handler.hook_registry.clone(),
+        );
+        assert!(agent.has_context_engine(), "agent must have context engine attached");
+        assert!(agent.has_pressure_tracker(), "agent must have pressure tracker attached");
+        assert_eq!(agent.session_id(), Some("sess-gw".to_string()));
     }
 }
 
