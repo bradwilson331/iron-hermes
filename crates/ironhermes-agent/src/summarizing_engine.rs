@@ -1437,4 +1437,140 @@ mod tests {
         assert!(outcome.compressed);
         assert_compress_ok_no_orphan(&msgs);
     }
+
+    /// Build a front-straddle fixture: `protect_first_n=3`, assistant tool_call
+    /// at idx 2 (inside front-protected region), tool_result(s) at idx 3+
+    /// (in the prune range). Mirrors live UAT 2026-04-13T05:18 shape
+    /// (~64555 before_tokens, single web_read pair).
+    fn build_list_with_front_straddle_pair(
+        tool_call_ids: &[&str],
+        pair_body: &str,
+        protect_last_tokens: usize,
+        total_token_target: usize,
+    ) -> Vec<ChatMessage> {
+        let mut msgs = Vec::new();
+        // Front-protected region [0..3):
+        //   0: system
+        //   1: identity user turn
+        //   2: assistant with tool_call(s) — first tool-calling turn.
+        msgs.push(ChatMessage::system("sys"));
+        msgs.push(ChatMessage::user("identity"));
+        let calls: Vec<ToolCall> = tool_call_ids
+            .iter()
+            .map(|id| ToolCall {
+                id: (*id).into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: r#"{"url":"https://example.com"}"#.into(),
+                },
+            })
+            .collect();
+        msgs.push(ChatMessage::assistant_tool_calls(calls));
+        // tool_results immediately after (idx 3..3+N) — in the prune range.
+        for id in tool_call_ids {
+            msgs.push(ChatMessage::tool_result(*id, pair_body));
+        }
+        // Fill middle with prunable filler until we hit target tokens.
+        while estimate_messages_tokens(&msgs) < total_token_target {
+            // Insert prunable content AFTER the tool_results so protect_start
+            // can walk back from the tail without swallowing the pair.
+            let insert_at = 3 + tool_call_ids.len();
+            msgs.insert(insert_at, ChatMessage::user("pad ".repeat(40)));
+        }
+        // Tail filler to ensure protect_last_tokens' walk lands past the pair.
+        let _ = protect_last_tokens;
+        msgs.push(ChatMessage::user("tail anchor"));
+        msgs
+    }
+
+    /// Assert the fixture is in the front-straddle shape expected by the bug:
+    /// assistant_idx < protect_first_n (front-protected), at least one
+    /// tool_result in [protect_first_n, protect_start) (prune range).
+    fn assert_pair_front_straddles(
+        msgs: &[ChatMessage],
+        protect_first_n: usize,
+        protect_last_tokens: usize,
+    ) {
+        let protect_start = ContextCompressor::compute_protect_start(
+            msgs,
+            protect_last_tokens,
+            protect_first_n,
+        );
+        let pairs = tool_pair::detect_tool_pairs(msgs);
+        assert_eq!(pairs.len(), 1, "fixture must contain exactly one tool-pair");
+        let p = &pairs[0];
+        assert!(
+            p.assistant_idx < protect_first_n,
+            "assistant must be front-protected (asst_idx={}, protect_first_n={})",
+            p.assistant_idx,
+            protect_first_n
+        );
+        assert!(
+            p.tool_result_indices
+                .iter()
+                .any(|&i| i >= protect_first_n && i < protect_start),
+            "≥1 tool_result must be in prune range [{}, {})",
+            protect_first_n,
+            protect_start
+        );
+    }
+
+    #[tokio::test]
+    async fn compress_ok_front_straddle_asst_in_protect_first_n_single_result() {
+        // Live UAT 2026-04-13T05:18 shape: protect_first_n=3, single web_read
+        // pair with asst at idx 2, tool_result at idx 3. Before fix: guard
+        // collapsed prune_end=2 below prune_start=3 → no-op with
+        // `reason="pair_atomicity_collapsed_range"`.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 130_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_front_straddle_pair(
+            &["web_read_front_1"],
+            "web page body",
+            protect_last,
+            64_555,
+        );
+        assert_pair_front_straddles(&msgs, 3, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — front-straddle single-result");
+        assert!(
+            outcome.compressed,
+            "compressed flag must be true — live UAT regression"
+        );
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_front_straddle_parallel_tool_calls() {
+        // Parallel tool_calls variant: asst at idx 2 emits two tool_calls,
+        // tool_results at idx 3 and 4. All results land in the prune range
+        // while the assistant stays front-protected. Before fix: same
+        // collapsed-range no-op.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 130_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_front_straddle_pair(
+            &["web_read_front_p1", "web_read_front_p2"],
+            "web page body",
+            protect_last,
+            64_555,
+        );
+        assert_pair_front_straddles(&msgs, 3, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — front-straddle parallel calls");
+        assert!(
+            outcome.compressed,
+            "compressed flag must be true — parallel front-straddle"
+        );
+        assert_compress_ok_no_orphan(&msgs);
+    }
 }
