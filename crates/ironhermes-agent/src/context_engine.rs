@@ -51,6 +51,16 @@ pub trait ContextEngine: Send + Sync + 'static {
     ) -> Result<CompressionOutcome, ContextError>;
     fn threshold(&self) -> f32;
     fn mode(&self) -> CompressionMode;
+
+    /// Phase 18 Plan 06: Run only the pressure-warning channel without
+    /// performing any destructive compression. Agent loop calls this when
+    /// the token ratio is below the compression threshold so the 85% warning
+    /// can still fire on the pre-compression slope.
+    ///
+    /// Default implementation is a no-op; both shipped engines override it.
+    async fn check_pressure(&self, _stats: &ContextStats) -> bool {
+        false
+    }
 }
 
 pub struct LocalPruningEngine {
@@ -210,6 +220,23 @@ impl ContextEngine for LocalPruningEngine {
 
     fn mode(&self) -> CompressionMode {
         CompressionMode::Hard
+    }
+
+    async fn check_pressure(&self, stats: &ContextStats) -> bool {
+        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
+            tracker
+                .check_and_maybe_emit(
+                    sid,
+                    self.threshold,
+                    stats.estimated_tokens,
+                    self.context_length,
+                    "hard",
+                    self.hook_registry.as_deref(),
+                )
+                .await
+        } else {
+            false
+        }
     }
 }
 

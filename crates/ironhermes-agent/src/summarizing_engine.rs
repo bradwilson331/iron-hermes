@@ -384,6 +384,23 @@ impl ContextEngine for SummarizingEngine {
     fn mode(&self) -> CompressionMode {
         CompressionMode::Soft
     }
+
+    async fn check_pressure(&self, stats: &ContextStats) -> bool {
+        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
+            tracker
+                .check_and_maybe_emit(
+                    sid,
+                    self.threshold,
+                    stats.estimated_tokens,
+                    self.context_length,
+                    "soft",
+                    self.hook_registry.as_deref(),
+                )
+                .await
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

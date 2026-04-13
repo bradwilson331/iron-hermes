@@ -8,6 +8,8 @@ use tracing::{error, info, warn};
 use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryProvider, MessageContent, MessageEvent, Platform, ProviderResolver, Role, SkillRegistry};
 use ironhermes_agent::{AgentLoop, AnyClient, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
+use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
+use ironhermes_agent::context_compressor::estimate_messages_tokens;
 use ironhermes_tools::ToolRegistry;
 
 use crate::adapter::{MessageHandler, PlatformAdapter};
@@ -51,6 +53,12 @@ pub struct GatewayMessageHandler {
     skill_registry: Option<Arc<SkillRegistry>>,
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
     rate_limiter: PerUserRateLimiter,
+    /// Phase 18 Plan 06: per-turn hygiene compression engine (runs at
+    /// `gateway.compression_threshold`, default 0.85). None = no hygiene pass.
+    gateway_engine: Option<Arc<dyn ContextEngine>>,
+    /// Provider context window used for ratio calculation. Falls back to
+    /// 128k when the resolver does not expose a per-endpoint value.
+    context_length: usize,
 }
 
 impl GatewayMessageHandler {
@@ -74,6 +82,48 @@ impl GatewayMessageHandler {
             skill_registry: None,
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             rate_limiter,
+            gateway_engine: None,
+            context_length: 128_000,
+        }
+    }
+
+    /// Phase 18 Plan 06: install the per-turn hygiene engine. Wired by composition
+    /// root (gateway startup) using `engine_factory::build_context_engine(...)`
+    /// with `config.gateway.context_engine` + `config.gateway.compression_threshold`.
+    pub fn set_gateway_engine(&mut self, engine: Arc<dyn ContextEngine>, context_length: usize) {
+        self.gateway_engine = Some(engine);
+        self.context_length = context_length;
+    }
+
+    /// Phase 18 Plan 06: per-turn hygiene check (D-12, planner guidance #7).
+    /// Compresses in-place when `estimated / context_length >= gateway.compression_threshold`.
+    /// No-op when no engine is configured or ratio is below threshold.
+    ///
+    /// NOTE: D-13 parent_session_id lineage is deferred to Phase 21 (full gateway lifecycle).
+    pub(crate) async fn maybe_compress_gateway(&self, messages: &mut Vec<ChatMessage>) -> bool {
+        let Some(engine) = self.gateway_engine.as_ref() else {
+            return false;
+        };
+        let estimated = estimate_messages_tokens(messages);
+        let ratio = estimated as f32 / self.context_length.max(1) as f32;
+        let gw_threshold = self.config.gateway.compression_threshold;
+        if ratio < gw_threshold {
+            return false;
+        }
+        let stats = ContextStats {
+            context_length: self.context_length,
+            estimated_tokens: estimated,
+            protect_first_n: 3,
+            protect_last_tokens: 20_000.min(self.context_length / 4),
+            compression_count: 0,
+            prior_summary: None,
+        };
+        match engine.compress(messages, stats).await {
+            Ok(outcome) => outcome.compressed,
+            Err(e) => {
+                tracing::error!(error = ?e, "gateway hygiene compression failed");
+                false
+            }
         }
     }
 
@@ -298,6 +348,9 @@ impl GatewayMessageHandler {
         // Prepend system message
         let mut messages = vec![system_msg];
         messages.append(&mut session_messages);
+
+        // Phase 18 Plan 06: per-turn gateway hygiene at 85% threshold (D-12).
+        let _ = self.maybe_compress_gateway(&mut messages).await;
 
         // 5. Create mpsc channels for streaming bridge
         let (stream_tx, mut stream_rx) = mpsc::channel::<String>(256);
@@ -565,6 +618,65 @@ mod tests {
             enforcement_would_trigger,
             "not permitted by the active skill set — enforcement would trigger for non-allowed tools"
         );
+    }
+
+    // ── Phase 18 Plan 06: gateway hygiene per-turn compression (D-12) ───────
+
+    use async_trait::async_trait;
+    use ironhermes_agent::context_engine::{
+        CompressionMode, CompressionOutcome, ContextError, ContextEngine, ContextStats,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct RecordingGatewayEngine {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ContextEngine for RecordingGatewayEngine {
+        async fn compress(
+            &self,
+            _messages: &mut Vec<ChatMessage>,
+            _stats: ContextStats,
+        ) -> Result<CompressionOutcome, ContextError> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(CompressionOutcome { compressed: true, ..CompressionOutcome::default() })
+        }
+        fn threshold(&self) -> f32 { 0.85 }
+        fn mode(&self) -> CompressionMode { CompressionMode::Hard }
+    }
+
+    fn filler_messages(n: usize) -> Vec<ChatMessage> {
+        (0..n)
+            .map(|i| ChatMessage::user(format!("message {i} ").repeat(20)))
+            .collect()
+    }
+
+    /// Handler triggers gateway compression exactly once per turn when ratio >= 0.85,
+    /// and never when below.
+    #[tokio::test]
+    async fn gateway_handler_per_turn_hygiene() {
+        // Above threshold: tiny context_length forces ratio > 0.85.
+        let mut handler = make_handler();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine: Arc<dyn ContextEngine> = Arc::new(RecordingGatewayEngine { calls: calls.clone() });
+        handler.set_gateway_engine(engine, 100);
+
+        let mut msgs = filler_messages(20);
+        let fired = handler.maybe_compress_gateway(&mut msgs).await;
+        assert!(fired, "hygiene must fire above 0.85 threshold");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "exactly one compress call");
+
+        // Below threshold: huge context_length keeps ratio << 0.85.
+        let mut handler2 = make_handler();
+        let calls2 = Arc::new(AtomicUsize::new(0));
+        let engine2: Arc<dyn ContextEngine> = Arc::new(RecordingGatewayEngine { calls: calls2.clone() });
+        handler2.set_gateway_engine(engine2, 10_000_000);
+
+        let mut msgs2 = filler_messages(3);
+        let fired2 = handler2.maybe_compress_gateway(&mut msgs2).await;
+        assert!(!fired2, "hygiene must not fire below 0.85 threshold");
+        assert_eq!(calls2.load(AtomicOrdering::SeqCst), 0, "no compress call below threshold");
     }
 }
 

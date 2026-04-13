@@ -11,7 +11,9 @@ use tracing::{debug, info, warn};
 
 use crate::any_client::AnyClient;
 use crate::client::{StreamEvent, ToolCallDelta};
-use crate::context_compressor::ContextCompressor;
+use crate::context_compressor::{estimate_messages_tokens, ContextCompressor};
+use crate::context_engine::{ContextEngine, ContextStats};
+use crate::pressure_warning::PressureTracker;
 use crate::subdir_discovery::SubdirDiscovery;
 
 /// Result of an agent loop execution.
@@ -80,6 +82,18 @@ pub struct AgentLoop {
     /// Optional StateStore for session_search tool interception (D-07).
     /// When set, session_search calls are handled directly without registry dispatch.
     state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
+    /// Phase 18 Plan 06: pre-chat context engine. When set, replaces the legacy
+    /// `compressor` path and runs at the engine's own threshold (default 0.5).
+    context_engine: Option<Arc<dyn ContextEngine>>,
+    /// Phase 18 Plan 06: pressure tracker used to drain transient warnings
+    /// (D-24 channel 3) and inject them as system messages before the next LLM call.
+    pressure_tracker: Option<Arc<PressureTracker>>,
+    /// Session id for routing pressure + pre_compress events.
+    session_id: Option<String>,
+    /// Total context window size (used for ratio = estimated / context_length).
+    context_length: usize,
+    /// Runtime compression count passed into ContextStats (D-24 runaway guard).
+    compression_count: usize,
 }
 
 impl AgentLoop {
@@ -101,7 +115,36 @@ impl AgentLoop {
             fallback_activated: false,
             subdir_discovery: None,
             state_store: None,
+            context_engine: None,
+            pressure_tracker: None,
+            session_id: None,
+            context_length: 128_000,
+            compression_count: 0,
         }
+    }
+
+    /// Phase 18 Plan 06: inject a pre-chat context engine.
+    /// Also populates context_length so ratio checks work correctly.
+    pub fn with_context_engine(
+        mut self,
+        engine: Arc<dyn ContextEngine>,
+        context_length: usize,
+    ) -> Self {
+        self.context_engine = Some(engine);
+        self.context_length = context_length;
+        self
+    }
+
+    /// Phase 18 Plan 06: attach a pressure tracker for transient message drain.
+    pub fn with_pressure_tracker(mut self, tracker: Arc<PressureTracker>) -> Self {
+        self.pressure_tracker = Some(tracker);
+        self
+    }
+
+    /// Phase 18 Plan 06: session id for transient drain + pre_compress routing.
+    pub fn with_session_id(mut self, sid: impl Into<String>) -> Self {
+        self.session_id = Some(sid.into());
+        self
     }
 
     /// Set a cancellation token for cooperative shutdown (D-21).
@@ -219,6 +262,45 @@ impl AgentLoop {
         (true, false)
     }
 
+    /// Phase 18 Plan 06: pre-chat compression + transient-drain block.
+    /// Extracted for direct unit testing without spinning the full `run()` loop.
+    pub(crate) async fn pre_chat_compress(&mut self, messages: &mut Vec<ChatMessage>) {
+        let engine = match &self.context_engine {
+            Some(e) => e.clone(),
+            None => return,
+        };
+
+        // Drain transient pressure message (D-24 channel 3) BEFORE compression so it
+        // sits on the same pre-chat message vector the LLM is about to see.
+        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
+            if let Some(transient) = tracker.take_transient(sid) {
+                messages.push(ChatMessage::system(transient));
+            }
+        }
+
+        let estimated = estimate_messages_tokens(messages);
+        let ratio = estimated as f32 / self.context_length.max(1) as f32;
+        let threshold = engine.threshold();
+        let stats = ContextStats {
+            context_length: self.context_length,
+            estimated_tokens: estimated,
+            protect_first_n: 3,
+            protect_last_tokens: 20_000.min(self.context_length / 4),
+            compression_count: self.compression_count,
+            prior_summary: None,
+        };
+        debug!(ratio, threshold, "context compression check");
+        if ratio >= threshold {
+            match engine.compress(messages, stats).await {
+                Ok(outcome) if outcome.compressed => self.compression_count += 1,
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = ?e, "context compression failed"),
+            }
+        } else {
+            engine.check_pressure(&stats).await;
+        }
+    }
+
     /// Fire a hook event fire-and-forget. No-op if no hook registry is configured.
     fn fire_hook(&self, kind: HookEventKind) {
         if let Some(ref registry) = self.hook_registry {
@@ -285,8 +367,12 @@ impl AgentLoop {
                 }
             }
 
-            // Check for context compression
-            if let Some(ref compressor) = self.compressor {
+            // Phase 18 Plan 06: pre-chat context engine path (replaces legacy compressor
+            // when wired). Drain transient pressure message, then compress at >= threshold
+            // or run pressure check only when below.
+            if self.context_engine.is_some() {
+                self.pre_chat_compress(&mut messages).await;
+            } else if let Some(ref compressor) = self.compressor {
                 let mut comp = compressor.lock().await;
                 comp.compress(&mut messages);
             }
@@ -1317,5 +1403,144 @@ mod fallback_tests {
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "500 should be retryable");
         assert!(should_fallback, "500 should trigger fallback");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Phase 18 Plan 06 pre-chat compression wiring
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod plan_18_06_tests {
+    use super::*;
+    use crate::context_engine::{CompressionMode, CompressionOutcome, ContextError};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// Recording fake engine — captures call order without real LLM work.
+    struct RecordingEngine {
+        threshold: f32,
+        compress_calls: Arc<AtomicUsize>,
+        pressure_calls: Arc<AtomicUsize>,
+        event_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl ContextEngine for RecordingEngine {
+        async fn compress(
+            &self,
+            _messages: &mut Vec<ChatMessage>,
+            _stats: ContextStats,
+        ) -> Result<CompressionOutcome, ContextError> {
+            self.compress_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.event_log.lock().unwrap().push("compress");
+            Ok(CompressionOutcome {
+                compressed: true,
+                ..CompressionOutcome::default()
+            })
+        }
+        fn threshold(&self) -> f32 {
+            self.threshold
+        }
+        fn mode(&self) -> CompressionMode {
+            CompressionMode::Hard
+        }
+        async fn check_pressure(&self, _stats: &ContextStats) -> bool {
+            self.pressure_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.event_log.lock().unwrap().push("check_pressure");
+            false
+        }
+    }
+
+    fn make_engine(threshold: f32) -> (Arc<RecordingEngine>, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<&'static str>>>) {
+        let c = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(AtomicUsize::new(0));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = Arc::new(RecordingEngine {
+            threshold,
+            compress_calls: c.clone(),
+            pressure_calls: p.clone(),
+            event_log: log.clone(),
+        });
+        (engine, c, p, log)
+    }
+
+    fn make_agent_with_engine(engine: Arc<dyn ContextEngine>, ctx_len: usize) -> AgentLoop {
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "test",
+        ));
+        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        AgentLoop::new(client, registry, 10)
+            .with_context_engine(engine, ctx_len)
+            .with_session_id("sess-test")
+    }
+
+    fn filler_messages(n: usize) -> Vec<ChatMessage> {
+        (0..n)
+            .map(|i| ChatMessage::user(format!("message {i} ").repeat(20)))
+            .collect()
+    }
+
+    /// Agent loop compresses at >= threshold ratio and runs check_pressure below it.
+    #[tokio::test]
+    async fn dual_mode_thresholds() {
+        // Below threshold: filler messages keep ratio < 0.5.
+        let (engine, compress_calls, pressure_calls, _log) = make_engine(0.5);
+        let mut agent = make_agent_with_engine(engine.clone(), 1_000_000);
+        let mut messages = filler_messages(5);
+        agent.pre_chat_compress(&mut messages).await;
+        assert_eq!(compress_calls.load(AtomicOrdering::SeqCst), 0, "below threshold must not compress");
+        assert_eq!(pressure_calls.load(AtomicOrdering::SeqCst), 1, "below threshold must run pressure check");
+
+        // Above threshold: tiny ctx_len forces ratio > 0.5.
+        let (engine2, compress_calls2, pressure_calls2, _log2) = make_engine(0.5);
+        let mut agent2 = make_agent_with_engine(engine2.clone(), 100);
+        let mut msgs2 = filler_messages(20);
+        agent2.pre_chat_compress(&mut msgs2).await;
+        assert_eq!(compress_calls2.load(AtomicOrdering::SeqCst), 1, "above threshold must compress");
+        assert_eq!(pressure_calls2.load(AtomicOrdering::SeqCst), 0, "above threshold must NOT also run pressure check");
+    }
+
+    /// Transient pressure message is drained and injected as a system message
+    /// before compression runs; subsequent drain returns None (consumed).
+    #[tokio::test]
+    async fn agent_loop_injects_transient_pressure_message() {
+        let tracker = Arc::new(PressureTracker::new());
+        // Seed a transient via check_and_maybe_emit: ratio above 85% of threshold.
+        let fired = tracker
+            .check_and_maybe_emit("sess-test", 0.5, 50, 100, "hard", None)
+            .await;
+        assert!(fired, "precondition: tracker must fire the transient");
+
+        let (engine, _c, _p, _log) = make_engine(0.5);
+        let mut agent = make_agent_with_engine(engine, 1_000_000)
+            .with_pressure_tracker(tracker.clone());
+
+        let mut messages = filler_messages(3);
+        let before_len = messages.len();
+        agent.pre_chat_compress(&mut messages).await;
+
+        assert_eq!(messages.len(), before_len + 1, "transient must be appended");
+        let injected = messages.last().unwrap();
+        assert_eq!(injected.role, ironhermes_core::Role::System);
+        assert!(injected.content_text().unwrap_or("").contains("CONTEXT PRESSURE HIGH"));
+
+        // Transient is one-shot — subsequent drain returns None.
+        assert!(tracker.take_transient("sess-test").is_none());
+    }
+
+    /// Compression fires BEFORE any client call — since pre_chat_compress returns
+    /// before the LLM is touched, its completion is a strict happens-before for chat.
+    /// Verified by event_log ordering: compress recorded, no chat marker yet.
+    #[tokio::test]
+    async fn agent_loop_compression_before_chat() {
+        let (engine, _c, _p, log) = make_engine(0.5);
+        let mut agent = make_agent_with_engine(engine, 100);
+        let mut messages = filler_messages(20);
+        agent.pre_chat_compress(&mut messages).await;
+        let final_log = log.lock().unwrap().clone();
+        assert_eq!(final_log, vec!["compress"], "compress must be the pre-chat event");
     }
 }
