@@ -220,6 +220,14 @@ impl ContextEngine for SummarizingEngine {
         let before = estimate_messages_tokens(messages);
         let pct = before as f32 / self.context_length.max(1) as f32;
 
+        tracing::info!(
+            before_tokens = before,
+            pct,
+            threshold = self.threshold,
+            session_id = ?self.session_id,
+            "summarizing_engine: compress attempt"
+        );
+
         // Phase 18 D-23/D-24: emit pressure warning at 85% of compression threshold.
         let mut pressure_warning_fired = false;
         if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
@@ -240,6 +248,12 @@ impl ContextEngine for SummarizingEngine {
         }
 
         if pct < self.threshold {
+            tracing::info!(
+                pct,
+                threshold = self.threshold,
+                reason = "below_threshold",
+                "summarizing_engine: no-op"
+            );
             return Ok(CompressionOutcome::default());
         }
 
@@ -290,6 +304,13 @@ impl ContextEngine for SummarizingEngine {
         // Determine prune range [protect_first_n .. protect_start], excluding
         // the pinned history segment (D-19).
         if protect_start <= self.protect_first_n {
+            tracing::info!(
+                protect_start,
+                protect_first_n = self.protect_first_n,
+                protect_last_tokens = self.protect_last_tokens,
+                reason = "nothing_to_prune_first_n",
+                "summarizing_engine: no-op"
+            );
             return Ok(CompressionOutcome::default());
         }
         let prune_start = self.protect_first_n;
@@ -308,6 +329,12 @@ impl ContextEngine for SummarizingEngine {
             .collect();
 
         if pruned_blocks.is_empty() {
+            tracing::info!(
+                prune_start,
+                prune_end,
+                reason = "prune_range_empty_after_history_filter",
+                "summarizing_engine: no-op"
+            );
             return Ok(CompressionOutcome::default());
         }
 
@@ -369,6 +396,12 @@ impl ContextEngine for SummarizingEngine {
         tool_pair::check_orphan_invariant(messages)?;
 
         let after = estimate_messages_tokens(messages);
+        tracing::info!(
+            before_tokens = before,
+            after_tokens = after,
+            compression_count = stats.compression_count + 1,
+            "summarizing_engine: compressed"
+        );
         Ok(CompressionOutcome {
             compressed: true,
             tokens_freed: before.saturating_sub(after),

@@ -51,6 +51,19 @@ mkdir -p ~/.ironhermes
 echo "OPENROUTER_API_KEY=your-key-here" > ~/.ironhermes/.env
 ```
 
+### Compression Tuning
+
+Context compression behavior is configurable via `config.yaml`:
+
+```yaml
+compression:
+  protect_last_tokens: 20000   # last N tokens are never pruned (default 20000)
+  protect_first_n: 3           # first N messages are never pruned (default 3)
+  tool_pair_shift_tokens: 500  # adaptive shift for tool-pair atomicity (default 500)
+```
+
+For UAT or testing, lower `protect_last_tokens` (e.g. to 100) to force compression to prune short conversations.
+
 ## Tools
 
 Built-in tools available to the agent:

@@ -307,14 +307,21 @@ impl AgentLoop {
             compression_count: self.compression_count,
             prior_summary: None,
         };
-        debug!(ratio, threshold, "context compression check");
         if ratio >= threshold {
+            info!(ratio, threshold, "context compression check");
             match engine.compress(messages, stats).await {
-                Ok(outcome) if outcome.compressed => self.compression_count += 1,
+                Ok(outcome) if outcome.compressed => {
+                    self.compression_count += 1;
+                    info!(
+                        compression_count = self.compression_count,
+                        "pre_chat_compress: compression fired"
+                    );
+                }
                 Ok(_) => {}
                 Err(e) => tracing::error!(error = ?e, "context compression failed"),
             }
         } else {
+            debug!(ratio, threshold, "context compression check");
             engine.check_pressure(&stats).await;
         }
     }
