@@ -95,6 +95,12 @@ impl GatewayMessageHandler {
         self.context_length = context_length;
     }
 
+    /// Test-only accessor: used by 18-08 runner tests to assert the engine is attached.
+    #[cfg(test)]
+    pub(crate) fn gateway_engine_is_some(&self) -> bool {
+        self.gateway_engine.is_some()
+    }
+
     /// Phase 18 Plan 06: per-turn hygiene check (D-12, planner guidance #7).
     /// Compresses in-place when `estimated / context_length >= gateway.compression_threshold`.
     /// No-op when no engine is configured or ratio is below threshold.
