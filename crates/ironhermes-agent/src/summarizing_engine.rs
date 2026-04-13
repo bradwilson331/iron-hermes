@@ -331,14 +331,31 @@ impl ContextEngine for SummarizingEngine {
             );
             return Ok(CompressionOutcome::default());
         }
-        let prune_start = self.protect_first_n;
+        let mut prune_start = self.protect_first_n;
         let mut prune_end = protect_start;
 
         // Phase 18 Plan 10 pair-atomicity guard: ensure no detected pair is
-        // split across [prune_start..prune_end]. If a pair straddles the
-        // boundary, pull prune_end BACK to exclude the assistant tool_call
-        // so the whole pair stays live (user policy: pair-crossing guard
-        // prefers keeping the pair live to maximizing recovery).
+        // split across [prune_start..prune_end]. Two straddle directions exist:
+        //
+        //   (a) BACK-STRADDLE: assistant is inside prune range, at least one
+        //       tool_result is AFTER prune_end (in protected tail). Pull
+        //       prune_end BACK to `assistant_idx` so both sides stay live.
+        //
+        //   (b) FRONT-STRADDLE: assistant is BEFORE prune_start (inside the
+        //       front-protected `protect_first_n` region), and one or more
+        //       tool_results are inside prune range. We must push prune_start
+        //       FORWARD past `max(tool_result_idx) + 1` so the whole pair
+        //       stays in the front-protected region — otherwise we'd prune
+        //       tool_results whose assistant cannot be removed, orphaning them.
+        //
+        // Post-fix invariant: `prune_start` only increases, `prune_end` only
+        // decreases. This is why we compute adjustments then apply the
+        // monotone update.
+        //
+        // Live UAT 2026-04-13T05:18 failed every compression because the
+        // previous guard only handled (a) and collapsed the range on (b):
+        // protect_first_n=3, asst at idx 2, tool_result at idx 3 → old guard
+        // pulled prune_end=2, below prune_start=3 → logic-stall no-op.
         let pairs_after_shift = tool_pair::detect_tool_pairs(messages);
         for pair in &pairs_after_shift {
             let asst_in = pair.assistant_idx >= prune_start && pair.assistant_idx < prune_end;
@@ -355,11 +372,30 @@ impl ContextEngine for SummarizingEngine {
             if fully_in || fully_out {
                 continue;
             }
-            // Split detected — pull prune_end back to before the assistant
-            // so both the assistant tool_call and every tool_result stay live.
-            if pair.assistant_idx < prune_end {
-                prune_end = pair.assistant_idx;
+            if asst_in {
+                // (a) back-straddle: assistant prunable, ≥1 result in tail.
+                // Pull prune_end BACK to before the assistant.
+                if pair.assistant_idx < prune_end {
+                    prune_end = pair.assistant_idx;
+                }
+            } else if pair.assistant_idx < prune_start && any_result_in {
+                // (b) front-straddle: assistant front-protected, results in
+                // prune range. Push prune_start FORWARD past the last result
+                // so the whole pair lives in the front-protected region.
+                let last_result = pair
+                    .tool_result_indices
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(pair.assistant_idx);
+                let push_to = last_result + 1;
+                if push_to > prune_start {
+                    prune_start = push_to;
+                }
             }
+            // Remaining theoretical case (asst after prune_end with results
+            // before prune_start) is impossible — tool_results always follow
+            // their assistant in a valid sequence.
         }
         if prune_end <= prune_start {
             tracing::warn!(
