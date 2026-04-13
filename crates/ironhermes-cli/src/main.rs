@@ -293,6 +293,16 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         }
     }
 
+    // Phase 18 Plan 09: wire agent-side context compression (honors
+    // config.agent.context_engine + config.agent.compression_threshold).
+    agent = ironhermes_agent::attach_context_engine(
+        agent,
+        &config,
+        &resolver,
+        session_id.as_str(),
+        None, // CLI does not register a hook registry
+    );
+
     let result = agent.run(messages).await?;
 
     // Persist assistant response messages to SQLite
@@ -406,7 +416,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         let _ = state_store.add_message(&session_id, &user_msg);
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
-        let response = run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget).await?;
+        let response = run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget, &session_id).await?;
         // Persist assistant response
         if let Some(ref text) = response {
             let assistant_msg = ChatMessage::assistant(text);
@@ -454,7 +464,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 messages.push(user_msg);
 
                 let response =
-                    run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget).await?;
+                    run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget, &session_id).await?;
                 // Persist assistant response
                 if let Some(ref text) = response {
                     let assistant_msg = ChatMessage::assistant(text);
@@ -493,6 +503,7 @@ async fn run_agent_turn(
     config: &Config,
     resolver: &ProviderResolver,
     budget: &Arc<AtomicUsize>,
+    session_id: &str,
 ) -> Result<Option<String>> {
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
@@ -513,6 +524,15 @@ async fn run_agent_turn(
             agent = agent.with_fallback(fb_client);
         }
     }
+
+    // Phase 18 Plan 09: wire agent-side context compression.
+    agent = ironhermes_agent::attach_context_engine(
+        agent,
+        config,
+        resolver,
+        session_id,
+        None,
+    );
 
     // Pass a clone of messages so agent can work with them
     let result = agent.run(messages.clone()).await?;
