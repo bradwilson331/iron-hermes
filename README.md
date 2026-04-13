@@ -51,6 +51,40 @@ mkdir -p ~/.ironhermes
 echo "OPENROUTER_API_KEY=your-key-here" > ~/.ironhermes/.env
 ```
 
+### Auxiliary model roles (compression, vision, etc.)
+
+Long-context summarization, vision, and other auxiliary tasks can be routed to
+dedicated models via `model.roles` in `~/.ironhermes/config.yaml`. Configuring a
+`compression` role silences the `compression role unconfigured, falling back to
+main client` warning and keeps summarization off your main (expensive) model.
+
+```yaml
+model:
+  provider: openrouter
+  default: anthropic/claude-sonnet-4-5
+  roles:
+    # Summarization for the SummarizingEngine (Phase 18) — prefer a cheap/fast model.
+    compression:
+      provider: anthropic        # or "main" to reuse the main provider
+      model: claude-haiku-4-5    # omit to use the provider's default model
+    vision:
+      provider: openrouter
+      model: anthropic/claude-sonnet-4-5
+
+agent:
+  context_engine: summarizing      # "summarizing" (default) or "local_prune"
+  compression_threshold: 0.5       # compress agent loop at 50% of context_length
+
+gateway:
+  context_engine: summarizing
+  compression_threshold: 0.85      # compress gateway turns at 85%
+```
+
+Fallback chain when the `compression` role is missing or fails to build:
+`compression role → main client → LocalPruningEngine` (hard prune). The agent
+keeps running either way — the role only controls *which* model does the
+summarizing.
+
 ### Compression Tuning
 
 Context compression behavior is configurable via `config.yaml`:
