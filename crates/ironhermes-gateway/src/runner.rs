@@ -4,6 +4,9 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use ironhermes_agent::{AgentLoop, AnyClient, LlmClient, PromptBuilder, build_main_client};
+use ironhermes_agent::engine_factory::build_context_engine;
+use ironhermes_agent::pressure_warning::PressureTracker;
+use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_core::{ChatMessage, Config, MemoryProvider, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
@@ -80,6 +83,56 @@ impl GatewayRunner {
         self.active_skills = Some(skills);
     }
 
+    /// Build the GatewayMessageHandler with all wiring (memory, hooks, skills,
+    /// active skills, AND Phase 18 Plan 06 gateway hygiene engine). Factored
+    /// out of `start()` so it is unit-testable without a live adapter.
+    fn build_gateway_handler(&self) -> GatewayMessageHandler {
+        let mut handler = GatewayMessageHandler::new(
+            self.config.clone(),
+            self.resolver.clone(),
+            self.session_store.clone(),
+            self.tool_registry.clone(),
+        );
+        if let Some(ref store) = self.memory_store {
+            handler.set_memory_store(store.clone());
+        }
+        if let Some(ref registry) = self.hook_registry {
+            handler.set_hook_registry(registry.clone());
+        }
+        if let Some(ref registry) = self.skill_registry {
+            handler.set_skill_registry(registry.clone());
+        }
+        if let Some(ref skills) = self.active_skills {
+            handler.set_active_skills(skills.clone());
+        }
+
+        // Phase 18 Plan 08 / UAT gap closure: construct the per-turn gateway
+        // hygiene engine from config and attach it. Without this call the
+        // handler's gateway_engine stays None and `maybe_compress_gateway`
+        // always short-circuits.
+        //
+        // Context length: no per-endpoint value is plumbed today (CLI also
+        // hardcodes 128_000 via `with_compression(128_000, _)`). Use the
+        // same default here; Phase 21 will plumb a real resolver-derived
+        // context length.
+        let ctx_len: usize = 128_000;
+        let hooks = self.hook_registry.clone();
+        let tracker = Some(Arc::new(PressureTracker::new()));
+        let engine: Arc<dyn ContextEngine> = build_context_engine(
+            &self.config,
+            &self.config.gateway.context_engine,
+            &self.resolver,
+            ctx_len,
+            self.config.gateway.compression_threshold,
+            "gateway", // D-13: per-session lineage deferred to Phase 21
+            hooks,
+            tracker,
+        );
+        handler.set_gateway_engine(engine, ctx_len);
+
+        handler
+    }
+
     /// Start the gateway. Blocks until ctrl+c or fatal error.
     pub async fn start(&self) -> Result<()> {
         // --- 1. Resolve Telegram token ---
@@ -142,25 +195,8 @@ impl GatewayRunner {
         let timeout_hours = tg_config.session_timeout_hours;
         let whitelist = tg_config.whitelist.clone();
 
-        // --- 6. Create handler and queue manager ---
-        let mut handler = GatewayMessageHandler::new(
-            self.config.clone(),
-            self.resolver.clone(),
-            self.session_store.clone(),
-            self.tool_registry.clone(),
-        );
-        if let Some(ref store) = self.memory_store {
-            handler.set_memory_store(store.clone());
-        }
-        if let Some(ref registry) = self.hook_registry {
-            handler.set_hook_registry(registry.clone());
-        }
-        if let Some(ref registry) = self.skill_registry {
-            handler.set_skill_registry(registry.clone());
-        }
-        if let Some(ref skills) = self.active_skills {
-            handler.set_active_skills(skills.clone());
-        }
+        // --- 6. Create handler (with gateway hygiene engine wired) and queue manager ---
+        let handler = self.build_gateway_handler();
         let handler = Arc::new(handler);
         let user_queue = Arc::new(UserQueueManager::new(
             adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
@@ -1548,6 +1584,44 @@ mod tests {
             resp_sent_count, 2,
             "execute_cron_job must contain exactly 2 ResponseSent fires (Ok arm + Err arm), \
              found {resp_sent_count}: D-04 requires ResponseSent fires on both success and failure"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Plan 18-08: GatewayRunner wires gateway hygiene engine
+    // -------------------------------------------------------------------------
+
+    fn make_runner_with_engine_kind(engine_kind: &str) -> GatewayRunner {
+        let mut config = Config::default();
+        config.gateway.context_engine = engine_kind.to_string();
+        config.gateway.compression_threshold = 0.85;
+        let resolver = ProviderResolver::build(&config).expect("resolver ok");
+        let tool_registry = Arc::new(ToolRegistry::new());
+        GatewayRunner::new(config, resolver, tool_registry)
+    }
+
+    /// Plan 18-08 Task 1: `build_gateway_handler` constructs a handler whose
+    /// gateway_engine is attached when config.gateway.context_engine = "local_prune".
+    #[test]
+    fn runner_attaches_gateway_engine_from_config() {
+        let runner = make_runner_with_engine_kind("local_prune");
+        let handler = runner.build_gateway_handler();
+        assert!(
+            handler.gateway_engine_is_some(),
+            "build_gateway_handler must attach a gateway engine (handler.gateway_engine must be Some)"
+        );
+    }
+
+    /// Plan 18-08 Task 1: When config.gateway.context_engine is an unknown string,
+    /// the factory falls back to local_prune (per 18-06 T-18-08 behavior) and the
+    /// handler still has an engine attached. No panic.
+    #[test]
+    fn runner_gateway_engine_respects_unknown_kind_fallback() {
+        let runner = make_runner_with_engine_kind("bogus_engine_kind");
+        let handler = runner.build_gateway_handler();
+        assert!(
+            handler.gateway_engine_is_some(),
+            "unknown engine kind must fall back to local_prune, not leave gateway_engine = None"
         );
     }
 }
