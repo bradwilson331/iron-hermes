@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Intelligence & Identity
 status: executing
-stopped_at: Completed 17-03-PLAN.md
-last_updated: "2026-04-12T18:18:22.161Z"
-last_activity: 2026-04-12
+stopped_at: 18-10 shipped + live UAT Test 5&6 pass; 18-11/18-12 planned
+last_updated: "2026-04-13T23:50:00.000Z"
+last_activity: 2026-04-13 -- Phase 18 live UAT 2/4 new passes; 2 new plans queued
 progress:
   total_phases: 13
-  completed_phases: 5
-  total_plans: 19
-  completed_plans: 17
-  percent: 89
+  completed_phases: 6
+  total_plans: 26
+  completed_plans: 25
+  percent: 96
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 17 — memory-tools-external-providers
+**Current focus:** Phase 18 — context-compression
 
 ## Current Position
 
-Phase: 17 (memory-tools-external-providers) — EXECUTING
-Plan: 4 of 5
-Status: Ready to execute
-Last activity: 2026-04-12
+Phase: 18 (context-compression) — EXECUTING
+Plan: 10/12 shipped; 18-11 & 18-12 queued
+Status: Live UAT Tests 5 & 6 pass (with `protect_first_n=2`); default config still deadlocks → 18-11; post-compression agent loop → 18-12
+Last activity: 2026-04-13T23:44 -- Live UAT 10 consecutive compressions green, two new gaps filed
 
 Progress: [██████████] 100%
 
@@ -92,10 +92,11 @@ None.
 
 ### Blockers/Concerns
 
-None.
+- **Default config deadlock (18-11 scope):** With `compression.protect_first_n=3` (documented default) and a [sys, user, asst-tool_use, tool_result] shape, the two-direction guard correctly collapses the prune range to zero — compression cannot fire. UAT only passed after lowering to 2. Fix: auto-extend/auto-shrink `protect_first_n` around tool-pair boundaries.
+- **Post-compression retry loop (18-12 scope):** Live UAT saw the agent re-call `web_read` on every turn for 10 consecutive turns (hit MAX_COMPRESSION_PASSES), never returning a summary. `[CONTEXT HISTORY]` summary content does not convey tool-call completion, so the model treats every turn as a fresh request.
 
 ## Session Continuity
 
-Last session: 2026-04-12T18:18:17.273Z
-Stopped at: Completed 17-03-PLAN.md
-Resume file: None
+Last session: 2026-04-13T23:50:00.000Z
+Stopped at: Live UAT complete — Tests 5 & 6 pass; 18-11 and 18-12 queued for planning
+Resume file: None — run `/gsd-plan-phase 18` to plan 18-11 (protect_first_n tool-pair awareness) next
