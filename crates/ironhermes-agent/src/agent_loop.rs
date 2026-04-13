@@ -147,6 +147,24 @@ impl AgentLoop {
         self
     }
 
+    // ── Phase 18 Plan 09: introspection accessors for tests ────────────────
+    // These are harmless `is_some` / clone accessors used by unit tests in
+    // this crate and in `ironhermes-gateway` to verify that the Phase 18
+    // wiring helper (`attach_context_engine`) has been called before
+    // `agent.run(...)`. They are `pub` so cross-crate tests can call them.
+    pub fn has_context_engine(&self) -> bool {
+        self.context_engine.is_some()
+    }
+    pub fn has_pressure_tracker(&self) -> bool {
+        self.pressure_tracker.is_some()
+    }
+    pub fn session_id(&self) -> Option<String> {
+        self.session_id.clone()
+    }
+    pub fn context_engine_threshold(&self) -> Option<f32> {
+        self.context_engine.as_ref().map(|e| e.threshold())
+    }
+
     /// Set a cancellation token for cooperative shutdown (D-21).
     /// When the token is cancelled, the agent loop returns early.
     pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
