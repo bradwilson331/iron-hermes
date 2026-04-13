@@ -674,4 +674,410 @@ mod tests {
         assert_eq!(engine.mode(), CompressionMode::Soft);
         assert!((engine.threshold() - 0.5).abs() < f32::EPSILON);
     }
+
+    // ── Phase 18 Plan 10: UAT-shape reproducing tests for apply_adaptive_shift ──
+    //
+    // These tests pin the 2026-04-13 live UAT defect where `apply_adaptive_shift`'s
+    // return value was discarded by `compress`, causing every tool-pair-straddling
+    // compression attempt to split the pair and roll back with OrphanedToolPair.
+
+    use crate::context_compressor::ContextCompressor;
+    use ironhermes_core::{FunctionCall, ToolCall};
+
+    /// Build a message list with a single tool-pair (web_read-style) STRADDLING
+    /// the protect boundary: pair's assistant message is prunable, tool_result
+    /// lies in the protected tail. Pads to target total-token budget while
+    /// keeping the pair positioned so `compute_protect_start(msgs, protect_last_tokens, 3)`
+    /// falls BETWEEN assistant and tool_result.
+    fn build_list_with_straddling_pair(
+        pair_body: &str,
+        total_token_target: usize,
+        protect_last_tokens: usize,
+    ) -> Vec<ChatMessage> {
+        let mut msgs = Vec::new();
+        msgs.push(ChatMessage::system("sys"));
+        msgs.push(ChatMessage::user("first user"));
+        msgs.push(ChatMessage::assistant("first assistant"));
+        // Pair goes at position 3 initially; we grow prunable region before it
+        // and add exactly enough tail filler after tool_result to pull
+        // protect_start between assistant and tool_result.
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "web_read_1".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "web_read".into(),
+                arguments: r#"{"url":"https://example.com"}"#.into(),
+            },
+        }]));
+        msgs.push(ChatMessage::tool_result("web_read_1", pair_body));
+
+        // Phase 1: Grow prunable region BEFORE the pair until total tokens
+        // hit target. This also ensures enough prunable content exists that
+        // `protect_start` can land between the assistant and tool_result.
+        while estimate_messages_tokens(&msgs) < total_token_target {
+            msgs.insert(3, ChatMessage::user("pad ".repeat(40)));
+        }
+
+        // Phase 2: Fine-tune the tail so that
+        //   asst_idx < protect_start ≤ tool_result_idx (straddle).
+        // Walking backward: tail accumulates tool_result+tail_filler.
+        // - If tool_result is NOT yet in tail (protect_start > result_idx):
+        //   add tail filler to push tail window further left.
+        // - If tail already includes assistant (protect_start ≤ asst_idx):
+        //   tail is too generous — prepend MORE prunable filler so the
+        //   walk still stops on the assistant (assistant tokens + tail tokens
+        //   push over protect_last once tail shrinks relative to growing list).
+        //   Actually simpler: reduce the gap by adding filler BEFORE pair
+        //   (pushes asst_idx right; doesn't change tail walk tokens).
+        //   Since asst_idx > protect_start is the failure, we need to GROW
+        //   the tail until it stops before the assistant. Add a chunk of
+        //   tail filler right before the tool_result is NOT allowed
+        //   (would split the pair). We can insert filler just AFTER the
+        //   tool_result to inflate "stuff after result" but that's already
+        //   counted. Alt: inflate the assistant tool_call args so its
+        //   own token weight alone exceeds (protect_last - tool_result_tokens).
+        let asst_pos = |v: &Vec<ChatMessage>| {
+            v.iter()
+                .position(|m| {
+                    m.role == Role::Assistant
+                        && m.tool_calls
+                            .as_ref()
+                            .map(|vv| vv.iter().any(|c| c.id == "web_read_1"))
+                            .unwrap_or(false)
+                })
+                .unwrap()
+        };
+        let result_pos = |v: &Vec<ChatMessage>| {
+            v.iter()
+                .position(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("web_read_1"))
+                .unwrap()
+        };
+
+        // First, add tail filler (if needed) so protect_start ≤ result_idx.
+        loop {
+            let ri = result_pos(&msgs);
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last_tokens, 3);
+            if ri >= ps {
+                break;
+            }
+            msgs.push(ChatMessage::user("tail ".repeat(10)));
+            if msgs.len() > 10_000 {
+                panic!("runaway tail filler");
+            }
+        }
+
+        // Then, if protect_start ≤ asst_idx (tail too deep), inflate the
+        // assistant tool_call's arguments with padding so its own token
+        // weight forces the tail walk to STOP at the tool_result boundary.
+        loop {
+            let ai = asst_pos(&msgs);
+            let ps = ContextCompressor::compute_protect_start(&msgs, protect_last_tokens, 3);
+            if ai < ps {
+                break;
+            }
+            // Inflate assistant args with padding.
+            let pos = ai;
+            if let Some(ref mut calls) = msgs[pos].tool_calls {
+                let padded = format!(
+                    "{}{}",
+                    calls[0].function.arguments,
+                    " ".repeat(40) // ~10 more tokens per loop
+                );
+                calls[0].function.arguments = padded;
+            }
+            if msgs[pos]
+                .tool_calls
+                .as_ref()
+                .map(|v| v[0].function.arguments.len())
+                .unwrap_or(0)
+                > 100_000
+            {
+                panic!("runaway assistant arg inflation");
+            }
+        }
+        msgs
+    }
+
+    /// Legacy fixture-builder kept for backward compatibility with non-straddle
+    /// tests (fully-prunable / fully-protected-tail shapes).
+    fn build_list_with_pair(
+        filler_before: usize,
+        pair_body: &str,
+        filler_after: usize,
+        total_token_target: usize,
+    ) -> Vec<ChatMessage> {
+        let mut msgs = Vec::new();
+        msgs.push(ChatMessage::system("sys"));
+        msgs.push(ChatMessage::user("first user"));
+        msgs.push(ChatMessage::assistant("first assistant"));
+        for i in 0..filler_before {
+            msgs.push(ChatMessage::user(format!("filler_b {i} ").repeat(20)));
+        }
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "web_read_1".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "web_read".into(),
+                arguments: r#"{"url":"https://example.com"}"#.into(),
+            },
+        }]));
+        msgs.push(ChatMessage::tool_result("web_read_1", pair_body));
+        for i in 0..filler_after {
+            msgs.push(ChatMessage::user(format!("filler_a {i} ").repeat(20)));
+        }
+        while estimate_messages_tokens(&msgs) < total_token_target {
+            msgs.insert(3, ChatMessage::user("pad ".repeat(40)));
+        }
+        msgs
+    }
+
+    fn assert_compress_ok_no_orphan(msgs: &[ChatMessage]) {
+        assert!(
+            tool_pair::check_orphan_invariant(msgs).is_ok(),
+            "post-compression message list must satisfy orphan invariant"
+        );
+        let pins: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.name.as_deref() == Some(HISTORY_NAME))
+            .collect();
+        assert_eq!(pins.len(), 1, "exactly one pinned [CONTEXT HISTORY] segment");
+    }
+
+    /// Assert the fixture actually places the pair straddling the protect
+    /// boundary (assistant prunable, at least one tool_result protected).
+    /// Guards against silent false-GREEN from a miscounted fixture.
+    fn assert_pair_straddles(msgs: &[ChatMessage], protect_last_tokens: usize) {
+        let protect_start =
+            ContextCompressor::compute_protect_start(msgs, protect_last_tokens, 3);
+        let pairs = tool_pair::detect_tool_pairs(msgs);
+        assert_eq!(pairs.len(), 1, "fixture must contain exactly one tool-pair");
+        let p = &pairs[0];
+        assert!(
+            p.assistant_idx < protect_start
+                && p.tool_result_indices.iter().any(|&i| i >= protect_start),
+            "fixture must STRADDLE protect_start (asst_idx={}, tool_results={:?}, protect_start={})",
+            p.assistant_idx,
+            p.tool_result_indices,
+            protect_start
+        );
+    }
+
+    fn uat_stats(context_length: usize, protect_last_tokens: usize, before: usize) -> ContextStats {
+        ContextStats {
+            context_length,
+            estimated_tokens: before,
+            protect_first_n: 3,
+            protect_last_tokens,
+            compression_count: 0,
+            prior_summary: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn compress_ok_small_pair_488_tokens() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 976;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair("web page body", 488, protect_last);
+        assert_pair_straddles(&msgs, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — UAT shape (488 tokens)");
+        assert!(outcome.compressed, "compressed flag must be true");
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_small_pair_3055_tokens() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 6110;
+        let protect_last = 200;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair("web page body", 3055, protect_last);
+        assert_pair_straddles(&msgs, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — UAT shape (3055 tokens)");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_small_pair_3511_tokens() {
+        // UAT 3511-token shape — same path as 3055 but closes the documentation
+        // gap (plan-checker concern #2).
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 7022;
+        let protect_last = 200;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair("web page body", 3511, protect_last);
+        assert_pair_straddles(&msgs, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — UAT shape (3511 tokens)");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_large_pair_7111_tokens() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 14222;
+        // protect_last > tool_result body (~625 tokens) so the tool_result can
+        // sit in the protected tail while the assistant stays prunable.
+        let protect_last = 800;
+        // ~2500-char body → ~625+ estimated tokens, exceeds 500-token shift threshold.
+        let big_body = "x".repeat(2500);
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair(&big_body, 7111, protect_last);
+        assert_pair_straddles(&msgs, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — UAT shape (7111 tokens, large body)");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_large_pair_9467_tokens() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 18934;
+        let protect_last = 800;
+        let big_body = "x".repeat(2500);
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_straddling_pair(&big_body, 9467, protect_last);
+        assert_pair_straddles(&msgs, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — UAT shape (9467 tokens, large body)");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_pair_fully_in_prunable_range() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 6000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        // Pair placed near front with LOTS of filler after → pair sits fully
+        // in the prunable middle while tail filler fills the protected window.
+        let mut msgs = build_list_with_pair(2, "small result", 30, 3000);
+        // Sanity: the pair is fully in prunable range (asst + result < protect_start).
+        let protect_start = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        assert!(
+            pairs[0].assistant_idx < protect_start
+                && pairs[0].tool_result_indices.iter().all(|&i| i < protect_start),
+            "fixture must place pair fully in prunable range"
+        );
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — pair fully prunable");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_pair_fully_in_protected_tail() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 6000;
+        let protect_last = 2000;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        // Big protect_last window → pair near the end sits entirely inside tail.
+        let mut msgs = build_list_with_pair(20, "tail result", 0, 3000);
+        // Sanity: pair is fully in protected tail.
+        let protect_start = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        assert!(
+            pairs[0].assistant_idx >= protect_start,
+            "fixture must place pair fully in protected tail (asst_idx={}, protect_start={})",
+            pairs[0].assistant_idx,
+            protect_start
+        );
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — pair fully protected");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+        // Original pair survived untouched.
+        assert!(msgs.iter().any(
+            |m| m.role == Role::Assistant
+                && m.tool_calls
+                    .as_ref()
+                    .map(|v| v.iter().any(|c| c.id == "web_read_1"))
+                    .unwrap_or(false)
+        ));
+        assert!(msgs.iter().any(
+            |m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("web_read_1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn compress_ok_multiple_pairs_mixed() {
+        // Three pairs: one fully-prunable, one straddling, one fully-protected.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 12000;
+        let protect_last = 400;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+
+        let mut msgs = Vec::new();
+        msgs.push(ChatMessage::system("sys"));
+        msgs.push(ChatMessage::user("u1"));
+        msgs.push(ChatMessage::assistant("a1"));
+        // Pair A — fully prunable (early)
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "pA".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+        }]));
+        msgs.push(ChatMessage::tool_result("pA", "r_a"));
+        // middle filler to build size
+        for i in 0..30 {
+            msgs.push(ChatMessage::user(format!("midfill {i} ").repeat(20)));
+        }
+        // Pair B — straddling (near boundary)
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "pB".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+        }]));
+        msgs.push(ChatMessage::tool_result("pB", "r_b"));
+        // tail filler
+        for i in 0..2 {
+            msgs.push(ChatMessage::user(format!("tailfill {i} ").repeat(5)));
+        }
+        // Pair C — fully in protected tail
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "pC".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+        }]));
+        msgs.push(ChatMessage::tool_result("pC", "r_c"));
+
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — mixed pairs");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
 }

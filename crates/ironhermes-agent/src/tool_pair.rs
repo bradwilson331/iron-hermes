@@ -243,6 +243,57 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_shift_return_value_applied_by_caller_contract() {
+        // Contract: apply_adaptive_shift returns the adjusted protect_start that
+        // the caller MUST use as the effective prune boundary. Phase 18 Plan 10
+        // closes the defect where SummarizingEngine discarded this value.
+        //
+        // Arm 1: small body straddling → returned < original (shift forward).
+        let mut msgs_small = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("a"),
+            ChatMessage::assistant_tool_calls(vec![tc("s1", "fn", "{}")]),
+            ChatMessage::tool_result("s1", "tiny"),
+            ChatMessage::user("tail"),
+        ];
+        let pair = detect_tool_pairs(&msgs_small).remove(0);
+        let original = 4; // tool_result index — pair straddles 3→4
+        let returned_small = apply_adaptive_shift(&mut msgs_small, &pair, original, 500);
+        assert!(
+            returned_small < original,
+            "small body must shift boundary FORWARD (returned={} original={})",
+            returned_small, original
+        );
+        // Content is preserved in-place (no backward summarization).
+        assert_eq!(msgs_small[4].content_text(), Some("tiny"));
+
+        // Arm 2: large body straddling → returned == original AND content rewritten in place.
+        let big_body = "x".repeat(4_000);
+        let mut msgs_big = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("a"),
+            ChatMessage::assistant_tool_calls(vec![tc("b1", "big_fn", "{\"a\":1}")]),
+            ChatMessage::tool_result("b1", big_body.clone()),
+            ChatMessage::user("tail"),
+        ];
+        let pair = detect_tool_pairs(&msgs_big).remove(0);
+        let original = 4;
+        let returned_big = apply_adaptive_shift(&mut msgs_big, &pair, original, 500);
+        assert_eq!(
+            returned_big, original,
+            "large body must KEEP boundary (returned unchanged)"
+        );
+        let rewritten = msgs_big[4].content_text().unwrap_or("");
+        assert!(
+            rewritten.starts_with("[Tool result summarized]"),
+            "large body must be rewritten in place, got: {}", rewritten
+        );
+        assert!(!rewritten.contains(&big_body));
+    }
+
+    #[test]
     fn orphan_invariant_passes_clean_list() {
         let msgs = vec![
             ChatMessage::user("hi"),
