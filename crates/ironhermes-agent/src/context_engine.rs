@@ -129,6 +129,15 @@ impl ContextEngine for LocalPruningEngine {
         _stats: ContextStats,
     ) -> Result<CompressionOutcome, ContextError> {
         let before = crate::context_compressor::estimate_messages_tokens(messages);
+        let pct = before as f32 / self.context_length.max(1) as f32;
+
+        tracing::info!(
+            before_tokens = before,
+            pct,
+            threshold = self.threshold,
+            session_id = ?self.session_id,
+            "local_pruning_engine: compress attempt"
+        );
 
         // Phase 18 D-23/D-24: emit pressure warning at 85% of compression threshold.
         let mut pressure_warning_fired = false;
@@ -152,8 +161,15 @@ impl ContextEngine for LocalPruningEngine {
         // Phase 18 D-20: fire context:pre_compress BEFORE destructive pruning and
         // await async handler completion (e.g. memory flush) via fire_awaitable.
         // Threshold gate: only emit when we would actually compress.
-        let would_compress =
-            (before as f32 / self.context_length.max(1) as f32) >= self.threshold;
+        let would_compress = pct >= self.threshold;
+        if !would_compress {
+            tracing::info!(
+                pct,
+                threshold = self.threshold,
+                reason = "below_threshold",
+                "local_pruning_engine: no-op"
+            );
+        }
         if would_compress {
             if let (Some(reg), Some(sid)) = (&self.hook_registry, &self.session_id) {
                 let event = HookEvent::new(
@@ -206,6 +222,20 @@ impl ContextEngine for LocalPruningEngine {
         }
 
         let after = crate::context_compressor::estimate_messages_tokens(messages);
+        if compressed {
+            tracing::info!(
+                before_tokens = before,
+                after_tokens = after,
+                "local_pruning_engine: compressed"
+            );
+        } else if would_compress {
+            tracing::info!(
+                before_tokens = before,
+                after_tokens = after,
+                reason = "compressor_returned_no_change",
+                "local_pruning_engine: no-op"
+            );
+        }
         Ok(CompressionOutcome {
             compressed,
             tokens_freed: before.saturating_sub(after),
