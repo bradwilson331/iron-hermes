@@ -46,8 +46,8 @@
 - [x] **Phase 14: Context Files & SOUL.md** — Priority-chain context file loading with SOUL.md identity and security scanning (completed 2026-04-12)
 - [x] **Phase 15: 10-Layer Prompt Assembly** — Full hermes-agent prompt builder with frozen memory snapshots and personality overlays (completed 2026-04-12)
 - [ ] **Phase 16: Prompt Caching** — DEFERRED (Anthropic blocking non-Anthropic clients)
-- [ ] **Phase 17: Memory Tools & External Providers** — Memory tool (add/replace/remove), capacity tracking, SQLite/Grafeo/DuckDB backends, session search
-- [ ] **Phase 18: Context Compression** — Dual compression system (agent at 50%, gateway at 85%) with pluggable ContextEngine trait
+- [x] **Phase 17: Memory Tools & External Providers** — Memory tool (add/replace/remove), capacity tracking, SQLite/Grafeo/DuckDB backends, session search (completed 2026-04-12)
+- [x] **Phase 18: Context Compression** — Dual compression system (agent at 50%, gateway at 85%) with pluggable ContextEngine trait (completed 2026-04-14)
 - [ ] **Phase 19: Skills Framework** — SKILL.md format, category discovery, conditional activation, env vars, credentials, security, and Hub
 - [ ] **Phase 20: Tool Registry & Slash Commands** — Tool availability checks, toolset management, slash command router, and core command implementations
 - [ ] **Phase 21: Gateway Architecture Alignment** — GatewayRunner with MemoryProvider integration, session key standard, authorization, hook lifecycle, and maintenance
@@ -152,13 +152,13 @@ Plans:
   3. Memory entries are rejected if they match security scanning patterns (injection/exfiltration)
   4. SQLite memory provider stores and retrieves facts with FTS5 search; Grafeo and DuckDB providers are available as feature-gated build options
   5. Agent can search past conversations using the session_search tool, which queries the FTS5 index on the StateStore
-**Plans:** 3/5 plans executed
+**Plans:** 5/5 plans complete
 Plans:
 - [x] 17-01-PLAN.md — Memory tool UX: capacity headers in snapshots, human-readable response format
 - [x] 17-02-PLAN.md — session_search tool and agent loop interception
 - [x] 17-03-PLAN.md — Provider infrastructure, factory relocation, SQLite memory provider
-- [ ] 17-04-PLAN.md — Grafeo graph database memory provider
-- [ ] 17-05-PLAN.md — DuckDB columnar memory provider with thread bridge
+- [x] 17-04-PLAN.md — Grafeo graph database memory provider
+- [x] 17-05-PLAN.md — DuckDB columnar memory provider with thread bridge
 
 ### Phase 18: Context Compression
 **Goal**: The agent manages context window pressure through dual-mode compression that preserves tool pairs and protects critical message boundaries
@@ -170,10 +170,10 @@ Plans:
   3. Compression protects the first N messages (system + first exchange) and last N messages (default 20); iterative re-compression updates the previous summary rather than summarizing from scratch
   4. Memory is flushed to disk before compression runs to prevent data loss
   5. ContextEngine trait is pluggable — the default strategy (local prune + structured summary) can be replaced via trait implementation
-**Plans:** 14 plans
+**Plans:** 14/14 plans complete
 Plans:
 - [x] 18-01..18-13 — shipped (see phase SUMMARYs)
-- [ ] 18-14-PLAN.md — PressureTracker hysteresis survives across CLI REPL turns: hoist tracker + compression_count into session scope so WARN fires once per crossing and transient `[CONTEXT PRESSURE HIGH …]` reaches turn N+1 (closes UAT gap surfaced 2026-04-14T16:12..16:17)
+- [x] 18-14-PLAN.md — PressureTracker hysteresis survives across CLI REPL turns: hoist tracker + compression_count into session scope so WARN fires once per crossing and transient `[CONTEXT PRESSURE HIGH …]` reaches turn N+1 (closes UAT gap surfaced 2026-04-14T16:12..16:17)
 
 ### Phase 19: Skills Framework
 **Goal**: Skills are discoverable from a structured directory, conditionally activated based on toolsets and platform, and securely injected into the system prompt
@@ -263,8 +263,8 @@ Plans:
 | 14. Context Files & SOUL.md | v2.0 | 2/2 | Complete   | 2026-04-12 |
 | 15. 10-Layer Prompt Assembly | v2.0 | 3/3 | Complete    | 2026-04-12 |
 | 16. Prompt Caching | v2.0 | 0/TBD | Deferred | - |
-| 17. Memory Tools & External Providers | v2.0 | 3/5 | In Progress|  |
-| 18. Context Compression | v2.0 | 10/12 | In Progress|  |
+| 17. Memory Tools & External Providers | v2.0 | 5/5 | Complete   | 2026-04-12 |
+| 18. Context Compression | v2.0 | 14/14 | Complete   | 2026-04-14 |
 | 19. Skills Framework | v2.0 | 0/TBD | Not started | - |
 | 20. Tool Registry & Slash Commands | v2.0 | 0/TBD | Not started | - |
 | 21. Gateway Architecture Alignment | v2.0 | 0/TBD | Not started | - |
