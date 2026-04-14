@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PromptBuilder, build_client as build_provider_client, build_main_client};
+use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
 use ironhermes_core::{ChatMessage, Config, MemoryProvider, MemoryStore, ProviderResolver, SkillRegistry, build_memory_provider};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -295,12 +295,14 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     // Phase 18 Plan 09: wire agent-side context compression (honors
     // config.agent.context_engine + config.agent.compression_threshold).
+    // Phase 18-14: one-shot path — fresh tracker is fine (single turn then exits).
     agent = ironhermes_agent::attach_context_engine(
         agent,
         &config,
         &resolver,
         session_id.as_str(),
         None, // CLI does not register a hook registry
+        None, // one-shot: fresh tracker per run
     );
 
     let result = agent.run(messages).await?;
@@ -342,6 +344,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
         .context("failed to create CLI session")?;
     let budget = Arc::new(AtomicUsize::new(0));
+    // Phase 18-14: session-scoped PressureTracker + compression_count.
+    // Constructed once per REPL session so hysteresis (above_threshold,
+    // pending_transient) and the summarizing engine's prior-summary chain
+    // survive across all run_agent_turn calls within this session.
+    let pressure_tracker = Arc::new(PressureTracker::new());
+    let compression_count = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
     // Register delegate_task tool (AGENT-01..05)
@@ -416,7 +424,19 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         let _ = state_store.add_message(&session_id, &user_msg);
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
-        let response = run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget, &session_id).await?;
+        let response = run_agent_turn(
+            &client,
+            registry.clone(),
+            &mut messages,
+            max_turns,
+            &config,
+            &resolver,
+            &budget,
+            &session_id,
+            pressure_tracker.clone(),
+            compression_count.clone(),
+        )
+        .await?;
         // Persist assistant response
         if let Some(ref text) = response {
             let assistant_msg = ChatMessage::assistant(text);
@@ -463,8 +483,19 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 let _ = state_store.add_message(&session_id, &user_msg);
                 messages.push(user_msg);
 
-                let response =
-                    run_agent_turn(&client, registry.clone(), &mut messages, max_turns, &config, &resolver, &budget, &session_id).await?;
+                let response = run_agent_turn(
+                    &client,
+                    registry.clone(),
+                    &mut messages,
+                    max_turns,
+                    &config,
+                    &resolver,
+                    &budget,
+                    &session_id,
+                    pressure_tracker.clone(),
+                    compression_count.clone(),
+                )
+                .await?;
                 // Persist assistant response
                 if let Some(ref text) = response {
                     let assistant_msg = ChatMessage::assistant(text);
@@ -495,6 +526,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 }
 
 /// Run one agent turn (may involve multiple tool calls).
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_turn(
     client: &AnyClient,
     registry: Arc<ToolRegistry>,
@@ -504,10 +536,17 @@ async fn run_agent_turn(
     resolver: &ProviderResolver,
     budget: &Arc<AtomicUsize>,
     session_id: &str,
+    pressure_tracker: Arc<PressureTracker>,
+    compression_count: Arc<AtomicUsize>,
 ) -> Result<Option<String>> {
+    // Phase 18-14: seed the AgentLoop's compression_count from the shared
+    // session-scoped counter so the summarizing engine's prior-summary chain
+    // continues across REPL turns instead of resetting to 0 each prompt.
+    let starting_count = compression_count.load(Ordering::SeqCst);
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
         .with_compression(128_000, config.agent.context_compression)
+        .with_compression_count(starting_count)
         .with_streaming(Box::new(|delta| {
             print!("{}", delta);
             io::stdout().flush().ok();
@@ -526,16 +565,23 @@ async fn run_agent_turn(
     }
 
     // Phase 18 Plan 09: wire agent-side context compression.
+    // Phase 18-14: reuse the session-scoped PressureTracker so hysteresis
+    // state (above_threshold, pending_transient) survives across turns.
     agent = ironhermes_agent::attach_context_engine(
         agent,
         config,
         resolver,
         session_id,
         None,
+        Some(pressure_tracker.clone()),
     );
 
     // Pass a clone of messages so agent can work with them
     let result = agent.run(messages.clone()).await?;
+
+    // Phase 18-14: persist the post-turn compression_count back into the
+    // shared counter so the next turn seeds its AgentLoop with the right value.
+    compression_count.store(result.compression_count_after, Ordering::SeqCst);
 
     // Update messages with the full conversation (includes tool calls and results)
     *messages = result.messages;
