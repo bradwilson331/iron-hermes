@@ -1,39 +1,36 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-14T03:48:37.591Z",
-  "phase": "18",
-  "phase_name": "context-compression",
-  "phase_dir": ".planning/phases/18-context-compression",
-  "plan": 12,
+  "timestamp": "2026-04-14T22:49:37.487Z",
+  "phase": "19",
+  "phase_name": "Skills Framework",
+  "phase_dir": ".planning/phases/19-skills-framework",
+  "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
+  "stage": "discuss-phase",
   "completed_tasks": [
-    {"id": "18-11", "name": "protect_first_n autocorrection", "status": "done", "commit": "2713d47"},
-    {"id": "18-12", "name": "tool-call outcome signal", "status": "done", "commit": "b0f7a5c"},
-    {"id": "18-review", "name": "code review 18-11 + 18-12", "status": "done", "commit": "b6d1296"},
-    {"id": "uat-live-2026-04-14", "name": "live UAT re-run post 18-11 + 18-12", "status": "done", "commit": "pending"}
+    {"id": 1, "name": "Init phase 19, scout codebase, load prior context (PROJECT.md, REQUIREMENTS.md, STATE.md, CONTEXT.md from phases 14/15/17, existing skills code in core/tools)", "status": "done"},
+    {"id": 2, "name": "Identify 7 gray areas for Phase 19 (conditional activation, env/credential UX, settings namespace, security scanning, Skills Hub, credential mounting, hermes metadata extraction strategy)", "status": "done"},
+    {"id": 3, "name": "Present gray areas to user with code-context annotations and prior-decision carry-forward", "status": "done"}
   ],
   "remaining_tasks": [
-    {"id": "18-13", "name": "decouple PressureTracker attachment from HookRegistry (proposed)", "status": "not_started"},
-    {"id": "test-3", "name": "gateway live UAT (Telegram) for per-turn compression", "status": "deferred"},
-    {"id": "test-9", "name": "SystemMessage prompt slot wiring", "status": "skipped"}
+    {"id": 4, "name": "User selects which gray areas to discuss", "status": "not_started"},
+    {"id": 5, "name": "Discuss each selected area (4 questions per area, with code/prior-context annotations)", "status": "not_started"},
+    {"id": 6, "name": "Write 19-CONTEXT.md to .planning/phases/19-skills-framework/", "status": "not_started"},
+    {"id": 7, "name": "Write 19-DISCUSSION-LOG.md", "status": "not_started"},
+    {"id": 8, "name": "git commit + STATE.md update", "status": "not_started"}
   ],
   "blockers": [
-    {"description": "Test 4 pressure warning unreachable from CLI", "type": "technical", "workaround": "Proposed phase 18-13 to decouple tracker from hooks"}
+    {"description": "Context window pressure (~81%) on the paused session — fresh session recommended for the question/answer loop", "type": "technical", "workaround": "Resume in fresh session; re-read the listed prior-context files plus this handoff."}
   ],
   "human_actions_pending": [
-    {"action": "Commit pending 18-UAT.md changes and ironhermes-cli/Cargo.toml (memory-sqlite feature passthrough added during Test 8 setup)", "context": "Uncommitted from this UAT session", "blocking": false}
+    {"action": "Pick which of the 7 gray areas to discuss for Phase 19 (or reply 'all', or 'skip 5' if Skills Hub should split off into its own phase)", "context": "Skills Hub alone is ~2,691 LOC in Python reference (skills_hub.py); largest scope item by far.", "blocking": true}
   ],
-  "decisions": [
-    {"decision": "Classify Test 4 as blocked (not not_exercised) pending 18-13", "rationale": "Root cause is structural wiring gap in engine_factory.rs, not configuration choice", "phase": "18"},
-    {"decision": "Re-run Test 5 under documented default protect_first_n=3", "rationale": "18-11 shipped to close the default-config deadlock; needed live confirmation", "phase": "18"},
-    {"decision": "Use aggressive threshold=0.001 config (3b) for Tests 7 and 8", "rationale": "User chose to reproduce last session's setup; pressure band test required separate threshold=0.05 bump anyway", "phase": "18"}
-  ],
+  "decisions": [],
   "uncommitted_files": [
-    ".planning/phases/18-context-compression/18-UAT.md",
-    "crates/ironhermes-cli/Cargo.toml"
+    ".planning/phases/19-skills-framework/.continue-here.md (just written)"
   ],
-  "next_action": "Open phase 18-13 (or append to phase 18 backlog): decouple tracker attachment from hook attachment in engine_factory.rs so PressureTracker + session_id are attached whenever tracker is Some, independent of hooks. Also propagate session_id unconditionally. Then re-run Test 4 live.",
-  "context_notes": "UAT closure is one gap away. Three of four live-verifiable blocked/failed tests now pass (5 under default, 7, 8). The 18-12 fix (completed-tools sentinel in pinned [CONTEXT HISTORY]) visibly drove the agent to emit a user-facing reply on turn 2 rather than loop re-calling web_read — strong live signal. Test 4 failure is NOT a regression; it's a pre-existing structural gap surfaced only by actually exercising the pressure band. Test 3 (gateway Telegram) remains deferred and was not attempted this session."
+  "next_action": "Re-read .planning/phases/19-skills-framework/.continue-here.md and the 7 gray areas listed; ask user which to discuss; then resume discuss-phase workflow at the discuss_areas step.",
+  "context_notes": "Phase 19 Skills Framework adds the v2.0 layers on top of the existing Phase 7/7.1/7.2 baseline (SkillRegistry, SkillsTool, SkillsConfig, platform filter, opaque metadata). REQUIREMENTS SKILL-01..SKILL-11 cover SKILL.md format, conditional activation, env vars/credentials, security scanning, settings namespace, sandbox pass-through, and Skills Hub with trust levels. SKILL-12/13/14 (slash commands) are Phase 20. The biggest open question is whether Skills Hub stays in Phase 19 or splits off given its size (~2,691 LOC of Python reference)."
 }
