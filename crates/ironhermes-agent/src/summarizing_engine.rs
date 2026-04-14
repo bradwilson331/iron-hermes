@@ -1745,4 +1745,130 @@ mod tests {
         );
         assert_compress_ok_no_orphan(&msgs);
     }
+
+    // ── Phase 18 Plan 11 Task 3: regression matrix additive tests ───────────
+
+    #[tokio::test]
+    async fn compress_ok_no_shrink_when_pair_fully_prunable() {
+        // Pair fully inside the prunable range (asst_idx >= protect_first_n,
+        // all tool_results also >= protect_first_n AND < protect_start).
+        // compute_effective_protect_first_n sees asst_idx >= configured so
+        // skips — effective == configured, no shrink. This verifies the
+        // auto-shrink path is DORMANT for fully-prunable pairs (parity with
+        // pre-11 behavior).
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 6000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let mut msgs = build_list_with_pair(2, "small result", 30, 3000);
+        let protect_start = ContextCompressor::compute_protect_start(&msgs, protect_last, 3);
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        assert!(
+            pairs[0].assistant_idx >= 3,
+            "fixture must place asst fully outside front-protect (asst_idx={}, protect_first_n=3)",
+            pairs[0].assistant_idx
+        );
+        assert!(
+            pairs[0].tool_result_indices.iter().all(|&i| i < protect_start),
+            "fixture must place pair fully in prunable range"
+        );
+        // Auto-shrink must be dormant: effective == configured.
+        let eff = tool_pair::compute_effective_protect_first_n(&msgs, 3, &pairs);
+        assert_eq!(eff, 3, "auto-shrink must be DORMANT when pair fully prunable");
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — pair fully prunable under effective=configured");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_no_shrink_when_configured_first_n_zero() {
+        // protect_first_n=0 short-circuits auto-shrink (effective=0 regardless
+        // of pair positions). Verifies no underflow / no unintended shrink
+        // below zero. Use the minimal front-straddle fixture from Task 1.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(0, protect_last);
+        let body = "x".repeat(12_000);
+        let mut msgs = build_minimal_front_straddle_default_first_n(&["zero_first_n_1"], &body);
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        let eff = tool_pair::compute_effective_protect_first_n(&msgs, 0, &pairs);
+        assert_eq!(eff, 0, "configured 0 must short-circuit to 0");
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed with protect_first_n=0");
+        assert!(outcome.compressed, "compressed flag must be true — zero first_n path");
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    async fn compress_ok_multiple_front_straddling_pairs_shrinks_to_minimum_asst() {
+        // Two front-straddling pairs with protect_first_n=4:
+        //   idx 0: system
+        //   idx 1: asst_tool_calls(A)   ← asst_idx=1 < 4
+        //   idx 2: asst_tool_calls(B)   ← asst_idx=2 < 4
+        //   idx 3: user (filler)
+        //   idx 4..: tool_result(A), tool_result(B), prunable filler, tail
+        // With protect_first_n=4, both assts front-protected, both results
+        // outside → effective = min(1, 2) = 1. Compress must succeed.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(4, protect_last);
+        let body = "x".repeat(8_000);
+        let mut msgs: Vec<ChatMessage> = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "pair_A".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: r#"{"url":"https://a.com"}"#.into(),
+                },
+            }]),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "pair_B".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: r#"{"url":"https://b.com"}"#.into(),
+                },
+            }]),
+            ChatMessage::user("identity filler"),
+            ChatMessage::tool_result("pair_A", body.clone()),
+            ChatMessage::tool_result("pair_B", body.clone()),
+        ];
+        // Sanity: both pairs front-straddle.
+        let pairs = tool_pair::detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 2, "fixture must contain two pairs");
+        assert!(
+            pairs.iter().all(|p| p.assistant_idx < 4),
+            "both assts must be front-protected"
+        );
+        assert!(
+            pairs
+                .iter()
+                .all(|p| p.tool_result_indices.iter().any(|&i| i >= 4)),
+            "both pairs must have ≥1 result outside front-protect"
+        );
+        let eff = tool_pair::compute_effective_protect_first_n(&msgs, 4, &pairs);
+        assert_eq!(
+            eff, 1,
+            "multiple front-straddling pairs must shrink to min(asst_idx)=1"
+        );
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — multi-pair min shrink");
+        assert!(outcome.compressed);
+        assert_compress_ok_no_orphan(&msgs);
+    }
 }
