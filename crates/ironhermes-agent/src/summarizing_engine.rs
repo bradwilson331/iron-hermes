@@ -27,6 +27,14 @@ pub const HISTORY_SENTINEL: &str = "[CONTEXT HISTORY]";
 /// Stable `name` field value used to locate the pinned history segment (D-17).
 pub const HISTORY_NAME: &str = "context_history";
 
+/// Phase 18 Plan 12: sentinel phrase prepended to the pinned
+/// [CONTEXT HISTORY] body when a compression pass pruned one or more
+/// tool_use/tool_result pairs. Gives the model an unambiguous
+/// "tool execution already completed" signal so it does not re-call
+/// the same tool on the next turn.
+pub const COMPLETED_TOOLS_SENTINEL: &str =
+    "UNIMPLEMENTED_18_12_SENTINEL";
+
 /// Hard cap on summary content to bound prompt-injection surface (T-18-01).
 const HISTORY_SUMMARY_MAX_CHARS: usize = 8_000;
 /// Per-pruned-block character truncation before concatenation into prompt.
@@ -605,6 +613,35 @@ mod tests {
                 return Err(ContextError::SummarizationFailed("no more mock responses".into()));
             }
             r.remove(0)
+        }
+    }
+
+    /// Phase 18 Plan 12 test double: captures the outgoing prompt string for
+    /// directive-preservation assertions. Returns a fixed reply (which the
+    /// tests intentionally do NOT seed with the sentinel — the sentinel is
+    /// prepended by OUR code path after the aux-model call returns).
+    struct PromptCapturingSummarizer {
+        reply: String,
+        captured: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl PromptCapturingSummarizer {
+        fn new(reply: &str) -> Self {
+            Self {
+                reply: reply.into(),
+                captured: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+        fn captured_prompt(&self) -> Option<String> {
+            self.captured.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SummarizationClient for PromptCapturingSummarizer {
+        async fn summarize(&self, prompt: String) -> Result<String, ContextError> {
+            *self.captured.lock().unwrap() = Some(prompt);
+            Ok(self.reply.clone())
         }
     }
 
@@ -1870,5 +1907,120 @@ mod tests {
             .expect("compress must succeed — multi-pair min shrink");
         assert!(outcome.compressed);
         assert_compress_ok_no_orphan(&msgs);
+    }
+
+    // ── Phase 18 Plan 12: prompt-directive + body-sentinel RED tests ─────────
+    //
+    // Live UAT 2026-04-13T23:44: the agent re-called `web_read` on every turn
+    // for 10 consecutive turns after compression, never emitting a final
+    // summary. Root cause hypothesis: the summary prompt / aux-model output
+    // does not preserve tool-call outcome markers so the model interprets
+    // every turn as a fresh request.
+    //
+    // Fix shape (18-12):
+    // 1. Enrich prompt template to require tool-call outcome lines.
+    // 2. Prepend COMPLETED_TOOLS_SENTINEL + tool-name list to the pinned
+    //    [CONTEXT HISTORY] body when pruned_blocks contained tool pairs.
+    //
+    // These RED tests compile against the Task-1 placeholder const value
+    // ("UNIMPLEMENTED_18_12_SENTINEL"). Task 2 swaps the const value to the
+    // real sentence AND starts prepending it on the output path, turning
+    // both tests GREEN.
+
+    /// Build a 6-message fixture with one tool_use/tool_result pair that will
+    /// cross the compression threshold (ctx_len=1_000_000, threshold=0.001,
+    /// one padded user message ≥ ~1500 tokens). asst(tool_use) at idx 2 with
+    /// protect_first_n=3 ⇒ front-straddle ⇒ auto-shrink to 2 ⇒ pair in prune
+    /// range ⇒ compression fires and `pruned_blocks` contains the tool pair.
+    fn build_prompt_capture_fixture() -> Vec<ChatMessage> {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        vec![
+            ChatMessage::system("You are an agent"),
+            ChatMessage::user("search for rust async"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "tc1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: r#"{"url":"https://example.com/rust"}"#.into(),
+                },
+            }]),
+            ChatMessage::tool_result(
+                "tc1",
+                "Rust async uses Futures, poll model, executors...",
+            ),
+            ChatMessage::user("ok summarize"),
+            // padding (~5000 chars) to guarantee we are above the 0.001 threshold
+            ChatMessage::user("pad ".repeat(1250)),
+        ]
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn prompt_instructs_model_to_preserve_tool_call_outcome_markers_RED_then_GREEN() {
+        let capturer = Arc::new(PromptCapturingSummarizer::new("the summary"));
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine =
+            SummarizingEngine::new(ctx_len, 0.001, capturer.clone()).with_protect(3, protect_last);
+        let mut msgs = build_prompt_capture_fixture();
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed");
+        assert!(outcome.compressed, "fixture must trigger compression");
+
+        let prompt = capturer
+            .captured_prompt()
+            .expect("summarizer must have been called — prompt captured");
+        assert!(
+            prompt.contains("Tool executions already completed"),
+            "prompt must carry the completion sentinel phrase, got:\n{prompt}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("do not re-call"),
+            "prompt must instruct model not to re-call completed tools, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("preserve tool-call outcome"),
+            "prompt must instruct model to preserve tool-call outcomes, got:\n{prompt}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn compressed_history_body_contains_completed_tools_sentinel_when_tool_pair_pruned_RED_then_GREEN()
+     {
+        let capturer = Arc::new(PromptCapturingSummarizer::new("model-summary-body"));
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine =
+            SummarizingEngine::new(ctx_len, 0.001, capturer).with_protect(3, protect_last);
+        let mut msgs = build_prompt_capture_fixture();
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed");
+        assert!(outcome.compressed, "fixture must trigger compression");
+
+        let pin_idx = locate_history_segment(&msgs).expect("pinned history must exist");
+        let body = msgs[pin_idx]
+            .content_text()
+            .expect("pinned history must have content")
+            .to_string();
+        assert!(
+            body.contains(HISTORY_SENTINEL),
+            "existing [CONTEXT HISTORY] invariant preserved, got:\n{body}"
+        );
+        assert!(
+            body.contains(COMPLETED_TOOLS_SENTINEL),
+            "pinned body must contain COMPLETED_TOOLS_SENTINEL when tool pair was pruned, got:\n{body}"
+        );
+        assert!(
+            body.contains("web_read"),
+            "pinned body must name the pruned tool(s), got:\n{body}"
+        );
     }
 }
