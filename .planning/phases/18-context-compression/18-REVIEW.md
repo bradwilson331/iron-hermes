@@ -211,3 +211,204 @@ this is not accidental `SCREAMING_SNAKE_CASE`.
 _Reviewed: 2026-04-13_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+
+---
+
+## Plan 18-14 Review
+
+**Scope:** `f8717b2..19e7bce` (commits feat(18-14) × 3 + test(18-14) × 1)
+**Reviewed:** 2026-04-14
+**Depth:** standard
+**Files reviewed:** 7
+
+```
+crates/ironhermes-agent/src/agent_wiring.rs
+crates/ironhermes-agent/src/agent_loop.rs
+crates/ironhermes-agent/src/pressure_warning.rs
+crates/ironhermes-agent/src/lib.rs
+crates/ironhermes-cli/src/main.rs
+crates/ironhermes-cli/src/batch/tests.rs
+crates/ironhermes-gateway/src/handler.rs
+```
+
+### Summary
+
+The 18-14 gap-closure is a surgical, well-scoped change. The core fix — hoisting
+`Arc<PressureTracker>` and a shared `Arc<AtomicUsize>` compression counter to CLI REPL
+session scope — is implemented correctly. The backwards-compatible
+`Option<Arc<PressureTracker>>` extension to `attach_context_engine` is clean; one-shot
+callers pass `None` and get the prior fresh-tracker behaviour unchanged. The
+`with_compression_count` builder and `AgentResult::compression_count_after` field are
+minimal and correctly plumbed at all three `AgentResult` construction sites
+(cancel-pre-loop, cancel-during-LLM, natural completion). The integration test in
+`agent_wiring.rs` exercises the real `pre_chat_compress` + `check_pressure` path
+end-to-end and asserts all three hysteresis invariants.
+
+One **warning-grade** latent gap was found: `pre_chat_compress` always passes
+`prior_summary: None` in `ContextStats`, meaning future engine variants that consume
+`ContextStats::prior_summary` to build the iterative chain will silently produce
+single-pass summaries. This is not an active regression (both shipped engines discover
+prior_summary from the message vector directly), but it should be documented or closed
+before a third engine is added. No security issues found.
+
+---
+
+### Blocking
+
+None.
+
+### High
+
+None.
+
+---
+
+### Warnings
+
+#### WR-01 — `pre_chat_compress` passes `prior_summary: None` in `ContextStats`; latent gap for future engine variants
+
+**File:** `crates/ironhermes-agent/src/agent_loop.rs:324`
+
+```rust
+let stats = ContextStats {
+    context_length: self.context_length,
+    estimated_tokens: estimated,
+    protect_first_n: 3,
+    protect_last_tokens: 20_000.min(self.context_length / 4),
+    compression_count: self.compression_count,
+    prior_summary: None,   // always None
+};
+```
+
+`compression_count` is now correctly carried across turns via 18-14, so
+`ContextStats::compression_count` is actively populated. However `prior_summary` is
+always `None`. The `SummarizingEngine::compress` path uses `prior_summary` to build the
+iterative re-summarization chain (18-07/18-12 invariant). When
+`AgentLoop::pre_chat_compress` drives compression on turn N>1, a prior compressed history
+sentinel already exists in `messages`, but `ContextStats::prior_summary` does not reflect
+it.
+
+Both shipped engines (`LocalPruningEngine`, `SummarizingEngine`) discover prior_summary
+by scanning the message vector directly via `locate_history_segment`, so this is not an
+active regression today. However, if a third engine variant is added that consumes
+`ContextStats::prior_summary` as its source of truth, it will silently produce
+single-pass summaries on every turn even when iterative compression was intended.
+
+**Fix (minimal):** add a doc comment to the `prior_summary: None` line stating that both
+shipped engines derive prior_summary from the message vector and do not consume
+`ContextStats::prior_summary`, so the `None` is intentional for current engines:
+
+```rust
+prior_summary: None, // Both LocalPruningEngine and SummarizingEngine discover
+                     // prior_summary via locate_history_segment on messages —
+                     // not from this field. Future engines must follow the same
+                     // pattern or this must be populated before adding them.
+```
+
+**Fix (complete):** populate the field from the message vector so any future engine
+inherits the correct iterative chain automatically:
+
+```rust
+use crate::summarizing_engine::HISTORY_SENTINEL; // or whichever crate exports it
+let prior_summary = messages.iter().find_map(|m| {
+    m.content_text()
+        .filter(|t| t.contains(HISTORY_SENTINEL))
+        .map(|t| t.to_string())
+});
+let stats = ContextStats { ..., prior_summary };
+```
+
+---
+
+### Info
+
+#### IN-01 — Gateway `attach_context_engine` call passes `None` for tracker; D-24 hysteresis gap remains for Telegram multi-turn sessions
+
+**File:** `crates/ironhermes-gateway/src/handler.rs:452-459`
+
+```rust
+agent = ironhermes_agent::attach_context_engine(
+    agent, &self.config, &self.resolver, &session_id_str,
+    self.hook_registry.clone(),
+    None, // Phase 18-14: gateway constructs a fresh tracker per request
+);
+```
+
+This is explicitly out-of-scope for 18-14 (documented in plan and summary). The gateway
+will exhibit the same D-24 hysteresis symptom on multi-turn Telegram conversations —
+WARN re-fires on every request because the tracker is fresh each call. A follow-up
+gap-closure plan is needed before shipping the gateway to production with
+`compression_threshold` < 1.0 in config.
+
+#### IN-02 — `protect_first_n: 3` and `protect_last_tokens: 20_000.min(...)` are hardcoded magic numbers in `pre_chat_compress`
+
+**File:** `crates/ironhermes-agent/src/agent_loop.rs:321-322`
+
+These values predate 18-14 and are not a regression. Now that `compression_count` is
+correctly plumbed and `ContextStats` is actively used across REPL turns, the magic
+numbers are more visible. Worth promoting to named constants or deriving from
+`config.agent` in a future cleanup pass.
+
+---
+
+### What Was Checked (18-14)
+
+**Focus area 1 — `attach_context_engine` optional-tracker change:**
+`tracker.unwrap_or_else(|| Arc::new(PressureTracker::new()))` is correct: `None` creates
+a fresh tracker; `Some` reuses verbatim. No double-construction possible. `tracker.clone()`
+is called once before being moved into `build_context_engine` and once into
+`AgentLoop::with_pressure_tracker`. The caller retains their own `Arc` clone.
+`Arc::strong_count` test asserts `>= 3` (caller + engine + loop), which is sound. No
+strong-count leak: `AgentLoop` is dropped at end of each REPL turn, releasing both
+clones, leaving only the caller's `Arc` in REPL scope.
+
+**Focus area 2 — CLI REPL integration:**
+`pressure_tracker` and `compression_count` are constructed once after `session_id` at
+the REPL entry point and before the prompt loop. Both are cloned into each
+`run_agent_turn` call at both REPL call sites. `compression_count.load(Ordering::SeqCst)`
+seeds the `AgentLoop`; `compression_count.store(result.compression_count_after, Ordering::SeqCst)`
+persists it after each turn. `SeqCst` ordering is conservative but correct and carries no
+correctness risk in a single-threaded `await`-sequential REPL loop — there is only one
+writer. One-shot path (`main.rs:299-306`) correctly passes `None, None` — behaviour
+unchanged.
+
+**Focus area 3 — `AgentLoop::with_compression_count` + `AgentResult::compression_count_after`:**
+`with_compression_count(usize)` builder assigns `self.compression_count = count`.
+Correct and minimal. `compression_count_after: self.compression_count` is populated at
+all three `AgentResult` construction sites: cancel-pre-loop, cancel-during-LLM, and
+natural completion. Complete coverage confirmed. `batch/tests.rs` adds
+`compression_count_after: 0` to `mock_agent_result` — the compiler enforces exhaustive
+struct literal construction so any missed site would be a compile error, not a runtime
+bug.
+
+**Focus area 4 — Gateway handler.rs call-site adjustments:**
+Both `attach_context_engine` calls (production `run_agent` and test
+`gateway_handler_attaches_agent_engine`) pass `None` as the final argument. The `None`
+path creates a fresh `PressureTracker` — identical to pre-18-14 behaviour. Pre-existing
+gateway tests pass unchanged.
+
+**Focus area 5 — Integration test correctness:**
+`pressure_tracker_hysteresis_survives_across_repl_turns` calls `pre_chat_compress`
+directly (not the full `run()` loop), which is the correct insertion point: it is the
+single site where both `take_transient` and `check_pressure` are dispatched. Turn 1
+asserts `warn_count == 1` and `was_warned == true`. Turn 2 asserts the transient was
+injected into the outbound message vector (body contains "CONTEXT PRESSURE HIGH") and
+`warn_count` is still `1` (hysteresis held). Turn 3 asserts `warn_count == 1` and no
+second transient (one-shot semantics). Token band sizing (`threshold=0.01`, 4400-char
+message → ratio ~0.00866 ∈ [0.0085, 0.01)) is correct and wide enough to be robust
+against minor token-estimation drift. No flakiness vectors: no sleeps, no network, no
+shared global state (each test uses a unique `session_id`).
+
+**Focus area 6 — Security:**
+No new network endpoints, auth paths, trust-boundary changes, or user-controlled inputs
+reaching new code paths. `session_id_str` in the gateway is constructed from
+`event.chat_id` + `event.sender_id`, both of which were already used before 18-14. No
+new injection surfaces introduced.
+
+---
+
+_Reviewed: 2026-04-14_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
+_Commit range: f8717b2..19e7bce_
