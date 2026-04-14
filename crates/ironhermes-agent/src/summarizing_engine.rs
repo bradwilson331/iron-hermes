@@ -33,7 +33,7 @@ pub const HISTORY_NAME: &str = "context_history";
 /// "tool execution already completed" signal so it does not re-call
 /// the same tool on the next turn.
 pub const COMPLETED_TOOLS_SENTINEL: &str =
-    "UNIMPLEMENTED_18_12_SENTINEL";
+    "Tool executions already completed; do NOT re-call unless the user explicitly asks again.";
 
 /// Hard cap on summary content to bound prompt-injection surface (T-18-01).
 const HISTORY_SUMMARY_MAX_CHARS: usize = 8_000;
@@ -466,17 +466,47 @@ impl ContextEngine for SummarizingEngine {
             return Ok(CompressionOutcome::default());
         }
 
+        // Phase 18 Plan 12: when `pruned_blocks` contains assistant messages
+        // with tool_calls, compose a header that prepends COMPLETED_TOOLS_SENTINEL
+        // plus the tool-name list to the pinned body AFTER summarization.
+        // The header is empty when no tool pairs were pruned (no-op for
+        // user/assistant-only compression), so the existing
+        // `[CONTEXT HISTORY]\n<summary>` shape is preserved.
+        let tool_names: Vec<String> = pruned_blocks
+            .iter()
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|c| c.function.name.clone()))
+            .collect();
+        let completion_header = if tool_names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}\nTools: {}\n\n",
+                COMPLETED_TOOLS_SENTINEL,
+                tool_names.join(", ")
+            )
+        };
+
         let serialized_blocks = self.serialize_blocks(&pruned_blocks);
 
-        // Build prompt (D-18 formula).
+        // Build prompt (D-18 formula). Phase 18 Plan 12: enriched directive
+        // requires the aux model to preserve tool-call outcome markers so the
+        // main model recognizes prior tool executions are DONE and does not
+        // re-call the same tool on the next turn (18-UAT gap closure).
         let prompt = if let Some(prior) = prior_summary_text.as_deref() {
             format!(
-                "Summarize the following conversation segment. Preserve user intents, decisions made, and key facts.\n\nPrior summary:\n{}\n\nNew pruned blocks:\n{}\n\nReturn a single concise paragraph.",
+                "Summarize the following conversation segment. Preserve user intents, decisions made, and key facts.\n\n\
+                 IMPORTANT: Where the segment contains assistant tool_calls that received tool_results, you MUST preserve tool-call outcome markers in the summary in this shape: \"Tool executions already completed: <tool_name>(<args_preview>) -> <result_snippet>\". Do not re-describe these as open actions; they are DONE. Do NOT re-call these tools unless the user explicitly asks again.\n\n\
+                 Prior summary:\n{}\n\nNew pruned blocks:\n{}\n\n\
+                 Return a single concise paragraph followed by the tool-outcome lines (if any).",
                 prior, serialized_blocks
             )
         } else {
             format!(
-                "Summarize the following conversation segment. Preserve user intents, decisions made, and key facts.\n\n{}\n\nReturn a single concise paragraph.",
+                "Summarize the following conversation segment. Preserve user intents, decisions made, and key facts.\n\n\
+                 IMPORTANT: Where the segment contains assistant tool_calls that received tool_results, you MUST preserve tool-call outcome markers in the summary in this shape: \"Tool executions already completed: <tool_name>(<args_preview>) -> <result_snippet>\". Do not re-describe these as open actions; they are DONE. Do NOT re-call these tools unless the user explicitly asks again.\n\n\
+                 {}\n\n\
+                 Return a single concise paragraph followed by the tool-outcome lines (if any).",
                 serialized_blocks
             )
         };
@@ -515,7 +545,8 @@ impl ContextEngine for SummarizingEngine {
             let m = new_messages.pop().unwrap();
             kept_after.insert(0, m);
         }
-        new_messages.push(make_history_message(&new_summary));
+        let enriched_summary = format!("{}{}", completion_header, new_summary);
+        new_messages.push(make_history_message(&enriched_summary));
         new_messages.extend(kept_after);
 
         *messages = new_messages;
