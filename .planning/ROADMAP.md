@@ -170,7 +170,11 @@ Plans:
   3. Compression protects the first N messages (system + first exchange) and last N messages (default 20); iterative re-compression updates the previous summary rather than summarizing from scratch
   4. Memory is flushed to disk before compression runs to prevent data loss
   5. ContextEngine trait is pluggable — the default strategy (local prune + structured summary) can be replaced via trait implementation
-**Plans**: TBD
+**Plans:** 12 plans
+Plans:
+- [x] 18-01..18-10 — shipped (see phase SUMMARYs)
+- [ ] 18-11-PLAN.md — Default-config compression safety: auto-shrink effective protect_first_n when asst(tool_use) front-protected with tool_result outside (closes UAT gap: default protect_first_n=3 deadlock)
+- [ ] 18-12-PLAN.md — Compression preserves tool-call outcome signal: enriched summary prompt + COMPLETED_TOOLS_SENTINEL in pinned [CONTEXT HISTORY] body (closes UAT gap: agent retries tool calls post-compression)
 
 ### Phase 19: Skills Framework
 **Goal**: Skills are discoverable from a structured directory, conditionally activated based on toolsets and platform, and securely injected into the system prompt
