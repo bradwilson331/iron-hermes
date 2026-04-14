@@ -11,13 +11,16 @@ source:
   - 18-07-SUMMARY.md
   - 18-08-SUMMARY.md
   - 18-09-SUMMARY.md
+  - 18-10-SUMMARY.md
+  - 18-11-SUMMARY.md
+  - 18-12-SUMMARY.md
 started: 2026-04-12T00:00:00Z
-updated: 2026-04-13T04:10:00Z
+updated: 2026-04-14T03:40:00Z
 ---
 
 ## Current Test
 
-[live UAT 2026-04-13T23:44 (post 18-10 post-ship fix): Test 5 passes with `protect_first_n=2`; 10 consecutive successful compressions, zero `pair_atomicity_collapsed_range` warns, stable single pinned `[CONTEXT HISTORY]`. Two new findings surfaced — see Gaps.]
+[live UAT 2026-04-14T01:05 / 02:45 / 03:36 (post 18-11 + 18-12 ship): Test 5 passes under default config (`protect_first_n=3`) with 18-11 auto-shrink firing cleanly; 18-12 "completed tools" sentinel verified live (agent emits user-facing reply on turn 2, no re-call loop); Tests 7 and 8 pass. Test 4 pressure warning discovered structurally unreachable from CLI — new gap opened.]
 
 ## Tests
 
@@ -37,14 +40,15 @@ reason: "Live UAT on 2026-04-13 exercised the agent-side path (test 2) which now
 
 ### 4. Pressure Warning at 85% of Threshold
 expected: As usage climbs past 85% of the engine's compression threshold (but before actual compression), a `tracing::warn!` fires, a `ContextPressure` hook event is emitted, and a one-shot transient system message `[CONTEXT PRESSURE HIGH — earlier history may soon be summarized]` is injected into the next model call. Re-crossing without descent does NOT re-fire; descending and re-crossing does.
-result: not_exercised
-reason: "Config used for 2026-04-13 UAT (threshold=0.001) skips the pressure band — compression fires before any pre-compression pressure window exists. Needs a separate UAT pass with a realistic threshold (e.g. 0.50) where usage can sit in the 0.425–0.50 band."
+result: blocked
+blocked_by: 18-13 (proposed)
+reason: "2026-04-14 live UAT at threshold=0.05: ratio correctly climbed into band [0.0425, 0.05) but no `WARN ... context pressure warning` log appeared. Root cause (verified): `engine_factory.rs:104–106` gates both `with_hooks` and `with_pressure_tracker` behind a combined `if let (Some(hooks), Some(tracker)) = ...` guard. CLI passes `hooks=None` (main.rs:303), so tracker + session_id are never attached to the engine — pressure check inside `context_engine.rs:144` requires both and silently no-ops. Agent-level tracker from `agent_wiring.rs:52` is attached but unused by the engine path. Blocks until wiring gap closed."
 
 ### 5. Tool-Pair Atomicity (No Orphaned Calls)
 expected: Run a session with tool calls so compression triggers mid-pair. Resulting message list has zero orphaned tool_use/tool_result messages — no API 400 errors from the provider. Adaptive 500-token shift visibly keeps pairs together.
 result: pass
-verified: "2026-04-13T23:44 live UAT (agent CLI, web_read loop). 10/10 consecutive compressions succeeded (outcome=\"compressed\"), zero pair_atomicity_collapsed_range warns, zero Anthropic 400s. Token reduction stable ~2780/pass (3444→665). Config used: compression.protect_first_n=2, protect_last_tokens=100, threshold=0.001, aux=claude-haiku-4-5."
-caveat: "Pass required dropping protect_first_n from the documented default 3 to 2 — see new gap: default-config compression deadlock."
+verified: "2026-04-14T01:05 live UAT (agent CLI, default config). First turn with `please get the top 3 stories from hacker news`: ratio=0.0252 crossed threshold=0.001, compression fired with `effective_protect_first_n shrunk configured_protect_first_n=3 effective_protect_first_n=2 reason=\"tool_pair_front_boundary_autoshrink\"`. `outcome=\"compressed\"` before_tokens=3225 → after_tokens=652, prune_start=2 prune_end=4 pair_count=1, zero pair_atomicity_collapsed_range warns. 18-11 auto-shrink validated live under documented default."
+history: "2026-04-13T23:44 run required dropping protect_first_n to 2; 18-11 (shipped 2026-04-14) closed that gap by auto-shrinking when a front-protected asst(tool_use) has its result outside the protect window."
 
 ### 6. SummarizingEngine Single Pinned [CONTEXT HISTORY]
 expected: With `context_engine = "summarizing"`, drive multiple compression passes. The message list always contains exactly one `[CONTEXT HISTORY]` system message (name=`context_history`), not two. Body reflects updated summary including the newly pruned blocks.
@@ -53,15 +57,13 @@ verified: "2026-04-13T23:44 live UAT. Post-compression message count was stable 
 
 ### 7. Aux-Model Fallback to LocalPruning
 expected: With `context_engine = "summarizing"` but aux-model call forced to fail (misconfigured compression role or network error), compression still succeeds via LocalPruningEngine fallback. Logs show warn about summarization failure; conversation continues; no user-visible error.
-result: blocked
-blocked_by: 18-10
-reason: "The 2026-04-13 UAT with aux model claude-haiku-4-5 configured never reached the fallback path — OrphanedToolPair fires before the aux call returns. Retest after 18-10; then also run with a misconfigured compression role to exercise the actual fallback branch."
+result: pass
+verified: "2026-04-14 live UAT with compression role misconfigured to a nonexistent model. Aux call failed, warn log emitted, SummarizingEngine fell back to LocalPruningEngine; compression outcome still succeeded with reduced token count; no API 400s from main provider; agent continued without user-visible error."
 
 ### 8. Memory Flush Before Prune
 expected: With a MemoryProvider registered, observe log/trace ordering on a compression event: `sync_turn` (memory flush) completes BEFORE destructive prune runs. No memory entries lost across compression boundary.
-result: blocked
-blocked_by: 18-10
-reason: "Destructive prune never reaches the message list — rollback replaces it before any inserts commit. Retest once compression actually succeeds."
+result: pass
+verified: "2026-04-14 live UAT with `memory.provider: sqlite` (built with --features memory-sqlite). Pre_compress handler ran before destructive prune; sync_turn completed cleanly; memory entries preserved across the compression boundary."
 
 ### 9. SystemMessage Prompt Slot Wiring
 expected: With `config.agent.system_message = "You are a test."`, inspect the assembled prompt — a SystemMessage slot appears between Identity and ToolGuidance, content is scanned (no injection markers) and capped at 20K chars. Empty config omits the slot entirely.
@@ -71,16 +73,16 @@ reason: "Deferred; not blocking. Orthogonal to compression wiring fix."
 ## Summary
 
 total: 9
-passed: 4
+passed: 6
 partial_pass: 0
 issues: 0
 pending: 0
-blocked: 2
-not_exercised: 1
+blocked: 1
+not_exercised: 0
 deferred: 1
 skipped: 1
 
-last_run: 2026-04-13T23:44 (live, agent CLI, post 18-10 post-ship fix)
+last_run: 2026-04-14T03:36 (live, agent CLI, post 18-11 + 18-12 ship)
 
 ## Gaps
 
@@ -100,31 +102,30 @@ last_run: 2026-04-13T23:44 (live, agent CLI, post 18-10 post-ship fix)
   test: 5
 
 - truth: "Default compression.protect_first_n=3 is safe for single-tool-pair conversations"
-  status: failed
-  severity: high
-  reason: "With protect_first_n=3 and a [sys, user, asst(tool_use), tool_result] shape, the asst is pinned in front-protect while the tool_result is the only prunable message. Two-direction guard correctly detects the front-straddle and pushes prune_start past max(result_idx)+1, collapsing prune_start==prune_end. Result: `pair_atomicity_collapsed_range` warn on every turn, zero compression, unbounded token growth until agent context is exhausted."
-  impact: "Documented default (protect_first_n=3) is unsafe. UAT only passed after lowering to 2. Must auto-extend protect_first_n to cover dangling tool-pair results OR auto-shrink to exclude a pinned asst tool_use whose result falls outside."
-  test: 5 (re-exposed under default config)
-  root_cause: "protect_first_n is a pure index count; it does not consider tool-pair atomicity when selecting its boundary."
-  artifacts:
-    - crates/ironhermes-agent/src/summarizing_engine.rs (compute_protect_start + front-straddle guard at lines 337–372)
-    - live UAT log 2026-04-13T23:35 (path-1 reconfig attempt failed with protect_first_n=3)
-  owner: 18-11
+  status: resolved
+  resolution: "18-11 shipped `compute_effective_protect_first_n` — auto-shrinks effective protect_first_n when a front-protected asst(tool_use) has its tool_result outside the window. Verified live 2026-04-14T01:05 with documented default (protect_first_n=3): compression fired cleanly on first tool turn, log shows `effective_protect_first_n shrunk configured=3 effective=2 reason=\"tool_pair_front_boundary_autoshrink\"`, outcome=\"compressed\"."
+  test: 5
 
 - truth: "After compression, the model recognizes its prior tool call completed and does not retry"
-  status: failed
-  severity: medium
-  reason: "Live UAT 2026-04-13T23:44: agent re-called web_read on every turn for 10 consecutive turns, never emitting a final summary to the user, until MAX_COMPRESSION_PASSES=10 guard fired. Each compression replaced the prior asst(tool_use)+tool_result pair with a [CONTEXT HISTORY] summary that does not carry enough signal for the model to recognize the task was completed."
-  impact: "Compression is technically functional but semantically breaks the agent's sense of progress. Without an explicit 'already executed' signal in the summary, the model treats every turn as a fresh request."
-  test: new (discovered during Test 5 re-run)
-  root_cause_hypothesis: "Summary prompt / aux-model output does not preserve tool-call outcome markers. Or: summary positioned as system message competes with the original user message which still reads as an open request."
-  artifacts:
-    - live UAT log 2026-04-13T23:44 (10 consecutive compress-then-re-fetch cycles)
-    - crates/ironhermes-agent/src/summarizing_engine.rs (summary prompt construction)
-  owner: 18-12
+  status: resolved
+  resolution: "18-12 shipped enriched summary prompt directive + `COMPLETED_TOOLS_SENTINEL` prepended to pinned `[CONTEXT HISTORY]` body. Verified live 2026-04-14T01:05: after the first compression (web_read pair pruned), turn 2 agent emitted a final user-facing reply (`\"Based on the tool execution that was already completed...\"`) and terminated cleanly (`Agent completed naturally (no tool calls) turn=2`). No re-call loop, no MAX_COMPRESSION_PASSES."
+  test: 5 (adjacent — tool-outcome recognition)
 
 - truth: "Tests 7, 8 require a configurable compression pass end-to-end"
-  status: blocked
-  blocked_by: 18-11
-  reason: "Tests 7 (aux fallback) and 8 (memory flush ordering) require a clean compression pass under default or near-default config. Currently only passes with protect_first_n=2. Retest after 18-11 lands."
+  status: resolved
+  resolution: "With 18-11 unblocking default-config compression, Test 7 (aux fallback via misconfigured compression role) and Test 8 (memory flush ordering with sqlite MemoryProvider) both ran cleanly on 2026-04-14. See Tests 7 and 8 for details."
   test: [7, 8]
+
+- truth: "PressureTracker fires on agent-side compression pressure band from CLI"
+  status: failed
+  severity: medium
+  reason: "2026-04-14 live UAT with threshold=0.05 and session token ratio correctly climbing into band [0.0425, 0.05): no `WARN ... context pressure warning` log emitted, no `ContextPressure` hook event, no transient `[CONTEXT PRESSURE HIGH ...]` injected. Root cause verified: `engine_factory.rs:104–106` gates `with_hooks(h, sid).with_pressure_tracker(t)` behind a combined `if let (Some(hooks), Some(tracker)) = ...` guard. CLI calls `attach_context_engine` with `hooks=None` (main.rs:303), so BOTH the pressure tracker AND the session_id go unattached to the engine. `context_engine.rs:144` requires both to run `check_and_maybe_emit`, so every pressure channel silently no-ops."
+  impact: "PressureTracker is effectively dead code in CLI sessions. Agent-level tracker on `AgentLoop` from `agent_wiring.rs:52` is attached but unused by the engine-level check. Gateway path may or may not hit the same bug depending on whether its hook registry is wired; needs verification."
+  test: 4
+  root_cause: "engine_factory couples tracker attachment to hooks attachment, but the two are independent concerns."
+  artifacts:
+    - crates/ironhermes-agent/src/engine_factory.rs:104-106 (combined if let guard)
+    - crates/ironhermes-agent/src/context_engine.rs:144 (check_and_maybe_emit gated on both)
+    - crates/ironhermes-cli/src/main.rs:303 (CLI passes hooks=None)
+    - live UAT log 2026-04-14T03:36 (ratio 0.07 past threshold 0.05; compression fired with session_id=None, no pressure warn log)
+  proposed_owner: 18-13 (decouple tracker attachment from hook attachment; also propagate session_id unconditionally)
