@@ -93,6 +93,15 @@ pub struct Config {
 // =============================================================================
 
 /// Context compression tuning (D-02, D-10, D-11, D-15, D-26).
+///
+/// `protect_first_n` is the CONFIGURED lower bound on the number of
+/// front-of-list messages that cannot be pruned. At compression time the
+/// effective value may auto-shrink (never grow) when a pinned assistant
+/// tool_call has at least one tool_result outside the front-protected
+/// region — shrinking releases the assistant into the prunable range so
+/// the whole tool-pair can be summarized atomically (safety-over-recovery,
+/// see 18-11). The configured value is preserved; only the per-call
+/// boundary changes.
 // T-18-06: if renaming later, add serde(alias)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

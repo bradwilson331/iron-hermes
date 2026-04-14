@@ -116,6 +116,52 @@ pub fn apply_adaptive_shift(
     protect_start
 }
 
+/// Phase 18 Plan 11: compute the effective `protect_first_n` boundary for
+/// `SummarizingEngine::compress` given the configured value and the detected
+/// tool pairs in the message list.
+///
+/// Rule (safety-over-recovery, per 18-10 precedent): when an assistant
+/// `tool_use` message is pinned inside the front-protected region
+/// (`asst_idx < configured_first_n`) and has at least one matching
+/// `tool_result` OUTSIDE that region (`max(tool_result_indices) >=
+/// configured_first_n`), the effective boundary auto-shrinks to `asst_idx` so
+/// the whole pair falls into the prunable range and can be summarized
+/// atomically. The helper NEVER grows the boundary above the configured
+/// value — operator intent is an upper bound.
+///
+/// Invariants:
+///   1. `configured_first_n == 0` → returns `0` (nothing to shrink).
+///   2. If no pair conflicts exist, the configured value is returned unchanged.
+///   3. With multiple conflicting pairs, returns the MINIMUM of their
+///      `asst_idx` (most protective; releases the earliest pinned pair).
+///   4. Result is always `<= configured_first_n`.
+///
+/// `_messages` is reserved for future extensions (e.g. inspecting
+/// message-level flags) and is intentionally unused today.
+pub fn compute_effective_protect_first_n(
+    _messages: &[ChatMessage],
+    configured_first_n: usize,
+    pairs: &[ToolPair],
+) -> usize {
+    if configured_first_n == 0 {
+        return 0;
+    }
+    let mut effective = configured_first_n;
+    for pair in pairs {
+        if pair.assistant_idx >= configured_first_n {
+            continue;
+        }
+        let any_outside = pair
+            .tool_result_indices
+            .iter()
+            .any(|&i| i >= configured_first_n);
+        if any_outside && pair.assistant_idx < effective {
+            effective = pair.assistant_idx;
+        }
+    }
+    effective
+}
+
 /// Post-compression invariant (D-16): every assistant tool_call id must have a
 /// subsequent matching tool message, and every tool message must refer to a
 /// preceding assistant tool_call.
@@ -291,6 +337,153 @@ mod tests {
             "large body must be rewritten in place, got: {}", rewritten
         );
         assert!(!rewritten.contains(&big_body));
+    }
+
+    // ── Phase 18 Plan 11: compute_effective_protect_first_n unit tests ──────
+
+    #[test]
+    fn effective_protect_first_n_single_pair_front_straddle_shrinks() {
+        // asst at idx 2, result at idx 3, configured=3 → asst_idx < 3 and
+        // result outside → shrink to asst_idx=2.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("a", "fn", "{}")]),
+            ChatMessage::tool_result("a", "r"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        let eff = compute_effective_protect_first_n(&msgs, 3, &pairs);
+        assert_eq!(eff, 2, "front-straddle must shrink effective to asst_idx");
+    }
+
+    #[test]
+    fn effective_protect_first_n_parallel_tool_calls_shrinks() {
+        // asst at idx 2, results at idx 3 and 4, configured=3 → shrink to 2.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![
+                tc("p1", "fn_a", "{}"),
+                tc("p2", "fn_b", "{}"),
+            ]),
+            ChatMessage::tool_result("p1", "r1"),
+            ChatMessage::tool_result("p2", "r2"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        let eff = compute_effective_protect_first_n(&msgs, 3, &pairs);
+        assert_eq!(eff, 2, "parallel tool_calls must shrink to asst_idx");
+    }
+
+    #[test]
+    fn effective_protect_first_n_pair_fully_inside_protect_no_change() {
+        // asst at idx 1, result at idx 2, configured=4 → both inside
+        // [0, 4) → no shrink.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::assistant_tool_calls(vec![tc("a", "fn", "{}")]),
+            ChatMessage::tool_result("a", "r"),
+            ChatMessage::user("u"),
+            ChatMessage::user("tail"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        let eff = compute_effective_protect_first_n(&msgs, 4, &pairs);
+        assert_eq!(
+            eff, 4,
+            "pair fully inside front-protect must not shrink (asst_idx=1, result=2, configured=4)"
+        );
+    }
+
+    #[test]
+    fn effective_protect_first_n_pair_fully_outside_protect_no_change() {
+        // asst at idx 5, result at idx 6, configured=3 → pair entirely
+        // outside front-protect → no change.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::user("u"),
+            ChatMessage::user("u"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("a", "fn", "{}")]),
+            ChatMessage::tool_result("a", "r"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 1);
+        let eff = compute_effective_protect_first_n(&msgs, 3, &pairs);
+        assert_eq!(eff, 3, "pair fully outside front-protect must not shrink");
+    }
+
+    #[test]
+    fn effective_protect_first_n_no_pairs_returns_configured() {
+        // Empty pairs list, configured=3 → returns 3.
+        let msgs: Vec<ChatMessage> = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("a"),
+        ];
+        let pairs: Vec<ToolPair> = Vec::new();
+        let eff = compute_effective_protect_first_n(&msgs, 3, &pairs);
+        assert_eq!(eff, 3, "no pairs must return configured value");
+    }
+
+    #[test]
+    fn effective_protect_first_n_multiple_pairs_picks_min() {
+        // Two front-straddling pairs: asst at 1 (result at 4) and asst at 2
+        // (result at 5), configured=4 → shrink to min(1, 2) = 1.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::assistant_tool_calls(vec![tc("a1", "fn", "{}")]),
+            ChatMessage::assistant_tool_calls(vec![tc("a2", "fn", "{}")]),
+            ChatMessage::user("u"),
+            ChatMessage::tool_result("a1", "r1"),
+            ChatMessage::tool_result("a2", "r2"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert_eq!(pairs.len(), 2, "two pairs expected");
+        let eff = compute_effective_protect_first_n(&msgs, 4, &pairs);
+        assert_eq!(
+            eff, 1,
+            "multiple conflicting pairs must pick min(asst_idx)"
+        );
+    }
+
+    #[test]
+    fn effective_protect_first_n_malformed_asst_at_boundary_no_result_no_change() {
+        // Assistant tool_calls at idx 2, but NO matching tool_result exists
+        // in the message list. `detect_tool_pairs` returns no pair for it.
+        // Helper sees empty pairs list → returns configured value unchanged.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("orphan", "fn", "{}")]),
+            ChatMessage::user("next user"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        assert!(
+            pairs.is_empty(),
+            "orphan tool_calls must not yield a pair (detect requires matching result)"
+        );
+        let eff = compute_effective_protect_first_n(&msgs, 3, &pairs);
+        assert_eq!(
+            eff, 3,
+            "no detected pair → no shrink even if malformed asst lives in front-protect"
+        );
+    }
+
+    #[test]
+    fn effective_protect_first_n_zero_configured_returns_zero() {
+        // configured_first_n == 0 short-circuits to 0 regardless of pairs.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("a", "fn", "{}")]),
+            ChatMessage::tool_result("a", "r"),
+        ];
+        let pairs = detect_tool_pairs(&msgs);
+        let eff = compute_effective_protect_first_n(&msgs, 0, &pairs);
+        assert_eq!(eff, 0);
     }
 
     #[test]

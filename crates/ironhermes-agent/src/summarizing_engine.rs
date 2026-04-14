@@ -282,6 +282,34 @@ impl ContextEngine for SummarizingEngine {
         // LLM after `?` propagates an error.
         let snapshot = messages.clone();
 
+        // Phase 18 Plan 11 fix: when an asst(tool_use) message is pinned by
+        // `protect_first_n` but ≥1 of its tool_results lies OUTSIDE the
+        // front-protected region, shrink the effective protect_first_n to
+        // the assistant's index so the whole pair falls into the prunable
+        // range. Without this, the 18-10 front-straddle guard pushes
+        // prune_start past the tool_results while prune_end stays at
+        // protect_start — collapsing the range to a no-op. Under default
+        // config (protect_first_n=3) with message shape
+        // `[sys, user, asst(tool_use), tool_result]`, every compression
+        // attempt stalled (live UAT 2026-04-13T23:35).
+        //
+        // Safety-over-recovery: effective value is MONOTONIC downward —
+        // never grows above configured. Operator intent is an upper bound.
+        let detected_pairs_early = tool_pair::detect_tool_pairs(messages);
+        let effective_first_n = tool_pair::compute_effective_protect_first_n(
+            messages,
+            self.protect_first_n,
+            &detected_pairs_early,
+        );
+        if effective_first_n != self.protect_first_n {
+            tracing::info!(
+                configured_protect_first_n = self.protect_first_n,
+                effective_protect_first_n = effective_first_n,
+                reason = "tool_pair_front_boundary_autoshrink",
+                "summarizing_engine: effective_protect_first_n shrunk"
+            );
+        }
+
         // Phase 18 Plan 10 fix: apply_adaptive_shift returns the adjusted
         // protect boundary. Previously we discarded it and used the stale
         // `protect_start` as prune_end, which cut through tool_use/tool_result
@@ -293,7 +321,7 @@ impl ContextEngine for SummarizingEngine {
             crate::context_compressor::ContextCompressor::compute_protect_start(
                 messages,
                 self.protect_last_tokens,
-                self.protect_first_n,
+                effective_first_n,
             );
         let pairs = tool_pair::detect_tool_pairs(messages);
         let mut effective_protect_start = initial_protect_start;
@@ -321,17 +349,18 @@ impl ContextEngine for SummarizingEngine {
 
         // Determine prune range [protect_first_n .. protect_start], excluding
         // the pinned history segment (D-19).
-        if protect_start <= self.protect_first_n {
+        if protect_start <= effective_first_n {
             tracing::info!(
                 protect_start,
-                protect_first_n = self.protect_first_n,
+                effective_protect_first_n = effective_first_n,
+                configured_protect_first_n = self.protect_first_n,
                 protect_last_tokens = self.protect_last_tokens,
                 reason = "nothing_to_prune_first_n",
                 "summarizing_engine: no-op"
             );
             return Ok(CompressionOutcome::default());
         }
-        let mut prune_start = self.protect_first_n;
+        let mut prune_start = effective_first_n;
         let mut prune_end = protect_start;
 
         // Phase 18 Plan 10 pair-atomicity guard: ensure no detected pair is
@@ -471,7 +500,7 @@ impl ContextEngine for SummarizingEngine {
         let mut new_messages = Vec::with_capacity(kept_before.len() + 1 + kept_after.len());
         new_messages.extend(kept_before);
         // Re-check pin index doesn't exceed bounds — clamp to len.
-        let pin_idx = self.protect_first_n.min(new_messages.len());
+        let pin_idx = effective_first_n.min(new_messages.len());
         // If insertion point moved (history removed above), fix up by truncation.
         while new_messages.len() > pin_idx {
             // Move the tail into kept_after so we can insert cleanly.
@@ -506,6 +535,8 @@ impl ContextEngine for SummarizingEngine {
             prune_start,
             prune_end,
             pair_count = pairs.len(),
+            effective_protect_first_n = effective_first_n,
+            configured_protect_first_n = self.protect_first_n,
             outcome = "compressed",
             "summarizing_engine: compressed"
         );
