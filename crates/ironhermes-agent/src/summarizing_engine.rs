@@ -1609,4 +1609,109 @@ mod tests {
         );
         assert_compress_ok_no_orphan(&msgs);
     }
+
+    // ── Phase 18 Plan 11: default protect_first_n=3 deadlock reproducer ──────
+    //
+    // Live UAT 2026-04-13T23:35 passed Tests 5 & 6 only after lowering
+    // compression.protect_first_n from the documented default `3` to `2`. The
+    // minimal 4-message shape [sys, user, asst(tool_use), tool_result] with
+    // protect_first_n=3 and protect_last_tokens=100 causes the 18-10
+    // front-straddle guard to push prune_start to max(tool_result_idx)+1=4
+    // while prune_end=protect_start=4 — the range collapses and compression
+    // is a no-op. Under live load the agent hits MAX_COMPRESSION_PASSES and
+    // context grows unbounded.
+    //
+    // These tests REPRODUCE the deadlock in RED state. Task 2's
+    // compute_effective_protect_first_n auto-shrinks protect_first_n to
+    // asst_idx=2 so the whole pair falls in the prunable range, unblocking
+    // the normal prune path → GREEN.
+
+    fn build_minimal_front_straddle_default_first_n(
+        tool_call_ids: &[&str],
+        pair_body: &str,
+    ) -> Vec<ChatMessage> {
+        let mut msgs = Vec::new();
+        msgs.push(ChatMessage::system("sys"));
+        msgs.push(ChatMessage::user("identity"));
+        let calls: Vec<ToolCall> = tool_call_ids
+            .iter()
+            .map(|id| ToolCall {
+                id: (*id).into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: r#"{"url":"https://example.com"}"#.into(),
+                },
+            })
+            .collect();
+        msgs.push(ChatMessage::assistant_tool_calls(calls));
+        for id in tool_call_ids {
+            msgs.push(ChatMessage::tool_result(*id, pair_body));
+        }
+        msgs
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn compress_fails_default_protect_first_n_single_pair_RED_then_GREEN() {
+        // UAT 2026-04-13T23:35 minimal shape: 4 messages
+        //   [sys, user, asst(tool_use), tool_result(12KB body)]
+        // protect_first_n=3 (documented default), protect_last_tokens=100.
+        //
+        // tool_result body is ~3K tokens >> 100-token tail budget, so the tail
+        // walker takes 0 messages → protect_start = msgs.len() = 4. Prune
+        // range is [3, 4). Front-straddle guard pushes prune_start to 4 →
+        // collapse.
+        //
+        // Required: outcome.compressed == true (achieved by Task 2's
+        // auto-shrink of effective protect_first_n to asst_idx=2).
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let body = "x".repeat(12_000);
+        let mut msgs = build_minimal_front_straddle_default_first_n(&["web_read_1"], &body);
+        // Anti-false-GREEN: confirm the fixture reproduces the front-straddle.
+        assert_pair_front_straddles(&msgs, 3, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — default protect_first_n=3 deadlock");
+        assert!(
+            outcome.compressed,
+            "compressed flag must be true — default protect_first_n=3 must be safe for single tool pair (UAT gap closure)"
+        );
+        assert_compress_ok_no_orphan(&msgs);
+    }
+
+    #[tokio::test]
+    #[allow(non_snake_case)]
+    async fn compress_fails_default_protect_first_n_parallel_tool_calls_RED_then_GREEN() {
+        // Parallel variant: asst at idx 2 issues two tool_calls, tool_results
+        // at idx 3 and 4. protect_first_n=3, protect_last_tokens=100. Same
+        // collapse behavior — front-straddle guard pushes prune_start past
+        // index 4 while protect_start stays ≤ 4 → collapse. Auto-shrink must
+        // bring effective protect_first_n down to asst_idx=2.
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary".into())]);
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+        let body = "x".repeat(12_000);
+        let mut msgs = build_minimal_front_straddle_default_first_n(
+            &["web_read_p1", "web_read_p2"],
+            &body,
+        );
+        assert_pair_front_straddles(&msgs, 3, protect_last);
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("compress must succeed — default protect_first_n=3 parallel tool_calls");
+        assert!(
+            outcome.compressed,
+            "compressed flag must be true — parallel tool_calls under default protect_first_n=3 (UAT gap closure)"
+        );
+        assert_compress_ok_no_orphan(&msgs);
+    }
 }
