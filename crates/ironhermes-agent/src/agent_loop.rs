@@ -29,6 +29,10 @@ pub struct AgentResult {
     pub final_response: Option<String>,
     /// Aggregated token usage.
     pub total_usage: AggregatedUsage,
+    /// Phase 18 Plan 14: compression_count at the end of this run.
+    /// The CLI REPL persists this back into its shared AtomicUsize so that the
+    /// summarizing engine's prior-summary chain is continuous across turns.
+    pub compression_count_after: usize,
 }
 
 #[derive(Debug, Default)]
@@ -144,6 +148,13 @@ impl AgentLoop {
     /// Phase 18 Plan 06: session id for transient drain + pre_compress routing.
     pub fn with_session_id(mut self, sid: impl Into<String>) -> Self {
         self.session_id = Some(sid.into());
+        self
+    }
+
+    /// Phase 18 Plan 14: seed the starting compression_count so the summarizing
+    /// engine's prior-summary chain is continuous across REPL turns.
+    pub fn with_compression_count(mut self, count: usize) -> Self {
+        self.compression_count = count;
         self
     }
 
@@ -385,6 +396,7 @@ impl AgentLoop {
                         finished_naturally: false,
                         final_response: Some("Cancelled by parent".to_string()),
                         total_usage,
+                        compression_count_after: self.compression_count,
                     });
                 }
             }
@@ -447,6 +459,7 @@ impl AgentLoop {
                                 finished_naturally: false,
                                 final_response: Some("Cancelled by parent".to_string()),
                                 total_usage,
+                                compression_count_after: self.compression_count,
                             });
                         }
                     }
@@ -533,6 +546,7 @@ impl AgentLoop {
             finished_naturally: turns_used < self.max_iterations,
             final_response,
             total_usage,
+            compression_count_after: self.compression_count,
         })
     }
 

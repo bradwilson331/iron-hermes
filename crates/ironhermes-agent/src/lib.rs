@@ -26,5 +26,6 @@ pub use prompt_builder::{PromptBuilder, PromptSlot};
 pub use personality::PersonalityRegistry;
 pub use context_compressor::ContextCompressor;
 pub use agent_wiring::{attach_context_engine, DEFAULT_CONTEXT_LENGTH};
+pub use pressure_warning::PressureTracker;
 pub use subagent_runner::AgentSubagentRunner;
 pub use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};

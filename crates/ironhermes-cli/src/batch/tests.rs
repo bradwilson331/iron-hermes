@@ -103,6 +103,7 @@ fn mock_agent_result(messages: Vec<ChatMessage>, final_response: Option<String>)
         finished_naturally: true,
         final_response,
         total_usage: AggregatedUsage::default(),
+        compression_count_after: 0,
     }
 }
 
