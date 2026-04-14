@@ -236,8 +236,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKILL-05 | Phase 19 | Pending |
 | SKILL-06 | Phase 19 | Pending |
 | SKILL-07 | Phase 19 | Pending |
-| SKILL-08 | Phase 19 | Pending |
-| SKILL-09 | Phase 19 | Pending |
+| SKILL-08 | Phase 19.1 | Pending |
+| SKILL-09 | Phase 19.1 | Pending |
 | SKILL-10 | Phase 19 | Pending |
 | SKILL-11 | Phase 19 | Pending |
 | SKILL-12 | Phase 20 | Pending |

@@ -48,7 +48,8 @@
 - [ ] **Phase 16: Prompt Caching** — DEFERRED (Anthropic blocking non-Anthropic clients)
 - [x] **Phase 17: Memory Tools & External Providers** — Memory tool (add/replace/remove), capacity tracking, SQLite/Grafeo/DuckDB backends, session search (completed 2026-04-12)
 - [x] **Phase 18: Context Compression** — Dual compression system (agent at 50%, gateway at 85%) with pluggable ContextEngine trait (completed 2026-04-14)
-- [ ] **Phase 19: Skills Framework** — SKILL.md format, category discovery, conditional activation, env vars, credentials, security, and Hub
+- [ ] **Phase 19: Skills Framework** — SKILL.md format, category discovery, conditional activation, env vars, credentials, security (local framework)
+- [ ] **Phase 19.1: Skills Hub** — Publish/install across GitHub / skills.sh / well-known endpoints with origin-based trust levels and clone-and-vendor lifecycle
 - [ ] **Phase 20: Tool Registry & Slash Commands** — Tool availability checks, toolset management, slash command router, and core command implementations
 - [ ] **Phase 21: Gateway Architecture Alignment** — GatewayRunner with MemoryProvider integration, session key standard, authorization, hook lifecycle, and maintenance
 - [ ] **Phase 22: CLI Feature Parity & ACP Adapter** — CLI gets execute_code/hooks/guardrails; ACP JSON-RPC stdio adapter for editor integration
@@ -178,14 +179,24 @@ Plans:
 ### Phase 19: Skills Framework
 **Goal**: Skills are discoverable from a structured directory, conditionally activated based on toolsets and platform, and securely injected into the system prompt
 **Depends on**: Phase 15
-**Requirements**: SKILL-01, SKILL-02, SKILL-03, SKILL-04, SKILL-05, SKILL-06, SKILL-07, SKILL-08, SKILL-09, SKILL-10, SKILL-11
+**Requirements**: SKILL-01, SKILL-02, SKILL-03, SKILL-04, SKILL-05, SKILL-06, SKILL-07, SKILL-10, SKILL-11
 **Success Criteria** (what must be TRUE):
   1. Skills use SKILL.md format with YAML frontmatter; the catalog is listed at startup and full skill content loads only on activation (progressive disclosure)
   2. Skills with unmet requires_toolsets or requires_tools are hidden; skills with fallback_for_toolsets/fallback_for_tools are hidden when primaries are present
   3. Missing required_environment_variables trigger a setup prompt on skill load; credential files declared in required_credential_files are checked for existence and mounted into sandboxes
   4. Skills are restricted to declared platforms (macos/linux/windows) and hidden on incompatible platforms; skill env vars pass through to execute_code and terminal sandboxes
-  5. Skills Hub allows publishing to and installing from external repos (GitHub, skills.sh, well-known endpoints) with trust levels (builtin, official, trusted, community)
-  6. All skill content is security scanned before injection into the system prompt
+  5. All skill content is security scanned before injection into the system prompt
+**Plans**: TBD
+
+### Phase 19.1: Skills Hub
+**Goal**: Skills can be published to and installed from external repos with trust gating, giving users a distribution surface on top of the Phase 19 local framework
+**Depends on**: Phase 19
+**Requirements**: SKILL-08, SKILL-09
+**Success Criteria** (what must be TRUE):
+  1. Skills Hub publishes skills to external repos and installs from GitHub, skills.sh, and well-known endpoints via pluggable source adapters
+  2. Installed skills carry origin-based trust labels (builtin, official, trusted, community) that gate security-scan enforcement (hard-reject community on scan hit, WARN-BUT-LOAD builtin/official per Phase 19 D-15)
+  3. Installed skills are cloned-and-vendored into `~/.ironhermes/skills/` so the runtime works offline and is stable against upstream changes
+  4. Management surface is primarily CLI; `skills_list()` and `skill_view()` tool actions remain available so the agent can self-discover installed skills
 **Plans**: TBD
 
 ### Phase 20: Tool Registry & Slash Commands
