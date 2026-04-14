@@ -28,15 +28,26 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 ///
 /// Returns the same `AgentLoop` with the builders applied. Call this
 /// BEFORE `agent.run(messages).await`.
+///
+/// ## Phase 18 Plan 14: caller-provided tracker
+///
+/// When `tracker` is `Some`, the supplied `Arc<PressureTracker>` is reused
+/// verbatim — enabling a single CLI REPL session to share one tracker across
+/// multiple `run_agent_turn` calls and preserve hysteresis state between turns.
+///
+/// When `tracker` is `None` (the common one-shot path), a fresh
+/// `PressureTracker` is created as before — backwards-compatible with all
+/// existing call sites.
 pub fn attach_context_engine(
     agent: AgentLoop,
     config: &Config,
     resolver: &ProviderResolver,
     session_id: impl Into<String>,
     hooks: Option<Arc<HookRegistry>>,
+    tracker: Option<Arc<PressureTracker>>,
 ) -> AgentLoop {
     let sid = session_id.into();
-    let tracker = Arc::new(PressureTracker::new());
+    let tracker = tracker.unwrap_or_else(|| Arc::new(PressureTracker::new()));
     let engine = build_context_engine(
         config,
         &config.agent.context_engine,
@@ -72,7 +83,8 @@ mod tests {
     fn attach_context_engine_wires_all_three_builders() {
         let config = Config::default();
         let resolver = ProviderResolver::build(&config).unwrap();
-        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-1", None);
+        // Phase 18-14: pass None for tracker → backwards-compatible fresh tracker.
+        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-1", None, None);
         assert!(agent.has_context_engine());
         assert!(agent.has_pressure_tracker());
         assert_eq!(agent.session_id(), Some("sess-1".to_string()));
@@ -84,8 +96,28 @@ mod tests {
         config.agent.context_engine = "local_prune".to_string();
         config.agent.compression_threshold = 0.42;
         let resolver = ProviderResolver::build(&config).unwrap();
-        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-2", None);
+        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-2", None, None);
         let t = agent.context_engine_threshold().unwrap();
         assert!((t - 0.42).abs() < 1e-4);
+    }
+
+    /// Phase 18-14: when a caller-provided Arc<PressureTracker> is passed, it
+    /// is reused verbatim.  The strong count increases as the tracker is cloned
+    /// into both the context engine and the AgentLoop.
+    #[test]
+    fn attach_context_engine_reuses_caller_tracker() {
+        let config = Config::default();
+        let resolver = ProviderResolver::build(&config).unwrap();
+        let t = Arc::new(PressureTracker::new());
+        // Baseline: caller holds one reference.
+        assert_eq!(Arc::strong_count(&t), 1);
+        let _agent =
+            attach_context_engine(bare_agent(), &config, &resolver, "sess-3", None, Some(t.clone()));
+        // After wiring: caller (1) + AgentLoop (1) + inside engine (1) = >= 3.
+        assert!(
+            Arc::strong_count(&t) >= 3,
+            "expected >= 3 strong references, got {}",
+            Arc::strong_count(&t)
+        );
     }
 }

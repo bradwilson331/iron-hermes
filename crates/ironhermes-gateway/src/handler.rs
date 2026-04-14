@@ -455,6 +455,7 @@ impl GatewayMessageHandler {
             &self.resolver,
             &session_id_str,
             self.hook_registry.clone(),
+            None, // Phase 18-14: gateway constructs a fresh tracker per request
         );
 
         // 8. Run agent with error recovery (D-18)
@@ -723,6 +724,7 @@ mod tests {
             &handler.resolver,
             "sess-gw",
             handler.hook_registry.clone(),
+            None, // Phase 18-14: fresh tracker per gateway test
         );
         assert!(agent.has_context_engine(), "agent must have context engine attached");
         assert!(agent.has_pressure_tracker(), "agent must have pressure tracker attached");
