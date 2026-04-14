@@ -30,6 +30,10 @@ struct SessionState {
     /// Pending one-shot transient message for this session (consumed by
     /// `take_transient`).
     pending_transient: Option<String>,
+    /// Phase 18-14: running total of warnings fired for this session across
+    /// all crossings.  Used by REPL-harness tests to assert exactly-once
+    /// firing across multiple turns.
+    warn_count: u32,
 }
 
 /// Thread-safe per-session pressure tracker.
@@ -90,6 +94,7 @@ impl PressureTracker {
             // First crossing — arm the cooldown and queue the transient.
             state.above_threshold = true;
             state.pending_transient = Some(TRANSIENT_WARNING_TEXT.to_string());
+            state.warn_count = state.warn_count.saturating_add(1);
         }
 
         // ── Channel 1: tracing ────────────────────────────────────────────
@@ -139,6 +144,15 @@ impl PressureTracker {
     pub fn was_warned(&self, session_id: &str) -> bool {
         let map = self.inner.lock().unwrap();
         map.get(session_id).map(|s| s.above_threshold).unwrap_or(false)
+    }
+
+    /// Phase 18-14: test-only accessor — returns the running count of
+    /// warnings fired for this session across all crossings.  Used by
+    /// REPL-harness tests to assert "fired exactly once across 3 turns".
+    #[cfg(test)]
+    pub fn warn_count(&self, session_id: &str) -> u32 {
+        let map = self.inner.lock().unwrap();
+        map.get(session_id).map(|s| s.warn_count).unwrap_or(0)
     }
 }
 
