@@ -2054,4 +2054,127 @@ mod tests {
             "pinned body must name the pruned tool(s), got:\n{body}"
         );
     }
+
+    /// Phase 18 Plan 12 Task 3: regression test — COMPLETED_TOOLS_SENTINEL
+    /// survives iterative multi-pass compression. The aux model's reply
+    /// intentionally DOES NOT include the sentinel; this proves the sentinel
+    /// is injected by OUR code path on the output side, not by relying on
+    /// the aux model to preserve it.
+    #[tokio::test]
+    async fn compressed_history_body_retains_sentinel_after_iterative_compression() {
+        use ironhermes_core::{FunctionCall, ToolCall};
+        let capturer = Arc::new(PromptCapturingSummarizer::new("plain summary with no sentinel"));
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine =
+            SummarizingEngine::new(ctx_len, 0.001, capturer).with_protect(3, protect_last);
+
+        // Pass 1 fixture: asst(tool_A) + tool_result(A) + threshold-crossing padding.
+        let mut msgs: Vec<ChatMessage> = vec![
+            ChatMessage::system("You are an agent"),
+            ChatMessage::user("search rust"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "tc_A".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "tool_A".into(),
+                    arguments: r#"{"q":"rust"}"#.into(),
+                },
+            }]),
+            ChatMessage::tool_result("tc_A", "result A body"),
+            ChatMessage::user("pad ".repeat(1250)),
+        ];
+        let before1 = estimate_messages_tokens(&msgs);
+        let outcome1 = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before1))
+            .await
+            .expect("pass 1 compress ok");
+        assert!(outcome1.compressed, "pass 1 must compress");
+
+        // Assert pass 1 produced the sentinel with tool_A.
+        let pin_idx1 = locate_history_segment(&msgs).expect("pin after pass 1");
+        let body1 = msgs[pin_idx1].content_text().unwrap().to_string();
+        assert!(
+            body1.contains(COMPLETED_TOOLS_SENTINEL),
+            "pass 1 body must contain sentinel, got:\n{body1}"
+        );
+        assert!(body1.contains("tool_A"), "pass 1 body must name tool_A");
+
+        // Pass 2: append another tool pair + padding to cross threshold again.
+        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
+            id: "tc_B".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "tool_B".into(),
+                arguments: r#"{"q":"async"}"#.into(),
+            },
+        }]));
+        msgs.push(ChatMessage::tool_result("tc_B", "result B body"));
+        msgs.push(ChatMessage::user("pad ".repeat(1250)));
+
+        let mut stats2 = uat_stats(ctx_len, protect_last, estimate_messages_tokens(&msgs));
+        stats2.compression_count = 1;
+        let outcome2 = engine
+            .compress(&mut msgs, stats2)
+            .await
+            .expect("pass 2 compress ok");
+        assert!(outcome2.compressed, "pass 2 must compress");
+
+        // Critical assertion: sentinel survives iterative re-compression even
+        // though the aux model reply never contains it. Also exactly one pin.
+        let pins: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.name.as_deref() == Some(HISTORY_NAME))
+            .collect();
+        assert_eq!(pins.len(), 1, "exactly one pin after iterative compression");
+        let body2 = pins[0].content_text().unwrap().to_string();
+        assert!(
+            body2.contains(COMPLETED_TOOLS_SENTINEL),
+            "pass 2 body MUST still contain sentinel (survives iterative re-summarize), got:\n{body2}"
+        );
+        let mentions_any_tool = body2.contains("tool_A") || body2.contains("tool_B");
+        assert!(
+            mentions_any_tool,
+            "pass 2 body must name at least one of the pruned tools, got:\n{body2}"
+        );
+    }
+
+    /// Phase 18 Plan 12 Task 3: guard against false-positive sentinel
+    /// injection. When a compression pass prunes ONLY user-role messages
+    /// (no tool pairs), the pinned body MUST NOT contain the sentinel.
+    #[tokio::test]
+    async fn compressed_history_body_has_no_sentinel_when_no_tool_pair_pruned() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("user-only summary".into())]);
+        let ctx_len = 1_000_000;
+        let protect_last = 100;
+        let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
+
+        // User-only fixture — no assistant messages, no tool_calls. Multiple
+        // padded user messages to cross the threshold.
+        let mut msgs: Vec<ChatMessage> = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("identity"),
+            ChatMessage::user("pad ".repeat(500)),
+            ChatMessage::user("pad ".repeat(500)),
+            ChatMessage::user("pad ".repeat(500)),
+            ChatMessage::user("tail anchor"),
+        ];
+        let before = estimate_messages_tokens(&msgs);
+        let outcome = engine
+            .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
+            .await
+            .expect("user-only compress ok");
+        assert!(outcome.compressed, "user-only fixture must compress");
+
+        let pin_idx = locate_history_segment(&msgs).expect("pin must exist");
+        let body = msgs[pin_idx].content_text().unwrap().to_string();
+        assert!(
+            body.contains(HISTORY_SENTINEL),
+            "existing HISTORY_SENTINEL preserved, got:\n{body}"
+        );
+        assert!(
+            !body.contains(COMPLETED_TOOLS_SENTINEL),
+            "COMPLETED_TOOLS_SENTINEL must be ABSENT when no tool pair was pruned, got:\n{body}"
+        );
+    }
 }
