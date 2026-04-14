@@ -130,6 +130,16 @@ impl PressureTracker {
         map.get_mut(session_id)
             .and_then(|s| s.pending_transient.take())
     }
+
+    /// Phase 18-13: test-only accessor — returns `true` if this session has
+    /// crossed the pressure threshold at least once (i.e., `above_threshold`
+    /// is currently set).  Used by unit tests that verify tracker fires
+    /// without an active hook registry.
+    #[cfg(test)]
+    pub fn was_warned(&self, session_id: &str) -> bool {
+        let map = self.inner.lock().unwrap();
+        map.get(session_id).map(|s| s.above_threshold).unwrap_or(false)
+    }
 }
 
 // ---------------------------------------------------------------------------

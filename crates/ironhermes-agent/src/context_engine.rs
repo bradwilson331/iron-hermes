@@ -101,14 +101,24 @@ impl LocalPruningEngine {
         self
     }
 
-    /// Phase 18 D-20: attach a hook registry + session id so `compress` fires
+    /// Phase 18 D-20: attach a hook registry so `compress` fires
     /// `context:pre_compress` and awaits handler completion before pruning.
-    pub fn with_hooks(
-        mut self,
-        registry: Arc<HookRegistry>,
-        session_id: impl Into<String>,
-    ) -> Self {
+    ///
+    /// Session id is now attached independently via `with_session_id` (18-13
+    /// gap-closure). `with_hooks` no longer accepts a session_id argument so
+    /// that PressureTracker wiring works even when no hook registry is installed
+    /// (the CLI default wiring path).
+    pub fn with_hooks(mut self, registry: Arc<HookRegistry>) -> Self {
         self.hook_registry = Some(registry);
+        self
+    }
+
+    /// Phase 18-13: attach a session id independently of hook registry presence.
+    ///
+    /// Required for PressureTracker wiring in the CLI default path where
+    /// `hooks = None` but the tracker still needs a `session_id` to key its
+    /// per-session hysteresis state.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
     }
@@ -419,7 +429,8 @@ mod tests {
         let reg = Arc::new(registry);
 
         let engine = LocalPruningEngine::new(1000, 0.5)
-            .with_hooks(Arc::clone(&reg), "sess-hook-1");
+            .with_hooks(Arc::clone(&reg))
+            .with_session_id("sess-hook-1");
 
         let mut msgs = build_large_message_vec(30);
         let _ = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
@@ -463,7 +474,8 @@ mod tests {
         let reg = Arc::new(registry);
 
         let engine = LocalPruningEngine::new(1000, 0.5)
-            .with_hooks(Arc::clone(&reg), "sess-order");
+            .with_hooks(Arc::clone(&reg))
+            .with_session_id("sess-order");
 
         let mut msgs = build_large_message_vec(30);
         let _ = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
@@ -526,6 +538,48 @@ mod tests {
                 b.tool_calls.as_ref().map(|v| v.len())
             );
         }
+    }
+
+    // ── Phase 18 Plan 13: pressure-check fires without hooks (gap-closure) ──
+
+    #[tokio::test]
+    async fn pressure_check_fires_when_session_id_attached_without_hooks() {
+        use crate::pressure_warning::PressureTracker;
+
+        let tracker = Arc::new(PressureTracker::new());
+        // No .with_hooks() — simulates CLI wiring (hooks = None).
+        // context_length = 100_000, threshold = 0.50
+        // warning_trigger = 0.50 * 0.85 = 0.425 → fires at estimated_tokens >= 42_500.
+        let engine = LocalPruningEngine::new(100_000, 0.50)
+            .with_session_id("sess-test-1")
+            .with_pressure_tracker(tracker.clone());
+
+        // Use check_pressure directly with stats that put us in the band
+        // [42_500, 50_000) — avoids running the full compress path and the
+        // need to craft a correctly-sized message vec.
+        let stats = ContextStats {
+            context_length: 100_000,
+            estimated_tokens: 46_000,  // ratio=0.46, above 85% warning trigger (0.425)
+            protect_first_n: 3,
+            protect_last_tokens: 100,
+            compression_count: 0,
+            prior_summary: None,
+        };
+
+        // check_pressure exercises the (tracker, sid) pressure gate directly.
+        // Before 18-13: with_session_id didn't exist, so tracker.was_warned
+        // would always be false (session_id was None).
+        // After 18-13: session_id is set, pressure gate fires.
+        let fired = engine.check_pressure(&stats).await;
+
+        assert!(
+            fired,
+            "pressure_warning_fired must be true when session_id attached without hooks"
+        );
+        assert!(
+            tracker.was_warned("sess-test-1"),
+            "pressure tracker must fire when session_id attached without hooks"
+        );
     }
 
     #[test]

@@ -49,11 +49,20 @@ pub fn build_context_engine(
                        tracker: Option<Arc<PressureTracker>>,
                        sid: &str|
      -> Arc<dyn ContextEngine> {
+        // Phase 18-13 gap-closure: attach session_id unconditionally so the
+        // PressureTracker can key its per-session hysteresis state even when
+        // no hook registry is installed (CLI default path).  tracker and hooks
+        // are each attached independently — the old combined guard
+        // `if let (Some(h), Some(t))` short-circuited both when hooks was None.
         let mut e = LocalPruningEngine::new(context_length, threshold)
             .with_protect(protect_first, protect_last)
-            .with_tool_pair_shift(shift);
-        if let (Some(h), Some(t)) = (hooks, tracker) {
-            e = e.with_hooks(h, sid).with_pressure_tracker(t);
+            .with_tool_pair_shift(shift)
+            .with_session_id(sid);
+        if let Some(t) = tracker {
+            e = e.with_pressure_tracker(t);
+        }
+        if let Some(h) = hooks {
+            e = e.with_hooks(h);
         }
         Arc::new(e) as Arc<dyn ContextEngine>
     };
@@ -98,11 +107,18 @@ pub fn build_context_engine(
             let summarizer: Arc<dyn SummarizationClient> =
                 Arc::new(AnyClientSummarizer::new(Arc::new(client), model));
 
+            // Phase 18-13 gap-closure: same three-branch independent attachment
+            // as build_local — session_id unconditional, tracker/hooks each
+            // gated on Some independently.
             let mut e = SummarizingEngine::new(context_length, threshold, summarizer)
                 .with_protect(protect_first, protect_last)
-                .with_tool_pair_shift(shift);
-            if let (Some(h), Some(t)) = (hooks, tracker) {
-                e = e.with_hooks(h, &sid).with_pressure_tracker(t);
+                .with_tool_pair_shift(shift)
+                .with_session_id(&sid);
+            if let Some(t) = tracker {
+                e = e.with_pressure_tracker(t);
+            }
+            if let Some(h) = hooks {
+                e = e.with_hooks(h);
             }
             Arc::new(e)
         }

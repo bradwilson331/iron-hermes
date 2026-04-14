@@ -141,14 +141,24 @@ impl SummarizingEngine {
         }
     }
 
-    /// Phase 18 D-20: attach a hook registry + session id so `compress` fires
+    /// Phase 18 D-20: attach a hook registry so `compress` fires
     /// `context:pre_compress` and awaits handler completion before pruning.
-    pub fn with_hooks(
-        mut self,
-        registry: Arc<HookRegistry>,
-        session_id: impl Into<String>,
-    ) -> Self {
+    ///
+    /// Session id is now attached independently via `with_session_id` (18-13
+    /// gap-closure). `with_hooks` no longer accepts a session_id argument so
+    /// that PressureTracker wiring works even when no hook registry is installed
+    /// (the CLI default wiring path).
+    pub fn with_hooks(mut self, registry: Arc<HookRegistry>) -> Self {
         self.hook_registry = Some(registry);
+        self
+    }
+
+    /// Phase 18-13: attach a session id independently of hook registry presence.
+    ///
+    /// Required for PressureTracker wiring in the CLI default path where
+    /// `hooks = None` but the tracker still needs a `session_id` to key its
+    /// per-session hysteresis state.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
     }
@@ -2175,6 +2185,47 @@ mod tests {
         assert!(
             !body.contains(COMPLETED_TOOLS_SENTINEL),
             "COMPLETED_TOOLS_SENTINEL must be ABSENT when no tool pair was pruned, got:\n{body}"
+        );
+    }
+
+    // ── Phase 18 Plan 13: pressure-check fires without hooks (gap-closure) ──
+
+    #[tokio::test]
+    async fn pressure_check_fires_on_summarizing_engine_without_hooks() {
+        use crate::pressure_warning::PressureTracker;
+        use std::sync::Arc;
+
+        let tracker = Arc::new(PressureTracker::new());
+        let (mock, _) = MockSummarizer::new(vec![]);
+
+        // No .with_hooks() — simulates CLI wiring (hooks = None).
+        // context_length = 100_000, threshold = 0.50
+        // warning_trigger = 0.50 * 0.85 = 0.425 → 42_500 tokens.
+        // We drive check_pressure directly with estimated_tokens = 46_000 (ratio 0.46 > 0.425).
+        let engine = SummarizingEngine::new(100_000, 0.50, mock)
+            .with_session_id("sess-sum-test-1")
+            .with_pressure_tracker(tracker.clone());
+
+        let stats = ContextStats {
+            context_length: 100_000,
+            estimated_tokens: 46_000,
+            protect_first_n: 3,
+            protect_last_tokens: 100,
+            compression_count: 0,
+            prior_summary: None,
+        };
+
+        // check_pressure exercises the (tracker, sid) gate without running
+        // the full summarization path (avoids needing mock responses).
+        let fired = engine.check_pressure(&stats).await;
+
+        assert!(
+            fired,
+            "pressure tracker must fire on SummarizingEngine when session_id attached without hooks"
+        );
+        assert!(
+            tracker.was_warned("sess-sum-test-1"),
+            "tracker.was_warned must be true after pressure check fires"
         );
     }
 }
