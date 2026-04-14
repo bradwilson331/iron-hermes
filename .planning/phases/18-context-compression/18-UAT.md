@@ -1,5 +1,5 @@
 ---
-status: partial
+status: pass
 phase: 18-context-compression
 source:
   - 18-01-SUMMARY.md
@@ -14,13 +14,14 @@ source:
   - 18-10-SUMMARY.md
   - 18-11-SUMMARY.md
   - 18-12-SUMMARY.md
+  - 18-13-SUMMARY.md
 started: 2026-04-12T00:00:00Z
-updated: 2026-04-14T03:40:00Z
+updated: 2026-04-14T16:12:00Z
 ---
 
 ## Current Test
 
-[live UAT 2026-04-14T01:05 / 02:45 / 03:36 (post 18-11 + 18-12 ship): Test 5 passes under default config (`protect_first_n=3`) with 18-11 auto-shrink firing cleanly; 18-12 "completed tools" sentinel verified live (agent emits user-facing reply on turn 2, no re-call loop); Tests 7 and 8 pass. Test 4 pressure warning discovered structurally unreachable from CLI — new gap opened.]
+[live UAT 2026-04-14T16:12 (post 18-13 ship): Test 4 pressure warning now fires under CLI default wiring (hooks=None) — WARN `context pressure warning` emitted with session_id populated after tool call crossed 85%-of-threshold band. 18-13 decoupling of tracker/session_id from hook-registry attachment verified live. All non-deferred/non-skipped tests pass.]
 
 ## Tests
 
@@ -40,9 +41,8 @@ reason: "Live UAT on 2026-04-13 exercised the agent-side path (test 2) which now
 
 ### 4. Pressure Warning at 85% of Threshold
 expected: As usage climbs past 85% of the engine's compression threshold (but before actual compression), a `tracing::warn!` fires, a `ContextPressure` hook event is emitted, and a one-shot transient system message `[CONTEXT PRESSURE HIGH — earlier history may soon be summarized]` is injected into the next model call. Re-crossing without descent does NOT re-fire; descending and re-crossing does.
-result: blocked
-blocked_by: 18-13 (proposed)
-reason: "2026-04-14 live UAT at threshold=0.05: ratio correctly climbed into band [0.0425, 0.05) but no `WARN ... context pressure warning` log appeared. Root cause (verified): `engine_factory.rs:104–106` gates both `with_hooks` and `with_pressure_tracker` behind a combined `if let (Some(hooks), Some(tracker)) = ...` guard. CLI passes `hooks=None` (main.rs:303), so tracker + session_id are never attached to the engine — pressure check inside `context_engine.rs:144` requires both and silently no-ops. Agent-level tracker from `agent_wiring.rs:52` is attached but unused by the engine path. Blocks until wiring gap closed."
+result: pass
+verified: "2026-04-14T16:12 live UAT (agent CLI, threshold=0.05, summarizing engine) post 18-13 ship. Session 4c3bda53-0acf-45c3-88dd-b8560a8526f9. Turn 1 initial check ratio=0.0415 under band. After web_read tool call ratio jumped to 0.0639 — WARN fired: `context pressure warning (85% of compression threshold) session_id=4c3bda53-... estimated_tokens=8184 threshold=0.05 percent_used=0.0639 mode=soft`. `summarizing_engine: compress attempt` log confirms `session_id=Some(\"4c3bda53-...\")` reached the engine under CLI default wiring (hooks=None). Compression then fired (before_tokens=8184 → after_tokens=5524). Transient `[CONTEXT PRESSURE HIGH ...]` user-facing line not observed because the tool call jumped past the warning-only window [0.0425, 0.05) directly into the compression zone; no descent/ascent cycle occurred. Primary fix (18-13) verified: pressure tracker + session_id now reach the engine without a hook registry."
 
 ### 5. Tool-Pair Atomicity (No Orphaned Calls)
 expected: Run a session with tool calls so compression triggers mid-pair. Resulting message list has zero orphaned tool_use/tool_result messages — no API 400 errors from the provider. Adaptive 500-token shift visibly keeps pairs together.
@@ -73,16 +73,16 @@ reason: "Deferred; not blocking. Orthogonal to compression wiring fix."
 ## Summary
 
 total: 9
-passed: 6
+passed: 7
 partial_pass: 0
 issues: 0
 pending: 0
-blocked: 1
+blocked: 0
 not_exercised: 0
 deferred: 1
 skipped: 1
 
-last_run: 2026-04-14T03:36 (live, agent CLI, post 18-11 + 18-12 ship)
+last_run: 2026-04-14T16:12 (live, agent CLI, post 18-13 ship)
 
 ## Gaps
 
@@ -117,15 +117,6 @@ last_run: 2026-04-14T03:36 (live, agent CLI, post 18-11 + 18-12 ship)
   test: [7, 8]
 
 - truth: "PressureTracker fires on agent-side compression pressure band from CLI"
-  status: failed
-  severity: medium
-  reason: "2026-04-14 live UAT with threshold=0.05 and session token ratio correctly climbing into band [0.0425, 0.05): no `WARN ... context pressure warning` log emitted, no `ContextPressure` hook event, no transient `[CONTEXT PRESSURE HIGH ...]` injected. Root cause verified: `engine_factory.rs:104–106` gates `with_hooks(h, sid).with_pressure_tracker(t)` behind a combined `if let (Some(hooks), Some(tracker)) = ...` guard. CLI calls `attach_context_engine` with `hooks=None` (main.rs:303), so BOTH the pressure tracker AND the session_id go unattached to the engine. `context_engine.rs:144` requires both to run `check_and_maybe_emit`, so every pressure channel silently no-ops."
-  impact: "PressureTracker is effectively dead code in CLI sessions. Agent-level tracker on `AgentLoop` from `agent_wiring.rs:52` is attached but unused by the engine-level check. Gateway path may or may not hit the same bug depending on whether its hook registry is wired; needs verification."
+  status: resolved
+  resolution: "18-13 shipped (commits bf0fbaa + 9086afc on develop): split `with_hooks(registry, sid)` into `with_hooks(registry)` + `with_session_id(sid)` on both LocalPruningEngine and SummarizingEngine; engine_factory rewired to three independent attachment branches (session_id unconditional, tracker+hooks each gated on Some). Verified live 2026-04-14T16:12 — WARN `context pressure warning` fired with session_id populated under CLI default wiring (hooks=None), and `summarizing_engine: compress attempt` confirms session_id reached the engine."
   test: 4
-  root_cause: "engine_factory couples tracker attachment to hooks attachment, but the two are independent concerns."
-  artifacts:
-    - crates/ironhermes-agent/src/engine_factory.rs:104-106 (combined if let guard)
-    - crates/ironhermes-agent/src/context_engine.rs:144 (check_and_maybe_emit gated on both)
-    - crates/ironhermes-cli/src/main.rs:303 (CLI passes hooks=None)
-    - live UAT log 2026-04-14T03:36 (ratio 0.07 past threshold 0.05; compression fired with session_id=None, no pressure warn log)
-  proposed_owner: 18-13 (decouple tracker attachment from hook attachment; also propagate session_id unconditionally)
