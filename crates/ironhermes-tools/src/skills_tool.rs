@@ -50,7 +50,9 @@ pub struct SkillsTool {
     registry: Arc<SkillRegistry>,
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
     credential_dir: PathBuf,
-    #[allow(dead_code)] // used in Plan 04 for per-skill config injection
+    /// Per-skill config values, keyed by skill name → (key → YAML value).
+    /// Consumed by `build_skill_config_header` in the activate success path
+    /// to synthesize the `[Skill config: ...]` body-injection header (D-08).
     skills_config: HashMap<String, HashMap<String, serde_yaml::Value>>,
 }
 
@@ -67,6 +69,57 @@ impl SkillsTool {
             credential_dir,
             skills_config,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skill config header (Phase 19 Plan 04 / D-08)
+// ---------------------------------------------------------------------------
+
+/// Build the `[Skill config: k1 = v1, k2 = v2]` header prepended to the skill
+/// body on activate success when config values exist for the skill.
+///
+/// Returns `None` when either the skill is absent from `skills_config` or its
+/// inner map is empty — in that case callers return the body unchanged with no
+/// empty header.
+///
+/// Keys are sorted lexicographically to make the header deterministic across
+/// runs, which preserves prompt-cache safety
+/// (see threat_model T-19-04-nondeterministic-output).
+pub(crate) fn build_skill_config_header(
+    skills_config: &HashMap<String, HashMap<String, serde_yaml::Value>>,
+    skill_name: &str,
+) -> Option<String> {
+    let entry = skills_config.get(skill_name)?;
+    if entry.is_empty() {
+        return None;
+    }
+    let mut pairs: Vec<(String, String)> = entry
+        .iter()
+        .map(|(k, v)| (k.clone(), format_yaml_value_inline(v)))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let body = pairs
+        .iter()
+        .map(|(k, v)| format!("{} = {}", k, v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("[Skill config: {}]", body))
+}
+
+/// Render a `serde_yaml::Value` for inline display inside the config header.
+/// Strings are unquoted, scalars are rendered naturally, complex values fall
+/// back to `serde_yaml::to_string` (trimmed) so the header never panics.
+fn format_yaml_value_inline(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Null => "null".to_string(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
@@ -114,6 +167,7 @@ fn handle_activate(
     args: &Value,
     active_skills: &std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>,
     credential_dir: &std::path::Path,
+    skills_config: &HashMap<String, HashMap<String, serde_yaml::Value>>,
 ) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -199,7 +253,13 @@ fn handle_activate(
                     skills.push(record.clone());
                 }
             }
-            json!({"status": "ok", "name": canonical_name, "content": body})
+            // D-08 body-injection: prepend `[Skill config: ...]\n\n` when
+            // per-skill config exists; otherwise return the body unchanged.
+            let final_content = match build_skill_config_header(skills_config, &canonical_name) {
+                Some(header) => format!("{}\n\n{}", header, body),
+                None => body,
+            };
+            json!({"status": "ok", "name": canonical_name, "content": final_content})
         }
         None => json!({"status": "error", "message": format!("Skill not found: {}", name)}),
     }
@@ -272,7 +332,13 @@ impl Tool for SkillsTool {
         let result = match action {
             "list" => handle_list(&self.registry),
             "view" => handle_view(&self.registry, &args),
-            "activate" => handle_activate(&self.registry, &args, &self.active_skills, &self.credential_dir),
+            "activate" => handle_activate(
+                &self.registry,
+                &args,
+                &self.active_skills,
+                &self.credential_dir,
+                &self.skills_config,
+            ),
             "deactivate" => handle_deactivate(&args, &self.active_skills),
             other => {
                 json!({"status": "error", "message": format!("Unknown action '{}'. Valid: list, view, activate, deactivate", other)})
@@ -799,6 +865,154 @@ mod tests {
         let v = parse_response(&result);
         assert_eq!(v["status"], "error");
         assert!(v["message"].as_str().unwrap().contains("no-such-skill"));
+    }
+
+    // =========================================================================
+    // Phase 19 Plan 04: body-injection header tests (D-08, CFG01)
+    // =========================================================================
+
+    fn make_p04_tool(
+        skills: &[(&str, &str, &str)],
+        skills_config: HashMap<String, HashMap<String, serde_yaml::Value>>,
+    ) -> (SkillsTool, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        for (name, description, body) in skills {
+            let skill_dir = skills_dir.join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                make_skill_md(name, description, body),
+            )
+            .unwrap();
+        }
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cred_dir = tempfile::tempdir().unwrap().keep();
+        let tool = SkillsTool::new(
+            Arc::new(registry),
+            active_skills,
+            cred_dir,
+            skills_config,
+        );
+        (tool, dir)
+    }
+
+    #[tokio::test]
+    async fn test_activate_config_injection() {
+        let mut cfg: HashMap<String, HashMap<String, serde_yaml::Value>> = HashMap::new();
+        let mut wiki_cfg: HashMap<String, serde_yaml::Value> = HashMap::new();
+        wiki_cfg.insert(
+            "path".to_string(),
+            serde_yaml::Value::String("~/research".to_string()),
+        );
+        wiki_cfg.insert(
+            "format".to_string(),
+            serde_yaml::Value::String("markdown".to_string()),
+        );
+        cfg.insert("wiki".to_string(), wiki_cfg);
+
+        let (tool, _dir) = make_p04_tool(
+            &[("wiki", "Wiki skill", "Wiki body content")],
+            cfg,
+        );
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "wiki"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "ok");
+        let content = v["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("[Skill config: "),
+            "content should start with skill-config header, got: {:?}",
+            content
+        );
+        assert!(content.contains("path = ~/research"), "missing path pair: {:?}", content);
+        assert!(content.contains("format = markdown"), "missing format pair: {:?}", content);
+        // header is followed by \n\n then the original body
+        assert!(
+            content.contains("]\n\nWiki body content"),
+            "header must be followed by blank line then body, got: {:?}",
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_no_config_no_header() {
+        // Empty skills_config — no header should be emitted.
+        let (tool, _dir) = make_p04_tool(
+            &[("wiki", "Wiki skill", "Wiki body content")],
+            HashMap::new(),
+        );
+        let result = tool
+            .execute(json!({"action": "activate", "name": "wiki"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "ok");
+        let content = v["content"].as_str().unwrap();
+        assert!(
+            !content.contains("[Skill config:"),
+            "no header should be emitted when skills_config is empty: {:?}",
+            content
+        );
+        assert_eq!(content.trim(), "Wiki body content");
+    }
+
+    #[tokio::test]
+    async fn test_activate_config_key_ordering_stable() {
+        // Insert keys in non-lex order; build_skill_config_header sorts them.
+        let mut cfg: HashMap<String, HashMap<String, serde_yaml::Value>> = HashMap::new();
+        let mut inner: HashMap<String, serde_yaml::Value> = HashMap::new();
+        inner.insert(
+            "zeta".to_string(),
+            serde_yaml::Value::String("z".to_string()),
+        );
+        inner.insert(
+            "alpha".to_string(),
+            serde_yaml::Value::String("a".to_string()),
+        );
+        inner.insert(
+            "mu".to_string(),
+            serde_yaml::Value::String("m".to_string()),
+        );
+        cfg.insert("wiki".to_string(), inner);
+
+        let (tool, _dir) = make_p04_tool(
+            &[("wiki", "Wiki skill", "Body")],
+            cfg,
+        );
+
+        let r1 = tool
+            .execute(json!({"action": "activate", "name": "wiki"}))
+            .await
+            .unwrap();
+        let r2 = tool
+            .execute(json!({"action": "activate", "name": "wiki"}))
+            .await
+            .unwrap();
+        let v1 = parse_response(&r1);
+        let v2 = parse_response(&r2);
+        assert_eq!(
+            v1["content"], v2["content"],
+            "back-to-back activations must return identical content"
+        );
+        let content = v1["content"].as_str().unwrap();
+        // Expect lexicographic order: alpha, mu, zeta
+        let header_line = content.lines().next().unwrap();
+        let alpha_pos = header_line.find("alpha").expect("alpha missing");
+        let mu_pos = header_line.find("mu").expect("mu missing");
+        let zeta_pos = header_line.find("zeta").expect("zeta missing");
+        assert!(
+            alpha_pos < mu_pos && mu_pos < zeta_pos,
+            "keys not sorted lexicographically: {:?}",
+            header_line
+        );
     }
 
     #[tokio::test]
