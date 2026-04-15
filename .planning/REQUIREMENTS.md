@@ -78,7 +78,7 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [ ] **SKILL-08**: Skills Hub: publish skills to external repos, install from GitHub/skills.sh/well-known endpoints
 - [ ] **SKILL-09**: Trust levels for installed skills: builtin (shipped), official (optional-skills/), trusted (known repos), community (security-gated)
 - [ ] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
-- [ ] **SKILL-11**: Skill env vars automatically passed through to execute_code and terminal sandboxes when set
+- [x] **SKILL-11**: Skill env vars automatically passed through to execute_code and terminal sandboxes when set
 - [ ] **SKILL-12**: Slash command router intercepts / prefixed messages before AgentLoop — platform-agnostic (CLI + gateway + ACP)
 - [ ] **SKILL-13**: Core slash commands implemented: /help, /reset, /personality, /skills, /memory, /sessions, /search, /model, /stop, /new
 - [ ] **SKILL-14**: Slash command resolution supports aliases and prefix matching via resolve_command()
@@ -239,7 +239,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKILL-08 | Phase 19.1 | Pending |
 | SKILL-09 | Phase 19.1 | Pending |
 | SKILL-10 | Phase 19 | Pending |
-| SKILL-11 | Phase 19 | Pending |
+| SKILL-11 | Phase 19 | Complete |
 | SKILL-12 | Phase 20 | Pending |
 | SKILL-13 | Phase 20 | Pending |
 | SKILL-14 | Phase 20 | Pending |
