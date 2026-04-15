@@ -74,7 +74,7 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [x] **SKILL-04**: Skills declare required_environment_variables with prompt/help/required_for fields; missing vars trigger setup prompt on load
 - [x] **SKILL-05**: Skills declare config settings (metadata.hermes.config) stored in config.yaml under skills.config namespace
 - [x] **SKILL-06**: Skills declare required_credential_files for OAuth tokens; existence checked on load, files mounted into sandboxes
-- [ ] **SKILL-07**: Skill content security scanned before injection into system prompt (same patterns as context file scanning)
+- [x] **SKILL-07**: Skill content security scanned before injection into system prompt (same patterns as context file scanning)
 - [ ] **SKILL-08**: Skills Hub: publish skills to external repos, install from GitHub/skills.sh/well-known endpoints
 - [ ] **SKILL-09**: Trust levels for installed skills: builtin (shipped), official (optional-skills/), trusted (known repos), community (security-gated)
 - [ ] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
@@ -235,7 +235,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKILL-04 | Phase 19 | Complete |
 | SKILL-05 | Phase 19 | Complete |
 | SKILL-06 | Phase 19 | Complete |
-| SKILL-07 | Phase 19 | Pending |
+| SKILL-07 | Phase 19 | Complete |
 | SKILL-08 | Phase 19.1 | Pending |
 | SKILL-09 | Phase 19.1 | Pending |
 | SKILL-10 | Phase 19 | Pending |

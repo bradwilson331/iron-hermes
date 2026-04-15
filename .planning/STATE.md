@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Intelligence & Identity
 status: executing
-stopped_at: Completed 19-04-PLAN.md
-last_updated: "2026-04-15T02:05:37.960Z"
+stopped_at: Completed 19-05-PLAN.md
+last_updated: "2026-04-15T02:10:20.818Z"
 last_activity: 2026-04-15
 progress:
   total_phases: 14
   completed_phases: 7
   total_plans: 39
-  completed_plans: 37
-  percent: 95
+  completed_plans: 38
+  percent: 97
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 18 (context-compression) — EXECUTING
-Plan: 3 of 14
+Plan: 4 of 14
 Status: Ready to execute
 Last activity: 2026-04-15
 
@@ -63,6 +63,7 @@ Progress: [██████████] 100%
 | Phase 17 P03 | 4 | 2 tasks | 9 files |
 | Phase 19 P03 | 6min | 2 tasks | 6 files |
 | Phase 19 P04 | ~3 min | 2 tasks | 3 files |
+| Phase 19 P05 | 8 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,7 @@ Recent decisions affecting current work:
 - [Phase 19]: Plan 04: SkillsConfig.config stored as HashMap<String, HashMap<String, serde_yaml::Value>> with serde(default) for backward compat
 - [Phase 19]: Plan 04: [Skill config: ...] header keys lex-sorted for deterministic prompt output and cache safety
 - [Phase 19]: Plan 04: declared_config_schema returns None for unknown skill / no hermes meta / empty config — single sentinel for 'no schema'
+- [Phase 19]: Plan 05: scan_skill_content layers SKILL_THREAT_PATTERNS over existing context THREAT_PATTERNS via short-circuit composition; scope=frontmatter+body (D-14), enforcement=Community-hard-reject + Builtin/Official-WARN-BUT-LOAD at registry-load (D-15/D-16)
 
 ### Pending Todos
 
@@ -104,6 +106,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-15T02:05:37.958Z
-Stopped at: Completed 19-04-PLAN.md
+Last session: 2026-04-15T02:10:20.816Z
+Stopped at: Completed 19-05-PLAN.md
 Resume file: None
