@@ -34,6 +34,55 @@ const THREAT_NAMES: &[&str] = &[
     "read_secrets",
 ];
 
+/// Skill-specific threat patterns (Phase 19 Plan 05, D-13).
+/// Sourced from hermes-agent `skills_guard.py` + `skills_tool.py`:
+/// Cat 1: tool-redefinition / privilege-escalation
+/// Cat 2: system-prompt override
+/// Cat 3: prompt-role markers
+/// Cat 4: agent-config persistence
+/// Cat 5: credential exfiltration (additions beyond existing context patterns)
+static SKILL_THREAT_PATTERNS: LazyLock<regex::RegexSet> = LazyLock::new(|| {
+    regex::RegexSet::new([
+        // Category 1: Tool redefinition / privilege escalation
+        r"(?mi)^allowed-tools\s*:",
+        r"(?i)\bsudo\b",
+        r"(?i)setuid|setgid|cap_setuid",
+        r"(?i)NOPASSWD",
+        r"(?i)chmod\s+[u+]?s",
+        // Category 2: System prompt override
+        r"(?i)system\s+prompt\s+override",
+        r"(?i)output\s+(?:\w+\s+)*(system|initial)\s+prompt",
+        r"(?i)system prompt:",
+        r"(?i)<system>",
+        r"\]\]>",
+        // Category 3: Prompt-role markers
+        r"(?i)ignore\s+(?:\w+\s+)*(previous|all|above|prior)\s+instructions",
+        r"(?i)you\s+are\s+(?:\w+\s+)*now\s+",
+        r"(?i)do\s+not\s+(?:\w+\s+)*tell\s+(?:\w+\s+)*the\s+user",
+        r"(?i)pretend\s+(?:\w+\s+)*(you\s+are|to\s+be)\s+",
+        r"(?i)disregard\s+(?:\w+\s+)*(your|all|any)\s+(?:\w+\s+)*(instructions|rules|guidelines)",
+        r"(?i)act\s+as\s+(if|though)\s+(?:\w+\s+)*you\s+(?:\w+\s+)*(have\s+no|don't\s+have)\s+(?:\w+\s+)*(restrictions|limits|rules)",
+        r"(?i)(respond|answer|reply)\s+without\s+(?:\w+\s+)*(restrictions|limitations|filters|safety)",
+        r"(?i)you are now",
+        r"(?i)disregard your",
+        r"(?i)forget your instructions",
+        r"(?i)new instructions:",
+        // Category 4: Agent config persistence
+        r"(?i)AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules",
+        r"(?i)\.hermes/config\.yaml|\.hermes/SOUL\.md",
+        // Category 5: Credential exfiltration
+        r"(?i)\$HOME/\.ssh|~/\.ssh",
+        r"(?i)\$HOME/\.aws|~/\.aws",
+        r"(?i)\$HOME/\.hermes/\.env|~/\.hermes/\.env",
+        r"(?i)base64[^\n]*env",
+        r"(?i)printenv|env\s*\|",
+        r#"(?i)os\.getenv\s*\(\s*[^\)]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)"#,
+        r#"(?i)(?:api[_-]?key|token|secret|password)\s*[=:]\s*["'][A-Za-z0-9+/=_-]{20,}"#,
+        r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----",
+    ])
+    .expect("SKILL_THREAT_PATTERNS regex compilation failed")
+});
+
 const INVISIBLE_CHARS: &[char] = &[
     '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{202a}', '\u{202b}',
     '\u{202c}', '\u{202d}', '\u{202e}',
@@ -69,6 +118,41 @@ pub fn scan_context_content(content: &str, filename: &str) -> String {
     } else {
         content.to_string()
     }
+}
+
+/// Scan skill content (frontmatter + body) for injection threats.
+///
+/// Runs BOTH the existing context THREAT_PATTERNS AND SKILL_THREAT_PATTERNS.
+/// Returns original content if clean, or `[BLOCKED: ...]` string on hit
+/// (same contract as `scan_context_content`, Pitfall 4).
+///
+/// Phase 19 D-13/D-14: called at registry-load time on combined
+/// `frontmatter_raw_text + body` — see skills.rs `load_with_paths`.
+pub fn scan_skill_content(content: &str, filename: &str) -> String {
+    // Run existing context scan first — if it blocks, short-circuit.
+    let base = scan_context_content(content, filename);
+    if base.starts_with("[BLOCKED:") {
+        return base;
+    }
+    // Run skill-specific patterns.
+    let matches = SKILL_THREAT_PATTERNS.matches(content);
+    let ids: Vec<String> = matches
+        .into_iter()
+        .map(|i| format!("skill_pattern_{}", i))
+        .collect();
+    if !ids.is_empty() {
+        warn!(
+            "Skill file {} blocked: {}",
+            filename,
+            ids.join(", ")
+        );
+        return format!(
+            "[BLOCKED: {} contained potential prompt injection ({}). Content not loaded.]",
+            filename,
+            ids.join(", ")
+        );
+    }
+    content.to_string()
 }
 
 /// Truncate content to max_chars using a 70% head / 20% tail split.

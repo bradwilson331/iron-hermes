@@ -240,6 +240,21 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
     Some((frontmatter, body))
 }
 
+/// Extract the raw YAML frontmatter text (between the two `---` fences) from a
+/// SKILL.md file content. Returns `None` when no well-formed frontmatter is
+/// present. Phase 19 Plan 05 uses this to build the scan scope (D-14).
+fn extract_raw_frontmatter(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    let after_open = trimmed.strip_prefix("---")?;
+    let after_open = after_open.strip_prefix('\n').or_else(|| {
+        after_open
+            .strip_prefix('\r')
+            .and_then(|s| s.strip_prefix('\n'))
+    })?;
+    let close_pos = after_open.find("\n---")?;
+    Some(after_open[..close_pos].to_string())
+}
+
 // =============================================================================
 // Platform filter (SKILL-05)
 // =============================================================================
@@ -392,13 +407,46 @@ impl SkillRegistry {
                     }
                 };
 
-                let (frontmatter, _body) = match parse_skill_md(&content) {
+                let (frontmatter, body) = match parse_skill_md(&content) {
                     Some(parsed) => parsed,
                     None => {
                         debug!("SkillRegistry: skipping {:?} — invalid SKILL.md", skill_md_path);
                         continue;
                     }
                 };
+
+                // Phase 19 Plan 05 (D-13/D-14/D-15/D-16): scan skill at registry-load.
+                // Scan scope = raw frontmatter text + body per D-14.
+                let raw_frontmatter_text = extract_raw_frontmatter(&content).unwrap_or_default();
+                let combined_scan_target = format!("{}\n\n{}", raw_frontmatter_text, body);
+                let scan_result = crate::context_scanner::scan_skill_content(
+                    &combined_scan_target,
+                    &skill_md_path.display().to_string(),
+                );
+                // Phase 19 defaults locally-discovered skills to Builtin (RESEARCH.md A4);
+                // Phase 19.1 will set provenance before this point. The match-on-source
+                // shape below is written to accommodate that future wiring today.
+                let source = SkillSource::Builtin;
+                if scan_result.starts_with("[BLOCKED:") {
+                    match source {
+                        SkillSource::Community => {
+                            warn!(
+                                skill = %frontmatter.name,
+                                path = %skill_md_path.display(),
+                                "SkillRegistry: hard-rejecting community skill — scan hit"
+                            );
+                            continue; // D-15 community hard-reject
+                        }
+                        SkillSource::Builtin | SkillSource::Official => {
+                            warn!(
+                                skill = %frontmatter.name,
+                                path = %skill_md_path.display(),
+                                "SkillRegistry: WARN-BUT-LOAD — scan hit on builtin/official skill"
+                            );
+                            // proceed — D-15 WARN-BUT-LOAD
+                        }
+                    }
+                }
 
                 // SKILL-07 dir-name-match check (D-13, D-15): warn-but-load on case-insensitive mismatch.
                 let dir_name = subdir
@@ -452,7 +500,7 @@ impl SkillRegistry {
                     allowed_tools,
                     metadata,
                     hermes_metadata,
-                    source: SkillSource::Builtin, // Phase 19 default per RESEARCH.md A4
+                    source, // Phase 19 default per RESEARCH.md A4 (Builtin); Phase 19.1 flips per provenance
                 });
             }
         }
@@ -534,6 +582,53 @@ impl SkillRegistry {
             .and_then(|s| s.hermes_metadata.as_ref())
             .map(|m| m.config.as_slice())
             .filter(|slice| !slice.is_empty())
+    }
+
+    /// Test-only constructor: load via `load_with_paths`, then inject a `source`
+    /// value onto every SkillRecord and re-apply D-15 community hard-reject.
+    ///
+    /// Production `load_with_paths` always sets `source = SkillSource::Builtin`
+    /// (RESEARCH.md A4 — Phase 19.1 will plumb real provenance). This helper
+    /// lets tests exercise the community-hard-reject / builtin-WARN-BUT-LOAD
+    /// branches without waiting for Phase 19.1.
+    #[cfg(test)]
+    pub fn load_with_paths_for_test(
+        search_paths: &[PathBuf],
+        source: SkillSource,
+    ) -> Self {
+        let mut reg = Self::load_with_paths(search_paths);
+        for s in reg.skills.iter_mut() {
+            s.source = source;
+        }
+        if source == SkillSource::Community {
+            // Re-apply D-15: re-scan the full SKILL.md content (frontmatter + body)
+            // and drop any that hit.
+            reg.skills.retain(|s| {
+                let content = match std::fs::read_to_string(&s.path) {
+                    Ok(c) => c,
+                    Err(_) => return true, // can't re-read → keep (rare; don't silently drop)
+                };
+                let raw_fm = extract_raw_frontmatter(&content).unwrap_or_default();
+                let body = parse_skill_md(&content)
+                    .map(|(_, b)| b)
+                    .unwrap_or_default();
+                let combined = format!("{}\n\n{}", raw_fm, body);
+                let scan = crate::context_scanner::scan_skill_content(
+                    &combined,
+                    &s.path.display().to_string(),
+                );
+                let hit = scan.starts_with("[BLOCKED:");
+                if hit {
+                    warn!(
+                        skill = %s.name,
+                        path = %s.path.display(),
+                        "SkillRegistry(test): hard-rejecting community skill — scan hit"
+                    );
+                }
+                !hit
+            });
+        }
+        reg
     }
 }
 
