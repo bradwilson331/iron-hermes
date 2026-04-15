@@ -1,36 +1,41 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-14T22:49:37.487Z",
-  "phase": "19",
-  "phase_name": "Skills Framework",
-  "phase_dir": ".planning/phases/19-skills-framework",
+  "timestamp": "2026-04-15T10:52:01.604Z",
+  "phase": "19.1",
+  "phase_name": "skills-hub",
+  "phase_dir": ".planning/phases/19.1-skills-hub",
   "plan": null,
   "task": null,
-  "total_tasks": null,
-  "status": "paused",
-  "stage": "discuss-phase",
+  "total_tasks": 12,
+  "status": "ready_to_execute",
+  "stage": "post-plan-check",
   "completed_tasks": [
-    {"id": 1, "name": "Init phase 19, scout codebase, load prior context (PROJECT.md, REQUIREMENTS.md, STATE.md, CONTEXT.md from phases 14/15/17, existing skills code in core/tools)", "status": "done"},
-    {"id": 2, "name": "Identify 7 gray areas for Phase 19 (conditional activation, env/credential UX, settings namespace, security scanning, Skills Hub, credential mounting, hermes metadata extraction strategy)", "status": "done"},
-    {"id": 3, "name": "Present gray areas to user with code-context annotations and prior-decision carry-forward", "status": "done"}
+    {"id": "discuss", "name": "CONTEXT.md (14 decisions D-01..D-14)", "status": "done", "commit": "6e0d853"},
+    {"id": "research", "name": "RESEARCH.md (Rust crates, adapter details, Validation Architecture)", "status": "done", "commit": "af89ce1"},
+    {"id": "validation", "name": "VALIDATION.md (Per-Task Verification Map, 12 task rows)", "status": "done", "commit": "6d476d6"},
+    {"id": "planning", "name": "5 PLAN.md files across 4 waves (12 tasks total)", "status": "done", "commit": "b18ca28"},
+    {"id": "research-fix", "name": "RESEARCH.md Open Questions marked RESOLVED (Dim-11 gate)", "status": "done", "commit": "c290c9c"}
   ],
   "remaining_tasks": [
-    {"id": 4, "name": "User selects which gray areas to discuss", "status": "not_started"},
-    {"id": 5, "name": "Discuss each selected area (4 questions per area, with code/prior-context annotations)", "status": "not_started"},
-    {"id": 6, "name": "Write 19-CONTEXT.md to .planning/phases/19-skills-framework/", "status": "not_started"},
-    {"id": 7, "name": "Write 19-DISCUSSION-LOG.md", "status": "not_started"},
-    {"id": 8, "name": "git commit + STATE.md update", "status": "not_started"}
+    {"id": "wave-1", "name": "Plan 19.1-01: SkillSource::Trusted + HubConfig + ironhermes-hub crate scaffold (3 tasks)", "status": "not_started"},
+    {"id": "wave-2", "name": "Plan 19.1-02: GitHubSource / WellKnownSource / SkillsShSource adapters (3 tasks)", "status": "not_started"},
+    {"id": "wave-3a", "name": "Plan 19.1-03: Install pipeline + update/uninstall (2 tasks)", "status": "not_started"},
+    {"id": "wave-3b", "name": "Plan 19.1-04: resolve_source() trust recomputation in SkillRegistry (2 tasks)", "status": "not_started"},
+    {"id": "wave-4", "name": "Plan 19.1-05: hermes skills CLI tree + hub_search tool action (2 tasks)", "status": "not_started"}
   ],
   "blockers": [
-    {"description": "Context window pressure (~81%) on the paused session — fresh session recommended for the question/answer loop", "type": "technical", "workaround": "Resume in fresh session; re-read the listed prior-context files plus this handoff."}
+    {"description": "Context window at 87% on paused session — fresh /clear strongly recommended before /gsd-execute-phase 19.1", "type": "technical", "workaround": "Resume in fresh session; re-read 19.1-CONTEXT.md + 19.1-RESEARCH.md + each PLAN.md as needed."}
   ],
-  "human_actions_pending": [
-    {"action": "Pick which of the 7 gray areas to discuss for Phase 19 (or reply 'all', or 'skip 5' if Skills Hub should split off into its own phase)", "context": "Skills Hub alone is ~2,691 LOC in Python reference (skills_hub.py); largest scope item by far.", "blocking": true}
+  "human_actions_pending": [],
+  "decisions": [
+    {"decision": "Skip publish flows (D-12 deferred to Phase 19.2 or 20)", "rationale": "Smallest viable Hub; publish needs PAT write-scope + repo bootstrap (~300-500 LOC)", "phase": "19.1"},
+    {"decision": "Read-only hub_search tool only (D-13)", "rationale": "Agent helps users discover skills; install mutations stay under user control via CLI", "phase": "19.1"},
+    {"decision": "New crate ironhermes-hub (not module in ironhermes-tools)", "rationale": "Isolates reqwest/tar/flate2 from core dep graph", "phase": "19.1"},
+    {"decision": "Wave 0 absorbed into Plan 01", "rationale": "SkillSource::Trusted variant + HubConfig + crate scaffold all needed before adapters; no separate Wave 0 plan", "phase": "19.1"},
+    {"decision": "wiremock 0.6 over mockito for HTTP mocking", "rationale": "Async-native, tokio-compatible; matches existing async stack", "phase": "19.1"},
+    {"decision": "Plans 01 (10 files) and 02 (11 files) at scope-sanity warning threshold accepted as-is", "rationale": "Plan 01 is pure scaffolding (small sibling modules); Plan 02 is structurally-parallel adapters. Split only if execution context overruns.", "phase": "19.1"}
   ],
-  "decisions": [],
-  "uncommitted_files": [
-    ".planning/phases/19-skills-framework/.continue-here.md (just written)"
-  ],
-  "next_action": "Re-read .planning/phases/19-skills-framework/.continue-here.md and the 7 gray areas listed; ask user which to discuss; then resume discuss-phase workflow at the discuss_areas step.",
-  "context_notes": "Phase 19 Skills Framework adds the v2.0 layers on top of the existing Phase 7/7.1/7.2 baseline (SkillRegistry, SkillsTool, SkillsConfig, platform filter, opaque metadata). REQUIREMENTS SKILL-01..SKILL-11 cover SKILL.md format, conditional activation, env vars/credentials, security scanning, settings namespace, sandbox pass-through, and Skills Hub with trust levels. SKILL-12/13/14 (slash commands) are Phase 20. The biggest open question is whether Skills Hub stays in Phase 19 or splits off given its size (~2,691 LOC of Python reference)."
+  "uncommitted_files": [],
+  "next_action": "Run /clear, then /gsd-execute-phase 19.1 — Wave 1 starts with Plan 19.1-01 (SkillSource::Trusted variant unblocks everything downstream)",
+  "context_notes": "Phase 19.1 went discuss → research → plan → check (1 blocker: RESEARCH.md '## Open Questions' missing (RESOLVED) suffix — auto-fixed) cleanly. CONTEXT.md (D-01..D-14) is authoritative; downstream agents must NOT re-litigate. Reference impl lives at ~/code/hermes-agent/tools/skills_hub.py (2,691 LOC) — port faithfully per PROJECT.md constraint. SKILL-08 + SKILL-09 covered across all 5 plans. Threat models on every plan (security_enforcement enabled, ASVS L1)."
 }
