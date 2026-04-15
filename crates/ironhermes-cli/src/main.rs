@@ -637,8 +637,14 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     rpc_registry.register_memory_tool(memory_store.clone());
     let rpc_registry = Arc::new(rpc_registry);
 
-    // Register execute_code tool with the RPC dispatch registry
-    registry.register_execute_code_tool(rpc_registry, config.exec.clone());
+    // Register execute_code tool with the RPC dispatch registry.
+    // Phase 19 Plan 06 (D-05): pass active_skills so skill-declared env vars
+    // bypass the sandbox secret-strip in `Sandbox::build_env`.
+    registry.register_execute_code_tool_with_active_skills(
+        rpc_registry,
+        config.exec.clone(),
+        active_skills.clone(),
+    );
 
     // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));

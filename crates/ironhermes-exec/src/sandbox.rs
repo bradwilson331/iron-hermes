@@ -64,6 +64,7 @@ impl Sandbox {
         script: &str,
         tool_dispatch: Arc<dyn ToolDispatch>,
         cancel: Option<CancellationToken>,
+        skill_env_whitelist: &[String],
     ) -> anyhow::Result<SandboxResult> {
         let dir = tempfile::TempDir::new()?;
 
@@ -92,8 +93,8 @@ impl Sandbox {
             }
         });
 
-        // Build filtered environment (D-35, D-36, D-37)
-        let env_vars = self.build_env(dir.path(), &socket_path);
+        // Build filtered environment (D-35, D-36, D-37) with skill whitelist (D-05)
+        let env_vars = self.build_env(dir.path(), &socket_path, skill_env_whitelist);
 
         // Spawn Python child process with filtered environment
         let mut cmd = tokio::process::Command::new(&self.config.python_path);
@@ -233,22 +234,37 @@ impl Sandbox {
         }
     }
 
-    /// Build the filtered environment for the child process (D-35, D-36, D-37).
+    /// Build the filtered environment for the child process (D-35, D-36, D-37, D-05).
     ///
     /// Strategy: inherit all env vars EXCEPT those matching secret patterns,
-    /// unless the var is in the safe list. Then inject sandbox-specific overrides.
-    fn build_env(&self, temp_dir: &std::path::Path, socket_path: &std::path::Path) -> Vec<(String, String)> {
+    /// unless the var is in the safe list OR is whitelisted by an active skill
+    /// (D-05 — declared-and-present skill env vars bypass the secret strip).
+    /// Then inject sandbox-specific overrides.
+    fn build_env(
+        &self,
+        temp_dir: &std::path::Path,
+        socket_path: &std::path::Path,
+        skill_env_whitelist: &[String],
+    ) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = Vec::new();
 
-        // Start with full environment, strip secrets
+        // D-05: normalize whitelist to uppercase once for case-insensitive match.
+        let whitelist_upper: Vec<String> = skill_env_whitelist
+            .iter()
+            .map(|s| s.to_uppercase())
+            .collect();
+
+        // Start with full environment, strip secrets (unless whitelisted)
         for (name, value) in std::env::vars() {
             let upper = name.to_uppercase();
             // D-36: safe vars always pass through
             let is_safe = SAFE_VARS.iter().any(|s| upper == *s) || upper.starts_with("XDG_");
             // D-35: strip vars containing secret patterns (case-insensitive)
             let is_secret = SECRET_PATTERNS.iter().any(|p| upper.contains(p));
+            // D-05: skill-declared names bypass the strip
+            let is_whitelisted = whitelist_upper.iter().any(|w| upper == *w);
 
-            if is_safe || !is_secret {
+            if is_safe || is_whitelisted || !is_secret {
                 env.push((name, value));
             }
         }
@@ -323,7 +339,7 @@ mod tests {
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let result = sandbox
-            .run(r#"print("hello world")"#, dispatch, None)
+            .run(r#"print("hello world")"#, dispatch, None, &[])
             .await
             .expect("should succeed");
 
@@ -351,7 +367,7 @@ import os
 env = dict(os.environ)
 print(repr(env))
 "#;
-        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
 
         let output = &result.stdout;
 
@@ -404,7 +420,7 @@ print(repr(env))
         // Wrap the entire test in a 5-second timeout to ensure it doesn't hang
         let test_result = tokio::time::timeout(Duration::from_secs(10), async {
             sandbox
-                .run("import time; time.sleep(999)", dispatch, None)
+                .run("import time; time.sleep(999)", dispatch, None, &[])
                 .await
                 .expect("should succeed even on timeout")
         })
@@ -424,7 +440,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"print("A" * 60000)"#;
-        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
 
         // stdout should be truncated: 100 bytes + truncation notice
         let notice = "\n[truncated: output exceeded limit]";
@@ -445,7 +461,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"import sys; sys.stderr.write("err msg")"#;
-        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
 
         assert!(
             result.stderr.contains("err msg"),
@@ -460,7 +476,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"import sys; sys.exit(42)"#;
-        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
 
         assert_eq!(result.exit_code, Some(42));
     }
@@ -476,7 +492,7 @@ print(repr(env))
 
         // Write >100 bytes to stderr
         let script = r#"import sys; sys.stderr.write("X" * 60000)"#;
-        let result = sandbox.run(script, dispatch, None).await.expect("should succeed");
+        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
 
         let notice = "\n[stderr truncated at 10KB]";
         assert!(
@@ -497,7 +513,7 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let result = sandbox
-            .run(r#"import time; time.sleep(0.1); print("done")"#, dispatch, None)
+            .run(r#"import time; time.sleep(0.1); print("done")"#, dispatch, None, &[])
             .await
             .expect("should succeed");
 

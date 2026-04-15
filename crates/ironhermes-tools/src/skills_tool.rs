@@ -73,6 +73,34 @@ impl SkillsTool {
 }
 
 // ---------------------------------------------------------------------------
+// Active-skill env whitelist (Phase 19 Plan 06 / D-05)
+// ---------------------------------------------------------------------------
+
+/// Collect declared env var names across all currently-active skills.
+///
+/// Used by `execute_code` (and any other sandbox caller) to build the
+/// whitelist passed into `Sandbox::build_env`. Names are collected in
+/// insertion order across active skills; duplicates are dropped so the
+/// same name declared by multiple skills appears only once.
+///
+/// Note: this helper does NOT check parent env presence — `build_env`
+/// filters on `std::env::vars()` naturally, so declared names not present
+/// in the parent never enter the child env (D-05 declared-AND-present rule).
+pub fn active_skill_env_names(active: &[ironhermes_core::SkillRecord]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for record in active {
+        if let Some(meta) = &record.hermes_metadata {
+            for entry in &meta.required_environment_variables {
+                if !out.contains(&entry.name) {
+                    out.push(entry.name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Skill config header (Phase 19 Plan 04 / D-08)
 // ---------------------------------------------------------------------------
 

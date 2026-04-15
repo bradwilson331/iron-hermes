@@ -4,12 +4,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironhermes_core::{ExecConfig, ToolSchema};
+use ironhermes_core::{ExecConfig, SkillRecord, ToolSchema};
 use ironhermes_exec::{CancellationToken, Sandbox, SandboxConfig, ToolDispatch};
 use serde_json::json;
 use tracing::debug;
 
 use crate::registry::{Tool, ToolRegistry};
+use crate::skills_tool::active_skill_env_names;
 
 // =============================================================================
 // RegistryDispatch — adapter bridging ToolRegistry to ToolDispatch trait
@@ -54,6 +55,11 @@ pub struct ExecuteCodeTool {
     /// and triggers it when a new message arrives from the same user.
     /// TODO: Wire CancellationToken creation in gateway handler (Phase 8 follow-up).
     cancel_token: Option<CancellationToken>,
+    /// Phase 19 Plan 06 (D-05): shared list of currently-active skills. Used to
+    /// compute the skill-declared env-var whitelist passed into the sandbox so
+    /// skill-declared keys bypass the secret-strip in `Sandbox::build_env`.
+    /// `None` when wired without skill support (tests / legacy construction).
+    active_skills: Option<Arc<std::sync::Mutex<Vec<SkillRecord>>>>,
 }
 
 impl ExecuteCodeTool {
@@ -71,6 +77,24 @@ impl ExecuteCodeTool {
             rpc_registry,
             config,
             cancel_token,
+            active_skills: None,
+        }
+    }
+
+    /// Phase 19 Plan 06 (D-05): Create an ExecuteCodeTool with shared access to
+    /// the active-skills list so skill-declared env vars bypass the sandbox
+    /// secret-strip in `Sandbox::build_env`.
+    pub fn with_active_skills(
+        rpc_registry: Arc<ToolRegistry>,
+        config: ExecConfig,
+        cancel_token: Option<CancellationToken>,
+        active_skills: Arc<std::sync::Mutex<Vec<SkillRecord>>>,
+    ) -> Self {
+        Self {
+            rpc_registry,
+            config,
+            cancel_token,
+            active_skills: Some(active_skills),
         }
     }
 }
@@ -131,7 +155,22 @@ impl Tool for ExecuteCodeTool {
             registry: Arc::clone(&self.rpc_registry),
         });
 
-        let result = sandbox.run(code, dispatch, self.cancel_token.clone()).await?;
+        // Phase 19 Plan 06 (D-05): compute skill-declared env whitelist
+        let skill_env_whitelist: Vec<String> = match &self.active_skills {
+            Some(active) => match active.lock() {
+                Ok(guard) => active_skill_env_names(&guard),
+                Err(poisoned) => {
+                    // Defensive: read past a poisoned lock rather than failing the
+                    // whole tool — absent whitelist just means no bypass.
+                    active_skill_env_names(&poisoned.into_inner())
+                }
+            },
+            None => Vec::new(),
+        };
+
+        let result = sandbox
+            .run(code, dispatch, self.cancel_token.clone(), &skill_env_whitelist)
+            .await?;
 
         // D-25..D-27: Structured JSON response format
         let status = if result.interrupted {

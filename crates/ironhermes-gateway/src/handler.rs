@@ -565,6 +565,9 @@ mod tests {
             compatibility: None,
             allowed_tools,
             metadata: None,
+            // Phase 19 Plan 01: typed HermesMetadata + SkillSource fields.
+            hermes_metadata: None,
+            source: ironhermes_core::SkillSource::Builtin,
         }
     }
 

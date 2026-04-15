@@ -293,6 +293,23 @@ impl ToolRegistry {
         use crate::execute_code::ExecuteCodeTool;
         self.register(Box::new(ExecuteCodeTool::new(rpc_registry, config, None)));
     }
+
+    /// Phase 19 Plan 06 (D-05): register execute_code with shared access to the
+    /// active-skills list so skill-declared env vars bypass the sandbox secret-strip.
+    pub fn register_execute_code_tool_with_active_skills(
+        &mut self,
+        rpc_registry: Arc<ToolRegistry>,
+        config: ironhermes_core::ExecConfig,
+        active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    ) {
+        use crate::execute_code::ExecuteCodeTool;
+        self.register(Box::new(ExecuteCodeTool::with_active_skills(
+            rpc_registry,
+            config,
+            None,
+            active_skills,
+        )));
+    }
 }
 
 impl Default for ToolRegistry {
