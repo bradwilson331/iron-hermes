@@ -469,6 +469,31 @@ impl SkillRegistry {
             .join("\n")
     }
 
+    /// Return a filtered catalog string (D-01/D-03 catalog-render filter, Phase 19 Plan 02).
+    ///
+    /// Honors typed `HermesMetadata` dimensions on each `SkillRecord`:
+    /// - `requires_toolsets`: skill hidden unless ALL listed toolsets are in `active_toolsets`
+    /// - `requires_tools`: skill hidden unless ALL listed tools are in `active_tools`
+    /// - `fallback_for_toolsets`: skill hidden when ANY listed toolset is in `active_toolsets`
+    /// - `fallback_for_tools`: skill hidden when ANY listed tool is in `active_tools`
+    ///
+    /// Skills without hermes metadata are always shown.
+    ///
+    /// D-06: This function is pure and in-memory — it must not perform filesystem or
+    /// environment access. Activation-time checks (credentials, env vars) live elsewhere.
+    pub fn filtered_catalog_text(
+        &self,
+        active_toolsets: &std::collections::HashSet<String>,
+        active_tools: &std::collections::HashSet<String>,
+    ) -> String {
+        self.skills
+            .iter()
+            .filter(|s| skill_passes_filter(s, active_toolsets, active_tools))
+            .map(|s| format!("- {}: {}", s.name, s.description))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Case-insensitive lookup by skill name.
     pub fn find(&self, name: &str) -> Option<&SkillRecord> {
         let lower = name.to_lowercase();
@@ -487,6 +512,63 @@ impl SkillRegistry {
     pub fn list(&self) -> &[SkillRecord] {
         &self.skills
     }
+}
+
+// =============================================================================
+// Catalog-render filter helper (Phase 19 Plan 02, D-01/D-03)
+// =============================================================================
+
+/// Returns true if the skill should appear in the rendered catalog given the
+/// active toolset/tool snapshot.
+///
+/// Rules (see HermesMetadata docs on skills.rs):
+/// - No hermes metadata → always show
+/// - `requires_toolsets` nonempty → all must be active
+/// - `requires_tools` nonempty → all must be active
+/// - Any `fallback_for_toolsets` entry active → hide
+/// - Any `fallback_for_tools` entry active → hide
+///
+/// D-06: pure function — no env/filesystem access. Takes immutable HashSet refs.
+fn skill_passes_filter(
+    record: &SkillRecord,
+    active_toolsets: &std::collections::HashSet<String>,
+    active_tools: &std::collections::HashSet<String>,
+) -> bool {
+    let meta = match &record.hermes_metadata {
+        Some(m) => m,
+        None => return true, // no hermes metadata → always show
+    };
+    if !meta.requires_toolsets.is_empty()
+        && !meta
+            .requires_toolsets
+            .iter()
+            .all(|t| active_toolsets.contains(t.as_str()))
+    {
+        return false;
+    }
+    if !meta.requires_tools.is_empty()
+        && !meta
+            .requires_tools
+            .iter()
+            .all(|t| active_tools.contains(t.as_str()))
+    {
+        return false;
+    }
+    if meta
+        .fallback_for_toolsets
+        .iter()
+        .any(|t| active_toolsets.contains(t.as_str()))
+    {
+        return false;
+    }
+    if meta
+        .fallback_for_tools
+        .iter()
+        .any(|t| active_tools.contains(t.as_str()))
+    {
+        return false;
+    }
+    true
 }
 
 // =============================================================================
@@ -1520,5 +1602,170 @@ Body content.
         assert!(record.hermes_metadata.is_none(), "hermes_metadata should be None when no metadata block");
         assert_eq!(record.name, "bare-skill");
         assert_eq!(record.description, "No metadata block");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 19 Plan 02: Wave 0 — catalog-render filter tests (D-01/D-03)
+    // -------------------------------------------------------------------------
+
+    fn make_skill_with_hermes(dir: &std::path::Path, name: &str, description: &str, hermes_yaml: &str) {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        let metadata_block = if hermes_yaml.is_empty() {
+            String::new()
+        } else {
+            format!("metadata:\n  hermes:\n{}\n", hermes_yaml)
+        };
+        let content = format!(
+            "---\nname: {}\ndescription: {}\n{}---\nBody.\n",
+            name, description, metadata_block
+        );
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[test]
+    fn test_filter_requires_toolsets() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        // alpha requires toolset "web"
+        make_skill_with_hermes(&skills_dir, "alpha", "Alpha skill", "    requires_toolsets:\n      - web");
+        // beta has no hermes metadata
+        let beta_dir = skills_dir.join("beta");
+        fs::create_dir_all(&beta_dir).unwrap();
+        fs::write(beta_dir.join("SKILL.md"), make_skill_md("beta", "Beta skill", "")).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 2);
+
+        // active_toolsets=["fs"]: alpha hidden (requires "web"), beta shown
+        let active_toolsets: HashSet<String> = ["fs".to_string()].into_iter().collect();
+        let active_tools: HashSet<String> = HashSet::new();
+        let catalog = registry.filtered_catalog_text(&active_toolsets, &active_tools);
+        assert!(catalog.contains("beta"), "beta (no metadata) must appear: {catalog}");
+        assert!(!catalog.contains("alpha"), "alpha (requires web, not active) must be hidden: {catalog}");
+
+        // active_toolsets=["web","fs"]: both shown
+        let active_toolsets2: HashSet<String> = ["web".to_string(), "fs".to_string()].into_iter().collect();
+        let catalog2 = registry.filtered_catalog_text(&active_toolsets2, &active_tools);
+        assert!(catalog2.contains("alpha"), "alpha must appear when web is active: {catalog2}");
+        assert!(catalog2.contains("beta"), "beta must always appear: {catalog2}");
+    }
+
+    #[test]
+    fn test_filter_requires_tools() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        // gamma requires BOTH fetch_url AND parse_html
+        make_skill_with_hermes(
+            &skills_dir, "gamma", "Gamma skill",
+            "    requires_tools:\n      - fetch_url\n      - parse_html",
+        );
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+
+        // Only fetch_url active → gamma hidden (not ALL required tools present)
+        let active_toolsets: HashSet<String> = HashSet::new();
+        let partial_tools: HashSet<String> = ["fetch_url".to_string()].into_iter().collect();
+        let catalog = registry.filtered_catalog_text(&active_toolsets, &partial_tools);
+        assert!(!catalog.contains("gamma"), "gamma must be hidden when only 1/2 required tools active: {catalog}");
+
+        // Both tools active → gamma shown
+        let full_tools: HashSet<String> = ["fetch_url".to_string(), "parse_html".to_string()].into_iter().collect();
+        let catalog2 = registry.filtered_catalog_text(&active_toolsets, &full_tools);
+        assert!(catalog2.contains("gamma"), "gamma must appear when all required tools active: {catalog2}");
+    }
+
+    #[test]
+    fn test_filter_fallback_for_toolsets() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        // fallback-web is a fallback for when playwright is NOT active
+        make_skill_with_hermes(
+            &skills_dir, "fallback-web", "Fallback web skill",
+            "    fallback_for_toolsets:\n      - playwright",
+        );
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+
+        // playwright active → fallback-web hidden
+        let with_playwright: HashSet<String> = ["playwright".to_string()].into_iter().collect();
+        let active_tools: HashSet<String> = HashSet::new();
+        let catalog = registry.filtered_catalog_text(&with_playwright, &active_tools);
+        assert!(!catalog.contains("fallback-web"), "fallback-web must be hidden when playwright is active: {catalog}");
+
+        // playwright NOT active → fallback-web shown
+        let no_playwright: HashSet<String> = HashSet::new();
+        let catalog2 = registry.filtered_catalog_text(&no_playwright, &active_tools);
+        assert!(catalog2.contains("fallback-web"), "fallback-web must appear when playwright is not active: {catalog2}");
+    }
+
+    #[test]
+    fn test_filter_fallback_for_tools() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        make_skill_with_hermes(
+            &skills_dir, "fallback-tool", "Fallback tool skill",
+            "    fallback_for_tools:\n      - playwright_nav",
+        );
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+
+        // playwright_nav active → hidden
+        let active_toolsets: HashSet<String> = HashSet::new();
+        let with_nav: HashSet<String> = ["playwright_nav".to_string()].into_iter().collect();
+        let catalog = registry.filtered_catalog_text(&active_toolsets, &with_nav);
+        assert!(!catalog.contains("fallback-tool"), "fallback-tool must be hidden when playwright_nav is active: {catalog}");
+
+        // playwright_nav NOT active → shown
+        let no_nav: HashSet<String> = HashSet::new();
+        let catalog2 = registry.filtered_catalog_text(&active_toolsets, &no_nav);
+        assert!(catalog2.contains("fallback-tool"), "fallback-tool must appear when playwright_nav is not active: {catalog2}");
+    }
+
+    #[test]
+    fn test_filter_no_metadata_always_shown() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        // bare skill with no metadata block at all
+        let skill_dir = skills_dir.join("bare");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), make_skill_md("bare", "Bare skill no metadata", "")).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+
+        // Even with completely empty active sets, no-metadata skill always appears
+        let empty_toolsets: HashSet<String> = HashSet::new();
+        let empty_tools: HashSet<String> = HashSet::new();
+        let catalog = registry.filtered_catalog_text(&empty_toolsets, &empty_tools);
+        assert!(catalog.contains("bare"), "skill with no hermes_metadata must always appear: {catalog}");
+
+        // Also shown with arbitrary active sets
+        let some_toolsets: HashSet<String> = ["web".to_string(), "fs".to_string()].into_iter().collect();
+        let some_tools: HashSet<String> = ["fetch_url".to_string()].into_iter().collect();
+        let catalog2 = registry.filtered_catalog_text(&some_toolsets, &some_tools);
+        assert!(catalog2.contains("bare"), "skill with no hermes_metadata must appear regardless of active sets: {catalog2}");
+    }
+
+    #[test]
+    fn test_filter_pure_no_io() {
+        // D-06: filter must not touch env or filesystem during the filter computation.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        make_skill_with_hermes(&skills_dir, "pure-skill", "Pure skill", "    requires_toolsets:\n      - web");
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+
+        let sentinel = "FILTER_TEST_VAR_19_02";
+        assert!(std::env::var_os(sentinel).is_none(), "sentinel env var must not exist before test");
+
+        let active_toolsets: HashSet<String> = HashSet::new();
+        let active_tools: HashSet<String> = HashSet::new();
+        let _catalog = registry.filtered_catalog_text(&active_toolsets, &active_tools);
+
+        assert!(std::env::var_os(sentinel).is_none(), "sentinel env var must not exist after filter call — filter must not touch env");
     }
 }
