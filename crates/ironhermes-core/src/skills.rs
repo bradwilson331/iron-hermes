@@ -1268,4 +1268,150 @@ mod tests {
             "load() and load_with_config(default) must return identical skill lists"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 19 Plan 01: Wave 0 — HermesMetadata typed extraction + D-18 WARN-BUT-LOAD
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_hermes_metadata() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("my-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = r#"---
+name: my-skill
+description: A test skill
+metadata:
+  hermes:
+    requires_toolsets:
+      - web
+    requires_tools:
+      - fetch_url
+    fallback_for_tools:
+      - playwright
+    required_environment_variables:
+      - name: TENOR_API_KEY
+        prompt: "Enter Tenor key"
+        help: "https://tenor.com/developer"
+        required_for: "GIF search"
+    required_credential_files:
+      - oauth_token.json
+    config:
+      - key: "wiki.path"
+        type: path
+        default: "~/research"
+        description: "Where to store notes"
+---
+Body content.
+"#;
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1);
+        let record = &registry.list()[0];
+        assert!(record.hermes_metadata.is_some(), "hermes_metadata should be Some");
+        let hm = record.hermes_metadata.as_ref().unwrap();
+        assert_eq!(hm.requires_toolsets, vec!["web"]);
+        assert_eq!(hm.requires_tools, vec!["fetch_url"]);
+        assert_eq!(hm.fallback_for_tools, vec!["playwright"]);
+        assert_eq!(hm.required_environment_variables.len(), 1);
+        let env_entry = &hm.required_environment_variables[0];
+        assert_eq!(env_entry.name, "TENOR_API_KEY");
+        assert_eq!(env_entry.prompt, Some("Enter Tenor key".to_string()));
+        assert_eq!(env_entry.required_for, Some("GIF search".to_string()));
+        assert_eq!(hm.required_credential_files.len(), 1);
+        assert!(
+            matches!(&hm.required_credential_files[0], CredentialFileEntry::Path(p) if p == "oauth_token.json"),
+            "expected CredentialFileEntry::Path(\"oauth_token.json\")"
+        );
+        assert_eq!(hm.config.len(), 1);
+        assert_eq!(hm.config[0].key, "wiki.path");
+        assert_eq!(hm.config[0].field_type, Some("path".to_string()));
+    }
+
+    #[test]
+    fn test_warn_but_load_unknown_fields() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("unknown-fields-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = r#"---
+name: unknown-fields-skill
+description: Skill with unknown hermes fields
+metadata:
+  hermes:
+    requires_toolsets:
+      - web
+    totally_unknown_field:
+      nested: true
+    another_extra: "value"
+---
+Body content.
+"#;
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert!(registry.list().len() == 1, "skill should load despite unknown fields");
+        let record = &registry.list()[0];
+        assert!(record.hermes_metadata.is_some(), "hermes_metadata should be Some");
+        let hm = record.hermes_metadata.as_ref().unwrap();
+        assert_eq!(hm.requires_toolsets, vec!["web"]);
+        assert!(hm.extras.contains_key("totally_unknown_field"), "unknown field should be in extras");
+        assert!(hm.extras.contains_key("another_extra"), "extra field should be in extras");
+        assert!(hm.requires_tools.is_empty(), "requires_tools should be empty");
+    }
+
+    #[test]
+    fn test_07_2_compat_metadata() {
+        // Phase 07.2 shape: metadata.hermes.tags and metadata.hermes.related_skills
+        // These are NOT in HermesMetadata typed fields — they must land in extras.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("compat-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = r#"---
+name: compat-skill
+description: Phase 07.2 compatibility skill
+metadata:
+  hermes:
+    tags:
+      - productivity
+    related_skills:
+      - other-skill
+---
+Body content.
+"#;
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert!(registry.list().len() == 1, "07.2 skill should load cleanly");
+        let record = &registry.list()[0];
+        assert!(record.hermes_metadata.is_some(), "hermes_metadata should be Some");
+        let hm = record.hermes_metadata.as_ref().unwrap();
+        assert!(hm.extras.contains_key("tags"), "tags should be in extras");
+        let tags_val = &hm.extras["tags"];
+        assert!(tags_val.as_sequence().is_some(), "tags should be a YAML sequence");
+        assert!(hm.extras.contains_key("related_skills"), "related_skills should be in extras");
+        assert!(hm.requires_toolsets.is_empty(), "requires_toolsets should be empty");
+        assert!(hm.required_environment_variables.is_empty(), "env vars should be empty");
+    }
+
+    #[test]
+    fn test_no_metadata_at_all() {
+        // Skill with no metadata: block at all — hermes_metadata should be None
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("bare-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = "---\nname: bare-skill\ndescription: No metadata block\n---\nBody content.\n";
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 1, "skill should load even with no metadata");
+        let record = &registry.list()[0];
+        assert!(record.hermes_metadata.is_none(), "hermes_metadata should be None when no metadata block");
+        assert_eq!(record.name, "bare-skill");
+        assert_eq!(record.description, "No metadata block");
+    }
 }
