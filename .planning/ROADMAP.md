@@ -186,12 +186,12 @@ Plans:
   3. Missing required_environment_variables trigger a setup prompt on skill load; credential files declared in required_credential_files are checked for existence and mounted into sandboxes
   4. Skills are restricted to declared platforms (macos/linux/windows) and hidden on incompatible platforms; skill env vars pass through to execute_code and terminal sandboxes
   5. All skill content is security scanned before injection into the system prompt
-**Plans:** 3/6 plans executed
+**Plans:** 4/6 plans executed
 Plans:
 - [x] 19-01-PLAN.md — Typed HermesMetadata foundation (SKILL-01, SKILL-02): replace opaque serde_yaml::Value with typed struct + SkillSource enum + WARN-BUT-LOAD extras bag
 - [x] 19-02-PLAN.md — Catalog-render conditional activation filter (SKILL-03, SKILL-10): filtered_catalog_text honoring requires_/fallback_for_toolsets/tools, wired into prompt_builder slot 4
 - [x] 19-03-PLAN.md — Env + credential setup-error envelope on activate (SKILL-04, SKILL-06): three-branch handle_activate with setup_needed envelope per D-04/D-12
-- [ ] 19-04-PLAN.md — Skill settings namespace + body-injection config header (SKILL-05): SkillsConfig.config round-trip and deterministic [Skill config: ...] header on activate success
+- [x] 19-04-PLAN.md — Skill settings namespace + body-injection config header (SKILL-05): SkillsConfig.config round-trip and deterministic [Skill config: ...] header on activate success
 - [ ] 19-05-PLAN.md — Security scan extension + D-15 registry-load enforcement (SKILL-07): SKILL_THREAT_PATTERNS RegexSet + scan_skill_content + source-differentiated hard-reject/WARN-BUT-LOAD
 - [ ] 19-06-PLAN.md — Sandbox env pass-through whitelist (SKILL-11): build_env accepts skill_env_whitelist so declared+present vars bypass SECRET_PATTERNS strip
 
@@ -283,7 +283,7 @@ Plans:
 | 16. Prompt Caching | v2.0 | 0/TBD | Deferred | - |
 | 17. Memory Tools & External Providers | v2.0 | 5/5 | Complete   | 2026-04-12 |
 | 18. Context Compression | v2.0 | 14/14 | Complete   | 2026-04-14 |
-| 19. Skills Framework | v2.0 | 3/6 | In Progress|  |
+| 19. Skills Framework | v2.0 | 4/6 | In Progress|  |
 | 20. Tool Registry & Slash Commands | v2.0 | 0/TBD | Not started | - |
 | 21. Gateway Architecture Alignment | v2.0 | 0/TBD | Not started | - |
 | 22. CLI Feature Parity & ACP Adapter | v2.0 | 0/TBD | Not started | - |
