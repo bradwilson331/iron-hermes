@@ -68,16 +68,16 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 
 ### Skills
 
-- [ ] **SKILL-01**: Skills use SKILL.md format with YAML frontmatter (name, description, version, author, platforms, metadata)
-- [ ] **SKILL-02**: Skills organized by category in skills/ directory with progressive disclosure (catalog at startup, full content on activation)
-- [ ] **SKILL-03**: Conditional skill activation: requires_toolsets, requires_tools hide skills when dependencies absent; fallback_for_toolsets, fallback_for_tools hide skills when primaries present
+- [x] **SKILL-01**: Skills use SKILL.md format with YAML frontmatter (name, description, version, author, platforms, metadata)
+- [x] **SKILL-02**: Skills organized by category in skills/ directory with progressive disclosure (catalog at startup, full content on activation)
+- [x] **SKILL-03**: Conditional skill activation: requires_toolsets, requires_tools hide skills when dependencies absent; fallback_for_toolsets, fallback_for_tools hide skills when primaries present
 - [x] **SKILL-04**: Skills declare required_environment_variables with prompt/help/required_for fields; missing vars trigger setup prompt on load
 - [x] **SKILL-05**: Skills declare config settings (metadata.hermes.config) stored in config.yaml under skills.config namespace
 - [x] **SKILL-06**: Skills declare required_credential_files for OAuth tokens; existence checked on load, files mounted into sandboxes
 - [x] **SKILL-07**: Skill content security scanned before injection into system prompt (same patterns as context file scanning)
 - [ ] **SKILL-08**: Skills Hub: publish skills to external repos, install from GitHub/skills.sh/well-known endpoints
 - [ ] **SKILL-09**: Trust levels for installed skills: builtin (shipped), official (optional-skills/), trusted (known repos), community (security-gated)
-- [ ] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
+- [x] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
 - [x] **SKILL-11**: Skill env vars automatically passed through to execute_code and terminal sandboxes when set
 - [ ] **SKILL-12**: Slash command router intercepts / prefixed messages before AgentLoop — platform-agnostic (CLI + gateway + ACP)
 - [ ] **SKILL-13**: Core slash commands implemented: /help, /reset, /personality, /skills, /memory, /sessions, /search, /model, /stop, /new
@@ -229,16 +229,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CTX-05 | Phase 14 | Pending |
 | CTX-06 | Phase 14 | Pending |
 | CTX-07 | Phase 14 | Pending |
-| SKILL-01 | Phase 19 | Pending |
-| SKILL-02 | Phase 19 | Pending |
-| SKILL-03 | Phase 19 | Pending |
+| SKILL-01 | Phase 19 | Complete |
+| SKILL-02 | Phase 19 | Complete |
+| SKILL-03 | Phase 19 | Complete |
 | SKILL-04 | Phase 19 | Complete |
 | SKILL-05 | Phase 19 | Complete |
 | SKILL-06 | Phase 19 | Complete |
 | SKILL-07 | Phase 19 | Complete |
 | SKILL-08 | Phase 19.1 | Pending |
 | SKILL-09 | Phase 19.1 | Pending |
-| SKILL-10 | Phase 19 | Pending |
+| SKILL-10 | Phase 19 | Complete |
 | SKILL-11 | Phase 19 | Complete |
 | SKILL-12 | Phase 20 | Pending |
 | SKILL-13 | Phase 20 | Pending |
