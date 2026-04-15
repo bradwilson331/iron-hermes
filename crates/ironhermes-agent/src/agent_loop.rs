@@ -1126,6 +1126,9 @@ mod hooks_ordering_tests {
             compatibility: None,
             allowed_tools: allowed_tools.map(|v| v.into_iter().map(|s| s.to_string()).collect()),
             metadata: None,
+            // Phase 19 Plan 01 added typed hermes_metadata + source fields.
+            hermes_metadata: None,
+            source: ironhermes_core::SkillSource::Builtin,
         }
     }
 

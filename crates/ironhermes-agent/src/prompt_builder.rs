@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +71,12 @@ pub struct PromptBuilder {
     slots: BTreeMap<PromptSlot, String>,
     memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
     skill_registry: Option<Arc<SkillRegistry>>,
+    /// Snapshot of active toolsets used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
+    /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
+    active_toolsets: HashSet<String>,
+    /// Snapshot of active tools used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
+    /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
+    active_tools: HashSet<String>,
 }
 
 impl PromptBuilder {
@@ -87,7 +93,23 @@ impl PromptBuilder {
             slots: BTreeMap::new(),
             memory_store: None,
             skill_registry: None,
+            active_toolsets: HashSet::new(),
+            active_tools: HashSet::new(),
         }
+    }
+
+    /// Set the active toolset snapshot for the catalog-render filter (Phase 19 Plan 02).
+    /// Called at session-freeze time so slot 4 (Skills) reflects the live toolset state.
+    /// Phase 19 ships with empty snapshots; Phase 20 wires real toolset state.
+    pub fn set_active_toolsets(&mut self, toolsets: HashSet<String>) {
+        self.active_toolsets = toolsets;
+    }
+
+    /// Set the active tool snapshot for the catalog-render filter (Phase 19 Plan 02).
+    /// Called at session-freeze time so slot 4 (Skills) reflects the live tool state.
+    /// Phase 19 ships with empty snapshots; Phase 20 wires real toolset state.
+    pub fn set_active_tools(&mut self, tools: HashSet<String>) {
+        self.active_tools = tools;
     }
 
     /// Skip all context files (SOUL.md, project context, AGENTS.md, memory, skills).
@@ -378,11 +400,17 @@ impl PromptBuilder {
         }
         let skill_content = if let Some(ref registry) = self.skill_registry {
             if !registry.list().is_empty() {
-                let catalog = registry.catalog_text();
-                Some(format!(
-                    "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
-                    catalog
-                ))
+                // D-01/D-03 catalog-render filter — honors requires_* and fallback_for_* (Phase 19 Plan 02).
+                let catalog =
+                    registry.filtered_catalog_text(&self.active_toolsets, &self.active_tools);
+                if catalog.trim().is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
+                        catalog
+                    ))
+                }
             } else {
                 None
             }
@@ -415,12 +443,14 @@ impl PromptBuilder {
         if !self.skip_context_files && !slots.contains_key(&PromptSlot::Skills) {
             if let Some(ref registry) = self.skill_registry {
                 if !registry.list().is_empty() {
-                    let catalog = registry.catalog_text();
-                    let content = format!(
-                        "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
-                        catalog
-                    );
-                    if !content.trim().is_empty() {
+                    // D-01/D-03 catalog-render filter — honors requires_* and fallback_for_* (Phase 19 Plan 02).
+                    let catalog = registry
+                        .filtered_catalog_text(&self.active_toolsets, &self.active_tools);
+                    if !catalog.trim().is_empty() {
+                        let content = format!(
+                            "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
+                            catalog
+                        );
                         slots.insert(PromptSlot::Skills, content);
                     }
                 }
@@ -1167,5 +1197,55 @@ mod tests {
         // No extra block beyond default identity + tool guidance
         assert!(durable.contains("IronHermes, an AI assistant"));
         assert!(durable.contains("When you need to use tools"));
+    }
+
+    // ── Phase 19 Plan 02: catalog-render filter integration ───────────────────
+
+    #[test]
+    fn test_prompt_builder_skills_slot_filter_applies() {
+        use ironhermes_core::SkillRegistry;
+
+        let dir = make_temp_dir();
+        // Skill A: requires toolset "nonexistent" (not active) → must be hidden
+        let a_dir = dir.path().join("filtered-skill");
+        fs::create_dir_all(&a_dir).unwrap();
+        fs::write(
+            a_dir.join("SKILL.md"),
+            "---\nname: filtered-skill\ndescription: Should be hidden\nmetadata:\n  hermes:\n    requires_toolsets:\n      - nonexistent\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // Skill B: no hermes metadata → always shown
+        let b_dir = dir.path().join("always-shown");
+        fs::create_dir_all(&b_dir).unwrap();
+        fs::write(
+            b_dir.join("SKILL.md"),
+            "---\nname: always-shown\ndescription: Always visible\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let registry = Arc::new(SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]));
+        assert_eq!(registry.list().len(), 2, "both skills should load");
+
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_skill_registry(registry);
+        // Empty active_toolsets/active_tools → filtered-skill (requires nonexistent) must be hidden.
+        builder.set_active_toolsets(HashSet::new());
+        builder.set_active_tools(HashSet::new());
+
+        let output = builder.build();
+
+        assert!(
+            output.contains("## Available Skills"),
+            "skills header must be present: {output}"
+        );
+        assert!(
+            output.contains("always-shown"),
+            "always-shown skill (no metadata) must appear: {output}"
+        );
+        assert!(
+            !output.contains("filtered-skill"),
+            "filtered-skill (requires nonexistent toolset) must be hidden: {output}"
+        );
     }
 }
