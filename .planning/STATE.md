@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Intelligence & Identity
 status: executing
-stopped_at: Live UAT complete — Tests 5 & 6 pass; 18-11 and 18-12 queued for planning
-last_updated: "2026-04-14T17:14:29.795Z"
-last_activity: 2026-04-14 -- Phase 18 execution started
+stopped_at: Completed 19-03-PLAN.md
+last_updated: "2026-04-15T01:56:51.155Z"
+last_activity: 2026-04-15
 progress:
-  total_phases: 13
+  total_phases: 14
   completed_phases: 7
-  total_plans: 33
-  completed_plans: 33
-  percent: 100
+  total_plans: 39
+  completed_plans: 36
+  percent: 92
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 18 (context-compression) — EXECUTING
-Plan: 1 of 14
-Status: Executing Phase 18
-Last activity: 2026-04-14 -- Phase 18 execution started
+Plan: 2 of 14
+Status: Ready to execute
+Last activity: 2026-04-15
 
 Progress: [██████████] 100%
 
@@ -61,6 +61,7 @@ Progress: [██████████] 100%
 | Phase 17 P01 | 8 | 2 tasks | 2 files |
 | Phase 17 P02 | 4 | 2 tasks | 3 files |
 | Phase 17 P03 | 4 | 2 tasks | 9 files |
+| Phase 19 P03 | 6min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,8 @@ Recent decisions affecting current work:
 - [Phase 17]: session_search schema only added to LLM tool list when state_store is configured — acts as subagent safety gate
 - [Phase 17]: Mutex<Connection> wraps rusqlite::Connection to satisfy Sync bound on MemoryProvider trait
 - [Phase 17]: Factory in ironhermes-agent returns Arc<Mutex<dyn MemoryProvider>> vs Box<dyn> in core for MemoryTool compatibility
+- [Phase 19]: 19-03: setup_needed envelope shape aligns with Phase 17 D-15 structured errors; setup_note is a verbatim-quotable relay string
+- [Phase 19]: 19-03: credential_dir precedence = SkillsConfig.credential_dir → HERMES_HOME/credentials → ~/.ironhermes/credentials (per D-10)
 
 ### Pending Todos
 
@@ -97,6 +100,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-13T23:50:00.000Z
-Stopped at: Live UAT complete — Tests 5 & 6 pass; 18-11 and 18-12 queued for planning
-Resume file: None — run `/gsd-plan-phase 18` to plan 18-11 (protect_first_n tool-pair awareness) next
+Last session: 2026-04-15T01:56:45.290Z
+Stopped at: Completed 19-03-PLAN.md
+Resume file: None
