@@ -364,6 +364,11 @@ pub struct SkillsConfig {
     pub enabled: bool,
     /// Additional scan paths appended after the 3 defaults (D-19).
     pub extra_paths: Vec<PathBuf>,
+    /// Root directory for skill credentials (Phase 19 D-10). Defaults to
+    /// `$HERMES_HOME/credentials` with fallback to `~/.ironhermes/credentials`
+    /// when unset. Resolved via `default_credential_dir()` in ironhermes-tools.
+    #[serde(default)]
+    pub credential_dir: Option<PathBuf>,
 }
 
 impl Default for SkillsConfig {
@@ -371,6 +376,7 @@ impl Default for SkillsConfig {
         Self {
             enabled: true,
             extra_paths: Vec::new(),
+            credential_dir: None,
         }
     }
 }

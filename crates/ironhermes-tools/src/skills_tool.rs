@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironhermes_core::{SkillRegistry, ToolSchema};
+use ironhermes_core::config::SkillsConfig;
+use ironhermes_core::{CredentialFileEntry, SkillRegistry, ToolSchema};
 use serde_json::{json, Value};
 
 use crate::registry::Tool;
@@ -14,17 +17,56 @@ const SKILLS_DESCRIPTION: &str =
     "Browse and activate skill documents. Actions: list, view, activate, deactivate.";
 
 // ---------------------------------------------------------------------------
+// Credential directory resolution (Phase 19 Plan 03, D-10)
+// ---------------------------------------------------------------------------
+
+/// Resolve the credential root directory for skill activations.
+///
+/// Precedence (first match wins):
+/// 1. `SkillsConfig.credential_dir` (explicit user override)
+/// 2. `$HERMES_HOME/credentials` (deployment convention)
+/// 3. `~/.ironhermes/credentials` (home fallback)
+/// 4. `./.ironhermes/credentials` (last-resort fallback when home is unavailable)
+pub fn default_credential_dir(config: &SkillsConfig) -> PathBuf {
+    if let Some(explicit) = &config.credential_dir {
+        return explicit.clone();
+    }
+    if let Ok(hermes_home) = std::env::var("HERMES_HOME") {
+        if !hermes_home.is_empty() {
+            return PathBuf::from(hermes_home).join("credentials");
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".ironhermes").join("credentials");
+    }
+    PathBuf::from(".ironhermes").join("credentials")
+}
+
+// ---------------------------------------------------------------------------
 // SkillsTool
 // ---------------------------------------------------------------------------
 
 pub struct SkillsTool {
     registry: Arc<SkillRegistry>,
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    credential_dir: PathBuf,
+    #[allow(dead_code)] // used in Plan 04 for per-skill config injection
+    skills_config: HashMap<String, HashMap<String, serde_yaml::Value>>,
 }
 
 impl SkillsTool {
-    pub fn new(registry: Arc<SkillRegistry>, active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) -> Self {
-        Self { registry, active_skills }
+    pub fn new(
+        registry: Arc<SkillRegistry>,
+        active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+        credential_dir: PathBuf,
+        skills_config: HashMap<String, HashMap<String, serde_yaml::Value>>,
+    ) -> Self {
+        Self {
+            registry,
+            active_skills,
+            credential_dir,
+            skills_config,
+        }
     }
 }
 
@@ -59,7 +101,20 @@ fn handle_view(registry: &SkillRegistry, args: &Value) -> Value {
     }
 }
 
-fn handle_activate(registry: &SkillRegistry, args: &Value, active_skills: &std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>) -> Value {
+/// Phase 19 Plan 03: three-branch activate flow.
+///
+/// 1. Not found → existing error envelope (`status=error`).
+/// 2. Requirements unmet (missing env vars or credential files) → setup-error
+///    envelope (`status=setup_needed`) with `missing_required_environment_variables`,
+///    `missing_credential_files`, `setup_note`, `setup_help` fields (D-04, D-12).
+/// 3. All requirements met → existing success path (`status=ok`, push to
+///    active_skills, return body content).
+fn handle_activate(
+    registry: &SkillRegistry,
+    args: &Value,
+    active_skills: &std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>,
+    credential_dir: &std::path::Path,
+) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
@@ -67,14 +122,79 @@ fn handle_activate(registry: &SkillRegistry, args: &Value, active_skills: &std::
         }
     };
 
-    match registry.read_content(name) {
+    // Branch 1: not found
+    let record = match registry.find(name) {
+        Some(r) => r.clone(),
+        None => {
+            return json!({"status": "error", "message": format!("Skill not found: {}", name)})
+        }
+    };
+
+    // Branch 2: evaluate requirements
+    let mut missing_env: Vec<String> = Vec::new();
+    let mut missing_creds: Vec<String> = Vec::new();
+    let mut setup_help: Option<String> = None;
+    let mut required_for_hints: Vec<String> = Vec::new();
+
+    if let Some(meta) = &record.hermes_metadata {
+        for entry in &meta.required_environment_variables {
+            match std::env::var(&entry.name) {
+                Ok(v) if !v.is_empty() => {}
+                _ => {
+                    missing_env.push(entry.name.clone());
+                    if setup_help.is_none() {
+                        if let Some(h) = &entry.help {
+                            setup_help = Some(h.clone());
+                        }
+                    }
+                    if let Some(rf) = &entry.required_for {
+                        required_for_hints.push(rf.clone());
+                    }
+                }
+            }
+        }
+        for entry in &meta.required_credential_files {
+            let rel = match entry {
+                CredentialFileEntry::Path(p) => p.clone(),
+                CredentialFileEntry::Structured { path, .. } => path.clone(),
+            };
+            let abs = credential_dir.join(&record.name).join(&rel);
+            if !abs.exists() {
+                missing_creds.push(rel);
+            }
+        }
+    }
+
+    if !missing_env.is_empty() || !missing_creds.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        for e in &missing_env {
+            parts.push(format!("${}", e));
+        }
+        for c in &missing_creds {
+            parts.push(format!("file {}", c));
+        }
+        let suffix = if let Some(first) = required_for_hints.first() {
+            format!(" to {}", first)
+        } else {
+            String::new()
+        };
+        let setup_note = format!("I need {}{}.", parts.join(", "), suffix);
+        return json!({
+            "status": "setup_needed",
+            "name": record.name,
+            "readiness_status": "setup_needed",
+            "missing_required_environment_variables": missing_env,
+            "missing_credential_files": missing_creds,
+            "setup_note": setup_note,
+            "setup_help": setup_help,
+        });
+    }
+
+    // Branch 3: success — read body content and push to active_skills
+    match registry.read_content(&record.name) {
         Some(body) => {
-            // find() is safe here since read_content already verified the skill exists
-            let record = registry.find(name).unwrap();
-            let canonical_name = record.name.as_str();
-            // D-02: push SkillRecord into shared active_skills
+            let canonical_name = record.name.clone();
             if let Ok(mut skills) = active_skills.lock() {
-                // Avoid duplicate activation
                 if !skills.iter().any(|s| s.name == canonical_name) {
                     skills.push(record.clone());
                 }
@@ -152,7 +272,7 @@ impl Tool for SkillsTool {
         let result = match action {
             "list" => handle_list(&self.registry),
             "view" => handle_view(&self.registry, &args),
-            "activate" => handle_activate(&self.registry, &args, &self.active_skills),
+            "activate" => handle_activate(&self.registry, &args, &self.active_skills, &self.credential_dir),
             "deactivate" => handle_deactivate(&args, &self.active_skills),
             other => {
                 json!({"status": "error", "message": format!("Unknown action '{}'. Valid: list, view, activate, deactivate", other)})
@@ -195,7 +315,13 @@ mod tests {
 
         let registry = SkillRegistry::load_with_paths(&[skills_dir]);
         let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tool = SkillsTool::new(Arc::new(registry), active_skills);
+        let cred_dir = tempfile::tempdir().unwrap().keep();
+        let tool = SkillsTool::new(
+            Arc::new(registry),
+            active_skills,
+            cred_dir,
+            std::collections::HashMap::new(),
+        );
         (tool, dir)
     }
 
@@ -216,7 +342,13 @@ mod tests {
 
         let registry = SkillRegistry::load_with_paths(&[skills_dir]);
         let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tool = SkillsTool::new(Arc::new(registry), active_skills.clone());
+        let cred_dir = tempfile::tempdir().unwrap().keep();
+        let tool = SkillsTool::new(
+            Arc::new(registry),
+            active_skills.clone(),
+            cred_dir,
+            std::collections::HashMap::new(),
+        );
         (tool, dir, active_skills)
     }
 

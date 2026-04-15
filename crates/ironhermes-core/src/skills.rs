@@ -1393,7 +1393,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = SkillsConfig { enabled: false, extra_paths: vec![] };
+        let config = SkillsConfig { enabled: false, extra_paths: vec![], ..SkillsConfig::default() };
         let registry = SkillRegistry::load_with_config(dir.path(), &config);
         assert!(
             registry.list().is_empty(),
@@ -1418,6 +1418,7 @@ mod tests {
         let config = SkillsConfig {
             enabled: true,
             extra_paths: vec![extra.path().to_path_buf()],
+            ..SkillsConfig::default()
         };
         let registry = SkillRegistry::load_with_config(cwd.path(), &config);
         assert!(
@@ -1435,6 +1436,7 @@ mod tests {
         let config = SkillsConfig {
             enabled: true,
             extra_paths: vec![PathBuf::from("/extra/a"), PathBuf::from("/extra/b")],
+            ..SkillsConfig::default()
         };
         let paths = build_skill_search_paths(&cwd, &config);
         assert_eq!(paths.len(), 5, "3 defaults + 2 extras");

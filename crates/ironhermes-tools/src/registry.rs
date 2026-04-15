@@ -236,13 +236,23 @@ impl ToolRegistry {
 
     /// Register the skills tool with a shared SkillRegistry and active_skills tracker.
     /// Called separately from register_defaults() because it requires a SkillRegistry instance.
+    ///
+    /// Phase 19 Plan 03: now also takes `credential_dir` (root for per-skill credentials,
+    /// per D-10) and `skills_config` (per-skill config map reserved for Plan 04 injection).
     pub fn register_skills_tool(
         &mut self,
         registry: Arc<ironhermes_core::SkillRegistry>,
         active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+        credential_dir: std::path::PathBuf,
+        skills_config: std::collections::HashMap<String, std::collections::HashMap<String, serde_yaml::Value>>,
     ) {
         use crate::skills_tool::SkillsTool;
-        self.register(Box::new(SkillsTool::new(registry, active_skills)));
+        self.register(Box::new(SkillsTool::new(
+            registry,
+            active_skills,
+            credential_dir,
+            skills_config,
+        )));
     }
 
     /// Register the delegate_task tool with a SubagentRunner, semaphore, and config.

@@ -618,7 +618,13 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    registry.register_skills_tool(skill_registry.clone(), active_skills.clone());
+    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
+    registry.register_skills_tool(
+        skill_registry.clone(),
+        active_skills.clone(),
+        credential_dir,
+        std::collections::HashMap::new(),
+    );
 
     // Build RPC dispatch registry — only D-07 safe tools for sandbox (no terminal, no execute_code)
     let mut rpc_registry = ToolRegistry::new();
