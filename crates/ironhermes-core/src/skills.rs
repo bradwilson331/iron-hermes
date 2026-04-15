@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::config::SkillsConfig;
@@ -53,6 +53,80 @@ fn validate_skill_name(name: &str) -> Result<(), &'static str> {
 }
 
 // =============================================================================
+// HermesMetadata and related types (Phase 19, Plan 01)
+// =============================================================================
+
+/// A declared required environment variable with human-readable prompts.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct EnvVarEntry {
+    pub name: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub help: Option<String>,
+    #[serde(default)]
+    pub required_for: Option<String>,
+}
+
+/// A declared credential file path (relative to HERMES_CREDENTIAL_DIR/<skill-name>/).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CredentialFileEntry {
+    Path(String),
+    Structured {
+        path: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
+}
+
+/// A single config field declared in metadata.hermes.config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillConfigField {
+    pub key: String,
+    #[serde(default)]
+    pub default: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Type hint: "string" | "boolean" | "integer" | "path" (advisory only in Phase 19)
+    #[serde(rename = "type", default)]
+    pub field_type: Option<String>,
+}
+
+/// Typed representation of metadata.hermes.* (D-17, D-19).
+/// Unknown fields are preserved in `extras` (D-18 WARN-BUT-LOAD).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HermesMetadata {
+    pub requires_toolsets: Vec<String>,
+    pub requires_tools: Vec<String>,
+    pub fallback_for_toolsets: Vec<String>,
+    pub fallback_for_tools: Vec<String>,
+    pub required_environment_variables: Vec<EnvVarEntry>,
+    pub required_credential_files: Vec<CredentialFileEntry>,
+    pub config: Vec<SkillConfigField>,
+    /// Preserve unknown hermes fields for forward compat (D-18).
+    #[serde(flatten)]
+    pub extras: HashMap<String, serde_yaml::Value>,
+}
+
+/// Provenance label used by D-15 scan enforcement (Plan 05).
+/// Phase 19 defaults locally-discovered skills to Builtin; Phase 19.1 flips this
+/// to Community for hub-installed skills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillSource {
+    Builtin,
+    Official,
+    Community,
+}
+
+impl Default for SkillSource {
+    fn default() -> Self {
+        SkillSource::Builtin
+    }
+}
+
+// =============================================================================
 // SkillFrontmatter
 // =============================================================================
 
@@ -95,6 +169,12 @@ pub struct SkillRecord {
     pub compatibility: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub metadata: Option<serde_yaml::Value>,
+    /// Typed extraction of metadata.hermes.* (D-17, Phase 19 Plan 01).
+    /// None if no metadata block or no hermes sub-key.
+    pub hermes_metadata: Option<HermesMetadata>,
+    /// Provenance label for D-15 scan enforcement (Phase 19 Plan 05).
+    /// Defaults to Builtin for all locally-discovered skills in Phase 19.
+    pub source: SkillSource,
 }
 
 // =============================================================================
@@ -190,6 +270,30 @@ fn skill_matches_current_platform(platforms: Option<&Vec<String>>) -> bool {
         "windows" => cfg!(target_os = "windows"),
         _ => false, // unknown / alias → non-match (no `darwin`, no `osx`, no `win32`)
     })
+}
+
+// =============================================================================
+// HermesMetadata extraction (Phase 19 Plan 01)
+// =============================================================================
+
+/// Extract typed HermesMetadata from the opaque `metadata: Option<serde_yaml::Value>` blob.
+///
+/// Returns `None` if there is no metadata block or no `hermes` sub-key.
+/// On parse error (unexpected serde error), logs a WARN and returns `Some(HermesMetadata::default())`
+/// so the skill always loads (D-18 WARN-BUT-LOAD).
+///
+/// Unknown fields inside `metadata.hermes.*` are captured by `#[serde(flatten)] extras`
+/// and do NOT cause an error.
+fn extract_hermes_metadata(raw: &Option<serde_yaml::Value>) -> Option<HermesMetadata> {
+    let root = raw.as_ref()?;
+    let hermes_val = root.get("hermes")?.clone();
+    match serde_yaml::from_value::<HermesMetadata>(hermes_val) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!(error = %e, "HermesMetadata parse error (WARN-BUT-LOAD) — using default with empty extras");
+            Some(HermesMetadata::default())
+        }
+    }
 }
 
 // =============================================================================
@@ -338,6 +442,7 @@ impl SkillRegistry {
                     metadata,
                     .. // version/author/license intentionally ignored here — not needed on SkillRecord
                 } = frontmatter;
+                let hermes_metadata = extract_hermes_metadata(&metadata);
                 skills.push(SkillRecord {
                     name,
                     description,
@@ -346,6 +451,8 @@ impl SkillRegistry {
                     compatibility,
                     allowed_tools,
                     metadata,
+                    hermes_metadata,
+                    source: SkillSource::Builtin, // Phase 19 default per RESEARCH.md A4
                 });
             }
         }

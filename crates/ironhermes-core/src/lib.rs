@@ -19,6 +19,9 @@ pub use error::{HermesError, Result};
 pub use memory_provider::{build_memory_provider, MemoryEntries, MemoryProvider, MemoryProviderConfig};
 pub use memory_store::{MemoryStore, MemoryTarget};
 pub use provider::{ProviderResolver, ResolvedEndpoint};
-pub use skills::{SkillRecord, SkillRegistry};
+pub use skills::{
+    CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,
+    SkillSource,
+};
 pub use ssrf::is_safe_url;
 pub use types::*;
