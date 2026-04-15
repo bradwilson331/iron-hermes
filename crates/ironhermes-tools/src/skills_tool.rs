@@ -436,4 +436,264 @@ mod tests {
         assert_eq!(v["status"], "error");
         assert!(v["message"].as_str().unwrap().contains("name"));
     }
+
+    // =========================================================================
+    // Phase 19 Plan 03: setup-error envelope tests (D-04, D-06, D-10, D-12)
+    // =========================================================================
+    //
+    // These tests reference the Plan 03 Task 2 target signature:
+    //   SkillsTool::new(registry, active_skills, credential_dir, skills_config)
+    //
+    // They build a skill with `metadata.hermes.required_environment_variables`
+    // and `metadata.hermes.required_credential_files`, activate it, and assert
+    // on the setup-needed envelope shape.
+    //
+    // Env-var mutations use a test-module-wide Mutex to prevent the tests from
+    // racing with each other on shared process env.
+
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    // Serialize env-mutating tests so we don't clobber each other's HERMES_TEST_* vars.
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn make_skill_md_with_hermes(
+        name: &str,
+        description: &str,
+        hermes_yaml: &str,
+        body: &str,
+    ) -> String {
+        format!(
+            "---\nname: {}\ndescription: {}\nmetadata:\n  hermes:\n{}\n---\n{}",
+            name, description, hermes_yaml, body
+        )
+    }
+
+    fn make_p03_tool(
+        skills: &[(&str, &str, &str, &str)],
+        credential_dir: std::path::PathBuf,
+    ) -> (SkillsTool, tempfile::TempDir, Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        for (name, description, hermes_yaml, body) in skills {
+            let skill_dir = skills_dir.join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                make_skill_md_with_hermes(name, description, hermes_yaml, body),
+            )
+            .unwrap();
+        }
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let skills_config: HashMap<String, HashMap<String, serde_yaml::Value>> = HashMap::new();
+        let tool = SkillsTool::new(
+            Arc::new(registry),
+            active_skills.clone(),
+            credential_dir,
+            skills_config,
+        );
+        (tool, dir, active_skills)
+    }
+
+    #[tokio::test]
+    async fn test_activate_missing_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Ensure the test var is unset.
+        // SAFETY: tests serialized via ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("HERMES_TEST_MISSING_KEY");
+        }
+
+        let cred_dir = tempfile::tempdir().unwrap();
+        let hermes_yaml = "    required_environment_variables:\n      - name: HERMES_TEST_MISSING_KEY\n        prompt: \"Enter test key\"\n        help: \"https://example.com/docs\"\n        required_for: \"testing\"";
+        let (tool, _dir, active_skills) = make_p03_tool(
+            &[("needs-env", "Needs env var", hermes_yaml, "Body content")],
+            cred_dir.path().to_path_buf(),
+        );
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "needs-env"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+
+        assert_eq!(v["status"], "setup_needed");
+        let missing_env = v["missing_required_environment_variables"].as_array().unwrap();
+        assert!(
+            missing_env.iter().any(|e| e == "HERMES_TEST_MISSING_KEY"),
+            "expected HERMES_TEST_MISSING_KEY in missing_required_environment_variables: {:?}",
+            missing_env
+        );
+        let missing_creds = v["missing_credential_files"].as_array().unwrap();
+        assert!(missing_creds.is_empty(), "missing_credential_files should be empty: {:?}", missing_creds);
+        let setup_note = v["setup_note"].as_str().unwrap();
+        assert!(!setup_note.is_empty(), "setup_note must be non-empty");
+        assert!(
+            setup_note.contains("HERMES_TEST_MISSING_KEY") || setup_note.contains("Enter test key"),
+            "setup_note should mention var name or prompt: {:?}",
+            setup_note
+        );
+        assert_eq!(v["setup_help"], "https://example.com/docs");
+
+        // active_skills must NOT be updated
+        assert_eq!(active_skills.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_activate_missing_credential() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let cred_dir = tempfile::tempdir().unwrap();
+        let hermes_yaml = "    required_credential_files:\n      - oauth_token.json";
+        let (tool, _dir, active_skills) = make_p03_tool(
+            &[("needs-cred", "Needs credential", hermes_yaml, "Body")],
+            cred_dir.path().to_path_buf(),
+        );
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "needs-cred"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+
+        assert_eq!(v["status"], "setup_needed");
+        let missing_creds = v["missing_credential_files"].as_array().unwrap();
+        assert!(
+            missing_creds.iter().any(|e| e == "oauth_token.json"),
+            "expected oauth_token.json in missing_credential_files: {:?}",
+            missing_creds
+        );
+        let missing_env = v["missing_required_environment_variables"].as_array().unwrap();
+        assert!(missing_env.is_empty());
+
+        assert_eq!(active_skills.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_activate_all_requirements_met() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via ENV_LOCK above.
+        unsafe {
+            std::env::set_var("HERMES_TEST_PRESENT_KEY", "dummy");
+        }
+
+        let cred_dir = tempfile::tempdir().unwrap();
+        // Touch the expected credential file at <cred_dir>/<skill-name>/oauth_token.json
+        let skill_cred_dir = cred_dir.path().join("all-set");
+        fs::create_dir_all(&skill_cred_dir).unwrap();
+        fs::write(skill_cred_dir.join("oauth_token.json"), "{}").unwrap();
+
+        let hermes_yaml = "    required_environment_variables:\n      - name: HERMES_TEST_PRESENT_KEY\n    required_credential_files:\n      - oauth_token.json";
+        let (tool, _dir, active_skills) = make_p03_tool(
+            &[("all-set", "All requirements met", hermes_yaml, "Happy body content")],
+            cred_dir.path().to_path_buf(),
+        );
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "all-set"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+
+        // SAFETY: clean up env after assertion prep
+        unsafe {
+            std::env::remove_var("HERMES_TEST_PRESENT_KEY");
+        }
+
+        assert_eq!(v["status"], "ok", "envelope: {}", v);
+        let content = v["content"].as_str().unwrap();
+        assert!(!content.is_empty(), "content should be non-empty");
+        assert!(content.contains("Happy body content"));
+
+        let skills = active_skills.lock().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "all-set");
+    }
+
+    #[tokio::test]
+    async fn test_activate_mixed_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("HERMES_TEST_MIXED_KEY");
+        }
+
+        let cred_dir = tempfile::tempdir().unwrap();
+        let hermes_yaml = "    required_environment_variables:\n      - name: HERMES_TEST_MIXED_KEY\n        required_for: \"mixed testing\"\n    required_credential_files:\n      - creds.json";
+        let (tool, _dir, _active_skills) = make_p03_tool(
+            &[("mixed", "Mixed missing", hermes_yaml, "Body")],
+            cred_dir.path().to_path_buf(),
+        );
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "mixed"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+
+        assert_eq!(v["status"], "setup_needed");
+        let missing_env = v["missing_required_environment_variables"].as_array().unwrap();
+        assert!(missing_env.iter().any(|e| e == "HERMES_TEST_MIXED_KEY"));
+        let missing_creds = v["missing_credential_files"].as_array().unwrap();
+        assert!(missing_creds.iter().any(|e| e == "creds.json"));
+
+        let setup_note = v["setup_note"].as_str().unwrap();
+        assert!(
+            setup_note.contains("HERMES_TEST_MIXED_KEY"),
+            "setup_note should mention env var: {:?}",
+            setup_note
+        );
+        assert!(
+            setup_note.contains("creds.json"),
+            "setup_note should mention credential file: {:?}",
+            setup_note
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_not_found() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cred_dir = tempfile::tempdir().unwrap();
+        let (tool, _dir, _active_skills) = make_p03_tool(&[], cred_dir.path().to_path_buf());
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "no-such-skill"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error");
+        assert!(v["message"].as_str().unwrap().contains("no-such-skill"));
+    }
+
+    #[tokio::test]
+    async fn test_setup_note_format() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("TENOR_API_KEY");
+        }
+
+        let cred_dir = tempfile::tempdir().unwrap();
+        let hermes_yaml = "    required_environment_variables:\n      - name: TENOR_API_KEY\n        required_for: \"GIF search\"";
+        let (tool, _dir, _active_skills) = make_p03_tool(
+            &[("gif-skill", "GIF skill", hermes_yaml, "Body")],
+            cred_dir.path().to_path_buf(),
+        );
+
+        let result = tool
+            .execute(json!({"action": "activate", "name": "gif-skill"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+
+        assert_eq!(v["status"], "setup_needed");
+        assert_eq!(
+            v["setup_note"], "I need $TENOR_API_KEY to GIF search.",
+            "setup_note exact-format check failed"
+        );
+    }
 }
