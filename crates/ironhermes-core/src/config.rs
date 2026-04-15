@@ -369,6 +369,15 @@ pub struct SkillsConfig {
     /// when unset. Resolved via `default_credential_dir()` in ironhermes-tools.
     #[serde(default)]
     pub credential_dir: Option<PathBuf>,
+    /// Per-skill config values (Phase 19 D-07):
+    /// `skills.config.<skill-name>.<key> = <value>`.
+    ///
+    /// Consumed by `SkillsTool` to synthesize the `[Skill config: ...]`
+    /// body-injection header on activation (D-08). Values are typed as
+    /// `serde_yaml::Value` so any YAML scalar or nested structure is preserved
+    /// without forcing schema changes as new skills are added.
+    #[serde(default)]
+    pub config: HashMap<String, HashMap<String, serde_yaml::Value>>,
 }
 
 impl Default for SkillsConfig {
@@ -377,6 +386,7 @@ impl Default for SkillsConfig {
             enabled: true,
             extra_paths: Vec::new(),
             credential_dir: None,
+            config: HashMap::new(),
         }
     }
 }
@@ -663,6 +673,61 @@ subagent:
         assert!(config.subagent.provider.is_none());
         assert!(config.subagent.base_url.is_none());
         assert!(config.subagent.api_key.is_none());
+    }
+
+    // =========================================================================
+    // Phase 19 Plan 04: SkillsConfig.config (D-07) round-trip tests
+    // =========================================================================
+
+    #[test]
+    fn test_skills_config_round_trip_with_config_map() {
+        let yaml = r#"
+skills:
+  enabled: true
+  config:
+    wiki:
+      path: "~/research"
+      format: "markdown"
+    tenor:
+      api_key_env: "TENOR_API_KEY"
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert!(cfg.skills.enabled);
+        assert_eq!(
+            cfg.skills.config["wiki"]["path"],
+            serde_yaml::Value::String("~/research".to_string())
+        );
+        assert_eq!(
+            cfg.skills.config["wiki"]["format"],
+            serde_yaml::Value::String("markdown".to_string())
+        );
+        assert_eq!(
+            cfg.skills.config["tenor"]["api_key_env"],
+            serde_yaml::Value::String("TENOR_API_KEY".to_string())
+        );
+
+        // Full round-trip: serialize → deserialize → structurally equivalent
+        let ser = serde_yaml::to_string(&cfg).expect("serialize");
+        let re: Config = serde_yaml::from_str(&ser).expect("deserialize");
+        assert_eq!(re.skills.config, cfg.skills.config);
+    }
+
+    #[test]
+    fn test_skills_config_empty_config_defaults_to_empty_map() {
+        // No `config:` sub-key at all — must deserialize via #[serde(default)]
+        // and yield an empty map.
+        let yaml = r#"
+skills:
+  enabled: true
+  extra_paths:
+    - /tmp/x
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert!(cfg.skills.enabled);
+        assert!(
+            cfg.skills.config.is_empty(),
+            "skills.config should default to empty HashMap when absent"
+        );
     }
 
     #[test]

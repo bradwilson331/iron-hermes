@@ -512,6 +512,29 @@ impl SkillRegistry {
     pub fn list(&self) -> &[SkillRecord] {
         &self.skills
     }
+
+    /// Return the typed config schema declared in a skill's
+    /// `metadata.hermes.config` frontmatter (Phase 19 D-07).
+    ///
+    /// Phase 23's `hermes config migrate` CLI consumes this to seed
+    /// `config.yaml skills.config.<skill-name>` with declared defaults.
+    ///
+    /// Semantics:
+    /// - Skill not found → `None`.
+    /// - Skill has no `hermes_metadata` block → `None`.
+    /// - Skill has `hermes_metadata` but empty `config` slice → `None`
+    ///   (treated as "no schema declared", matches the contract tested by
+    ///   `test_declared_config_schema_no_hermes_meta`).
+    /// - Otherwise → `Some(&[SkillConfigField])` in declaration order.
+    pub fn declared_config_schema(&self, skill_name: &str) -> Option<&[SkillConfigField]> {
+        let lower = skill_name.to_lowercase();
+        self.skills
+            .iter()
+            .find(|s| s.name.to_lowercase() == lower)
+            .and_then(|s| s.hermes_metadata.as_ref())
+            .map(|m| m.config.as_slice())
+            .filter(|slice| !slice.is_empty())
+    }
 }
 
 // =============================================================================
@@ -1769,5 +1792,77 @@ Body content.
         let _catalog = registry.filtered_catalog_text(&active_toolsets, &active_tools);
 
         assert!(std::env::var_os(sentinel).is_none(), "sentinel env var must not exist after filter call — filter must not touch env");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 19 Plan 04: declared_config_schema tests (D-07 → Phase 23 CLI hook)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_declared_config_schema_returns_fields() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("wiki");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = r#"---
+name: wiki
+description: Wiki skill with declared config schema
+metadata:
+  hermes:
+    config:
+      - key: "wiki.path"
+        type: path
+        description: "Notes dir"
+      - key: "wiki.format"
+        type: string
+        default: "markdown"
+---
+Body.
+"#;
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        let schema = registry
+            .declared_config_schema("wiki")
+            .expect("wiki should have a declared schema");
+        assert_eq!(schema.len(), 2, "expected two declared config fields");
+        assert_eq!(schema[0].key, "wiki.path");
+        assert_eq!(schema[0].field_type, Some("path".to_string()));
+        assert_eq!(schema[0].description, Some("Notes dir".to_string()));
+        assert_eq!(schema[1].key, "wiki.format");
+        assert_eq!(schema[1].field_type, Some("string".to_string()));
+        assert_eq!(
+            schema[1].default,
+            Some(serde_yaml::Value::String("markdown".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_declared_config_schema_not_found() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert!(
+            registry.declared_config_schema("nonexistent").is_none(),
+            "unknown skill name must return None"
+        );
+    }
+
+    #[test]
+    fn test_declared_config_schema_no_hermes_meta() {
+        // Skill with no hermes metadata at all → None.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("bare");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = "---\nname: bare\ndescription: No hermes metadata\n---\nBody.\n";
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert!(
+            registry.declared_config_schema("bare").is_none(),
+            "skill without metadata.hermes.config must return None"
+        );
     }
 }
