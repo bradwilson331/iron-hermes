@@ -507,4 +507,165 @@ print(repr(env))
             result.duration_seconds
         );
     }
+
+    // =========================================================================
+    // Phase 19 Plan 06: build_env skill-declared whitelist (D-05)
+    // =========================================================================
+    //
+    // These tests verify that `Sandbox::build_env` accepts a
+    // `skill_env_whitelist: &[String]` parameter and that whitelisted names
+    // bypass the SECRET_PATTERNS strip, while non-whitelisted secret-looking
+    // vars continue to be stripped (no regression).
+    //
+    // Env-var mutations serialize on a shared guard to avoid clobbering each
+    // other in the default (parallel) cargo test runner.
+
+    use std::sync::Mutex as StdMutex;
+    static BUILD_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn test_build_env_whitelisted_secret_var_kept() {
+        let _guard = BUILD_ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via BUILD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("HERMES_TEST_API_KEY", "testval");
+        }
+
+        let sandbox = Sandbox::new(test_config());
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("rpc.sock");
+
+        let whitelist = vec!["HERMES_TEST_API_KEY".to_string()];
+        let env = sandbox.build_env(tmp.path(), &sock, &whitelist);
+
+        // SAFETY: cleanup after reading env
+        unsafe {
+            std::env::remove_var("HERMES_TEST_API_KEY");
+        }
+
+        assert!(
+            env.iter().any(|(k, v)| k == "HERMES_TEST_API_KEY" && v == "testval"),
+            "whitelisted HERMES_TEST_API_KEY should be kept; got: {:?}",
+            env.iter().filter(|(k, _)| k.contains("HERMES_TEST")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_build_env_non_whitelisted_secret_var_stripped() {
+        let _guard = BUILD_ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via BUILD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("HERMES_TEST_OTHER_API_KEY", "stripme");
+        }
+
+        let sandbox = Sandbox::new(test_config());
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("rpc.sock");
+
+        let env = sandbox.build_env(tmp.path(), &sock, &[]);
+
+        // SAFETY: cleanup after reading env
+        unsafe {
+            std::env::remove_var("HERMES_TEST_OTHER_API_KEY");
+        }
+
+        assert!(
+            !env.iter().any(|(k, _)| k == "HERMES_TEST_OTHER_API_KEY"),
+            "non-whitelisted HERMES_TEST_OTHER_API_KEY must be stripped"
+        );
+    }
+
+    #[test]
+    fn test_build_env_non_secret_var_always_kept() {
+        let _guard = BUILD_ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via BUILD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("HERMES_TEST_PLAIN", "keepme");
+        }
+
+        let sandbox = Sandbox::new(test_config());
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("rpc.sock");
+
+        // Empty whitelist — should still keep non-secret var.
+        let env = sandbox.build_env(tmp.path(), &sock, &[]);
+
+        // SAFETY: cleanup after reading env
+        unsafe {
+            std::env::remove_var("HERMES_TEST_PLAIN");
+        }
+
+        assert!(
+            env.iter().any(|(k, v)| k == "HERMES_TEST_PLAIN" && v == "keepme"),
+            "non-secret HERMES_TEST_PLAIN must be kept regardless of whitelist"
+        );
+    }
+
+    #[test]
+    fn test_build_env_whitelist_case_insensitive() {
+        let _guard = BUILD_ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via BUILD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("HERMES_TEST_CASEKEY", "x");
+        }
+
+        let sandbox = Sandbox::new(test_config());
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("rpc.sock");
+
+        // Whitelist provided in lowercase — must still match the uppercase env
+        // var name via case-insensitive comparison.
+        let whitelist = vec!["hermes_test_casekey".to_string()];
+        let env = sandbox.build_env(tmp.path(), &sock, &whitelist);
+
+        // SAFETY: cleanup after reading env
+        unsafe {
+            std::env::remove_var("HERMES_TEST_CASEKEY");
+        }
+
+        assert!(
+            env.iter().any(|(k, v)| k == "HERMES_TEST_CASEKEY" && v == "x"),
+            "whitelist match should be case-insensitive; env did not contain HERMES_TEST_CASEKEY"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_env_passthrough() {
+        // Integration test proving a Python child process reads a skill-declared
+        // API key from os.environ when the parent has that key set AND the
+        // whitelist is passed through to build_env via Sandbox::run.
+        let _guard = BUILD_ENV_LOCK.lock().unwrap();
+        // SAFETY: tests serialized via BUILD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("HERMES_TEST_SKILL_KEY", "integrationval");
+        }
+
+        let sandbox = Sandbox::new(test_config());
+        let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
+
+        let whitelist = vec!["HERMES_TEST_SKILL_KEY".to_string()];
+        let script = r#"
+import os
+print(os.environ.get('HERMES_TEST_SKILL_KEY', 'MISSING'))
+"#;
+        let result = sandbox
+            .run(script, dispatch, None, &whitelist)
+            .await
+            .expect("should succeed");
+
+        // SAFETY: cleanup after reading env
+        unsafe {
+            std::env::remove_var("HERMES_TEST_SKILL_KEY");
+        }
+
+        assert!(
+            result.stdout.contains("integrationval"),
+            "expected Python child to read skill-declared env var; stdout: {:?}, stderr: {:?}",
+            result.stdout, result.stderr
+        );
+        assert!(
+            !result.stdout.contains("MISSING"),
+            "child reported MISSING — whitelist not threaded through run()"
+        );
+    }
 }

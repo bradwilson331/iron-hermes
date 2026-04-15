@@ -1042,4 +1042,93 @@ mod tests {
             "setup_note exact-format check failed"
         );
     }
+
+    // =========================================================================
+    // Phase 19 Plan 06: active_skill_env_names helper (D-05)
+    // =========================================================================
+
+    use ironhermes_core::{EnvVarEntry, HermesMetadata, SkillRecord, SkillSource};
+    use std::path::PathBuf;
+
+    fn make_skill_record_with_env_vars(name: &str, env_var_names: &[&str]) -> SkillRecord {
+        let entries: Vec<EnvVarEntry> = env_var_names
+            .iter()
+            .map(|n| EnvVarEntry {
+                name: (*n).to_string(),
+                prompt: None,
+                help: None,
+                required_for: None,
+            })
+            .collect();
+        let meta = HermesMetadata {
+            required_environment_variables: entries,
+            ..Default::default()
+        };
+        SkillRecord {
+            name: name.to_string(),
+            description: format!("{} description", name),
+            path: PathBuf::from(format!("/tmp/{}/SKILL.md", name)),
+            platforms: None,
+            compatibility: None,
+            allowed_tools: None,
+            metadata: None,
+            hermes_metadata: Some(meta),
+            source: SkillSource::Builtin,
+        }
+    }
+
+    fn make_skill_record_without_hermes(name: &str) -> SkillRecord {
+        SkillRecord {
+            name: name.to_string(),
+            description: format!("{} description", name),
+            path: PathBuf::from(format!("/tmp/{}/SKILL.md", name)),
+            platforms: None,
+            compatibility: None,
+            allowed_tools: None,
+            metadata: None,
+            hermes_metadata: None,
+            source: SkillSource::Builtin,
+        }
+    }
+
+    #[test]
+    fn test_active_skill_env_names() {
+        let skill_a = make_skill_record_with_env_vars("a", &["TENOR_API_KEY", "TENOR_BASE_URL"]);
+        let skill_b = make_skill_record_with_env_vars("b", &["WIKI_TOKEN"]);
+        let active = vec![skill_a, skill_b];
+
+        let names = active_skill_env_names(&active);
+        assert_eq!(
+            names,
+            vec![
+                "TENOR_API_KEY".to_string(),
+                "TENOR_BASE_URL".to_string(),
+                "WIKI_TOKEN".to_string(),
+            ],
+            "expected names in insertion order across both skills, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_active_skill_env_names_empty() {
+        let active: Vec<SkillRecord> = Vec::new();
+        let names = active_skill_env_names(&active);
+        assert!(names.is_empty(), "empty active_skills must yield empty Vec, got: {:?}", names);
+    }
+
+    #[test]
+    fn test_active_skill_env_names_skips_skills_with_no_hermes_meta() {
+        let skill_plain = make_skill_record_without_hermes("plain");
+        let skill_with = make_skill_record_with_env_vars("has-meta", &["SOME_KEY"]);
+        let active = vec![skill_plain, skill_with];
+
+        let names = active_skill_env_names(&active);
+        assert_eq!(
+            names,
+            vec!["SOME_KEY".to_string()],
+            "skills without hermes_metadata should contribute no names, got: {:?}",
+            names
+        );
+    }
 }
