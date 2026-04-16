@@ -452,6 +452,60 @@ fn char_count(entries: &[String], delimiter: &str) -> usize {
 mod tests {
     use super::*;
 
+    // -------------------------------------------------------------------------
+    // Phase 20-04 Task 20-04-01: pin file provider name() and get_config_schema()
+    // These assertions pin the plugin-contract surface for the file provider
+    // (wizard 20-03 consumer). Breaking changes here require a wizard update.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn file_provider_name_is_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = super::MemoryStore::new(tmp.path().to_path_buf());
+        assert_eq!(
+            <super::MemoryStore as crate::memory_provider::MemoryProvider>::name(&store),
+            "file",
+        );
+    }
+
+    #[test]
+    fn file_provider_config_schema_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = super::MemoryStore::new(tmp.path().to_path_buf());
+        let schema = <super::MemoryStore as crate::memory_provider::MemoryProvider>::get_config_schema(&store);
+
+        let keys: Vec<&str> = schema.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, vec!["memory_dir", "memory_char_limit", "user_char_limit"]);
+
+        let memory_dir = schema.iter().find(|f| f.key == "memory_dir").unwrap();
+        assert!(!memory_dir.required);
+        assert!(!memory_dir.secret);
+        assert!(memory_dir.env_var.is_none());
+        assert_eq!(memory_dir.default, Some(serde_json::json!("$HERMES_HOME/memory")));
+
+        let mem_limit = schema.iter().find(|f| f.key == "memory_char_limit").unwrap();
+        assert_eq!(mem_limit.default, Some(serde_json::json!(2200)));
+
+        let user_limit = schema.iter().find(|f| f.key == "user_char_limit").unwrap();
+        assert_eq!(user_limit.default, Some(serde_json::json!(1375)));
+    }
+
+    #[test]
+    fn file_provider_secret_implies_env_var() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = super::MemoryStore::new(tmp.path().to_path_buf());
+        let schema = <super::MemoryStore as crate::memory_provider::MemoryProvider>::get_config_schema(&store);
+        for field in &schema {
+            if field.secret {
+                assert!(
+                    field.env_var.is_some(),
+                    "secret field {:?} must declare env_var",
+                    field.key,
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_new_creates_store_and_load_succeeds_on_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
