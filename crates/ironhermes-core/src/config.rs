@@ -136,12 +136,18 @@ fn default_gateway_threshold() -> f32 { 0.85 }
 pub struct MemoryConfig {
     /// Provider type: "file" (default), "sqlite", "grafeo", "duckdb".
     pub provider: String,
+    /// Optional mirror provider (D-27). When set, the factory builds a
+    /// secondary provider that receives `on_memory_write` events but does
+    /// not serve reads. Preserves MEM-12 (single primary).
+    #[serde(default)]
+    pub mirror_provider: Option<String>,
 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             provider: "file".to_string(),
+            mirror_provider: None,
         }
     }
 }
