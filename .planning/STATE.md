@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 20-01-trait-enrichment-and-factory-fix-PLAN.md
-last_updated: "2026-04-16T12:48:23.449Z"
+stopped_at: Completed 20-02-memory-manager-and-wiring-PLAN.md
+last_updated: "2026-04-16T14:09:02.794Z"
 last_activity: 2026-04-16
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
-  percent: 25
+  completed_plans: 2
+  percent: 50
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 20 (memory-provider-plugin-contract) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-16
 
@@ -69,6 +69,7 @@ Progress: [██████████] 100%
 | Phase 19 P06 | 7min | 2 tasks | 7 files |
 | Phase 18 P15 | 3 | 3 tasks | 4 files |
 | Phase 20-memory-provider-plugin-contract P01 | 19 | 3 tasks | 10 files |
+| Phase 20 P02 | 42 min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -105,6 +106,9 @@ Recent decisions affecting current work:
 - [Phase 20-memory-provider-plugin-contract]: Plan 20-01: grafeo DB path must use .grafeo file extension (memory_graph.grafeo) — required for grafeo persistence flush
 - [Phase 20-memory-provider-plugin-contract]: Plan 20-01: MemoryProviderConfig deleted entirely (no compat shim per D-10/D-20); all providers migrated in lockstep
 - [Phase 20-memory-provider-plugin-contract]: Plan 20-01: env-mutating tests use OnceLock<Mutex<()>> + double-set idiom (re-assert IRONHERMES_HOME before each build_memory_provider call) to tolerate racing prompt_builder tests
+- [Phase 20]: Plan 20-02: MemoryManagerHandle trait in ironhermes-tools resolves tools→agent circular dep; impl lives in ironhermes-agent so MemoryTool can delegate to handle_tool_call via dyn dispatch
+- [Phase 20]: Plan 20-02: full workspace migration from std::sync::Mutex to tokio::sync::Mutex executed atomically; load_memory promoted to async fn; queue_prefetch fires as detached tokio::spawn on natural-end break with last user message as query
+- [Phase 20]: Plan 20-02: on_pre_compress fire site placed inside ContextEngine.compress_messages (not at caller boundary) to structurally guarantee D-23 ordering; trait-level contract test in ironhermes-core locks the ordering into a regression test reusable by any future provider crate
 
 ### Pending Todos
 
@@ -120,6 +124,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-16T12:48:08.734Z
-Stopped at: Completed 20-01-trait-enrichment-and-factory-fix-PLAN.md
+Last session: 2026-04-16T14:09:02.792Z
+Stopped at: Completed 20-02-memory-manager-and-wiring-PLAN.md
 Resume file: None

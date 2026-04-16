@@ -20,7 +20,7 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [x] **MEM-09**: SQLite memory provider stores facts with FTS5 search capability
 - [x] **MEM-10**: Grafeo graph database memory provider stores facts as nodes/edges with relationship queries (feature-gated build)
 - [x] **MEM-11**: DuckDB memory provider stores facts with analytical query capability (feature-gated build, async bridge for !Send Connection)
-- [ ] **MEM-12**: Only one external memory provider can be active at a time — single-provider selection via config
+- [x] **MEM-12**: Only one external memory provider can be active at a time — single-provider selection via config
 - [x] **MEM-13**: Agent can search past conversations via session_search tool backed by StateStore FTS5
 
 ### Session Storage
@@ -193,7 +193,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MEM-09 | Phase 17 | Complete |
 | MEM-10 | Phase 17 | Complete |
 | MEM-11 | Phase 17 | Complete |
-| MEM-12 | Phase 11 | Pending |
+| MEM-12 | Phase 11 | Complete |
 | MEM-13 | Phase 17 | Complete |
 | SESS-01 | Phase 13 | Complete |
 | SESS-02 | Phase 13 | Complete |
