@@ -150,6 +150,157 @@ async fn build_file_provider(
     Ok(Arc::new(Mutex::new(store)))
 }
 
+/// Build a `MemoryManager` wrapping a primary provider plus an optional
+/// mirror provider selected via `MemoryConfig.mirror_provider`.
+///
+/// The returned handle is `Arc<tokio::sync::Mutex<MemoryManager>>` — the
+/// canonical Plan-20-02 sharing shape. All consumers (MemoryTool,
+/// prompt_builder, context_engine, memory_flush_handler, agent_loop,
+/// gateway runner/handler, CLI) hold this handle and call `.lock().await`.
+///
+/// Mirror recursion guard: when a mirror provider is requested, its own
+/// `mirror_provider` field is cleared before constructing the secondary
+/// provider so a config like `{provider: sqlite, mirror_provider: Some("grafeo")}`
+/// does not recursively build more mirrors.
+///
+/// Implementation note: `build_memory_provider` returns
+/// `Arc<std::sync::Mutex<dyn MemoryProvider + Send>>` (legacy shape held by
+/// the existing gateway/CLI consumers until Plan 20-02's Task 02 migrates
+/// them). We CANNOT convert that to `tokio::sync::Mutex` because moving a
+/// `dyn Trait` out of `std::sync::Mutex::into_inner` requires `Sized`, which
+/// trait objects do not satisfy. Instead this function rebuilds the inner
+/// provider(s) directly into `tokio::sync::Mutex` wrappers — duplicating the
+/// provider-kind match once. When Task 02 migrates `build_memory_provider`
+/// to `tokio::sync::Mutex`, this helper collapses back to a single path.
+pub async fn build_memory_manager(
+    config: &ironhermes_core::config::MemoryConfig,
+) -> anyhow::Result<Arc<tokio::sync::Mutex<crate::memory::MemoryManager>>> {
+    let primary = build_tokio_provider(config).await?;
+
+    let mirror = if let Some(name) = &config.mirror_provider {
+        let mut mirror_cfg = config.clone();
+        mirror_cfg.provider = name.clone();
+        mirror_cfg.mirror_provider = None; // prevent recursion
+        Some(build_tokio_provider(&mirror_cfg).await?)
+    } else {
+        None
+    };
+
+    let mgr = crate::memory::MemoryManager::new(primary, mirror).await?;
+    Ok(Arc::new(tokio::sync::Mutex::new(mgr)))
+}
+
+/// Build a provider wrapped in `Arc<tokio::sync::Mutex<...>>` directly.
+/// Mirrors the provider-kind dispatch of `build_memory_provider` but emits
+/// the Plan-20-02 tokio-mutex shape that `MemoryManager` requires.
+async fn build_tokio_provider(
+    config: &ironhermes_core::config::MemoryConfig,
+) -> anyhow::Result<crate::memory::SharedProvider> {
+    let hermes_home = get_hermes_home();
+    let provider_config = serde_json::Value::Null;
+
+    let provider: crate::memory::SharedProvider = match config.provider.as_str() {
+        "file" => build_tokio_file_provider(&hermes_home).await?,
+        #[cfg(feature = "memory-sqlite")]
+        "sqlite" => {
+            let db_path = hermes_home.join("memory.db");
+            let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
+            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.load_from_disk()?;
+            if !p.is_available() {
+                let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
+                tracing::warn!(
+                    provider = "sqlite",
+                    reason = %reason,
+                    "memory provider reported is_available=false; falling back to file provider"
+                );
+                return build_tokio_file_provider(&hermes_home).await;
+            }
+            Arc::new(tokio::sync::Mutex::new(p))
+        }
+        #[cfg(not(feature = "memory-sqlite"))]
+        "sqlite" => {
+            anyhow::bail!(
+                "Memory provider 'sqlite' requires the 'memory-sqlite' feature. \
+                 Rebuild with: cargo build --features memory-sqlite"
+            );
+        }
+        #[cfg(feature = "memory-duckdb")]
+        "duckdb" => {
+            let db_path = hermes_home.join("memory_duckdb.db");
+            let mut p = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
+            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.load_from_disk()?;
+            if !p.is_available() {
+                let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
+                tracing::warn!(
+                    provider = "duckdb",
+                    reason = %reason,
+                    "memory provider reported is_available=false; falling back to file provider"
+                );
+                return build_tokio_file_provider(&hermes_home).await;
+            }
+            Arc::new(tokio::sync::Mutex::new(p))
+        }
+        #[cfg(not(feature = "memory-duckdb"))]
+        "duckdb" => {
+            anyhow::bail!(
+                "Memory provider 'duckdb' requires the 'memory-duckdb' feature. \
+                 Rebuild with: cargo build --features memory-duckdb"
+            );
+        }
+        #[cfg(feature = "memory-grafeo")]
+        "grafeo" => {
+            let db_path = hermes_home.join("memory_graph.grafeo");
+            let mut p = memory_grafeo::GrafeoMemoryProvider::new(&db_path)?;
+            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.load_from_disk()?;
+            if !p.is_available() {
+                let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
+                tracing::warn!(
+                    provider = "grafeo",
+                    reason = %reason,
+                    "memory provider reported is_available=false; falling back to file provider"
+                );
+                return build_tokio_file_provider(&hermes_home).await;
+            }
+            Arc::new(tokio::sync::Mutex::new(p))
+        }
+        #[cfg(not(feature = "memory-grafeo"))]
+        "grafeo" => {
+            anyhow::bail!(
+                "Memory provider 'grafeo' requires the 'memory-grafeo' feature. \
+                 Rebuild with: cargo build --features memory-grafeo"
+            );
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown memory provider '{}'. Available providers: file{}{}{}",
+                other,
+                if cfg!(feature = "memory-sqlite") { ", sqlite" } else { "" },
+                if cfg!(feature = "memory-grafeo") { ", grafeo" } else { "" },
+                if cfg!(feature = "memory-duckdb") { ", duckdb" } else { "" }
+            );
+        }
+    };
+
+    Ok(provider)
+}
+
+async fn build_tokio_file_provider(
+    hermes_home: &std::path::Path,
+) -> anyhow::Result<crate::memory::SharedProvider> {
+    let memory_dir = hermes_home.join("memories");
+    let mut store = MemoryStore::new(memory_dir);
+    store
+        .initialize("factory-boot", hermes_home, &serde_json::Value::Null)
+        .await?;
+    if let Err(e) = store.load_from_disk() {
+        tracing::warn!("Failed to load memory from disk: {}", e);
+    }
+    Ok(Arc::new(tokio::sync::Mutex::new(store)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +460,27 @@ mod tests {
             .format_for_system_prompt(MemoryTarget::Memory)
             .expect("duckdb reload should populate");
         assert!(block.contains("duckdb-fact-XYZ"), "got: {block}");
+    }
+
+    // =========================================================================
+    // Plan 20-02: `build_memory_manager` should construct a no-mirror manager
+    // for the default `file` provider without error.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn factory_builds_manager_with_no_mirror() {
+        let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let mgr = build_memory_manager(&cfg("file")).await;
+        assert!(
+            mgr.is_ok(),
+            "file-provider manager must build with no mirror, got {:?}",
+            mgr.err()
+        );
+        // Smoke-test that we can lock + drop the tokio mutex.
+        let handle = mgr.unwrap();
+        let _guard = handle.lock().await;
     }
 
     #[cfg(feature = "memory-grafeo")]

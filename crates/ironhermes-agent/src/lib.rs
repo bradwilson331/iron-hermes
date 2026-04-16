@@ -19,6 +19,7 @@ pub mod anthropic_client;
 pub mod any_client;
 
 pub use agent_loop::{AgentLoop, AgentResult, AggregatedUsage};
+pub use memory::{MemoryManager, SharedProvider};
 pub use client::LlmClient;
 pub use anthropic_client::AnthropicClient;
 pub use any_client::{AnyClient, build_client, build_main_client, build_role_client};
