@@ -474,10 +474,7 @@ pub fn cmd_list(cfg: &Config, format: Format) -> anyhow::Result<i32> {
 
 /// Inner list that returns a String (for testing without printing).
 pub fn cmd_list_impl(cfg: &Config, format: Format) -> String {
-    let manifest = match HubManifest::load_or_default() {
-        Ok(m) => m,
-        Err(_) => HubManifest::default(),
-    };
+    let manifest = HubManifest::load_or_default().unwrap_or_default();
 
     let trusted_set = cfg.skills.hub.trusted_repos_set();
 
