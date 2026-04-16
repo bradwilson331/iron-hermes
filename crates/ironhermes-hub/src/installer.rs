@@ -331,9 +331,24 @@ pub fn uninstall(skill_name: &str) -> Result<UninstallOutcome, HubError> {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Write all files from a bundle into a directory.
+///
+/// Defense-in-depth: re-validates each file path even though `extract_tarball_prefix`
+/// already checked during extraction. This guards against `SkillBundle` structs
+/// constructed by future code paths that bypass tarball extraction.
 fn write_bundle_to_dir(dir: &Path, bundle: &SkillBundle) -> Result<(), HubError> {
     for file in &bundle.files {
+        // Re-validate path components (defense-in-depth against traversal)
+        let _ = crate::tarball::validate_bundle_rel_path(&file.path)?;
         let dest = dir.join(&file.path);
+        // Verify the resolved dest is still under dir (canonicalization guard)
+        if !dest.starts_with(dir) {
+            return Err(HubError::Typed {
+                kind: HubErrorKind::Parse,
+                message: format!("path escapes target directory: {}", file.path),
+                suggestion: None,
+                retry_after_s: None,
+            });
+        }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
