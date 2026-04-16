@@ -8,6 +8,7 @@ description = "Tool registry and implementations for IronHermes"
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-hub = { path = "../ironhermes-hub" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-exec = { path = "../ironhermes-exec" }

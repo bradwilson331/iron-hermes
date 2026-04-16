@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironhermes_core::config::SkillsConfig;
-use ironhermes_core::{CredentialFileEntry, SkillRegistry, ToolSchema};
+use ironhermes_core::{CredentialFileEntry, HubConfig, SkillRegistry, ToolSchema};
 use serde_json::{json, Value};
 
 use crate::registry::Tool;
@@ -14,7 +14,7 @@ use crate::registry::Tool;
 // ---------------------------------------------------------------------------
 
 const SKILLS_DESCRIPTION: &str =
-    "Browse and activate skill documents. Actions: list, view, activate, deactivate.";
+    "Browse and activate skill documents, and search the Hub for new skills. Actions: list, view, activate, deactivate, hub_search.";
 
 // ---------------------------------------------------------------------------
 // Credential directory resolution (Phase 19 Plan 03, D-10)
@@ -54,6 +54,9 @@ pub struct SkillsTool {
     /// Consumed by `build_skill_config_header` in the activate success path
     /// to synthesize the `[Skill config: ...]` body-injection header (D-08).
     skills_config: HashMap<String, HashMap<String, serde_yaml::Value>>,
+    /// Hub configuration for hub_search tool action (Phase 19.1 D-13).
+    /// Read-only: no hub_install action — only agent-visible discovery.
+    hub_config: HubConfig,
 }
 
 impl SkillsTool {
@@ -68,7 +71,14 @@ impl SkillsTool {
             active_skills,
             credential_dir,
             skills_config,
+            hub_config: HubConfig::default(),
         }
+    }
+
+    /// Builder: attach hub configuration for the hub_search tool action (D-13).
+    pub fn with_hub_config(mut self, hub_config: HubConfig) -> Self {
+        self.hub_config = hub_config;
+        self
     }
 }
 
@@ -312,6 +322,159 @@ fn handle_deactivate(args: &Value, active_skills: &std::sync::Mutex<Vec<ironherm
 }
 
 // ---------------------------------------------------------------------------
+// hub_search handler (Phase 19.1 D-13 — read-only agent discovery)
+// ---------------------------------------------------------------------------
+
+/// Map SkillSource to its string representation (D-13 trust_level field).
+fn trust_level_str(s: ironhermes_core::SkillSource) -> &'static str {
+    match s {
+        ironhermes_core::SkillSource::Builtin => "builtin",
+        ironhermes_core::SkillSource::Official => "official",
+        ironhermes_core::SkillSource::Trusted => "trusted",
+        ironhermes_core::SkillSource::Community => "community",
+    }
+}
+
+/// Build a structured error envelope for hub_search failures (Phase 17 D-15 pattern).
+fn hub_search_error_envelope(
+    kind: &str,
+    message: &str,
+    suggestion: Option<&str>,
+    retry_after_s: Option<u64>,
+) -> Value {
+    json!({
+        "error": "hub_search_failed",
+        "kind": kind,
+        "message": message,
+        "suggestion": suggestion,
+        "retry_after_s": retry_after_s,
+    })
+}
+
+/// Read-only Hub discovery action (D-13).
+///
+/// Returns `{"results": [...]}` with each entry having:
+/// `name, source, identifier, description, trust_level`
+///
+/// Hard cap: 20 results total (T-19.1-05-03 DoS mitigation).
+/// No filesystem mutation — guaranteed by not calling any install/update functions.
+async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
+    let query = match args.get("query").and_then(|v| v.as_str()) {
+        Some(q) if !q.is_empty() => q,
+        _ => return hub_search_error_envelope("invalid_identifier", "query parameter is required and must be non-empty", None, None),
+    };
+
+    let source_filter = args.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    // Build sources from hub_config (same pattern as CLI build_sources)
+    let auth = ironhermes_hub::GitHubAuth::resolve(hub_config.github_token_env.as_deref()).await;
+    let trusted = hub_config.trusted_repos_set();
+    let extra_taps: Vec<ironhermes_hub::GitHubTap> = hub_config
+        .extra_taps
+        .iter()
+        .map(|t| ironhermes_hub::GitHubTap {
+            repo: t.repo.clone(),
+            path_prefix: t.path.clone(),
+        })
+        .collect();
+    let gh = std::sync::Arc::new(ironhermes_hub::GitHubSource::new(auth, trusted, extra_taps));
+    let wk = ironhermes_hub::WellKnownSkillSource::new(hub_config.well_known_origins.clone());
+    let sh = ironhermes_hub::SkillsShSource::new(gh.clone());
+
+    const HARD_CAP: usize = 20;
+
+    // Determine which source IDs to query
+    let source_ids: Vec<&'static str> = match source_filter.as_deref() {
+        None => vec!["github", "well-known", "skills-sh"],
+        Some("github") => vec!["github"],
+        Some("well-known") => vec!["well-known"],
+        Some("skills-sh") => vec!["skills-sh"],
+        Some(other) => {
+            return hub_search_error_envelope(
+                "invalid_identifier",
+                &format!("unknown source '{}'; valid values: github, well-known, skills-sh", other),
+                Some("Use one of: github, well-known, skills-sh"),
+                None,
+            );
+        }
+    };
+
+    let mut results: Vec<Value> = Vec::new();
+
+    // Collect from github adapter
+    if source_ids.contains(&"github") && results.len() < HARD_CAP {
+        let limit = HARD_CAP.saturating_sub(results.len()).max(1);
+        match ironhermes_hub::HubSource::search(gh.as_ref(), query, limit).await {
+            Ok(metas) => {
+                for m in metas {
+                    if results.len() >= HARD_CAP { break; }
+                    let trust = ironhermes_hub::HubSource::trust_level_for(gh.as_ref(), &m.identifier);
+                    results.push(json!({
+                        "name": m.name,
+                        "source": m.source_id,
+                        "identifier": m.identifier,
+                        "description": m.description,
+                        "trust_level": trust_level_str(trust),
+                    }));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("hub_search github error: {}", e);
+            }
+        }
+    }
+
+    // Collect from well-known adapter
+    if source_ids.contains(&"well-known") && results.len() < HARD_CAP {
+        let limit = HARD_CAP.saturating_sub(results.len()).max(1);
+        match ironhermes_hub::HubSource::search(&wk, query, limit).await {
+            Ok(metas) => {
+                for m in metas {
+                    if results.len() >= HARD_CAP { break; }
+                    let trust = ironhermes_hub::HubSource::trust_level_for(&wk, &m.identifier);
+                    results.push(json!({
+                        "name": m.name,
+                        "source": m.source_id,
+                        "identifier": m.identifier,
+                        "description": m.description,
+                        "trust_level": trust_level_str(trust),
+                    }));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("hub_search well-known error: {}", e);
+            }
+        }
+    }
+
+    // Collect from skills-sh adapter
+    if source_ids.contains(&"skills-sh") && results.len() < HARD_CAP {
+        let limit = HARD_CAP.saturating_sub(results.len()).max(1);
+        match ironhermes_hub::HubSource::search(&sh, query, limit).await {
+            Ok(metas) => {
+                for m in metas {
+                    if results.len() >= HARD_CAP { break; }
+                    let trust = ironhermes_hub::HubSource::trust_level_for(&sh, &m.identifier);
+                    results.push(json!({
+                        "name": m.name,
+                        "source": m.source_id,
+                        "identifier": m.identifier,
+                        "description": m.description,
+                        "trust_level": trust_level_str(trust),
+                    }));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("hub_search skills-sh error: {}", e);
+            }
+        }
+    }
+
+    results.truncate(HARD_CAP);
+    json!({ "results": results })
+}
+
+// ---------------------------------------------------------------------------
 // Tool trait implementation
 // ---------------------------------------------------------------------------
 
@@ -338,12 +501,21 @@ impl Tool for SkillsTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "view", "activate", "deactivate"],
-                        "description": "Action to perform. list: show all skills; view: read full SKILL.md; activate: load skill body for use; deactivate: remove skill from active set."
+                        "enum": ["list", "view", "activate", "deactivate", "hub_search"],
+                        "description": "Action to perform. list: show all skills; view: read full SKILL.md; activate: load skill body for use; deactivate: remove skill from active set; hub_search: search Hub adapters for skills (read-only, D-13)."
                     },
                     "name": {
                         "type": "string",
                         "description": "Skill name. Required for view and activate."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search query. Required for hub_search."
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["github", "well-known", "skills-sh"],
+                        "description": "Optional source filter for hub_search. Omit to search all adapters."
                     }
                 },
                 "required": ["action"]
@@ -368,8 +540,9 @@ impl Tool for SkillsTool {
                 &self.skills_config,
             ),
             "deactivate" => handle_deactivate(&args, &self.active_skills),
+            "hub_search" => handle_hub_search(&self.hub_config, &args).await,
             other => {
-                json!({"status": "error", "message": format!("Unknown action '{}'. Valid: list, view, activate, deactivate", other)})
+                json!({"status": "error", "message": format!("Unknown action '{}'. Valid: list, view, activate, deactivate, hub_search", other)})
             }
         };
 

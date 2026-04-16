@@ -242,17 +242,27 @@ impl GitHubSource {
                 continue;
             }
 
-            // skill_dir = path without trailing /SKILL.md
-            let skill_dir = &entry_path[..entry_path.len() - "/SKILL.md".len()];
-            // skill_name = last component
-            let skill_name = skill_dir.rsplit('/').next().unwrap_or(skill_dir);
+            // skill_dir = path without trailing /SKILL.md (or bare "SKILL.md" at root)
+            let skill_dir = entry_path
+                .strip_suffix("/SKILL.md")
+                .unwrap_or_else(|| entry_path.strip_suffix("SKILL.md").unwrap_or(entry_path));
+            // skill_name = last component (or empty-string guard for root SKILL.md)
+            let skill_name = if skill_dir.is_empty() {
+                tap.repo.rsplit('/').next().unwrap_or(&tap.repo)
+            } else {
+                skill_dir.rsplit('/').next().unwrap_or(skill_dir)
+            };
 
             // Substring match against query
             if !q.is_empty() && !skill_name.to_lowercase().contains(&q) {
                 continue;
             }
 
-            let identifier = format!("{}/{}", tap.repo, skill_dir);
+            let identifier = if skill_dir.is_empty() {
+                tap.repo.clone()
+            } else {
+                format!("{}/{}", tap.repo, skill_dir)
+            };
             skills.push(SkillMeta {
                 name: skill_name.to_string(),
                 identifier,
