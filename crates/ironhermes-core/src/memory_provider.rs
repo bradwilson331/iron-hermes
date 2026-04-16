@@ -179,6 +179,48 @@ fn parse_target(args: &Value) -> anyhow::Result<MemoryTarget> {
 impl MemoryProvider for MemoryStore {
     fn name(&self) -> &'static str { "file" }
 
+    fn get_config_schema(&self) -> Vec<ConfigField> {
+        use serde_json::json;
+        vec![
+            ConfigField {
+                key: "memory_dir".to_string(),
+                description: Some(
+                    "Directory holding MEMORY.md and USER.md files".to_string(),
+                ),
+                secret: false,
+                required: false,
+                default: Some(json!("$HERMES_HOME/memory")),
+                choices: None,
+                env_var: None,
+                url: None,
+            },
+            ConfigField {
+                key: "memory_char_limit".to_string(),
+                description: Some(
+                    "Character limit for the MEMORY.md scope (default 2200)".to_string(),
+                ),
+                secret: false,
+                required: false,
+                default: Some(json!(crate::constants::MEMORY_CHAR_LIMIT)),
+                choices: None,
+                env_var: None,
+                url: None,
+            },
+            ConfigField {
+                key: "user_char_limit".to_string(),
+                description: Some(
+                    "Character limit for the USER.md scope (default 1375)".to_string(),
+                ),
+                secret: false,
+                required: false,
+                default: Some(json!(crate::constants::USER_CHAR_LIMIT)),
+                choices: None,
+                env_var: None,
+                url: None,
+            },
+        ]
+    }
+
     async fn initialize(
         &mut self,
         _session_id: &str,

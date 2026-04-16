@@ -83,6 +83,23 @@ impl SqliteMemoryProvider {
 impl MemoryProvider for SqliteMemoryProvider {
     fn name(&self) -> &'static str { "sqlite" }
 
+    fn get_config_schema(&self) -> Vec<ironhermes_core::config_schema::ConfigField> {
+        use ironhermes_core::config_schema::ConfigField;
+        use serde_json::json;
+        vec![ConfigField {
+            key: "db_path".to_string(),
+            description: Some(
+                "SQLite database file path. Created on first run if absent.".to_string(),
+            ),
+            secret: false,
+            required: false,
+            default: Some(json!("$HERMES_HOME/memory.db")),
+            choices: None,
+            env_var: None,
+            url: None,
+        }]
+    }
+
     async fn initialize(
         &mut self,
         _session_id: &str,
