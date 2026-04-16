@@ -55,7 +55,7 @@ pub struct SkillsTool {
     /// to synthesize the `[Skill config: ...]` body-injection header (D-08).
     skills_config: HashMap<String, HashMap<String, serde_yaml::Value>>,
     /// Hub configuration for hub_search tool action (Phase 19.1 D-13).
-    /// Read-only: no hub_install action — only agent-visible discovery.
+    /// Read-only: agent gets discovery only; install mutations are CLI-only (D-13).
     hub_config: HubConfig,
 }
 
