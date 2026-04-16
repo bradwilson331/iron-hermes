@@ -70,3 +70,67 @@ pub fn build_memory_provider(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironhermes_core::config::MemoryConfig;
+
+    fn cfg(provider: &str) -> MemoryConfig {
+        let mut c = MemoryConfig::default();
+        c.provider = provider.to_string();
+        c
+    }
+
+    #[test]
+    fn file_provider_returns_ok() {
+        // Also exercises the load_from_disk path added in Task 1 — a missing
+        // memories directory must not cause a bail (warn-on-error behavior).
+        let result = build_memory_provider(&cfg("file"));
+        assert!(result.is_ok(), "file provider should build, got {:?}", result.err());
+    }
+
+    #[test]
+    fn unknown_provider_returns_err_with_message() {
+        let result = build_memory_provider(&cfg("totally-unknown"));
+        assert!(result.is_err(), "unknown provider must error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("Unknown memory provider 'totally-unknown'"),
+            "got: {msg}",
+        );
+        assert!(msg.contains("file"), "available providers must include 'file', got: {msg}");
+    }
+
+    #[cfg(feature = "memory-sqlite")]
+    #[test]
+    fn sqlite_provider_with_feature_returns_ok() {
+        // UAT Test 2 regression guard — this test must pass under
+        // `cargo test -p ironhermes-agent --features memory-sqlite`.
+        // Verifies that run_gateway no longer bails with "requires a feature flag
+        // that is not enabled" when built with --features memory-sqlite.
+        let _tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: test-only env mutation; acceptable since tests run single-threaded
+        // per cargo's default for lib tests.
+        unsafe { std::env::set_var("HERMES_HOME", _tmp.path()); }
+        let result = build_memory_provider(&cfg("sqlite"));
+        assert!(
+            result.is_ok(),
+            "sqlite provider must build when memory-sqlite feature is enabled, got {:?}",
+            result.err(),
+        );
+    }
+
+    #[cfg(not(feature = "memory-sqlite"))]
+    #[test]
+    fn sqlite_provider_without_feature_returns_err_naming_feature() {
+        let result = build_memory_provider(&cfg("sqlite"));
+        assert!(result.is_err(), "sqlite provider without feature must error");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("memory-sqlite"), "error must name the feature, got: {msg}");
+        assert!(
+            msg.contains("cargo build --features memory-sqlite"),
+            "error must include the rebuild instruction, got: {msg}",
+        );
+    }
+}
