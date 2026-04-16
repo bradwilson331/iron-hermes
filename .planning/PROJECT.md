@@ -33,7 +33,7 @@ A working conversational AI agent with personality (context files) that operates
 - [x] Memory provider trait with pluggable backend abstraction, lifecycle hooks, and config-driven factory — Validated in Phase 11: Memory Provider Trait
 - [ ] Memory provider backends: SQLite, Grafeo (graph DB), and DuckDB; single-provider selection
 - [ ] Session storage (SQLite state.db, WAL mode, sessions/messages tables, FTS5 full-text search, schema migrations, write contention handling, session lineage, session_search tool)
-- [ ] Context compression (dual system: gateway hygiene at 85%, agent ContextEngine at 50%; pluggable ContextEngine trait, structured summaries, iterative re-compression)
+- [x] Context compression (dual system: gateway hygiene at 85%, agent ContextEngine at 50%; pluggable ContextEngine trait, structured summaries, iterative re-compression) — Validated in Phase 18: Context Compression (live UAT Test 2 re-run pending)
 - [ ] Prompt caching (Anthropic cache_control breakpoints, system_and_3 strategy, cached/ephemeral separation)
 - [x] Prompt assembly (10-layer system prompt builder matching hermes-agent: SOUL.md identity, tool-aware guidance, memory snapshots, skills index, context files, timestamps, platform hints) — Validated in Phase 15: 10-Layer Prompt Assembly
 - [x] Context file loading (.hermes.md > HERMES.md > AGENTS.md > CLAUDE.md > .cursorrules priority chain, .cursor/rules/*.mdc fallback, progressive subdirectory discovery with 8K cap, security scanning, truncation) — Validated in Phase 15: 10-Layer Prompt Assembly
@@ -120,4 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-12 after Phase 15 (10-Layer Prompt Assembly) complete*
+*Last updated: 2026-04-16 after Phase 18 (Context Compression) complete*
