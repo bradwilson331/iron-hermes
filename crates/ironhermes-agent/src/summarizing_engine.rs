@@ -12,9 +12,11 @@ use async_trait::async_trait;
 use ironhermes_core::{ChatMessage, MessageContent, Role};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::any_client::AnyClient;
 use crate::context_compressor::{estimate_message_tokens, estimate_messages_tokens};
+use crate::memory::MemoryManager;
 use crate::context_engine::{
     CompressionMode, CompressionOutcome, ContextEngine, ContextError, ContextStats,
     LocalPruningEngine,
@@ -118,6 +120,9 @@ pub struct SummarizingEngine {
     hook_registry: Option<Arc<HookRegistry>>,
     session_id: Option<String>,
     pressure_tracker: Option<Arc<PressureTracker>>,
+    /// Plan 20-02: memory manager is invoked at the top of `compress` so the
+    /// provider's `on_pre_compress` hook fires BEFORE summarization.
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
 }
 
 impl SummarizingEngine {
@@ -138,7 +143,18 @@ impl SummarizingEngine {
             hook_registry: None,
             session_id: None,
             pressure_tracker: None,
+            memory_manager: None,
         }
+    }
+
+    /// Plan 20-02: attach the MemoryManager so its `on_pre_compress` hook fires
+    /// BEFORE summarization. The fallback `LocalPruningEngine` is also wired so
+    /// that when summarization fails and we fall through to local prune, the
+    /// hook still fires exactly once (idempotency is the provider's concern).
+    pub fn with_memory_manager(mut self, manager: Arc<TokioMutex<MemoryManager>>) -> Self {
+        self.memory_manager = Some(manager.clone());
+        self.fallback = self.fallback.with_memory_manager(manager);
+        self
     }
 
     /// Phase 18 D-20: attach a hook registry so `compress` fires
@@ -245,6 +261,16 @@ impl ContextEngine for SummarizingEngine {
             session_id = ?self.session_id,
             "summarizing_engine: compress attempt"
         );
+
+        // Plan 20-02 hook-ordering contract: `on_pre_compress` fires at the top
+        // of compress BEFORE any mutation so providers can stash facts that
+        // would otherwise be summarized away.
+        if let Some(mgr) = &self.memory_manager {
+            let guard = mgr.lock().await;
+            if let Err(e) = guard.on_pre_compress(messages).await {
+                tracing::warn!(error = %e, "memory.on_pre_compress failed; continuing");
+            }
+        }
 
         // Phase 18 D-23/D-24: emit pressure warning at 85% of compression threshold.
         let mut pressure_warning_fired = false;

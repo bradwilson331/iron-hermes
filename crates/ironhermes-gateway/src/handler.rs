@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MemoryProvider, MessageContent, MessageEvent, Platform, ProviderResolver, Role, SkillRegistry};
-use ironhermes_agent::{AgentLoop, AnyClient, PromptBuilder, build_main_client, build_client as build_provider_client};
+use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform, ProviderResolver, Role, SkillRegistry};
+use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
@@ -48,7 +48,7 @@ pub struct GatewayMessageHandler {
     resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
     tool_registry: Arc<ToolRegistry>,
-    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
@@ -77,7 +77,7 @@ impl GatewayMessageHandler {
             resolver,
             session_store,
             tool_registry,
-            memory_store: None,
+            memory_manager: None,
             hook_registry: None,
             skill_registry: None,
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -133,9 +133,11 @@ impl GatewayMessageHandler {
         }
     }
 
-    /// Set the memory store for prompt injection and tool access.
-    pub fn set_memory_store(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
-        self.memory_store = Some(store);
+    /// Plan 20-02: set the `MemoryManager` handle used for prompt injection
+    /// and tool/memory writes. The handle is shared (clone-of-Arc) with the
+    /// runner + tool registry + context engine for consistent fanout.
+    pub fn set_memory_manager(&mut self, manager: Arc<TokioMutex<MemoryManager>>) {
+        self.memory_manager = Some(manager);
     }
 
     /// Set the hook registry for event emission.
@@ -342,13 +344,13 @@ impl GatewayMessageHandler {
         let mut prompt_builder = PromptBuilder::new(&model, "telegram")
             .with_provider(&self.config.model.provider)
             .load_context(&cwd);
-        if let Some(ref store) = self.memory_store {
-            prompt_builder.set_memory_store(store.clone());
+        if let Some(ref mgr) = self.memory_manager {
+            prompt_builder.set_memory_manager(mgr.clone());
         }
         if let Some(ref registry) = self.skill_registry {
             prompt_builder.set_skill_registry(registry.clone());
         }
-        prompt_builder.load_memory();
+        prompt_builder.load_memory().await;
         prompt_builder.load_skills();
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message

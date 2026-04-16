@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use ironhermes_agent::{AgentLoop, AnyClient, LlmClient, PromptBuilder, build_main_client};
+use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client};
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::context_engine::ContextEngine;
-use ironhermes_core::{ChatMessage, Config, MemoryProvider, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
+use ironhermes_core::{ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::ToolRegistry;
 use tracing::{debug, error, info, warn};
@@ -28,7 +28,7 @@ pub struct GatewayRunner {
     session_store: Arc<RwLock<SessionStore>>,
     state_store: Arc<Mutex<ironhermes_state::StateStore>>,
     tool_registry: Arc<ToolRegistry>,
-    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     job_store: Option<Arc<Mutex<JobStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
@@ -49,7 +49,7 @@ impl GatewayRunner {
             session_store: Arc::new(RwLock::new(SessionStore::new(Arc::clone(&state_store)))),
             state_store,
             tool_registry,
-            memory_store: None,
+            memory_manager: None,
             job_store: None,
             hook_registry: None,
             skill_registry: None,
@@ -58,9 +58,10 @@ impl GatewayRunner {
         }
     }
 
-    /// Set the memory store for prompt injection and tool access.
-    pub fn set_memory_store(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
-        self.memory_store = Some(store);
+    /// Plan 20-02: set the `MemoryManager` handle used by the gateway runner,
+    /// handler, and cron tick task. Shared via `Arc<TokioMutex<MemoryManager>>`.
+    pub fn set_memory_manager(&mut self, manager: Arc<TokioMutex<MemoryManager>>) {
+        self.memory_manager = Some(manager);
     }
 
     /// Set the job store for cron tick task integration.
@@ -93,8 +94,8 @@ impl GatewayRunner {
             self.session_store.clone(),
             self.tool_registry.clone(),
         );
-        if let Some(ref store) = self.memory_store {
-            handler.set_memory_store(store.clone());
+        if let Some(ref mgr) = self.memory_manager {
+            handler.set_memory_manager(mgr.clone());
         }
         if let Some(ref registry) = self.hook_registry {
             handler.set_hook_registry(registry.clone());
@@ -452,7 +453,7 @@ impl GatewayRunner {
             // D-04 / D-11: four additional captures for real AgentLoop execution
             let hook_registry_tick = self.hook_registry.clone();
             let tool_registry_tick = self.tool_registry.clone();
-            let memory_store_tick = self.memory_store.clone();
+            let memory_manager_tick = self.memory_manager.clone();
             let config_tick = self.config.clone();
 
             join_set.spawn(async move {
@@ -515,7 +516,7 @@ impl GatewayRunner {
                                             &job_store_tick,
                                             &skill_registry_tick,
                                             &tool_registry_tick,
-                                            &memory_store_tick,
+                                            &memory_manager_tick,
                                             &hook_registry_tick,
                                             &config_tick,
                                         )
@@ -672,7 +673,7 @@ pub(crate) async fn execute_cron_job(
     job_store: &Arc<Mutex<ironhermes_cron::JobStore>>,
     skill_registry: &Option<Arc<SkillRegistry>>,
     tool_registry: &Arc<ironhermes_tools::ToolRegistry>,
-    memory_store: &Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+    memory_manager: &Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: &Option<Arc<ironhermes_hooks::HookRegistry>>,
     config: &Config,
 ) -> Result<()> {
@@ -720,12 +721,13 @@ pub(crate) async fn execute_cron_job(
     let cwd = std::env::current_dir().unwrap_or_default();
     let model = resolver.resolve_for_main().default_model.clone();
     let mut prompt_builder = PromptBuilder::new(&model, "cron").load_context(&cwd);
-    if let Some(store) = memory_store {
-        prompt_builder.set_memory_store(store.clone());
+    if let Some(mgr) = memory_manager {
+        prompt_builder.set_memory_manager(mgr.clone());
     }
     if let Some(skill_reg) = skill_registry {
         prompt_builder.set_skill_registry(skill_reg.clone());
     }
+    prompt_builder.load_memory().await;
     let system_msg = prompt_builder.build_system_message();
 
     // Build user message with the resolved full_input (skill content + user prompt)
@@ -1008,7 +1010,7 @@ mod tests {
             &job_store,
             &Some(skill_registry),
             &tool_registry,
-            &None,              // memory_store
+            &None,              // memory_manager
             &None,              // hook_registry
             &config,
         ).await;

@@ -6,17 +6,18 @@
 //! AGENT-05: delegate_task is structurally excluded from child registry (no recursion)
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironhermes_core::{MemoryProvider, SubagentConfig, ToolSchema};
+use ironhermes_core::{SubagentConfig, ToolSchema};
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::info;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::memory_tool::SharedMemoryManager;
 use crate::registry::{Tool, ToolRegistry};
 
 /// Progress events emitted by subagent execution (D-19).
@@ -118,7 +119,7 @@ pub trait SubagentRunner: Send + Sync {
 pub struct DelegateTaskTool {
     runner: Arc<dyn SubagentRunner>,
     semaphore: Arc<Semaphore>,
-    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+    memory_manager: Option<SharedMemoryManager>,
     config: SubagentConfig,
     /// Parent's cancellation token for propagating interrupt to children (D-21).
     parent_cancel_token: Option<CancellationToken>,
@@ -130,14 +131,14 @@ impl DelegateTaskTool {
     pub fn new(
         runner: Arc<dyn SubagentRunner>,
         semaphore: Arc<Semaphore>,
-        memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+        memory_manager: Option<SharedMemoryManager>,
         config: SubagentConfig,
         parent_cancel_token: Option<CancellationToken>,
     ) -> Self {
         Self {
             runner,
             semaphore,
-            memory_store,
+            memory_manager,
             config,
             parent_cancel_token,
             progress_callback: None,
@@ -200,7 +201,7 @@ impl DelegateTaskTool {
 
             let runner = self.runner.clone();
             let semaphore = self.semaphore.clone();
-            let memory_store = self.memory_store.clone();
+            let memory_manager = self.memory_manager.clone();
             let config = self.config.clone();
 
             // D-21/D-22: Create child cancel token based on detach flag
@@ -247,7 +248,7 @@ impl DelegateTaskTool {
                     .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
 
                 let child_registry =
-                    build_child_registry(&allowed_tools, memory_store, child_dir.path())?;
+                    build_child_registry(&allowed_tools, memory_manager, child_dir.path())?;
 
                 let mut system_prompt = format!(
                     "You are a focused assistant. Complete the following task:\n\n{}",
@@ -322,7 +323,7 @@ impl DelegateTaskTool {
 /// - `memory` gets read-only mode (D-12)
 pub fn build_child_registry(
     allowed_tools: &[String],
-    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+    memory_manager: Option<SharedMemoryManager>,
     child_cwd: &Path,
 ) -> anyhow::Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
@@ -347,12 +348,12 @@ pub fn build_child_registry(
 
             // Memory — read-only in child context (D-12)
             "memory" => {
-                if let Some(ref store) = memory_store {
+                if let Some(ref mgr) = memory_manager {
                     registry.register(Box::new(
-                        crate::memory_tool::MemoryTool::new_read_only(store.clone()),
+                        crate::memory_tool::MemoryTool::new_read_only(mgr.clone()),
                     ));
                 } else {
-                    tracing::warn!("memory tool requested but no MemoryProvider available; skipping");
+                    tracing::warn!("memory tool requested but no MemoryManager available; skipping");
                 }
             }
 
@@ -495,7 +496,7 @@ impl Tool for DelegateTaskTool {
         // Build child registry (D-01..D-05)
         let child_registry = build_child_registry(
             &allowed_tools,
-            self.memory_store.clone(),
+            self.memory_manager.clone(),
             child_dir.path(),
         )?;
 
@@ -679,15 +680,29 @@ mod tests {
 
     #[test]
     fn test_build_child_registry_memory_is_read_only() {
-        use ironhermes_core::MemoryStore;
-        let mem_dir = tempfile::tempdir().unwrap();
-        let mut store = MemoryStore::new(mem_dir.path().join("memories"));
-        store.load_from_disk().unwrap();
-        let store: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
+        use crate::memory_manager_handle::MemoryManagerHandle;
+        use ironhermes_core::memory_store::MemoryResult;
+
+        // Minimal mock handle — we only verify the tool is registered, not
+        // that writes go anywhere.
+        struct NoopManager;
+        #[async_trait]
+        impl MemoryManagerHandle for NoopManager {
+            async fn handle_tool_call(
+                &self,
+                _name: &str,
+                _args: serde_json::Value,
+            ) -> MemoryResult {
+                Ok("{}".to_string())
+            }
+        }
+
+        let mgr: SharedMemoryManager =
+            Arc::new(tokio::sync::Mutex::new(NoopManager));
 
         let registry = build_child_registry(
             &["memory".to_string()],
-            Some(store),
+            Some(mgr),
             Path::new("/tmp"),
         )
         .unwrap();

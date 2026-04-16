@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironhermes_core::{MemoryProvider, ToolSchema};
+use ironhermes_core::ToolSchema;
 use ironhermes_cron::JobStore;
+
+use crate::memory_tool::SharedMemoryManager;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -220,11 +222,14 @@ impl ToolRegistry {
         self.register(Box::new(WebReadTool));
     }
 
-    /// Register the memory tool with a shared MemoryProvider.
-    /// Called separately from register_defaults() because it requires a MemoryProvider instance.
-    pub fn register_memory_tool(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
+    /// Register the memory tool with a shared `MemoryManager` handle (Plan 20-02).
+    ///
+    /// The handle delegates writes through the manager so the optional mirror
+    /// provider is kept in sync. Callers build the handle via
+    /// `ironhermes_agent::memory::factory::build_memory_manager`.
+    pub fn register_memory_tool(&mut self, manager: SharedMemoryManager) {
         use crate::memory_tool::MemoryTool;
-        self.register(Box::new(MemoryTool::new(store)));
+        self.register(Box::new(MemoryTool::new(manager)));
     }
 
     /// Register the cronjob tool with a shared JobStore.
@@ -263,14 +268,14 @@ impl ToolRegistry {
         &mut self,
         runner: Arc<dyn crate::delegate_task::SubagentRunner>,
         semaphore: Arc<tokio::sync::Semaphore>,
-        memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+        memory_manager: Option<SharedMemoryManager>,
         config: ironhermes_core::SubagentConfig,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         progress_callback: Option<crate::delegate_task::SubagentProgressCallback>,
     ) {
         use crate::delegate_task::DelegateTaskTool;
         let mut tool = DelegateTaskTool::new(
-            runner, semaphore, memory_store, config, cancel_token,
+            runner, semaphore, memory_manager, config, cancel_token,
         );
         if let Some(cb) = progress_callback {
             tool = tool.with_progress_callback(cb);

@@ -1,29 +1,33 @@
 // Phase 18 Plan 04: default `context:pre_compress` handler that flushes the
-// active MemoryProvider via `sync_turn` before destructive pruning runs
+// active memory backend via `sync_turn` before destructive pruning runs
 // (D-20 / PRMT-16). Handler failures are logged via `tracing::warn!` and
 // swallowed so the engine proceeds with compression (D-22, T-18-07).
+//
+// Plan 20-02: the listener now takes a `MemoryManager` handle rather than a
+// raw provider so the mirror fanout runs for `sync_turn` calls too.
 
-use ironhermes_core::MemoryProvider;
 use ironhermes_hooks::{AsyncHookListener, HookEvent, HookEventKind};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Build an async hook listener that calls `MemoryProvider::sync_turn` when a
+use crate::memory::MemoryManager;
+
+/// Build an async hook listener that calls `MemoryManager::sync_turn` when a
 /// `ContextPreCompress` event fires. All other event kinds are ignored.
 ///
 /// The returned listener is `Arc`-cheap-to-clone and can be registered via
 /// [`ironhermes_hooks::HookRegistry::add_async_listener`].
 pub fn build_memory_flush_listener(
-    provider: Arc<Mutex<dyn MemoryProvider + Send>>,
+    manager: Arc<Mutex<MemoryManager>>,
 ) -> AsyncHookListener {
     Arc::new(move |event: HookEvent| {
-        let provider = Arc::clone(&provider);
+        let manager = Arc::clone(&manager);
         Box::pin(async move {
             if let HookEventKind::ContextPreCompress { session_id, .. } = &event.kind {
                 let sid = session_id.clone();
-                let guard = provider.lock().await;
-                // Snapshot current MemoryEntries from the provider and hand to sync_turn.
-                let entries = guard.to_memory_entries();
+                let guard = manager.lock().await;
+                // Snapshot current MemoryEntries from the manager and hand to sync_turn.
+                let entries = guard.to_memory_entries().await;
                 if let Err(e) = guard.sync_turn(&sid, &entries).await {
                     tracing::warn!(
                         error = ?e,
@@ -41,7 +45,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use ironhermes_core::memory_store::MemoryResult;
-    use ironhermes_core::{MemoryEntries, MemoryTarget};
+    use ironhermes_core::{MemoryEntries, MemoryProvider, MemoryTarget};
     use ironhermes_hooks::{HookRegistry, HooksConfig};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -123,12 +127,23 @@ mod tests {
         }
     }
 
+    /// Build a MemoryManager around a MockProvider for listener tests.
+    async fn make_manager() -> (
+        Arc<Mutex<MemoryManager>>,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<String>>>,
+    ) {
+        let (provider, sync_calls, last_session) = MockProvider::new();
+        let shared: crate::memory::SharedProvider = Arc::new(Mutex::new(provider));
+        let manager = MemoryManager::new(shared, None).await.expect("MemoryManager");
+        (Arc::new(Mutex::new(manager)), sync_calls, last_session)
+    }
+
     #[tokio::test]
     async fn build_memory_flush_listener_calls_sync_turn() {
-        let (provider, sync_calls, last_session) = MockProvider::new();
-        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(provider));
+        let (manager, sync_calls, last_session) = make_manager().await;
 
-        let listener = build_memory_flush_listener(provider);
+        let listener = build_memory_flush_listener(manager);
         let mut registry = HookRegistry::new(HooksConfig::default());
         registry.add_async_listener(listener);
 
@@ -150,10 +165,9 @@ mod tests {
 
     #[tokio::test]
     async fn listener_ignores_non_pre_compress_events() {
-        let (provider, sync_calls, _) = MockProvider::new();
-        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(provider));
+        let (manager, sync_calls, _) = make_manager().await;
 
-        let listener = build_memory_flush_listener(provider);
+        let listener = build_memory_flush_listener(manager);
         let mut registry = HookRegistry::new(HooksConfig::default());
         registry.add_async_listener(listener);
 

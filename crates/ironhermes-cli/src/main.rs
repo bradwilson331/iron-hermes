@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
-use ironhermes_core::{ChatMessage, Config, MemoryProvider, ProviderResolver, SkillRegistry};
+use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
@@ -278,7 +278,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry.clone());
-    prompt_builder.load_memory();
+    prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
 
@@ -422,7 +422,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry);
-    prompt_builder.load_memory();
+    prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
 
@@ -606,15 +606,16 @@ async fn run_agent_turn(
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config, resolver) = build_client(cli)?;
 
-    // Build the memory provider from config (MEM-12, D-09, D-11, D-12).
-    // Feature-gated: memory.provider=sqlite requires --features memory-sqlite, etc.
-    // Factory handles disk-load for the file provider internally.
-    let memory_store: Arc<Mutex<dyn MemoryProvider + Send>> =
-        ironhermes_agent::memory::factory::build_memory_provider(&config.memory).await?;
+    // Plan 20-02: build the MemoryManager (primary + optional mirror) once
+    // and share the handle across tool registries, delegate_task, runner,
+    // and context-engine wiring. All consumers hold
+    // `Arc<tokio::sync::Mutex<MemoryManager>>` and call `.lock().await`.
+    let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
+        ironhermes_agent::memory::factory::build_memory_manager(&config.memory).await?;
 
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry();
-    registry.register_memory_tool(memory_store.clone());
+    registry.register_memory_tool(memory_manager.clone());
 
     // Open cron job store and register the cronjob tool
     let cron_dir = ironhermes_core::get_hermes_home().join("cron");
@@ -642,7 +643,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    rpc_registry.register_memory_tool(memory_store.clone());
+    rpc_registry.register_memory_tool(memory_manager.clone());
     let rpc_registry = Arc::new(rpc_registry);
 
     // Register execute_code tool with the RPC dispatch registry.
@@ -666,7 +667,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        Some(memory_store.clone()),
+        Some(memory_manager.clone()),
         config.subagent.clone(),
         Some(gateway_cancel_token.clone()),
         None, // D-20: gateway uses tracing::info only, no stderr progress
@@ -733,7 +734,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     info!("Starting IronHermes Telegram Gateway");
     let mut runner = GatewayRunner::new(config, resolver, registry);
-    runner.set_memory_store(memory_store);
+    runner.set_memory_manager(memory_manager);
     runner.set_job_store(job_store);
     runner.set_skill_registry(skill_registry);
     runner.set_hook_registry(hook_registry);

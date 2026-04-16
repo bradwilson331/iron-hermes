@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
-use ironhermes_core::{ChatMessage, MemoryProvider, MemoryTarget, SkillRegistry};
+use ironhermes_core::{ChatMessage, MemoryTarget, SkillRegistry};
+use tokio::sync::Mutex as TokioMutex;
 use tracing::debug;
 
 use crate::context_loader::{find_git_root, strip_yaml_frontmatter, CONTEXT_CANDIDATES};
+use crate::memory::MemoryManager;
 
 const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Nous Research. You are helpful, harmless, and honest.
 
@@ -69,7 +71,10 @@ pub struct PromptBuilder {
     /// Used for subagents so they get only slots 1-2. Per D-10, D-15.
     skip_context_files: bool,
     slots: BTreeMap<PromptSlot, String>,
-    memory_store: Option<Arc<Mutex<dyn MemoryProvider + Send>>>,
+    /// Plan 20-02: PromptBuilder now talks to the MemoryManager handle
+    /// instead of a raw provider. The manager fans writes out to the
+    /// optional mirror and owns the hook-ordering contract.
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     skill_registry: Option<Arc<SkillRegistry>>,
     /// Snapshot of active toolsets used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
     /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
@@ -91,7 +96,7 @@ impl PromptBuilder {
             active_overlay: None,
             skip_context_files: false,
             slots: BTreeMap::new(),
-            memory_store: None,
+            memory_manager: None,
             skill_registry: None,
             active_toolsets: HashSet::new(),
             active_tools: HashSet::new(),
@@ -152,9 +157,12 @@ impl PromptBuilder {
         self.active_overlay = None;
     }
 
-    /// Set the memory store for prompt injection. Memory is frozen at load time. Per MEM-06.
-    pub fn set_memory_store(&mut self, store: Arc<Mutex<dyn MemoryProvider + Send>>) {
-        self.memory_store = Some(store);
+    /// Set the memory manager for prompt injection. Memory is frozen at load time. Per MEM-06.
+    /// Plan 20-02: PromptBuilder now consumes a `MemoryManager` handle instead of a raw
+    /// provider so prefetch/read paths go through the manager and, transitively, honor
+    /// the mirror contract if one is configured.
+    pub fn set_memory_manager(&mut self, manager: Arc<TokioMutex<MemoryManager>>) {
+        self.memory_manager = Some(manager);
     }
 
     /// Set the skill registry for catalog injection into the system prompt.
@@ -186,9 +194,13 @@ impl PromptBuilder {
         }
     }
 
-    /// Load all context files (SOUL.md, project context, AGENTS.md, memory, skills).
+    /// Load all context files (SOUL.md, project context, AGENTS.md, skills).
     /// Context is frozen at call time — mid-session file edits do not change the prompt.
     /// When skip_context_files is true, returns self immediately (D-10, D-15).
+    ///
+    /// Plan 20-02: memory loading moved out of this sync method because
+    /// `MemoryManager` is async under a `tokio::sync::Mutex`. Callers must
+    /// invoke `.load_memory().await` separately after `load_context`.
     pub fn load_context(mut self, cwd: &Path) -> Self {
         if self.skip_context_files {
             return self; // subagents get only slots 1+2 (built at build_split time)
@@ -213,8 +225,9 @@ impl PromptBuilder {
             );
         }
 
-        // Load memory (slot 3) and skills (slot 4) — frozen at session start per MEM-06, D-06.
-        self.load_memory();
+        // Skills (slot 4) — frozen at session start per D-06. Memory is now
+        // loaded separately via the async `load_memory` method because the
+        // manager handle uses `tokio::sync::Mutex`.
         self.load_skills();
 
         self
@@ -367,18 +380,34 @@ impl PromptBuilder {
     }
 
     /// Load memory snapshot into slot 3 (frozen at session start). Per MEM-06, D-11.
-    pub fn load_memory(&mut self) {
+    ///
+    /// Plan 20-02: now async because the manager handle wraps its primary
+    /// provider in `tokio::sync::Mutex`. Callers migrated from
+    /// `builder.load_memory()` → `builder.load_memory().await`.
+    pub async fn load_memory(&mut self) {
         if self.skip_context_files {
             return;
         }
-        let mem_content = if let Some(ref store) = self.memory_store {
-            let store = store.lock().unwrap();
+        let mem_content = if let Some(ref mgr) = self.memory_manager {
+            let guard = mgr.lock().await;
             let mut mem_parts = Vec::new();
-            if let Some(block) = store.format_for_system_prompt(MemoryTarget::Memory) {
+            if let Some(block) = guard.format_for_system_prompt(MemoryTarget::Memory).await {
                 mem_parts.push(block);
             }
-            if let Some(block) = store.format_for_system_prompt(MemoryTarget::User) {
+            if let Some(block) = guard.format_for_system_prompt(MemoryTarget::User).await {
                 mem_parts.push(block);
+            }
+            // Plan 20-02 acceptance: fetch the manager's unified system prompt
+            // block after target-scoped blocks so providers that inject
+            // additional facts (e.g. "Prefetched context" from letta/mem0)
+            // land in slot 3 without duplicating the per-target output.
+            if let Some(block) = guard.system_prompt_block().await {
+                // Dedup: some providers return the same content for
+                // system_prompt_block() as for format_for_system_prompt().
+                // Only append if it is not already present.
+                if !mem_parts.iter().any(|b| b == &block) {
+                    mem_parts.push(block);
+                }
             }
             if mem_parts.is_empty() {
                 None

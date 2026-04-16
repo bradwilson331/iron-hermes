@@ -3,7 +3,9 @@ use ironhermes_core::ChatMessage;
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex as TokioMutex;
 
+use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +74,10 @@ pub struct LocalPruningEngine {
     hook_registry: Option<Arc<HookRegistry>>,
     session_id: Option<String>,
     pressure_tracker: Option<Arc<PressureTracker>>,
+    /// Plan 20-02: memory manager is invoked at the top of `compress` so the
+    /// provider's `on_pre_compress` hook can react (e.g. flush working-memory
+    /// deltas) BEFORE destructive pruning.
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
 }
 
 impl LocalPruningEngine {
@@ -86,7 +92,15 @@ impl LocalPruningEngine {
             hook_registry: None,
             session_id: None,
             pressure_tracker: None,
+            memory_manager: None,
         }
+    }
+
+    /// Plan 20-02: attach the MemoryManager so its `on_pre_compress` hook
+    /// fires before prune.
+    pub fn with_memory_manager(mut self, manager: Arc<TokioMutex<MemoryManager>>) -> Self {
+        self.memory_manager = Some(manager);
+        self
     }
 
     pub fn with_protect(mut self, first_n: usize, last_tokens: usize) -> Self {
@@ -148,6 +162,17 @@ impl ContextEngine for LocalPruningEngine {
             session_id = ?self.session_id,
             "local_pruning_engine: compress attempt"
         );
+
+        // Plan 20-02 hook-ordering contract: `on_pre_compress` fires at the top
+        // of compress BEFORE any mutation so providers can stash facts that
+        // would otherwise be pruned. Mirror failures are logged by the manager
+        // and do not abort compression.
+        if let Some(mgr) = &self.memory_manager {
+            let guard = mgr.lock().await;
+            if let Err(e) = guard.on_pre_compress(messages).await {
+                tracing::warn!(error = %e, "memory.on_pre_compress failed; continuing");
+            }
+        }
 
         // Phase 18 D-23/D-24: emit pressure warning at 85% of compression threshold.
         let mut pressure_warning_fired = false;

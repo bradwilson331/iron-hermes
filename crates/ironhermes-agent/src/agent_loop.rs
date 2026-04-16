@@ -13,6 +13,7 @@ use crate::any_client::AnyClient;
 use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::{estimate_messages_tokens, ContextCompressor};
 use crate::context_engine::{ContextEngine, ContextStats};
+use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::subdir_discovery::SubdirDiscovery;
 
@@ -98,6 +99,10 @@ pub struct AgentLoop {
     context_length: usize,
     /// Runtime compression count passed into ContextStats (D-24 runaway guard).
     compression_count: usize,
+    /// Plan 20-02: optional MemoryManager handle for post-turn prefetch warming.
+    /// When set, the loop spawns `queue_prefetch` after the natural-end break
+    /// using the last user message as the query hint.
+    memory_manager: Option<Arc<Mutex<MemoryManager>>>,
 }
 
 impl AgentLoop {
@@ -124,7 +129,21 @@ impl AgentLoop {
             session_id: None,
             context_length: 128_000,
             compression_count: 0,
+            memory_manager: None,
         }
+    }
+
+    /// Plan 20-02: attach a `MemoryManager` handle so the loop can fire
+    /// `queue_prefetch` after the natural-end break (post-turn warming).
+    pub fn with_memory_manager(mut self, manager: Arc<Mutex<MemoryManager>>) -> Self {
+        self.memory_manager = Some(manager);
+        self
+    }
+
+    /// Plan 20-02: introspection accessor for tests — confirms the manager
+    /// handle has been wired before `agent.run(...)`.
+    pub fn has_memory_manager(&self) -> bool {
+        self.memory_manager.is_some()
     }
 
     /// Phase 18 Plan 06: inject a pre-chat context engine.
@@ -520,6 +539,29 @@ impl AgentLoop {
 
             if !has_tool_calls {
                 debug!(turn = turns_used, "Agent completed naturally (no tool calls)");
+                // Plan 20-02: fire the provider's `queue_prefetch` hook on the
+                // natural-end break so the primary can warm its cache for the
+                // next turn. The query is the most recent user message content.
+                if let Some(ref mgr) = self.memory_manager {
+                    let query = messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == ironhermes_core::Role::User)
+                        .and_then(|m| m.content_text().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    if !query.is_empty() {
+                        let mgr = Arc::clone(mgr);
+                        tokio::spawn(async move {
+                            let guard = mgr.lock().await;
+                            if let Err(e) = guard.queue_prefetch(&query).await {
+                                warn!(
+                                    error = ?e,
+                                    "queue_prefetch failed after natural-end break"
+                                );
+                            }
+                        });
+                    }
+                }
                 break;
             }
 

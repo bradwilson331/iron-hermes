@@ -227,6 +227,23 @@ fn target_as_str(t: MemoryTarget) -> &'static str {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Implement the `ironhermes_tools::MemoryManagerHandle` trait so `MemoryTool`
+// can delegate writes through a manager without `ironhermes-tools` having to
+// reverse-depend on `ironhermes-agent`. The handle forwards straight to the
+// inherent `MemoryManager::handle_tool_call` method above.
+// ----------------------------------------------------------------------------
+#[async_trait::async_trait]
+impl ironhermes_tools::MemoryManagerHandle for MemoryManager {
+    async fn handle_tool_call(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> MemoryResult {
+        MemoryManager::handle_tool_call(self, name, args).await
+    }
+}
+
 /// Infer `(action, target, content)` from the tool call so mirror observers
 /// receive a typed event regardless of the wire name used. Returns None
 /// when the tool name is not an add/replace/remove — mirror is not called.

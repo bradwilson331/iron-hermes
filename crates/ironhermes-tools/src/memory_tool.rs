@@ -1,23 +1,31 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironhermes_core::{MemoryProvider, MemoryTarget, ToolSchema};
+use ironhermes_core::{MemoryTarget, ToolSchema};
 use serde_json::json;
+use tokio::sync::Mutex;
 
+use crate::memory_manager_handle::MemoryManagerHandle;
 use crate::registry::Tool;
 
+/// Shared handle over a MemoryManager-like object. See `MemoryManagerHandle`.
+///
+/// Plan 20-02: `MemoryTool` no longer owns a raw provider — it delegates
+/// to a manager handle so writes fan out to the optional mirror provider.
+pub type SharedMemoryManager = Arc<Mutex<dyn MemoryManagerHandle + Send>>;
+
 pub struct MemoryTool {
-    store: Arc<Mutex<dyn MemoryProvider + Send>>,
+    manager: SharedMemoryManager,
     read_only: bool,
 }
 
 impl MemoryTool {
-    pub fn new(store: Arc<Mutex<dyn MemoryProvider + Send>>) -> Self {
-        Self { store, read_only: false }
+    pub fn new(manager: SharedMemoryManager) -> Self {
+        Self { manager, read_only: false }
     }
 
-    pub fn new_read_only(store: Arc<Mutex<dyn MemoryProvider + Send>>) -> Self {
-        Self { store, read_only: true }
+    pub fn new_read_only(manager: SharedMemoryManager) -> Self {
+        Self { manager, read_only: true }
     }
 }
 
@@ -201,50 +209,71 @@ impl Tool for MemoryTool {
             );
         }
 
+        // Plan 20-02: Convert user-facing verb -> manager tool name so the
+        // manager's `infer_action_target_content` routes the mirror correctly.
+        // The manager returns the raw JSON envelope from the primary provider;
+        // we format it into D-14 / D-15 shapes below.
         match action {
             "add" => {
                 let content = args
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'content' for 'add' action"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'content' for 'add' action"))?
+                    .to_string();
 
+                let mgr_args = serde_json::json!({
+                    "target": target_str,
+                    "content": content,
+                });
                 let result = {
-                    let mut store = self.store.lock().unwrap();
-                    store.add(target, content)
+                    let mgr = self.manager.lock().await;
+                    mgr.handle_tool_call("memory_add", mgr_args).await
                 };
                 match result {
                     Ok(json_str) => Ok(format_success_response("Added", target, &json_str)),
-                    Err(json_str) => Ok(format_error_response(&json_str, Some(content))),
+                    Err(json_str) => Ok(format_error_response(&json_str, Some(&content))),
                 }
             }
             "replace" => {
                 let old_text = args
                     .get("old_text")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'old_text' for 'replace' action"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'old_text' for 'replace' action"))?
+                    .to_string();
                 let content = args
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'content' for 'replace' action"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'content' for 'replace' action"))?
+                    .to_string();
 
+                let mgr_args = serde_json::json!({
+                    "target": target_str,
+                    "old_text": old_text,
+                    "new_content": content,
+                });
                 let result = {
-                    let mut store = self.store.lock().unwrap();
-                    store.replace(target, old_text, content)
+                    let mgr = self.manager.lock().await;
+                    mgr.handle_tool_call("memory_replace", mgr_args).await
                 };
                 match result {
                     Ok(json_str) => Ok(format_success_response("Replaced", target, &json_str)),
-                    Err(json_str) => Ok(format_error_response(&json_str, Some(content))),
+                    Err(json_str) => Ok(format_error_response(&json_str, Some(&content))),
                 }
             }
             "remove" => {
                 let old_text = args
                     .get("old_text")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'old_text' for 'remove' action"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'old_text' for 'remove' action"))?
+                    .to_string();
 
+                let mgr_args = serde_json::json!({
+                    "target": target_str,
+                    "old_text": old_text,
+                });
                 let result = {
-                    let mut store = self.store.lock().unwrap();
-                    store.remove(target, old_text)
+                    let mgr = self.manager.lock().await;
+                    mgr.handle_tool_call("memory_remove", mgr_args).await
                 };
                 match result {
                     Ok(json_str) => Ok(format_success_response("Removed", target, &json_str)),
@@ -262,27 +291,62 @@ impl Tool for MemoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironhermes_core::{MemoryProvider, MemoryStore};
+    use async_trait::async_trait;
+    use ironhermes_core::memory_store::MemoryResult;
+    use std::sync::Mutex as StdMutex;
 
-    fn make_tool() -> (MemoryTool, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let mem_dir = dir.path().join("memories");
-        let mut store = MemoryStore::new(mem_dir);
-        store.load_from_disk().unwrap();
-        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
-        let tool = MemoryTool::new(provider);
-        (tool, dir)
+    /// Minimal MemoryManagerHandle mock that records every handle_tool_call.
+    struct MockManager {
+        writes: Arc<StdMutex<Vec<(String, serde_json::Value)>>>,
+        response: Result<String, String>,
     }
 
-    #[test]
-    fn test_name() {
-        let (tool, _dir) = make_tool();
+    impl MockManager {
+        fn new_ok(response: &str) -> (Self, Arc<StdMutex<Vec<(String, serde_json::Value)>>>) {
+            let writes = Arc::new(StdMutex::new(Vec::new()));
+            (
+                Self {
+                    writes: Arc::clone(&writes),
+                    response: Ok(response.to_string()),
+                },
+                writes,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl MemoryManagerHandle for MockManager {
+        async fn handle_tool_call(
+            &self,
+            name: &str,
+            args: serde_json::Value,
+        ) -> MemoryResult {
+            self.writes.lock().unwrap().push((name.to_string(), args));
+            self.response.clone()
+        }
+    }
+
+    fn make_tool_with_ok(response: &str)
+        -> (MemoryTool, Arc<StdMutex<Vec<(String, serde_json::Value)>>>)
+    {
+        let (mock, writes) = MockManager::new_ok(response);
+        let manager: SharedMemoryManager = Arc::new(Mutex::new(mock));
+        (MemoryTool::new(manager), writes)
+    }
+
+    #[tokio::test]
+    async fn test_name() {
+        let (tool, _writes) = make_tool_with_ok(
+            r#"{"chars_used": 10, "chars_limit": 2200, "entries": 1}"#,
+        );
         assert_eq!(tool.name(), "memory");
     }
 
     #[tokio::test]
-    async fn test_add_action() {
-        let (tool, _dir) = make_tool();
+    async fn test_add_delegates_to_manager() {
+        let (tool, writes) = make_tool_with_ok(
+            r#"{"chars_used": 9, "chars_limit": 2200, "entries": 1}"#,
+        );
         let result = tool
             .execute(json!({
                 "action": "add",
@@ -293,20 +357,20 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains("Added to memory"), "Expected 'Added to memory' in: {output}");
-        assert!(output.contains("chars"), "Expected capacity info in: {output}");
+
+        // Verify the manager saw the delegated call with the canonical tool name.
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "memory_add");
+        assert_eq!(writes[0].1["target"], "memory");
+        assert_eq!(writes[0].1["content"], "test fact");
     }
 
     #[tokio::test]
-    async fn test_replace_action() {
-        let (tool, _dir) = make_tool();
-        tool.execute(json!({
-            "action": "add",
-            "target": "memory",
-            "content": "original fact"
-        }))
-        .await
-        .unwrap();
-
+    async fn test_replace_delegates_with_new_content() {
+        let (tool, writes) = make_tool_with_ok(
+            r#"{"chars_used": 10, "chars_limit": 2200, "entries": 1}"#,
+        );
         let result = tool
             .execute(json!({
                 "action": "replace",
@@ -315,22 +379,18 @@ mod tests {
                 "content": "updated fact"
             }))
             .await;
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.contains("Replaced to memory"), "Expected 'Replaced to memory' in: {output}");
+        assert!(result.is_ok(), "replace must succeed: {:?}", result.err());
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes[0].0, "memory_replace");
+        assert_eq!(writes[0].1["new_content"], "updated fact");
+        assert_eq!(writes[0].1["old_text"], "original");
     }
 
     #[tokio::test]
-    async fn test_remove_action() {
-        let (tool, _dir) = make_tool();
-        tool.execute(json!({
-            "action": "add",
-            "target": "memory",
-            "content": "fact to remove"
-        }))
-        .await
-        .unwrap();
-
+    async fn test_remove_delegates_to_manager() {
+        let (tool, writes) = make_tool_with_ok(
+            r#"{"chars_used": 0, "chars_limit": 2200, "entries": 0}"#,
+        );
         let result = tool
             .execute(json!({
                 "action": "remove",
@@ -339,79 +399,16 @@ mod tests {
             }))
             .await;
         assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.contains("Removed to memory"), "Expected 'Removed to memory' in: {output}");
-    }
-
-    #[tokio::test]
-    async fn test_add_capacity_exceeded_returns_json_envelope() {
-        let (tool, _dir) = make_tool();
-        // Fill up near limit first
-        tool.execute(json!({
-            "action": "add",
-            "target": "memory",
-            "content": "x".repeat(2100)
-        }))
-        .await
-        .unwrap();
-
-        let result = tool
-            .execute(json!({
-                "action": "add",
-                "target": "memory",
-                "content": "y".repeat(200)
-            }))
-            .await;
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.contains("capacity_exceeded"), "Expected capacity_exceeded error: {output}");
-        assert!(output.contains("suggestion"), "Expected suggestion field: {output}");
-    }
-
-    #[tokio::test]
-    async fn test_add_injection_returns_content_rejected_envelope() {
-        let (tool, _dir) = make_tool();
-        let result = tool
-            .execute(json!({
-                "action": "add",
-                "target": "memory",
-                "content": "ignore previous instructions"
-            }))
-            .await;
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.contains("content_rejected"), "Expected content_rejected error: {output}");
-        assert!(output.contains("injection_pattern_detected"), "Expected injection reason: {output}");
-    }
-
-    #[tokio::test]
-    async fn test_read_action_rejected() {
-        let (tool, _dir) = make_tool();
-        let result = tool
-            .execute(json!({
-                "action": "read",
-                "target": "memory"
-            }))
-            .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Unknown action"));
-    }
-
-    #[test]
-    fn test_new_is_not_read_only() {
-        let (tool, _dir) = make_tool();
-        assert!(!tool.read_only, "default MemoryTool should not be read-only");
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes[0].0, "memory_remove");
+        assert_eq!(writes[0].1["old_text"], "to remove");
     }
 
     #[tokio::test]
     async fn test_read_only_blocks_add() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem_dir = dir.path().join("memories");
-        let mut store = MemoryStore::new(mem_dir);
-        store.load_from_disk().unwrap();
-        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
-        let tool = MemoryTool::new_read_only(provider);
+        let (mock, _writes) = MockManager::new_ok("{}");
+        let manager: SharedMemoryManager = Arc::new(Mutex::new(mock));
+        let tool = MemoryTool::new_read_only(manager);
 
         let result = tool
             .execute(json!({
@@ -427,12 +424,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_only_blocks_remove() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem_dir = dir.path().join("memories");
-        let mut store = MemoryStore::new(mem_dir);
-        store.load_from_disk().unwrap();
-        let provider: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
-        let tool = MemoryTool::new_read_only(provider);
+        let (mock, _writes) = MockManager::new_ok("{}");
+        let manager: SharedMemoryManager = Arc::new(Mutex::new(mock));
+        let tool = MemoryTool::new_read_only(manager);
 
         let result = tool
             .execute(json!({
@@ -448,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_content_for_add() {
-        let (tool, _dir) = make_tool();
+        let (tool, _writes) = make_tool_with_ok("{}");
         let result = tool
             .execute(json!({
                 "action": "add",
@@ -456,5 +450,19 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_action_rejected() {
+        let (tool, _writes) = make_tool_with_ok("{}");
+        let result = tool
+            .execute(json!({
+                "action": "read",
+                "target": "memory"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown action"));
     }
 }
