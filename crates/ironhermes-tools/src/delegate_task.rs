@@ -764,14 +764,31 @@ mod tests {
     }
 
     #[test]
-    fn test_delegate_task_schema_has_required_task() {
+    fn test_delegate_task_schema_task_and_tasks_are_mutually_exclusive_optional() {
+        // Per WR-01 (commit bbf48db): `task` and `tasks` are mutually exclusive,
+        // so neither appears in `required`. Runtime validation in `execute()` enforces
+        // that at least one is present.
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let params = &schema.function.parameters;
         let required = params["required"].as_array().unwrap();
         assert!(
-            required.iter().any(|v| v.as_str() == Some("task")),
-            "schema must have 'task' as required"
+            required.is_empty(),
+            "schema 'required' must be empty — mutual exclusivity is enforced at runtime"
+        );
+        let props = &params["properties"];
+        assert!(props.get("task").is_some(), "schema should expose 'task' property");
+        assert!(props.get("tasks").is_some(), "schema should expose 'tasks' property");
+    }
+
+    #[tokio::test]
+    async fn test_delegate_task_execute_rejects_when_neither_task_nor_tasks_provided() {
+        let tool = make_delegate_tool();
+        let err = tool.execute(json!({})).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("task") && msg.contains("tasks"),
+            "error should mention both 'task' and 'tasks'; got: {msg}"
         );
     }
 
