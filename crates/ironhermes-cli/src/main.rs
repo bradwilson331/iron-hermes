@@ -14,6 +14,7 @@ use tracing::info;
 
 mod cron;
 mod batch;
+mod memory_setup;
 use ironhermes_cli::skills_cmd;
 
 #[derive(Parser)]
@@ -85,6 +86,17 @@ enum Commands {
         #[command(subcommand)]
         action: skills_cmd::SkillsAction,
     },
+    /// Memory provider management (Plan 20-03, D-08).
+    Memory {
+        #[command(subcommand)]
+        action: MemorySubcommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemorySubcommand {
+    /// Interactive setup for the currently-selected memory provider.
+    Setup,
 }
 
 #[tokio::main]
@@ -120,6 +132,9 @@ async fn main() -> Result<()> {
                 Ok(code) => { std::process::exit(code); }
                 Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
             }
+        }
+        Some(Commands::Memory { action: MemorySubcommand::Setup }) => {
+            memory_setup::run_memory_setup(&cli).await
         }
         None => {
             if let Some(ref prompt) = cli.execute {
