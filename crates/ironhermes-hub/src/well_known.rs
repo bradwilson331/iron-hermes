@@ -210,9 +210,17 @@ impl WellKnownSkillSource {
     }
 }
 
-/// Returns `true` if `host` is a loopback or RFC-1918 private address.
+/// Returns `true` if `host` is a loopback, RFC-1918, or IPv6 private/link-local address.
 fn is_private_host(host: &str) -> bool {
+    // Strip brackets from IPv6 addresses in URLs (e.g. "[::1]" -> "::1")
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return true;
+    }
+    // IPv6 link-local (fe80::) and unique-local (fc00::/fd00::)
+    let lower = host.to_lowercase();
+    if lower.starts_with("fe80:") || lower.starts_with("fc00:") || lower.starts_with("fd00:") {
         return true;
     }
     // RFC-1918 ranges
@@ -405,10 +413,22 @@ mod tests {
     }
 
     #[test]
+    fn is_private_host_rejects_ipv6_private() {
+        assert!(is_private_host("fe80::1"));         // link-local
+        assert!(is_private_host("FE80::1"));         // case-insensitive
+        assert!(is_private_host("fc00::1"));         // unique-local
+        assert!(is_private_host("fd00::abcd"));      // unique-local
+        assert!(is_private_host("[::1]"));            // bracket-wrapped loopback
+        assert!(is_private_host("[fe80::1]"));        // bracket-wrapped link-local
+        assert!(is_private_host("[fd00::1]"));        // bracket-wrapped unique-local
+    }
+
+    #[test]
     fn is_private_host_allows_public() {
         assert!(!is_private_host("example.com"));
         assert!(!is_private_host("github.com"));
         assert!(!is_private_host("172.32.0.1")); // outside 172.16-31 range
+        assert!(!is_private_host("2001:db8::1")); // documentation address, not private
     }
 
     #[test]
