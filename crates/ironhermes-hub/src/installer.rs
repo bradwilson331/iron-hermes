@@ -226,7 +226,7 @@ pub async fn update(
     if old_hash == new_hash {
         return Err(HubError::Typed {
             kind: HubErrorKind::AlreadyInstalled,
-            message: format!("skill '{}' is already up to date (hash: {})", skill_name, &old_hash[..12]),
+            message: format!("skill '{}' is already up to date (hash: {})", skill_name, old_hash.get(..12).unwrap_or(&old_hash)),
             suggestion: None,
             retry_after_s: None,
         });

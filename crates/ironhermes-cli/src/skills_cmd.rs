@@ -241,7 +241,7 @@ pub async fn cmd_install(cfg: &Config, identifier: &str) -> anyhow::Result<i32> 
                 outcome.name,
                 outcome.install_path.display(),
                 trust_level_str(outcome.trust_level),
-                &outcome.content_hash[..12],
+                outcome.content_hash.get(..12).unwrap_or(&outcome.content_hash),
             );
             Ok(0)
         }
@@ -400,8 +400,8 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32>
                 println!(
                     "updated '{}': {} → {} ({})",
                     outcome.name,
-                    &outcome.old_hash[..12],
-                    &outcome.new_hash[..12],
+                    outcome.old_hash.get(..12).unwrap_or(&outcome.old_hash),
+                    outcome.new_hash.get(..12).unwrap_or(&outcome.new_hash),
                     outcome.scan_verdict,
                 );
             }
