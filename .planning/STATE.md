@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 20-02-memory-manager-and-wiring-PLAN.md
-last_updated: "2026-04-16T14:09:02.794Z"
+stopped_at: Completed 20-04-provider-hook-adoption-PLAN.md
+last_updated: "2026-04-16T14:24:00.312Z"
 last_activity: 2026-04-16
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 4
-  completed_plans: 2
-  percent: 50
+  completed_plans: 3
+  percent: 75
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 20 (memory-provider-plugin-contract) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-04-16
 
@@ -70,6 +70,7 @@ Progress: [██████████] 100%
 | Phase 18 P15 | 3 | 3 tasks | 4 files |
 | Phase 20-memory-provider-plugin-contract P01 | 19 | 3 tasks | 10 files |
 | Phase 20 P02 | 42 min | 3 tasks | 13 files |
+| Phase 20 P04 | 8 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,10 @@ Recent decisions affecting current work:
 - [Phase 20]: Plan 20-02: MemoryManagerHandle trait in ironhermes-tools resolves tools→agent circular dep; impl lives in ironhermes-agent so MemoryTool can delegate to handle_tool_call via dyn dispatch
 - [Phase 20]: Plan 20-02: full workspace migration from std::sync::Mutex to tokio::sync::Mutex executed atomically; load_memory promoted to async fn; queue_prefetch fires as detached tokio::spawn on natural-end break with last user message as query
 - [Phase 20]: Plan 20-02: on_pre_compress fire site placed inside ContextEngine.compress_messages (not at caller boundary) to structurally guarantee D-23 ordering; trait-level contract test in ironhermes-core locks the ordering into a regression test reusable by any future provider crate
+- [Phase 20]: Plan 20-04: file-provider get_config_schema written in memory_provider.rs (actual impl site from 20-01), not memory_store.rs; tests placed in memory_store.rs tests mod with qualified trait syntax
+- [Phase 20]: Plan 20-04: ConfigField.description is Option<String> — all 4 providers use Some("...".to_string()); assertion helper uses is_some_and non-empty
+- [Phase 20]: Plan 20-04: sqlite_mirror_fixture uses Arc<tokio::sync::Mutex<dyn MemoryProvider + Send>> SharedProvider (per 20-02), not Box<dyn>+parking_lot as plan samples showed; no new dep
+- [Phase 20]: Plan 20-04: DuckDB threads field declarative only — wizard prompts+persists; PRAGMA threads=N runtime wiring deferred
 
 ### Pending Todos
 
@@ -124,6 +129,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-16T14:09:02.792Z
-Stopped at: Completed 20-02-memory-manager-and-wiring-PLAN.md
+Last session: 2026-04-16T14:24:00.311Z
+Stopped at: Completed 20-04-provider-hook-adoption-PLAN.md
 Resume file: None
