@@ -103,7 +103,8 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None.
+4 pending. Latest:
+- [memory] Memory does not persist across gateway restart and chat mode has no memory wiring (2026-04-16)
 
 ### Blockers/Concerns
 
