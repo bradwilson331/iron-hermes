@@ -610,7 +610,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // Feature-gated: memory.provider=sqlite requires --features memory-sqlite, etc.
     // Factory handles disk-load for the file provider internally.
     let memory_store: Arc<Mutex<dyn MemoryProvider + Send>> =
-        ironhermes_agent::memory::factory::build_memory_provider(&config.memory)?;
+        ironhermes_agent::memory::factory::build_memory_provider(&config.memory).await?;
 
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry();
