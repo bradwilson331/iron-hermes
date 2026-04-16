@@ -14,9 +14,11 @@ use std::path::Path;
 use async_trait::async_trait;
 use grafeo::{Config, GrafeoDB, NodeId, Value};
 use grafeo_common::types::PropertyKey;
+use serde_json::Value as JsonValue;
+
 use ironhermes_core::constants::ENTRY_DELIMITER;
 use ironhermes_core::context_scanner::scan_context_content;
-use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider, MemoryProviderConfig};
+use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
 
 use schema::{NODE_LABEL, PROP_CONTENT, PROP_CREATED_AT, PROP_TARGET};
@@ -138,8 +140,17 @@ impl GrafeoMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for GrafeoMemoryProvider {
-    async fn initialize(&mut self, _config: &MemoryProviderConfig) -> anyhow::Result<()> {
-        // Database and indexes are initialized in new(); no-op here.
+    fn name(&self) -> &'static str { "grafeo" }
+
+    async fn initialize(
+        &mut self,
+        _session_id: &str,
+        _hermes_home: &Path,
+        _provider_config: &JsonValue,
+    ) -> anyhow::Result<()> {
+        // Existing construction happens in Provider::new(db_path). Provider-specific
+        // config derived from `_provider_config` is wired in Plan 20-04 when the
+        // provider adopts `get_config_schema`. Phase 20-01 keeps this a no-op.
         Ok(())
     }
 

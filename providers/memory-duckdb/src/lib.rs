@@ -15,10 +15,11 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use ironhermes_core::constants::ENTRY_DELIMITER;
 use ironhermes_core::context_scanner::scan_context_content;
-use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider, MemoryProviderConfig};
+use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
 
 use bridge::{DuckDbBridge, DuckDbCommand};
@@ -112,8 +113,17 @@ impl DuckDbMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for DuckDbMemoryProvider {
-    async fn initialize(&mut self, _config: &MemoryProviderConfig) -> anyhow::Result<()> {
-        // Schema created in new(); no-op here.
+    fn name(&self) -> &'static str { "duckdb" }
+
+    async fn initialize(
+        &mut self,
+        _session_id: &str,
+        _hermes_home: &Path,
+        _provider_config: &Value,
+    ) -> anyhow::Result<()> {
+        // Existing construction happens in Provider::new(db_path). Provider-specific
+        // config derived from `_provider_config` is wired in Plan 20-04 when the
+        // provider adopts `get_config_schema`. Phase 20-01 keeps this a no-op.
         Ok(())
     }
 

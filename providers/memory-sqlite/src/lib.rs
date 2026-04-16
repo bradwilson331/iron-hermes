@@ -14,10 +14,11 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rusqlite::Connection;
+use serde_json::Value;
 
 use ironhermes_core::constants::ENTRY_DELIMITER;
 use ironhermes_core::context_scanner::scan_context_content;
-use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider, MemoryProviderConfig};
+use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
 
 // =============================================================================
@@ -80,8 +81,17 @@ impl SqliteMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for SqliteMemoryProvider {
-    async fn initialize(&mut self, _config: &MemoryProviderConfig) -> anyhow::Result<()> {
-        // Schema is created in new(); no-op here.
+    fn name(&self) -> &'static str { "sqlite" }
+
+    async fn initialize(
+        &mut self,
+        _session_id: &str,
+        _hermes_home: &Path,
+        _provider_config: &Value,
+    ) -> anyhow::Result<()> {
+        // Existing construction happens in Provider::new(db_path). Provider-specific
+        // config derived from `_provider_config` is wired in Plan 20-04 when the
+        // provider adopts `get_config_schema`. Phase 20-01 keeps this a no-op.
         Ok(())
     }
 

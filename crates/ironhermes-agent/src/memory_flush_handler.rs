@@ -41,8 +41,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use ironhermes_core::memory_store::MemoryResult;
-    use ironhermes_core::{MemoryEntries, MemoryProviderConfig, MemoryTarget};
+    use ironhermes_core::{MemoryEntries, MemoryTarget};
     use ironhermes_hooks::{HookRegistry, HooksConfig};
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Minimal MemoryProvider that records sync_turn invocations.
@@ -65,7 +66,14 @@ mod tests {
 
     #[async_trait]
     impl MemoryProvider for MockProvider {
-        async fn initialize(&mut self, _cfg: &MemoryProviderConfig) -> anyhow::Result<()> {
+        fn name(&self) -> &'static str { "mock" }
+
+        async fn initialize(
+            &mut self,
+            _session_id: &str,
+            _hermes_home: &Path,
+            _provider_config: &serde_json::Value,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
         async fn prefetch(&self, _session_id: &str) -> anyhow::Result<MemoryEntries> {
