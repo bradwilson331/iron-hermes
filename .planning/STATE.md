@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 20 context gathered
-last_updated: "2026-04-16T11:32:42.445Z"
+stopped_at: Completed 20-01-trait-enrichment-and-factory-fix-PLAN.md
+last_updated: "2026-04-16T12:48:23.449Z"
 last_activity: 2026-04-16
 progress:
-  total_phases: 10
-  completed_phases: 9
-  total_plans: 45
-  completed_plans: 45
-  percent: 100
+  total_phases: 1
+  completed_phases: 0
+  total_plans: 4
+  completed_plans: 1
+  percent: 25
 ---
 
 # Project State
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 18 — context-compression
+**Current focus:** Phase 20 — memory-provider-plugin-contract
 
 ## Current Position
 
-Phase: 19
-Plan: Not started
+Phase: 20 (memory-provider-plugin-contract) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
 Last activity: 2026-04-16
 
@@ -68,6 +68,7 @@ Progress: [██████████] 100%
 | Phase 19 P05 | 8 min | 2 tasks | 2 files |
 | Phase 19 P06 | 7min | 2 tasks | 7 files |
 | Phase 18 P15 | 3 | 3 tasks | 4 files |
+| Phase 20-memory-provider-plugin-contract P01 | 19 | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,10 @@ Recent decisions affecting current work:
 - [Phase 19]: Plan 05: scan_skill_content layers SKILL_THREAT_PATTERNS over existing context THREAT_PATTERNS via short-circuit composition; scope=frontmatter+body (D-14), enforcement=Community-hard-reject + Builtin/Official-WARN-BUT-LOAD at registry-load (D-15/D-16)
 - [Phase 18]: Disk-load responsibility moved into agent factory file branch so gateway needs only a single factory call
 - [Phase 18]: Used .err().unwrap() instead of .unwrap_err() to extract errors from Result<Arc<Mutex<dyn MemoryProvider>>, _> which lacks Debug on T
+- [Phase 20-memory-provider-plugin-contract]: Plan 20-01: kept std::sync::Mutex in build_memory_provider return type; deferred tokio::sync::Mutex workspace migration to Plan 20-02 atomic wave
+- [Phase 20-memory-provider-plugin-contract]: Plan 20-01: grafeo DB path must use .grafeo file extension (memory_graph.grafeo) — required for grafeo persistence flush
+- [Phase 20-memory-provider-plugin-contract]: Plan 20-01: MemoryProviderConfig deleted entirely (no compat shim per D-10/D-20); all providers migrated in lockstep
+- [Phase 20-memory-provider-plugin-contract]: Plan 20-01: env-mutating tests use OnceLock<Mutex<()>> + double-set idiom (re-assert IRONHERMES_HOME before each build_memory_provider call) to tolerate racing prompt_builder tests
 
 ### Pending Todos
 
@@ -115,6 +120,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-16T11:32:42.442Z
-Stopped at: Phase 20 context gathered
-Resume file: .planning/phases/20-memory-provider-plugin-contract/20-CONTEXT.md
+Last session: 2026-04-16T12:48:08.734Z
+Stopped at: Completed 20-01-trait-enrichment-and-factory-fix-PLAN.md
+Resume file: None
