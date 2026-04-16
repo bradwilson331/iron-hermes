@@ -15,6 +15,7 @@ use tracing::info;
 mod cron;
 mod batch;
 mod memory_setup;
+mod tui;
 use ironhermes_cli::skills_cmd;
 
 #[derive(Parser)]
