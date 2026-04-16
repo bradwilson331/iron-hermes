@@ -488,10 +488,26 @@ impl SkillRegistry {
         let mut registry = Self::load_with_paths(&search_paths);
 
         // D-08: recompute trust labels on every load from config.hub.trusted_repos.
-        // skills_root is the second default path (get_hermes_home()/skills), which
-        // is where Hub installs land and where .hub/lock.json lives.
-        let skills_root = get_hermes_home().join("skills");
-        let manifest = load_hub_manifest(&skills_root);
+        // The primary skills root is get_hermes_home()/skills (where Hub installs
+        // land); extra_paths may also contain skills roots with their own .hub/
+        // directories. Merge all manifests: entries from earlier paths win on
+        // install_path collision (same first-path-wins priority as skill loading).
+        let mut merged_manifest = HubManifestReadOnly { installed: std::collections::HashMap::new() };
+        // Process all search paths in reverse priority order so that
+        // higher-priority paths overwrite lower-priority on collision.
+        let hub_roots: Vec<PathBuf> = search_paths
+            .iter()
+            .rev()
+            .chain(std::iter::once(&get_hermes_home().join("skills")))
+            .cloned()
+            .collect();
+        for root in &hub_roots {
+            let m = load_hub_manifest(root);
+            for (k, v) in m.installed {
+                merged_manifest.installed.insert(k, v);
+            }
+        }
+        let manifest = merged_manifest;
         let trusted = config.hub.trusted_repos_set();
 
         for record in registry.skills.iter_mut() {
