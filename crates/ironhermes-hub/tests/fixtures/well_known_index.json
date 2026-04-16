@@ -1,0 +1,9 @@
+[
+  {
+    "name": "foo-skill",
+    "description": "Example well-known skill",
+    "version": "1.0",
+    "identifier": "well-known:example.com/foo-skill",
+    "tarball_url": "https://example.com/foo-skill.tar.gz"
+  }
+]

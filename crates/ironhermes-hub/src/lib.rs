@@ -6,11 +6,18 @@
 
 pub mod auth;
 pub mod error;
+pub mod github;
 pub mod manifest;
 pub mod paths;
+pub mod skills_sh;
 pub mod source;
+pub mod tarball;
+pub mod well_known;
 
 pub use auth::GitHubAuth;
 pub use error::{HubError, HubErrorKind};
+pub use github::{GitHubSource, GitHubTap};
 pub use manifest::{HubManifest, ManifestEntry};
+pub use skills_sh::SkillsShSource;
 pub use source::{BundleFile, HubSource, SkillBundle, SkillMeta};
+pub use well_known::WellKnownSkillSource;

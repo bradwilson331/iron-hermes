@@ -58,6 +58,21 @@ impl GitHubAuth {
         None
     }
 
+    /// Create an anonymous (no-token) auth.
+    pub fn anonymous() -> Self {
+        Self { token: None }
+    }
+
+    /// Create auth from an explicit token string.
+    pub fn from_token(token: String) -> Self {
+        Self { token: Some(token) }
+    }
+
+    /// Returns `Some("Bearer <token>")` if a token is present, `None` otherwise.
+    pub fn authorization_header(&self) -> Option<String> {
+        self.token.as_ref().map(|t| format!("Bearer {t}"))
+    }
+
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
     }
