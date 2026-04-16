@@ -189,6 +189,38 @@ pub fn trust_level_str(s: ironhermes_core::SkillSource) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Trust recomputation helper (D-08: never frozen in manifest)
+// ---------------------------------------------------------------------------
+
+/// Recompute the trust level string for a manifest entry from live config.
+///
+/// IMPORTANT: This must stay in sync with `resolve_source` in
+/// `ironhermes-core/src/skills.rs` and the adapters' `trust_level_for` methods
+/// (`GitHubSource`, `WellKnownSkillSource`, `SkillsShSource`).
+fn recompute_trust_str(
+    source: &str,
+    identifier: &str,
+    trusted_set: &std::collections::HashSet<String>,
+) -> &'static str {
+    if source == "github" {
+        let owner_repo = identifier
+            .splitn(3, '/')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("/");
+        if trusted_set.contains(&owner_repo) {
+            "trusted"
+        } else {
+            "community"
+        }
+    } else if source == "well-known" || source == "skills-sh" {
+        "community"
+    } else {
+        "builtin"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Command handlers — public for lib-level (test) access
 // ---------------------------------------------------------------------------
 
@@ -454,18 +486,7 @@ pub fn cmd_list_impl(cfg: &Config, format: Format) -> String {
         .values()
         .map(|e| {
             // Recompute trust per D-08 (never frozen in manifest)
-            let trust_level = if e.source == "github" {
-                let owner_repo = e.identifier.splitn(3, '/').take(2).collect::<Vec<_>>().join("/");
-                if trusted_set.contains(&owner_repo) {
-                    "trusted"
-                } else {
-                    "community"
-                }
-            } else if e.source == "well-known" || e.source == "skills-sh" {
-                "community"
-            } else {
-                "builtin"
-            };
+            let trust_level = recompute_trust_str(&e.source, &e.identifier, &trusted_set);
             serde_json::json!({
                 "name": e.name,
                 "source": e.source,
