@@ -16,7 +16,7 @@ pub use config::{
 pub use constants::*;
 pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
 pub use error::{HermesError, Result};
-pub use memory_provider::{build_memory_provider, MemoryEntries, MemoryProvider, MemoryProviderConfig};
+pub use memory_provider::{MemoryEntries, MemoryProvider, MemoryProviderConfig};
 pub use memory_store::{MemoryStore, MemoryTarget};
 pub use provider::{ProviderResolver, ResolvedEndpoint};
 pub use skills::{

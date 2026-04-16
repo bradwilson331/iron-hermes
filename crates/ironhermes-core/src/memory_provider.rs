@@ -2,7 +2,6 @@
 //!
 //! MEM-07: Trait with Send + Sync + 'static bounds and async lifecycle hooks.
 //! MEM-08: MemoryStore implements the trait as the default file-based backend.
-//! MEM-12: Single-provider selection via config with build_memory_provider factory.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -127,33 +126,3 @@ impl MemoryProvider for MemoryStore {
     }
 }
 
-// =============================================================================
-// Factory function (MEM-12, D-09)
-// =============================================================================
-
-/// Build a memory provider from config. Hard error on unknown/unavailable provider (D-09).
-#[deprecated(note = "Use ironhermes_agent::memory::factory::build_memory_provider instead")]
-pub fn build_memory_provider(
-    config: &crate::config::MemoryConfig,
-) -> anyhow::Result<Box<dyn MemoryProvider + Send>> {
-    match config.provider.as_str() {
-        "file" => {
-            let memory_dir = crate::constants::get_hermes_home().join("memories");
-            let store = MemoryStore::new(memory_dir);
-            Ok(Box::new(store))
-        }
-        "sqlite" | "grafeo" | "duckdb" => {
-            anyhow::bail!(
-                "Memory provider '{}' requires a feature flag that is not enabled. \
-                 Available providers: file",
-                config.provider
-            );
-        }
-        other => {
-            anyhow::bail!(
-                "Unknown memory provider '{}'. Available providers: file",
-                other
-            );
-        }
-    }
-}
