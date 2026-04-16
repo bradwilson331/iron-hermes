@@ -103,8 +103,9 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-4 pending. Latest:
-- [memory] Memory does not persist across gateway restart and chat mode has no memory wiring (2026-04-16)
+5 pending. Latest:
+- [memory] Gateway memory does not persist across restart — factory never calls load_from_disk (2026-04-16, targets Plan 20-01)
+- [cli] Chat and single CLI modes have no memory wiring (2026-04-16, targets Plan 20-03)
 
 ### Blockers/Concerns
 
