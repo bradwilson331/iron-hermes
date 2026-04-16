@@ -115,6 +115,37 @@ impl DuckDbMemoryProvider {
 impl MemoryProvider for DuckDbMemoryProvider {
     fn name(&self) -> &'static str { "duckdb" }
 
+    fn get_config_schema(&self) -> Vec<ironhermes_core::config_schema::ConfigField> {
+        use ironhermes_core::config_schema::ConfigField;
+        use serde_json::json;
+        vec![
+            ConfigField {
+                key: "db_path".to_string(),
+                description: Some(
+                    "DuckDB database file path. Created on first run if absent.".to_string(),
+                ),
+                secret: false,
+                required: false,
+                default: Some(json!("$HERMES_HOME/memory.duckdb")),
+                choices: None,
+                env_var: None,
+                url: None,
+            },
+            ConfigField {
+                key: "threads".to_string(),
+                description: Some(
+                    "Number of worker threads DuckDB may use (default 1 for deterministic single-user workloads).".to_string(),
+                ),
+                secret: false,
+                required: false,
+                default: Some(json!(1)),
+                choices: None,
+                env_var: None,
+                url: None,
+            },
+        ]
+    }
+
     async fn initialize(
         &mut self,
         _session_id: &str,

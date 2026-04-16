@@ -142,6 +142,23 @@ impl GrafeoMemoryProvider {
 impl MemoryProvider for GrafeoMemoryProvider {
     fn name(&self) -> &'static str { "grafeo" }
 
+    fn get_config_schema(&self) -> Vec<ironhermes_core::config_schema::ConfigField> {
+        use ironhermes_core::config_schema::ConfigField;
+        use serde_json::json;
+        vec![ConfigField {
+            key: "graph_dir".to_string(),
+            description: Some(
+                "Directory holding the Grafeo graph database (file or directory). Created on first run if absent.".to_string(),
+            ),
+            secret: false,
+            required: false,
+            default: Some(json!("$HERMES_HOME/grafeo")),
+            choices: None,
+            env_var: None,
+            url: None,
+        }]
+    }
+
     async fn initialize(
         &mut self,
         _session_id: &str,
