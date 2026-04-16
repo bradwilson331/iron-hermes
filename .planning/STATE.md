@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 20-04-provider-hook-adoption-PLAN.md
-last_updated: "2026-04-16T14:24:00.312Z"
+status: verifying
+stopped_at: Completed 20-03-setup-wizard-and-chat-wiring-PLAN.md
+last_updated: "2026-04-16T14:36:31.321Z"
 last_activity: 2026-04-16
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 3
-  percent: 75
+  completed_plans: 4
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 20 (memory-provider-plugin-contract) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-16
 
 Progress: [██████████] 100%
@@ -71,6 +71,7 @@ Progress: [██████████] 100%
 | Phase 20-memory-provider-plugin-contract P01 | 19 | 3 tasks | 10 files |
 | Phase 20 P02 | 42 min | 3 tasks | 13 files |
 | Phase 20 P04 | 8 min | 3 tasks | 9 files |
+| Phase 20 P03 | 5 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -114,6 +115,10 @@ Recent decisions affecting current work:
 - [Phase 20]: Plan 20-04: ConfigField.description is Option<String> — all 4 providers use Some("...".to_string()); assertion helper uses is_some_and non-empty
 - [Phase 20]: Plan 20-04: sqlite_mirror_fixture uses Arc<tokio::sync::Mutex<dyn MemoryProvider + Send>> SharedProvider (per 20-02), not Box<dyn>+parking_lot as plan samples showed; no new dep
 - [Phase 20]: Plan 20-04: DuckDB threads field declarative only — wizard prompts+persists; PRAGMA threads=N runtime wiring deferred
+- [Phase 20]: Plan 20-03: scripted-stdin D-23 integration test uses always-present file provider (3 defaulted fields) instead of cfg-gated TestProvider — zero new code surface, full wizard round-trip still covered
+- [Phase 20]: Plan 20-03: run_memory_setup_with_io<R: BufRead, W: Write> is the pure testable core; public run_memory_setup(&Cli) is a thin wrapper that locks real stdin/stdout
+- [Phase 20]: Plan 20-03: Fix 2 closure — run_chat and run_single now build MemoryManager + register_memory_tool + set_memory_manager + delegate_task memory slot; CLI reaches gateway parity for cross-invocation memory persistence
+- [Phase 20]: Plan 20-03: static-grep regression test (run_chat_and_run_single_both_wire_memory_manager) locks the three wiring calls in main.rs against future refactor regressions
 
 ### Pending Todos
 
@@ -129,6 +134,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-16T14:24:00.311Z
-Stopped at: Completed 20-04-provider-hook-adoption-PLAN.md
+Last session: 2026-04-16T14:36:18.942Z
+Stopped at: Completed 20-03-setup-wizard-and-chat-wiring-PLAN.md
 Resume file: None
