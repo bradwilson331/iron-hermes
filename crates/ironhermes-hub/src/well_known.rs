@@ -338,7 +338,26 @@ impl HubSource for WellKnownSkillSource {
             typed(HubErrorKind::Parse, format!("index entry for '{skill_name}' has no tarball_url"))
         })?;
 
-        // Replace placeholder host with actual mock server in tests
+        // Validate tarball_url against the same SSRF guards applied to identifiers.
+        // A malicious well-known server could set tarball_url to an internal endpoint.
+        let tarball_parsed = Url::parse(&tarball_url).map_err(|e| {
+            typed(HubErrorKind::InvalidIdentifier, format!("invalid tarball_url: {e}"))
+        })?;
+        if !self.test_mode {
+            if tarball_parsed.scheme() != "https" {
+                return Err(typed(HubErrorKind::InvalidIdentifier, "tarball_url must use HTTPS"));
+            }
+            if let Some(host) = tarball_parsed.host_str() {
+                if is_private_host(host) {
+                    return Err(typed(
+                        HubErrorKind::InvalidIdentifier,
+                        format!("tarball_url has private/loopback host (SSRF guard): {host}"),
+                    ));
+                }
+            }
+        }
+
+        // Download and extract the tarball
         let files = self.fetch_tarball_bundle(&tarball_url, &skill_name).await?;
 
         if files.is_empty() {
