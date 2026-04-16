@@ -321,6 +321,119 @@ pub struct SkillRegistry {
     skills: Vec<SkillRecord>,
 }
 
+// =============================================================================
+// Hub manifest read-only types (Plan 04 — minimal local parse)
+//
+// ironhermes-core must NOT depend on ironhermes-hub (that crate depends on
+// ironhermes-core, so the reverse would cycle). We duplicate the minimal
+// manifest shape here — only the fields resolve_source() needs. Drift risk is
+// low because only `source`, `identifier`, and `install_path` are accessed;
+// all other fields are silently ignored by serde.
+// =============================================================================
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubManifestReadOnly {
+    #[serde(default)]
+    installed: std::collections::HashMap<String, HubManifestEntryReadOnly>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubManifestEntryReadOnly {
+    source: String,
+    identifier: String,
+    install_path: PathBuf,
+}
+
+/// Read `.hub/lock.json` from the skills root directory.
+///
+/// Returns an empty manifest on any I/O or parse error; the caller treats every
+/// skill as Builtin when the manifest is absent (T-19.1-04-03 mitigation).
+fn load_hub_manifest(skills_root: &Path) -> HubManifestReadOnly {
+    let p = skills_root.join(".hub").join("lock.json");
+    if !p.exists() {
+        return HubManifestReadOnly { installed: Default::default() };
+    }
+    match std::fs::read_to_string(&p) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %p.display(),
+                err = %e,
+                "failed to parse .hub/lock.json; treating all skills as Builtin (T-19.1-04-03)"
+            );
+            HubManifestReadOnly { installed: Default::default() }
+        }),
+        Err(_) => HubManifestReadOnly { installed: Default::default() },
+    }
+}
+
+/// Compute trust level for a skill at registry-load time.
+///
+/// Decision table:
+///
+/// | Condition                                              | Result    |
+/// |--------------------------------------------------------|-----------|
+/// | path has "optional-skills" component                   | Official  |
+/// | no manifest entry matching install_path               | Builtin   |
+/// | manifest entry source = "well-known"                  | Community |
+/// | manifest entry source = "skills-sh"                   | Community |
+/// | manifest entry source = "github", owner/repo in set   | Trusted   |
+/// | manifest entry source = "github", owner/repo not in set | Community |
+///
+/// D-05: `optional-skills/` → Official.
+/// D-06/D-08: hub-installed skills look up install_path in .hub/lock.json,
+///   then consult `hub.trusted_repos` (re-read every load — never frozen).
+/// D-07: well-known source is always Community regardless of config.
+///
+/// skills-sh: we do NOT re-query the skills.sh registry here — doing so would
+/// require a network call at registry-load time (violates the frozen-snapshot
+/// and no-network-at-load rules). Community is the safe default. Users who
+/// want Trusted status for a skills-sh skill must vendor the resolved repo into
+/// hub.trusted_repos explicitly.
+fn resolve_source(
+    skill_path: &Path,
+    manifest: &HubManifestReadOnly,
+    trusted_repos: &std::collections::HashSet<String>,
+) -> SkillSource {
+    // D-05: optional-skills/ is a special directory tagged Official.
+    if skill_path.components().any(|c| c.as_os_str() == "optional-skills") {
+        return SkillSource::Official;
+    }
+
+    // Find manifest entry whose install_path is an ancestor of (or equal to)
+    // the skill's parent directory.
+    let skill_dir = match skill_path.parent() {
+        Some(p) => p,
+        None => return SkillSource::Builtin,
+    };
+    let entry = manifest.installed.values().find(|e| {
+        skill_dir == e.install_path || skill_dir.starts_with(&e.install_path)
+    });
+    let entry = match entry {
+        Some(e) => e,
+        None => return SkillSource::Builtin,
+    };
+
+    // D-07: well-known is always Community.
+    if entry.source == "well-known" {
+        return SkillSource::Community;
+    }
+
+    // skills-sh: no network at load time — Community is safe default (T-19.1-04-05).
+    if entry.source == "skills-sh" {
+        return SkillSource::Community;
+    }
+
+    // github case (D-06/D-08): split "owner/repo/..." → "owner/repo" for exact match.
+    // T-19.1-04-04: splitn(3).take(2) gets exactly "owner/repo"; extra path components
+    // are ignored; HashSet comparison is exact (no substring/prefix attacks).
+    let repo = entry.identifier.splitn(3, '/').take(2).collect::<Vec<_>>().join("/");
+    if trusted_repos.contains(&repo) {
+        SkillSource::Trusted
+    } else {
+        SkillSource::Community
+    }
+}
+
 /// Build the ordered list of skill search paths for a given cwd and SkillsConfig.
 ///
 /// Defaults first (priority order), extras appended after (D-19).
@@ -361,6 +474,10 @@ impl SkillRegistry {
     /// - Otherwise, scans the 3 hardcoded defaults in priority order, then
     ///   appends `config.extra_paths` at the end. First-path-wins dedup means
     ///   defaults retain priority over extras (D-19).
+    ///
+    /// Phase 19.1 Plan 04 (D-08): after scanning, re-resolve each skill's source
+    /// by consulting .hub/lock.json and config.hub.trusted_repos. Trust is never
+    /// frozen — it is recomputed on every call by re-reading the config.
     pub fn load_with_config(cwd: &Path, config: &SkillsConfig) -> Self {
         // SKILL-08 kill switch (D-20).
         if !config.enabled {
@@ -368,7 +485,55 @@ impl SkillRegistry {
         }
 
         let search_paths = build_skill_search_paths(cwd, config);
-        Self::load_with_paths(&search_paths)
+        let mut registry = Self::load_with_paths(&search_paths);
+
+        // D-08: recompute trust labels on every load from config.hub.trusted_repos.
+        // skills_root is the second default path (get_hermes_home()/skills), which
+        // is where Hub installs land and where .hub/lock.json lives.
+        let skills_root = get_hermes_home().join("skills");
+        let manifest = load_hub_manifest(&skills_root);
+        let trusted = config.hub.trusted_repos_set();
+
+        for record in registry.skills.iter_mut() {
+            record.source = resolve_source(&record.path, &manifest, &trusted);
+        }
+
+        // Re-apply D-15 community hard-reject after source re-labeling: any skill
+        // that was Builtin (WARN-BUT-LOAD) but is now Community (hard-reject) after
+        // trust recomputation must be removed from the registry.
+        registry.skills.retain(|s| {
+            if s.source != SkillSource::Community {
+                return true; // Builtin/Official/Trusted always kept
+            }
+            // Re-scan to check if this community skill was already rejected in
+            // load_with_paths. If it was rejected there it won't be here; if it
+            // survived (because it was Builtin at scan time), re-check now.
+            let content = match std::fs::read_to_string(&s.path) {
+                Ok(c) => c,
+                Err(_) => return true, // can't re-read → keep (rare)
+            };
+            let raw_fm = extract_raw_frontmatter(&content).unwrap_or_default();
+            let body = parse_skill_md(&content)
+                .map(|(_, b)| b)
+                .unwrap_or_default();
+            let combined = format!("{}\n\n{}", raw_fm, body);
+            let scan = crate::context_scanner::scan_skill_content(
+                &combined,
+                &s.path.display().to_string(),
+            );
+            if scan.starts_with("[BLOCKED:") {
+                tracing::warn!(
+                    skill = %s.name,
+                    path = %s.path.display(),
+                    "SkillRegistry: hard-rejecting community skill after trust recompute — scan hit (D-15)"
+                );
+                false
+            } else {
+                true
+            }
+        });
+
+        registry
     }
 
     /// Load from explicit search paths (useful for testing).
@@ -2082,5 +2247,132 @@ Body.
             registry.declared_config_schema("bare").is_none(),
             "skill without metadata.hermes.config must return None"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 19.1 Plan 04: resolve_source() unit tests (D-05/D-06/D-07/D-08)
+    // -------------------------------------------------------------------------
+
+    fn make_manifest_entry(
+        source: &str,
+        identifier: &str,
+        install_path: std::path::PathBuf,
+    ) -> HubManifestEntryReadOnly {
+        HubManifestEntryReadOnly {
+            source: source.to_string(),
+            identifier: identifier.to_string(),
+            install_path,
+        }
+    }
+
+    fn make_manifest(
+        entries: Vec<(&str, HubManifestEntryReadOnly)>,
+    ) -> HubManifestReadOnly {
+        HubManifestReadOnly {
+            installed: entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_source_optional_skills_official() {
+        // D-05: path containing "optional-skills" component → Official regardless of manifest.
+        let manifest = make_manifest(vec![]);
+        let trusted: std::collections::HashSet<String> = Default::default();
+        let skill_path = std::path::Path::new("/home/user/.ironhermes/skills/optional-skills/foo/SKILL.md");
+        let result = resolve_source(skill_path, &manifest, &trusted);
+        assert_eq!(result, SkillSource::Official, "optional-skills/ path must yield Official (D-05)");
+    }
+
+    #[test]
+    fn test_resolve_source_builtin_no_manifest() {
+        // No manifest entry for this path → Builtin fallback.
+        let manifest = make_manifest(vec![]);
+        let trusted: std::collections::HashSet<String> = Default::default();
+        let skill_path = std::path::Path::new("/home/user/.ironhermes/skills/category/bar/SKILL.md");
+        let result = resolve_source(skill_path, &manifest, &trusted);
+        assert_eq!(result, SkillSource::Builtin, "no manifest entry → Builtin");
+    }
+
+    #[test]
+    fn test_resolve_source_trusted_github() {
+        // Manifest entry source=github, identifier="anthropics/skills/tenor-gif",
+        // trusted_repos=["anthropics/skills"] → Trusted.
+        let dir = tempdir().unwrap();
+        let install_path = dir.path().join("uncategorized/tenor-gif");
+        let entry = make_manifest_entry("github", "anthropics/skills/tenor-gif", install_path.clone());
+        let manifest = make_manifest(vec![("tenor-gif", entry)]);
+        let trusted: std::collections::HashSet<String> =
+            std::iter::once("anthropics/skills".to_string()).collect();
+        let skill_path = install_path.join("SKILL.md");
+        let result = resolve_source(&skill_path, &manifest, &trusted);
+        assert_eq!(result, SkillSource::Trusted, "github identifier in trusted_repos → Trusted");
+    }
+
+    #[test]
+    fn test_resolve_source_community_github() {
+        // Manifest entry source=github, identifier="unknown/repo/baz",
+        // trusted_repos=[] → Community.
+        let dir = tempdir().unwrap();
+        let install_path = dir.path().join("uncategorized/baz");
+        let entry = make_manifest_entry("github", "unknown/repo/baz", install_path.clone());
+        let manifest = make_manifest(vec![("baz", entry)]);
+        let trusted: std::collections::HashSet<String> = Default::default();
+        let skill_path = install_path.join("SKILL.md");
+        let result = resolve_source(&skill_path, &manifest, &trusted);
+        assert_eq!(result, SkillSource::Community, "github identifier not in trusted_repos → Community");
+    }
+
+    #[test]
+    fn test_resolve_source_well_known_always_community() {
+        // D-07: well-known source is always Community regardless of trusted_repos.
+        let dir = tempdir().unwrap();
+        let install_path = dir.path().join("uncategorized/foo");
+        // Even if we hypothetically put the identifier in trusted_repos, D-07 must override.
+        let entry = make_manifest_entry("well-known", "well-known:example.com/foo", install_path.clone());
+        let manifest = make_manifest(vec![("foo", entry)]);
+        let trusted: std::collections::HashSet<String> =
+            std::iter::once("example.com".to_string()).collect();
+        let skill_path = install_path.join("SKILL.md");
+        let result = resolve_source(&skill_path, &manifest, &trusted);
+        assert_eq!(result, SkillSource::Community, "well-known source always yields Community (D-07)");
+    }
+
+    #[test]
+    fn test_resolve_source_skills_sh_defaults_community() {
+        // skills-sh source: cannot re-query registry at load time (no-network-at-load rule).
+        // Falls back to Community.
+        let dir = tempdir().unwrap();
+        let install_path = dir.path().join("uncategorized/tenor-gif");
+        let entry = make_manifest_entry("skills-sh", "skills-sh:tenor-gif", install_path.clone());
+        let manifest = make_manifest(vec![("tenor-gif", entry)]);
+        let trusted: std::collections::HashSet<String> = Default::default();
+        let skill_path = install_path.join("SKILL.md");
+        let result = resolve_source(&skill_path, &manifest, &trusted);
+        assert_eq!(result, SkillSource::Community, "skills-sh source falls back to Community (no-network-at-load)");
+    }
+
+    #[test]
+    fn test_resolve_source_recomputes_on_config_change() {
+        // D-08: same path + manifest, different trusted_repos → different trust output.
+        let dir = tempdir().unwrap();
+        let install_path = dir.path().join("uncategorized/tenor-gif");
+        let entry_a = make_manifest_entry("github", "anthropics/skills/tenor-gif", install_path.clone());
+        let manifest = make_manifest(vec![("tenor-gif", entry_a)]);
+        let skill_path = install_path.join("SKILL.md");
+
+        // First call: trusted_repos contains "anthropics/skills" → Trusted
+        let trusted_with: std::collections::HashSet<String> =
+            std::iter::once("anthropics/skills".to_string()).collect();
+        let result_trusted = resolve_source(&skill_path, &manifest, &trusted_with);
+
+        // Second call: trusted_repos is empty → Community
+        let trusted_empty: std::collections::HashSet<String> = Default::default();
+        let result_community = resolve_source(&skill_path, &manifest, &trusted_empty);
+
+        assert_eq!(result_trusted, SkillSource::Trusted, "D-08: with trusted_repos → Trusted");
+        assert_eq!(result_community, SkillSource::Community, "D-08: without trusted_repos → Community");
     }
 }
