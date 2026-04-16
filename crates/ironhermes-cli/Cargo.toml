@@ -10,6 +10,10 @@ description = "Interactive CLI for IronHermes"
 name = "ironhermes"
 path = "src/main.rs"
 
+[lib]
+name = "ironhermes_cli"
+path = "src/lib.rs"
+
 [features]
 memory-sqlite = ["ironhermes-agent/memory-sqlite"]
 memory-duckdb = ["ironhermes-agent/memory-duckdb"]
@@ -23,8 +27,12 @@ ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-gateway = { path = "../ironhermes-gateway" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
+ironhermes-hub = { path = "../ironhermes-hub" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

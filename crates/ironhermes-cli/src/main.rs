@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 mod cron;
 mod batch;
+use ironhermes_cli::skills_cmd;
 
 #[derive(Parser)]
 #[command(
@@ -79,6 +80,11 @@ enum Commands {
         #[command(subcommand)]
         command: batch::BatchCommands,
     },
+    /// Manage skills from the Hub (install/search/update/uninstall/list/trust).
+    Skills {
+        #[command(subcommand)]
+        action: skills_cmd::SkillsAction,
+    },
 }
 
 #[tokio::main]
@@ -108,6 +114,13 @@ async fn main() -> Result<()> {
         Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
         Some(Commands::Batch { command }) => batch::handle_batch_command(command).await,
+        Some(Commands::Skills { action }) => {
+            let config_path = ironhermes_core::Config::config_path();
+            match skills_cmd::dispatch(&config_path, action).await {
+                Ok(code) => { std::process::exit(code); }
+                Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+            }
+        }
         None => {
             if let Some(ref prompt) = cli.execute {
                 run_single(&cli, prompt.clone()).await
