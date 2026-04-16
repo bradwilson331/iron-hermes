@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 20-03-setup-wizard-and-chat-wiring-PLAN.md
-last_updated: "2026-04-16T14:59:07.743Z"
+stopped_at: Completed 21-02-activity-watch-and-render-task-PLAN.md
+last_updated: "2026-04-16T20:33:22.632Z"
 last_activity: 2026-04-16
 progress:
-  total_phases: 1
+  total_phases: 2
   completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_plans: 7
+  completed_plans: 6
+  percent: 86
 ---
 
 # Project State
@@ -73,6 +73,7 @@ Progress: [██████████] 100%
 | Phase 20 P02 | 42 min | 3 tasks | 13 files |
 | Phase 20 P04 | 8 min | 3 tasks | 9 files |
 | Phase 20 P03 | 5 min | 2 tasks | 4 files |
+| Phase 21 P21-02 | 17 | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,9 @@ Recent decisions affecting current work:
 - [Phase 20]: Plan 20-03: run_memory_setup_with_io<R: BufRead, W: Write> is the pure testable core; public run_memory_setup(&Cli) is a thin wrapper that locks real stdin/stdout
 - [Phase 20]: Plan 20-03: Fix 2 closure — run_chat and run_single now build MemoryManager + register_memory_tool + set_memory_manager + delegate_task memory slot; CLI reaches gateway parity for cross-invocation memory persistence
 - [Phase 20]: Plan 20-03: static-grep regression test (run_chat_and_run_single_both_wire_memory_manager) locks the three wiring calls in main.rs against future refactor regressions
+- [Phase 21]: TuiHandle uses shutdown(self) consuming self — Wave 3 wraps in Arc<TuiHandle> per W3
+- [Phase 21]: ActivityState::Thinking absent (W6) — only Idle/Streaming/ToolCall{name}
+- [Phase 21]: dead_code suppressed in tui/mod.rs with module-level allow — removed in Wave 3 on wiring
 
 ### Pending Todos
 
@@ -135,6 +139,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-16T14:36:18.942Z
-Stopped at: Completed 20-03-setup-wizard-and-chat-wiring-PLAN.md
+Last session: 2026-04-16T20:33:22.630Z
+Stopped at: Completed 21-02-activity-watch-and-render-task-PLAN.md
 Resume file: None
