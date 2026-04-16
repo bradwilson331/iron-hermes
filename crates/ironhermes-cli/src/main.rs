@@ -267,6 +267,14 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let budget = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
+    // Plan 20-03 Fix 2: wire MemoryManager into run_single so the
+    // single-prompt path can read/write persistent memory.
+    let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
+        ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
+            .await
+            .context("building memory manager for single-prompt mode")?;
+    registry.register_memory_tool(memory_manager.clone());
+
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let subagent_runner = Arc::new(AgentSubagentRunner::new(
@@ -277,7 +285,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        None, // no memory store in single mode
+        Some(memory_manager.clone()),
         config.subagent.clone(),
         None, // no cancel token in single mode
         None, // no progress callback in single mode
@@ -293,6 +301,9 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry.clone());
+    // Plan 20-03 Fix 2: inject manager so the frozen-snapshot memory
+    // block renders into the system prompt.
+    prompt_builder.set_memory_manager(memory_manager.clone());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -380,6 +391,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let compression_count = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
+    // Plan 20-03 Fix 2: wire MemoryManager into run_chat so chat-mode
+    // memory persists across invocations (matches gateway parity).
+    let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
+        ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
+            .await
+            .context("building memory manager for chat mode")?;
+    registry.register_memory_tool(memory_manager.clone());
+
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let subagent_runner = Arc::new(AgentSubagentRunner::new(
@@ -422,7 +441,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        None, // no memory store in chat mode
+        Some(memory_manager.clone()),
         config.subagent.clone(),
         Some(chat_cancel_token.clone()),
         Some(subagent_progress),
@@ -437,6 +456,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry);
+    // Plan 20-03 Fix 2: inject manager before load_memory so the
+    // frozen-snapshot memory block renders into the system prompt.
+    prompt_builder.set_memory_manager(memory_manager.clone());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
