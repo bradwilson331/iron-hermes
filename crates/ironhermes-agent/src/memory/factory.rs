@@ -6,13 +6,18 @@ use ironhermes_core::constants::get_hermes_home;
 
 /// Build a memory provider from config. Returns Arc<Mutex<...>> for direct use with MemoryTool.
 /// Relocated from ironhermes-core per D-11. Feature-gated providers per D-12.
+/// For the file-backed provider, loads existing memories from disk (warn-on-error).
+/// External backends (sqlite/grafeo/duckdb) persist natively — no explicit load needed.
 pub fn build_memory_provider(
     config: &ironhermes_core::config::MemoryConfig,
 ) -> anyhow::Result<Arc<Mutex<dyn MemoryProvider + Send>>> {
     match config.provider.as_str() {
         "file" => {
             let memory_dir = get_hermes_home().join("memories");
-            let store = MemoryStore::new(memory_dir);
+            let mut store = MemoryStore::new(memory_dir);
+            if let Err(e) = store.load_from_disk() {
+                tracing::warn!("Failed to load memory from disk: {}", e);
+            }
             Ok(Arc::new(Mutex::new(store)))
         }
         #[cfg(feature = "memory-sqlite")]

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
-use ironhermes_core::{ChatMessage, Config, MemoryProvider, MemoryStore, ProviderResolver, SkillRegistry, build_memory_provider};
+use ironhermes_core::{ChatMessage, Config, MemoryProvider, ProviderResolver, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 mod cron;
 mod batch;
@@ -606,16 +606,11 @@ async fn run_agent_turn(
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config, resolver) = build_client(cli)?;
 
-    // Validate provider config — hard error on unknown/unavailable provider (D-09)
-    let _ = build_memory_provider(&config.memory)?;
-
-    // Create MemoryStore and load from disk
-    let memory_dir = ironhermes_core::get_hermes_home().join("memories");
-    let mut store = MemoryStore::new(memory_dir);
-    if let Err(e) = store.load_from_disk() {
-        warn!("Failed to load memory from disk: {}", e);
-    }
-    let memory_store: Arc<Mutex<dyn MemoryProvider + Send>> = Arc::new(Mutex::new(store));
+    // Build the memory provider from config (MEM-12, D-09, D-11, D-12).
+    // Feature-gated: memory.provider=sqlite requires --features memory-sqlite, etc.
+    // Factory handles disk-load for the file provider internally.
+    let memory_store: Arc<Mutex<dyn MemoryProvider + Send>> =
+        ironhermes_agent::memory::factory::build_memory_provider(&config.memory)?;
 
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry();
