@@ -10,8 +10,8 @@ pub mod ssrf;
 pub mod types;
 
 pub use config::{
-    ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, MemoryConfig, ModelRoleConfig,
-    ProviderConfig, SubagentConfig,
+    ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, HubConfig,
+    MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
 };
 pub use constants::*;
 pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};

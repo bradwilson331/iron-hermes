@@ -347,6 +347,40 @@ impl Default for RateLimitConfig {
 // SkillsConfig (SKILL-08)
 // =============================================================================
 
+/// Skills Hub configuration (Phase 19.1, D-04/D-08).
+///
+/// `trusted_repos` is read on every registry load (D-08 — trust is never
+/// frozen in the install manifest). Empty default (D-04).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HubConfig {
+    /// Allowlist of repos whose Hub installs become SkillSource::Trusted.
+    /// Format: "owner/repo". Default: empty.
+    pub trusted_repos: Vec<String>,
+    /// Override env var name for GitHub token; default precedence falls back
+    /// to HERMES_GITHUB_TOKEN → GITHUB_TOKEN → `gh auth token` (D-03).
+    pub github_token_env: Option<String>,
+    /// Additional GitHub taps beyond DEFAULT_TAPS (D-02).
+    pub extra_taps: Vec<ExtraTap>,
+    /// Optional well-known HTTPS origins the user wants surfaced in search
+    /// (trust is still Community per D-07 regardless of origin).
+    pub well_known_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ExtraTap {
+    pub repo: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl HubConfig {
+    pub fn trusted_repos_set(&self) -> std::collections::HashSet<String> {
+        self.trusted_repos.iter().cloned().collect()
+    }
+}
+
 /// Skills subsystem configuration (07.2 D-17, D-18, D-19, D-20).
 ///
 /// Controls whether skills are loaded at all (`enabled`) and allows the user
@@ -378,6 +412,9 @@ pub struct SkillsConfig {
     /// without forcing schema changes as new skills are added.
     #[serde(default)]
     pub config: HashMap<String, HashMap<String, serde_yaml::Value>>,
+    /// Skills Hub settings (Phase 19.1 D-04/D-08).
+    #[serde(default)]
+    pub hub: HubConfig,
 }
 
 impl Default for SkillsConfig {
@@ -387,6 +424,7 @@ impl Default for SkillsConfig {
             extra_paths: Vec::new(),
             credential_dir: None,
             config: HashMap::new(),
+            hub: HubConfig::default(),
         }
     }
 }
@@ -741,6 +779,80 @@ skills:
 
         assert_eq!(parsed.skills.enabled, original.skills.enabled);
         assert_eq!(parsed.skills.extra_paths, original.skills.extra_paths);
+    }
+
+    // =========================================================================
+    // Phase 19.1 Plan 01: HubConfig round-trip tests (D-04/D-08)
+    // =========================================================================
+
+    #[test]
+    fn test_hub_config_default() {
+        let d = HubConfig::default();
+        assert!(d.trusted_repos.is_empty());
+        assert!(d.github_token_env.is_none());
+        assert!(d.extra_taps.is_empty());
+        assert!(d.well_known_origins.is_empty());
+    }
+
+    #[test]
+    fn test_hub_config_roundtrip() {
+        let yaml = r#"
+skills:
+  hub:
+    trusted_repos:
+      - "anthropics/skills"
+    github_token_env: "MY_TOKEN"
+    extra_taps:
+      - repo: "owner/repo"
+        path: "skills/"
+    well_known_origins:
+      - "https://skills.example.com"
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.skills.hub.trusted_repos, vec!["anthropics/skills"]);
+        assert_eq!(cfg.skills.hub.github_token_env.as_deref(), Some("MY_TOKEN"));
+        assert_eq!(cfg.skills.hub.extra_taps.len(), 1);
+        assert_eq!(cfg.skills.hub.extra_taps[0].repo, "owner/repo");
+        assert_eq!(cfg.skills.hub.extra_taps[0].path.as_deref(), Some("skills/"));
+        assert_eq!(cfg.skills.hub.well_known_origins, vec!["https://skills.example.com"]);
+
+        let ser = serde_yaml::to_string(&cfg).expect("serialize");
+        let re: Config = serde_yaml::from_str(&ser).expect("re-parse");
+        assert_eq!(re.skills.hub.trusted_repos, cfg.skills.hub.trusted_repos);
+        assert_eq!(re.skills.hub.github_token_env, cfg.skills.hub.github_token_env);
+        assert_eq!(re.skills.hub.extra_taps.len(), cfg.skills.hub.extra_taps.len());
+        assert_eq!(re.skills.hub.well_known_origins, cfg.skills.hub.well_known_origins);
+    }
+
+    #[test]
+    fn test_hub_trusted_repos_roundtrip() {
+        let yaml = r#"
+skills:
+  hub:
+    trusted_repos:
+      - "openai/skills"
+      - "anthropics/skills"
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        let set = cfg.skills.hub.trusted_repos_set();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("openai/skills"));
+        assert!(set.contains("anthropics/skills"));
+    }
+
+    #[test]
+    fn test_skills_config_backward_compat_no_hub() {
+        let yaml = r#"
+skills:
+  enabled: true
+  extra_paths: []
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert!(cfg.skills.enabled);
+        assert!(cfg.skills.hub.trusted_repos.is_empty());
+        assert!(cfg.skills.hub.github_token_env.is_none());
+        assert!(cfg.skills.hub.extra_taps.is_empty());
+        assert!(cfg.skills.hub.well_known_origins.is_empty());
     }
 
     // =========================================================================
