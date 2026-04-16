@@ -115,10 +115,10 @@ pub fn save_config_atomic(path: &std::path::Path, cfg: &Config) -> anyhow::Resul
 // Source builder
 // ---------------------------------------------------------------------------
 
-fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
-    let auth = futures::executor::block_on(GitHubAuth::resolve(
+async fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
+    let auth = GitHubAuth::resolve(
         cfg.skills.hub.github_token_env.as_deref(),
-    ));
+    ).await;
     let trusted = cfg.skills.hub.trusted_repos_set();
     let extra_taps: Vec<GitHubTap> = cfg
         .skills
@@ -203,7 +203,7 @@ pub async fn cmd_install(cfg: &Config, identifier: &str) -> anyhow::Result<i32> 
         .map_err(|e| anyhow::anyhow!("cannot resolve skills root: {}", e))?;
     std::fs::create_dir_all(&skills_root)?;
 
-    let sources = build_sources(cfg);
+    let sources = build_sources(cfg).await;
     let source: &(dyn HubSource + Send + Sync) = if identifier.starts_with("well-known:") {
         // find the WellKnownSkillSource box
         sources
@@ -273,7 +273,7 @@ pub async fn cmd_search_impl(
     format: Format,
     limit: usize,
 ) -> String {
-    let sources = build_sources(cfg);
+    let sources = build_sources(cfg).await;
     const HARD_CAP: usize = 20;
     let effective_limit = limit.min(HARD_CAP);
 
@@ -343,7 +343,7 @@ pub async fn cmd_search_impl(
 pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32> {
     let skills_root = ironhermes_hub::paths::skills_root()
         .map_err(|e| anyhow::anyhow!("cannot resolve skills root: {}", e))?;
-    let sources = build_sources(cfg);
+    let sources = build_sources(cfg).await;
     let scanner = CoreSkillScanner;
 
     let names_to_update: Vec<String> = if let Some(n) = name {
