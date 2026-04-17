@@ -121,7 +121,7 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 ### CLI & ACP
 
 - [x] **CLI-01**: CLI registers execute_code, hooks, and guardrails (feature parity with gateway)
-- [ ] **CLI-02**: CLI extension hooks: _get_extra_tui_widgets(), _register_extra_tui_keybindings(), _build_tui_layout_children(), process_command(), _build_tui_style_dict()
+- [x] **CLI-02**: CLI extension hooks: _get_extra_tui_widgets(), _register_extra_tui_keybindings(), _build_tui_layout_children(), process_command(), _build_tui_style_dict()
 - [ ] **CLI-03**: ACP adapter: JSON-RPC stdio server wrapping AgentLoop for VS Code / Zed / JetBrains integration
 - [ ] **CLI-04**: ACP SessionManager with create/get/remove/fork/list/cleanup operations
 - [ ] **CLI-05**: ACP event bridge converts AgentLoop callbacks (tool_progress, thinking, reasoning, step, stream_delta) into ACP session_update events via run_coroutine_threadsafe
@@ -270,7 +270,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GW-10 | Phase 21 | Pending |
 | GW-11 | Phase 21 | Pending |
 | CLI-01 | Phase 22 | Complete |
-| CLI-02 | Phase 22.1 | Pending |
+| CLI-02 | Phase 22.1 | Complete |
 | CLI-03 | Phase 22.2 | Pending |
 | CLI-04 | Phase 22.2 | Pending |
 | CLI-05 | Phase 22.2 | Pending |
