@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt, finish_prompt, prepare_prompt_with_reserve, finish_prompt_with_reserve};
+use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt_with_reserve, finish_prompt_with_reserve};
 use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
 use crate::tui::extension::{KeyContext, TuiExtension};
 use std::time::Instant;

@@ -286,6 +286,7 @@ fn reset_scroll_region_with_reserve(reserved: u16) {
 
 /// Clear reserved bottom rows and reset DECSTBM scroll region to full terminal.
 /// Backward-compatibility wrapper: clears exactly 3 rows (zero-extension case).
+#[allow(dead_code)]
 fn reset_scroll_region() {
     reset_scroll_region_with_reserve(3);
 }
