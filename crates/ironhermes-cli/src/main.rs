@@ -341,6 +341,38 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let registry = Arc::new(registry);
 
+    // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
+    let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
+
+    // JSONL listener — default when event_log.enabled (per D-06)
+    if hooks_config.event_log.enabled {
+        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
+        hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
+    }
+
+    // Webhook listeners — opt-in per D-07
+    let retry_queue = Arc::new(
+        ironhermes_hooks::RetryQueue::new(
+            ironhermes_hooks::RetryQueue::default_path()
+        ).context("Failed to initialize webhook retry queue")?
+    );
+    for endpoint in &hooks_config.webhooks {
+        hook_registry.add_listener(
+            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone())
+        );
+    }
+    let hook_registry = Arc::new(hook_registry);
+
+    // Drain persistent retry queue
+    let default_ttl = hooks_config.webhooks.first()
+        .and_then(|e| e.queue_ttl_hours)
+        .unwrap_or(24);
+    ironhermes_hooks::drain_retry_queue(
+        retry_queue.clone(),
+        &hooks_config.webhooks,
+        default_ttl,
+    ).await;
+
     let max_turns = cli
         .max_turns
         .unwrap_or(config.agent.max_turns);
@@ -363,6 +395,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let mut agent = AgentLoop::new(client, registry, max_turns)
         .with_budget(budget)
+        .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
         .with_compression(128_000, config.agent.context_compression)
         .with_streaming(Box::new(|delta| {
             print!("{}", delta);
@@ -388,7 +421,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         &config,
         &resolver,
         session_id.as_str(),
-        None, // CLI does not register a hook registry
+        Some(hook_registry.clone()),   // Phase 22: D-09
         None, // one-shot: fresh tracker per run
     );
 
