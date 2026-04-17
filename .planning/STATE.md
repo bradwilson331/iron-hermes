@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 22.1-01-PLAN.md
-last_updated: "2026-04-17T23:03:00.584Z"
+status: verifying
+stopped_at: Completed 22.1-02-PLAN.md
+last_updated: "2026-04-17T23:10:01.185Z"
 last_activity: 2026-04-17
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 11
-  completed_plans: 10
-  percent: 91
+  completed_plans: 11
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 22.1 (tui-extension-hooks) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-17
 
 Progress: [██████████] 100%
@@ -79,6 +79,7 @@ Progress: [██████████] 100%
 | Phase 22 P01 | 3 | 2 tasks | 1 files |
 | Phase 22 P02 | 5 | 2 tasks | 2 files |
 | Phase 22.1 P01 | 4 | 2 tasks | 4 files |
+| Phase 22.1 P02 | 4 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -136,6 +137,9 @@ Recent decisions affecting current work:
 - [Phase 22.1]: TuiExtension name() has no default — every extension must name itself for debug logging and widget ID prefixing
 - [Phase 22.1]: catch_unwind with AssertUnwindSafe wraps all extension calls in dispatch_command for T-22.1-03 panic containment
 - [Phase 22.1]: format_help accepts Option<KeybindingRegistry> — None-safe; Plan 02 wires the real registry
+- [Phase 22.1]: reserved_rows() is the single source of truth for DECSTBM row count; all five hardcoded saturating_sub(3) calls replaced
+- [Phase 22.1]: render_loop takes mpsc::UnboundedReceiver<TuiEvent> directly; zero-extension case passes empty collections (no Option wrapper)
+- [Phase 22.1]: build_scanner_frame() delegates to knight_rider::frame() when colors match defaults for exact Phase 21 output fidelity
 
 ### Roadmap Evolution
 
@@ -157,6 +161,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-17T23:03:00.582Z
-Stopped at: Completed 22.1-01-PLAN.md
+Last session: 2026-04-17T23:10:01.183Z
+Stopped at: Completed 22.1-02-PLAN.md
 Resume file: None
