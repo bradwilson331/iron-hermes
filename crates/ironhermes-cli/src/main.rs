@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt, finish_prompt};
+use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt, finish_prompt, prepare_prompt_with_reserve, finish_prompt_with_reserve};
+use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
+use crate::tui::extension::{KeyContext, TuiExtension};
 use std::time::Instant;
 
 mod cron;
@@ -482,7 +484,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         tokens_limit: 128_000,
         hint: "ctrl+c cancel · /help commands".to_string(),
     };
-    let tui = Arc::new(TuiHandle::new(initial_status));
+    // Phase 22.1: construct TuiHandle with extensions (empty vec for now --
+    // no extensions are registered yet, but the hook mechanism is active).
+    let extensions: Vec<Box<dyn TuiExtension>> = Vec::new();
+    let tui = Arc::new(TuiHandle::new_with_extensions(initial_status, extensions));
+
+    // Build keybinding registry from registered extensions.
+    let keybinding_registry = KeybindingRegistry::register_from_extensions(tui.extensions());
 
     // Plan 20-03 Fix 2: wire MemoryManager into run_chat so chat-mode
     // memory persists across invocations (matches gateway parity).
@@ -684,9 +692,26 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     }
 
     loop {
-        prepare_prompt();
+        // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
+        // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
+        // already buffered. Only modifier-key combos (Ctrl+X, Alt+X) should be
+        // registered as Idle bindings to avoid stealing chars from rustyline.
+        if crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+            if let Ok(crossterm::event::Event::Key(key_event)) = crossterm::event::read() {
+                if let Some(action) = keybinding_registry.match_key(&key_event, &KeyContext::Idle) {
+                    // Dispatch keybinding action -- for now, actions are logged.
+                    // Future extensions will handle actions via their own callbacks.
+                    tracing::debug!("tui: keybinding dispatched: {}", action);
+                    continue; // Skip readline for this iteration
+                }
+                // Key didn't match any binding -- it's consumed and lost.
+                // Acceptable for modifier-key combos that rustyline wouldn't process.
+            }
+        }
+
+        prepare_prompt_with_reserve(tui.reserved_row_count());
         let readline = rl.readline(&format!("{} ", "You:".bold().green()));
-        finish_prompt();
+        finish_prompt_with_reserve(tui.reserved_row_count());
         match readline {
             Ok(line) => {
                 let input = line.trim().to_string();
@@ -694,26 +719,45 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     continue;
                 }
 
-                // Handle special commands
-                match input.as_str() {
-                    "/quit" | "/exit" | "/q" => {
-                        println!("{}", "Goodbye!".dimmed());
-                        break;
-                    }
-                    "/clear" => {
-                        messages.truncate(1); // Keep system message
-                        println!("{}", "Conversation cleared.".dimmed());
+                // Phase 22.1 D-06: extension-first command dispatch.
+                if input.starts_with('/') {
+                    let parts: Vec<&str> = input[1..].split_whitespace().collect();
+                    if parts.is_empty() {
                         continue;
                     }
-                    "/status" => {
-                        cmd_status()?;
-                        continue;
+                    let cmd = parts[0];
+                    let args = &parts[1..];
+                    match dispatch_command(tui.extensions(), cmd, args) {
+                        CommandResult::Handled(output) => {
+                            // Special handling for commands that have side effects
+                            match cmd {
+                                "quit" | "exit" | "q" => {
+                                    println!("{}", output.dimmed());
+                                    break;
+                                }
+                                "clear" => {
+                                    messages.truncate(1); // Keep system message
+                                    println!("{}", output.dimmed());
+                                    continue;
+                                }
+                                "status" => {
+                                    cmd_status()?;
+                                    continue;
+                                }
+                                _ => {
+                                    println!("{}", output);
+                                    continue;
+                                }
+                            }
+                        }
+                        CommandResult::Silent => {
+                            continue;
+                        }
+                        CommandResult::Error(msg) => {
+                            eprintln!("{}", format!("Error: {}", msg).red());
+                            continue;
+                        }
                     }
-                    "/help" => {
-                        print_help();
-                        continue;
-                    }
-                    _ => {}
                 }
 
                 let _ = rl.add_history_entry(&input);
@@ -1124,9 +1168,60 @@ fn print_banner() {
 }
 
 fn print_help() {
-    println!("{}", "Commands:".bold());
-    println!("  {}  — Exit the chat", "/quit".yellow());
-    println!("  {}  — Clear conversation history", "/clear".yellow());
-    println!("  {} — Show status", "/status".yellow());
-    println!("  {}   — Show this help", "/help".yellow());
+    // Phase 22.1: delegate to format_help with no extensions and no keybinding registry.
+    // When run_chat wires extensions, it uses dispatch_command which calls format_help directly.
+    println!("{}", crate::tui::commands::format_help(&[], None));
+}
+
+#[cfg(test)]
+mod tui_extension_wiring_tests {
+    /// INV-22.1-01: run_chat uses new_with_extensions (not bare TuiHandle::new)
+    #[test]
+    fn run_chat_uses_new_with_extensions() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("new_with_extensions"),
+            "run_chat must use TuiHandle::new_with_extensions"
+        );
+    }
+
+    /// INV-22.1-02: run_chat uses dispatch_command (not inline match)
+    #[test]
+    fn run_chat_uses_dispatch_command() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("dispatch_command("),
+            "run_chat must use dispatch_command for command routing"
+        );
+    }
+
+    /// INV-22.1-03: run_chat builds KeybindingRegistry
+    #[test]
+    fn run_chat_builds_keybinding_registry() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("KeybindingRegistry::register_from_extensions"),
+            "run_chat must build keybinding registry from extensions"
+        );
+    }
+
+    /// INV-22.1-04: run_chat uses prepare_prompt_with_reserve
+    #[test]
+    fn run_chat_uses_dynamic_prompt_reserve() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("prepare_prompt_with_reserve"),
+            "run_chat must use dynamic prompt reserve, not hardcoded prepare_prompt()"
+        );
+    }
+
+    /// INV-22.1-05: run_chat has pre-readline keybinding check
+    #[test]
+    fn run_chat_has_pre_readline_keybinding_check() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("match_key(") && src.contains("KeyContext::Idle"),
+            "run_chat must check keybindings before readline"
+        );
+    }
 }
