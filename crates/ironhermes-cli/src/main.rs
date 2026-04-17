@@ -635,10 +635,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     }
                 };
 
-                // Turn completed cleanly: reset debounce + emergency + issue fresh child token.
-                double_ctrl_c.reset();
-                emergency_press_count = 0;
-                emergency_first_press = None;
+                // Only reset the double-ctrl-c window on clean completion.
+                // After CancelTurn, keep the window open so a second ctrl-c
+                // at the prompt (caught by rustyline) triggers ExitCleanly.
+                if !chat_cancel_token.is_cancelled() {
+                    double_ctrl_c.reset();
+                    emergency_press_count = 0;
+                    emergency_first_press = None;
+                }
                 chat_cancel_token = chat_cancel_parent.child_token();
 
                 // Persist assistant response
