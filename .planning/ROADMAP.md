@@ -48,13 +48,20 @@ Plans:
 
 ### Phase 22.1: TUI Extension Hooks
 
-**Goal:** [To be planned]
+**Goal:** Create a Rust extension mechanism for the CLI TUI so that external code (plugins, custom builds, future crates) can add widgets, keybindings, layout sections, command handlers, and style overrides -- the Rust equivalent of hermes-agent's subclassable CliManager. Implements a hybrid three-layer architecture: TuiExtension trait (static contract), mpsc message bus (dynamic updates), and command registry (extension-first dispatch). Slot-based layout with dynamic DECSTBM scroll region adjustment. No new dependencies.
 **Requirements:** CLI-02
 **Depends on:** Phase 22
-**Plans:** 0 plans
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 22.1 to break down)
+- [ ] 22.1-01-PLAN.md — Define pure-function type contracts: TuiExtension trait, Widget/LayoutSlot/TuiEvent types, KeybindingRegistry, CommandRegistry with extension-first dispatch chain and unit tests
+- [ ] 22.1-02-PLAN.md — Wire extension contracts into render loop (dynamic DECSTBM, widget slot compositing, TuiEvent channel) and REPL loop (pre-readline keybinding dispatch, extension-first command routing)
+
+**Wave structure:**
+- Wave 1: 22.1-01 (pure types + trait + registries — autonomous)
+- Wave 2: 22.1-02 (render.rs + main.rs integration — depends on 22.1-01, autonomous)
+
+**Phase directory:** `.planning/phases/22.1-tui-extension-hooks/`
 
 ### Phase 22.2: ACP Adapter
 
