@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use crate::tui::{ActivityState, StatusLineState, TuiHandle};
+use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
+use std::time::Instant;
 
 mod cron;
 mod batch;
@@ -420,7 +421,21 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         resolver.clone(),
         Some(budget.clone()),
     ));
-    let chat_cancel_token = CancellationToken::new();
+    // Plan 21-03: parent CancellationToken lives the full chat session; per-turn
+    // children are issued via `.child_token()` so cancelling one turn does NOT
+    // poison the session. (See RESEARCH §Pitfall 2: CancellationToken cancel is permanent.)
+    let chat_cancel_parent = CancellationToken::new();
+    let mut chat_cancel_token = chat_cancel_parent.child_token();
+
+    // Double-ctrl-c state machine (D-10..D-14). 1.5s debounce window is baked in.
+    let mut double_ctrl_c = DoubleCtrlCState::new();
+
+    // Emergency 3rd-press escape per RESEARCH §Pitfall 7: track first-press time
+    // across the whole session. If 3 ctrl-c events arrive within 3 seconds of the
+    // FIRST press, we std::process::exit(130) to avoid tokio's permanent-handler
+    // footgun where shutdown itself could hang.
+    let mut emergency_first_press: Option<Instant> = None;
+    let mut emergency_press_count: u32 = 0;
 
     // D-19: CLI tree-view progress callback for subagent tool calls
     let subagent_progress: ironhermes_tools::delegate_task::SubagentProgressCallback =
@@ -457,7 +472,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         subagent_semaphore,
         Some(memory_manager.clone()),
         config.subagent.clone(),
-        Some(chat_cancel_token.clone()),
+        Some(chat_cancel_parent.child_token()), // delegate_task gets its own long-lived child
         Some(subagent_progress),
     );
 
@@ -548,7 +563,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 let _ = state_store.add_message(&session_id, &user_msg);
                 messages.push(user_msg);
 
-                let response = run_agent_turn(
+                // D-13: fresh user input resets the 1.5s debounce window.
+                double_ctrl_c.reset();
+
+                // Plan 21-03 Task 2: wrap in-flight agent turn in tokio::select!
+                // racing against tokio::signal::ctrl_c() per D-10.
+                // The future is pinned outside the select loop so a CancelTurn
+                // decision can `continue` and the agent sees the cancelled token.
+                let mut run_fut = Box::pin(run_agent_turn(
                     &client,
                     registry.clone(),
                     &mut messages,
@@ -560,8 +582,65 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     pressure_tracker.clone(),
                     compression_count.clone(),
                     tui.clone(),
-                )
-                .await?;
+                ));
+
+                let response: Option<String> = 'turn: loop {
+                    tokio::select! {
+                        biased;
+                        _ = tokio::signal::ctrl_c() => {
+                            let now = Instant::now();
+                            // Emergency escape: 3 presses within 3s of first → hard exit 130.
+                            emergency_press_count += 1;
+                            if emergency_first_press.is_none() {
+                                emergency_first_press = Some(now);
+                            }
+                            if let Some(first) = emergency_first_press {
+                                if emergency_press_count >= 3
+                                    && now.duration_since(first) <= std::time::Duration::from_secs(3)
+                                {
+                                    eprintln!("{}", "^C×3 — emergency exit".red());
+                                    std::process::exit(130);
+                                }
+                            }
+
+                            match double_ctrl_c.on_ctrl_c(now, /* in_flight = */ true) {
+                                CtrlCDecision::CancelTurn => {
+                                    chat_cancel_token.cancel();
+                                    println!("{}", "^C — turn cancelled".dimmed());
+                                    tui.set_activity(ActivityState::Idle);
+                                    // Stay in the select loop so the cancel propagates
+                                    // and the agent future resolves naturally.
+                                    continue 'turn;
+                                }
+                                CtrlCDecision::ExitCleanly => {
+                                    chat_cancel_token.cancel();
+                                    println!("{}", "Goodbye!".dimmed());
+                                    // D-12: memory flush not available via flush_to_disk —
+                                    // on_session_end requires MemoryEntries; skip with debug log.
+                                    tracing::debug!("tui: memory flush on interrupted-exit skipped — no flush_to_disk API");
+                                    // Best-effort: clear activity before hard exit.
+                                    // Arc::try_unwrap would fail (run_fut holds a clone),
+                                    // so signal Idle and let process exit clean up the rest.
+                                    tui.set_activity(ActivityState::Idle);
+                                    let _ = state_store.end_session(&session_id, "interrupted");
+                                    std::process::exit(0);
+                                }
+                                CtrlCDecision::ShowPromptHint => {
+                                    // Unreachable here — we're in-flight. Defensive no-op.
+                                    continue 'turn;
+                                }
+                            }
+                        }
+                        r = &mut run_fut => { break 'turn r?; }
+                    }
+                };
+
+                // Turn completed cleanly: reset debounce + emergency + issue fresh child token.
+                double_ctrl_c.reset();
+                emergency_press_count = 0;
+                emergency_first_press = None;
+                chat_cancel_token = chat_cancel_parent.child_token();
+
                 // Persist assistant response
                 if let Some(ref text) = response {
                     let assistant_msg = ChatMessage::assistant(text);
