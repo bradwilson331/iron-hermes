@@ -16,3 +16,12 @@ TBD. Likely install a `tokio::signal::ctrl_c` handler in agent-mode run loops (`
 1. First signal: abort the in-flight provider request / tool call, flush partial response, return to input prompt
 2. Second signal within a short window: exit cleanly (persist any thread/session state first)
 3. Reset the counter on user input or successful turn completion
+
+---
+
+## Resolution
+
+Completed in Phase 21. See:
+- Plan `21-03-run-chat-integration-and-double-ctrl-c-PLAN.md`
+- D-10..D-14 in `.planning/phases/21-commandline-ui-update-polish-cli-ux-including-graceful-doubl/21-CONTEXT.md`
+- Integration tests locked via INV-1, INV-2, INV-3 in `crates/ironhermes-cli/tests/run_chat_invariants.rs`
