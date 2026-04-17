@@ -7,6 +7,7 @@
 //! Items in this module are wired into run_chat in Plan 21-03 (Wave 3).
 
 pub mod activity;
+pub mod extension;
 pub mod double_ctrl_c;
 pub mod knight_rider;
 pub mod pills;
