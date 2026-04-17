@@ -41,7 +41,7 @@ A working conversational AI agent with personality (context files) that operates
 - [ ] Skill framework (SKILL.md format, category-based discovery, progressive disclosure, conditional activation, env var/config requirements, credential file mounting, security scanning, Skills Hub)
 - [ ] Slash command integration (SKILL-13 backlog from v1.1)
 - [ ] Tool registry improvements (toolset management, check functions, setup wizard integration)
-- [ ] CLI feature parity (execute_code, hooks, guardrails available in CLI mode)
+- [x] CLI feature parity (execute_code, hooks, guardrails available in CLI mode) — Validated in Phase 22: CLI Feature Parity
 - [ ] Configuration/setup wizard improvements
 
 ### Out of Scope
@@ -57,6 +57,7 @@ A working conversational AI agent with personality (context files) that operates
 - v1.0 shipped 2026-04-08: core agent loop, Telegram gateway, self-improvement, web scraping
 - v1.1 shipped 2026-04-11: scheduled tasks, event hooks, skills, code execution, subagents, batch processing
 - v2.0 Phase 21 complete 2026-04-17: CLI TUI polish (status bar, knight-rider scanner, graceful double ctrl-c)
+- v2.0 Phase 22 complete 2026-04-17: CLI feature parity (cron, skills, execute_code, guardrails, HookRegistry in both CLI paths)
 - 400+ workspace tests passing
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
 - Tech stack: Rust 2024 edition, tokio async, SQLite (rusqlite), OpenAI-compatible LLM API
