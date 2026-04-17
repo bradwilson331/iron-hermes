@@ -17,5 +17,5 @@ pub mod status_line;
 pub use activity::ActivityState;
 #[allow(unused_imports)] // Used in Task 2 (ctrl-c state machine wiring)
 pub use double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
-pub use render::TuiHandle;
+pub use render::{TuiHandle, prepare_prompt, finish_prompt};
 pub use status_line::StatusLineState;

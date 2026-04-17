@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
+use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt, finish_prompt};
 use std::time::Instant;
 
 mod cron;
@@ -528,7 +528,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     }
 
     loop {
+        prepare_prompt();
         let readline = rl.readline(&format!("{} ", "You:".bold().green()));
+        finish_prompt();
         match readline {
             Ok(line) => {
                 let input = line.trim().to_string();
@@ -594,13 +596,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                             if emergency_first_press.is_none() {
                                 emergency_first_press = Some(now);
                             }
-                            if let Some(first) = emergency_first_press {
-                                if emergency_press_count >= 3
-                                    && now.duration_since(first) <= std::time::Duration::from_secs(3)
-                                {
-                                    eprintln!("{}", "^C×3 — emergency exit".red());
-                                    std::process::exit(130);
-                                }
+                            if let Some(first) = emergency_first_press && emergency_press_count >= 3
+                                && now.duration_since(first) <= std::time::Duration::from_secs(3)
+                            {
+                                eprintln!("{}", "^C×3 — emergency exit".red());
+                                tui.cleanup_on_exit();
+                                std::process::exit(130);
                             }
 
                             match double_ctrl_c.on_ctrl_c(now, /* in_flight = */ true) {
@@ -618,10 +619,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                                     // D-12: memory flush not available via flush_to_disk —
                                     // on_session_end requires MemoryEntries; skip with debug log.
                                     tracing::debug!("tui: memory flush on interrupted-exit skipped — no flush_to_disk API");
-                                    // Best-effort: clear activity before hard exit.
-                                    // Arc::try_unwrap would fail (run_fut holds a clone),
-                                    // so signal Idle and let process exit clean up the rest.
-                                    tui.set_activity(ActivityState::Idle);
+                                    tui.cleanup_on_exit();
                                     let _ = state_store.end_session(&session_id, "interrupted");
                                     std::process::exit(0);
                                 }

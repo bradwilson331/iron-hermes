@@ -47,6 +47,19 @@ impl TuiHandle {
         let shutdown = CancellationToken::new();
         let task_shutdown = shutdown.clone();
 
+        // DECSTBM: reserve bottom 3 rows (prompt + scanner + status bar) by
+        // setting a scroll region BEFORE any streaming output starts. Normal
+        // stdout/stderr output scrolls only within rows 1..rows-3, keeping the
+        // prompt, scanner, and status bar rows fixed outside the scroll region.
+        if stderr().is_tty() && let Ok((_cols, rows)) = size() {
+            let scroll_end = rows.saturating_sub(3);
+            if scroll_end > 0 {
+                let mut out = stderr();
+                let _ = write!(out, "\x1b[1;{}r", scroll_end);
+                let _ = out.flush();
+            }
+        }
+
         let task = tokio::spawn(async move {
             render_loop(activity_rx, status_rx, task_shutdown).await;
         });
@@ -78,6 +91,14 @@ impl TuiHandle {
         let _ = self.status_tx.send(state);
     }
 
+    /// Best-effort terminal cleanup for exit paths that cannot consume self
+    /// (e.g. ExitCleanly via process::exit while Arc clones exist). Cancels
+    /// the render loop, clears bottom rows, and resets the DECSTBM scroll region.
+    pub fn cleanup_on_exit(&self) {
+        self.shutdown.cancel();
+        reset_scroll_region();
+    }
+
     /// Shut down the render task cooperatively. Safe to call once; consumes
     /// self so the JoinHandle is awaited exactly once.
     pub async fn shutdown(mut self) {
@@ -85,25 +106,71 @@ impl TuiHandle {
         if let Some(h) = self.task.take() {
             let _ = h.await;
         }
-        // Best-effort terminal cleanup: clear the two bottom rows so the
-        // status bar doesn't linger after exit. Only if stderr is a tty.
-        let mut out = stderr();
-        if out.is_tty() {
-            let Ok((_cols, rows)) = size() else { return };
-            let _ = queue!(
-                out,
-                SavePosition,
-                Hide,
-                MoveTo(0, rows.saturating_sub(2)),
-                Clear(ClearType::CurrentLine),
-                MoveTo(0, rows.saturating_sub(1)),
-                Clear(ClearType::CurrentLine),
-                Show,
-                RestorePosition,
-            );
-            let _ = out.flush();
-        }
+        reset_scroll_region();
     }
+}
+
+/// Clear reserved bottom rows and reset DECSTBM scroll region to full terminal.
+fn reset_scroll_region() {
+    let mut out = stderr();
+    if out.is_tty() {
+        let Ok((_cols, rows)) = size() else { return };
+        let _ = queue!(
+            out,
+            SavePosition,
+            Hide,
+            MoveTo(0, rows.saturating_sub(3)),
+            Clear(ClearType::CurrentLine),
+            MoveTo(0, rows.saturating_sub(2)),
+            Clear(ClearType::CurrentLine),
+            MoveTo(0, rows.saturating_sub(1)),
+            Clear(ClearType::CurrentLine),
+            Show,
+            RestorePosition,
+        );
+        let _ = write!(out, "\x1b[r");
+        let _ = out.flush();
+    }
+}
+
+/// Position the terminal cursor at the fixed prompt row (row rows-3, outside
+/// the scroll region). Call before `rl.readline()` so user input appears at
+/// a stable position above the scanner and status bar.
+pub fn prepare_prompt() {
+    let mut out = stderr();
+    if !out.is_tty() {
+        return;
+    }
+    let Ok((_cols, rows)) = size() else { return };
+    let prompt_row = rows.saturating_sub(3);
+    let _ = queue!(
+        out,
+        MoveTo(0, prompt_row),
+        Clear(ClearType::CurrentLine),
+    );
+    let _ = out.flush();
+}
+
+/// Clear the prompt row after `rl.readline()` returns and reposition the cursor
+/// at the bottom of the scroll region so subsequent `println!()` output flows
+/// naturally inside the scrollable content area.
+pub fn finish_prompt() {
+    use std::io::stdout;
+    let _ = stdout().flush();
+    let mut out = stderr();
+    if !out.is_tty() {
+        return;
+    }
+    let Ok((_cols, rows)) = size() else { return };
+    let prompt_row = rows.saturating_sub(3);
+    let scroll_bottom = rows.saturating_sub(4);
+    let _ = queue!(
+        out,
+        MoveTo(0, prompt_row),
+        Clear(ClearType::CurrentLine),
+        MoveTo(0, scroll_bottom),
+    );
+    let _ = out.flush();
 }
 
 /// Main render loop. Per D-17 exits immediately if stderr is not a TTY.
@@ -122,11 +189,22 @@ async fn render_loop(
     let mut ticker = tokio::time::interval(FRAME_PERIOD);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tick: u64 = 0;
+    let mut prev_rows: u16 = size().map(|(_, r)| r).unwrap_or(0);
 
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = ticker.tick() => {
+                // DECSTBM resize tracking: update scroll region when terminal
+                // height changes so the reserved area stays at the new bottom.
+                if let Ok((_cols, rows)) = size() && rows != prev_rows && rows >= 4 {
+                    let scroll_end = rows.saturating_sub(3);
+                    let mut out = stderr();
+                    let _ = write!(out, "\x1b[1;{}r", scroll_end);
+                    let _ = out.flush();
+                    prev_rows = rows;
+                }
+
                 let activity = activity_rx.borrow().clone();
                 let status = status_rx.borrow().clone();
                 if let Err(e) = redraw(tick, &activity, &status) {
@@ -146,7 +224,7 @@ fn redraw(tick: u64, activity: &ActivityState, status: &StatusLineState) -> std:
     let (_cols, rows) = size()?;
     // Need at least 3 rows: prompt + scanner + status. On tiny terminals (<3 rows)
     // skip rendering to avoid colliding with the prompt.
-    if rows < 3 {
+    if rows < 4 {
         return Ok(());
     }
     let bottom = rows.saturating_sub(1);
