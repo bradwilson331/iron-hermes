@@ -32,13 +32,16 @@ impl DoubleCtrlCState {
     /// Returns the decision for THIS ctrl-c event.
     /// Caller tracks `in_flight` externally (derived from whether the agent future is running).
     pub fn on_ctrl_c(&mut self, now: Instant, in_flight: bool) -> CtrlCDecision {
-        if !in_flight {
-            return CtrlCDecision::ShowPromptHint;
-        }
         let within_window = self
             .last_cancel_at
             .map(|t| now.duration_since(t) < self.window)
             .unwrap_or(false);
+        if !in_flight {
+            if within_window {
+                return CtrlCDecision::ExitCleanly;
+            }
+            return CtrlCDecision::ShowPromptHint;
+        }
         if within_window {
             CtrlCDecision::ExitCleanly
         } else {
@@ -99,6 +102,15 @@ mod tests {
         s.reset();
         let t1 = t0 + Duration::from_millis(100);
         assert_eq!(s.on_ctrl_c(t1, true), CtrlCDecision::CancelTurn);
+    }
+
+    #[test]
+    fn second_ctrlc_at_prompt_within_window_exits() {
+        let mut s = DoubleCtrlCState::new();
+        let t0 = Instant::now();
+        assert_eq!(s.on_ctrl_c(t0, true), CtrlCDecision::CancelTurn);
+        let t1 = t0 + Duration::from_millis(500);
+        assert_eq!(s.on_ctrl_c(t1, false), CtrlCDecision::ExitCleanly);
     }
 
     #[test]

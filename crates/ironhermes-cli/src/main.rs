@@ -651,7 +651,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 println!();
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
-                println!("{}", "^C — type /quit to exit".dimmed());
+                match double_ctrl_c.on_ctrl_c(Instant::now(), false) {
+                    CtrlCDecision::ExitCleanly => {
+                        println!("{}", "Goodbye!".dimmed());
+                        tui.cleanup_on_exit();
+                        let _ = state_store.end_session(&session_id, "interrupted");
+                        std::process::exit(0);
+                    }
+                    _ => {
+                        println!("{}", "^C — type /quit to exit".dimmed());
+                    }
+                }
             }
             Err(rustyline::error::ReadlineError::Eof) => {
                 println!("{}", "Goodbye!".dimmed());
