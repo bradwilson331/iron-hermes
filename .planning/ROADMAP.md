@@ -34,11 +34,11 @@ Plans:
 
 **Requirements:** CLI-01
 **Depends on:** Phase 21
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 22-01-PLAN.md — Wire cron_tool, skills_tool, execute_code_tool (with shared active_skills Arc and D-04 safe-subset RPC registry), and BlocklistGuardrail + error_detail into both run_chat and run_single, matching run_gateway's tool registration sequence per D-08.
-- [ ] 22-02-PLAN.md — Construct HookRegistry with JSONL listener (D-06) and webhook listeners (D-07) in both CLI paths. Wire hook_registry into run_agent_turn (AgentLoop builder) and attach_context_engine (D-09). Drain retry queue on startup. Add static-grep regression tests for all wiring calls.
+- [x] 22-02-PLAN.md — Construct HookRegistry with JSONL listener (D-06) and webhook listeners (D-07) in both CLI paths. Wire hook_registry into run_agent_turn (AgentLoop builder) and attach_context_engine (D-09). Drain retry queue on startup. Add static-grep regression tests for all wiring calls.
 
 **Wave structure:**
 - Wave 1: 22-01 (tool registration parity — autonomous)
