@@ -294,12 +294,57 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         None, // no progress callback in single mode
     );
 
+    // Phase 22: register cron_tool (per D-02/D-03)
+    let cron_dir = ironhermes_core::get_hermes_home().join("cron");
+    let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
+    registry.register_cronjob_tool(job_store.clone());
+
+    // Phase 22: skills tool (per D-02/D-03)
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
+    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
+    registry.register_skills_tool(
+        skill_registry.clone(),
+        active_skills.clone(),
+        credential_dir,
+        std::collections::HashMap::new(),
+    );
+
+    // Phase 22: RPC dispatch registry — safe subset per D-04 (no terminal, no execute_code)
+    let mut rpc_registry = ToolRegistry::new();
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::WriteFileTool));
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::PatchFileTool));
+    rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
+    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
+    rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
+    rpc_registry.register_memory_tool(memory_manager.clone());
+    let rpc_registry = Arc::new(rpc_registry);
+
+    // Phase 22: execute_code with active_skills for skill env var bypass (per D-02)
+    registry.register_execute_code_tool_with_active_skills(
+        rpc_registry,
+        config.exec.clone(),
+        active_skills.clone(),
+    );
+
+    // Phase 22: guardrails (per D-02, D-08 — before Arc wrap)
+    let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
+    if !hooks_config.blocked_tools.is_empty() {
+        registry.add_guardrail(Box::new(
+            ironhermes_hooks::BlocklistGuardrail::from_config(&hooks_config),
+        ));
+    }
+    registry.set_error_detail(hooks_config.error_detail.clone());
+
+    let registry = Arc::new(registry);
+
     let max_turns = cli
         .max_turns
         .unwrap_or(config.agent.max_turns);
 
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
         .load_context(&cwd);
@@ -316,7 +361,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .context("failed to persist user message")?;
     let messages = vec![system_msg, user_msg];
 
-    let mut agent = AgentLoop::new(client, Arc::new(registry), max_turns)
+    let mut agent = AgentLoop::new(client, registry, max_turns)
         .with_budget(budget)
         .with_compression(128_000, config.agent.context_compression)
         .with_streaming(Box::new(|delta| {
