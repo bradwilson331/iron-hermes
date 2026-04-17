@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 22.1 context gathered
-last_updated: "2026-04-17T21:17:22.035Z"
+status: executing
+stopped_at: Completed 22.1-01-PLAN.md
+last_updated: "2026-04-17T23:03:00.584Z"
 last_activity: 2026-04-17
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
-  percent: 100
+  total_plans: 11
+  completed_plans: 10
+  percent: 91
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22 — cli-feature-parity
+**Current focus:** Phase 22.1 — tui-extension-hooks
 
 ## Current Position
 
-Phase: 22.1
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 22.1 (tui-extension-hooks) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-17
 
 Progress: [██████████] 100%
@@ -78,6 +78,7 @@ Progress: [██████████] 100%
 | Phase 21 P21-02 | 17 | 1 tasks | 3 files |
 | Phase 22 P01 | 3 | 2 tasks | 1 files |
 | Phase 22 P02 | 5 | 2 tasks | 2 files |
+| Phase 22.1 P01 | 4 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -132,6 +133,9 @@ Recent decisions affecting current work:
 - [Phase 22]: Separated Arc::new(registry) into explicit statement in run_single for pattern consistency
 - [Phase 22]: hooks_config kept in scope for Plan 02 HookRegistry construction
 - [Phase 22]: HookRegistry construction block identical across run_chat, run_single, and run_gateway for maintainability
+- [Phase 22.1]: TuiExtension name() has no default — every extension must name itself for debug logging and widget ID prefixing
+- [Phase 22.1]: catch_unwind with AssertUnwindSafe wraps all extension calls in dispatch_command for T-22.1-03 panic containment
+- [Phase 22.1]: format_help accepts Option<KeybindingRegistry> — None-safe; Plan 02 wires the real registry
 
 ### Roadmap Evolution
 
@@ -153,6 +157,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-17T21:17:22.033Z
-Stopped at: Phase 22.1 context gathered
-Resume file: .planning/phases/22.1-tui-extension-hooks/22.1-CONTEXT.md
+Last session: 2026-04-17T23:03:00.582Z
+Stopped at: Completed 22.1-01-PLAN.md
+Resume file: None
