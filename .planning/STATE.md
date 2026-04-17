@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 22 UI-SPEC approved
-last_updated: "2026-04-17T17:20:48.128Z"
-last_activity: 2026-04-17 -- Phase 22 planning complete
+stopped_at: Completed 22-01-PLAN.md
+last_updated: "2026-04-17T20:34:03.921Z"
+last_activity: 2026-04-17
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 9
-  completed_plans: 7
-  percent: 78
+  completed_plans: 8
+  percent: 89
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21 — commandline-ui-update-polish-cli-ux-including-graceful-doubl
+**Current focus:** Phase 22 — cli-feature-parity
 
 ## Current Position
 
-Phase: 21
-Plan: Not started
+Phase: 22 (cli-feature-parity) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
-Last activity: 2026-04-17 -- Phase 22 planning complete
+Last activity: 2026-04-17
 
 Progress: [██████████] 100%
 
@@ -75,6 +75,7 @@ Progress: [██████████] 100%
 | Phase 20 P04 | 8 min | 3 tasks | 9 files |
 | Phase 20 P03 | 5 min | 2 tasks | 4 files |
 | Phase 21 P21-02 | 17 | 1 tasks | 3 files |
+| Phase 22 P01 | 3 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,9 @@ Recent decisions affecting current work:
 - [Phase 21]: TuiHandle uses shutdown(self) consuming self — Wave 3 wraps in Arc<TuiHandle> per W3
 - [Phase 21]: ActivityState::Thinking absent (W6) — only Idle/Streaming/ToolCall{name}
 - [Phase 21]: dead_code suppressed in tui/mod.rs with module-level allow — removed in Wave 3 on wiring
+- [Phase 22]: Mirrored run_gateway registration order exactly for consistency and maintainability
+- [Phase 22]: Separated Arc::new(registry) into explicit statement in run_single for pattern consistency
+- [Phase 22]: hooks_config kept in scope for Plan 02 HookRegistry construction
 
 ### Roadmap Evolution
 
@@ -146,6 +150,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-17T17:05:04.329Z
-Stopped at: Phase 22 UI-SPEC approved
-Resume file: .planning/phases/22-cli-feature-parity/22-UI-SPEC.md
+Last session: 2026-04-17T20:34:03.919Z
+Stopped at: Completed 22-01-PLAN.md
+Resume file: None
