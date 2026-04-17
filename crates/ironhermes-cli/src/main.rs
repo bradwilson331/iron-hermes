@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use crate::tui::{ActivityState, StatusLineState, TuiHandle};
 
 mod cron;
 mod batch;
@@ -392,6 +393,18 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let compression_count = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
+    // Plan 21-03: spawn the bottom-bar TUI (status line + knight-rider scanner).
+    // Activity is Idle at startup; turns publish ActivityState::Streaming/ToolCall.
+    let initial_status = StatusLineState {
+        mode: "Chat".to_string(),
+        model_short: client.model().to_string(),
+        provider: config.model.provider.clone(),
+        tokens_used: 0,
+        tokens_limit: 128_000,
+        hint: "ctrl+c cancel · /help commands".to_string(),
+    };
+    let tui = Arc::new(TuiHandle::new(initial_status));
+
     // Plan 20-03 Fix 2: wire MemoryManager into run_chat so chat-mode
     // memory persists across invocations (matches gateway parity).
     let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
@@ -486,6 +499,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             &session_id,
             pressure_tracker.clone(),
             compression_count.clone(),
+            tui.clone(),
         )
         .await?;
         // Persist assistant response
@@ -545,6 +559,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     &session_id,
                     pressure_tracker.clone(),
                     compression_count.clone(),
+                    tui.clone(),
                 )
                 .await?;
                 // Persist assistant response
@@ -570,6 +585,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         }
     }
 
+    // Plan 21-03: shut down the TUI before ending the session so the bottom bar
+    // is cleared cleanly. Arc::try_unwrap succeeds here because tui.clone() in
+    // the REPL loop is dropped at end-of-scope; if any clone outlives this point
+    // (shouldn't happen), we log and skip — the render task is cancelled on runtime drop.
+    match Arc::try_unwrap(tui) {
+        Ok(handle) => handle.shutdown().await,
+        Err(_) => tracing::debug!("tui: Arc still has outstanding clones at clean-exit — skipping explicit shutdown"),
+    }
     state_store.end_session(&session_id, "completed")
         .context("failed to end CLI session")?;
 
@@ -589,22 +612,33 @@ async fn run_agent_turn(
     session_id: &str,
     pressure_tracker: Arc<PressureTracker>,
     compression_count: Arc<AtomicUsize>,
+    tui: Arc<TuiHandle>,   // Plan 21-03: TUI handle for activity publishing
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
     // continues across REPL turns instead of resetting to 0 each prompt.
     let starting_count = compression_count.load(Ordering::SeqCst);
+
+    let tui_stream = tui.clone();
+    let tui_tool = tui.clone();
+
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
         .with_compression(128_000, config.agent.context_compression)
         .with_compression_count(starting_count)
-        .with_streaming(Box::new(|delta| {
+        .with_streaming(Box::new(move |delta| {
+            // Stream tokens directly to stdout (D-22: stream appears inline above the prompt).
+            // Keep on stdout per RESEARCH §Pitfall 5 — ExternalPrinter is too high-frequency.
             print!("{}", delta);
             io::stdout().flush().ok();
+            // Publish coarse activity state (best-effort; watch coalesces rapid updates).
+            tui_stream.set_activity(ActivityState::Streaming);
         }))
-        .with_tool_progress(Box::new(|name, _args| {
-            eprint!("\r{} {}...", "Running:".dimmed(), name.yellow());
-            io::stderr().flush().ok();
+        .with_tool_progress(Box::new(move |name, _args| {
+            // D-08: REPLACE the old `eprint!("\r Running: ...")` clutter with a
+            // watch publish. The render task renders the scanner + label at bottom row
+            // every 100ms — no more inline stderr spray.
+            tui_tool.set_activity(ActivityState::ToolCall { name: name.to_string() });
         }));
 
     // Wire fallback from resolver
@@ -629,6 +663,19 @@ async fn run_agent_turn(
 
     // Pass a clone of messages so agent can work with them
     let result = agent.run(messages.clone()).await?;
+
+    // After the turn completes, reset activity to Idle so the scanner hides (D-08).
+    tui.set_activity(ActivityState::Idle);
+
+    // Update the status line with post-turn token count (D-05).
+    tui.set_status(StatusLineState {
+        mode: "Chat".to_string(),
+        model_short: client.model().to_string(),
+        provider: config.model.provider.clone(),
+        tokens_used: result.total_usage.total_tokens,
+        tokens_limit: 128_000,
+        hint: "ctrl+c cancel · /help commands".to_string(),
+    });
 
     // Phase 18-14: persist the post-turn compression_count back into the
     // shared counter so the next turn seeds its AgentLoop with the right value.
