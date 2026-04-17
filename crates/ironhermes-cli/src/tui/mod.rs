@@ -22,7 +22,7 @@ pub mod status_line;
 pub use activity::ActivityState;
 #[allow(unused_imports)] // Used in Task 2 (ctrl-c state machine wiring)
 pub use double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
-pub use render::{TuiHandle, prepare_prompt, finish_prompt};
+pub use render::{TuiHandle, prepare_prompt, finish_prompt, prepare_prompt_with_reserve, finish_prompt_with_reserve};
 pub use status_line::StatusLineState;
 
 // Re-exports for Phase 22.1 extension system (consumed by Plan 22.1-02).
