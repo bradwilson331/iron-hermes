@@ -270,13 +270,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GW-10 | Phase 21 | Pending |
 | GW-11 | Phase 21 | Pending |
 | CLI-01 | Phase 22 | Pending |
-| CLI-02 | Phase 22 | Pending |
-| CLI-03 | Phase 22 | Pending |
-| CLI-04 | Phase 22 | Pending |
-| CLI-05 | Phase 22 | Pending |
-| CLI-06 | Phase 22 | Pending |
-| CLI-07 | Phase 22 | Pending |
-| CLI-08 | Phase 22 | Pending |
+| CLI-02 | Phase 22.1 | Pending |
+| CLI-03 | Phase 22.2 | Pending |
+| CLI-04 | Phase 22.2 | Pending |
+| CLI-05 | Phase 22.2 | Pending |
+| CLI-06 | Phase 22.2 | Pending |
+| CLI-07 | Phase 22.2 | Pending |
+| CLI-08 | Phase 22.2 | Pending |
 | CFG-01 | Phase 23 | Pending |
 | CFG-02 | Phase 23 | Pending |
 | CFG-03 | Phase 23 | Pending |
@@ -289,4 +289,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-11 after roadmap creation (v2.0 phases 11-23)*
+*Last updated: 2026-04-17 after Phase 22 planning (D-01 three-way split: 22/22.1/22.2)*

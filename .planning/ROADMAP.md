@@ -28,15 +28,43 @@ Plans:
 
 **Phase directory:** `.planning/phases/20-memory-provider-plugin-contract/`
 
-### Phase 22: CLI feature parity
+### Phase 22: CLI Tool Parity
+
+**Goal:** Wire execute_code, skills_tool, cron_tool, BlocklistGuardrail, and HookRegistry (JSONL event logging + webhook listeners) into both `run_chat` and `run_single` CLI paths, achieving full tool-level parity with `run_gateway`. Pass the HookRegistry to AgentLoop and attach_context_engine so all lifecycle events fire in CLI mode. Per D-01: this phase covers CLI-01 only (tool parity). TUI extension hooks split to Phase 22.1; ACP adapter split to Phase 22.2.
+
+**Requirements:** CLI-01
+**Depends on:** Phase 21
+**Plans:** 2 plans
+
+Plans:
+- [ ] 22-01-PLAN.md — Wire cron_tool, skills_tool, execute_code_tool (with shared active_skills Arc and D-04 safe-subset RPC registry), and BlocklistGuardrail + error_detail into both run_chat and run_single, matching run_gateway's tool registration sequence per D-08.
+- [ ] 22-02-PLAN.md — Construct HookRegistry with JSONL listener (D-06) and webhook listeners (D-07) in both CLI paths. Wire hook_registry into run_agent_turn (AgentLoop builder) and attach_context_engine (D-09). Drain retry queue on startup. Add static-grep regression tests for all wiring calls.
+
+**Wave structure:**
+- Wave 1: 22-01 (tool registration parity — autonomous)
+- Wave 2: 22-02 (HookRegistry wiring + regression tests — depends on 22-01, autonomous)
+
+**Phase directory:** `.planning/phases/22-cli-feature-parity/`
+
+### Phase 22.1: TUI Extension Hooks
 
 **Goal:** [To be planned]
-**Requirements**: TBD
-**Depends on:** Phase 21
+**Requirements:** CLI-02
+**Depends on:** Phase 22
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 22 to break down)
+- [ ] TBD (run /gsd-plan-phase 22.1 to break down)
+
+### Phase 22.2: ACP Adapter
+
+**Goal:** [To be planned]
+**Requirements:** CLI-03, CLI-04, CLI-05, CLI-06, CLI-07, CLI-08
+**Depends on:** Phase 22
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 22.2 to break down)
 
 ---
 
