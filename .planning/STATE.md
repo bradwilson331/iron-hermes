@@ -126,12 +126,18 @@ Recent decisions affecting current work:
 - [Phase 21]: ActivityState::Thinking absent (W6) — only Idle/Streaming/ToolCall{name}
 - [Phase 21]: dead_code suppressed in tui/mod.rs with module-level allow — removed in Wave 3 on wiring
 
+### Roadmap Evolution
+
+- Phase 22 added: CLI feature parity
+
 ### Pending Todos
 
-5 pending. Latest:
+6 pending. Latest:
 
-- [memory] Gateway memory does not persist across restart — factory never calls load_from_disk (2026-04-16, targets Plan 20-01)
-- [cli] Chat and single CLI modes have no memory wiring (2026-04-16, targets Plan 20-03)
+- [skills] Slash command integration SKILL-13 (2026-04-17)
+- [tools] Tool registry improvements (2026-04-17)
+- [cli] CLI feature parity (2026-04-17)
+- [cli] Configuration and setup wizard improvements (2026-04-17)
 
 ### Blockers/Concerns
 
