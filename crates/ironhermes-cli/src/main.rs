@@ -567,6 +567,39 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     registry.set_error_detail(hooks_config.error_detail.clone());
 
     let registry = Arc::new(registry);
+
+    // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
+    let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
+
+    // JSONL listener — default when event_log.enabled (per D-06)
+    if hooks_config.event_log.enabled {
+        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
+        hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
+    }
+
+    // Webhook listeners — opt-in per D-07 (registered only if config has entries)
+    let retry_queue = Arc::new(
+        ironhermes_hooks::RetryQueue::new(
+            ironhermes_hooks::RetryQueue::default_path()
+        ).context("Failed to initialize webhook retry queue")?
+    );
+    for endpoint in &hooks_config.webhooks {
+        hook_registry.add_listener(
+            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone())
+        );
+    }
+    let hook_registry = Arc::new(hook_registry);
+
+    // Drain persistent retry queue from previous runs (mirrors gateway behavior)
+    let default_ttl = hooks_config.webhooks.first()
+        .and_then(|e| e.queue_ttl_hours)
+        .unwrap_or(24);
+    ironhermes_hooks::drain_retry_queue(
+        retry_queue.clone(),
+        &hooks_config.webhooks,
+        default_ttl,
+    ).await;
+
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
@@ -604,6 +637,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             compression_count.clone(),
             tui.clone(),
             chat_cancel_token.clone(),
+            hook_registry.clone(),   // Phase 22: D-05
         )
         .await?;
         // Persist assistant response
@@ -674,6 +708,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     compression_count.clone(),
                     tui.clone(),
                     chat_cancel_token.clone(),
+                    hook_registry.clone(),   // Phase 22: D-05
                 ));
 
                 let response: Option<String> = 'turn: loop {
@@ -795,6 +830,7 @@ async fn run_agent_turn(
     compression_count: Arc<AtomicUsize>,
     tui: Arc<TuiHandle>,   // Plan 21-03: TUI handle for activity publishing
     cancel_token: CancellationToken,
+    hook_registry: Arc<ironhermes_hooks::HookRegistry>,   // Phase 22: D-05
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -807,6 +843,7 @@ async fn run_agent_turn(
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
         .with_cancellation_token(cancel_token)
+        .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
         .with_compression(128_000, config.agent.context_compression)
         .with_compression_count(starting_count)
         .with_streaming(Box::new(move |delta| {
@@ -840,7 +877,7 @@ async fn run_agent_turn(
         config,
         resolver,
         session_id,
-        None,
+        Some(hook_registry.clone()),   // Phase 22: D-09
         Some(pressure_tracker.clone()),
     );
 
