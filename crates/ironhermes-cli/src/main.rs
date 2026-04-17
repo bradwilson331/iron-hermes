@@ -515,6 +515,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             pressure_tracker.clone(),
             compression_count.clone(),
             tui.clone(),
+            chat_cancel_token.clone(),
         )
         .await?;
         // Persist assistant response
@@ -584,6 +585,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     pressure_tracker.clone(),
                     compression_count.clone(),
                     tui.clone(),
+                    chat_cancel_token.clone(),
                 ));
 
                 let response: Option<String> = 'turn: loop {
@@ -690,6 +692,7 @@ async fn run_agent_turn(
     pressure_tracker: Arc<PressureTracker>,
     compression_count: Arc<AtomicUsize>,
     tui: Arc<TuiHandle>,   // Plan 21-03: TUI handle for activity publishing
+    cancel_token: CancellationToken,
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -701,6 +704,7 @@ async fn run_agent_turn(
 
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
+        .with_cancellation_token(cancel_token)
         .with_compression(128_000, config.agent.context_compression)
         .with_compression_count(starting_count)
         .with_streaming(Box::new(move |delta| {
