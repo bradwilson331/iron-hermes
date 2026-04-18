@@ -619,13 +619,21 @@ fn redraw_with_extensions(
     }
 
     // AboveStatus widgets (rendered in rows above scanner_row, going upward).
+    // WR-03 fix: stop rendering when row_cursor would enter the scroll region
+    // (row 0) to prevent overwriting scrollable content above the TUI area.
     if !above_status.is_empty() {
         let mut row_cursor = scanner_row.saturating_sub(1);
         for w in above_status.iter().rev() {
+            if row_cursor == 0 {
+                break; // WR-03: no more room above -- stop to avoid overwriting content
+            }
             let h = w.height.min(MAX_WIDGET_HEIGHT);
             let lines: Vec<&str> = w.content.lines().collect();
             let line_count = lines.len().min(h as usize);
             for i in (0..line_count).rev() {
+                if row_cursor == 0 {
+                    break; // WR-03: stop before overwriting scroll region
+                }
                 let truncated: String = lines[i].chars().take(_cols as usize).collect();
                 queue!(
                     out,
@@ -633,9 +641,7 @@ fn redraw_with_extensions(
                     Clear(ClearType::CurrentLine),
                     Print(&truncated)
                 )?;
-                if row_cursor > 0 {
-                    row_cursor -= 1;
-                }
+                row_cursor -= 1;
             }
         }
     }
