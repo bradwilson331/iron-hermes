@@ -705,7 +705,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
         // already buffered. Only modifier-key combos (Ctrl+X, Alt+X) should be
         // registered as Idle bindings to avoid stealing chars from rustyline.
-        if crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        //
+        // WR-02 fix: only poll when extensions actually have Idle/Always keybindings
+        // registered. This avoids consuming (and losing) unmatched key events when
+        // no extensions are active (the current default).
+        let has_idle_bindings = !keybinding_registry.help_entries().is_empty();
+        if has_idle_bindings && crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
             if let Ok(crossterm::event::Event::Key(key_event)) = crossterm::event::read() {
                 if let Some(action) = keybinding_registry.match_key(&key_event, &KeyContext::Idle) {
                     // Dispatch keybinding action -- for now, actions are logged.
