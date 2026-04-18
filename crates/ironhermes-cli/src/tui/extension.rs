@@ -118,6 +118,10 @@ pub enum CommandResult {
     Silent,
     /// Command failed; `String` is an error message displayed to the user.
     Error(String),
+    /// Exit the application (maps from core `Quit`).
+    Quit,
+    /// Clear session history (maps from core `ClearSession` / `NewSession`).
+    ClearSession(String),
 }
 
 // ---------------------------------------------------------------------------

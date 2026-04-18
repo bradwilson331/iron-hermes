@@ -747,24 +747,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
                     match dispatch_command(tui.extensions(), cmd, args, &command_router, &cmd_ctx) {
                         CommandResult::Handled(output) => {
-                            // Map router result semantics: Quit and ClearSession are now
-                            // surfaced directly from core via map_core_to_tui in commands.rs.
-                            // Quit maps to Handled("Goodbye!"), ClearSession maps to Handled("Conversation cleared.").
-                            // We detect them by the well-known messages since the TUI CommandResult
-                            // has no Quit/ClearSession variants (only Handled/Silent/Error).
-                            if output == "Goodbye!" {
-                                println!("{}", output.dimmed());
-                                break;
-                            } else if output == "Conversation cleared."
-                                || output == "Conversation cleared. Starting fresh."
-                            {
-                                messages.truncate(1); // Keep system message
-                                println!("{}", output.dimmed());
-                                continue;
-                            } else {
-                                println!("{}", output);
-                                continue;
-                            }
+                            println!("{}", output);
+                            continue;
+                        }
+                        CommandResult::Quit => {
+                            println!("{}", "Goodbye!".dimmed());
+                            break;
+                        }
+                        CommandResult::ClearSession(output) => {
+                            messages.truncate(1); // Keep system message
+                            println!("{}", output.dimmed());
+                            continue;
                         }
                         CommandResult::Silent => {
                             continue;

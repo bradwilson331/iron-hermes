@@ -112,15 +112,17 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         CoreCommandResult::Output(text) => CommandResult::Handled(text),
         CoreCommandResult::Handled => CommandResult::Silent,
         CoreCommandResult::Error(msg) => CommandResult::Error(msg),
-        CoreCommandResult::Quit => CommandResult::Handled("Goodbye!".to_string()),
+        CoreCommandResult::Quit => CommandResult::Quit,
         CoreCommandResult::ClearSession => {
-            CommandResult::Handled("Conversation cleared.".to_string())
+            CommandResult::ClearSession("Conversation cleared.".to_string())
         }
         CoreCommandResult::NewSession { message } => {
             if message.is_empty() {
-                CommandResult::Handled("Conversation cleared. Starting fresh.".to_string())
+                CommandResult::ClearSession(
+                    "Conversation cleared. Starting fresh.".to_string(),
+                )
             } else {
-                CommandResult::Handled(message)
+                CommandResult::ClearSession(message)
             }
         }
         CoreCommandResult::PassThrough => CommandResult::Error("Unknown command.".to_string()),
@@ -299,7 +301,7 @@ mod tests {
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "quit", &[], &router, &ctx);
-        assert_eq!(result, CommandResult::Handled("Goodbye!".to_string()));
+        assert_eq!(result, CommandResult::Quit);
     }
 
     #[test]
@@ -308,7 +310,7 @@ mod tests {
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "exit", &[], &router, &ctx);
-        assert_eq!(result, CommandResult::Handled("Goodbye!".to_string()));
+        assert_eq!(result, CommandResult::Quit);
     }
 
     #[test]
@@ -319,7 +321,7 @@ mod tests {
         let result = dispatch_command(&exts, "clear", &[], &router, &ctx);
         assert_eq!(
             result,
-            CommandResult::Handled("Conversation cleared.".to_string())
+            CommandResult::ClearSession("Conversation cleared.".to_string())
         );
     }
 
@@ -379,7 +381,7 @@ mod tests {
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "quit", &[], &router, &ctx);
-        assert_eq!(result, CommandResult::Handled("Goodbye!".to_string()));
+        assert_eq!(result, CommandResult::Quit);
     }
 
     #[test]
@@ -402,7 +404,7 @@ mod tests {
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "quit", &[], &router, &ctx);
-        assert_eq!(result, CommandResult::Handled("Goodbye!".to_string()));
+        assert_eq!(result, CommandResult::Quit);
     }
 
     // --- Ambiguous and unknown prefix tests ---
