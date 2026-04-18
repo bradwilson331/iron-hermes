@@ -541,9 +541,14 @@ fn redraw_with_extensions(
         effective_status.hint = msg.clone();
     }
     if let Some(color) = hint_override {
-        // Apply hint color override — for now we store as a marker in hint field.
-        // The colored crate is applied inline; this is a best-effort override.
-        let _ = color; // accepted, T-22.1-05: handled gracefully by colored crate
+        // WR-04 fix: "status.hint" is not yet implemented as a render-time color
+        // override. Log at debug level so extension authors get feedback instead
+        // of silently dropping the value.
+        tracing::debug!(
+            "tui: style slot 'status.hint' override '{}' accepted but not yet applied \
+             -- hint color rendering is a future enhancement",
+            color
+        );
     }
     let mut status_str = render_status_line(&effective_status);
 
