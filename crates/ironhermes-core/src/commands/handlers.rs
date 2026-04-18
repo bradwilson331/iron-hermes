@@ -75,10 +75,15 @@ fn cmd_quit(_ctx: &CommandContext) -> CommandResult {
 }
 
 fn cmd_stop(ctx: &CommandContext) -> CommandResult {
+    // NOTE: On the CLI, /stop can only be entered at the readline prompt when
+    // the agent is idle (the REPL is single-threaded), so agent_running is
+    // always false. On the gateway, agent_running is not yet wired. In-flight
+    // cancellation is handled by ctrl-c (CLI) or platform-level mechanisms.
+    // TODO: Wire CancellationToken into CommandContext to enable true /stop.
     if ctx.agent_running.load(Ordering::SeqCst) {
-        CommandResult::Output("Stopping agent...".to_string())
+        CommandResult::Output("Stopping agent... (note: cancellation token not yet wired — agent may continue)".to_string())
     } else {
-        CommandResult::Output("No agent running.".to_string())
+        CommandResult::Output("No agent is currently running. Use Ctrl-C to cancel an in-flight turn.".to_string())
     }
 }
 
@@ -342,10 +347,15 @@ mod tests {
         let ctx = make_ctx(false);
         let router = make_router();
         let cmd = find_cmd("stop");
-        assert_eq!(
-            dispatch(&cmd, &[], &ctx, &router),
-            CommandResult::Output("No agent running.".to_string())
-        );
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match &result {
+            CommandResult::Output(s) => assert!(
+                s.contains("No agent is currently running"),
+                "Expected idle message, got: {}",
+                s
+            ),
+            other => panic!("Expected Output, got {:?}", other),
+        }
     }
 
     #[test]
@@ -353,10 +363,15 @@ mod tests {
         let ctx = make_ctx(true);
         let router = make_router();
         let cmd = find_cmd("stop");
-        assert_eq!(
-            dispatch(&cmd, &[], &ctx, &router),
-            CommandResult::Output("Stopping agent...".to_string())
-        );
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match &result {
+            CommandResult::Output(s) => assert!(
+                s.contains("Stopping agent"),
+                "Expected stopping message, got: {}",
+                s
+            ),
+            other => panic!("Expected Output, got {:?}", other),
+        }
     }
 
     #[test]
