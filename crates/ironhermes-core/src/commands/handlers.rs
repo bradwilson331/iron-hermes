@@ -165,7 +165,7 @@ fn cmd_help(ctx: &CommandContext, router: &CommandRouter) -> CommandResult {
         let cat_name = match category {
             crate::commands::CommandCategory::Session => "SESSION",
             crate::commands::CommandCategory::Configuration => "CONFIGURATION",
-            crate::commands::CommandCategory::ToolsAndSkills => "TOOLS AND SKILLS",
+            crate::commands::CommandCategory::ToolsAndSkills => "TOOLS & SKILLS",
             crate::commands::CommandCategory::Info => "INFO",
             crate::commands::CommandCategory::Exit => "EXIT",
         };
@@ -174,13 +174,11 @@ fn cmd_help(ctx: &CommandContext, router: &CommandRouter) -> CommandResult {
         out.push('\n');
 
         for cmd in cmds {
-            // Format: "  /name           args_hint    description"
-            // cmd-col = 14 chars (name portion), arg-col = 16 chars
-            let name_field = format!("/{}", cmd.name);
-            let args_field = cmd.args_hint;
+            // UI-SPEC: 2-space indent, cmd-col=14 (/{:<13}), arg-col=16
+            // Matches format_help in ironhermes-cli/src/tui/commands.rs
             out.push_str(&format!(
-                "  {:<14}{:<16}{}\n",
-                name_field, args_field, cmd.description
+                "  /{:<13}{:<16}{}\n",
+                cmd.name, cmd.args_hint, cmd.description
             ));
         }
     }
