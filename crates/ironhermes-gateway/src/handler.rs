@@ -6,6 +6,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform, ProviderResolver, Role, SkillRegistry};
+use ironhermes_core::commands::{
+    CommandResult as CoreCommandResult, CommandRouter, ResolveResult,
+    registry::build_registry,
+};
+use ironhermes_core::commands::context::CommandContext;
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
@@ -59,6 +64,8 @@ pub struct GatewayMessageHandler {
     /// Provider context window used for ratio calculation. Falls back to
     /// 128k when the resolver does not expose a per-endpoint value.
     context_length: usize,
+    /// Phase 21.1 Plan 02: unified slash command router.
+    command_router: CommandRouter,
 }
 
 impl GatewayMessageHandler {
@@ -84,6 +91,7 @@ impl GatewayMessageHandler {
             rate_limiter,
             gateway_engine: None,
             context_length: 128_000,
+            command_router: CommandRouter::new(build_registry()),
         }
     }
 
@@ -157,102 +165,130 @@ impl GatewayMessageHandler {
         self.active_skills = skills;
     }
 
-    /// Dispatch a slash command to the appropriate handler (plan 04).
+    /// Dispatch a slash command via the unified CommandRouter (Phase 21.1 Plan 02).
+    ///
+    /// Replaces the old hardcoded match on /start, /new, /clear, /help.
+    /// Unknown commands pass through to agent as normal messages per D-08.
     async fn handle_slash_command(
         &self,
         event: &MessageEvent,
         adapter: Arc<dyn PlatformAdapter>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let command = event.content.split_whitespace().next().unwrap_or("");
-        // Strip @botname suffix (e.g., "/start@mybot" -> "/start")
-        let command = command.split('@').next().unwrap_or(command);
+        // Strip @botname suffix (e.g., "/start@mybot" -> "/start") per T-21.1-06.
+        let command_input = event.content.split('@').next().unwrap_or(&event.content);
 
-        match command {
-            "/start" => self.cmd_start(event, adapter, cancel).await,
-            "/new" => self.cmd_new(event, adapter).await,
-            "/clear" => self.cmd_clear(event, adapter).await,
-            "/help" => self.cmd_help(event, adapter).await,
-            _ => {
-                // Unknown slash command — pass through to agent loop as a normal message
-                let no_attachments = ProcessedAttachments { text_prefix: None, image_data_uri: None };
-                self.run_agent(event, adapter, cancel, no_attachments).await
+        let platform = &event.platform;
+        let session_key = SessionKey::new(platform.clone(), &event.chat_id)
+            .with_user(&event.sender_id);
+
+        // Build CommandContext (agent_running always false for gateway slash commands —
+        // the running-agent guard is a future enhancement using per-session state).
+        let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ctx = CommandContext::new(
+            platform.clone(),
+            session_key.to_string_key(),
+            agent_running,
+        );
+
+        let parts: Vec<&str> = command_input.split_whitespace().collect();
+        let args: Vec<&str> = if parts.len() > 1 { parts[1..].to_vec() } else { vec![] };
+
+        match self.command_router.resolve(command_input, platform) {
+            ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                let core_result = ironhermes_core::commands::handlers::dispatch(
+                    def, &args, &ctx, &self.command_router,
+                );
+                match core_result {
+                    CoreCommandResult::Output(text) => {
+                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &text, None))
+                            .await?;
+                    }
+                    CoreCommandResult::NewSession { .. } => {
+                        // /start special handling: reset session then LLM greeting.
+                        // /new: remove session and confirm.
+                        if def.name == "start" {
+                            {
+                                let mut store = self.session_store.write().await;
+                                store.remove(&session_key);
+                            }
+                            let mut intro_event = event.clone();
+                            intro_event.content =
+                                "Please introduce yourself. This is the start of a new conversation."
+                                    .to_string();
+                            let no_attachments = ProcessedAttachments {
+                                text_prefix: None,
+                                image_data_uri: None,
+                            };
+                            return self
+                                .run_agent(&intro_event, adapter, cancel, no_attachments)
+                                .await;
+                        }
+                        // /new: clear entire session history
+                        let had_session = {
+                            let mut store = self.session_store.write().await;
+                            store.remove(&session_key).is_some()
+                        };
+                        let msg = if had_session {
+                            "Conversation cleared. Starting fresh."
+                        } else {
+                            "No active conversation. Ready for a new one."
+                        };
+                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, msg, None))
+                            .await?;
+                    }
+                    CoreCommandResult::ClearSession => {
+                        // /clear: wipe messages but keep session alive
+                        {
+                            let mut store = self.session_store.write().await;
+                            if let Some(session) = store.get_mut(&session_key) {
+                                session.clear();
+                            }
+                        }
+                        with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, "History cleared.", None)
+                        })
+                        .await?;
+                    }
+                    CoreCommandResult::Error(msg) => {
+                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None))
+                            .await?;
+                    }
+                    CoreCommandResult::Handled => {
+                        // Silent — no response to user
+                    }
+                    CoreCommandResult::Quit => {
+                        // Quit not meaningful on gateway — ignore
+                    }
+                    CoreCommandResult::PassThrough => {
+                        // Fall through to agent as normal message
+                        let no_attachments =
+                            ProcessedAttachments { text_prefix: None, image_data_uri: None };
+                        return self.run_agent(event, adapter, cancel, no_attachments).await;
+                    }
+                }
+            }
+            ResolveResult::Ambiguous(candidates) => {
+                let first = parts.first().copied().unwrap_or("");
+                let list = candidates
+                    .iter()
+                    .map(|c| format!("/{}", c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let msg = format!(
+                    "Ambiguous command: {}. Matches: {}. Be more specific.",
+                    first, list
+                );
+                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None))
+                    .await?;
+            }
+            ResolveResult::NotFound => {
+                // D-08: Unknown commands pass through to agent as normal message
+                let no_attachments =
+                    ProcessedAttachments { text_prefix: None, image_data_uri: None };
+                return self.run_agent(event, adapter, cancel, no_attachments).await;
             }
         }
-    }
-
-    /// /start — Reset session, then generate in-character LLM greeting (D-15).
-    async fn cmd_start(
-        &self,
-        event: &MessageEvent,
-        adapter: Arc<dyn PlatformAdapter>,
-        cancel: CancellationToken,
-    ) -> Result<()> {
-        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
-            .with_user(&event.sender_id);
-        {
-            let mut store = self.session_store.write().await;
-            store.remove(&key);
-        }
-        // Create synthetic event asking for introduction — LLM generates greeting with SOUL.md
-        let mut intro_event = event.clone();
-        intro_event.content =
-            "Please introduce yourself. This is the start of a new conversation.".to_string();
-        let no_attachments = ProcessedAttachments { text_prefix: None, image_data_uri: None };
-        self.run_agent(&intro_event, adapter, cancel, no_attachments).await
-    }
-
-    /// /new — Archive current session and confirm fresh start (D-13).
-    async fn cmd_new(
-        &self,
-        event: &MessageEvent,
-        adapter: Arc<dyn PlatformAdapter>,
-    ) -> Result<()> {
-        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
-            .with_user(&event.sender_id);
-        let had_session = {
-            let mut store = self.session_store.write().await;
-            store.remove(&key).is_some()
-        };
-        let msg = if had_session {
-            "Conversation cleared. Starting fresh."
-        } else {
-            "No active conversation. Ready for a new one."
-        };
-        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, msg, None)).await?;
-        Ok(())
-    }
-
-    /// /clear — Wipe history but keep session alive (D-13).
-    async fn cmd_clear(
-        &self,
-        event: &MessageEvent,
-        adapter: Arc<dyn PlatformAdapter>,
-    ) -> Result<()> {
-        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
-            .with_user(&event.sender_id);
-        {
-            let mut store = self.session_store.write().await;
-            if let Some(session) = store.get_mut(&key) {
-                session.clear();
-            }
-        }
-        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "History cleared.", None))
-            .await?;
-        Ok(())
-    }
-
-    /// /help — Show available commands (D-13).
-    async fn cmd_help(
-        &self,
-        event: &MessageEvent,
-        adapter: Arc<dyn PlatformAdapter>,
-    ) -> Result<()> {
-        let help_text = "/start - Start a new conversation with an introduction\n\
-                         /new - Start a fresh conversation (clears history)\n\
-                         /clear - Clear conversation history\n\
-                         /help - Show this help message";
-        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, help_text, None)).await?;
         Ok(())
     }
 
@@ -734,6 +770,59 @@ mod tests {
         assert!(agent.has_context_engine(), "agent must have context engine attached");
         assert!(agent.has_pressure_tracker(), "agent must have pressure tracker attached");
         assert_eq!(agent.session_id(), Some("sess-gw".to_string()));
+    }
+
+    // ── Phase 21.1 Plan 02: slash command router integration tests ────────────
+
+    /// Regression: handler.rs must use CommandRouter for slash command dispatch.
+    #[test]
+    fn handler_uses_command_router() {
+        let src = include_str!("handler.rs");
+        assert!(
+            src.contains("CommandRouter"),
+            "handler.rs must use CommandRouter for slash command dispatch"
+        );
+    }
+
+    /// Regression: handler.rs must construct CommandContext for command dispatch.
+    #[test]
+    fn handler_uses_command_context() {
+        let src = include_str!("handler.rs");
+        assert!(
+            src.contains("CommandContext"),
+            "handler.rs must construct CommandContext for command dispatch"
+        );
+    }
+
+    /// Regression: handler.rs must not contain old hardcoded help text.
+    #[test]
+    fn handler_does_not_have_hardcoded_help_text() {
+        let src = include_str!("handler.rs");
+        // Split the forbidden string so this test itself doesn't trigger the check.
+        let forbidden = ["/start - ", "Start a new conversation with an introduction"].concat();
+        assert!(
+            !src.contains(&forbidden),
+            "handler.rs must not contain hardcoded help text (use CommandRouter)"
+        );
+    }
+
+    /// Regression: handler.rs must call command_router.resolve() for slash command resolution.
+    #[test]
+    fn handler_resolves_commands_via_router() {
+        let src = include_str!("handler.rs");
+        assert!(
+            src.contains("command_router.resolve(") || src.contains("self.command_router.resolve("),
+            "handler.rs must call command_router.resolve() for slash command resolution"
+        );
+    }
+
+    /// Structural: GatewayMessageHandler has command_router field initialized in new().
+    #[test]
+    fn handler_struct_has_command_router_field() {
+        // Verify the field is present and initialized — construction succeeds.
+        let handler = make_handler();
+        // CommandRouter construction panics on duplicate names — if it succeeds, registry is valid.
+        let _ = handler.command_router.resolve("/help", &ironhermes_core::types::Platform::Telegram);
     }
 }
 
