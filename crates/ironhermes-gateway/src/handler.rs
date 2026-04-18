@@ -174,6 +174,7 @@ impl GatewayMessageHandler {
         event: &MessageEvent,
         adapter: Arc<dyn PlatformAdapter>,
         cancel: CancellationToken,
+        processed: ProcessedAttachments,
     ) -> Result<()> {
         // Strip @botname suffix (e.g., "/start@mybot" -> "/start") per T-21.1-06.
         let command_input = event.content.split('@').next().unwrap_or(&event.content);
@@ -261,10 +262,8 @@ impl GatewayMessageHandler {
                         // Quit not meaningful on gateway — ignore
                     }
                     CoreCommandResult::PassThrough => {
-                        // Fall through to agent as normal message
-                        let no_attachments =
-                            ProcessedAttachments { text_prefix: None, image_data_uri: None };
-                        return self.run_agent(event, adapter, cancel, no_attachments).await;
+                        // Fall through to agent as normal message, preserving attachments
+                        return self.run_agent(event, adapter, cancel, processed).await;
                     }
                 }
             }
@@ -283,10 +282,8 @@ impl GatewayMessageHandler {
                     .await?;
             }
             ResolveResult::NotFound => {
-                // D-08: Unknown commands pass through to agent as normal message
-                let no_attachments =
-                    ProcessedAttachments { text_prefix: None, image_data_uri: None };
-                return self.run_agent(event, adapter, cancel, no_attachments).await;
+                // D-08: Unknown commands pass through to agent as normal message, preserving attachments
+                return self.run_agent(event, adapter, cancel, processed).await;
             }
         }
         Ok(())
@@ -307,7 +304,7 @@ impl GatewayMessageHandler {
         }
 
         if event.content.starts_with('/') {
-            return self.handle_slash_command(event, adapter, cancel).await;
+            return self.handle_slash_command(event, adapter, cancel, processed).await;
         }
         self.run_agent(event, adapter, cancel, processed).await
     }
@@ -565,7 +562,12 @@ impl MessageHandler for GatewayMessageHandler {
     ) -> Result<()> {
         // Intercept slash commands before agent loop (plan 04)
         if event.content.starts_with('/') {
-            return self.handle_slash_command(event, adapter, cancel).await;
+            // Text-only path — no multimodal attachments to forward
+            let no_attachments = ProcessedAttachments {
+                text_prefix: None,
+                image_data_uri: None,
+            };
+            return self.handle_slash_command(event, adapter, cancel, no_attachments).await;
         }
         // No multimodal data via this path (text-only fallback)
         let no_attachments = ProcessedAttachments {
