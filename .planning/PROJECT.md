@@ -39,7 +39,7 @@ A working conversational AI agent with personality (context files) that operates
 - [x] Context file loading (.hermes.md > HERMES.md > AGENTS.md > CLAUDE.md > .cursorrules priority chain, .cursor/rules/*.mdc fallback, progressive subdirectory discovery with 8K cap, security scanning, truncation) — Validated in Phase 15: 10-Layer Prompt Assembly
 - [x] SOUL.md personality system (durable identity from HERMES_HOME, default fallback, /personality session overlays, 14 built-in presets, custom preset loading) — Validated in Phase 15: 10-Layer Prompt Assembly
 - [ ] Skill framework (SKILL.md format, category-based discovery, progressive disclosure, conditional activation, env var/config requirements, credential file mounting, security scanning, Skills Hub)
-- [ ] Slash command integration (SKILL-13 backlog from v1.1)
+- [x] Slash command integration (platform-agnostic CommandRouter with 49 commands, three-stage resolution, unified CLI+gateway dispatch) — Validated in Phase 21.1: Slash Commands
 - [ ] Tool registry improvements (toolset management, check functions, setup wizard integration)
 - [x] CLI feature parity (execute_code, hooks, guardrails available in CLI mode) — Validated in Phase 22: CLI Feature Parity
 - [ ] Configuration/setup wizard improvements
@@ -59,6 +59,7 @@ A working conversational AI agent with personality (context files) that operates
 - v2.0 Phase 21 complete 2026-04-17: CLI TUI polish (status bar, knight-rider scanner, graceful double ctrl-c)
 - v2.0 Phase 22 complete 2026-04-17: CLI feature parity (cron, skills, execute_code, guardrails, HookRegistry in both CLI paths)
 - v2.0 Phase 22.1 complete 2026-04-17: TUI extension hooks (TuiExtension trait, widget slot compositing, keybinding registry, command dispatch chain, render/REPL integration)
+- v2.0 Phase 21.1 complete 2026-04-18: Slash commands (CommandRouter with 49 commands, three-stage resolve, unified CLI+gateway dispatch replacing hardcoded handlers)
 - 400+ workspace tests passing
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
 - Tech stack: Rust 2024 edition, tokio async, SQLite (rusqlite), OpenAI-compatible LLM API
