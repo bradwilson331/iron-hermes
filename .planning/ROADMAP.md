@@ -102,10 +102,10 @@ Plans:
 **Goal:** Implement platform-agnostic slash command router that intercepts `/` prefixed messages before AgentLoop dispatch, with full hermes-agent command parity (44 commands), alias resolution, shortest-unique-prefix matching, platform availability filtering, and running-agent guard. Replace hardcoded CLI and gateway dispatchers with unified router in ironhermes-core. Works across CLI, gateway, and ACP.
 **Requirements:** SKILL-12, SKILL-13, SKILL-14
 **Depends on:** Phase 21
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
-- [ ] 21.1-01-PLAN.md — Build CommandRouter in ironhermes-core: CommandDef/PlatformFilter/CommandCategory types, three-stage resolve_command (exact/alias/prefix), full 44-command registry with wired handlers and TODO stubs, CommandContext struct, comprehensive unit tests
+- [x] 21.1-01-PLAN.md — Build CommandRouter in ironhermes-core: CommandDef/PlatformFilter/CommandCategory types, three-stage resolve_command (exact/alias/prefix), full 44-command registry with wired handlers and TODO stubs, CommandContext struct, comprehensive unit tests
 - [ ] 21.1-02-PLAN.md — Wire CommandRouter into CLI (replace core_dispatch, update dispatch_command chain, construct CommandContext in REPL loop) and gateway (replace handle_slash_command with router-based dispatch, delete old cmd_* methods). Static-grep regression tests.
 
 **Wave structure:**

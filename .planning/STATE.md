@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 21.1 context gathered
-last_updated: "2026-04-18T02:24:29.920Z"
-last_activity: 2026-04-17
+status: executing
+stopped_at: Completed 21.1-01-PLAN.md
+last_updated: "2026-04-18T03:02:29.856Z"
+last_activity: 2026-04-18
 progress:
   total_phases: 6
   completed_phases: 4
-  total_plans: 11
-  completed_plans: 11
-  percent: 100
+  total_plans: 13
+  completed_plans: 12
+  percent: 92
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22.1 — tui-extension-hooks
+**Current focus:** Phase 21.1 — slash-commands
 
 ## Current Position
 
-Phase: 22.2
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-04-17
+Phase: 21.1 (slash-commands) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
+Last activity: 2026-04-18
 
 Progress: [██████████] 100%
 
@@ -81,6 +81,7 @@ Progress: [██████████] 100%
 | Phase 22 P02 | 5 | 2 tasks | 2 files |
 | Phase 22.1 P01 | 4 | 2 tasks | 4 files |
 | Phase 22.1 P02 | 4 | 2 tasks | 3 files |
+| Phase 21.1 P01 | 4 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,10 @@ Recent decisions affecting current work:
 - [Phase 22.1]: reserved_rows() is the single source of truth for DECSTBM row count; all five hardcoded saturating_sub(3) calls replaced
 - [Phase 22.1]: render_loop takes mpsc::UnboundedReceiver<TuiEvent> directly; zero-extension case passes empty collections (no Option wrapper)
 - [Phase 22.1]: build_scanner_frame() delegates to knight_rider::frame() when colors match defaults for exact Phase 21 output fidelity
+- [Phase 21.1]: match-on-name dispatch in handlers.rs (no trait objects) per RESEARCH.md Open Question 1
+- [Phase 21.1]: CommandResult re-exported as SlashCommandResult to avoid ambiguity with crate::error::Result
+- [Phase 21.1]: q alias assigned to quit (not queue) per hermes-agent exit priority
+- [Phase 21.1]: CommandContext kept minimal: platform, session_id, agent_running (required) + skill_registry (optional)
 
 ### Roadmap Evolution
 
@@ -163,6 +168,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-18T02:24:29.918Z
-Stopped at: Phase 21.1 context gathered
-Resume file: .planning/phases/21.1-slash-commands/21.1-CONTEXT.md
+Last session: 2026-04-18T03:02:29.854Z
+Stopped at: Completed 21.1-01-PLAN.md
+Resume file: None

@@ -79,9 +79,9 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [ ] **SKILL-09**: Trust levels for installed skills: builtin (shipped), official (optional-skills/), trusted (known repos), community (security-gated)
 - [x] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
 - [x] **SKILL-11**: Skill env vars automatically passed through to execute_code and terminal sandboxes when set
-- [ ] **SKILL-12**: Slash command router intercepts / prefixed messages before AgentLoop — platform-agnostic (CLI + gateway + ACP)
-- [ ] **SKILL-13**: Core slash commands implemented: /help, /reset, /personality, /skills, /memory, /sessions, /search, /model, /stop, /new
-- [ ] **SKILL-14**: Slash command resolution supports aliases and prefix matching via resolve_command()
+- [x] **SKILL-12**: Slash command router intercepts / prefixed messages before AgentLoop — platform-agnostic (CLI + gateway + ACP)
+- [x] **SKILL-13**: Core slash commands implemented: /help, /reset, /personality, /skills, /memory, /sessions, /search, /model, /stop, /new
+- [x] **SKILL-14**: Slash command resolution supports aliases and prefix matching via resolve_command()
 
 ### Tool Registry
 
@@ -240,9 +240,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKILL-09 | Phase 19.1 | Pending |
 | SKILL-10 | Phase 19 | Complete |
 | SKILL-11 | Phase 19 | Complete |
-| SKILL-12 | Phase 20 | Pending |
-| SKILL-13 | Phase 20 | Pending |
-| SKILL-14 | Phase 20 | Pending |
+| SKILL-12 | Phase 20 | Complete |
+| SKILL-13 | Phase 20 | Complete |
+| SKILL-14 | Phase 20 | Complete |
 | TOOL-01 | Phase 20 | Pending |
 | TOOL-02 | Phase 20 | Pending |
 | TOOL-03 | Phase 20 | Pending |
