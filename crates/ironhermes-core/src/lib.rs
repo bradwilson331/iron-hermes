@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod config;
 pub mod config_schema;
 pub mod constants;
@@ -25,5 +26,10 @@ pub use skills::{
     CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,
     SkillSource,
 };
+pub use commands::{
+    CommandCategory, CommandDef, CommandResult as SlashCommandResult, CommandRouter, PlatformFilter,
+    ResolveResult,
+};
+pub use commands::context::CommandContext;
 pub use ssrf::is_safe_url;
 pub use types::*;
