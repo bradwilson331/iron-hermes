@@ -60,10 +60,13 @@ pub fn dispatch(
 // Wirable handlers
 // =============================================================================
 
-fn cmd_new(_args: &[&str], _ctx: &CommandContext) -> CommandResult {
-    CommandResult::NewSession {
-        message: "Conversation cleared. Starting fresh.".to_string(),
-    }
+fn cmd_new(args: &[&str], _ctx: &CommandContext) -> CommandResult {
+    let message = if args.is_empty() {
+        "Conversation cleared. Starting fresh.".to_string()
+    } else {
+        format!("Starting new session: {}", args.join(" "))
+    };
+    CommandResult::NewSession { message }
 }
 
 fn cmd_clear(_ctx: &CommandContext) -> CommandResult {
