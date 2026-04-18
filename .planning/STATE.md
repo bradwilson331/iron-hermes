@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 22.1-02-PLAN.md
-last_updated: "2026-04-17T23:16:50.302Z"
+stopped_at: Phase 22.2 context gathered
+last_updated: "2026-04-18T01:31:43.005Z"
 last_activity: 2026-04-17
 progress:
   total_phases: 5
@@ -162,6 +162,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-17T23:10:01.183Z
-Stopped at: Completed 22.1-02-PLAN.md
-Resume file: None
+Last session: 2026-04-18T01:31:43.003Z
+Stopped at: Phase 22.2 context gathered
+Resume file: .planning/phases/22.2-acp-adapter/22.2-CONTEXT.md
