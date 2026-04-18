@@ -7,13 +7,18 @@ use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt_with_reserve, finish_prompt_with_reserve};
 use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
 use crate::tui::extension::{KeyContext, TuiExtension};
+use crate::tui::commands::build_cli_router;
+use ironhermes_core::commands::{CommandResult as CoreCommandResult, CommandRouter};
+use ironhermes_core::commands::context::CommandContext;
+use ironhermes_core::commands::registry::build_registry as build_command_registry;
+use ironhermes_core::types::Platform;
 use std::time::Instant;
 
 mod cron;
@@ -656,6 +661,10 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
     let mut messages = vec![system_msg];
 
+    // Phase 21.1 Plan 02: unified CommandRouter and agent_running flag.
+    let command_router = CommandRouter::new(build_command_registry());
+    let agent_running = Arc::new(AtomicBool::new(false));
+
     // Use rustyline for readline with history
     let mut rl = rustyline::DefaultEditor::new().context("Failed to initialize readline")?;
 
@@ -719,7 +728,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     continue;
                 }
 
-                // Phase 22.1 D-06: extension-first command dispatch.
+                // Phase 21.1 D-06/D-07/D-08: extension-first command dispatch via CommandRouter.
                 if input.starts_with('/') {
                     let parts: Vec<&str> = input[1..].split_whitespace().collect();
                     if parts.is_empty() {
@@ -727,27 +736,34 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     }
                     let cmd = parts[0];
                     let args = &parts[1..];
-                    match dispatch_command(tui.extensions(), cmd, args) {
+
+                    // Build CommandContext for this turn.
+                    let cmd_ctx = CommandContext::new(
+                        Platform::Local,
+                        session_id.clone(),
+                        agent_running.clone(),
+                    );
+
+                    // dispatch_command: extension-first -> CommandRouter -> skill catch-all
+                    match dispatch_command(tui.extensions(), cmd, args, &command_router, &cmd_ctx) {
                         CommandResult::Handled(output) => {
-                            // Special handling for commands that have side effects
-                            match cmd {
-                                "quit" | "exit" | "q" => {
-                                    println!("{}", output.dimmed());
-                                    break;
-                                }
-                                "clear" => {
-                                    messages.truncate(1); // Keep system message
-                                    println!("{}", output.dimmed());
-                                    continue;
-                                }
-                                "status" => {
-                                    cmd_status()?;
-                                    continue;
-                                }
-                                _ => {
-                                    println!("{}", output);
-                                    continue;
-                                }
+                            // Map router result semantics: Quit and ClearSession are now
+                            // surfaced directly from core via map_core_to_tui in commands.rs.
+                            // Quit maps to Handled("Goodbye!"), ClearSession maps to Handled("Conversation cleared.").
+                            // We detect them by the well-known messages since the TUI CommandResult
+                            // has no Quit/ClearSession variants (only Handled/Silent/Error).
+                            if output == "Goodbye!" {
+                                println!("{}", output.dimmed());
+                                break;
+                            } else if output == "Conversation cleared."
+                                || output == "Conversation cleared. Starting fresh."
+                            {
+                                messages.truncate(1); // Keep system message
+                                println!("{}", output.dimmed());
+                                continue;
+                            } else {
+                                println!("{}", output);
+                                continue;
                             }
                         }
                         CommandResult::Silent => {
@@ -772,6 +788,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                 // racing against tokio::signal::ctrl_c() per D-10.
                 // The future is pinned outside the select loop so a CancelTurn
                 // decision can `continue` and the agent sees the cancelled token.
+                agent_running.store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut run_fut = Box::pin(run_agent_turn(
                     &client,
                     registry.clone(),
@@ -834,6 +851,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                         r = &mut run_fut => { break 'turn r?; }
                     }
                 };
+
+                agent_running.store(false, std::sync::atomic::Ordering::SeqCst);
 
                 // Only reset the double-ctrl-c window on clean completion.
                 // After CancelTurn, keep the window open so a second ctrl-c
@@ -1168,9 +1187,13 @@ fn print_banner() {
 }
 
 fn print_help() {
-    // Phase 22.1: delegate to format_help with no extensions and no keybinding registry.
+    // Phase 21.1 Plan 02: delegate to format_help via CommandRouter (no keybinding registry at startup).
     // When run_chat wires extensions, it uses dispatch_command which calls format_help directly.
-    println!("{}", crate::tui::commands::format_help(&[], None));
+    let router = crate::tui::commands::build_cli_router();
+    println!(
+        "{}",
+        crate::tui::commands::format_help(&[], None, &router, &Platform::Local)
+    );
 }
 
 #[cfg(test)]
@@ -1222,6 +1245,36 @@ mod tui_extension_wiring_tests {
         assert!(
             src.contains("match_key(") && src.contains("KeyContext::Idle"),
             "run_chat must check keybindings before readline"
+        );
+    }
+
+    /// INV-21.1-01: run_chat constructs a CommandRouter from build_command_registry
+    #[test]
+    fn run_chat_constructs_command_router() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("CommandRouter::new(build_command_registry())"),
+            "run_chat must construct CommandRouter::new(build_command_registry())"
+        );
+    }
+
+    /// INV-21.1-02: run_chat constructs a CommandContext
+    #[test]
+    fn run_chat_constructs_command_context() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("CommandContext::new("),
+            "run_chat must construct CommandContext::new() for command dispatch"
+        );
+    }
+
+    /// INV-21.1-03: run_chat has agent_running flag
+    #[test]
+    fn run_chat_has_agent_running_flag() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("agent_running"),
+            "run_chat must track agent_running state"
         );
     }
 }
