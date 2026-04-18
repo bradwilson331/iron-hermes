@@ -25,6 +25,8 @@ use crossterm::{
 };
 use std::collections::HashMap;
 use std::io::{stderr, Write};
+use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -98,8 +100,9 @@ pub struct TuiHandle {
     shutdown: CancellationToken,
     task: Option<JoinHandle<()>>,
     extensions: Vec<Box<dyn TuiExtension>>,
-    /// Cached reserved row count for prepare/finish_prompt callers.
-    reserved: u16,
+    /// Shared reserved row count, updated by the render loop when widgets
+    /// are added/removed at runtime (WR-01 fix: AtomicU16 replaces stale cache).
+    reserved: Arc<AtomicU16>,
 }
 
 impl TuiHandle {
@@ -166,12 +169,14 @@ impl TuiHandle {
         // Merge style overrides from all extensions.
         let merged_styles = merge_style_overrides(&extensions);
 
-        // Calculate reserved rows.
-        let reserved = reserved_rows(&widgets);
+        // Calculate reserved rows and store in shared atomic (WR-01).
+        let initial_reserved = reserved_rows(&widgets);
+        let reserved = Arc::new(AtomicU16::new(initial_reserved));
+        let reserved_atomic = reserved.clone(); // clone for the render loop
 
         // DECSTBM: set scroll region using dynamic reserved row count.
         if stderr().is_tty() && let Ok((_cols, rows)) = size() {
-            let scroll_end = rows.saturating_sub(reserved);
+            let scroll_end = rows.saturating_sub(initial_reserved);
             if scroll_end > 0 {
                 let mut out = stderr();
                 let _ = write!(out, "\x1b[1;{}r", scroll_end);
@@ -189,6 +194,7 @@ impl TuiHandle {
                 event_rx,
                 widgets,
                 merged_styles,
+                reserved_atomic,
                 task_shutdown,
             )
             .await;
@@ -230,10 +236,10 @@ impl TuiHandle {
         self.event_tx.clone()
     }
 
-    /// Return the cached reserved row count. Used by callers of
-    /// `prepare_prompt_with_reserve` / `finish_prompt_with_reserve`.
+    /// Return the current reserved row count. Updated atomically by the
+    /// render loop when widgets are added/removed at runtime (WR-01 fix).
     pub fn reserved_row_count(&self) -> u16 {
-        self.reserved
+        self.reserved.load(AtomicOrdering::Relaxed)
     }
 
     /// Return a reference to the registered extensions slice.
@@ -246,7 +252,7 @@ impl TuiHandle {
     /// the render loop, clears bottom rows, and resets the DECSTBM scroll region.
     pub fn cleanup_on_exit(&self) {
         self.shutdown.cancel();
-        reset_scroll_region_with_reserve(self.reserved);
+        reset_scroll_region_with_reserve(self.reserved.load(AtomicOrdering::Relaxed));
     }
 
     /// Shut down the render task cooperatively. Safe to call once; consumes
@@ -256,7 +262,7 @@ impl TuiHandle {
         if let Some(h) = self.task.take() {
             let _ = h.await;
         }
-        reset_scroll_region_with_reserve(self.reserved);
+        reset_scroll_region_with_reserve(self.reserved.load(AtomicOrdering::Relaxed));
     }
 }
 
@@ -363,6 +369,7 @@ async fn render_loop(
     mut event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     mut widgets: HashMap<String, (LayoutSlot, Widget)>,
     style_overrides: StyleOverrides,
+    reserved_atomic: Arc<AtomicU16>,
     shutdown: CancellationToken,
 ) {
     // D-17 graceful degradation: non-tty stderr (pipe/ssh/CI) → no-op loop.
@@ -385,7 +392,9 @@ async fn render_loop(
             _ = ticker.tick() => {
                 // DECSTBM resize tracking: update scroll region when terminal
                 // height changes so the reserved area stays at the new bottom.
+                // WR-01: also publish to AtomicU16 so callers get current value.
                 let reserved = reserved_rows(&widgets);
+                reserved_atomic.store(reserved, AtomicOrdering::Relaxed);
                 if let Ok((_cols, rows)) = size() && rows != prev_rows && rows >= 4 {
                     let scroll_end = rows.saturating_sub(reserved);
                     let mut out = stderr();
