@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Phase 22.2 context gathered
-last_updated: "2026-04-18T01:31:43.005Z"
+stopped_at: Phase 21.1 context gathered
+last_updated: "2026-04-18T02:24:29.920Z"
 last_activity: 2026-04-17
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 4
   total_plans: 11
   completed_plans: 11
@@ -145,6 +145,7 @@ Recent decisions affecting current work:
 ### Roadmap Evolution
 
 - Phase 22 added: CLI feature parity
+- Phase 21.1 inserted after Phase 21: Slash Commands (INSERTED)
 
 ### Pending Todos
 
@@ -162,6 +163,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-18T01:31:43.003Z
-Stopped at: Phase 22.2 context gathered
-Resume file: .planning/phases/22.2-acp-adapter/22.2-CONTEXT.md
+Last session: 2026-04-18T02:24:29.918Z
+Stopped at: Phase 21.1 context gathered
+Resume file: .planning/phases/21.1-slash-commands/21.1-CONTEXT.md
