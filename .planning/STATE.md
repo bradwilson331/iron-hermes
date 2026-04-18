@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 21.1-01-PLAN.md
-last_updated: "2026-04-18T03:02:29.856Z"
+status: verifying
+stopped_at: Completed 21.1-02-PLAN.md
+last_updated: "2026-04-18T04:39:30.608Z"
 last_activity: 2026-04-18
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 13
-  completed_plans: 12
-  percent: 92
+  completed_plans: 13
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 21.1 (slash-commands) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-18
 
 Progress: [██████████] 100%
@@ -82,6 +82,7 @@ Progress: [██████████] 100%
 | Phase 22.1 P01 | 4 | 2 tasks | 4 files |
 | Phase 22.1 P02 | 4 | 2 tasks | 3 files |
 | Phase 21.1 P01 | 4 | 3 tasks | 5 files |
+| Phase 21.1-slash-commands P02 | 35 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,9 @@ Recent decisions affecting current work:
 - [Phase 21.1]: CommandResult re-exported as SlashCommandResult to avoid ambiguity with crate::error::Result
 - [Phase 21.1]: q alias assigned to quit (not queue) per hermes-agent exit priority
 - [Phase 21.1]: CommandContext kept minimal: platform, session_id, agent_running (required) + skill_registry (optional)
+- [Phase 21.1]: map_core_to_tui detects quit/clear by well-known message strings since TUI CommandResult has no Quit/ClearSession variants
+- [Phase 21.1]: /start gateway behavior preserved by checking def.name == 'start' in NewSession arm
+- [Phase 21.1]: SessionKey::to_string_key() used instead of to_string() (no Display impl on SessionKey)
 
 ### Roadmap Evolution
 
@@ -168,6 +172,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-18T03:02:29.854Z
-Stopped at: Completed 21.1-01-PLAN.md
+Last session: 2026-04-18T04:39:30.606Z
+Stopped at: Completed 21.1-02-PLAN.md
 Resume file: None
