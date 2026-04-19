@@ -9,6 +9,7 @@ pub mod memory_store;
 pub mod model_metadata;
 pub mod provider;
 pub mod skills;
+pub mod token_estimator;
 pub mod ssrf;
 pub mod types;
 
@@ -32,5 +33,10 @@ pub use commands::{
     ResolveResult,
 };
 pub use commands::context::CommandContext;
+pub use model_metadata::{ModelCapabilities, ModelMetadata, ModelRegistry};
+pub use token_estimator::{
+    TokenEstimator, TiktokenEncoding, init_global_estimator, global_estimate_tokens,
+    warm_tiktoken_singletons,
+};
 pub use ssrf::is_safe_url;
 pub use types::*;
