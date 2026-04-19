@@ -7,6 +7,7 @@ pub mod error;
 pub mod memory_provider;
 pub mod memory_store;
 pub mod model_metadata;
+pub mod models_cache;
 pub mod provider;
 pub mod skills;
 pub mod token_estimator;
@@ -34,6 +35,10 @@ pub use commands::{
 };
 pub use commands::context::CommandContext;
 pub use model_metadata::{ModelCapabilities, ModelMetadata, ModelRegistry};
+pub use models_cache::{
+    ModelsCache, ModelsCacheEntry, FetchResult, fetch_all, fetch_from_models_dev,
+    fetch_from_openrouter, normalize_model_id,
+};
 pub use token_estimator::{
     TokenEstimator, TiktokenEncoding, init_global_estimator, global_estimate_tokens,
     warm_tiktoken_singletons,

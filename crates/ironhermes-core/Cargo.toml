@@ -22,6 +22,7 @@ async-trait = { workspace = true }
 fs2 = { workspace = true }
 url = { workspace = true }
 tiktoken-rs = "0.11.0"
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
