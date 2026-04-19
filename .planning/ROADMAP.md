@@ -102,14 +102,14 @@ Plans:
 **Goal:** Replace the hardcoded `DEFAULT_CONTEXT_LENGTH = 128_000` with a model-aware metadata system (static lookup table + disk cache from models.dev/OpenRouter APIs), replace the crude `text.len() / 4 + 1` token estimation heuristic with proper BPE tokenization via tiktoken-rs, wire accurate model metadata through all consumers (AgentLoop, ContextCompressor, PressureTracker, StatusLine), and add `hermes models list/fetch/info` CLI subcommand plus `/models` slash command. D-01..D-15 from CONTEXT.md serve as requirements.
 **Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13, D-14, D-15
 **Depends on:** Phase 21
-**Plans:** 5 plans (4 complete, 1 gap closure)
+**Plans:** 5/5 plans complete
 
 Plans:
 - [x] 21.3-01-PLAN.md — Create ModelMetadata/ModelCapabilities/ModelRegistry structs with static lookup table (30+ models across 7 families), canonical ID + alias map (versioned/prefixed/legacy name resolution), TokenEstimator wrapping tiktoken-rs singletons (cl100k_base + o200k_base), global estimator with OnceLock, warm function. All in ironhermes-core with comprehensive TDD unit tests.
 - [x] 21.3-02-PLAN.md — Wire metadata through resolution chain: add model_metadata to ResolvedEndpoint, populate from ModelRegistry in ProviderResolver::build(), replace text.len()/4 heuristic with tiktoken in context_compressor, parameterize attach_context_engine with context_length, update all four hardcoded 128_000 sites in main.rs and gateway handler.
 - [x] 21.3-03-PLAN.md — Implement disk cache (ModelsCache with load/save to ~/.ironhermes/models-cache.json) and API fetch layer (models.dev primary + OpenRouter fallback per D-03), parse functions for both API response formats, normalize_model_id, fetch_all with fallback chain and FetchResult reporting.
 - [x] 21.3-04-PLAN.md — Add hermes models list/fetch/info CLI subcommands (models_cmd.rs following cron.rs pattern, UI-SPEC terminal output contracts) and /models refresh|info slash commands (plain text CommandResult::Output, no ANSI codes). Wire into Commands enum and CommandRouter registry.
-- [ ] 21.3-05-PLAN.md — Gap closure: Wire ModelsCache::load() + merge_cache() into ProviderResolver::build() so disk cache is auto-loaded at startup for all runtime entry points (D-02, D-06 completion). Regression tests.
+- [x] 21.3-05-PLAN.md — Gap closure: Wire ModelsCache::load() + merge_cache() into ProviderResolver::build() so disk cache is auto-loaded at startup for all runtime entry points (D-02, D-06 completion). Regression tests.
 
 **Wave structure:**
 - Wave 1: 21.3-01 (ModelMetadata + TokenEstimator + static table — autonomous)

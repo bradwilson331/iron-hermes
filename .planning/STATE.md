@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 21.3-04-PLAN.md
-last_updated: "2026-04-19T22:04:04.293Z"
+status: executing
+stopped_at: Completed 21.3-05-PLAN.md
+last_updated: "2026-04-19T23:25:59.513Z"
 last_activity: 2026-04-19
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 22
-  completed_plans: 17
-  percent: 77
+  total_plans: 23
+  completed_plans: 18
+  percent: 78
 ---
 
 # Project State
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.3 (model-metadata-models-dev-context-lengths-token-estimation) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
+Plan: 2 of 5
+Status: Ready to execute
 Last activity: 2026-04-19
 
 Progress: [██████████] 100%
@@ -88,6 +88,7 @@ Progress: [██████████] 100%
 | Phase 21.3 P02 | 11min | 2 tasks | 9 files |
 | Phase 21.3 P03 | 3min | 1 tasks | 3 files |
 | Phase 21.3 P04 | 5min | 2 tasks | 5 files |
+| Phase 21.3 P05 | 3min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -161,6 +162,7 @@ Recent decisions affecting current work:
 - [Phase 21.3]: Hysteresis test recalibrated for tiktoken: wider threshold band and dynamic filler to be robust against both BPE and heuristic counting
 - [Phase 21.3]: Pure parse functions take serde_json::Value for testability; OpenRouter entries override models.dev for same key (richer tokenizer data)
 - [Phase 21.3]: tokio promoted from dev-dep to dep in ironhermes-core for block_in_place in slash command handler
+- [Phase 21.3]: Minimal 3-line change in ProviderResolver::build() (let mut + load + merge_cache) auto-loads disk cache for all runtime entry points
 
 ### Roadmap Evolution
 
@@ -185,6 +187,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-19T22:04:04.291Z
-Stopped at: Completed 21.3-04-PLAN.md
+Last session: 2026-04-19T23:25:59.511Z
+Stopped at: Completed 21.3-05-PLAN.md
 Resume file: None
