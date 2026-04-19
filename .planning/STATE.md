@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.3-01-PLAN.md
-last_updated: "2026-04-19T21:37:19.465Z"
+stopped_at: Completed 21.3-02-PLAN.md
+last_updated: "2026-04-19T21:50:58.524Z"
 last_activity: 2026-04-19
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 22
-  completed_plans: 14
-  percent: 64
+  completed_plans: 15
+  percent: 68
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.3 (model-metadata-models-dev-context-lengths-token-estimation) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-19
 
@@ -85,6 +85,7 @@ Progress: [██████████] 100%
 | Phase 21.1 P01 | 4 | 3 tasks | 5 files |
 | Phase 21.1-slash-commands P02 | 35 | 2 tasks | 3 files |
 | Phase 21.3 P01 | 5 | 2 tasks | 4 files |
+| Phase 21.3 P02 | 11min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -154,6 +155,8 @@ Recent decisions affecting current work:
 - [Phase 21.1]: SessionKey::to_string_key() used instead of to_string() (no Display impl on SessionKey)
 - [Phase 21.3]: tiktoken-rs 0.11.0 singletons return &'static CoreBPE (lazy_static), not Arc<RwLock<CoreBPE>> -- no .read() needed on singleton references
 - [Phase 21.3]: 37 models in static table across 7 families (Claude, GPT, Llama, Gemini, Mistral/Mixtral, DeepSeek, Qwen); helper functions cl100k()/o200k() keep table DRY
+- [Phase 21.3]: D-06 precedence: context_length() on ResolvedEndpoint checks config.yaml first, then model metadata, then DEFAULT_CONTEXT_LENGTH
+- [Phase 21.3]: Hysteresis test recalibrated for tiktoken: wider threshold band and dynamic filler to be robust against both BPE and heuristic counting
 
 ### Roadmap Evolution
 
@@ -178,6 +181,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-19T21:37:19.463Z
-Stopped at: Completed 21.3-01-PLAN.md
+Last session: 2026-04-19T21:50:58.522Z
+Stopped at: Completed 21.3-02-PLAN.md
 Resume file: None
