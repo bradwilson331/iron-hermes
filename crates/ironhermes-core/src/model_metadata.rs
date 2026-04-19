@@ -26,6 +26,7 @@ pub struct ModelMetadata {
 }
 
 /// Registry of model metadata with static table, alias map, and disk cache overlay (per D-01, D-05, D-06).
+#[derive(Debug, Clone)]
 pub struct ModelRegistry {
     table: HashMap<&'static str, ModelMetadata>,
     aliases: HashMap<&'static str, &'static str>,

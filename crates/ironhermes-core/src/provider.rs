@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::config::{ApiMode, Config, ModelRoleConfig};
-use crate::constants::{ANTHROPIC_BASE_URL, OPENROUTER_BASE_URL};
+use crate::constants::{ANTHROPIC_BASE_URL, DEFAULT_CONTEXT_LENGTH, OPENROUTER_BASE_URL};
+use crate::model_metadata::{ModelMetadata, ModelRegistry};
 
 // =============================================================================
 // ResolvedEndpoint (D-01, D-04)
@@ -19,6 +20,26 @@ pub struct ResolvedEndpoint {
     pub api_mode: ApiMode,
     pub default_model: String,
     pub fallback_providers: Vec<String>,
+    pub model_metadata: Option<ModelMetadata>,       // Phase 21.3 D-14
+    pub config_context_length: Option<usize>,        // Phase 21.3 D-06
+}
+
+impl ResolvedEndpoint {
+    /// Returns the context_length with D-06 precedence:
+    /// 1. User config.yaml context_length (if set) — always wins
+    /// 2. Model metadata context_length (from cache or static table)
+    /// 3. DEFAULT_CONTEXT_LENGTH (128K) as last resort
+    pub fn context_length(&self) -> usize {
+        // D-06: user config always wins
+        if let Some(config_len) = self.config_context_length {
+            return config_len;
+        }
+        // Then model metadata (cache > static, handled by ModelRegistry lookup order)
+        self.model_metadata
+            .as_ref()
+            .map(|m| m.context_length)
+            .unwrap_or(DEFAULT_CONTEXT_LENGTH)
+    }
 }
 
 impl fmt::Debug for ResolvedEndpoint {
@@ -29,6 +50,8 @@ impl fmt::Debug for ResolvedEndpoint {
             .field("api_mode", &self.api_mode)
             .field("default_model", &self.default_model)
             .field("fallback_providers", &self.fallback_providers)
+            .field("model_metadata", &self.model_metadata)
+            .field("config_context_length", &self.config_context_length)
             .finish()
     }
 }
@@ -68,6 +91,7 @@ pub struct ProviderResolver {
     endpoints: HashMap<String, ResolvedEndpoint>,
     roles: HashMap<String, ModelRoleConfig>,
     main_provider: String,
+    model_registry: ModelRegistry,  // Phase 21.3
 }
 
 impl ProviderResolver {
@@ -78,6 +102,8 @@ impl ProviderResolver {
     /// - Custom provider with non-https base_url (unless localhost/127.0.0.1)
     pub fn build(config: &Config) -> Result<Self> {
         let mut endpoints: HashMap<String, ResolvedEndpoint> = HashMap::new();
+        let model_registry = ModelRegistry::new();
+        let config_context_length = config.model.context_length;
 
         // --- 1. Pre-populate three built-in providers with defaults ---
         endpoints.insert(
@@ -88,6 +114,8 @@ impl ProviderResolver {
                 api_mode: ApiMode::ChatCompletions,
                 default_model: config.model.default.clone(),
                 fallback_providers: vec![],
+                model_metadata: None,
+                config_context_length: None,
             },
         );
         endpoints.insert(
@@ -98,6 +126,8 @@ impl ProviderResolver {
                 api_mode: ApiMode::AnthropicMessages,
                 default_model: "claude-sonnet-4-20250514".to_string(),
                 fallback_providers: vec![],
+                model_metadata: None,
+                config_context_length: None,
             },
         );
         endpoints.insert(
@@ -108,6 +138,8 @@ impl ProviderResolver {
                 api_mode: ApiMode::ChatCompletions,
                 default_model: "gpt-4o".to_string(),
                 fallback_providers: vec![],
+                model_metadata: None,
+                config_context_length: None,
             },
         );
 
@@ -119,6 +151,8 @@ impl ProviderResolver {
                 api_mode: ApiMode::ChatCompletions,
                 default_model: String::new(),
                 fallback_providers: vec![],
+                model_metadata: None,
+                config_context_length: None,
             });
             if let Some(ref url) = prov_cfg.base_url {
                 entry.base_url = url.clone();
@@ -154,6 +188,8 @@ impl ProviderResolver {
                     api_mode: custom.api_mode.clone().unwrap_or(ApiMode::ChatCompletions),
                     default_model: custom.default_model.clone().unwrap_or_default(),
                     fallback_providers: vec![],
+                    model_metadata: None,
+                    config_context_length: None,
                 },
             );
         }
@@ -199,13 +235,20 @@ impl ProviderResolver {
         // Actually the check above works because we iterate &endpoints and check contains_key
         // simultaneously, which is fine for shared refs.
 
-        // --- 6. Store roles ---
+        // --- 6. Populate model_metadata and config_context_length (Phase 21.3) ---
+        for endpoint in endpoints.values_mut() {
+            endpoint.model_metadata = model_registry.lookup(&endpoint.default_model).cloned();
+            endpoint.config_context_length = config_context_length;
+        }
+
+        // --- 7. Store roles ---
         let roles = config.model.roles.clone();
 
         Ok(Self {
             endpoints,
             roles,
             main_provider: main.clone(),
+            model_registry,
         })
     }
 
@@ -243,6 +286,11 @@ impl ProviderResolver {
     /// Get the main provider name.
     pub fn main_provider(&self) -> &str {
         &self.main_provider
+    }
+
+    /// Get a reference to the model registry (Phase 21.3).
+    pub fn model_registry(&self) -> &ModelRegistry {
+        &self.model_registry
     }
 }
 
@@ -404,6 +452,8 @@ mod tests {
             api_mode: ApiMode::ChatCompletions,
             default_model: "gpt-4".to_string(),
             fallback_providers: vec![],
+            model_metadata: None,
+            config_context_length: None,
         };
         let debug_str = format!("{:?}", ep);
         assert!(!debug_str.contains("super-secret"), "Debug should redact api_key");
@@ -439,5 +489,91 @@ mod tests {
         );
         let result = ProviderResolver::build(&config);
         assert!(result.is_err(), "Unknown fallback provider should error");
+    }
+
+    // =========================================================================
+    // Phase 21.3: model_metadata and context_length tests
+    // =========================================================================
+
+    fn default_endpoint() -> ResolvedEndpoint {
+        ResolvedEndpoint {
+            base_url: "https://example.com".to_string(),
+            api_key: None,
+            api_mode: ApiMode::ChatCompletions,
+            default_model: "test-model".to_string(),
+            fallback_providers: vec![],
+            model_metadata: None,
+            config_context_length: None,
+        }
+    }
+
+    #[test]
+    fn test_resolved_endpoint_context_length_from_metadata() {
+        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+
+        // With metadata, no config override
+        let ep = ResolvedEndpoint {
+            model_metadata: Some(ModelMetadata {
+                context_length: 200_000,
+                max_output_tokens: Some(64_000),
+                tokenizer: "cl100k_base".to_string(),
+                capabilities: ModelCapabilities::default(),
+            }),
+            config_context_length: None,
+            ..default_endpoint()
+        };
+        assert_eq!(ep.context_length(), 200_000);
+
+        // Without metadata — falls back to DEFAULT_CONTEXT_LENGTH
+        let ep2 = ResolvedEndpoint {
+            model_metadata: None,
+            config_context_length: None,
+            ..default_endpoint()
+        };
+        assert_eq!(ep2.context_length(), crate::constants::DEFAULT_CONTEXT_LENGTH);
+    }
+
+    #[test]
+    fn test_user_config_context_length_overrides_metadata() {
+        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+
+        // D-06: config.yaml context_length > metadata context_length
+        let ep = ResolvedEndpoint {
+            model_metadata: Some(ModelMetadata {
+                context_length: 200_000,
+                max_output_tokens: Some(64_000),
+                tokenizer: "cl100k_base".to_string(),
+                capabilities: ModelCapabilities::default(),
+            }),
+            config_context_length: Some(1_000_000), // User set 1M in config.yaml
+            ..default_endpoint()
+        };
+        assert_eq!(
+            ep.context_length(),
+            1_000_000,
+            "D-06: user config must override metadata"
+        );
+    }
+
+    #[test]
+    fn test_provider_resolver_populates_model_metadata() {
+        let config = default_config();
+        let resolver = ProviderResolver::build(&config).unwrap();
+        let ep = resolver.resolve_for_main();
+        // Default model is "anthropic/claude-sonnet-4" — should resolve to claude-sonnet-4 metadata
+        assert!(
+            ep.model_metadata.is_some(),
+            "main endpoint should have model_metadata"
+        );
+        assert_eq!(ep.context_length(), 200_000);
+    }
+
+    #[test]
+    fn test_provider_resolver_has_model_registry() {
+        let config = default_config();
+        let resolver = ProviderResolver::build(&config).unwrap();
+        // model_registry accessor should work
+        let reg = resolver.model_registry();
+        assert!(reg.lookup("claude-sonnet-4").is_some());
     }
 }
