@@ -5,6 +5,7 @@ use std::fmt;
 use crate::config::{ApiMode, Config, ModelRoleConfig};
 use crate::constants::{ANTHROPIC_BASE_URL, DEFAULT_CONTEXT_LENGTH, OPENROUTER_BASE_URL};
 use crate::model_metadata::{ModelMetadata, ModelRegistry};
+use crate::models_cache::ModelsCache;
 
 // =============================================================================
 // ResolvedEndpoint (D-01, D-04)
@@ -102,7 +103,9 @@ impl ProviderResolver {
     /// - Custom provider with non-https base_url (unless localhost/127.0.0.1)
     pub fn build(config: &Config) -> Result<Self> {
         let mut endpoints: HashMap<String, ResolvedEndpoint> = HashMap::new();
-        let model_registry = ModelRegistry::new();
+        let mut model_registry = ModelRegistry::new();
+        let disk_cache = ModelsCache::load();
+        model_registry.merge_cache(disk_cache.into_metadata_map());
         let config_context_length = config.model.context_length;
 
         // --- 1. Pre-populate three built-in providers with defaults ---
