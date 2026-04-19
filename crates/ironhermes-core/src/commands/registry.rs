@@ -117,6 +117,9 @@ pub fn build_registry() -> Vec<CommandDef> {
             .platform(GatewayOnly),
         CommandDef::new("help", "Show this help message", Info).platform(All),
         CommandDef::new("usage", "Show token usage", Info).platform(Universal),
+        CommandDef::new("models", "Show or refresh model metadata", Info)
+            .args_hint("[refresh|info <model>]")
+            .platform(Universal),
         CommandDef::new("insights", "Show analytics", Info)
             .args_hint("[days]")
             .platform(Universal),

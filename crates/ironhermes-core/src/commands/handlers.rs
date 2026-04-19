@@ -45,6 +45,7 @@ pub fn dispatch(
         // -------------------------------------------------------------------
         // Info
         // -------------------------------------------------------------------
+        "models" => cmd_models(args, ctx),
         "help" => cmd_help(ctx, router),
         "commands" => cmd_commands(args, ctx, router),
         "skills" => cmd_skills(ctx),
@@ -219,6 +220,145 @@ fn cmd_commands(args: &[&str], ctx: &CommandContext, router: &CommandRouter) -> 
     out.push_str("--------------------");
 
     CommandResult::Output(out)
+}
+
+// =============================================================================
+// /models handler (Phase 21.3 Plan 04)
+// =============================================================================
+
+fn cmd_models(args: &[&str], _ctx: &CommandContext) -> CommandResult {
+    match args.first().copied() {
+        Some("refresh") => cmd_models_refresh(),
+        Some("info") => {
+            if let Some(model) = args.get(1) {
+                cmd_models_info(model)
+            } else {
+                CommandResult::Error("Usage: /models info <model>".to_string())
+            }
+        }
+        Some(_) | None => cmd_models_help(),
+    }
+}
+
+/// /models refresh -- fetch from APIs synchronously using block_in_place.
+///
+/// block_in_place is safe here: handlers::dispatch is called from within
+/// tokio::select! in run_chat (CLI) and from async handler methods (gateway).
+/// Both use #[tokio::main] multi-threaded runtime.
+fn cmd_models_refresh() -> CommandResult {
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            crate::models_cache::fetch_all().await
+        })
+    });
+    let (entries, fetch_result) = result;
+
+    let mut lines = Vec::new();
+    lines.push("Fetching model metadata...".to_string());
+
+    match fetch_result.models_dev_count {
+        Some(n) => lines.push(format!("  models.dev: {} models received", n)),
+        None => {
+            if let Some(ref e) = fetch_result.models_dev_error {
+                lines.push(format!("  models.dev: failed - {}", e));
+            }
+        }
+    }
+    match fetch_result.openrouter_count {
+        Some(n) => lines.push(format!("  OpenRouter: {} models received", n)),
+        None => {
+            if let Some(ref e) = fetch_result.openrouter_error {
+                lines.push(format!("  OpenRouter: failed - {}", e));
+            }
+        }
+    }
+
+    // Save to disk
+    let mut cache = crate::models_cache::ModelsCache::default();
+    cache.entries = entries;
+    match cache.save() {
+        Ok(()) => lines.push(format!(
+            "Fetch complete. {} entries saved to cache.",
+            cache.entries.len()
+        )),
+        Err(e) => {
+            return CommandResult::Error(format!(
+                "Fetch failed: {}. Check network and OPENROUTER_API_KEY.",
+                e
+            ))
+        }
+    }
+
+    CommandResult::Output(lines.join("\n"))
+}
+
+/// /models info <model> -- plain text model detail (no ANSI per UI-SPEC Surface 5).
+fn cmd_models_info(model: &str) -> CommandResult {
+    let mut registry = crate::model_metadata::ModelRegistry::new();
+    let cache = crate::models_cache::ModelsCache::load();
+    registry.merge_cache(cache.into_metadata_map());
+
+    match registry.lookup(model) {
+        Some(metadata) => {
+            let mut lines = Vec::new();
+            lines.push(model.to_string());
+            lines.push(format!(
+                "  Context:    {} tokens",
+                format_number(metadata.context_length)
+            ));
+            match metadata.max_output_tokens {
+                Some(n) => lines.push(format!("  Max output: {} tokens", format_number(n))),
+                None => lines.push("  Max output: unknown".to_string()),
+            }
+            lines.push(format!("  Tokenizer:  {}", metadata.tokenizer));
+            lines.push(format!(
+                "  Vision: {}  Tool use: {}  Reasoning: {}  Streaming: {}",
+                if metadata.capabilities.vision { "yes" } else { "no" },
+                if metadata.capabilities.tool_use {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if metadata.capabilities.reasoning {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if metadata.capabilities.streaming {
+                    "yes"
+                } else {
+                    "no"
+                },
+            ));
+            lines.push("  Source: static table".to_string());
+            CommandResult::Output(lines.join("\n"))
+        }
+        None => CommandResult::Error(format!(
+            "Model not found: {}. Run /models refresh to update cache.",
+            model
+        )),
+    }
+}
+
+/// Format a number with comma separators (e.g., 200000 -> "200,000").
+/// Used for plain-text slash command output per UI-SPEC Surface 5.
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+/// /models with no args -- show usage help.
+fn cmd_models_help() -> CommandResult {
+    CommandResult::Output(
+        "Usage: /models [refresh|info <model>]\n  refresh  \u{2014} Fetch latest model metadata from APIs\n  info     \u{2014} Show metadata for a specific model".to_string(),
+    )
 }
 
 // =============================================================================
@@ -428,6 +568,85 @@ mod tests {
             matches!(result, CommandResult::Error(_)),
             "Expected Error for /title with no args, got {:?}",
             result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // /models handler tests (Phase 21.3 Plan 04)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cmd_models_info_known_model() {
+        let result = cmd_models_info("claude-sonnet-4");
+        match result {
+            CommandResult::Output(text) => {
+                assert!(text.contains("claude-sonnet-4"), "missing model name");
+                assert!(text.contains("200,000"), "missing context length: {}", text);
+                assert!(text.contains("cl100k_base"), "missing tokenizer: {}", text);
+            }
+            _ => panic!("expected Output variant"),
+        }
+    }
+
+    #[test]
+    fn cmd_models_info_unknown_model() {
+        let result = cmd_models_info("nonexistent-model-xyz");
+        assert!(
+            matches!(result, CommandResult::Error(_)),
+            "expected Error for unknown model"
+        );
+    }
+
+    #[test]
+    fn cmd_models_help_returns_usage() {
+        let result = cmd_models_help();
+        match result {
+            CommandResult::Output(text) => {
+                assert!(text.contains("refresh"), "missing refresh in usage");
+                assert!(text.contains("info"), "missing info in usage");
+            }
+            _ => panic!("expected Output variant"),
+        }
+    }
+
+    #[test]
+    fn format_number_formats_correctly() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(1_000), "1,000");
+        assert_eq!(format_number(200_000), "200,000");
+        assert_eq!(format_number(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn cmd_models_dispatch_routes_info() {
+        let ctx = make_ctx(false);
+        let result = cmd_models(&["info", "claude-sonnet-4"], &ctx);
+        assert!(
+            matches!(result, CommandResult::Output(_)),
+            "expected Output for /models info"
+        );
+    }
+
+    #[test]
+    fn cmd_models_dispatch_no_args_shows_help() {
+        let ctx = make_ctx(false);
+        let result = cmd_models(&[], &ctx);
+        match result {
+            CommandResult::Output(text) => {
+                assert!(text.contains("Usage:"), "missing usage in help: {}", text);
+            }
+            _ => panic!("expected Output variant for /models help"),
+        }
+    }
+
+    #[test]
+    fn cmd_models_info_missing_arg_returns_error() {
+        let ctx = make_ctx(false);
+        let result = cmd_models(&["info"], &ctx);
+        assert!(
+            matches!(result, CommandResult::Error(_)),
+            "expected Error for /models info with no model arg"
         );
     }
 
