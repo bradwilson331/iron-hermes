@@ -6,6 +6,7 @@ pub mod context_scanner;
 pub mod error;
 pub mod memory_provider;
 pub mod memory_store;
+pub mod model_metadata;
 pub mod provider;
 pub mod skills;
 pub mod ssrf;
