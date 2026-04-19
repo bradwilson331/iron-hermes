@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 21.2 context gathered
-last_updated: "2026-04-18T22:18:19.442Z"
+stopped_at: Phase 21.3 context gathered
+last_updated: "2026-04-19T07:38:32.911Z"
 last_activity: 2026-04-18
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 5
   total_plans: 18
   completed_plans: 13
@@ -157,6 +157,7 @@ Recent decisions affecting current work:
 - Phase 22 added: CLI feature parity
 - Phase 21.1 inserted after Phase 21: Slash Commands (INSERTED)
 - Phase 21.2 inserted after Phase 21: MCP client tool and fold in slash commands related to MCP client use (INSERTED)
+- Phase 21.3 inserted after Phase 21: Model metadata & models.dev — context lengths, token estimation (URGENT)
 
 ### Pending Todos
 
@@ -174,6 +175,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-18T17:22:12.425Z
-Stopped at: Phase 21.2 context gathered
-Resume file: .planning/phases/21.2-mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl/21.2-CONTEXT.md
+Last session: 2026-04-19T07:38:32.908Z
+Stopped at: Phase 21.3 context gathered
+Resume file: .planning/phases/21.3-model-metadata-models-dev-context-lengths-token-estimation/21.3-CONTEXT.md
