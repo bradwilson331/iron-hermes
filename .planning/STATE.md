@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.3-02-PLAN.md
-last_updated: "2026-04-19T21:50:58.524Z"
+stopped_at: Completed 21.3-03-PLAN.md
+last_updated: "2026-04-19T21:56:12.733Z"
 last_activity: 2026-04-19
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 22
-  completed_plans: 15
-  percent: 68
+  completed_plans: 16
+  percent: 73
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.3 (model-metadata-models-dev-context-lengths-token-estimation) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-04-19
 
@@ -86,6 +86,7 @@ Progress: [██████████] 100%
 | Phase 21.1-slash-commands P02 | 35 | 2 tasks | 3 files |
 | Phase 21.3 P01 | 5 | 2 tasks | 4 files |
 | Phase 21.3 P02 | 11min | 2 tasks | 9 files |
+| Phase 21.3 P03 | 3min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -157,6 +158,7 @@ Recent decisions affecting current work:
 - [Phase 21.3]: 37 models in static table across 7 families (Claude, GPT, Llama, Gemini, Mistral/Mixtral, DeepSeek, Qwen); helper functions cl100k()/o200k() keep table DRY
 - [Phase 21.3]: D-06 precedence: context_length() on ResolvedEndpoint checks config.yaml first, then model metadata, then DEFAULT_CONTEXT_LENGTH
 - [Phase 21.3]: Hysteresis test recalibrated for tiktoken: wider threshold band and dynamic filler to be robust against both BPE and heuristic counting
+- [Phase 21.3]: Pure parse functions take serde_json::Value for testability; OpenRouter entries override models.dev for same key (richer tokenizer data)
 
 ### Roadmap Evolution
 
@@ -181,6 +183,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-19T21:50:58.522Z
-Stopped at: Completed 21.3-02-PLAN.md
+Last session: 2026-04-19T21:56:12.731Z
+Stopped at: Completed 21.3-03-PLAN.md
 Resume file: None
