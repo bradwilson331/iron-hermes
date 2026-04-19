@@ -79,6 +79,8 @@ impl GatewayMessageHandler {
             config.rate_limit.messages_per_minute,
             config.rate_limit.burst_size,
         );
+        // Phase 21.3: resolve context_length before moving resolver into struct
+        let context_length = resolver.resolve_for_main().context_length();
         Self {
             config,
             resolver,
@@ -90,7 +92,7 @@ impl GatewayMessageHandler {
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             rate_limiter,
             gateway_engine: None,
-            context_length: 128_000,
+            context_length,
             command_router: CommandRouter::new(build_registry()),
         }
     }
@@ -484,6 +486,7 @@ impl GatewayMessageHandler {
         // Phase 18 Plan 09: wire agent-side context compression (honors
         // config.agent.context_engine + config.agent.compression_threshold).
         let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
+        let context_length = self.resolver.resolve_for_main().context_length();
         agent = ironhermes_agent::attach_context_engine(
             agent,
             &self.config,
@@ -491,6 +494,7 @@ impl GatewayMessageHandler {
             &session_id_str,
             self.hook_registry.clone(),
             None, // Phase 18-14: gateway constructs a fresh tracker per request
+            context_length, // Phase 21.3
         );
 
         // 8. Run agent with error recovery (D-18)
@@ -761,6 +765,7 @@ mod tests {
             handler.tool_registry.clone(),
             max_turns,
         );
+        let context_length = handler.resolver.resolve_for_main().context_length();
         let agent = ironhermes_agent::attach_context_engine(
             agent,
             &handler.config,
@@ -768,6 +773,7 @@ mod tests {
             "sess-gw",
             handler.hook_registry.clone(),
             None, // Phase 18-14: fresh tracker per gateway test
+            context_length, // Phase 21.3
         );
         assert!(agent.has_context_engine(), "agent must have context engine attached");
         assert!(agent.has_pressure_tracker(), "agent must have pressure tracker attached");

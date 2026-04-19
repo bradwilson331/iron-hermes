@@ -107,16 +107,23 @@ impl GatewayRunner {
             handler.set_active_skills(skills.clone());
         }
 
+        // Phase 21.3: initialize global token estimator from model's encoding
+        let main_ep = self.resolver.resolve_for_main();
+        let encoding_name = main_ep.model_metadata
+            .as_ref()
+            .map(|m| m.tokenizer.as_str())
+            .unwrap_or("cl100k_base");
+        ironhermes_core::init_global_estimator(
+            ironhermes_core::TiktokenEncoding::from_name(encoding_name)
+        );
+
         // Phase 18 Plan 08 / UAT gap closure: construct the per-turn gateway
         // hygiene engine from config and attach it. Without this call the
         // handler's gateway_engine stays None and `maybe_compress_gateway`
         // always short-circuits.
         //
-        // Context length: no per-endpoint value is plumbed today (CLI also
-        // hardcodes 128_000 via `with_compression(128_000, _)`). Use the
-        // same default here; Phase 21 will plumb a real resolver-derived
-        // context length.
-        let ctx_len: usize = 128_000;
+        // Phase 21.3: context length now resolved from model metadata.
+        let ctx_len: usize = main_ep.context_length();
         let hooks = self.hook_registry.clone();
         let tracker = Some(Arc::new(PressureTracker::new()));
         let engine: Arc<dyn ContextEngine> = build_context_engine(

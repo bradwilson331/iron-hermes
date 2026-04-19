@@ -1,9 +1,10 @@
-use ironhermes_core::ChatMessage;
+use ironhermes_core::{global_estimate_tokens, ChatMessage};
 use tracing::{debug, info};
 
-/// Rough token estimation (~4 chars per token).
+/// Token estimation backed by tiktoken BPE (Phase 21.3 D-09).
+/// Falls back to text.len()/4+1 if global estimator not yet initialized.
 pub fn estimate_tokens(text: &str) -> usize {
-    text.len() / 4 + 1
+    global_estimate_tokens(text)
 }
 
 /// Estimate tokens for a single message.
@@ -242,8 +243,13 @@ mod tests {
 
     #[test]
     fn test_estimate_tokens() {
-        assert_eq!(estimate_tokens("hello"), 2); // 5/4 + 1
-        assert_eq!(estimate_tokens(""), 1); // 0/4 + 1
+        // tiktoken BPE count for "hello" is 1 token (single BPE token).
+        // If global estimator not initialized, falls back to heuristic: 5/4+1=2.
+        let count = estimate_tokens("hello");
+        assert!(count > 0, "estimate_tokens must return nonzero for non-empty text");
+        // Empty string: tiktoken returns 0, heuristic returns 1. Both are valid.
+        let empty_count = estimate_tokens("");
+        assert!(empty_count <= 1, "estimate_tokens for empty string must be 0 or 1");
     }
 
     #[test]

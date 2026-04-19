@@ -17,17 +17,19 @@ use crate::agent_loop::AgentLoop;
 use crate::engine_factory::build_context_engine;
 use crate::pressure_warning::PressureTracker;
 
-/// Default context length used when no per-endpoint value is plumbed.
-/// Matches the value CLI already hardcoded in `with_compression(128_000, _)`.
-/// Phase 21 will derive this from the resolver.
-pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
-
 /// Attach `agent.context_engine`, `PressureTracker`, and `session_id` to an
 /// `AgentLoop` using the agent-side compression config
 /// (`config.agent.context_engine` + `config.agent.compression_threshold`).
 ///
 /// Returns the same `AgentLoop` with the builders applied. Call this
 /// BEFORE `agent.run(messages).await`.
+///
+/// ## Phase 21.3: caller-provided context_length
+///
+/// The `context_length` parameter is the resolved context window size for
+/// the current model. Callers should obtain it from
+/// `resolver.resolve_for_main().context_length()` which implements D-06
+/// precedence (config.yaml > model metadata > 128K default).
 ///
 /// ## Phase 18 Plan 14: caller-provided tracker
 ///
@@ -45,6 +47,7 @@ pub fn attach_context_engine(
     session_id: impl Into<String>,
     hooks: Option<Arc<HookRegistry>>,
     tracker: Option<Arc<PressureTracker>>,
+    context_length: usize,  // Phase 21.3: caller-provided from resolved metadata
 ) -> AgentLoop {
     let sid = session_id.into();
     let tracker = tracker.unwrap_or_else(|| Arc::new(PressureTracker::new()));
@@ -52,14 +55,14 @@ pub fn attach_context_engine(
         config,
         &config.agent.context_engine,
         resolver,
-        DEFAULT_CONTEXT_LENGTH,
+        context_length,
         config.agent.compression_threshold,
         sid.clone(),
         hooks,
         Some(tracker.clone()),
     );
     agent
-        .with_context_engine(engine, DEFAULT_CONTEXT_LENGTH)
+        .with_context_engine(engine, context_length)
         .with_pressure_tracker(tracker)
         .with_session_id(sid)
 }
@@ -84,8 +87,9 @@ mod tests {
     fn attach_context_engine_wires_all_three_builders() {
         let config = Config::default();
         let resolver = ProviderResolver::build(&config).unwrap();
+        let context_length = resolver.resolve_for_main().context_length();
         // Phase 18-14: pass None for tracker → backwards-compatible fresh tracker.
-        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-1", None, None);
+        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-1", None, None, context_length);
         assert!(agent.has_context_engine());
         assert!(agent.has_pressure_tracker());
         assert_eq!(agent.session_id(), Some("sess-1".to_string()));
@@ -97,7 +101,8 @@ mod tests {
         config.agent.context_engine = "local_prune".to_string();
         config.agent.compression_threshold = 0.42;
         let resolver = ProviderResolver::build(&config).unwrap();
-        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-2", None, None);
+        let context_length = resolver.resolve_for_main().context_length();
+        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-2", None, None, context_length);
         let t = agent.context_engine_threshold().unwrap();
         assert!((t - 0.42).abs() < 1e-4);
     }
@@ -109,11 +114,12 @@ mod tests {
     fn attach_context_engine_reuses_caller_tracker() {
         let config = Config::default();
         let resolver = ProviderResolver::build(&config).unwrap();
+        let context_length = resolver.resolve_for_main().context_length();
         let t = Arc::new(PressureTracker::new());
         // Baseline: caller holds one reference.
         assert_eq!(Arc::strong_count(&t), 1);
         let _agent =
-            attach_context_engine(bare_agent(), &config, &resolver, "sess-3", None, Some(t.clone()));
+            attach_context_engine(bare_agent(), &config, &resolver, "sess-3", None, Some(t.clone()), context_length);
         // After wiring: caller (1) + AgentLoop (1) + inside engine (1) = >= 3.
         assert!(
             Arc::strong_count(&t) >= 3,
@@ -138,35 +144,31 @@ mod tests {
     // and turn 2's messages never get the transient (it was queued on a
     // tracker that was dropped at end of turn 1).
 
-    fn make_in_band_messages() -> Vec<ChatMessage> {
+    fn make_in_band_messages(context_length: usize) -> Vec<ChatMessage> {
         // Craft messages whose estimate_messages_tokens lands in the 85%
         // pressure band but BELOW the compression threshold, so
         // pre_chat_compress's `if ratio >= threshold` gate takes the `else`
         // branch (check_pressure) instead of the compress branch.
         //
-        // Engine config: threshold = 0.01, warning_trigger = 0.01 * 0.85 = 0.0085.
-        // DEFAULT_CONTEXT_LENGTH = 128_000.
-        // → need estimated_tokens ∈ [128_000 * 0.0085, 128_000 * 0.01)
-        //   = [1088, 1280) tokens.
+        // Engine config: threshold = 0.05, warning_trigger = 0.05 * 0.85 = 0.0425.
+        // context_length from resolver (200_000 for default model claude-sonnet-4).
+        // → need estimated_tokens ∈ [context_length * 0.0425, context_length * 0.05)
         //
-        // estimate_message_tokens = 4 + estimate_tokens(content)
-        //                         = 4 + (content.len() / 4 + 1)
-        // Four 4_400-char user messages:
-        //   4 + (4400/4 + 1) = 4 + 1101 = 1105 tokens each? No — we want smaller.
-        // One 4_400-char user message:
-        //   4 + (4400/4 + 1) = 4 + 1101 = 1105. Plus 3 overhead = 1108. ✓ in band.
-        // Use len=4400 to be safely inside [1088, 1280).
-        let filler = "x".repeat(4400);
+        // With tiktoken cl100k_base, natural English text averages ~4 chars/token.
+        // Use " word" repeated N times for predictable tokenization. Each " word"
+        // is 1-2 tokens. Target: ~context_length * 0.045 tokens (middle of band).
+        let target_tokens = (context_length as f64 * 0.045) as usize;
+        // Each "word " is roughly 1 token in cl100k_base; use 5 chars per token estimate
+        let filler = "word ".repeat(target_tokens);
         vec![ChatMessage::user(filler.as_str())]
     }
 
     fn band_config() -> Config {
         let mut config = Config::default();
         config.agent.context_engine = "local_prune".to_string();
-        // 0.01 threshold gives a wider band so the test is robust against
-        // small token-estimation drift. ratio ~0.0087 will fire check_pressure
-        // (above 0.0085 trigger) without crossing compression (0.01).
-        config.agent.compression_threshold = 0.01;
+        // 0.05 threshold gives a wider band so the test is robust against
+        // token-estimation variation between tiktoken BPE and heuristic fallback.
+        config.agent.compression_threshold = 0.05;
         config
     }
 
@@ -177,6 +179,7 @@ mod tests {
     async fn pressure_tracker_hysteresis_survives_across_repl_turns() {
         let config = band_config();
         let resolver = ProviderResolver::build(&config).unwrap();
+        let context_length = resolver.resolve_for_main().context_length();
         let session_id = "sess-repl-hysteresis";
         let tracker = Arc::new(PressureTracker::new());
 
@@ -188,8 +191,9 @@ mod tests {
             session_id,
             None,
             Some(tracker.clone()),
+            context_length,
         );
-        let mut messages_1 = make_in_band_messages();
+        let mut messages_1 = make_in_band_messages(context_length);
         agent1.pre_chat_compress(&mut messages_1).await;
 
         // After turn 1: warn fired exactly once, above_threshold=true,
@@ -214,8 +218,9 @@ mod tests {
             session_id,
             None,
             Some(tracker.clone()),
+            context_length,
         );
-        let mut messages_2 = make_in_band_messages();
+        let mut messages_2 = make_in_band_messages(context_length);
         let pre_len_2 = messages_2.len();
         agent2.pre_chat_compress(&mut messages_2).await;
 
@@ -250,8 +255,9 @@ mod tests {
             session_id,
             None,
             Some(tracker.clone()),
+            context_length,
         );
-        let mut messages_3 = make_in_band_messages();
+        let mut messages_3 = make_in_band_messages(context_length);
         let pre_len_3 = messages_3.len();
         agent3.pre_chat_compress(&mut messages_3).await;
 

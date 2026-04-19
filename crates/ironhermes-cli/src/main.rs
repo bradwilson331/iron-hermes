@@ -128,6 +128,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Phase 21.3: eagerly initialize tiktoken BPE tables to avoid ~100ms
+    // latency on first token count.
+    ironhermes_core::warm_tiktoken_singletons();
+
     match cli.command {
         Some(Commands::Status) => cmd_status(),
         Some(Commands::Doctor) => cmd_doctor(),
@@ -268,6 +272,17 @@ fn print_check(name: &str, ok: bool) {
 async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let (client, config, resolver) = build_client(cli)?;
 
+    // Phase 21.3: initialize global token estimator from model's encoding
+    let main_ep = resolver.resolve_for_main();
+    let encoding_name = main_ep.model_metadata
+        .as_ref()
+        .map(|m| m.tokenizer.as_str())
+        .unwrap_or("cl100k_base");
+    ironhermes_core::init_global_estimator(
+        ironhermes_core::TiktokenEncoding::from_name(encoding_name)
+    );
+    let context_length = main_ep.context_length();
+
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
@@ -403,7 +418,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let mut agent = AgentLoop::new(client, registry, max_turns)
         .with_budget(budget)
         .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
-        .with_compression(128_000, config.agent.context_compression)
+        .with_compression(context_length, config.agent.context_compression)
         .with_streaming(Box::new(|delta| {
             print!("{}", delta);
             io::stdout().flush().ok();
@@ -430,6 +445,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         session_id.as_str(),
         Some(hook_registry.clone()),   // Phase 22: D-09
         None, // one-shot: fresh tracker per run
+        context_length, // Phase 21.3
     );
 
     let result = agent.run(messages).await?;
@@ -464,6 +480,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
     let (client, config, resolver) = build_client(cli)?;
 
+    // Phase 21.3: initialize global token estimator from model's encoding
+    let main_ep = resolver.resolve_for_main();
+    let encoding_name = main_ep.model_metadata
+        .as_ref()
+        .map(|m| m.tokenizer.as_str())
+        .unwrap_or("cl100k_base");
+    ironhermes_core::init_global_estimator(
+        ironhermes_core::TiktokenEncoding::from_name(encoding_name)
+    );
+    let context_length = main_ep.context_length();
+
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
@@ -486,7 +513,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         model_short: client.model().to_string(),
         provider: config.model.provider.clone(),
         tokens_used: 0,
-        tokens_limit: 128_000,
+        tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
     };
     // Phase 22.1: construct TuiHandle with extensions (empty vec for now --
@@ -688,6 +715,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             tui.clone(),
             chat_cancel_token.clone(),
             hook_registry.clone(),   // Phase 22: D-05
+            context_length, // Phase 21.3
         )
         .await?;
         // Persist assistant response
@@ -801,6 +829,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     tui.clone(),
                     chat_cancel_token.clone(),
                     hook_registry.clone(),   // Phase 22: D-05
+                    context_length, // Phase 21.3
                 ));
 
                 let response: Option<String> = 'turn: loop {
@@ -925,6 +954,7 @@ async fn run_agent_turn(
     tui: Arc<TuiHandle>,   // Plan 21-03: TUI handle for activity publishing
     cancel_token: CancellationToken,
     hook_registry: Arc<ironhermes_hooks::HookRegistry>,   // Phase 22: D-05
+    context_length: usize,  // Phase 21.3: resolved from model metadata
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -938,7 +968,7 @@ async fn run_agent_turn(
         .with_budget(budget.clone())
         .with_cancellation_token(cancel_token)
         .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
-        .with_compression(128_000, config.agent.context_compression)
+        .with_compression(context_length, config.agent.context_compression)
         .with_compression_count(starting_count)
         .with_streaming(Box::new(move |delta| {
             // Stream tokens directly to stdout (D-22: stream appears inline above the prompt).
@@ -973,6 +1003,7 @@ async fn run_agent_turn(
         session_id,
         Some(hook_registry.clone()),   // Phase 22: D-09
         Some(pressure_tracker.clone()),
+        context_length, // Phase 21.3
     );
 
     // Pass a clone of messages so agent can work with them
@@ -987,7 +1018,7 @@ async fn run_agent_turn(
         model_short: client.model().to_string(),
         provider: config.model.provider.clone(),
         tokens_used: result.total_usage.total_tokens,
-        tokens_limit: 128_000,
+        tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
     });
 

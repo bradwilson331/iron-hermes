@@ -168,6 +168,8 @@ mod tests {
             api_mode,
             default_model: "test-model".to_string(),
             fallback_providers: vec![],
+            model_metadata: None,
+            config_context_length: None,
         }
     }
 
