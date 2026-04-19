@@ -24,6 +24,7 @@ use std::time::Instant;
 mod cron;
 mod batch;
 mod memory_setup;
+mod models_cmd;
 mod tui;
 use ironhermes_cli::skills_cmd;
 
@@ -101,6 +102,11 @@ enum Commands {
         #[command(subcommand)]
         action: MemorySubcommand,
     },
+    /// Model metadata management.
+    Models {
+        #[command(subcommand)]
+        command: models_cmd::ModelsSubcommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -150,6 +156,7 @@ async fn main() -> Result<()> {
         Some(Commands::Memory { action: MemorySubcommand::Setup }) => {
             memory_setup::run_memory_setup(&cli).await
         }
+        Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
         None => {
             if let Some(ref prompt) = cli.execute {
                 run_single(&cli, prompt.clone()).await
