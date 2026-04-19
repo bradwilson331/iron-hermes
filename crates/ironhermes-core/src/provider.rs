@@ -579,4 +579,85 @@ mod tests {
         let reg = resolver.model_registry();
         assert!(reg.lookup("claude-sonnet-4").is_some());
     }
+
+    // =========================================================================
+    // Phase 21.3 Plan 05: Disk cache auto-load regression tests
+    // =========================================================================
+
+    #[test]
+    fn provider_resolver_loads_disk_cache_at_build() {
+        use crate::models_cache::{ModelsCache, ModelsCacheEntry};
+        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+        use chrono::Utc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ModelsCache::default();
+        cache.entries.insert(
+            "test-cache-only-model".to_string(),
+            ModelsCacheEntry {
+                metadata: ModelMetadata {
+                    context_length: 500_000,
+                    max_output_tokens: Some(8_000),
+                    tokenizer: "cl100k_base".to_string(),
+                    capabilities: ModelCapabilities::default(),
+                },
+                fetched_at: Utc::now(),
+            },
+        );
+        cache.save_to(&tmp.path().join("models-cache.json")).unwrap();
+
+        // SAFETY: test-only env var mutation
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+
+        let mut config = default_config();
+        config.model.default = "test-cache-only-model".to_string();
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let ep = resolver.resolve_for_main();
+
+        assert!(ep.model_metadata.is_some(), "cache-only model should have metadata");
+        assert_eq!(ep.model_metadata.as_ref().unwrap().context_length, 500_000);
+
+        // SAFETY: test-only cleanup
+        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+    }
+
+    #[test]
+    fn provider_resolver_cache_overrides_static_for_same_model() {
+        use crate::models_cache::{ModelsCache, ModelsCacheEntry};
+        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+        use chrono::Utc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ModelsCache::default();
+        cache.entries.insert(
+            "claude-sonnet-4".to_string(),
+            ModelsCacheEntry {
+                metadata: ModelMetadata {
+                    context_length: 999_999,
+                    max_output_tokens: Some(100_000),
+                    tokenizer: "cl100k_base".to_string(),
+                    capabilities: ModelCapabilities::default(),
+                },
+                fetched_at: Utc::now(),
+            },
+        );
+        cache.save_to(&tmp.path().join("models-cache.json")).unwrap();
+
+        // SAFETY: test-only env var mutation
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+
+        let mut config = default_config();
+        config.model.default = "claude-sonnet-4".to_string();
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let ep = resolver.resolve_for_main();
+
+        assert_eq!(
+            ep.context_length(),
+            999_999,
+            "cache entry should override static table (200K) for same model"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+    }
 }
