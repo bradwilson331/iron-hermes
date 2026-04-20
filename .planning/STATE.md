@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 21.4 context gathered
-last_updated: "2026-04-20T09:18:25.955Z"
+stopped_at: Completed 21.4-01-PLAN.md (GAP-ANALYSIS.md produced)
+last_updated: "2026-04-20T10:29:30.133Z"
 last_activity: 2026-04-20
 progress:
   total_phases: 9
   completed_phases: 6
-  total_plans: 23
-  completed_plans: 18
-  percent: 78
+  total_plans: 26
+  completed_plans: 19
+  percent: 73
 ---
 
 # Project State
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.3 — model-metadata-models-dev-context-lengths-token-estimation
+**Current focus:** Phase 21.4 — persistent-memory-gap-analysis-verification
 
 ## Current Position
 
-Phase: 22
-Plan: Not started
+Phase: 21.4 (persistent-memory-gap-analysis-verification) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
 Last activity: 2026-04-20
 
@@ -90,6 +90,7 @@ Progress: [██████████] 100%
 | Phase 21.3 P03 | 3min | 1 tasks | 3 files |
 | Phase 21.3 P04 | 5min | 2 tasks | 5 files |
 | Phase 21.3 P05 | 3min | 2 tasks | 1 files |
+| Phase 21.4 P01 | 3 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -164,6 +165,9 @@ Recent decisions affecting current work:
 - [Phase 21.3]: Pure parse functions take serde_json::Value for testability; OpenRouter entries override models.dev for same key (richer tokenizer data)
 - [Phase 21.3]: tokio promoted from dev-dep to dep in ironhermes-core for block_in_place in slash command handler
 - [Phase 21.3]: Minimal 3-line change in ProviderResolver::build() (let mut + load + merge_cache) auto-loads disk cache for all runtime entry points
+- [Phase 21.4]: GAP-2 fix must apply with_memory_manager() inside build_context_engine before Arc::new() — method is on concrete types only, not ContextEngine trait
+- [Phase 21.4]: GAP-4 fix uses Option<Arc<...>> return from build_memory_manager (not no-op sentinel) — all consumers already guard on if let Some
+- [Phase 21.4]: MEM-06 is VERIFIED correct — frozen snapshot pattern implemented and tested in all 3 entry points (run_single, run_chat, run_gateway)
 
 ### Roadmap Evolution
 
@@ -189,6 +193,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-20T09:18:25.953Z
-Stopped at: Phase 21.4 context gathered
-Resume file: .planning/phases/21.4-persistent-memory-gap-analysis-verification/21.4-CONTEXT.md
+Last session: 2026-04-20T10:29:30.131Z
+Stopped at: Completed 21.4-01-PLAN.md (GAP-ANALYSIS.md produced)
+Resume file: None
