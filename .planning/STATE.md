@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 21.4-02-PLAN.md
-last_updated: "2026-04-20T10:57:16.379Z"
+status: verifying
+stopped_at: Completed 21.4-03-PLAN.md
+last_updated: "2026-04-20T11:05:54.472Z"
 last_activity: 2026-04-20
 progress:
   total_phases: 9
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 26
-  completed_plans: 20
-  percent: 77
+  completed_plans: 21
+  percent: 81
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 21.4 (persistent-memory-gap-analysis-verification) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-20
 
 Progress: [██████████] 100%
@@ -92,6 +92,7 @@ Progress: [██████████] 100%
 | Phase 21.3 P05 | 3min | 2 tasks | 1 files |
 | Phase 21.4 P01 | 3 | 1 tasks | 1 files |
 | Phase 21.4 P02 | 90 | 2 tasks | 11 files |
+| Phase 21.4 P03 | 4 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -172,6 +173,8 @@ Recent decisions affecting current work:
 - [Phase 21.4]: Return Option<Arc<Mutex<MemoryManager>>> from build_memory_manager so callers handle disabled state uniformly
 - [Phase 21.4]: Apply with_memory_manager() on concrete engine types inside build_context_engine before Arc::new() — method not on ContextEngine trait
 - [Phase 21.4]: Add memory_manager as last parameter to build_context_engine and attach_context_engine with None at all existing call sites for backward compat
+- [Phase 21.4]: on_session_end fires with MemoryEntries::default() best-effort in run_single and run_chat clean exit; ctrl-c path intentionally skips (async unsuitable)
+- [Phase 21.4]: memory_cmd.rs exposed in lib.rs for test access; memory_setup.rs remains binary-only (references crate::Cli)
 
 ### Roadmap Evolution
 
@@ -197,6 +200,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-20T10:57:16.377Z
-Stopped at: Completed 21.4-02-PLAN.md
+Last session: 2026-04-20T11:05:54.470Z
+Stopped at: Completed 21.4-03-PLAN.md
 Resume file: None
