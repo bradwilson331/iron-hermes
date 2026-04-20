@@ -773,6 +773,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         println!();
     }
 
+    let mut exit_cleanly = false;
     loop {
         // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
@@ -908,12 +909,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                                 CtrlCDecision::ExitCleanly => {
                                     chat_cancel_token.cancel();
                                     println!("{}", "Goodbye!".dimmed());
-                                    // D-12: memory flush not available via flush_to_disk —
-                                    // on_session_end requires MemoryEntries; skip with debug log.
-                                    tracing::debug!("tui: memory flush on interrupted-exit skipped — no flush_to_disk API");
                                     tui.cleanup_on_exit();
                                     let _ = state_store.end_session(&session_id, "interrupted");
-                                    std::process::exit(0);
+                                    // Break to outer loop cleanup so on_session_end fires.
+                                    exit_cleanly = true;
+                                    break 'turn None;
                                 }
                                 CtrlCDecision::ShowPromptHint => {
                                     // Unreachable here — we're in-flight. Defensive no-op.
@@ -945,6 +945,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     println!();
                 }
                 println!();
+
+                // WR-04 fix: if ExitCleanly was signalled from the 'turn loop,
+                // break the outer REPL loop to reach on_session_end cleanup.
+                if exit_cleanly {
+                    break;
+                }
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
                 match double_ctrl_c.on_ctrl_c(Instant::now(), false) {
@@ -952,7 +958,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                         println!("{}", "Goodbye!".dimmed());
                         tui.cleanup_on_exit();
                         let _ = state_store.end_session(&session_id, "interrupted");
-                        std::process::exit(0);
+                        // Break to outer loop cleanup so on_session_end fires.
+                        break;
                     }
                     _ => {
                         println!("{}", "^C — type /quit to exit".dimmed());
