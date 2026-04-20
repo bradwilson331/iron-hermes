@@ -125,6 +125,7 @@ fn default_agent_engine() -> String { "summarizing".to_string() }
 fn default_agent_threshold() -> f32 { 0.5 }
 fn default_gateway_engine() -> String { "local_prune".to_string() }
 fn default_gateway_threshold() -> f32 { 0.85 }
+fn default_true() -> bool { true }
 
 // =============================================================================
 // MemoryConfig (MEM-12)
@@ -141,6 +142,16 @@ pub struct MemoryConfig {
     /// not serve reads. Preserves MEM-12 (single primary).
     #[serde(default)]
     pub mirror_provider: Option<String>,
+    /// When false, the entire memory subsystem is skipped at factory level:
+    /// no provider is constructed, no memory tool is registered, no prompt
+    /// injection occurs. Default: true (D-07, T-21.4-02).
+    #[serde(default = "default_true")]
+    pub memory_enabled: bool,
+    /// When false, the USER.md store is skipped but MEMORY.md still works.
+    /// Prompt builder omits the User target block. Memory tool rejects writes
+    /// to User target with a clear error. Default: true (D-07, T-21.4-03).
+    #[serde(default = "default_true")]
+    pub user_profile_enabled: bool,
 }
 
 impl Default for MemoryConfig {
@@ -148,6 +159,8 @@ impl Default for MemoryConfig {
         Self {
             provider: "file".to_string(),
             mirror_provider: None,
+            memory_enabled: true,
+            user_profile_enabled: true,
         }
     }
 }
@@ -958,5 +971,35 @@ model:
         let compression = &config.model.roles["compression"];
         assert_eq!(compression.provider, "main");
         assert!(compression.model.is_none());
+    }
+
+    // =========================================================================
+    // GAP-4: memory_enabled / user_profile_enabled toggle tests (Phase 21.4)
+    // =========================================================================
+
+    #[test]
+    fn memory_config_toggles_default_true() {
+        let mc = MemoryConfig::default();
+        assert!(mc.memory_enabled);
+        assert!(mc.user_profile_enabled);
+    }
+
+    #[test]
+    fn memory_config_toggles_round_trip() {
+        let yaml = "provider: file\nmemory_enabled: false\nuser_profile_enabled: false\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!mc.memory_enabled);
+        assert!(!mc.user_profile_enabled);
+        let serialized = serde_yaml::to_string(&mc).unwrap();
+        assert!(serialized.contains("memory_enabled: false"));
+        assert!(serialized.contains("user_profile_enabled: false"));
+    }
+
+    #[test]
+    fn memory_config_missing_toggles_default_to_true() {
+        let yaml = "provider: sqlite\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(mc.memory_enabled);
+        assert!(mc.user_profile_enabled);
     }
 }

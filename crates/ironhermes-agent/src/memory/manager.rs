@@ -33,6 +33,10 @@ pub type SharedProvider = Arc<Mutex<dyn MemoryProvider + Send>>;
 pub struct MemoryManager {
     primary: SharedProvider,
     mirror: Option<SharedProvider>,
+    /// GAP-4 / T-21.4-03: when false, writes to MemoryTarget::User are
+    /// rejected at the manager level so all code paths (tool, direct calls)
+    /// respect the config toggle. Default: true.
+    user_profile_enabled: bool,
 }
 
 impl MemoryManager {
@@ -49,7 +53,14 @@ impl MemoryManager {
             let mg = m.lock().await;
             Self::validate_schemas(mg.get_tool_schemas())?;
         }
-        Ok(Self { primary, mirror })
+        Ok(Self { primary, mirror, user_profile_enabled: true })
+    }
+
+    /// Set whether the User profile target (USER.md) is enabled.
+    /// When false, `handle_tool_call` rejects writes to `MemoryTarget::User`.
+    /// Called by the factory after construction when `config.user_profile_enabled=false`.
+    pub fn set_user_profile_enabled(&mut self, enabled: bool) {
+        self.user_profile_enabled = enabled;
     }
 
     fn validate_schemas(schemas: Vec<ToolSchema>) -> anyhow::Result<()> {
@@ -83,6 +94,19 @@ impl MemoryManager {
         name: &str,
         args: serde_json::Value,
     ) -> MemoryResult {
+        // GAP-4 / T-21.4-03: reject User-target writes when user_profile_enabled=false.
+        if !self.user_profile_enabled {
+            if let Some(target_str) = args.get("target").and_then(|v| v.as_str()) {
+                if target_str == "user" {
+                    return Err(
+                        "User profile memory is disabled via configuration. \
+                         Enable it with memory.user_profile_enabled=true in config.yaml."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
         // 1. Run the write on the primary. Drop guard before mirror call.
         let (outcome, action_target_content) = {
             let mut p = self.primary.lock().await;
@@ -605,6 +629,45 @@ mod tests {
         assert!(
             reads.is_empty(),
             "mirror must receive ZERO reads; got: {reads:?}"
+        );
+    }
+
+    // =========================================================================
+    // GAP-4: user_profile_enabled toggle tests (T-21.4-03)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn user_target_rejected_when_user_profile_disabled() {
+        let primary = primary_file();
+        let mut mgr = MemoryManager::new(primary, None).await.unwrap();
+        mgr.set_user_profile_enabled(false);
+
+        let args = serde_json::json!({ "target": "user", "content": "some fact" });
+        let result = mgr.handle_tool_call("memory_add", args).await;
+        assert!(
+            result.is_err(),
+            "User-target write must fail when user_profile_enabled=false"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("user_profile_enabled"),
+            "error must mention the config key, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_target_allowed_when_user_profile_disabled() {
+        let primary = primary_file();
+        let mut mgr = MemoryManager::new(primary, None).await.unwrap();
+        mgr.set_user_profile_enabled(false);
+
+        // MEMORY target must still work when only user_profile is disabled.
+        let args = serde_json::json!({ "target": "memory", "content": "general fact" });
+        let result = mgr.handle_tool_call("memory_add", args).await;
+        assert!(
+            result.is_ok(),
+            "Memory-target write must succeed when user_profile_enabled=false, got: {:?}",
+            result.err()
         );
     }
 }

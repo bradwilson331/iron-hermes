@@ -174,7 +174,14 @@ async fn build_file_provider(
 /// to `tokio::sync::Mutex`, this helper collapses back to a single path.
 pub async fn build_memory_manager(
     config: &ironhermes_core::config::MemoryConfig,
-) -> anyhow::Result<Arc<tokio::sync::Mutex<crate::memory::MemoryManager>>> {
+) -> anyhow::Result<Option<Arc<tokio::sync::Mutex<crate::memory::MemoryManager>>>> {
+    // GAP-4 / T-21.4-02: early-return None when memory is disabled so no
+    // provider is constructed and no memory tool is ever registered.
+    if !config.memory_enabled {
+        tracing::info!("memory subsystem disabled via config (memory_enabled=false)");
+        return Ok(None);
+    }
+
     let primary = build_tokio_provider(config).await?;
 
     let mirror = if let Some(name) = &config.mirror_provider {
@@ -186,8 +193,13 @@ pub async fn build_memory_manager(
         None
     };
 
-    let mgr = crate::memory::MemoryManager::new(primary, mirror).await?;
-    Ok(Arc::new(tokio::sync::Mutex::new(mgr)))
+    let mut mgr = crate::memory::MemoryManager::new(primary, mirror).await?;
+    // GAP-4 / T-21.4-03: propagate user_profile_enabled flag to manager so
+    // handle_tool_call can reject writes to the User target when disabled.
+    if !config.user_profile_enabled {
+        mgr.set_user_profile_enabled(false);
+    }
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(mgr))))
 }
 
 /// Build a provider wrapped in `Arc<tokio::sync::Mutex<...>>` directly.
@@ -472,15 +484,42 @@ mod tests {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
-        let mgr = build_memory_manager(&cfg("file")).await;
+        let result = build_memory_manager(&cfg("file")).await;
         assert!(
-            mgr.is_ok(),
+            result.is_ok(),
             "file-provider manager must build with no mirror, got {:?}",
-            mgr.err()
+            result.err()
+        );
+        // GAP-4: must return Some (memory_enabled defaults to true).
+        let maybe_mgr = result.unwrap();
+        assert!(
+            maybe_mgr.is_some(),
+            "file-provider manager must return Some when memory_enabled=true"
         );
         // Smoke-test that we can lock + drop the tokio mutex.
-        let handle = mgr.unwrap();
-        let _guard = handle.lock().await;
+        let handle = maybe_mgr.unwrap();
+        let _lock = handle.lock().await;
+    }
+
+    #[tokio::test]
+    async fn factory_returns_none_when_memory_disabled() {
+        let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let disabled_cfg = MemoryConfig {
+            provider: "file".to_string(),
+            memory_enabled: false,
+            ..Default::default()
+        };
+        let result = build_memory_manager(&disabled_cfg).await;
+        assert!(
+            result.is_ok(),
+            "disabled memory must return Ok(None), not Err"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "disabled memory must return None"
+        );
     }
 
     #[cfg(feature = "memory-grafeo")]

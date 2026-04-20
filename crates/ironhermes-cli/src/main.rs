@@ -299,13 +299,16 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let budget = Arc::new(AtomicUsize::new(0));
     let mut registry = build_registry();
 
-    // Plan 20-03 Fix 2: wire MemoryManager into run_single so the
-    // single-prompt path can read/write persistent memory.
-    let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
+    // Plan 20-03 Fix 2 / GAP-4: build memory manager — returns None when
+    // config.memory.memory_enabled=false (T-21.4-02). All downstream
+    // consumers guard with if-let so None propagates cleanly.
+    let memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>> =
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
             .await
             .context("building memory manager for single-prompt mode")?;
-    registry.register_memory_tool(memory_manager.clone());
+    if let Some(ref mgr) = memory_manager {
+        registry.register_memory_tool(mgr.clone());
+    }
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
@@ -317,7 +320,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        Some(memory_manager.clone()),
+        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
         config.subagent.clone(),
         None, // no cancel token in single mode
         None, // no progress callback in single mode
@@ -349,7 +352,9 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    rpc_registry.register_memory_tool(memory_manager.clone());
+    if let Some(ref mgr) = memory_manager {
+        rpc_registry.register_memory_tool(mgr.clone());
+    }
     let rpc_registry = Arc::new(rpc_registry);
 
     // Phase 22: execute_code with active_skills for skill env var bypass (per D-02)
@@ -410,9 +415,12 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry.clone());
-    // Plan 20-03 Fix 2: inject manager so the frozen-snapshot memory
-    // block renders into the system prompt.
-    prompt_builder.set_memory_manager(memory_manager.clone());
+    // Plan 20-03 Fix 2 / GAP-4: inject manager (when Some) so the frozen-snapshot
+    // memory block renders into the system prompt. Skip when memory is disabled.
+    if let Some(ref mgr) = memory_manager {
+        prompt_builder.set_memory_manager(mgr.clone());
+    }
+    prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -531,13 +539,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     // Build keybinding registry from registered extensions.
     let keybinding_registry = KeybindingRegistry::register_from_extensions(tui.extensions());
 
-    // Plan 20-03 Fix 2: wire MemoryManager into run_chat so chat-mode
-    // memory persists across invocations (matches gateway parity).
-    let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
+    // Plan 20-03 Fix 2 / GAP-4: wire MemoryManager into run_chat — returns None
+    // when config.memory.memory_enabled=false (T-21.4-02).
+    let memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>> =
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
             .await
             .context("building memory manager for chat mode")?;
-    registry.register_memory_tool(memory_manager.clone());
+    if let Some(ref mgr) = memory_manager {
+        registry.register_memory_tool(mgr.clone());
+    }
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
@@ -595,7 +605,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        Some(memory_manager.clone()),
+        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
         config.subagent.clone(),
         Some(chat_cancel_parent.child_token()), // delegate_task gets its own long-lived child
         Some(subagent_progress),
@@ -627,7 +637,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    rpc_registry.register_memory_tool(memory_manager.clone());
+    if let Some(ref mgr) = memory_manager {
+        rpc_registry.register_memory_tool(mgr.clone());
+    }
     let rpc_registry = Arc::new(rpc_registry);
 
     // Phase 22: execute_code with active_skills for skill env var bypass (per D-02)
@@ -686,9 +698,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         .with_provider(&config.model.provider)
         .load_context(&cwd);
     prompt_builder.set_skill_registry(skill_registry);
-    // Plan 20-03 Fix 2: inject manager before load_memory so the
-    // frozen-snapshot memory block renders into the system prompt.
-    prompt_builder.set_memory_manager(memory_manager.clone());
+    // Plan 20-03 Fix 2 / GAP-4: inject manager (when Some) before load_memory.
+    if let Some(ref mgr) = memory_manager {
+        prompt_builder.set_memory_manager(mgr.clone());
+    }
+    prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -1043,16 +1057,17 @@ async fn run_agent_turn(
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config, resolver) = build_client(cli)?;
 
-    // Plan 20-02: build the MemoryManager (primary + optional mirror) once
-    // and share the handle across tool registries, delegate_task, runner,
-    // and context-engine wiring. All consumers hold
-    // `Arc<tokio::sync::Mutex<MemoryManager>>` and call `.lock().await`.
-    let memory_manager: Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>> =
+    // Plan 20-02 / GAP-4: build the MemoryManager once — returns None when
+    // config.memory.memory_enabled=false (T-21.4-02). All consumers guard
+    // with if-let so None propagates cleanly.
+    let memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>> =
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory).await?;
 
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry();
-    registry.register_memory_tool(memory_manager.clone());
+    if let Some(ref mgr) = memory_manager {
+        registry.register_memory_tool(mgr.clone());
+    }
 
     // Open cron job store and register the cronjob tool
     let cron_dir = ironhermes_core::get_hermes_home().join("cron");
@@ -1080,7 +1095,9 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
     rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    rpc_registry.register_memory_tool(memory_manager.clone());
+    if let Some(ref mgr) = memory_manager {
+        rpc_registry.register_memory_tool(mgr.clone());
+    }
     let rpc_registry = Arc::new(rpc_registry);
 
     // Register execute_code tool with the RPC dispatch registry.
@@ -1104,7 +1121,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        Some(memory_manager.clone()),
+        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
         config.subagent.clone(),
         Some(gateway_cancel_token.clone()),
         None, // D-20: gateway uses tracing::info only, no stderr progress
@@ -1171,7 +1188,9 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     info!("Starting IronHermes Telegram Gateway");
     let mut runner = GatewayRunner::new(config, resolver, registry);
-    runner.set_memory_manager(memory_manager);
+    if let Some(mgr) = memory_manager {
+        runner.set_memory_manager(mgr);
+    }
     runner.set_job_store(job_store);
     runner.set_skill_registry(skill_registry);
     runner.set_hook_registry(hook_registry);

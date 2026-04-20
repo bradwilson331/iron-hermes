@@ -82,6 +82,9 @@ pub struct PromptBuilder {
     /// Snapshot of active tools used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
     /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
     active_tools: HashSet<String>,
+    /// GAP-4 / D-08: when false, load_memory skips the USER.md block.
+    /// Mirrors config.memory.user_profile_enabled. Default: true.
+    user_profile_enabled: bool,
 }
 
 impl PromptBuilder {
@@ -100,6 +103,7 @@ impl PromptBuilder {
             skill_registry: None,
             active_toolsets: HashSet::new(),
             active_tools: HashSet::new(),
+            user_profile_enabled: true,
         }
     }
 
@@ -163,6 +167,13 @@ impl PromptBuilder {
     /// the mirror contract if one is configured.
     pub fn set_memory_manager(&mut self, manager: Arc<TokioMutex<MemoryManager>>) {
         self.memory_manager = Some(manager);
+    }
+
+    /// Set whether the User profile target (USER.md) is included in the system prompt.
+    /// When false, `load_memory` skips `format_for_system_prompt(MemoryTarget::User)`.
+    /// Called from main.rs after prompt_builder construction when config.memory.user_profile_enabled=false.
+    pub fn set_user_profile_enabled(&mut self, enabled: bool) {
+        self.user_profile_enabled = enabled;
     }
 
     /// Set the skill registry for catalog injection into the system prompt.
@@ -394,8 +405,11 @@ impl PromptBuilder {
             if let Some(block) = guard.format_for_system_prompt(MemoryTarget::Memory).await {
                 mem_parts.push(block);
             }
-            if let Some(block) = guard.format_for_system_prompt(MemoryTarget::User).await {
-                mem_parts.push(block);
+            // GAP-4 / D-08: skip User target when user_profile_enabled=false.
+            if self.user_profile_enabled {
+                if let Some(block) = guard.format_for_system_prompt(MemoryTarget::User).await {
+                    mem_parts.push(block);
+                }
             }
             // Plan 20-02 acceptance: fetch the manager's unified system prompt
             // block after target-scoped blocks so providers that inject
