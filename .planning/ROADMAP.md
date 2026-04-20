@@ -102,11 +102,11 @@ Plans:
 **Goal:** Systematic gap analysis comparing IronHermes' persistent memory implementation (Phases 11, 17, 20) against hermes-agent's reference documentation and provider lifecycle contract. Produce GAP-ANALYSIS.md audit report, then close all gaps: wire memory_manager into AgentLoop and context engine across CLI/gateway (queue_prefetch, on_pre_compress), add memory_enabled/user_profile_enabled config toggles, add `hermes memory status` and `hermes memory off` CLI subcommands, wire on_session_end in clean exit paths. Includes MEM-06 verification (pulled from Phase 15 scope -- confirmed already correct).
 **Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12
 **Depends on:** Phase 21
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 
 Plans:
 - [x] 21.4-01-PLAN.md — Produce structured GAP-ANALYSIS.md audit report: feature-by-feature comparison against REFERENCE-hermes-agent-memory.md, provider lifecycle hook wiring matrix (11 hooks), MEM-06 frozen snapshot verification, 6 gaps catalogued with severity ratings
-- [ ] 21.4-02-PLAN.md — Close GAP-1/2/3/4: add memory_enabled and user_profile_enabled config toggles to MemoryConfig, update build_memory_manager to return Option (None when disabled), wire memory_manager into AgentLoop (run_agent_turn + gateway handler) and context engine (build_context_engine + attach_context_engine), static-grep regression tests
+- [x] 21.4-02-PLAN.md — Close GAP-1/2/3/4: add memory_enabled and user_profile_enabled config toggles to MemoryConfig, update build_memory_manager to return Option (None when disabled), wire memory_manager into AgentLoop (run_agent_turn + gateway handler) and context engine (build_context_engine + attach_context_engine), static-grep regression tests
 - [ ] 21.4-03-PLAN.md — Close GAP-5/6: add hermes memory status (provider info, store sizes, mirror status) and hermes memory off (reset to file provider) CLI subcommands in memory_cmd.rs, wire on_session_end in run_single and run_chat clean exit paths
 
 **Wave structure:**

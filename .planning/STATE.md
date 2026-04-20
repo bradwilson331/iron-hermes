@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.4-01-PLAN.md (GAP-ANALYSIS.md produced)
-last_updated: "2026-04-20T10:29:30.133Z"
+stopped_at: Completed 21.4-02-PLAN.md
+last_updated: "2026-04-20T10:57:16.379Z"
 last_activity: 2026-04-20
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 26
-  completed_plans: 19
-  percent: 73
+  completed_plans: 20
+  percent: 77
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.4 (persistent-memory-gap-analysis-verification) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-04-20
 
@@ -91,6 +91,7 @@ Progress: [██████████] 100%
 | Phase 21.3 P04 | 5min | 2 tasks | 5 files |
 | Phase 21.3 P05 | 3min | 2 tasks | 1 files |
 | Phase 21.4 P01 | 3 | 1 tasks | 1 files |
+| Phase 21.4 P02 | 90 | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -168,6 +169,9 @@ Recent decisions affecting current work:
 - [Phase 21.4]: GAP-2 fix must apply with_memory_manager() inside build_context_engine before Arc::new() — method is on concrete types only, not ContextEngine trait
 - [Phase 21.4]: GAP-4 fix uses Option<Arc<...>> return from build_memory_manager (not no-op sentinel) — all consumers already guard on if let Some
 - [Phase 21.4]: MEM-06 is VERIFIED correct — frozen snapshot pattern implemented and tested in all 3 entry points (run_single, run_chat, run_gateway)
+- [Phase 21.4]: Return Option<Arc<Mutex<MemoryManager>>> from build_memory_manager so callers handle disabled state uniformly
+- [Phase 21.4]: Apply with_memory_manager() on concrete engine types inside build_context_engine before Arc::new() — method not on ContextEngine trait
+- [Phase 21.4]: Add memory_manager as last parameter to build_context_engine and attach_context_engine with None at all existing call sites for backward compat
 
 ### Roadmap Evolution
 
@@ -193,6 +197,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-20T10:29:30.131Z
-Stopped at: Completed 21.4-01-PLAN.md (GAP-ANALYSIS.md produced)
+Last session: 2026-04-20T10:57:16.377Z
+Stopped at: Completed 21.4-02-PLAN.md
 Resume file: None
