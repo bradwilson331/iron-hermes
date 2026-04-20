@@ -400,13 +400,19 @@ impl PromptBuilder {
             return;
         }
         let mem_content = if let Some(ref mgr) = self.memory_manager {
-            let guard = mgr.lock().await;
             let mut mem_parts = Vec::new();
-            if let Some(block) = guard.format_for_system_prompt(MemoryTarget::Memory).await {
-                mem_parts.push(block);
+            // Acquire lock per-call to avoid holding it across multiple awaits,
+            // which would block concurrent memory writes (handle_tool_call,
+            // prefetch) for the entire prompt-build duration.
+            {
+                let guard = mgr.lock().await;
+                if let Some(block) = guard.format_for_system_prompt(MemoryTarget::Memory).await {
+                    mem_parts.push(block);
+                }
             }
             // GAP-4 / D-08: skip User target when user_profile_enabled=false.
             if self.user_profile_enabled {
+                let guard = mgr.lock().await;
                 if let Some(block) = guard.format_for_system_prompt(MemoryTarget::User).await {
                     mem_parts.push(block);
                 }
@@ -415,12 +421,15 @@ impl PromptBuilder {
             // block after target-scoped blocks so providers that inject
             // additional facts (e.g. "Prefetched context" from letta/mem0)
             // land in slot 3 without duplicating the per-target output.
-            if let Some(block) = guard.system_prompt_block().await {
-                // Dedup: some providers return the same content for
-                // system_prompt_block() as for format_for_system_prompt().
-                // Only append if it is not already present.
-                if !mem_parts.iter().any(|b| b == &block) {
-                    mem_parts.push(block);
+            {
+                let guard = mgr.lock().await;
+                if let Some(block) = guard.system_prompt_block().await {
+                    // Dedup: some providers return the same content for
+                    // system_prompt_block() as for format_for_system_prompt().
+                    // Only append if it is not already present.
+                    if !mem_parts.iter().any(|b| b == &block) {
+                        mem_parts.push(block);
+                    }
                 }
             }
             if mem_parts.is_empty() {
