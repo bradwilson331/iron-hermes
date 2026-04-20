@@ -467,6 +467,16 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let result = agent.run(messages).await?;
 
+    // GAP-6: notify provider of session end on natural exit (best-effort).
+    // Uses default MemoryEntries — providers use their own internal state.
+    if let Some(ref mgr) = memory_manager {
+        let mgr_lock = mgr.lock().await;
+        let entries = ironhermes_core::memory_provider::MemoryEntries::default();
+        if let Err(e) = mgr_lock.on_session_end(&session_id, &entries).await {
+            tracing::debug!(error = %e, "on_session_end failed in run_single (best-effort)");
+        }
+    }
+
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
         if msg.role == ironhermes_core::Role::Assistant {
@@ -957,6 +967,19 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         Ok(handle) => handle.shutdown().await,
         Err(_) => tracing::debug!("tui: Arc still has outstanding clones at clean-exit — skipping explicit shutdown"),
     }
+
+    // GAP-6: notify provider of clean session end (best-effort).
+    // Only fires on natural REPL exit (EOF or /quit) — not on ctrl-c
+    // (that path calls std::process::exit(0) above, preserving the
+    // existing skip comment at the ExitCleanly branch).
+    if let Some(ref mgr) = memory_manager {
+        let mgr_lock = mgr.lock().await;
+        let entries = ironhermes_core::memory_provider::MemoryEntries::default();
+        if let Err(e) = mgr_lock.on_session_end(&session_id, &entries).await {
+            tracing::debug!(error = %e, "on_session_end failed in run_chat (best-effort)");
+        }
+    }
+
     state_store.end_session(&session_id, "completed")
         .context("failed to end CLI session")?;
 
@@ -1343,6 +1366,37 @@ mod tui_extension_wiring_tests {
         assert!(
             src.contains("agent_running"),
             "run_chat must track agent_running state"
+        );
+    }
+
+    /// INV-21.4-GAP6-01: run_single calls on_session_end after agent.run()
+    #[test]
+    fn run_single_calls_on_session_end() {
+        let src = include_str!("main.rs");
+        let run_single_body = src.split("async fn run_single").nth(1).unwrap_or("");
+        // Extract until the next async fn definition
+        let until_next_fn = run_single_body
+            .split("\nasync fn ")
+            .next()
+            .unwrap_or(run_single_body);
+        assert!(
+            until_next_fn.contains("on_session_end"),
+            "run_single must call on_session_end before returning (GAP-6)"
+        );
+    }
+
+    /// INV-21.4-GAP6-02: run_chat clean exit calls on_session_end
+    #[test]
+    fn run_chat_clean_exit_calls_on_session_end() {
+        let src = include_str!("main.rs");
+        let run_chat_body = src.split("async fn run_chat").nth(1).unwrap_or("");
+        let until_next_fn = run_chat_body
+            .split("\nasync fn ")
+            .next()
+            .unwrap_or(run_chat_body);
+        assert!(
+            until_next_fn.contains("on_session_end"),
+            "run_chat must call on_session_end on clean exit (GAP-6)"
         );
     }
 }
