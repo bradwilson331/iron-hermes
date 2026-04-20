@@ -561,6 +561,17 @@ impl GatewayMessageHandler {
             }
         }
 
+        // GAP-6: notify memory provider of session end (best-effort).
+        // Gateway sessions lack a natural "end" signal, so fire at per-request
+        // completion — the closest equivalent for long-lived Telegram sessions.
+        if let Some(ref mgr) = self.memory_manager {
+            let mgr_lock = mgr.lock().await;
+            let entries = ironhermes_core::memory_provider::MemoryEntries::default();
+            if let Err(e) = mgr_lock.on_session_end(&session_id_str, &entries).await {
+                tracing::debug!(error = %e, "on_session_end failed in gateway run_agent (best-effort)");
+            }
+        }
+
         Ok(())
     }
 }
