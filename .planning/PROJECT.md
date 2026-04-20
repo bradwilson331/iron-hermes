@@ -61,6 +61,7 @@ A working conversational AI agent with personality (context files) that operates
 - v2.0 Phase 22.1 complete 2026-04-17: TUI extension hooks (TuiExtension trait, widget slot compositing, keybinding registry, command dispatch chain, render/REPL integration)
 - v2.0 Phase 21.1 complete 2026-04-18: Slash commands (CommandRouter with 49 commands, three-stage resolve, unified CLI+gateway dispatch replacing hardcoded handlers)
 - v2.0 Phase 21.3 complete 2026-04-20: Model metadata (ModelRegistry with 37-model static table + disk cache, tiktoken-rs token estimation, models.dev/OpenRouter API fetch, CLI subcommands + slash commands, D-06 context_length precedence chain)
+- v2.0 Phase 21.4 complete 2026-04-20: Persistent memory gap closure (memory_manager wired into AgentLoop/context engine across CLI+gateway, memory_enabled/user_profile_enabled config toggles, `hermes memory status/off` subcommands, on_session_end in clean exit paths, MEM-06 verified)
 - 400+ workspace tests passing
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
 - Tech stack: Rust 2024 edition, tokio async, SQLite (rusqlite), OpenAI-compatible LLM API
