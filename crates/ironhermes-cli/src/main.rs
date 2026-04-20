@@ -23,6 +23,7 @@ use std::time::Instant;
 
 mod cron;
 mod batch;
+mod memory_cmd;
 mod memory_setup;
 mod models_cmd;
 mod tui;
@@ -113,6 +114,10 @@ enum Commands {
 enum MemorySubcommand {
     /// Interactive setup for the currently-selected memory provider.
     Setup,
+    /// Display current memory subsystem state (D-09).
+    Status,
+    /// Disable external provider, keep built-in file memory (D-10).
+    Off,
 }
 
 #[tokio::main]
@@ -155,6 +160,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Memory { action: MemorySubcommand::Setup }) => {
             memory_setup::run_memory_setup(&cli).await
+        }
+        Some(Commands::Memory { action: MemorySubcommand::Status }) => {
+            memory_cmd::handle_memory_status().await
+        }
+        Some(Commands::Memory { action: MemorySubcommand::Off }) => {
+            memory_cmd::handle_memory_off().await
         }
         Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
         None => {
