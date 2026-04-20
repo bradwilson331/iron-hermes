@@ -510,16 +510,15 @@ mod tests {
         }
     }
 
-    /// Construct a temp-dir-backed MemoryStore as the primary. Holds the
-    /// TempDir alive for the test lifetime by leaking it into an `Arc`.
-    fn primary_file() -> SharedProvider {
+    /// Construct a temp-dir-backed MemoryStore as the primary. Returns the
+    /// `TempDir` alongside so the caller keeps it alive for the test duration
+    /// without leaking (the directory is cleaned up when the guard drops).
+    fn primary_file() -> (SharedProvider, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
         let mem_dir = tmp.path().join("memories");
         let mut store = MemoryStore::new(mem_dir);
         store.load_from_disk().ok();
-        // Leak tempdir so it outlives the test (SharedProvider returns ownership only).
-        std::mem::forget(tmp);
-        Arc::new(Mutex::new(store))
+        (Arc::new(Mutex::new(store)), tmp)
     }
 
     // =========================================================================
@@ -528,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn construction() {
-        let primary = primary_file();
+        let (primary, _tmp) = primary_file();
         assert!(MemoryManager::new(Arc::clone(&primary), None)
             .await
             .is_ok());
@@ -557,7 +556,7 @@ mod tests {
         );
 
         // Also test: reserved-name MIRROR is rejected.
-        let primary_ok = primary_file();
+        let (primary_ok, _tmp) = primary_file();
         let mirror_reserved: SharedProvider =
             Arc::new(Mutex::new(ReservedNameProvider));
         let result2 = MemoryManager::new(primary_ok, Some(mirror_reserved)).await;
@@ -566,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn mirror_observes_writes() {
-        let primary = primary_file();
+        let (primary, _tmp) = primary_file();
         let (mirror_provider, recorder_inner) = MockRecorderProvider::new();
         let mirror: SharedProvider = Arc::new(Mutex::new(mirror_provider));
 
@@ -590,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn mirror_failure_does_not_block_primary() {
-        let primary = primary_file();
+        let (primary, _tmp) = primary_file();
         let mirror: SharedProvider = Arc::new(Mutex::new(FailingMirror));
         let mgr = MemoryManager::new(primary, Some(mirror)).await.unwrap();
         let r = mgr.add(MemoryTarget::Memory, "still-writes").await;
@@ -615,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_paths_hit_primary_only() {
-        let primary = primary_file();
+        let (primary, _tmp) = primary_file();
         let (mirror_provider, recorder_inner) = MockRecorderProvider::new();
         let mirror: SharedProvider = Arc::new(Mutex::new(mirror_provider));
         let mgr = MemoryManager::new(primary, Some(mirror)).await.unwrap();
@@ -638,7 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_target_rejected_when_user_profile_disabled() {
-        let primary = primary_file();
+        let (primary, _tmp) = primary_file();
         let mut mgr = MemoryManager::new(primary, None).await.unwrap();
         mgr.set_user_profile_enabled(false);
 
@@ -657,7 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_target_allowed_when_user_profile_disabled() {
-        let primary = primary_file();
+        let (primary, _tmp) = primary_file();
         let mut mgr = MemoryManager::new(primary, None).await.unwrap();
         mgr.set_user_profile_enabled(false);
 
