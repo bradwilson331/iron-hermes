@@ -129,8 +129,9 @@ impl GatewayMessageHandler {
         let stats = ContextStats {
             context_length: self.context_length,
             estimated_tokens: estimated,
-            protect_first_n: 3,
-            protect_last_tokens: 20_000.min(self.context_length / 4),
+            protect_first_n: self.config.compression.protect_first_n,
+            protect_last_tokens: self.config.compression.protect_last_tokens
+                .min(self.context_length / 4),
             compression_count: 0,
             prior_summary: None,
         };
