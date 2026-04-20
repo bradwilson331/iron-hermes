@@ -16,6 +16,19 @@ fn read(path: &str) -> String {
     fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {:?}: {}", full, e))
 }
 
+fn repo_root() -> PathBuf {
+    let root = crate_root();
+    root.ancestors()
+        .find(|p| p.join("Cargo.lock").exists())
+        .map(|p| p.to_path_buf())
+        .unwrap_or(root)
+}
+
+fn read_repo(path: &str) -> String {
+    let full = repo_root().join(path);
+    fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {:?}: {}", full, e))
+}
+
 /// Extract the body of a top-level `async fn NAME` block from main.rs.
 /// Matches from `async fn NAME` through the first balanced `}` at indent 0.
 fn extract_fn_body(src: &str, name: &str) -> String {
@@ -151,4 +164,71 @@ fn inv_6_no_forbidden_new_deps_in_cargo_toml() {
             forbidden
         );
     }
+}
+
+// ── Phase 21.4 GAP regression tests ──────────────────────────────────────────
+//
+// These tests lock the GAP-1/GAP-2/GAP-3 wiring invariants closed. They are
+// intentionally brittle: if a refactor removes the wiring, the test fails with
+// the exact invariant name so the reviewer knows exactly what regressed.
+
+/// GAP-1 regression: run_agent_turn must accept a memory_manager parameter so
+/// the CLI REPL path can wire queue_prefetch via AgentLoop::with_memory_manager.
+#[test]
+fn gap1_run_agent_turn_accepts_memory_manager_parameter() {
+    let src = read("src/main.rs");
+    assert!(
+        src.contains("memory_manager: Option<Arc<tokio::sync::Mutex"),
+        "GAP-1: run_agent_turn must accept memory_manager: Option<Arc<tokio::sync::Mutex<...>>> parameter — not found in main.rs"
+    );
+}
+
+/// GAP-1 regression: run_agent_turn must call agent.with_memory_manager so
+/// queue_prefetch fires in the CLI REPL loop.
+#[test]
+fn gap1_run_agent_turn_wires_memory_manager_to_agent_loop() {
+    let src = read("src/main.rs");
+    let body = extract_fn_body(&src, "run_agent_turn");
+    assert!(
+        body.contains("with_memory_manager"),
+        "GAP-1: run_agent_turn body must call agent.with_memory_manager(...) — not found"
+    );
+}
+
+/// GAP-2 regression: attach_context_engine must accept a memory_manager parameter
+/// so the context engine's on_pre_compress hook fires in both CLI and gateway.
+#[test]
+fn gap2_attach_context_engine_accepts_memory_manager() {
+    let src = read_repo("crates/ironhermes-agent/src/agent_wiring.rs");
+    assert!(
+        src.contains("memory_manager: Option<Arc<TokioMutex<MemoryManager>>>"),
+        "GAP-2: attach_context_engine must accept memory_manager: Option<Arc<TokioMutex<MemoryManager>>> — not found in agent_wiring.rs"
+    );
+}
+
+/// GAP-2 regression: build_context_engine must accept and forward memory_manager
+/// to the engine builder before Arc::new() wrapping so with_memory_manager is
+/// applied on the concrete type.
+#[test]
+fn gap2_build_context_engine_accepts_memory_manager() {
+    let src = read_repo("crates/ironhermes-agent/src/engine_factory.rs");
+    assert!(
+        src.contains("memory_manager: Option<Arc<TokioMutex<MemoryManager>>>"),
+        "GAP-2: build_context_engine must accept memory_manager: Option<Arc<TokioMutex<MemoryManager>>> — not found in engine_factory.rs"
+    );
+    assert!(
+        src.contains("with_memory_manager"),
+        "GAP-2: build_context_engine must call e.with_memory_manager(...) before Arc::new — not found in engine_factory.rs"
+    );
+}
+
+/// GAP-3 regression: gateway handler must call agent.with_memory_manager so
+/// queue_prefetch fires in the gateway path.
+#[test]
+fn gap3_gateway_handler_wires_memory_manager_to_agent_loop() {
+    let src = read_repo("crates/ironhermes-gateway/src/handler.rs");
+    assert!(
+        src.contains("with_memory_manager"),
+        "GAP-3: gateway handler must call agent.with_memory_manager(...) — not found in handler.rs"
+    );
 }

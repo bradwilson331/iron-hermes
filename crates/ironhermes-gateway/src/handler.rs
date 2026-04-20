@@ -483,8 +483,15 @@ impl GatewayMessageHandler {
             agent = agent.with_hook_registry(registry.clone());
         }
 
+        // GAP-3: wire memory_manager to AgentLoop so queue_prefetch fires after
+        // each natural-end gateway turn. Guard with if-let per T-21.4-04.
+        if let Some(ref mgr) = self.memory_manager {
+            agent = agent.with_memory_manager(mgr.clone());
+        }
+
         // Phase 18 Plan 09: wire agent-side context compression (honors
         // config.agent.context_engine + config.agent.compression_threshold).
+        // GAP-2/GAP-3: pass memory_manager so on_pre_compress fires on compression.
         let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
         let context_length = self.resolver.resolve_for_main().context_length();
         agent = ironhermes_agent::attach_context_engine(
@@ -495,6 +502,7 @@ impl GatewayMessageHandler {
             self.hook_registry.clone(),
             None, // Phase 18-14: gateway constructs a fresh tracker per request
             context_length, // Phase 21.3
+            self.memory_manager.clone(), // GAP-2/GAP-3: wire into context engine
         );
 
         // 8. Run agent with error recovery (D-18)
@@ -774,6 +782,7 @@ mod tests {
             handler.hook_registry.clone(),
             None, // Phase 18-14: fresh tracker per gateway test
             context_length, // Phase 21.3
+            None, // memory_manager: None in gateway unit test
         );
         assert!(agent.has_context_engine(), "agent must have context engine attached");
         assert!(agent.has_pressure_tracker(), "agent must have pressure tracker attached");

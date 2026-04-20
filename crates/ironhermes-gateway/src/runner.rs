@@ -126,6 +126,9 @@ impl GatewayRunner {
         let ctx_len: usize = main_ep.context_length();
         let hooks = self.hook_registry.clone();
         let tracker = Some(Arc::new(PressureTracker::new()));
+        // Note: the per-turn gateway hygiene engine (local_prune) does not
+        // need a memory_manager — on_pre_compress is for agent compression,
+        // not for the lightweight gateway hygiene pass. Pass None.
         let engine: Arc<dyn ContextEngine> = build_context_engine(
             &self.config,
             &self.config.gateway.context_engine,
@@ -135,6 +138,7 @@ impl GatewayRunner {
             "gateway", // D-13: per-session lineage deferred to Phase 21
             hooks,
             tracker,
+            None, // GAP-2 backward compat: gateway hygiene engine has no memory hook
         );
         handler.set_gateway_engine(engine, ctx_len);
 

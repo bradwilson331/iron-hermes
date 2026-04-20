@@ -33,7 +33,8 @@ async fn memory_persists_across_invocations_with_file_provider() {
     {
         let mgr = ironhermes_agent::memory::factory::build_memory_manager(&cfg)
             .await
-            .expect("first build_memory_manager");
+            .expect("first build_memory_manager")
+            .expect("memory_enabled is true so manager must be Some");
         {
             let guard = mgr.lock().await;
             guard
@@ -55,7 +56,8 @@ async fn memory_persists_across_invocations_with_file_provider() {
     // Second invocation: build again. The memory line must still be there.
     let mgr2 = ironhermes_agent::memory::factory::build_memory_manager(&cfg)
         .await
-        .expect("second build_memory_manager");
+        .expect("second build_memory_manager")
+        .expect("memory_enabled is true so manager must be Some");
     let guard2 = mgr2.lock().await;
     let block = guard2
         .format_for_system_prompt(MemoryTarget::Memory)
@@ -81,7 +83,8 @@ async fn memory_persists_across_invocations_with_sqlite_provider() {
 
     let mgr1 = ironhermes_agent::memory::factory::build_memory_manager(&cfg)
         .await
-        .expect("first sqlite build_memory_manager");
+        .expect("first sqlite build_memory_manager")
+        .expect("memory_enabled is true so manager must be Some");
     {
         let guard = mgr1.lock().await;
         guard
@@ -97,7 +100,8 @@ async fn memory_persists_across_invocations_with_sqlite_provider() {
 
     let mgr2 = ironhermes_agent::memory::factory::build_memory_manager(&cfg)
         .await
-        .expect("second sqlite build_memory_manager");
+        .expect("second sqlite build_memory_manager")
+        .expect("memory_enabled is true so manager must be Some");
     let guard2 = mgr2.lock().await;
     let block = guard2
         .format_for_system_prompt(MemoryTarget::Memory)

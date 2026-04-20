@@ -453,6 +453,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     // Phase 18 Plan 09: wire agent-side context compression (honors
     // config.agent.context_engine + config.agent.compression_threshold).
     // Phase 18-14: one-shot path — fresh tracker is fine (single turn then exits).
+    // GAP-1/GAP-2: pass memory_manager so on_pre_compress fires on compression.
     agent = ironhermes_agent::attach_context_engine(
         agent,
         &config,
@@ -461,6 +462,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         Some(hook_registry.clone()),   // Phase 22: D-09
         None, // one-shot: fresh tracker per run
         context_length, // Phase 21.3
+        memory_manager.clone(), // GAP-1/GAP-2: wire into context engine
     );
 
     let result = agent.run(messages).await?;
@@ -737,6 +739,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             chat_cancel_token.clone(),
             hook_registry.clone(),   // Phase 22: D-05
             context_length, // Phase 21.3
+            memory_manager.clone(), // GAP-1: wire queue_prefetch
         )
         .await?;
         // Persist assistant response
@@ -851,6 +854,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     chat_cancel_token.clone(),
                     hook_registry.clone(),   // Phase 22: D-05
                     context_length, // Phase 21.3
+                    memory_manager.clone(), // GAP-1: wire queue_prefetch
                 ));
 
                 let response: Option<String> = 'turn: loop {
@@ -976,6 +980,7 @@ async fn run_agent_turn(
     cancel_token: CancellationToken,
     hook_registry: Arc<ironhermes_hooks::HookRegistry>,   // Phase 22: D-05
     context_length: usize,  // Phase 21.3: resolved from model metadata
+    memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>,  // GAP-1: wire queue_prefetch
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -1014,9 +1019,16 @@ async fn run_agent_turn(
         }
     }
 
+    // GAP-1: wire memory_manager to AgentLoop so queue_prefetch fires after
+    // each natural-end agent turn. Guard with if-let per T-21.4-04.
+    if let Some(ref mgr) = memory_manager {
+        agent = agent.with_memory_manager(mgr.clone());
+    }
+
     // Phase 18 Plan 09: wire agent-side context compression.
     // Phase 18-14: reuse the session-scoped PressureTracker so hysteresis
     // state (above_threshold, pending_transient) survives across turns.
+    // GAP-1/GAP-2: pass memory_manager so on_pre_compress fires on compression.
     agent = ironhermes_agent::attach_context_engine(
         agent,
         config,
@@ -1025,6 +1037,7 @@ async fn run_agent_turn(
         Some(hook_registry.clone()),   // Phase 22: D-09
         Some(pressure_tracker.clone()),
         context_length, // Phase 21.3
+        memory_manager.clone(), // GAP-2: wire into context engine
     );
 
     // Pass a clone of messages so agent can work with them

@@ -9,12 +9,14 @@
 //! (which ignores the config threshold).
 
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use ironhermes_core::{Config, ProviderResolver};
 use ironhermes_hooks::HookRegistry;
 
 use crate::agent_loop::AgentLoop;
 use crate::engine_factory::build_context_engine;
+use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 
 /// Attach `agent.context_engine`, `PressureTracker`, and `session_id` to an
@@ -48,6 +50,7 @@ pub fn attach_context_engine(
     hooks: Option<Arc<HookRegistry>>,
     tracker: Option<Arc<PressureTracker>>,
     context_length: usize,  // Phase 21.3: caller-provided from resolved metadata
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,  // GAP-2: forwarded to engine before Arc wrap
 ) -> AgentLoop {
     let sid = session_id.into();
     let tracker = tracker.unwrap_or_else(|| Arc::new(PressureTracker::new()));
@@ -60,6 +63,7 @@ pub fn attach_context_engine(
         sid.clone(),
         hooks,
         Some(tracker.clone()),
+        memory_manager,  // GAP-2: forwarded to build_context_engine
     );
     agent
         .with_context_engine(engine, context_length)
@@ -89,7 +93,7 @@ mod tests {
         let resolver = ProviderResolver::build(&config).unwrap();
         let context_length = resolver.resolve_for_main().context_length();
         // Phase 18-14: pass None for tracker → backwards-compatible fresh tracker.
-        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-1", None, None, context_length);
+        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-1", None, None, context_length, None);
         assert!(agent.has_context_engine());
         assert!(agent.has_pressure_tracker());
         assert_eq!(agent.session_id(), Some("sess-1".to_string()));
@@ -102,7 +106,7 @@ mod tests {
         config.agent.compression_threshold = 0.42;
         let resolver = ProviderResolver::build(&config).unwrap();
         let context_length = resolver.resolve_for_main().context_length();
-        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-2", None, None, context_length);
+        let agent = attach_context_engine(bare_agent(), &config, &resolver, "sess-2", None, None, context_length, None);
         let t = agent.context_engine_threshold().unwrap();
         assert!((t - 0.42).abs() < 1e-4);
     }
@@ -119,7 +123,7 @@ mod tests {
         // Baseline: caller holds one reference.
         assert_eq!(Arc::strong_count(&t), 1);
         let _agent =
-            attach_context_engine(bare_agent(), &config, &resolver, "sess-3", None, Some(t.clone()), context_length);
+            attach_context_engine(bare_agent(), &config, &resolver, "sess-3", None, Some(t.clone()), context_length, None);
         // After wiring: caller (1) + AgentLoop (1) + inside engine (1) = >= 3.
         assert!(
             Arc::strong_count(&t) >= 3,
@@ -192,6 +196,7 @@ mod tests {
             None,
             Some(tracker.clone()),
             context_length,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
         let mut messages_1 = make_in_band_messages(context_length);
         agent1.pre_chat_compress(&mut messages_1).await;
@@ -219,6 +224,7 @@ mod tests {
             None,
             Some(tracker.clone()),
             context_length,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
         let mut messages_2 = make_in_band_messages(context_length);
         let pre_len_2 = messages_2.len();
@@ -256,6 +262,7 @@ mod tests {
             None,
             Some(tracker.clone()),
             context_length,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
         let mut messages_3 = make_in_band_messages(context_length);
         let pre_len_3 = messages_3.len();

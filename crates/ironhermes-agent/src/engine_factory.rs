@@ -8,9 +8,11 @@
 use ironhermes_core::{Config, ProviderResolver};
 use ironhermes_hooks::HookRegistry;
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::any_client::{build_main_client, build_role_client};
 use crate::context_engine::{ContextEngine, LocalPruningEngine};
+use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::summarizing_engine::{AnyClientSummarizer, SummarizationClient, SummarizingEngine};
 
@@ -39,6 +41,7 @@ pub fn build_context_engine(
     session_id: impl Into<String>,
     hooks: Option<Arc<HookRegistry>>,
     tracker: Option<Arc<PressureTracker>>,
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,  // GAP-2: forward to engine before Arc wrap
 ) -> Arc<dyn ContextEngine> {
     let sid = session_id.into();
     let protect_first = config.compression.protect_first_n;
@@ -47,6 +50,7 @@ pub fn build_context_engine(
 
     let build_local = |hooks: Option<Arc<HookRegistry>>,
                        tracker: Option<Arc<PressureTracker>>,
+                       memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
                        sid: &str|
      -> Arc<dyn ContextEngine> {
         // Phase 18-13 gap-closure: attach session_id unconditionally so the
@@ -64,11 +68,16 @@ pub fn build_context_engine(
         if let Some(h) = hooks {
             e = e.with_hooks(h);
         }
+        // GAP-2: apply memory_manager BEFORE Arc::new() — method is on the
+        // concrete struct (LocalPruningEngine), not the ContextEngine trait.
+        if let Some(mgr) = memory_manager {
+            e = e.with_memory_manager(mgr);
+        }
         Arc::new(e) as Arc<dyn ContextEngine>
     };
 
     match engine_kind {
-        "local_prune" => build_local(hooks, tracker, &sid),
+        "local_prune" => build_local(hooks, tracker, memory_manager, &sid),
 
         "summarizing" => {
             // Resolve compression role with fallback to main client (T-18-10).
@@ -82,7 +91,7 @@ pub fn build_context_engine(
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!(error = ?e, "main client resolution failed, falling back to local_prune");
-                            return build_local(hooks, tracker, &sid);
+                            return build_local(hooks, tracker, memory_manager, &sid);
                         }
                     }
                 }
@@ -92,7 +101,7 @@ pub fn build_context_engine(
                         Ok(c) => c,
                         Err(e2) => {
                             tracing::warn!(error = ?e2, "main client also failed, falling back to local_prune");
-                            return build_local(hooks, tracker, &sid);
+                            return build_local(hooks, tracker, memory_manager, &sid);
                         }
                     }
                 }
@@ -120,6 +129,11 @@ pub fn build_context_engine(
             if let Some(h) = hooks {
                 e = e.with_hooks(h);
             }
+            // GAP-2: apply memory_manager BEFORE Arc::new() — method is on the
+            // concrete struct (SummarizingEngine), not the ContextEngine trait.
+            if let Some(mgr) = memory_manager {
+                e = e.with_memory_manager(mgr);
+            }
             Arc::new(e)
         }
 
@@ -128,7 +142,7 @@ pub fn build_context_engine(
                 engine_kind = %other,
                 "unknown context engine kind, falling back to local_prune"
             );
-            build_local(hooks, tracker, &sid)
+            build_local(hooks, tracker, memory_manager, &sid)
         }
     }
 }
@@ -161,6 +175,7 @@ mod tests {
             "sess-test",
             None,
             None,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
         assert_eq!(engine.mode(), CompressionMode::Hard);
         assert!((engine.threshold() - 0.85).abs() < 1e-4);
@@ -180,6 +195,7 @@ mod tests {
             "sess-test",
             None,
             None,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
         // SummarizingEngine mode is Soft
         assert_eq!(engine.mode(), CompressionMode::Soft);
@@ -209,6 +225,7 @@ mod tests {
             "sess-fallback",
             None,
             None,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
 
         // Should still be Soft mode regardless of which client was resolved
@@ -229,6 +246,7 @@ mod tests {
             "sess-unknown",
             None,
             None,
+            None, // memory_manager: None (GAP-2 backward compat)
         );
         // Must fall back to Hard mode (LocalPruningEngine)
         assert_eq!(engine.mode(), CompressionMode::Hard);
