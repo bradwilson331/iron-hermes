@@ -10,7 +10,7 @@ mod schema;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::Connection;
@@ -27,11 +27,13 @@ use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
 
 /// SQLite memory provider implementing MemoryProvider.
 ///
-/// `conn` is wrapped in `Mutex<Connection>` because `rusqlite::Connection` is
-/// `Send` but not `Sync`. The `Mutex` satisfies the `Sync` bound required by
-/// the `MemoryProvider` trait (`Send + Sync + 'static`).
+/// `conn` is wrapped in `Arc<Mutex<Connection>>` because `rusqlite::Connection`
+/// is `Send` but not `Sync`. The `Mutex` satisfies the `Sync` bound required by
+/// the `MemoryProvider` trait (`Send + Sync + 'static`). The `Arc` wrapper
+/// enables cloning the handle into `tokio::spawn` closures for non-blocking
+/// `sync_turn` (Phase 21.5, D-07/D-11).
 pub struct SqliteMemoryProvider {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     /// Frozen snapshot captured at load_from_disk() time.
     /// Mutations write to SQLite immediately but do NOT update this cache.
     /// format_for_system_prompt and to_memory_entries read from this cache.
@@ -57,7 +59,7 @@ impl SqliteMemoryProvider {
         conn.execute_batch(schema::CREATE_SCHEMA)?;
 
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             snapshot: HashMap::new(),
         })
     }
