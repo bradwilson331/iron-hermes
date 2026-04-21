@@ -20,6 +20,7 @@ use ironhermes_core::constants::ENTRY_DELIMITER;
 use ironhermes_core::context_scanner::scan_context_content;
 use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
+use ironhermes_core::types::ToolSchema;
 
 // =============================================================================
 // SqliteMemoryProvider
@@ -64,6 +65,40 @@ impl SqliteMemoryProvider {
         })
     }
 
+    /// Execute FTS5 search for memory_recall tool (D-03, D-05, D-11).
+    fn recall(&self, query: &str, limit: u32) -> MemoryResult {
+        let sanitized = sanitize_fts_query(query);
+        if sanitized.is_empty() {
+            return Ok("[]".to_string());
+        }
+        let conn = self.conn.lock().expect("SQLite mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT mf.content, mf.target, -bm25(memory_facts_fts) as relevance_score,
+                    snippet(memory_facts_fts, 0, '>>>', '<<<', '...', 10) as snippet
+             FROM memory_facts_fts
+             JOIN memory_facts mf ON mf.id = memory_facts_fts.rowid
+             WHERE memory_facts_fts MATCH ?1
+             ORDER BY bm25(memory_facts_fts)
+             LIMIT ?2"
+        ).map_err(|e| format!("FTS5 query failed: {}", e))?;
+
+        let results: Vec<RecallResult> = stmt
+            .query_map(rusqlite::params![sanitized, limit], |row| {
+                Ok(RecallResult {
+                    content: row.get(0)?,
+                    target: row.get(1)?,
+                    relevance_score: row.get(2)?,
+                    snippet: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("FTS5 query map failed: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("FTS5 row fetch failed: {}", e))?;
+
+        serde_json::to_string(&results)
+            .map_err(|e| format!("Failed to serialize recall results: {}", e))
+    }
+
     /// Fetch all entries for a given target from SQLite.
     fn fetch_entries(&self, target: MemoryTarget) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock().expect("SQLite mutex poisoned");
@@ -84,6 +119,71 @@ impl SqliteMemoryProvider {
 #[async_trait]
 impl MemoryProvider for SqliteMemoryProvider {
     fn name(&self) -> &'static str { "sqlite" }
+
+    fn get_tool_schemas(&self) -> Vec<ToolSchema> {
+        vec![ToolSchema::new(
+            "memory_recall",
+            "Search memory for relevant facts using full-text search. Returns ranked results with relevance snippets. Use this to find previously stored information.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to find relevant memory entries"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }),
+        )]
+    }
+
+    fn handle_tool_call(&mut self, name: &str, args: serde_json::Value) -> MemoryResult {
+        match name {
+            "memory_recall" => {
+                let query = args.get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "missing `query` parameter".to_string())?;
+                let limit = args.get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5) as u32;
+                self.recall(query, limit)
+            }
+            // Delegate add/replace/remove to the provider's own methods
+            other => {
+                let target = match args.get("target").and_then(|v| v.as_str()) {
+                    Some("memory") => MemoryTarget::Memory,
+                    Some("user") => MemoryTarget::User,
+                    Some(t) => return Err(format!("invalid target: {t}")),
+                    None => return Err("missing `target`".to_string()),
+                };
+                match other {
+                    "memory_add" | "add" => {
+                        let content = args.get("content").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `content`".to_string())?;
+                        self.add(target, content)
+                    }
+                    "memory_replace" | "replace" => {
+                        let old_text = args.get("old_text").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `old_text`".to_string())?;
+                        let new_content = args.get("new_content").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `new_content`".to_string())?;
+                        self.replace(target, old_text, new_content)
+                    }
+                    "memory_remove" | "remove" => {
+                        let old_text = args.get("old_text").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `old_text`".to_string())?;
+                        self.remove(target, old_text)
+                    }
+                    unknown => Err(format!("unknown memory tool: {unknown}")),
+                }
+            }
+        }
+    }
 
     fn get_config_schema(&self) -> Vec<ironhermes_core::config_schema::ConfigField> {
         use ironhermes_core::config_schema::ConfigField;
@@ -429,6 +529,30 @@ impl MemoryProvider for SqliteMemoryProvider {
 // Private helpers
 // =============================================================================
 
+/// FTS5 recall result returned by memory_recall tool.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecallResult {
+    content: String,
+    target: String,
+    relevance_score: f64,
+    snippet: String,
+}
+
+/// Sanitize a raw query string for FTS5 MATCH safety.
+/// Tokenizes on whitespace, wraps each token in double quotes,
+/// joins with space (implicit AND). Strips empty tokens.
+fn sanitize_fts_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            // Remove any existing double quotes to prevent injection
+            let cleaned = t.replace('"', "");
+            format!("\"{}\"", cleaned)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Total chars including delimiters between entries (mirrors MemoryStore::char_count).
 fn char_count(entries: &[String], delimiter: &str) -> usize {
     if entries.is_empty() {
@@ -672,6 +796,82 @@ mod tests {
             snapshot_before, snapshot_after,
             "Snapshot should be frozen after load_from_disk"
         );
+    }
+
+    #[test]
+    fn test_get_tool_schemas_returns_memory_recall() {
+        let provider = make_provider();
+        let schemas = provider.get_tool_schemas();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].function.name, "memory_recall");
+    }
+
+    #[test]
+    fn test_memory_recall_returns_ranked_results() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "cats are wonderful pets").unwrap();
+        provider.add(MemoryTarget::Memory, "dogs are loyal friends").unwrap();
+        provider.add(MemoryTarget::User, "user likes cats").unwrap();
+
+        let result = provider.recall("cats", 5);
+        assert!(result.is_ok(), "recall should succeed: {:?}", result);
+        let results: Vec<RecallResult> = serde_json::from_str(&result.unwrap()).unwrap();
+        assert!(!results.is_empty(), "should find at least one match for 'cats'");
+        // First result should be most relevant
+        assert!(results[0].content.contains("cats"), "top result should contain query term");
+        assert!(results[0].relevance_score > 0.0, "relevance score should be positive");
+        assert!(!results[0].snippet.is_empty(), "snippet should not be empty");
+    }
+
+    #[test]
+    fn test_memory_recall_empty_query_returns_empty_array() {
+        let provider = make_provider();
+        let result = provider.recall("", 5);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "[]");
+    }
+
+    #[test]
+    fn test_memory_recall_no_matches_returns_empty_array() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "cats are wonderful").unwrap();
+        let result = provider.recall("zzzznonexistent", 5);
+        assert!(result.is_ok());
+        let results: Vec<RecallResult> = serde_json::from_str(&result.unwrap()).unwrap();
+        assert!(results.is_empty(), "no matches expected for gibberish query");
+    }
+
+    #[test]
+    fn test_handle_tool_call_dispatches_memory_recall() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "important fact about Rust").unwrap();
+        let result = provider.handle_tool_call(
+            "memory_recall",
+            serde_json::json!({"query": "Rust"}),
+        );
+        assert!(result.is_ok(), "handle_tool_call for memory_recall should succeed: {:?}", result);
+        let body = result.unwrap();
+        assert!(body.contains("Rust"), "result should contain the matched content");
+    }
+
+    #[test]
+    fn test_handle_tool_call_delegates_add_to_provider() {
+        let mut provider = make_provider();
+        let result = provider.handle_tool_call(
+            "memory_add",
+            serde_json::json!({"target": "memory", "content": "delegated fact"}),
+        );
+        assert!(result.is_ok(), "delegated add should succeed");
+        let entries = provider.fetch_entries(MemoryTarget::Memory).unwrap();
+        assert!(entries.iter().any(|e| e.contains("delegated fact")));
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_wraps_tokens() {
+        assert_eq!(sanitize_fts_query("cats dogs"), "\"cats\" \"dogs\"");
+        assert_eq!(sanitize_fts_query("hello\"world"), "\"helloworld\"");
+        assert_eq!(sanitize_fts_query("  "), "");
+        assert_eq!(sanitize_fts_query("single"), "\"single\"");
     }
 
     #[test]

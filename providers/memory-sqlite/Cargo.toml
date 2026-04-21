@@ -9,6 +9,7 @@ description = "SQLite memory provider for IronHermes with FTS5 search"
 ironhermes-core = { path = "../../crates/ironhermes-core" }
 rusqlite = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
