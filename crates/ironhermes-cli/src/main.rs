@@ -137,6 +137,9 @@ async fn main() -> Result<()> {
         dotenvy::from_path(&env_path).ok();
     }
 
+    // D-21: Create ~/.ironhermes/ subdirectories on first run (belt-and-suspenders)
+    ensure_home_dirs().context("Failed to initialize IronHermes home directory")?;
+
     let cli = Cli::parse();
 
     // Phase 21.3: eagerly initialize tiktoken BPE tables to avoid ~100ms
@@ -186,6 +189,17 @@ fn cmd_version() -> Result<()> {
     );
     println!("The self-improving AI agent, rewritten in Rust");
     println!("Created by Nous Research");
+    Ok(())
+}
+
+/// Creates the standard ~/.ironhermes/ subdirectory tree on first run.
+/// Idempotent -- safe to call on every startup (D-21 belt-and-suspenders).
+fn ensure_home_dirs() -> Result<()> {
+    let home = ironhermes_core::get_hermes_home();
+    for sub in &["cron", "sessions", "logs", "hooks", "memories", "skills", "workspace"] {
+        std::fs::create_dir_all(home.join(sub))
+            .with_context(|| format!("Failed to create {}/{}", home.display(), sub))?;
+    }
     Ok(())
 }
 
@@ -1416,5 +1430,27 @@ mod tui_extension_wiring_tests {
             until_next_fn.contains("on_session_end"),
             "run_chat must call on_session_end on clean exit (GAP-6)"
         );
+    }
+}
+
+#[cfg(test)]
+mod ensure_home_dirs_tests {
+    use super::*;
+
+    #[test]
+    fn test_ensure_home_dirs_creates_all_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        ensure_home_dirs().unwrap();
+
+        for sub in &["cron", "sessions", "logs", "hooks", "memories", "skills", "workspace"] {
+            assert!(tmp.path().join(sub).is_dir(), "Missing directory: {}", sub);
+        }
+
+        // Idempotent: calling again should not error
+        ensure_home_dirs().unwrap();
+        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
+        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
     }
 }
