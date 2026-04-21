@@ -4,6 +4,24 @@ use ironhermes_core::MemoryProvider;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::memory_store::MemoryStore;
 
+/// Load provider-specific JSON config from `$HERMES_HOME/<provider_name>.json`.
+/// Returns `Value::Null` when the file is missing (provider uses defaults).
+/// Logs a warning and returns `Value::Null` when JSON is malformed.
+fn load_provider_config(hermes_home: &std::path::Path, provider_name: &str) -> serde_json::Value {
+    let config_path = hermes_home.join(format!("{}.json", provider_name));
+    match std::fs::read_to_string(&config_path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %e,
+                "provider config JSON is malformed; using defaults"
+            );
+            serde_json::Value::Null
+        }),
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
 /// Build a memory provider from config. Returns `Arc<std::sync::Mutex<...>>`
 /// for direct use with `MemoryTool`, `MemoryManager` (Plan 20-02) and the
 /// existing gateway/agent consumers.
@@ -39,14 +57,12 @@ pub async fn build_memory_provider(
     config: &ironhermes_core::config::MemoryConfig,
 ) -> anyhow::Result<Arc<Mutex<dyn MemoryProvider + Send>>> {
     let hermes_home = get_hermes_home();
-    let provider_config = serde_json::Value::Null; // Plan 20-03 will load
-                                                   // `$HERMES_HOME/<name>.json`
-                                                   // here; Phase 20-01 passes Null.
 
     let provider: Arc<Mutex<dyn MemoryProvider + Send>> = match config.provider.as_str() {
         "file" => build_file_provider(&hermes_home).await?,
         #[cfg(feature = "memory-sqlite")]
         "sqlite" => {
+            let provider_config = load_provider_config(&hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
             p.initialize("factory-boot", &hermes_home, &provider_config).await?;
@@ -71,6 +87,7 @@ pub async fn build_memory_provider(
         }
         #[cfg(feature = "memory-duckdb")]
         "duckdb" => {
+            let provider_config = load_provider_config(&hermes_home, "duckdb");
             let db_path = hermes_home.join("memory_duckdb.db");
             let mut p = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
             p.initialize("factory-boot", &hermes_home, &provider_config).await?;
@@ -95,6 +112,7 @@ pub async fn build_memory_provider(
         }
         #[cfg(feature = "memory-grafeo")]
         "grafeo" => {
+            let provider_config = load_provider_config(&hermes_home, "grafeo");
             // Grafeo convention: persistent stores use the `.grafeo` file/dir
             // extension (see memory-grafeo own `test_persistence_survives_reopen`).
             // Without the suffix the DB opens successfully but does not flush
@@ -209,12 +227,12 @@ async fn build_tokio_provider(
     config: &ironhermes_core::config::MemoryConfig,
 ) -> anyhow::Result<crate::memory::SharedProvider> {
     let hermes_home = get_hermes_home();
-    let provider_config = serde_json::Value::Null;
 
     let provider: crate::memory::SharedProvider = match config.provider.as_str() {
         "file" => build_tokio_file_provider(&hermes_home).await?,
         #[cfg(feature = "memory-sqlite")]
         "sqlite" => {
+            let provider_config = load_provider_config(&hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
             p.initialize("factory-boot", &hermes_home, &provider_config).await?;
@@ -239,6 +257,7 @@ async fn build_tokio_provider(
         }
         #[cfg(feature = "memory-duckdb")]
         "duckdb" => {
+            let provider_config = load_provider_config(&hermes_home, "duckdb");
             let db_path = hermes_home.join("memory_duckdb.db");
             let mut p = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
             p.initialize("factory-boot", &hermes_home, &provider_config).await?;
@@ -263,6 +282,7 @@ async fn build_tokio_provider(
         }
         #[cfg(feature = "memory-grafeo")]
         "grafeo" => {
+            let provider_config = load_provider_config(&hermes_home, "grafeo");
             let db_path = hermes_home.join("memory_graph.grafeo");
             let mut p = memory_grafeo::GrafeoMemoryProvider::new(&db_path)?;
             p.initialize("factory-boot", &hermes_home, &provider_config).await?;
@@ -545,5 +565,39 @@ mod tests {
             .format_for_system_prompt(MemoryTarget::Memory)
             .expect("grafeo reload should populate");
         assert!(block.contains("grafeo-fact-XYZ"), "got: {block}");
+    }
+
+    // =========================================================================
+    // Plan 21.5-01: load_provider_config unit tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn factory_loads_provider_config_json_when_present() {
+        let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Write a valid sqlite.json config file
+        let config_path = tmp.path().join("sqlite.json");
+        std::fs::write(&config_path, r#"{"db_path": "/custom/path.db"}"#).unwrap();
+        let loaded = load_provider_config(tmp.path(), "sqlite");
+        assert!(loaded.is_object(), "loaded config should be an object, got: {loaded}");
+        assert_eq!(loaded["db_path"], "/custom/path.db");
+    }
+
+    #[tokio::test]
+    async fn factory_uses_null_when_config_file_absent() {
+        let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let loaded = load_provider_config(tmp.path(), "nonexistent");
+        assert!(loaded.is_null(), "missing config should return Null, got: {loaded}");
+    }
+
+    #[tokio::test]
+    async fn factory_uses_null_when_config_json_malformed() {
+        let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("sqlite.json");
+        std::fs::write(&config_path, "not valid json {{{").unwrap();
+        let loaded = load_provider_config(tmp.path(), "sqlite");
+        assert!(loaded.is_null(), "malformed config should return Null, got: {loaded}");
     }
 }
