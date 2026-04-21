@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.6-01-PLAN.md
-last_updated: "2026-04-21T21:33:11.950Z"
+stopped_at: Completed 21.6-02-PLAN.md
+last_updated: "2026-04-21T22:17:03.877Z"
 last_activity: 2026-04-21
 progress:
   total_phases: 12
   completed_phases: 8
   total_plans: 33
-  completed_plans: 26
-  percent: 79
+  completed_plans: 27
+  percent: 82
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.6 (port-deployment-setup-files-from-hermes-agent) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-04-21
 
@@ -100,6 +100,7 @@ Progress: [██████████] 100%
 | Phase 21.5 P03 | 8 | 2 tasks | 6 files |
 | Phase 21.5 P04 | 2min | 1 tasks | 1 files |
 | Phase 21.6 P01 | 5 | 2 tasks | 5 files |
+| Phase 21.6 P02 | 13 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,9 @@ Recent decisions affecting current work:
 - [Phase 21.5]: DuckDB fire-and-forget bridge commands (SyncTurn/OnPreCompress/QueuePrefetch) have no respond channel; errors logged via tracing::warn
 - [Phase 21.5]: memory_provider_tool_names is a HashSet populated once in run() from memory_manager.get_tool_schemas() -- avoids re-querying on every tool call
 - [Phase 21.6]: Rust 2024 edition requires unsafe blocks for env var mutation in tests -- used unsafe with SAFETY comments and --test-threads=1 constraint
+- [Phase 21.6]: gosu from tianon/gosu:1.19 image (not apt) per RESEARCH.md anti-pattern
+- [Phase 21.6]: debian:bookworm-slim over distroless (needs python3 + bash for entrypoint)
+- [Phase 21.6]: chmod 600 on .env in entrypoint for credential protection (T-21.6-06)
 
 ### Roadmap Evolution
 
@@ -218,6 +222,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-21T21:33:11.936Z
-Stopped at: Completed 21.6-01-PLAN.md
+Last session: 2026-04-21T22:17:03.875Z
+Stopped at: Completed 21.6-02-PLAN.md
 Resume file: None
