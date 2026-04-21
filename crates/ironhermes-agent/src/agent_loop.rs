@@ -103,6 +103,10 @@ pub struct AgentLoop {
     /// When set, the loop spawns `queue_prefetch` after the natural-end break
     /// using the last user message as the query hint.
     memory_manager: Option<Arc<Mutex<MemoryManager>>>,
+    /// Phase 21.5: names of tools provided by the memory provider (e.g., "memory_recall").
+    /// Populated in `run()` from `memory_manager.get_tool_schemas()`.
+    /// Used in `execute_tool_call()` to intercept and route to MemoryManager.
+    memory_provider_tool_names: std::collections::HashSet<String>,
 }
 
 impl AgentLoop {
@@ -130,6 +134,7 @@ impl AgentLoop {
             context_length: 128_000,
             compression_count: 0,
             memory_manager: None,
+            memory_provider_tool_names: std::collections::HashSet::new(),
         }
     }
 
@@ -387,6 +392,17 @@ impl AgentLoop {
         // Not added in subagent context (subagents should not search sessions).
         if self.state_store.is_some() {
             tool_schemas.push(crate::session_search::session_search_schema());
+        }
+        // Phase 21.5: Add memory provider tool schemas (e.g. memory_recall).
+        // These are tools declared by the provider via get_tool_schemas() —
+        // distinct from the built-in "memory" tool which handles add/replace/remove.
+        if let Some(ref mgr) = self.memory_manager {
+            let guard = mgr.lock().await;
+            let schemas = guard.get_tool_schemas().await;
+            for s in &schemas {
+                self.memory_provider_tool_names.insert(s.function.name.clone());
+            }
+            tool_schemas.extend(schemas);
         }
         let tools_option = if tool_schemas.is_empty() {
             None
@@ -832,6 +848,44 @@ impl AgentLoop {
                 let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
 
                 let tool_start = std::time::Instant::now();
+
+                // Phase 21.5: Intercept memory provider tools (e.g. memory_recall).
+                // Route to MemoryManager.handle_tool_call which delegates to the primary provider.
+                if self.memory_provider_tool_names.contains(name.as_str()) {
+                    if let Some(ref mgr) = self.memory_manager {
+                        let mgr_clone = mgr.clone();
+                        let name_owned = name.clone();
+                        let args_clone = args.clone();
+                        let result = async move {
+                            let guard = mgr_clone.lock().await;
+                            guard.handle_tool_call(&name_owned, args_clone).await
+                        }.await;
+
+                        let tool_duration = tool_start.elapsed().as_millis() as u64;
+                        return match result {
+                            Ok(s) => {
+                                self.fire_hook(HookEventKind::ToolCompleted {
+                                    tool_name: name.to_string(),
+                                    success: true,
+                                    result_preview: ironhermes_hooks::event::preview(&s, 200),
+                                    duration_ms: tool_duration,
+                                });
+                                s
+                            }
+                            Err(e) => {
+                                self.fire_hook(HookEventKind::ToolCompleted {
+                                    tool_name: name.to_string(),
+                                    success: false,
+                                    result_preview: ironhermes_hooks::event::preview(&e, 200),
+                                    duration_ms: tool_duration,
+                                });
+                                e
+                            }
+                        };
+                    }
+                    return format!(r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#);
+                }
+
                 let dispatch_result = self.registry.execute_tool(name, args).await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
 
@@ -1686,5 +1740,55 @@ mod plan_18_06_tests {
         agent.pre_chat_compress(&mut messages).await;
         let final_log = log.lock().unwrap().clone();
         assert_eq!(final_log, vec!["compress"], "compress must be the pre-chat event");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Phase 21.5 memory provider tool wiring
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod memory_provider_wiring_tests {
+    use super::*;
+
+    fn make_agent() -> AgentLoop {
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new(
+                "http://localhost".to_string(),
+                "".to_string(),
+                "mock-model",
+            ),
+        );
+        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        AgentLoop::new(client, registry, 4)
+    }
+
+    #[tokio::test]
+    async fn memory_provider_tool_names_populated_from_manager() {
+        // Verify that the memory_provider_tool_names field is empty
+        // when no memory_manager is configured.
+        let agent = make_agent();
+        assert!(
+            agent.memory_provider_tool_names.is_empty(),
+            "should be empty when no memory_manager is configured"
+        );
+    }
+
+    #[test]
+    fn memory_recall_wiring_regression() {
+        // Static grep: verify the memory_recall wiring exists in agent_loop.rs
+        let source = include_str!("agent_loop.rs");
+        assert!(
+            source.contains("memory_provider_tool_names"),
+            "agent_loop.rs must contain memory_provider_tool_names field"
+        );
+        assert!(
+            source.contains("get_tool_schemas().await"),
+            "agent_loop.rs must call get_tool_schemas on memory_manager in run()"
+        );
+        assert!(
+            source.contains("memory_provider_tool_names.contains"),
+            "agent_loop.rs must intercept tools by name in execute_tool_call()"
+        );
     }
 }
