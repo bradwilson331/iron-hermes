@@ -112,10 +112,10 @@ Plans:
 **Goal:** Port hermes-agent's deployment and setup infrastructure to IronHermes: .env.example env var template, cli-config.yaml.example config template, Dockerfile with multi-stage Rust build, docker/entrypoint.sh bootstrap script, install.sh curl-pipe installer, setup-ironhermes.sh post-clone dev setup, and first-run directory scaffolding in main.rs. D-01..D-24 from CONTEXT.md serve as requirements.
 **Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13, D-14, D-15, D-16, D-17, D-18, D-19, D-20, D-21, D-22, D-23, D-24
 **Depends on:** Phase 21
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
-- [ ] 21.6-01-PLAN.md — Create .env.example (all provider/tool/gateway env vars, commented-out), cli-config.yaml.example (full Config struct mirror with inline docs), .dockerignore, docker/SOUL.md default identity seed, and ensure_home_dirs() first-run directory scaffolding in main.rs
+- [x] 21.6-01-PLAN.md — Create .env.example (all provider/tool/gateway env vars, commented-out), cli-config.yaml.example (full Config struct mirror with inline docs), .dockerignore, docker/SOUL.md default identity seed, and ensure_home_dirs() first-run directory scaffolding in main.rs
 - [ ] 21.6-02-PLAN.md — Create Dockerfile (multi-stage: gosu + rust:latest builder + debian:bookworm-slim runtime with python3, non-root ironhermes user UID 10000, IRONHERMES_HOME=/opt/data volume) and docker/entrypoint.sh (privilege drop via gosu, UID/GID remapping, directory creation, template seeding)
 - [ ] 21.6-03-PLAN.md — Create install.sh (curl-pipe end-user installer: OS/arch detection, GitHub Releases binary download with cargo install fallback, directory scaffolding, template seeding, PATH patching) and setup-ironhermes.sh (post-clone dev setup: Rust check, cargo build --release, symlink, config scaffolding)
 

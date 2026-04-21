@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 21.6 context gathered
-last_updated: "2026-04-21T19:37:37.591Z"
+status: executing
+stopped_at: Completed 21.6-01-PLAN.md
+last_updated: "2026-04-21T21:33:11.950Z"
 last_activity: 2026-04-21
 progress:
   total_phases: 12
   completed_phases: 8
-  total_plans: 30
-  completed_plans: 25
-  percent: 83
+  total_plans: 33
+  completed_plans: 26
+  percent: 79
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.5 — memory-provider-plugin
+**Current focus:** Phase 21.6 — port-deployment-setup-files-from-hermes-agent
 
 ## Current Position
 
-Phase: 22
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 21.6 (port-deployment-setup-files-from-hermes-agent) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-04-21
 
 Progress: [██████████] 100%
@@ -99,6 +99,7 @@ Progress: [██████████] 100%
 | Phase 21.5 P02 | 4 | 2 tasks | 2 files |
 | Phase 21.5 P03 | 8 | 2 tasks | 6 files |
 | Phase 21.5 P04 | 2min | 1 tasks | 1 files |
+| Phase 21.6 P01 | 5 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -188,6 +189,7 @@ Recent decisions affecting current work:
 - [Phase 21.5]: extract_entity_triples uses heuristic pattern matching (not regex) for entity extraction; GrafeoDB interior mutability enables &self graph mutation in on_pre_compress/sync_turn
 - [Phase 21.5]: DuckDB fire-and-forget bridge commands (SyncTurn/OnPreCompress/QueuePrefetch) have no respond channel; errors logged via tracing::warn
 - [Phase 21.5]: memory_provider_tool_names is a HashSet populated once in run() from memory_manager.get_tool_schemas() -- avoids re-querying on every tool call
+- [Phase 21.6]: Rust 2024 edition requires unsafe blocks for env var mutation in tests -- used unsafe with SAFETY comments and --test-threads=1 constraint
 
 ### Roadmap Evolution
 
@@ -216,6 +218,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-21T19:37:37.589Z
-Stopped at: Phase 21.6 context gathered
-Resume file: .planning/phases/21.6-port-deployment-setup-files-from-hermes-agent/21.6-CONTEXT.md
+Last session: 2026-04-21T21:33:11.936Z
+Stopped at: Completed 21.6-01-PLAN.md
+Resume file: None
