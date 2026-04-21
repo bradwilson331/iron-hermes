@@ -21,6 +21,7 @@ use ironhermes_core::constants::ENTRY_DELIMITER;
 use ironhermes_core::context_scanner::scan_context_content;
 use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
+use ironhermes_core::types::ToolSchema;
 
 use bridge::{DuckDbBridge, DuckDbCommand};
 
@@ -105,6 +106,20 @@ impl DuckDbMemoryProvider {
         rx.recv()
             .map_err(|_| anyhow::anyhow!("Worker thread disconnected"))?
     }
+
+    /// Send a Recall command and block until the worker responds.
+    fn bridge_recall(&self, query: &str, limit: u32) -> Result<String, String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.bridge
+            .send(DuckDbCommand::Recall {
+                query: query.to_string(),
+                limit,
+                respond: tx,
+            })
+            .map_err(|e| format!("Bridge send failed: {}", e))?;
+        rx.recv()
+            .map_err(|_| "Worker thread disconnected".to_string())?
+    }
 }
 
 // =============================================================================
@@ -114,6 +129,70 @@ impl DuckDbMemoryProvider {
 #[async_trait]
 impl MemoryProvider for DuckDbMemoryProvider {
     fn name(&self) -> &'static str { "duckdb" }
+
+    fn get_tool_schemas(&self) -> Vec<ToolSchema> {
+        vec![ToolSchema::new(
+            "memory_recall",
+            "Search memory for relevant facts using analytical queries. Returns results ordered by recency with pattern matching. Use this to find previously stored information with time-based context.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to find relevant memory entries"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }),
+        )]
+    }
+
+    fn handle_tool_call(&mut self, name: &str, args: serde_json::Value) -> MemoryResult {
+        match name {
+            "memory_recall" => {
+                let query = args.get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "missing `query` parameter".to_string())?;
+                let limit = args.get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5) as u32;
+                self.bridge_recall(query, limit)
+            }
+            other => {
+                let target = match args.get("target").and_then(|v| v.as_str()) {
+                    Some("memory") => MemoryTarget::Memory,
+                    Some("user") => MemoryTarget::User,
+                    Some(t) => return Err(format!("invalid target: {t}")),
+                    None => return Err("missing `target`".to_string()),
+                };
+                match other {
+                    "memory_add" | "add" => {
+                        let content = args.get("content").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `content`".to_string())?;
+                        self.add(target, content)
+                    }
+                    "memory_replace" | "replace" => {
+                        let old_text = args.get("old_text").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `old_text`".to_string())?;
+                        let new_content = args.get("new_content").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `new_content`".to_string())?;
+                        self.replace(target, old_text, new_content)
+                    }
+                    "memory_remove" | "remove" => {
+                        let old_text = args.get("old_text").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `old_text`".to_string())?;
+                        self.remove(target, old_text)
+                    }
+                    unknown => Err(format!("unknown memory tool: {unknown}")),
+                }
+            }
+        }
+    }
 
     fn get_config_schema(&self) -> Vec<ironhermes_core::config_schema::ConfigField> {
         use ironhermes_core::config_schema::ConfigField;
@@ -174,9 +253,58 @@ impl MemoryProvider for DuckDbMemoryProvider {
     async fn sync_turn(
         &self,
         _session_id: &str,
-        _entries: &MemoryEntries,
+        entries: &MemoryEntries,
     ) -> anyhow::Result<()> {
-        // Mutations are immediate via add/replace/remove; no-op.
+        // D-07: Fire-and-forget via bridge (no respond channel).
+        // Convert MemoryTarget keys to strings for serialization (MemoryTarget lacks Serialize).
+        let string_map: HashMap<String, &Vec<String>> = entries.entries.iter()
+            .map(|(k, v)| (k.label().to_string(), v))
+            .collect();
+        let entries_json = serde_json::to_string(&string_map).unwrap_or_default();
+        let _ = self.bridge.send(DuckDbCommand::SyncTurn { entries_json });
+        Ok(())
+    }
+
+    async fn on_pre_compress(&self, messages: &[ironhermes_core::types::ChatMessage]) -> anyhow::Result<()> {
+        // D-08: Extract structured facts from messages being compressed.
+        // Serialize message content for the bridge worker.
+        let msg_data: Vec<serde_json::Value> = messages.iter()
+            .filter_map(|m| m.content_text().map(|t| serde_json::json!({"content": t})))
+            .collect();
+        if msg_data.is_empty() {
+            return Ok(());
+        }
+        let messages_json = serde_json::to_string(&msg_data).unwrap_or_default();
+        let _ = self.bridge.send(DuckDbCommand::OnPreCompress { messages_json });
+        Ok(())
+    }
+
+    fn system_prompt_block(&self) -> Option<String> {
+        // D-10: Surface detected patterns and entry counts.
+        let map = self.bridge_load_all().ok()?;
+        let memory_count = map.get("memory").map(|v| v.len()).unwrap_or(0);
+        let user_count = map.get("user").map(|v| v.len()).unwrap_or(0);
+        if memory_count == 0 && user_count == 0 {
+            return None;
+        }
+
+        let mut block = String::from("[DuckDB Memory — Analytical Store]\n");
+        block.push_str(&format!("- {} memory entries, {} user profile entries\n", memory_count, user_count));
+
+        // Show most recent entries
+        if let Some(entries) = map.get("memory") {
+            for entry in entries.iter().rev().take(3) {
+                block.push_str(&format!("- [recent] {}\n", entry));
+            }
+        }
+        Some(block)
+    }
+
+    async fn queue_prefetch(&self, query: &str) -> anyhow::Result<()> {
+        if query.trim().is_empty() {
+            return Ok(());
+        }
+        let _ = self.bridge.send(DuckDbCommand::QueuePrefetch { query: query.to_string() });
         Ok(())
     }
 
@@ -520,5 +648,67 @@ mod tests {
             let mem_entries = &entries.entries[&MemoryTarget::Memory];
             assert_eq!(mem_entries.len(), 2);
         });
+    }
+
+    // =========================================================================
+    // Plan 03 tests: memory_recall, hooks
+    // =========================================================================
+
+    #[test]
+    fn test_get_tool_schemas_returns_memory_recall() {
+        let provider = make_provider();
+        let schemas = provider.get_tool_schemas();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].function.name, "memory_recall");
+    }
+
+    #[test]
+    fn test_memory_recall_finds_entries() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "cats are wonderful pets").unwrap();
+        provider.add(MemoryTarget::Memory, "dogs are loyal friends").unwrap();
+        let result = provider.bridge_recall("cats", 5);
+        assert!(result.is_ok(), "recall should succeed: {:?}", result);
+        let body = result.unwrap();
+        assert!(body.contains("cats"), "recall result should contain matched content");
+    }
+
+    #[test]
+    fn test_handle_tool_call_dispatches_recall() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "important fact about Rust").unwrap();
+        let result = provider.handle_tool_call(
+            "memory_recall",
+            serde_json::json!({"query": "Rust"}),
+        );
+        assert!(result.is_ok(), "handle_tool_call should succeed: {:?}", result);
+        assert!(result.unwrap().contains("Rust"));
+    }
+
+    #[test]
+    fn test_handle_tool_call_delegates_add() {
+        let mut provider = make_provider();
+        let result = provider.handle_tool_call(
+            "memory_add",
+            serde_json::json!({"target": "memory", "content": "delegated fact"}),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_system_prompt_block_with_entries() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "analytical fact").unwrap();
+        provider.load_from_disk().unwrap();
+        let block = provider.system_prompt_block();
+        assert!(block.is_some());
+        let block = block.unwrap();
+        assert!(block.contains("[DuckDB Memory"));
+    }
+
+    #[test]
+    fn test_system_prompt_block_none_when_empty() {
+        let provider = make_provider();
+        assert!(provider.system_prompt_block().is_none());
     }
 }

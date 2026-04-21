@@ -11,4 +11,10 @@ CREATE TABLE IF NOT EXISTS memory_facts (
     content     VARCHAR NOT NULL,
     created_at  TIMESTAMP NOT NULL DEFAULT current_timestamp
 );
+CREATE TABLE IF NOT EXISTS conversation_facts (
+    id          BIGINT DEFAULT nextval('memory_facts_seq'),
+    content     VARCHAR NOT NULL,
+    category    VARCHAR DEFAULT 'general',
+    created_at  TIMESTAMP NOT NULL DEFAULT current_timestamp
+);
 ";
