@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.5-01-PLAN.md
-last_updated: "2026-04-21T12:39:34.200Z"
+stopped_at: Completed 21.5-02-PLAN.md
+last_updated: "2026-04-21T12:46:13.104Z"
 last_activity: 2026-04-21
 progress:
   total_phases: 10
   completed_phases: 7
   total_plans: 30
-  completed_plans: 22
-  percent: 73
+  completed_plans: 23
+  percent: 77
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.5 (memory-provider-plugin) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-21
 
@@ -95,6 +95,7 @@ Progress: [██████████] 100%
 | Phase 21.4 P02 | 90 | 2 tasks | 11 files |
 | Phase 21.4 P03 | 4 | 2 tasks | 3 files |
 | Phase 21.5 P01 | 3 | 2 tasks | 2 files |
+| Phase 21.5 P02 | 4 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -178,6 +179,9 @@ Recent decisions affecting current work:
 - [Phase 21.4]: on_session_end fires with MemoryEntries::default() best-effort in run_single and run_chat clean exit; ctrl-c path intentionally skips (async unsuitable)
 - [Phase 21.4]: memory_cmd.rs exposed in lib.rs for test access; memory_setup.rs remains binary-only (references crate::Cli)
 - [Phase 21.5]: load_provider_config is module-private helper; per-arm config loading pattern in factory match; Arc<Mutex<Connection>> for SQLite spawn compat
+- [Phase 21.5]: sanitize_fts_query tokenizes and double-quotes each term for FTS5 MATCH injection prevention
+- [Phase 21.5]: conversation_extracts table created lazily in on_pre_compress (not in schema.rs)
+- [Phase 21.5]: system_prompt_block reads live DB (not frozen snapshot) for contextual awareness
 
 ### Roadmap Evolution
 
@@ -204,6 +208,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-21T12:39:34.198Z
-Stopped at: Completed 21.5-01-PLAN.md
+Last session: 2026-04-21T12:46:13.102Z
+Stopped at: Completed 21.5-02-PLAN.md
 Resume file: None
