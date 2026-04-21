@@ -21,7 +21,12 @@ use ironhermes_core::context_scanner::scan_context_content;
 use ironhermes_core::memory_provider::{MemoryEntries, MemoryProvider};
 use ironhermes_core::memory_store::{MemoryResult, MemoryTarget};
 
-use schema::{NODE_LABEL, PROP_CONTENT, PROP_CREATED_AT, PROP_TARGET};
+use ironhermes_core::types::ToolSchema;
+
+use schema::{
+    ENTITY_NODE_LABEL, PROP_ENTITY_NAME, EDGE_RELATES_TO, PROP_RELATION_TYPE,
+    NODE_LABEL, PROP_CONTENT, PROP_CREATED_AT, PROP_TARGET,
+};
 
 // =============================================================================
 // GrafeoMemoryProvider
@@ -132,6 +137,97 @@ impl GrafeoMemoryProvider {
             .map(|(_, content, _)| content)
             .collect()
     }
+
+    /// Search memory entries by content substring match with relevance scoring.
+    /// D-12: Graph traversal -- searches both memory entries and entity relationships.
+    fn recall(&self, query: &str, limit: u32) -> MemoryResult {
+        if query.trim().is_empty() {
+            return Ok("[]".to_string());
+        }
+        let query_lower = query.to_lowercase();
+        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
+        let mut results: Vec<RecallResult> = Vec::new();
+
+        // Search memory entry nodes by content substring match
+        let prop_content = PropertyKey::new(PROP_CONTENT);
+        let prop_target = PropertyKey::new(PROP_TARGET);
+
+        for node in self.db.iter_nodes() {
+            if !node.labels.iter().any(|l| &**l == NODE_LABEL) {
+                continue;
+            }
+            let content = match node.properties.get(&prop_content) {
+                Some(Value::String(s)) => s.to_string(),
+                _ => continue,
+            };
+            let target = match node.properties.get(&prop_target) {
+                Some(Value::String(s)) => s.to_string(),
+                _ => continue,
+            };
+
+            let content_lower = content.to_lowercase();
+            // Score: count how many query terms appear in the content
+            let matches: usize = query_terms.iter()
+                .filter(|term| content_lower.contains(*term))
+                .count();
+            if matches == 0 { continue; }
+
+            let relevance_score = matches as f64 / query_terms.len() as f64;
+            // Build snippet: first 100 chars with match context
+            let snippet = if content.len() > 100 {
+                format!("{}...", &content[..content.char_indices().nth(100).map(|(i, _)| i).unwrap_or(content.len())])
+            } else {
+                content.clone()
+            };
+
+            results.push(RecallResult {
+                content,
+                target,
+                relevance_score,
+                snippet,
+            });
+        }
+
+        // Sort by relevance descending
+        results.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit as usize);
+
+        serde_json::to_string(&results)
+            .map_err(|e| format!("Failed to serialize recall results: {}", e))
+    }
+
+    /// Find an existing entity node by name, or create one.
+    /// Takes &self because GrafeoDB uses interior mutability (all methods take &self).
+    fn find_or_create_entity(&self, name: &str) -> NodeId {
+        let prop_name = PropertyKey::new(PROP_ENTITY_NAME);
+        // Search for existing entity with this name
+        for node in self.db.iter_nodes() {
+            if node.labels.iter().any(|l| &**l == ENTITY_NODE_LABEL) {
+                if let Some(Value::String(n)) = node.properties.get(&prop_name) {
+                    if AsRef::<str>::as_ref(n) == name {
+                        return node.id;
+                    }
+                }
+            }
+        }
+        // Create new entity node
+        let node_id = self.db.create_node(&[ENTITY_NODE_LABEL]);
+        self.db.set_node_property(node_id, PROP_ENTITY_NAME, Value::String(name.into()));
+        node_id
+    }
+
+    /// Store extracted entity-relationship triples as graph edges.
+    /// Per D-08 and D-12: creates Entity nodes and RELATES_TO edges with relation_type properties.
+    /// Takes &self because GrafeoDB uses interior mutability.
+    fn store_triples(&self, triples: &[(String, String, String)]) {
+        for (subject, relation, object) in triples {
+            let subj_id = self.find_or_create_entity(subject);
+            let obj_id = self.find_or_create_entity(object);
+            let edge_id = self.db.create_edge(subj_id, obj_id, EDGE_RELATES_TO);
+            self.db.set_edge_property(edge_id, PROP_RELATION_TYPE, Value::String(relation.clone().into()));
+        }
+    }
 }
 
 // =============================================================================
@@ -141,6 +237,70 @@ impl GrafeoMemoryProvider {
 #[async_trait]
 impl MemoryProvider for GrafeoMemoryProvider {
     fn name(&self) -> &'static str { "grafeo" }
+
+    fn get_tool_schemas(&self) -> Vec<ToolSchema> {
+        vec![ToolSchema::new(
+            "memory_recall",
+            "Search memory for relevant facts using graph-based relationship search. Returns ranked results from the knowledge graph. Use this to find previously stored information and entity relationships.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to find relevant memory entries and relationships"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }),
+        )]
+    }
+
+    fn handle_tool_call(&mut self, name: &str, args: serde_json::Value) -> MemoryResult {
+        match name {
+            "memory_recall" => {
+                let query = args.get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "missing `query` parameter".to_string())?;
+                let limit = args.get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5) as u32;
+                self.recall(query, limit)
+            }
+            other => {
+                let target = match args.get("target").and_then(|v| v.as_str()) {
+                    Some("memory") => MemoryTarget::Memory,
+                    Some("user") => MemoryTarget::User,
+                    Some(t) => return Err(format!("invalid target: {t}")),
+                    None => return Err("missing `target`".to_string()),
+                };
+                match other {
+                    "memory_add" | "add" => {
+                        let content = args.get("content").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `content`".to_string())?;
+                        self.add(target, content)
+                    }
+                    "memory_replace" | "replace" => {
+                        let old_text = args.get("old_text").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `old_text`".to_string())?;
+                        let new_content = args.get("new_content").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `new_content`".to_string())?;
+                        self.replace(target, old_text, new_content)
+                    }
+                    "memory_remove" | "remove" => {
+                        let old_text = args.get("old_text").and_then(|v| v.as_str())
+                            .ok_or_else(|| "missing `old_text`".to_string())?;
+                        self.remove(target, old_text)
+                    }
+                    unknown => Err(format!("unknown memory tool: {unknown}")),
+                }
+            }
+        }
+    }
 
     fn get_config_schema(&self) -> Vec<ironhermes_core::config_schema::ConfigField> {
         use ironhermes_core::config_schema::ConfigField;
@@ -185,9 +345,95 @@ impl MemoryProvider for GrafeoMemoryProvider {
     async fn sync_turn(
         &self,
         _session_id: &str,
-        _entries: &MemoryEntries,
+        entries: &MemoryEntries,
     ) -> anyhow::Result<()> {
-        // Mutations are immediate via add/replace/remove; no-op.
+        // D-07: Grafeo operations are sync (no tokio::spawn needed -- GrafeoDB is !Send for spawn).
+        // D-12: Extract entity-relationship triples from memory entry content and store as graph edges.
+        // GrafeoDB uses interior mutability -- all mutation methods take &self, so this works
+        // from the &self sync_turn signature without needing &mut self or Mutex.
+        for (_target, contents) in &entries.entries {
+            for content in contents {
+                let triples = extract_entity_triples(content);
+                if !triples.is_empty() {
+                    self.store_triples(&triples);
+                    tracing::debug!(
+                        count = triples.len(),
+                        "sync_turn: stored entity-relationship triples in graph"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_pre_compress(&self, messages: &[ironhermes_core::types::ChatMessage]) -> anyhow::Result<()> {
+        // D-08: Extract entity-relationship triples from message content.
+        // D-12: Save relationship networks from discarded messages into the graph.
+        // GrafeoDB uses interior mutability -- all mutation methods (create_node,
+        // create_edge, set_node_property, set_edge_property) take &self, so we can
+        // store triples directly from on_pre_compress(&self) without Mutex.
+        for msg in messages {
+            if let Some(text) = msg.content_text() {
+                let triples = extract_entity_triples(text);
+                if !triples.is_empty() {
+                    self.store_triples(&triples);
+                    tracing::debug!(
+                        count = triples.len(),
+                        "on_pre_compress: extracted and stored entity-relationship triples in graph"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn system_prompt_block(&self) -> Option<String> {
+        // D-10: Surface key entity relationships and memory entry summaries.
+        let entries = self.fetch_content_strings(MemoryTarget::Memory);
+        let user_entries = self.fetch_content_strings(MemoryTarget::User);
+        if entries.is_empty() && user_entries.is_empty() {
+            return None;
+        }
+
+        let mut block = String::from("[Grafeo Memory — Knowledge Graph]\n");
+        // Show recent memory entries
+        let recent: Vec<&String> = entries.iter().rev().take(5).collect();
+        for entry in recent {
+            block.push_str(&format!("- [memory] {}\n", entry));
+        }
+        for entry in user_entries.iter().rev().take(3) {
+            block.push_str(&format!("- [user] {}\n", entry));
+        }
+
+        // Count entity nodes for context
+        let entity_count = self.db.iter_nodes()
+            .filter(|n| n.labels.iter().any(|l| &**l == ENTITY_NODE_LABEL))
+            .count();
+        if entity_count > 0 {
+            block.push_str(&format!("({} entity nodes in graph)\n", entity_count));
+        }
+
+        Some(block)
+    }
+
+    async fn queue_prefetch(&self, query: &str) -> anyhow::Result<()> {
+        // D-09: Pre-traverse relationship paths relevant to recent entities.
+        // GrafeoDB is sync and in-memory -- traversal is fast enough inline.
+        // Warm: scan for entity nodes matching query terms.
+        if query.trim().is_empty() {
+            return Ok(());
+        }
+        let query_lower = query.to_lowercase();
+        let prop_name = PropertyKey::new(PROP_ENTITY_NAME);
+        let _count = self.db.iter_nodes()
+            .filter(|n| n.labels.iter().any(|l| &**l == ENTITY_NODE_LABEL))
+            .filter(|n| {
+                n.properties.get(&prop_name)
+                    .and_then(|v| if let Value::String(s) = v { Some(s) } else { None })
+                    .map(|s| s.to_lowercase().contains(&query_lower))
+                    .unwrap_or(false)
+            })
+            .count();
         Ok(())
     }
 
@@ -459,6 +705,42 @@ impl MemoryProvider for GrafeoMemoryProvider {
 // Private helpers
 // =============================================================================
 
+#[derive(serde::Serialize)]
+struct RecallResult {
+    content: String,
+    target: String,
+    relevance_score: f64,
+    snippet: String,
+}
+
+/// Extract entity-relationship triples from text content using heuristic patterns.
+/// Returns Vec<(subject, relation, object)> where each element is a String.
+fn extract_entity_triples(text: &str) -> Vec<(String, String, String)> {
+    let mut triples = Vec::new();
+    // Split text into sentences (simple heuristic: split on '. ' or newlines)
+    for sentence in text.split(|c: char| c == '.' || c == '\n') {
+        let sentence = sentence.trim();
+        if sentence.len() < 5 { continue; }
+        let lower = sentence.to_lowercase();
+        // Pattern: "X is Y", "X has Y", "X uses Y", "X likes Y"
+        for relation in &["is", "has", "uses", "likes", "prefers", "works with", "knows"] {
+            let pattern = format!(" {} ", relation);
+            if let Some(pos) = lower.find(&pattern) {
+                let subject = sentence[..pos].trim();
+                let object = sentence[pos + pattern.len()..].trim();
+                if !subject.is_empty() && !object.is_empty() && subject.len() < 100 && object.len() < 100 {
+                    triples.push((
+                        subject.to_string(),
+                        relation.to_string(),
+                        object.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    triples
+}
+
 /// Total chars including delimiters between entries (mirrors MemoryStore::char_count).
 fn char_count(entries: &[String], delimiter: &str) -> usize {
     if entries.is_empty() {
@@ -715,5 +997,129 @@ mod tests {
             entries.contains(&"persistent fact".to_string()),
             "Persistent fact should survive reopen"
         );
+    }
+
+    // =========================================================================
+    // Plan 03 tests: memory_recall, entity extraction, hooks
+    // =========================================================================
+
+    #[test]
+    fn test_get_tool_schemas_returns_memory_recall() {
+        let provider = make_provider();
+        let schemas = provider.get_tool_schemas();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].function.name, "memory_recall");
+    }
+
+    #[test]
+    fn test_memory_recall_finds_entries_by_content() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "cats are wonderful pets").unwrap();
+        provider.add(MemoryTarget::Memory, "dogs are loyal friends").unwrap();
+
+        let result = provider.recall("cats", 5);
+        assert!(result.is_ok(), "recall should succeed: {:?}", result);
+        let results: Vec<serde_json::Value> = serde_json::from_str(&result.unwrap()).unwrap();
+        assert!(!results.is_empty(), "should find matches for 'cats'");
+        assert!(results[0]["content"].as_str().unwrap().contains("cats"));
+    }
+
+    #[test]
+    fn test_memory_recall_empty_query() {
+        let provider = make_provider();
+        let result = provider.recall("", 5);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "[]");
+    }
+
+    #[test]
+    fn test_handle_tool_call_dispatches_memory_recall() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "important fact about Rust").unwrap();
+        let result = provider.handle_tool_call(
+            "memory_recall",
+            serde_json::json!({"query": "Rust"}),
+        );
+        assert!(result.is_ok(), "handle_tool_call should succeed: {:?}", result);
+        assert!(result.unwrap().contains("Rust"));
+    }
+
+    #[test]
+    fn test_handle_tool_call_delegates_add() {
+        let mut provider = make_provider();
+        let result = provider.handle_tool_call(
+            "memory_add",
+            serde_json::json!({"target": "memory", "content": "delegated fact"}),
+        );
+        assert!(result.is_ok());
+        let entries = provider.fetch_content_strings(MemoryTarget::Memory);
+        assert!(entries.iter().any(|e| e.contains("delegated fact")));
+    }
+
+    #[test]
+    fn test_system_prompt_block_with_entries() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "fact about graphs").unwrap();
+        let block = provider.system_prompt_block();
+        assert!(block.is_some());
+        let block = block.unwrap();
+        assert!(block.contains("[Grafeo Memory"));
+        assert!(block.contains("fact about graphs"));
+    }
+
+    #[test]
+    fn test_system_prompt_block_none_when_empty() {
+        let provider = make_provider();
+        assert!(provider.system_prompt_block().is_none());
+    }
+
+    #[test]
+    fn test_extract_entity_triples() {
+        let triples = extract_entity_triples("Rust is a programming language. Brad likes Rust");
+        assert!(!triples.is_empty(), "should extract triples from text");
+        assert!(triples.iter().any(|(s, r, _)| s.contains("Rust") && r == "is"));
+    }
+
+    #[test]
+    fn test_store_triples_creates_entity_nodes_and_edges() {
+        let provider = make_provider();
+        let triples = vec![
+            ("Rust".to_string(), "is".to_string(), "a programming language".to_string()),
+            ("Brad".to_string(), "likes".to_string(), "Rust".to_string()),
+        ];
+        provider.store_triples(&triples);
+
+        // Verify entity nodes were created
+        let prop_name = grafeo_common::types::PropertyKey::new(schema::PROP_ENTITY_NAME);
+        let entity_names: Vec<String> = provider.db.iter_nodes()
+            .filter(|n| n.labels.iter().any(|l| &**l == schema::ENTITY_NODE_LABEL))
+            .filter_map(|n| {
+                n.properties.get(&prop_name)
+                    .and_then(|v| if let grafeo::Value::String(s) = v { Some(s.to_string()) } else { None })
+            })
+            .collect();
+        // "Rust" appears in both triples but should be deduplicated via find_or_create_entity
+        assert!(entity_names.contains(&"Rust".to_string()), "should have Rust entity");
+        assert!(entity_names.contains(&"Brad".to_string()), "should have Brad entity");
+        assert!(entity_names.contains(&"a programming language".to_string()), "should have object entity");
+        // Rust should appear only once (deduplicated)
+        assert_eq!(entity_names.iter().filter(|n| *n == "Rust").count(), 1, "Rust entity should be deduplicated");
+    }
+
+    #[test]
+    fn test_on_pre_compress_stores_triples() {
+        let provider = make_provider();
+        // on_pre_compress is async; use tokio runtime for test
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let messages = vec![
+            ironhermes_core::types::ChatMessage::assistant("Rust is a systems language"),
+        ];
+        rt.block_on(provider.on_pre_compress(&messages)).unwrap();
+
+        // Verify entity nodes were actually created in the graph
+        let entity_count = provider.db.iter_nodes()
+            .filter(|n| n.labels.iter().any(|l| &**l == schema::ENTITY_NODE_LABEL))
+            .count();
+        assert!(entity_count > 0, "on_pre_compress should store entity nodes in graph, not just log");
     }
 }

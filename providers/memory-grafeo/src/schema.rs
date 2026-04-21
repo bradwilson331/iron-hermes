@@ -19,6 +19,22 @@ pub const PROP_TARGET: &str = "target";
 /// Property key for the insertion timestamp (Unix seconds, i64).
 pub const PROP_CREATED_AT: &str = "created_at";
 
+/// Label for entity nodes extracted from conversation.
+pub const ENTITY_NODE_LABEL: &str = "Entity";
+
+/// Property key for entity name text.
+pub const PROP_ENTITY_NAME: &str = "entity_name";
+
+/// Edge label for relationships between entities.
+pub const EDGE_RELATES_TO: &str = "RELATES_TO";
+
+/// Edge label for entity-to-memory-entry relationships.
+#[allow(dead_code)]
+pub const EDGE_MENTIONED_IN: &str = "MENTIONED_IN";
+
+/// Property key for relationship type on edges (e.g., "is", "has", "uses").
+pub const PROP_RELATION_TYPE: &str = "relation_type";
+
 /// Property index key used by find_nodes_by_property for exact content lookups.
 ///
 /// We create a property index on PROP_CONTENT at initialization so that exact
