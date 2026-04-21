@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.5-02-PLAN.md
-last_updated: "2026-04-21T12:46:13.104Z"
+stopped_at: Completed 21.5-03-PLAN.md
+last_updated: "2026-04-21T12:56:57.589Z"
 last_activity: 2026-04-21
 progress:
   total_phases: 10
   completed_phases: 7
   total_plans: 30
-  completed_plans: 23
-  percent: 77
+  completed_plans: 24
+  percent: 80
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.5 (memory-provider-plugin) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-04-21
 
@@ -96,6 +96,7 @@ Progress: [██████████] 100%
 | Phase 21.4 P03 | 4 | 2 tasks | 3 files |
 | Phase 21.5 P01 | 3 | 2 tasks | 2 files |
 | Phase 21.5 P02 | 4 | 2 tasks | 2 files |
+| Phase 21.5 P03 | 8 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -182,6 +183,8 @@ Recent decisions affecting current work:
 - [Phase 21.5]: sanitize_fts_query tokenizes and double-quotes each term for FTS5 MATCH injection prevention
 - [Phase 21.5]: conversation_extracts table created lazily in on_pre_compress (not in schema.rs)
 - [Phase 21.5]: system_prompt_block reads live DB (not frozen snapshot) for contextual awareness
+- [Phase 21.5]: extract_entity_triples uses heuristic pattern matching (not regex) for entity extraction; GrafeoDB interior mutability enables &self graph mutation in on_pre_compress/sync_turn
+- [Phase 21.5]: DuckDB fire-and-forget bridge commands (SyncTurn/OnPreCompress/QueuePrefetch) have no respond channel; errors logged via tracing::warn
 
 ### Roadmap Evolution
 
@@ -208,6 +211,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-21T12:46:13.102Z
-Stopped at: Completed 21.5-02-PLAN.md
+Last session: 2026-04-21T12:56:57.586Z
+Stopped at: Completed 21.5-03-PLAN.md
 Resume file: None
