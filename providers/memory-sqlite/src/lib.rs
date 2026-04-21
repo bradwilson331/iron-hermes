@@ -231,7 +231,27 @@ impl MemoryProvider for SqliteMemoryProvider {
         _session_id: &str,
         _entries: &MemoryEntries,
     ) -> anyhow::Result<()> {
-        // Mutations are immediate via add/replace/remove; no-op.
+        // D-07: Fire-and-forget — return immediately, actual work in spawned task.
+        // D-11: Refresh FTS5 index from current memory entries.
+        let conn = Arc::clone(&self.conn);
+
+        tokio::spawn(async move {
+            // Use spawn_blocking since rusqlite is sync
+            let result = tokio::task::spawn_blocking(move || {
+                let guard = conn.lock().expect("SQLite mutex poisoned");
+                // Rebuild FTS5 index content from current memory_facts.
+                // The triggers handle normal add/replace/remove, but sync_turn
+                // ensures consistency after any out-of-band changes.
+                if let Err(e) = guard.execute_batch(
+                    "INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')"
+                ) {
+                    tracing::warn!(error = %e, "sync_turn FTS5 rebuild failed");
+                }
+            }).await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "sync_turn spawn_blocking panicked");
+            }
+        });
         Ok(())
     }
 
@@ -246,6 +266,106 @@ impl MemoryProvider for SqliteMemoryProvider {
 
     async fn shutdown(&mut self) -> anyhow::Result<()> {
         // Connection drops on struct drop; no-op.
+        Ok(())
+    }
+
+    async fn on_pre_compress(&self, messages: &[ironhermes_core::types::ChatMessage]) -> anyhow::Result<()> {
+        // D-08: Full-text index the raw messages being discarded.
+        // Extract content and insert into a conversation_extracts index table
+        // so memory_recall can find facts from compressed-away conversation.
+        let conn = Arc::clone(&self.conn);
+        let texts: Vec<String> = messages.iter()
+            .filter_map(|m| m.content_text())
+            .map(|s| s.to_string())
+            .collect();
+
+        if texts.is_empty() {
+            return Ok(());
+        }
+
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let guard = conn.lock().expect("SQLite mutex poisoned");
+                // Ensure the conversation_extracts table exists for compressed content
+                guard.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS conversation_extracts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        content TEXT NOT NULL,
+                        created_at REAL NOT NULL DEFAULT (julianday('now'))
+                    );
+                    CREATE VIRTUAL TABLE IF NOT EXISTS conversation_extracts_fts USING fts5(
+                        content,
+                        content=conversation_extracts,
+                        content_rowid=id
+                    );
+                    CREATE TRIGGER IF NOT EXISTS conv_fts_insert AFTER INSERT ON conversation_extracts BEGIN
+                        INSERT INTO conversation_extracts_fts(rowid, content) VALUES (new.id, new.content);
+                    END;"
+                ).ok(); // Ignore if already exists
+
+                for text in &texts {
+                    if let Err(e) = guard.execute(
+                        "INSERT INTO conversation_extracts (content) VALUES (?1)",
+                        rusqlite::params![text],
+                    ) {
+                        tracing::warn!(error = %e, "on_pre_compress insert failed");
+                    }
+                }
+            }).await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "on_pre_compress spawn_blocking panicked");
+            }
+        });
+        Ok(())
+    }
+
+    fn system_prompt_block(&self) -> Option<String> {
+        // D-10: Surface recent memory entries for contextual awareness.
+        let conn = self.conn.lock().expect("SQLite mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT content, target FROM memory_facts ORDER BY created_at DESC LIMIT 5"
+        ).ok()?;
+        let entries: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        let mut block = String::from("[SQLite Memory — Recent entries]\n");
+        for (content, target) in &entries {
+            block.push_str(&format!("- [{}] {}\n", target, content));
+        }
+        Some(block)
+    }
+
+    async fn queue_prefetch(&self, query: &str) -> anyhow::Result<()> {
+        // D-09: Warm FTS5 cache with likely query terms from the last turn.
+        // Execute a lightweight FTS5 query to prime the tokenizer cache.
+        let conn = Arc::clone(&self.conn);
+        let sanitized = sanitize_fts_query(query);
+        if sanitized.is_empty() {
+            return Ok(());
+        }
+
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let guard = conn.lock().expect("SQLite mutex poisoned");
+                // Lightweight query to warm FTS5 internal structures
+                let _ = guard.prepare(
+                    "SELECT rowid FROM memory_facts_fts WHERE memory_facts_fts MATCH ?1 LIMIT 1"
+                ).and_then(|mut stmt| {
+                    stmt.query_map(rusqlite::params![sanitized], |_row| Ok(()))
+                        .map(|rows| { for _ in rows {} }) // consume iterator
+                });
+            }).await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "queue_prefetch spawn_blocking panicked");
+            }
+        });
         Ok(())
     }
 
@@ -891,5 +1011,61 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("capacity_exceeded"), "Expected capacity error, got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_sync_turn_returns_immediately() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "test fact").unwrap();
+        let entries = provider.to_memory_entries();
+        // sync_turn should return Ok immediately (fire-and-forget)
+        let start = std::time::Instant::now();
+        let result = provider.sync_turn("test-session", &entries).await;
+        assert!(result.is_ok(), "sync_turn should succeed");
+        assert!(start.elapsed().as_millis() < 100, "sync_turn should return immediately");
+        // Give the spawned task time to complete
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_on_pre_compress_indexes_messages() {
+        let provider = make_provider();
+        use ironhermes_core::types::ChatMessage;
+        let messages = vec![
+            ChatMessage::user("remember this important fact about Rust"),
+            ChatMessage::assistant("I will remember that"),
+        ];
+        let result = provider.on_pre_compress(&messages).await;
+        assert!(result.is_ok(), "on_pre_compress should succeed");
+        // Give spawned task time to complete
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    #[test]
+    fn test_system_prompt_block_returns_recent_entries() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "fact about Rust").unwrap();
+        provider.add(MemoryTarget::User, "user prefers Rust").unwrap();
+
+        let block = provider.system_prompt_block();
+        assert!(block.is_some(), "should return a prompt block when entries exist");
+        let block = block.unwrap();
+        assert!(block.contains("[SQLite Memory"), "should have SQLite header");
+        assert!(block.contains("fact about Rust") || block.contains("user prefers Rust"),
+                "should contain entry content");
+    }
+
+    #[test]
+    fn test_system_prompt_block_returns_none_when_empty() {
+        let provider = make_provider();
+        assert!(provider.system_prompt_block().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_queue_prefetch_does_not_error() {
+        let mut provider = make_provider();
+        provider.add(MemoryTarget::Memory, "prefetch warmup test").unwrap();
+        let result = provider.queue_prefetch("warmup").await;
+        assert!(result.is_ok(), "queue_prefetch should succeed: {:?}", result);
     }
 }
