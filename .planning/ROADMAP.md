@@ -97,6 +97,26 @@ Plans:
 
 **Phase directory:** `.planning/phases/21-commandline-ui-update-polish-cli-ux-including-graceful-doubl/`
 
+### Phase 21.5: Memory Provider Plugin (INSERTED)
+
+**Goal:** Make memory providers deliver on the "plugin" promise: factory config loading from $HERMES_HOME/<name>.json, unified memory_recall tool (FTS5 for SQLite, graph traversal for Grafeo, analytical ILIKE for DuckDB), provider-specific hook implementations (sync_turn, on_pre_compress, system_prompt_block, queue_prefetch), and agent_loop wiring to expose memory_recall to the LLM. D-01..D-13 from CONTEXT.md serve as requirements.
+**Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13
+**Depends on:** Phase 21.4
+**Plans:** 4 plans
+
+Plans:
+- [ ] 21.5-01-PLAN.md — Factory config loading: load_provider_config helper reads $HERMES_HOME/<name>.json (D-01/D-02), replace Value::Null stubs in both build_memory_provider and build_tokio_provider. Refactor SqliteMemoryProvider.conn to Arc<Mutex<Connection>> for tokio::spawn compatibility.
+- [ ] 21.5-02-PLAN.md — SQLite provider: memory_recall via FTS5 MATCH with bm25 ranking and snippet generation (D-03/D-05/D-11), handle_tool_call dispatch, sync_turn fire-and-forget FTS5 rebuild (D-07), on_pre_compress indexes compressed messages (D-08), system_prompt_block surfaces recent entries (D-10), queue_prefetch FTS5 cache warming (D-09).
+- [ ] 21.5-03-PLAN.md — Grafeo provider: memory_recall via content substring match with relevance scoring (D-12), entity extraction heuristic helper, system_prompt_block with knowledge graph summary (D-10). DuckDB provider: memory_recall via ILIKE bridge command (D-13), new fire-and-forget DuckDbCommand variants (SyncTurn/OnPreCompress/QueuePrefetch), system_prompt_block with analytical summary (D-10).
+- [ ] 21.5-04-PLAN.md — Agent loop wiring: inject memory provider tool schemas into LLM tool list via memory_manager.get_tool_schemas(), add memory_provider_tool_names HashSet field, intercept memory_recall calls before registry dispatch and route to MemoryManager.handle_tool_call (D-03/D-04).
+
+**Wave structure:**
+- Wave 1: 21.5-01 (factory config loading + SQLite Arc refactor — autonomous)
+- Wave 2: 21.5-02 and 21.5-03 in parallel (SQLite hooks + Grafeo/DuckDB hooks — both depend on 01, both autonomous)
+- Wave 3: 21.5-04 (agent loop wiring — depends on 02 and 03, autonomous)
+
+**Phase directory:** `.planning/phases/21.5-memory-provider-plugin/`
+
 ### Phase 21.4: Persistent Memory gap analysis verification (INSERTED)
 
 **Goal:** Systematic gap analysis comparing IronHermes' persistent memory implementation (Phases 11, 17, 20) against hermes-agent's reference documentation and provider lifecycle contract. Produce GAP-ANALYSIS.md audit report, then close all gaps: wire memory_manager into AgentLoop and context engine across CLI/gateway (queue_prefetch, on_pre_compress), add memory_enabled/user_profile_enabled config toggles, add `hermes memory status` and `hermes memory off` CLI subcommands, wire on_session_end in clean exit paths. Includes MEM-06 verification (pulled from Phase 15 scope -- confirmed already correct).
