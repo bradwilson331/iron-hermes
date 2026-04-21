@@ -1,0 +1,10 @@
+target/
+.planning/
+.git/
+.claude/
+.omc/
+worktrees/
+*.lock
+!Cargo.lock
+news_analysis.md
+.DS_Store

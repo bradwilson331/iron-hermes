@@ -1,0 +1,251 @@
+# =============================================================================
+# IronHermes Configuration
+# =============================================================================
+# Copy to ~/.ironhermes/config.yaml and customize.
+# Values shown are defaults -- uncomment and change as needed.
+# Environment variables in .env override matching config values.
+
+# --- Model Configuration ---
+model:
+  # Default model identifier
+  # default: "anthropic/claude-sonnet-4"
+
+  # LLM provider: openrouter, anthropic, openai, ollama, google, together, mistral, groq, deepseek, fireworks
+  # provider: "openrouter"
+
+  # Override API base URL (usually not needed)
+  # base_url: null
+
+  # Override API key (prefer .env file for secrets)
+  # api_key: null
+
+  # Vision model for image analysis (null = use default model)
+  # vision_model: null
+
+  # Maximum tokens per response (null = provider default)
+  # max_tokens: null
+
+  # Model context window size (null = auto-detect from model metadata)
+  # context_length: null
+
+  # Auxiliary model role assignments (provider + optional model override)
+  # roles:
+  #   vision:
+  #     provider: "openrouter"
+  #     model: "openai/gpt-4o"
+  #   compression:
+  #     provider: "main"    # "main" inherits the primary provider
+
+# --- Agent Configuration ---
+agent:
+  # Maximum agent loop iterations per turn (default: 90)
+  # max_turns: 90
+
+  # Context compression ratio (default: 0.5)
+  # context_compression: 0.5
+
+  # Delay between tool calls in seconds (default: 1.0)
+  # tool_delay_secs: 1.0
+
+  # Context engine: "summarizing" (default, uses LLM) or "local_prune" (heuristic)
+  # context_engine: "summarizing"
+
+  # Compression threshold as fraction of context_length (default: 0.5)
+  # compression_threshold: 0.5
+
+  # Optional system message injected into prompt (empty = omitted)
+  # system_message: ""
+
+  # Custom personality presets (name -> system prompt text)
+  # personalities:
+  #   pirate: "You are a helpful pirate assistant. Arr!"
+
+# --- Terminal / Sandbox ---
+terminal:
+  # Sandbox backend: "local" (default) or "docker" (future)
+  # backend: "local"
+
+  # Default working directory for agent tool operations
+  # "." means current directory; set to "~/.ironhermes/workspace" for isolation
+  # cwd: "."
+
+  # Command execution timeout in seconds (default: 30)
+  # timeout: 30
+
+# --- Web Tools ---
+web:
+  # Web scraping backend: "firecrawl" (default) or "raw"
+  # backend: "firecrawl"
+
+  # User-Agent header for HTTP requests
+  # user_agent: "IronHermes/1.0 (+bot)"
+
+  # Maximum content length in characters before truncation (default: 50000)
+  # max_content_chars: 50000
+
+  # HTTP request timeout in seconds (default: 30)
+  # timeout_secs: 30
+
+# --- Code Execution ---
+exec:
+  # Path to Python interpreter (default: "python3")
+  # python_path: "python3"
+
+  # Execution timeout in seconds (default: 300 = 5 minutes)
+  # timeout_secs: 300
+
+  # Maximum RPC calls per execution (default: 50)
+  # max_rpc_calls: 50
+
+  # Maximum stdout bytes before truncation (default: 50000)
+  # max_output_bytes: 50000
+
+  # Maximum stderr bytes before truncation (default: 10240)
+  # max_stderr_bytes: 10240
+
+# --- Gateway ---
+gateway:
+  # Context engine for gateway sessions (default: "local_prune")
+  # context_engine: "local_prune"
+
+  # Compression threshold for gateway (default: 0.85)
+  # compression_threshold: 0.85
+
+  # Platform adapters
+  platforms:
+    telegram:
+      # Enable Telegram gateway
+      # enabled: false
+
+      # Bot token (prefer TELEGRAM_BOT_TOKEN env var for secrets)
+      # token: null
+
+      # Allowed Telegram user IDs (empty = deny all)
+      # whitelist: []
+
+      # Session inactivity timeout in hours (default: 24)
+      # session_timeout_hours: 24
+
+      # Maximum concurrent agent runs (default: 8)
+      # max_concurrent_runs: 8
+
+# --- Cron ---
+cron:
+  # Wrap cron job responses with metadata (default: true)
+  # wrap_response: true
+
+# --- Memory ---
+memory:
+  # Memory provider: "file" (default), "sqlite", "grafeo", "duckdb"
+  # provider: "file"
+
+  # Optional write-only mirror provider (receives on_memory_write events)
+  # mirror_provider: null
+
+  # Enable/disable entire memory subsystem (default: true)
+  # memory_enabled: true
+
+  # Enable/disable USER.md profile store (default: true)
+  # user_profile_enabled: true
+
+# --- Compression ---
+compression:
+  # Tokens to protect at end of conversation (default: 20000)
+  # protect_last_tokens: 20000
+
+  # Token budget for tool-pair boundary shifting (default: 500)
+  # tool_pair_shift_tokens: 500
+
+  # Number of messages protected at start of conversation (default: 3)
+  # protect_first_n: 3
+
+# --- Skills ---
+skills:
+  # Master enable switch (default: true)
+  # enabled: true
+
+  # Additional skill scan paths (appended after defaults)
+  # extra_paths: []
+
+  # Root directory for skill credentials
+  # credential_dir: null
+
+  # Per-skill configuration values
+  # config:
+  #   wiki:
+  #     path: "~/research"
+  #     format: "markdown"
+
+  # Skills Hub settings
+  # hub:
+  #   trusted_repos: []
+  #   github_token_env: null
+  #   extra_taps: []
+  #   well_known_origins: []
+
+# --- Subagent Delegation ---
+subagent:
+  # Timeout per subagent execution in seconds (default: 300)
+  # timeout_secs: 300
+
+  # Maximum concurrent subagents (default: 3)
+  # max_subagents: 3
+
+  # Maximum LLM iterations per subagent (default: 10)
+  # max_iterations: 10
+
+  # Default toolset groups for child agents
+  # default_toolsets: ["terminal", "file", "web"]
+
+  # Override model for subagents (null = use parent's model)
+  # model: null
+
+  # Override provider for subagents (null = use parent's provider)
+  # provider: null
+
+# --- Rate Limiting ---
+rate_limit:
+  # Maximum sustained messages per minute per user (default: 10)
+  # messages_per_minute: 10
+
+  # Maximum burst size (default: 3)
+  # burst_size: 3
+
+# --- Batch Processing ---
+batch:
+  # Default worker concurrency (default: 4)
+  # workers: 4
+
+  # Default max agent iterations per prompt (default: 20)
+  # max_turns: 20
+
+  # Default output directory relative to cwd (default: "batch_output")
+  # output_dir: "batch_output"
+
+# --- Security ---
+security:
+  # Redact secrets in logs and output (default: true)
+  # redact_secrets: true
+
+# --- Provider Overrides ---
+# Per-provider base_url, api_key, api_mode, fallback configuration.
+# providers:
+#   openrouter:
+#     api_mode: chat_completions
+#     fallback_providers: ["anthropic"]
+#   anthropic:
+#     api_mode: anthropic_messages
+
+# --- Custom Providers ---
+# User-defined OpenAI-compatible endpoints.
+# custom_providers:
+#   - name: "local-llama"
+#     base_url: "http://localhost:11434/v1"
+#     api_key: "ollama"
+#     api_mode: chat_completions
+#     default_model: "llama3"
+
+# --- Hooks ---
+# hooks:
+#   jsonl_log: true
+#   webhooks: []
