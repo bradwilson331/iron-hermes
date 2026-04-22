@@ -200,3 +200,43 @@ pub fn load_terminal_escape_vectors() -> Vec<EscapeVector> {
     let raw = include_str!("terminal_escape_vectors.json");
     serde_json::from_str(raw).expect("parse terminal_escape_vectors.json")
 }
+
+// ============================================================================
+// Phase 21.8 Wave 4 — blob-pipeline wiremock fixtures
+// ============================================================================
+
+/// Canonical SKILL.md frontmatter body that `ascii-art` skill tests serve from
+/// the raw.githubusercontent hop. Matches the reference blob.ts expectations:
+/// `name` and `description` only, plain YAML fences, trailing body content.
+#[allow(dead_code)] // referenced by integration tests only
+pub fn sample_skill_md_frontmatter() -> &'static str {
+    "---\nname: ascii-art\ndescription: ASCII art skill\n---\n# ASCII Art\nBody.\n"
+}
+
+/// Canonical GitHub Trees API response for an owner/repo containing a single
+/// SKILL.md at the given path. Used for the first-hop Trees call.
+#[allow(dead_code)]
+pub fn sample_tree_json(skill_md_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sha": "main-sha-abc",
+        "url": "https://api.github.com/repos/foo/bar/git/trees/main-sha-abc",
+        "tree": [
+            {"path": skill_md_path, "mode": "100644", "type": "blob", "sha": "file-sha-xyz", "size": 128}
+        ],
+        "truncated": false
+    })
+}
+
+/// Canonical skills.sh `/api/download` response body for the ASCII-art happy-path
+/// skill: 2 files (SKILL.md + helper.py), opaque `hash` string echoed verbatim
+/// into the resulting SkillLockEntry.snapshot_hash (D-14).
+#[allow(dead_code)]
+pub fn sample_blob_response_json(hash: &str) -> serde_json::Value {
+    serde_json::json!({
+        "files": [
+            {"path": "SKILL.md", "contents": sample_skill_md_frontmatter()},
+            {"path": "helper.py", "contents": "print('hi')\n"}
+        ],
+        "hash": hash
+    })
+}
