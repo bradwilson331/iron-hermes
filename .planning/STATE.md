@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 21.8-04-PLAN.md
-last_updated: "2026-04-22T13:41:41.631Z"
+status: verifying
+stopped_at: Completed 21.8-05-PLAN.md
+last_updated: "2026-04-22T14:52:39.022Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
-  completed_phases: 9
+  completed_phases: 10
   total_plans: 38
-  completed_plans: 32
-  percent: 84
+  completed_plans: 33
+  percent: 87
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 21.8 (skill-remote-download-and-install-from-skills-sh) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-22
 
-Progress: [████████░░] 84%
+Progress: [█████████░] 87%
 
 ## Performance Metrics
 
@@ -107,6 +107,7 @@ Progress: [████████░░] 84%
 | Phase 21.8 P02 | 7 | 2 tasks | 8 files |
 | Phase 21.8 P03 | 14 | 2 tasks | 9 files |
 | Phase 21.8 P04 | 104 | 2 tasks | 5 files |
+| Phase 21.8 P05 | 22 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -219,6 +220,11 @@ Recent decisions affecting current work:
 - Phase 21.8 Plan 04: D-21 lines 2 (Discovering) and 3 (Downloading) emit with identifier/0 placeholders — installer doesn't surface owner/repo + byte count before install() returns; deferred to plan 05 wiremock wiring
 - Phase 21.8 Plan 04: added pub format_error_clean wrapper around strip_terminal_escapes — D-16 print-boundary contract needs a testable seam that doesn't capture process stderr
 - Phase 21.8 Plan 04: migrate_from_hub_manifest called belt-and-braces at the top of cmd_install, cmd_update, cmd_remove, AND cmd_list_impl — installer.rs already calls it; idempotent second run is a plan 03 invariant
+- Phase 21.8 Plan 05: Rule 2 — added GITHUB_API_BASE + GITHUB_RAW_CONTENT_BASE env overrides to SkillsShBlobSource::new with https_only relaxer when any override uses http://; needed for subprocess CLI round-trip test against wiremock
+- Phase 21.8 Plan 05: Rule 1 — plan referenced CARGO_BIN_EXE_hermes but the binary is named ironhermes per [[bin]] name; subprocess test uses CARGO_BIN_EXE_ironhermes
+- Phase 21.8 Plan 05: integration-test identifiers align with sample_tree_json('ascii-art/SKILL.md') fixture — all tests use foo/bar/ascii-art so hops 1+2 succeed and the intended error path is reached at hop 3
+- Phase 21.8 Plan 05: any_file_named recursive walker hand-rolled in tests; walkdir NOT added to dev-deps per plan's zero-new-workspace-deps guarantee
+- Phase 21.8 Plan 05: expected_happy_path_hash computed inline from known fixture bytes with sha2 (workspace dep) — avoids exposing installer-private helpers for test-only hash computation
 
 ### Roadmap Evolution
 
@@ -248,8 +254,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T13:41:34.419Z
-Stopped at: Completed 21.8-04-PLAN.md
+Last session: 2026-04-22T14:52:10.622Z
+Stopped at: Completed 21.8-05-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
