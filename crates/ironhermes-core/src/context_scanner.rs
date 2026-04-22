@@ -45,7 +45,13 @@ static SKILL_THREAT_PATTERNS: LazyLock<regex::RegexSet> = LazyLock::new(|| {
     regex::RegexSet::new([
         // Category 1: Tool redefinition / privilege escalation
         r"(?mi)^allowed-tools\s*:",
-        r"(?i)\bsudo\b",
+        // `sudo` only flagged when it appears as the first token on a line
+        // (possibly after leading whitespace) — typical of actual invocation.
+        // Plain mentions inside echo strings or prose documentation (e.g.
+        // "try: sudo apt install ...") are not flagged. NOPASSWD, setuid,
+        // chmod +s, and cap_setuid patterns below still catch the high-value
+        // privilege-escalation signatures regardless of line position.
+        r"(?mi)^[\t ]*sudo[\t ]+\S",
         r"(?i)setuid|setgid|cap_setuid",
         r"(?i)NOPASSWD",
         r"(?i)chmod\s+[u+]?s",
@@ -312,6 +318,48 @@ mod tests {
         assert!(
             result.starts_with("[BLOCKED:"),
             "system prompt marker must be blocked"
+        );
+    }
+
+    #[test]
+    fn test_scan_skill_content_sudo_invocation_blocked() {
+        let body = "    sudo rm -rf /\n";
+        let result = scan_skill_content(body, "mal.sh");
+        assert!(
+            result.starts_with("[BLOCKED:"),
+            "actual sudo invocation at line start must be blocked: {result}"
+        );
+    }
+
+    #[test]
+    fn test_scan_skill_content_sudo_in_echo_string_allowed() {
+        // Real-world false positive: install-hint documentation inside echo
+        // strings should not trip the scanner (see ascii-art scripts/setup.sh).
+        let body = "echo \"  sudo apt install python3-venv\"\nerror \"try: sudo apt install python3-venv\"\n";
+        let result = scan_skill_content(body, "setup.sh");
+        assert_eq!(
+            result, body,
+            "sudo mentioned inside echo/error strings must NOT be blocked: {result}"
+        );
+    }
+
+    #[test]
+    fn test_scan_skill_content_sudo_in_prose_allowed() {
+        let body = "To install on Linux, run sudo apt install foo.";
+        let result = scan_skill_content(body, "readme.md");
+        assert_eq!(
+            result, body,
+            "sudo mentioned inside prose must NOT be blocked"
+        );
+    }
+
+    #[test]
+    fn test_scan_skill_content_nopasswd_still_blocked() {
+        let body = "user ALL=(ALL) NOPASSWD: ALL";
+        let result = scan_skill_content(body, "sudoers");
+        assert!(
+            result.starts_with("[BLOCKED:"),
+            "NOPASSWD must still be blocked regardless of sudo pattern tuning"
         );
     }
 
