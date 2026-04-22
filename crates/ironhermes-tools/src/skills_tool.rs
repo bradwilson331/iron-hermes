@@ -379,7 +379,7 @@ async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
         .collect();
     let gh = std::sync::Arc::new(ironhermes_hub::GitHubSource::new(auth, trusted, extra_taps));
     let wk = ironhermes_hub::WellKnownSkillSource::new(hub_config.well_known_origins.clone());
-    let sh = ironhermes_hub::SkillsShSource::new(gh.clone());
+    let sh = ironhermes_hub::SkillsShBlobSource::new(gh.clone());
 
     const HARD_CAP: usize = 20;
 

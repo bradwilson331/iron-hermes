@@ -15,7 +15,6 @@ pub mod manifest;
 pub mod paths;
 pub mod sanitize;
 pub mod scanner;
-pub mod skills_sh;
 pub mod source;
 pub mod tarball;
 pub mod well_known;
@@ -39,6 +38,5 @@ pub use scanner::{
     enforce_trust_gate, AlwaysBlockedScanner, AlwaysCleanScanner, CoreSkillScanner, ScanVerdict,
     SkillScanner,
 };
-pub use skills_sh::SkillsShSource;
 pub use source::{BundleFile, HubSource, SkillBundle, SkillMeta};
 pub use well_known::WellKnownSkillSource;

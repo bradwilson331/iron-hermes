@@ -13,7 +13,7 @@ use clap::{Subcommand, ValueEnum};
 use ironhermes_core::Config;
 use ironhermes_hub::{
     install as hub_install, uninstall as hub_uninstall, update as hub_update, CoreSkillScanner,
-    GitHubAuth, GitHubSource, GitHubTap, HubManifest, HubSource, SkillsShSource,
+    GitHubAuth, GitHubSource, GitHubTap, HubManifest, HubSource, SkillsShBlobSource,
     WellKnownSkillSource,
 };
 use std::sync::Arc;
@@ -133,7 +133,7 @@ async fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
 
     let gh = Arc::new(GitHubSource::new(auth, trusted, extra_taps));
     let wk = WellKnownSkillSource::new(cfg.skills.hub.well_known_origins.clone());
-    let sh = SkillsShSource::new(gh.clone());
+    let sh = SkillsShBlobSource::new(gh.clone());
 
     vec![
         Box::new(SharedGitHubSource(gh)),
@@ -196,7 +196,7 @@ pub fn trust_level_str(s: ironhermes_core::SkillSource) -> &'static str {
 ///
 /// IMPORTANT: This must stay in sync with `resolve_source` in
 /// `ironhermes-core/src/skills.rs` and the adapters' `trust_level_for` methods
-/// (`GitHubSource`, `WellKnownSkillSource`, `SkillsShSource`).
+/// (`GitHubSource`, `WellKnownSkillSource`, `SkillsShBlobSource`).
 fn recompute_trust_str(
     source: &str,
     identifier: &str,
@@ -228,7 +228,7 @@ fn recompute_trust_str(
 ///
 /// Identifier routing:
 ///   "well-known:..."   → WellKnownSkillSource
-///   "skills-sh:..."    → SkillsShSource
+///   "skills-sh:..."    → SkillsShBlobSource
 ///   otherwise          → GitHubSource (owner/repo/... format)
 pub async fn cmd_install(cfg: &Config, identifier: &str) -> anyhow::Result<i32> {
     let skills_root = ironhermes_hub::paths::skills_root()
