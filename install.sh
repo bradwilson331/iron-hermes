@@ -11,7 +11,7 @@
 # 4. Copying config templates
 # 5. Adding binary to PATH
 # =============================================================================
-set -e
+set -euo pipefail
 
 # --- Constants ---
 REPO_OWNER="nousresearch"

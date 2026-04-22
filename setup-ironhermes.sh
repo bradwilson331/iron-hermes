@@ -11,7 +11,7 @@
 # 4. Copy config templates (.env, config.yaml, SOUL.md)
 # 5. Optionally symlink binary and update PATH
 # =============================================================================
-set -e
+set -euo pipefail
 
 # --- Constants ---
 IRONHERMES_HOME="${IRONHERMES_HOME:-$HOME/.ironhermes}"

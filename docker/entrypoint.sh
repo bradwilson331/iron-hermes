@@ -6,7 +6,7 @@
 # Handles: privilege dropping via gosu, UID/GID remapping, directory creation,
 #          template seeding (.env, config.yaml, SOUL.md), then exec ironhermes.
 # =============================================================================
-set -e
+set -euo pipefail
 
 IRONHERMES_HOME="${IRONHERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/ironhermes"
@@ -14,14 +14,14 @@ INSTALL_DIR="/opt/ironhermes"
 # ─── Privilege drop (run as root initially, then switch to ironhermes) ───
 if [ "$(id -u)" = "0" ]; then
     # Remap UID/GID if overridden by environment (Docker -e IRONHERMES_UID=1000)
-    if [ -n "$IRONHERMES_UID" ]; then
+    if [ -n "${IRONHERMES_UID:-}" ]; then
         if ! echo "$IRONHERMES_UID" | grep -qE '^[0-9]+$'; then
             echo "Error: IRONHERMES_UID must be numeric, got: $IRONHERMES_UID" >&2
             exit 1
         fi
         usermod -u "$IRONHERMES_UID" ironhermes
     fi
-    if [ -n "$IRONHERMES_GID" ]; then
+    if [ -n "${IRONHERMES_GID:-}" ]; then
         if ! echo "$IRONHERMES_GID" | grep -qE '^[0-9]+$'; then
             echo "Error: IRONHERMES_GID must be numeric, got: $IRONHERMES_GID" >&2
             exit 1
