@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 21.8-05-PLAN.md
-last_updated: "2026-04-22T14:52:39.022Z"
-last_activity: 2026-04-22
+status: executing
+stopped_at: Completed 21.8-06-PLAN.md (gap-closure advisory hash observe)
+last_updated: "2026-04-22T19:00:57.165Z"
+last_activity: 2026-04-22 -- Phase --phase execution started
 progress:
   total_phases: 13
   completed_phases: 10
-  total_plans: 38
-  completed_plans: 33
+  total_plans: 39
+  completed_plans: 34
   percent: 87
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.8 — skill-remote-download-and-install-from-skills-sh
+**Current focus:** Phase --phase — 21.8
 
 ## Current Position
 
-Phase: 21.8 (skill-remote-download-and-install-from-skills-sh) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
-Last activity: 2026-04-22
+Phase: --phase (21.8) — EXECUTING
+Plan: 1 of --name
+Status: Executing Phase --phase
+Last activity: 2026-04-22 -- Phase --phase execution started
 
 Progress: [█████████░] 87%
 
@@ -108,6 +108,7 @@ Progress: [█████████░] 87%
 | Phase 21.8 P03 | 14 | 2 tasks | 9 files |
 | Phase 21.8 P04 | 104 | 2 tasks | 5 files |
 | Phase 21.8 P05 | 22 | 2 tasks | 5 files |
+| Phase 21.8-skill-remote-download-and-install-from-skills-sh P06 | 15 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -225,6 +226,8 @@ Recent decisions affecting current work:
 - Phase 21.8 Plan 05: integration-test identifiers align with sample_tree_json('ascii-art/SKILL.md') fixture — all tests use foo/bar/ascii-art so hops 1+2 succeed and the intended error path is reached at hop 3
 - Phase 21.8 Plan 05: any_file_named recursive walker hand-rolled in tests; walkdir NOT added to dev-deps per plan's zero-new-workspace-deps guarantee
 - Phase 21.8 Plan 05: expected_happy_path_hash computed inline from known fixture bytes with sha2 (workspace dep) — avoids exposing installer-private helpers for test-only hash computation
+- G-01: post-install server-vs-client hash equality is ADVISORY (log-only, never fails install) — D-14 opaque contract enforced in code
+- G-02: HubErrorKind::ShaMismatch variant KEPT, narrowed to drift-detection semantics only; no longer raised on server/client parity
 
 ### Roadmap Evolution
 
@@ -254,8 +257,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T14:52:10.622Z
-Stopped at: Completed 21.8-05-PLAN.md
+Last session: 2026-04-22T19:00:57.162Z
+Stopped at: Completed 21.8-06-PLAN.md (gap-closure advisory hash observe)
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
