@@ -94,20 +94,25 @@ download_binary() {
     local url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${artifact}"
 
     log_info "Downloading ${artifact}..."
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    trap "rm -rf '$tmpdir'" EXIT
 
-    if curl -fsSL "$url" -o "${tmpdir}/ironhermes.tar.gz" 2>/dev/null; then
-        tar -xzf "${tmpdir}/ironhermes.tar.gz" -C "${tmpdir}/"
-        mkdir -p "$INSTALL_DIR"
-        install -m 755 "${tmpdir}/ironhermes" "$INSTALL_DIR/ironhermes"
-        log_ok "Binary installed to ${INSTALL_DIR}/ironhermes"
-        return 0
-    else
-        log_warn "No prebuilt binary available for ${PLATFORM} (${VERSION})"
-        return 1
-    fi
+    # Run in subshell so the EXIT trap is scoped and does not leak to caller
+    (
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        cleanup() { rm -rf "$tmpdir"; }
+        trap cleanup EXIT
+
+        if curl -fsSL "$url" -o "${tmpdir}/ironhermes.tar.gz" 2>/dev/null; then
+            tar -xzf "${tmpdir}/ironhermes.tar.gz" -C "${tmpdir}/"
+            mkdir -p "$INSTALL_DIR"
+            install -m 755 "${tmpdir}/ironhermes" "$INSTALL_DIR/ironhermes"
+            log_ok "Binary installed to ${INSTALL_DIR}/ironhermes"
+            exit 0
+        else
+            log_warn "No prebuilt binary available for ${PLATFORM} (${VERSION})"
+            exit 1
+        fi
+    )
 }
 
 # --- Fallback: cargo install ---
