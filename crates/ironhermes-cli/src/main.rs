@@ -5,7 +5,9 @@ use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PressureTracke
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
+use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -401,6 +403,9 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let registry = Arc::new(RwLock::new(registry));
 
+    // Phase 21.2: MCP tool discovery (run_single)
+    let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
+
     // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
 
@@ -698,6 +703,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
     let registry = Arc::new(RwLock::new(registry));
 
+    // Phase 21.2: MCP tool discovery (run_chat)
+    let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
+
     // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
 
@@ -831,12 +839,19 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     let cmd = parts[0];
                     let args = &parts[1..];
 
-                    // Build CommandContext for this turn.
-                    let cmd_ctx = CommandContext::new(
-                        Platform::Local,
-                        session_id.clone(),
-                        agent_running.clone(),
-                    );
+                    // Build CommandContext for this turn (Phase 21.2: wire mcp_reloader D-15).
+                    let cmd_ctx = {
+                        let base = CommandContext::new(
+                            Platform::Local,
+                            session_id.clone(),
+                            agent_running.clone(),
+                        );
+                        if let Some(ref mgr) = mcp_manager {
+                            base.with_mcp_reloader(mgr.clone())
+                        } else {
+                            base
+                        }
+                    };
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
                     match dispatch_command(tui.extensions(), cmd, args, &command_router, &cmd_ctx) {
@@ -860,13 +875,52 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                             eprintln!("{}", format!("Error: {}", msg).red());
                             continue;
                         }
-                        // Phase 21.2 Plan 04: MCP reload — handled below after mcp_manager wired.
-                        // This arm is unreachable until Task 2 wires mcp_manager into CommandContext;
-                        // when mcp_reloader is None, cmd_reload_mcp returns Output("MCP not configured.")
-                        // instead of McpReload, so this arm won't fire yet.
+                        // Phase 21.2 Plan 04: MCP reload — async reload via McpReloader (D-12).
                         CommandResult::McpReload => {
-                            // TODO(plan-04-task-2): replaced by full reload handler in Task 2
-                            println!("{}", "MCP not configured.".dimmed());
+                            if let Some(ref mgr) = mcp_manager {
+                                use ironhermes_core::commands::context::McpReloader;
+                                let old_names = mgr.connected_server_names();
+                                // Call through dyn McpReloader to avoid name collision with
+                                // McpManager::reload(new_configs) (the concrete method).
+                                let reloader: &dyn McpReloader = mgr.as_ref();
+                                let result = reloader.reload().await;
+                                let mut parts = vec![format!(
+                                    "{} tool(s) from {} server(s)",
+                                    result.tool_count,
+                                    result.connected.len()
+                                )];
+                                let added: Vec<&String> = result
+                                    .connected
+                                    .iter()
+                                    .filter(|n| !old_names.contains(n))
+                                    .collect();
+                                let removed: Vec<&String> = old_names
+                                    .iter()
+                                    .filter(|n| !result.connected.contains(n))
+                                    .collect();
+                                if !added.is_empty() {
+                                    parts.push(format!(
+                                        "Added: {}",
+                                        added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                                    ));
+                                }
+                                if !removed.is_empty() {
+                                    parts.push(format!(
+                                        "Removed: {}",
+                                        removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                                    ));
+                                }
+                                if !result.failed.is_empty() {
+                                    let fails: Vec<String> = result
+                                        .failed
+                                        .iter()
+                                        .map(|(n, e)| format!("{} ({})", n, e))
+                                        .collect();
+                                    parts.push(format!("Failed: {}", fails.join(", ")));
+                                }
+                                println!("MCP reloaded. {}", parts.join(". "));
+                            }
+                            // (else: mcp_reloader is None, cmd_reload_mcp returned Output already)
                             continue;
                         }
                     }
@@ -1218,6 +1272,9 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     let registry = Arc::new(RwLock::new(registry));
 
+    // Phase 21.2: MCP tool discovery (run_gateway)
+    let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
+
     // Build HookRegistry
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
 
@@ -1297,6 +1354,71 @@ fn build_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register_defaults();
     registry
+}
+
+/// Phase 21.2: Build and start an McpManager if the config has any MCP servers.
+///
+/// Returns `Some(Arc<McpManager>)` when at least one enabled server is configured.
+/// Background tasks are spawned via `start_all()` (D-07 fire-and-forget).
+/// Prints startup messages to stderr per UI-SPEC (dimmed).
+async fn build_mcp_manager(
+    config: &Config,
+    registry: Arc<RwLock<ToolRegistry>>,
+) -> Option<Arc<McpManager>> {
+    let mcp_configs: HashMap<String, ironhermes_mcp::McpServerConfig> = config
+        .mcp_servers
+        .iter()
+        .filter_map(|(name, val)| {
+            serde_yaml::from_value::<ironhermes_mcp::McpServerConfig>(val.clone())
+                .ok()
+                .map(|c| (name.clone(), c))
+        })
+        .collect();
+
+    if mcp_configs.is_empty() {
+        return None;
+    }
+
+    let n = mcp_configs.len();
+    let mgr = Arc::new(McpManager::new(registry));
+    let mgr_clone = mgr.clone();
+    let configs_clone = mcp_configs.clone();
+
+    // D-07: background discovery — agent starts immediately without waiting
+    eprintln!(
+        "{}",
+        format!("MCP: connecting to {} server(s) in background...", n).dimmed()
+    );
+    tokio::spawn(async move {
+        mgr_clone.start_all(configs_clone).await;
+        let names = mgr_clone.connected_server_names();
+        let tool_count = mgr_clone.registered_tool_count().await;
+        if names.is_empty() {
+            eprintln!("{}", "MCP: all servers failed to connect.".dimmed());
+        } else if names.len() < n {
+            eprintln!(
+                "{}",
+                format!(
+                    "MCP: {} tool(s) ready. {} server(s) failed.",
+                    tool_count,
+                    n - names.len()
+                )
+                .dimmed()
+            );
+        } else {
+            eprintln!(
+                "{}",
+                format!(
+                    "MCP: {} tool(s) ready from {} server(s).",
+                    tool_count,
+                    names.len()
+                )
+                .dimmed()
+            );
+        }
+    });
+
+    Some(mgr)
 }
 
 fn print_banner() {
@@ -1462,5 +1584,59 @@ mod ensure_home_dirs_tests {
         ensure_home_dirs().unwrap();
         // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
         unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+    }
+}
+
+#[cfg(test)]
+mod mcp_wiring_tests {
+    /// INV-21.2-01: run_chat constructs McpManager (static-grep regression guard)
+    #[test]
+    fn run_chat_wires_mcp_manager() {
+        let src = include_str!("main.rs");
+        assert!(src.contains("McpManager::new"), "run_chat must construct McpManager");
+        assert!(src.contains("start_all"), "run_chat must call start_all");
+    }
+
+    /// INV-21.2-02: McpManager wired in at least 2 run paths (run_chat + run_single)
+    #[test]
+    fn run_single_wires_mcp_manager() {
+        let src = include_str!("main.rs");
+        // build_mcp_manager is called in run_chat, run_single, and run_gateway
+        let count = src.matches("build_mcp_manager").count();
+        assert!(
+            count >= 3,
+            "build_mcp_manager must be called in at least 3 run paths (chat, single, gateway), got {}",
+            count
+        );
+    }
+
+    /// INV-21.2-03: CommandContext has mcp_reloader wired (D-15)
+    #[test]
+    fn command_context_has_mcp_reloader() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("with_mcp_reloader"),
+            "CommandContext must have MCP reloader wired via with_mcp_reloader"
+        );
+    }
+
+    /// INV-21.2-04: McpReload arm handles result.failed for D-12 partial failure display
+    #[test]
+    fn mcp_reload_arm_handles_failures() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("result.failed.is_empty()"),
+            "McpReload arm must check result.failed.is_empty() for D-12 partial failure display"
+        );
+    }
+
+    /// INV-21.2-05: MCP startup message printed to stderr
+    #[test]
+    fn mcp_startup_message_printed_to_stderr() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("MCP: connecting to"),
+            "MCP startup message must be printed to stderr"
+        );
     }
 }

@@ -200,6 +200,54 @@ impl McpManager {
     }
 }
 
+// =============================================================================
+// McpReloader implementation (Phase 21.2 Plan 04)
+// =============================================================================
+
+#[async_trait::async_trait]
+impl ironhermes_core::commands::context::McpReloader for McpManager {
+    /// Reload all MCP connections by re-reading config and calling `reload_and_report`.
+    ///
+    /// Uses `ironhermes_core::Config::load()` to get fresh `mcp_servers` config, then
+    /// calls `reload_and_report` which shuts down existing servers and reconnects.
+    /// Returns `McpReloadResult.failed` populated from `ServerTaskResult.failure_reason`
+    /// via `StartResult.failed` (D-12 full delivery).
+    async fn reload(&self) -> ironhermes_core::commands::context::McpReloadResult {
+        // Re-read config to pick up any changes since startup.
+        let new_configs: HashMap<String, McpServerConfig> =
+            match ironhermes_core::Config::load() {
+                Ok(config) => config
+                    .mcp_servers
+                    .into_iter()
+                    .filter_map(|(name, val)| {
+                        serde_yaml::from_value::<McpServerConfig>(val)
+                            .ok()
+                            .map(|c| (name, c))
+                    })
+                    .collect(),
+                Err(_) => HashMap::new(),
+            };
+
+        // reload_and_report: shutdown all + start_all_and_wait; aggregates
+        // ServerTaskResult.failure_reason into StartResult.failed (D-12).
+        let result = self.reload_and_report(new_configs).await;
+
+        ironhermes_core::commands::context::McpReloadResult {
+            connected: result.connected,
+            failed: result.failed, // Populated from ServerTaskResult.failure_reason
+            tool_count: result.tool_count,
+        }
+    }
+
+    fn connected_server_names(&self) -> Vec<String> {
+        McpManager::connected_server_names(self)
+    }
+
+    async fn registered_tool_count(&self) -> usize {
+        McpManager::registered_tool_count(self).await
+    }
+}
+
 impl Drop for McpManager {
     fn drop(&mut self) {
         // Cancel all tasks on drop to avoid orphaned background tasks
