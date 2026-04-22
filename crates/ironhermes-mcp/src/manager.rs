@@ -1,5 +1,6 @@
 use crate::config::McpServerConfig;
 use crate::server_task::{self, ServerTaskResult};
+use crate::tool::sanitize_server_name;
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -111,10 +112,13 @@ impl McpManager {
             let guard = self.registry.read().await;
             for name in &task_names {
                 if let Some((handle, _cancel)) = tasks.get(name) {
+                    // GAP-4: registered tools use the SANITIZED prefix (make_prefixed_name
+                    // replaces `-`/`.`/`@`/`/` with `_`), so the lookup must sanitize too.
+                    let sanitized_prefix = format!("{}__", sanitize_server_name(name));
                     let has_tools = guard
                         .get_definitions(None)
                         .iter()
-                        .any(|t| t.function.name.starts_with(&format!("{name}__")));
+                        .any(|t| t.function.name.starts_with(&sanitized_prefix));
 
                     if handle.is_finished() && !has_tools {
                         failed.push((
@@ -148,8 +152,10 @@ impl McpManager {
                 results.push(result);
             }
             // Unregister tools for this server (D-09: rebuild registry on reload)
+            // GAP-4: unregister_by_prefix appends "__" to its argument; we must pass the
+            // already-sanitized server name so the match finds the tools we registered.
             let mut guard = self.registry.write().await;
-            let removed = guard.unregister_by_prefix(&name);
+            let removed = guard.unregister_by_prefix(&sanitize_server_name(&name));
             tracing::debug!(server = %name, removed, "Unregistered MCP tools");
             drop(guard); // explicitly drop before next iteration to avoid holding write lock
         }
@@ -310,5 +316,169 @@ mod tests {
         // Shutdown on empty manager should return empty results without panic
         let results = manager.shutdown_all().await;
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_unregisters_tools_for_server_with_special_char_name() {
+        use crate::tool::{McpTool, make_prefixed_name};
+        use ironhermes_tools::ToolRegistry;
+        use tokio::sync::mpsc;
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry.clone());
+
+        // A server name that hits every one of the four sanitized characters.
+        let server_name = "@scope/pkg-name.v1";
+
+        // Manually register two tools under the sanitized prefix — simulating
+        // what server_task::connect_and_serve would do at connect time.
+        {
+            let mut guard = registry.write().await;
+            for tool_original in ["read_file", "write_file"] {
+                let (tx, _rx) = mpsc::channel(1);
+                let tool = McpTool::new(
+                    server_name,
+                    tool_original,
+                    "desc",
+                    serde_json::json!({}),
+                    tx,
+                );
+                guard.register_dynamic(Box::new(tool));
+            }
+        }
+
+        // Seed the manager task map with a no-op task bound to `server_name`
+        // so shutdown_all has something to drain.
+        {
+            let cancel = CancellationToken::new();
+            let handle = tokio::spawn(async {
+                crate::server_task::ServerTaskResult {
+                    server_name: "placeholder".to_string(),
+                    tool_names: vec![],
+                    failure_reason: None,
+                }
+            });
+            manager
+                .tasks
+                .lock()
+                .await
+                .insert(server_name.to_string(), (handle, cancel));
+        }
+
+        // Pre-condition: both tools visible under sanitized prefix.
+        let sanitized_prefix = make_prefixed_name(server_name, "");
+        let sanitized_prefix = sanitized_prefix.trim_end_matches("__").to_string();
+        // sanitized_prefix is e.g. "_scope_pkg_name_v1"
+        {
+            let guard = registry.read().await;
+            let hits: Vec<_> = guard
+                .get_definitions(None)
+                .into_iter()
+                .filter(|t| {
+                    t.function
+                        .name
+                        .starts_with(&format!("{sanitized_prefix}__"))
+                })
+                .collect();
+            assert_eq!(
+                hits.len(),
+                2,
+                "precondition: 2 tools under sanitized prefix before shutdown"
+            );
+        }
+
+        // Act: shutdown_all must unregister them.
+        let _ = manager.shutdown_all().await;
+
+        // Post-condition: zero tools remain under the sanitized prefix.
+        let guard = registry.read().await;
+        let leftover: Vec<_> = guard
+            .get_definitions(None)
+            .into_iter()
+            .filter(|t| {
+                t.function
+                    .name
+                    .starts_with(&format!("{sanitized_prefix}__"))
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "GAP-4: shutdown_all must remove all tools of a special-char-named server; leftover={:?}",
+            leftover.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_with_special_char_server_name_does_not_duplicate_tools() {
+        // Higher-level regression: simulate two back-to-back reload cycles
+        // and assert the registry never grows beyond the per-cycle tool count.
+        // Uses the same manual-register pattern as the test above (no live MCP).
+        use crate::tool::{McpTool, make_prefixed_name};
+        use ironhermes_tools::ToolRegistry;
+        use tokio::sync::mpsc;
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry.clone());
+        let server_name = "@org/pkg-x.y";
+
+        async fn seed_cycle(
+            manager: &McpManager,
+            registry: &Arc<RwLock<ToolRegistry>>,
+            server_name: &str,
+        ) {
+            let mut guard = registry.write().await;
+            for tool_original in ["a", "b", "c"] {
+                let (tx, _rx) = mpsc::channel(1);
+                let tool = McpTool::new(
+                    server_name,
+                    tool_original,
+                    "d",
+                    serde_json::json!({}),
+                    tx,
+                );
+                guard.register_dynamic(Box::new(tool));
+            }
+            drop(guard);
+            let cancel = CancellationToken::new();
+            let handle = tokio::spawn(async {
+                crate::server_task::ServerTaskResult {
+                    server_name: "placeholder".to_string(),
+                    tool_names: vec![],
+                    failure_reason: None,
+                }
+            });
+            manager
+                .tasks
+                .lock()
+                .await
+                .insert(server_name.to_string(), (handle, cancel));
+        }
+
+        // Cycle 1: register + shutdown (simulates one reload iteration)
+        seed_cycle(&manager, &registry, server_name).await;
+        let _ = manager.shutdown_all().await;
+
+        // Cycle 2: register again + shutdown
+        seed_cycle(&manager, &registry, server_name).await;
+        let _ = manager.shutdown_all().await;
+
+        // The registry must be empty of this server's tools — no accumulation.
+        let sanitized_prefix = make_prefixed_name(server_name, "");
+        let sanitized_prefix = sanitized_prefix.trim_end_matches("__").to_string();
+        let guard = registry.read().await;
+        let residue: Vec<_> = guard
+            .get_definitions(None)
+            .into_iter()
+            .filter(|t| {
+                t.function
+                    .name
+                    .starts_with(&format!("{sanitized_prefix}__"))
+            })
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "GAP-4: two reload cycles must not leave duplicates; residue={:?}",
+            residue.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()
+        );
     }
 }
