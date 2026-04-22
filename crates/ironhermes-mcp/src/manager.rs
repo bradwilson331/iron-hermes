@@ -3,6 +3,7 @@ use crate::server_task::{self, ServerTaskResult};
 use crate::tool::sanitize_server_name;
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -32,6 +33,11 @@ pub struct McpManager {
     tasks: Mutex<HashMap<String, (JoinHandle<ServerTaskResult>, CancellationToken)>>,
     /// Last-known configs for each active server (used by reconnect/reload).
     configs: Mutex<HashMap<String, McpServerConfig>>,
+    /// GAP-7: per-server connected flag flipped to `true` by `server_task::connect_and_serve`
+    /// ONLY after the rmcp `initialize` handshake AND `list_all_tools()` both succeed.
+    /// `connected_server_names()` reads this map instead of `tasks.keys()` so servers
+    /// whose child exited before handshake completion are correctly reported as FAILED.
+    connected_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl McpManager {
@@ -41,6 +47,7 @@ impl McpManager {
             registry,
             tasks: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
+            connected_flags: Mutex::new(HashMap::new()),
         }
     }
 
@@ -52,6 +59,7 @@ impl McpManager {
     pub async fn start_all(&self, configs: HashMap<String, McpServerConfig>) {
         let mut tasks = self.tasks.lock().await;
         let mut stored_configs = self.configs.lock().await;
+        let mut flags = self.connected_flags.lock().await;
 
         for (name, config) in configs {
             if !config.enabled {
@@ -59,13 +67,18 @@ impl McpManager {
                 continue;
             }
             let cancel = CancellationToken::new();
+            // GAP-7: allocate per-server connected flag; server_task flips it to
+            // true ONLY after list_all_tools() succeeds.
+            let connected = Arc::new(AtomicBool::new(false));
             let handle = tokio::spawn(server_task::run_server_task(
                 name.clone(),
                 config.clone(),
                 self.registry.clone(),
                 cancel.clone(),
+                connected.clone(),
             ));
             tasks.insert(name.clone(), (handle, cancel));
+            flags.insert(name.clone(), connected);
             stored_configs.insert(name, config);
         }
     }
@@ -81,6 +94,7 @@ impl McpManager {
         {
             let mut tasks = self.tasks.lock().await;
             let mut stored_configs = self.configs.lock().await;
+            let mut flags = self.connected_flags.lock().await;
 
             for (name, config) in configs {
                 if !config.enabled {
@@ -88,14 +102,19 @@ impl McpManager {
                     continue;
                 }
                 let cancel = CancellationToken::new();
+                // GAP-7: allocate per-server connected flag; server_task flips it to
+                // true ONLY after list_all_tools() succeeds.
+                let connected = Arc::new(AtomicBool::new(false));
                 let handle = tokio::spawn(server_task::run_server_task(
                     name.clone(),
                     config.clone(),
                     self.registry.clone(),
                     cancel.clone(),
+                    connected.clone(),
                 ));
                 task_names.push(name.clone());
                 tasks.insert(name.clone(), (handle, cancel));
+                flags.insert(name.clone(), connected);
                 stored_configs.insert(name, config);
             }
         }
@@ -103,14 +122,22 @@ impl McpManager {
         // Give servers a brief window to complete initial connection
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-        // Collect status from running tasks via registry presence heuristic:
-        // A server has connected if it registered at least one tool with its prefix.
+        // GAP-7: a server is "connected" IFF its AtomicBool flag is true — the
+        // authoritative signal that rmcp `initialize` + `list_all_tools` both
+        // succeeded. The has_tools heuristic is kept as belt-and-braces (a server
+        // that registered tools must have flipped the flag to true) but the flag
+        // is the ground truth that closes the GAP-7 false-positive.
         let mut connected = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
         {
             let tasks = self.tasks.lock().await;
+            let flags = self.connected_flags.lock().await;
             let guard = self.registry.read().await;
             for name in &task_names {
+                let flag_true = flags
+                    .get(name)
+                    .map(|f| f.load(Ordering::SeqCst))
+                    .unwrap_or(false);
                 if let Some((handle, _cancel)) = tasks.get(name) {
                     // GAP-4: registered tools use the SANITIZED prefix (make_prefixed_name
                     // replaces `-`/`.`/`@`/`/` with `_`), so the lookup must sanitize too.
@@ -120,15 +147,17 @@ impl McpManager {
                         .iter()
                         .any(|t| t.function.name.starts_with(&sanitized_prefix));
 
-                    if handle.is_finished() && !has_tools {
+                    if flag_true {
+                        // Authoritative: handshake + list_all_tools both succeeded.
+                        connected.push(name.clone());
+                    } else if handle.is_finished() && !has_tools {
+                        // Task exited (e.g. child crashed before initialize completed).
                         failed.push((
                             name.clone(),
                             "connection failed after retries".to_string(),
                         ));
-                    } else if has_tools {
-                        connected.push(name.clone());
                     }
-                    // Task still running with no tools yet = still connecting; don't report failure
+                    // flag_true==false + task still running + no tools yet = still connecting
                 }
             }
         }
@@ -143,6 +172,7 @@ impl McpManager {
     /// removes the server's tools from the registry via `unregister_by_prefix`.
     pub async fn shutdown_all(&self) -> Vec<ServerTaskResult> {
         let mut tasks = self.tasks.lock().await;
+        let mut flags = self.connected_flags.lock().await;
         let mut results = Vec::new();
 
         for (name, (handle, cancel)) in tasks.drain() {
@@ -158,6 +188,9 @@ impl McpManager {
             let removed = guard.unregister_by_prefix(&sanitize_server_name(&name));
             tracing::debug!(server = %name, removed, "Unregistered MCP tools");
             drop(guard); // explicitly drop before next iteration to avoid holding write lock
+            // GAP-7: remove the connected flag alongside the task handle so no
+            // stale reads of `connected_server_names()` survive shutdown.
+            flags.remove(&name);
         }
         results
     }
@@ -183,13 +216,26 @@ impl McpManager {
         self.start_all_and_wait(new_configs).await
     }
 
-    /// Return names of servers that currently have active task entries.
+    /// Return names of servers whose rmcp `initialize` handshake AND
+    /// `list_all_tools()` both succeeded (GAP-7 contract). A spawned task
+    /// that exited before the handshake completed is NOT reported here —
+    /// unlike the old implementation which returned every `tasks.keys()`
+    /// regardless of whether the child ever spoke MCP.
     ///
-    /// Note: uses try_lock to avoid deadlock in sync call contexts.
-    /// Returns empty vec if the mutex is currently locked.
+    /// Note: uses try_lock to avoid deadlock in sync call contexts. Returns
+    /// empty vec if the mutex is currently locked.
     pub fn connected_server_names(&self) -> Vec<String> {
-        if let Ok(tasks) = self.tasks.try_lock() {
-            tasks.keys().cloned().collect()
+        if let Ok(flags) = self.connected_flags.try_lock() {
+            flags
+                .iter()
+                .filter_map(|(name, flag)| {
+                    if flag.load(Ordering::SeqCst) {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         }
@@ -405,6 +451,83 @@ mod tests {
             leftover.is_empty(),
             "GAP-4: shutdown_all must remove all tools of a special-char-named server; leftover={:?}",
             leftover.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// GAP-7: when a server's child exits before the rmcp `initialize`
+    /// handshake completes, `connected_server_names()` must NOT report it.
+    /// Before this fix, `tasks.keys()` was returned unconditionally, so a
+    /// crashed child appeared as "connected" with zero tools, producing the
+    /// false-positive startup message `MCP: 0 tool(s) ready from 1 server(s).`
+    #[tokio::test]
+    async fn connected_server_names_excludes_server_that_exited_before_initialize() {
+        use std::time::Duration;
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry.clone());
+
+        // A command that exits immediately without speaking MCP JSON-RPC.
+        // `false` on unix returns exit code 1 instantly; on Windows use
+        // `cmd /C exit 1` for equivalent behavior.
+        let mut cfg = McpServerConfig::default();
+        #[cfg(unix)]
+        {
+            cfg.command = Some("false".to_string());
+        }
+        #[cfg(not(unix))]
+        {
+            cfg.command = Some("cmd".to_string());
+            cfg.args = vec!["/C".to_string(), "exit".to_string(), "1".to_string()];
+        }
+        cfg.enabled = true;
+        // Tiny connect_timeout so the test doesn't wait 60s for retries.
+        cfg.connect_timeout = 1;
+
+        let mut configs = HashMap::new();
+        configs.insert("crashy".to_string(), cfg);
+
+        manager.start_all(configs).await;
+
+        // Give the child some room to spawn, exit, and let server_task observe
+        // the failure. list_all_tools() will never succeed against `false`, so
+        // connected.store(true) never fires. 500ms is plenty for a process
+        // that exits immediately.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let names = manager.connected_server_names();
+        assert!(
+            names.is_empty(),
+            "GAP-7: connected_server_names() must NOT include a server whose \
+             child exited before the rmcp initialize handshake. names={names:?}"
+        );
+
+        // Cleanly shut down so the test doesn't leak the spawned task.
+        let _ = manager.shutdown_all().await;
+    }
+
+    /// GAP-7 companion: after a manual flag-flip (simulating what
+    /// connect_and_serve does on the happy path after list_all_tools),
+    /// connected_server_names() MUST include the server. Proves the new
+    /// lookup path correctly reads the flag (not just "always empty").
+    #[tokio::test]
+    async fn connected_server_names_includes_server_whose_flag_is_true() {
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry.clone());
+
+        // Insert a flag directly — no live MCP needed. This mirrors exactly
+        // what server_task::connect_and_serve does after list_all_tools succeeds.
+        {
+            let mut flags = manager.connected_flags.lock().await;
+            let flag = Arc::new(AtomicBool::new(true));
+            flags.insert("ok_server".to_string(), flag);
+        }
+
+        let names = manager.connected_server_names();
+        assert_eq!(
+            names,
+            vec!["ok_server".to_string()],
+            "GAP-7: a server whose connected flag is true must be reported by \
+             connected_server_names(). names={names:?}"
         );
     }
 
