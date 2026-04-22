@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.2-03-PLAN.md (McpManager + server tasks + tool dispatch)
-last_updated: "2026-04-22T19:43:16.730Z"
+stopped_at: Completed 21.2-04-PLAN.md (/reload-mcp handler + McpManager CLI wiring)
+last_updated: "2026-04-22T19:55:47.329Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 10
   total_plans: 39
-  completed_plans: 37
-  percent: 95
+  completed_plans: 38
+  percent: 97
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [██████████] 95%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -113,6 +113,7 @@ Progress: [██████████] 95%
 | Phase 21.2 P01 | 5 | 2 tasks | 6 files |
 | Phase 21.2 P02 | 8 | 2 tasks | 9 files |
 | Phase 21.2-mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl P03 | 5 | 2 tasks | 7 files |
+| Phase 21.2 P04 | 9 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -239,6 +240,9 @@ Recent decisions affecting current work:
 - transport-streamable-http-client-reqwest feature required for from_uri (not -client alone) — reqwest backend required, confirmed from rmcp source
 - CallToolRequestParams is non_exhaustive: must use .new().with_arguments() builder pattern
 - ServerTaskResult.failure_reason data contract: sanitized error string when retries exhausted, None on clean cancellation (Plan 04 D-12 dependency)
+- McpReloader trait in ironhermes-core/commands/context.rs (not ironhermes-mcp) avoids circular dep; matches MemoryManagerHandle pattern from Phase 20
+- dyn McpReloader coercion before reload() call to disambiguate from McpManager::reload(new_configs) concrete method
+- build_mcp_manager() helper extracted — DRY across run_chat, run_single, run_gateway wiring sites
 
 ### Roadmap Evolution
 
@@ -268,8 +272,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T19:43:16.727Z
-Stopped at: Completed 21.2-03-PLAN.md (McpManager + server tasks + tool dispatch)
+Last session: 2026-04-22T19:55:47.325Z
+Stopped at: Completed 21.2-04-PLAN.md (/reload-mcp handler + McpManager CLI wiring)
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
