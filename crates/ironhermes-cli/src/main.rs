@@ -550,6 +550,12 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 /// Run interactive chat mode.
 async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     print_banner();
+    // GAP-5: force banner to hit the terminal BEFORE any async MCP startup
+    // message can interleave on stderr. Without this flush, the stdout buffer
+    // can be deferred until rustyline repaints on first keystroke, making the
+    // CLI look frozen when mcp_servers is configured (violates D-07).
+    io::stdout().flush().ok();
+    io::stderr().flush().ok();
 
     let (client, config, resolver) = build_client(cli)?;
 
@@ -812,6 +818,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     }
 
     let mut exit_cleanly = false;
+    // GAP-5: belt-and-braces flush — if any later synchronous println/eprintln
+    // happened between the banner and here (e.g., context injection, token
+    // estimator init, rustyline setup), force it to the terminal before we
+    // block inside rl.readline. The background MCP task's eprintln! has already
+    // raced with this point by the time we get here; flushing guarantees the
+    // user sees the prompt line rather than waiting on a keystroke.
+    io::stdout().flush().ok();
+    io::stderr().flush().ok();
     loop {
         // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
