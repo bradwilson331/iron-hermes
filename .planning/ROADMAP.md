@@ -97,6 +97,30 @@ Plans:
 
 **Phase directory:** `.planning/phases/21-commandline-ui-update-polish-cli-ux-including-graceful-doubl/`
 
+### Phase 21.8: skill remote download and install from skills.sh (INSERTED)
+
+**Goal:** Port the install/update path from the open-source `skills` CLI (TypeScript) into the Rust `ironhermes-hub` crate, targeting `https://skills.sh` as the remote source. Replace the broken `SkillsShSource` registry adapter with a new blob-API adapter (three-hop pipeline: GitHub Trees API -> raw.githubusercontent -> skills.sh /api/download/<owner>/<repo>/<slug>, path-based URL). Introduce `skills-lock.json` v1 (merge-clean, alphabetically sorted, timestamp-free hashed region) replacing Phase 19.1 per-skill manifest files. Land all mandatory security primitives (terminal escape stripping D-16, YAML-only frontmatter D-17, path traversal guards D-18, pre-install audit D-19, temp-dir containment D-20). CLI surface: `hermes skills install|list|remove|update` with `remove` replacing `uninstall` (alias retained). Closes the Skills Hub clause of the v2.0 Active `Skill framework` requirement for the skills.sh surface.
+
+**Requirements:** SKILL-08, MEM-06
+**Depends on:** Phase 21
+**Plans:** 5 plans
+
+Plans:
+- [ ] 21.8-01-PLAN.md — Wave 0 test infra: create `sanitize.rs` with 9 pure-function security primitives (D-16/D-17/D-18/D-20), extend `HubErrorKind` with ShaMismatch/ScanHit/PathTraversal/Audit (D-24), add `to_skill_slug` golden-vector integration test (20+ cases, reference TS byte-for-byte match).
+- [ ] 21.8-02-PLAN.md — Wave 1 data + network: create `blob.rs` (SkillsShBlobSource, 3-hop fetchers, with_one_retry wrapper, D-06 corrected path-based URL, D-08 10s timeout, D-22 User-Agent) and `lock.rs` (SkillLock/SkillLockEntry camelCase schema, compute_folder_hash with NO separator per D-13 corrected, D-12 alphabetical sort + atomic save, paths::skills_lock_path).
+- [ ] 21.8-03-PLAN.md — Wave 2 pipeline rework: create `audit.rs` (fetch_audit soft-fail, D-19 3s timeout), add `migrate_from_hub_manifest` to lock.rs (D-15 idempotent 19.1->21.8), rework installer.rs to write SkillLock (not HubManifest), insert audit between fetch+quarantine, gate remove_dir_all with assert_temp_contained, verify post-rename computed_hash vs server snapshot_hash (ShaMismatch path), deprecate HubManifest::save.
+- [ ] 21.8-04-PLAN.md — Wave 3 CLI rework: delete skills_sh.rs + skills_sh_adapter_test.rs (D-01), swap skills_cmd.rs:136 and skills_tool.rs:382 call sites to SkillsShBlobSource, rename SkillsAction::Uninstall -> Remove with `#[command(alias = "uninstall")]` (D-04), add `--skip-audit` flag (D-19), emit D-21 5-line progress + D-23 restart message, route every server-originated stderr/stdout through strip_terminal_escapes (D-16 at print boundary), wire migrate_from_hub_manifest at CLI startup (D-15).
+- [ ] 21.8-05-PLAN.md — Wave 4 end-to-end integration: create wiremock integration test suite covering happy path, exactly-once retry on 5xx, no retry on 404 / PathTraversal, path-traversal rejection before disk write, User-Agent openclaw ride capture, audit soft-fail (timeout/5xx/non-json), --skip-audit zero-network bypass, idempotent migration (byte-identical on re-run), cmd_install -> cmd_list -> cmd_remove round-trip; full `cargo test --workspace` green gate.
+
+**Wave structure:**
+- Wave 1: 21.8-01 (sanitize.rs + HubErrorKind + slug golden vectors — autonomous)
+- Wave 2: 21.8-02 (blob.rs + lock.rs + paths — depends on 01, autonomous)
+- Wave 3: 21.8-03 (audit.rs + installer.rs rework + migration + manifest deprecation — depends on 01, 02, autonomous)
+- Wave 4: 21.8-04 (delete skills_sh.rs, CLI rework, call-site swaps, D-21/D-23 UX, strip at print boundary — depends on 01, 02, 03, autonomous)
+- Wave 5: 21.8-05 (wiremock e2e + audit/migration/CLI integration tests — depends on 01, 02, 03, 04, autonomous)
+
+**Phase directory:** `.planning/phases/21.8-skill-remote-download-and-install-from-skills-sh/`
+
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
 **Goal:** [Urgent work - to be planned]

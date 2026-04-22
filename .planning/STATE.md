@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
+milestone: v2.0
 milestone_name: milestone
 status: verifying
 stopped_at: Phase 21.8 context gathered
-last_updated: "2026-04-22T04:08:09.459Z"
+last_updated: "2026-04-22T09:25:32.351Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 9
-  total_plans: 33
+  total_plans: 38
   completed_plans: 28
-  percent: 85
+  percent: 74
 ---
 
 # Project State
@@ -230,3 +230,5 @@ Recent decisions affecting current work:
 Last session: --stopped-at
 Stopped at: Phase 21.8 context gathered
 Resume file: --resume-file
+
+**Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
