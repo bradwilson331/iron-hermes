@@ -388,6 +388,7 @@ impl HubSource for WellKnownSkillSource {
                 "base_url": base_url,
                 "skill_name": skill_name,
             }),
+            snapshot_hash: None,
         })
     }
 }

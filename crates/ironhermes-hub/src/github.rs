@@ -89,6 +89,13 @@ impl GitHubSource {
         self
     }
 
+    /// Accessor for the resolved GitHub auth. Exposed so sibling adapters
+    /// (e.g. `SkillsShBlobSource`) can reuse the Phase 19.1 token-resolution
+    /// precedence without re-probing env vars or shelling out to `gh`.
+    pub fn auth(&self) -> &GitHubAuth {
+        &self.auth
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /// Resolve the default branch for a repo via `GET /repos/{repo}`.
@@ -486,6 +493,7 @@ impl HubSource for GitHubSource {
                 "repo": repo,
                 "skill_path": skill_path,
             }),
+            snapshot_hash: None,
         })
     }
 }

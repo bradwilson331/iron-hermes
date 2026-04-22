@@ -24,6 +24,11 @@ pub struct SkillBundle {
     pub files: Vec<BundleFile>,
     pub skill_md: String,
     pub metadata: serde_json::Value,
+    /// Server-returned `skillsComputedHash` for skills-sh source; `None` for other
+    /// HubSource impls. Used as the version key for `hermes skills update` diff per D-14.
+    /// This is an OPAQUE STRING — never recomputed on the client; stored verbatim and
+    /// compared byte-for-byte when diffing local vs remote snapshot.
+    pub snapshot_hash: Option<String>,
 }
 
 #[async_trait]

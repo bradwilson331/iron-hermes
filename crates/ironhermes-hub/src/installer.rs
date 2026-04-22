@@ -414,6 +414,7 @@ mod tests {
             ],
             skill_md: "---\nname: test\n---\nbody".to_string(),
             metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         let h1 = bundle_content_hash(&bundle);
         let h2 = bundle_content_hash(&bundle);
@@ -435,10 +436,12 @@ mod tests {
         let bundle_a = SkillBundle {
             name: "x".into(), identifier: "x".into(), source_id: "x".into(),
             files: files_a, skill_md: String::new(), metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         let bundle_b = SkillBundle {
             name: "x".into(), identifier: "x".into(), source_id: "x".into(),
             files: files_b, skill_md: String::new(), metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         assert_eq!(bundle_content_hash(&bundle_a), bundle_content_hash(&bundle_b));
     }
@@ -449,6 +452,7 @@ mod tests {
             name: "x".into(), identifier: "x".into(), source_id: "x".into(),
             files: vec![BundleFile { path: "f.txt".into(), bytes: data.to_vec() }],
             skill_md: String::new(), metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         assert_ne!(
             bundle_content_hash(&mk(b"hello")),
@@ -477,6 +481,7 @@ mod tests {
             files: vec![],
             skill_md: "---\nname: my-skill\nmetadata:\n  hermes:\n    category: devops\n---\n".into(),
             metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         let (cat, name) = parse_skill_identity(&bundle);
         assert_eq!(cat, "devops");
@@ -492,6 +497,7 @@ mod tests {
             files: vec![],
             skill_md: "---\nname: my-skill\n---\n".into(),
             metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         let (cat, name) = parse_skill_identity(&bundle);
         assert_eq!(cat, "general");
@@ -511,6 +517,7 @@ mod tests {
             ],
             skill_md: "# skill".into(),
             metadata: serde_json::json!({}),
+            snapshot_hash: None,
         };
         write_bundle_to_dir(tmp.path(), &bundle).unwrap();
         assert!(tmp.path().join("SKILL.md").exists());

@@ -5,6 +5,7 @@
 //! update / uninstall / trust-management only.
 
 pub mod auth;
+pub mod blob;
 pub mod error;
 pub mod github;
 pub mod installer;
@@ -19,6 +20,7 @@ pub mod tarball;
 pub mod well_known;
 
 pub use auth::GitHubAuth;
+pub use blob::{BlobSkill, RepoTree, SkillDownloadResponse, SkillSnapshotFile, SkillsShBlobSource, TreeEntry};
 pub use error::{HubError, HubErrorKind};
 pub use github::{GitHubSource, GitHubTap};
 pub use installer::{
