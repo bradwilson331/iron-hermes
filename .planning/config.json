@@ -1,7 +1,7 @@
 {
   "workflow": {
     "_auto_chain_active": false,
-    "use_worktrees": false
+    "use_worktrees": true
   },
   "created_at": "2026-04-01",
   "researcher_model": "sonnet",
