@@ -103,10 +103,10 @@ Plans:
 
 **Requirements:** SKILL-08, MEM-06
 **Depends on:** Phase 21
-**Plans:** 5 plans
+**Plans:** 1/5 plans complete
 
 Plans:
-- [ ] 21.8-01-PLAN.md — Wave 0 test infra: create `sanitize.rs` with 9 pure-function security primitives (D-16/D-17/D-18/D-20), extend `HubErrorKind` with ShaMismatch/ScanHit/PathTraversal/Audit (D-24), add `to_skill_slug` golden-vector integration test (20+ cases, reference TS byte-for-byte match).
+- [x] 21.8-01-PLAN.md — Wave 0 test infra: create `sanitize.rs` with 9 pure-function security primitives (D-16/D-17/D-18/D-20), extend `HubErrorKind` with ShaMismatch/ScanHit/PathTraversal/Audit (D-24), add `to_skill_slug` golden-vector integration test (20+ cases, reference TS byte-for-byte match).
 - [ ] 21.8-02-PLAN.md — Wave 1 data + network: create `blob.rs` (SkillsShBlobSource, 3-hop fetchers, with_one_retry wrapper, D-06 corrected path-based URL, D-08 10s timeout, D-22 User-Agent) and `lock.rs` (SkillLock/SkillLockEntry camelCase schema, compute_folder_hash with NO separator per D-13 corrected, D-12 alphabetical sort + atomic save, paths::skills_lock_path).
 - [ ] 21.8-03-PLAN.md — Wave 2 pipeline rework: create `audit.rs` (fetch_audit soft-fail, D-19 3s timeout), add `migrate_from_hub_manifest` to lock.rs (D-15 idempotent 19.1->21.8), rework installer.rs to write SkillLock (not HubManifest), insert audit between fetch+quarantine, gate remove_dir_all with assert_temp_contained, verify post-rename computed_hash vs server snapshot_hash (ShaMismatch path), deprecate HubManifest::save.
 - [ ] 21.8-04-PLAN.md — Wave 3 CLI rework: delete skills_sh.rs + skills_sh_adapter_test.rs (D-01), swap skills_cmd.rs:136 and skills_tool.rs:382 call sites to SkillsShBlobSource, rename SkillsAction::Uninstall -> Remove with `#[command(alias = "uninstall")]` (D-04), add `--skip-audit` flag (D-19), emit D-21 5-line progress + D-23 restart message, route every server-originated stderr/stdout through strip_terminal_escapes (D-16 at print boundary), wire migrate_from_hub_manifest at CLI startup (D-15).

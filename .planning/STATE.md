@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 21.8 context gathered
-last_updated: "2026-04-22T09:25:32.351Z"
+status: executing
+stopped_at: Completed 21.8-01-PLAN.md
+last_updated: "2026-04-22T11:16:45.678Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 38
-  completed_plans: 28
-  percent: 74
+  completed_plans: 29
+  percent: 76
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.6 — port-deployment-setup-files-from-hermes-agent
+**Current focus:** Phase 21.8 — skill-remote-download-and-install-from-skills-sh
 
 ## Current Position
 
-Phase: 21.7
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 21.8 (skill-remote-download-and-install-from-skills-sh) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [██████████] 100%
+Progress: [████████░░] 76%
 
 ## Performance Metrics
 
@@ -103,6 +103,7 @@ Progress: [██████████] 100%
 | Phase 21.6 P01 | 5 | 2 tasks | 5 files |
 | Phase 21.6 P02 | 13 | 2 tasks | 2 files |
 | Phase 21.6 P03 | 4 | 2 tasks | 2 files |
+| Phase 21.8 P01 | 7 | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -198,6 +199,10 @@ Recent decisions affecting current work:
 - [Phase 21.6]: chmod 600 on .env in entrypoint for credential protection (T-21.6-06)
 - [Phase 21.6]: install.sh downloads from GitHub Releases first, falls back to cargo install for end users
 - [Phase 21.6]: setup-ironhermes.sh uses ln -sf symlink for rebuild-friendly developer workflow
+- [Phase 21.8]: Plan 01 — pub use sanitize::{...9 functions} deferred from Task 1 to Task 2 (empty stub cannot satisfy pub-use of unwritten functions)
+- [Phase 21.8]: Plan 01 — sanitize_name preserves underscore (NON_SAFE=[^a-z0-9._]+) while to_skill_slug strips it (NON_SLUG=[^a-z0-9-]); contrast locked via test
+- [Phase 21.8]: Plan 01 — C1 control byte tests use \u{XX} not \xXX (Rust string-literal restriction for bytes > 0x7f)
+- [Phase 21.8]: Plan 01 — pre-existing workspace clippy warnings outside scope; logged to deferred-items.md and left unmodified
 
 ### Roadmap Evolution
 
@@ -227,8 +232,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: --stopped-at
-Stopped at: Phase 21.8 context gathered
-Resume file: --resume-file
+Last session: 2026-04-22T11:16:45.675Z
+Stopped at: Completed 21.8-01-PLAN.md
+Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
