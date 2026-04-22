@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use ironhermes_core::{ChatMessage, ProviderResolver};
 use ironhermes_tools::delegate_task::SubagentRunner;
 use ironhermes_tools::ToolRegistry;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::any_client::AnyClient;
@@ -47,7 +48,7 @@ impl AgentSubagentRunner {
 impl SubagentRunner for AgentSubagentRunner {
     async fn run_child(
         &self,
-        registry: Arc<ToolRegistry>,
+        registry: Arc<RwLock<ToolRegistry>>,
         system_prompt: String,
         max_iterations: usize,
         model_override: Option<&str>,

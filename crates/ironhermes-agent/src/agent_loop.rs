@@ -5,7 +5,7 @@ use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -60,7 +60,7 @@ pub type ToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// The main agent loop that orchestrates LLM calls and tool execution.
 pub struct AgentLoop {
     client: AnyClient,
-    registry: Arc<ToolRegistry>,
+    registry: Arc<RwLock<ToolRegistry>>,
     max_iterations: usize,
     compressor: Option<Mutex<ContextCompressor>>,
     stream_callback: Option<StreamCallback>,
@@ -110,7 +110,7 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
-    pub fn new(client: AnyClient, registry: Arc<ToolRegistry>, max_iterations: usize) -> Self {
+    pub fn new(client: AnyClient, registry: Arc<RwLock<ToolRegistry>>, max_iterations: usize) -> Self {
         Self {
             client,
             registry,
@@ -387,7 +387,7 @@ impl AgentLoop {
     /// - Max iterations are reached
     /// - An unrecoverable error occurs
     pub async fn run(&mut self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
-        let mut tool_schemas = self.registry.get_definitions(None);
+        let mut tool_schemas = self.registry.read().await.get_definitions(None);
         // D-07: Add session_search schema when state_store is configured.
         // Not added in subagent context (subagents should not search sessions).
         if self.state_store.is_some() {
@@ -786,7 +786,7 @@ impl AgentLoop {
         }
 
         // D-05 Step 1: check guardrails WITHOUT executing the tool.
-        let decision = self.registry.check_guardrails(name, &args);
+        let decision = self.registry.read().await.check_guardrails(name, &args);
 
         match decision {
             GuardrailDecision::Block { reason } => {
@@ -794,11 +794,12 @@ impl AgentLoop {
                 // format_guardrail_error path that ToolRegistry::dispatch uses, so the
                 // block error respects ErrorDetailLevel and looks identical to the
                 // pre-07.4 tool_result string that the LLM sees.
+                let err_detail = self.registry.read().await.guardrail_error_detail().clone();
                 let err_msg = ironhermes_hooks::format_guardrail_error(
                     name,
                     &reason,
                     "guardrail",
-                    self.registry.guardrail_error_detail(),
+                    &err_detail,
                 );
                 warn!(tool = %name, "Tool blocked by guardrail: {}", err_msg);
 
@@ -886,7 +887,7 @@ impl AgentLoop {
                     return format!(r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#);
                 }
 
-                let dispatch_result = self.registry.execute_tool(name, args).await;
+                let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
 
                 match dispatch_result {
@@ -1053,7 +1054,7 @@ mod hooks_ordering_tests {
         let client = AnyClient::ChatCompletions(
             crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
         );
-        AgentLoop::new(client, Arc::new(tool_registry), 4).with_hook_registry(hook_registry)
+        AgentLoop::new(client, Arc::new(RwLock::new(tool_registry)), 4).with_hook_registry(hook_registry)
     }
 
     // -----------------------------------------------------------------------
@@ -1364,7 +1365,7 @@ mod hooks_ordering_tests {
         let client = AnyClient::ChatCompletions(
             crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
         );
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let token = CancellationToken::new();
         let agent = AgentLoop::new(client, registry, 4)
             .with_cancellation_token(token.clone());
@@ -1378,7 +1379,7 @@ mod hooks_ordering_tests {
         let client = AnyClient::ChatCompletions(
             crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
         );
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let token = CancellationToken::new();
         // Cancel BEFORE run
         token.cancel();
@@ -1423,7 +1424,7 @@ mod budget_tests {
         let client = AnyClient::ChatCompletions(
             crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "test"),
         );
-        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         AgentLoop::new(client, registry, max_iterations)
     }
 
@@ -1492,7 +1493,7 @@ mod fallback_tests {
         let client = AnyClient::ChatCompletions(
             crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "test"),
         );
-        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         let agent = AgentLoop::new(client, registry, 10);
         assert!(!agent.fallback_activated, "fallback_activated should start false");
         assert!(agent.fallback_client.is_none(), "fallback_client should start None");
@@ -1530,7 +1531,7 @@ mod fallback_tests {
         let fallback = AnyClient::ChatCompletions(
             crate::client::LlmClient::new("http://fallback".to_string(), "key2".to_string(), "model2"),
         );
-        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         let mut agent = AgentLoop::new(primary, registry, 10).with_fallback(fallback);
 
         assert!(!agent.fallback_activated);
@@ -1620,7 +1621,7 @@ mod plan_18_06_tests {
             "".to_string(),
             "test",
         ));
-        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         AgentLoop::new(client, registry, 10)
             .with_context_engine(engine, ctx_len)
             .with_session_id("sess-test")
@@ -1759,7 +1760,7 @@ mod memory_provider_wiring_tests {
                 "mock-model",
             ),
         );
-        let registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         AgentLoop::new(client, registry, 4)
     }
 

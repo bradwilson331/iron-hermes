@@ -27,7 +27,7 @@ pub struct GatewayRunner {
     resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
     state_store: Arc<Mutex<ironhermes_state::StateStore>>,
-    tool_registry: Arc<ToolRegistry>,
+    tool_registry: Arc<RwLock<ToolRegistry>>,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     job_store: Option<Arc<Mutex<JobStore>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
@@ -37,7 +37,7 @@ pub struct GatewayRunner {
 }
 
 impl GatewayRunner {
-    pub fn new(config: Config, resolver: ProviderResolver, tool_registry: Arc<ToolRegistry>) -> Self {
+    pub fn new(config: Config, resolver: ProviderResolver, tool_registry: Arc<RwLock<ToolRegistry>>) -> Self {
         // Per D-03: all sources share a single state.db
         // Per D-11: gateway uses its own Connection instance via StateStore::open_default()
         let state_store = Arc::new(Mutex::new(
@@ -683,7 +683,7 @@ pub(crate) async fn execute_cron_job(
     job: &ironhermes_cron::CronJob,
     job_store: &Arc<Mutex<ironhermes_cron::JobStore>>,
     skill_registry: &Option<Arc<SkillRegistry>>,
-    tool_registry: &Arc<ironhermes_tools::ToolRegistry>,
+    tool_registry: &Arc<RwLock<ironhermes_tools::ToolRegistry>>,
     memory_manager: &Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: &Option<Arc<ironhermes_hooks::HookRegistry>>,
     config: &Config,
@@ -1013,7 +1013,7 @@ mod tests {
         // 3. Build a Config that points at a real LLM endpoint (uses env vars / config.yaml defaults)
         let config = ironhermes_core::Config::load()
             .expect("load config for LLM integration test");
-        let tool_registry = Arc::new(ToolRegistry::default());
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::default()));
 
         // 4. Call execute_cron_job directly (the helper Task 4 extracts)
         let result = execute_cron_job(
@@ -1502,7 +1502,7 @@ mod tests {
 
         // 4. Call execute_cron_job — expect it to return Err (LLM unreachable),
         //    but the hook events must still fire.
-        let tool_registry = Arc::new(ironhermes_tools::ToolRegistry::new());
+        let tool_registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         let _ = execute_cron_job(
             &job,
             &job_store,
@@ -1609,7 +1609,7 @@ mod tests {
         config.gateway.context_engine = engine_kind.to_string();
         config.gateway.compression_threshold = 0.85;
         let resolver = ProviderResolver::build(&config).expect("resolver ok");
-        let tool_registry = Arc::new(ToolRegistry::new());
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
         GatewayRunner::new(config, resolver, tool_registry)
     }
 

@@ -52,7 +52,7 @@ pub struct GatewayMessageHandler {
     config: Config,
     resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
-    tool_registry: Arc<ToolRegistry>,
+    tool_registry: Arc<RwLock<ToolRegistry>>,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
@@ -73,7 +73,7 @@ impl GatewayMessageHandler {
         config: Config,
         resolver: ProviderResolver,
         session_store: Arc<RwLock<SessionStore>>,
-        tool_registry: Arc<ToolRegistry>,
+        tool_registry: Arc<RwLock<ToolRegistry>>,
     ) -> Self {
         let rate_limiter = PerUserRateLimiter::new(
             config.rate_limit.messages_per_minute,
@@ -467,7 +467,7 @@ impl GatewayMessageHandler {
             let _ = tool_tx_clone.try_send(name.to_string());
         });
 
-        let mut agent = AgentLoop::new(client, self.tool_registry.clone(), max_turns)
+        let mut agent = AgentLoop::new(client, Arc::clone(&self.tool_registry), max_turns)
             .with_streaming(stream_callback)
             .with_tool_progress(tool_callback)
             .with_active_skills(self.active_skills.clone());
@@ -616,7 +616,7 @@ mod tests {
             ironhermes_state::StateStore::new(":memory:").expect("in-memory StateStore"),
         ));
         let session_store = Arc::new(RwLock::new(crate::session::SessionStore::new(state_store)));
-        let tool_registry = Arc::new(ToolRegistry::new());
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
         GatewayMessageHandler::new(config, resolver, session_store, tool_registry)
     }
 
@@ -677,7 +677,7 @@ mod tests {
                 "test-model",
             ),
         );
-        let tool_registry = Arc::new(ToolRegistry::new());
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let loop_instance = ironhermes_agent::AgentLoop::new(client, tool_registry, 4)
             .with_active_skills(shared.clone());
 

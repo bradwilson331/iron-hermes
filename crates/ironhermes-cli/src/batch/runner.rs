@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -234,11 +234,11 @@ pub async fn cmd_run(
         };
         let tx = tx.clone();
         let client = build_main_client(&resolver)?;
-        let registry = Arc::new({
+        let registry = Arc::new(RwLock::new({
             let mut r = ToolRegistry::new();
             r.register_defaults();
             r
-        });
+        }));
         let hash_clone = hash.clone();
         let model_for_traj = model_name.clone();
 
@@ -255,7 +255,9 @@ pub async fn cmd_run(
             match agent.run(messages).await {
                 Ok(result) => {
                     // Run quality filters (D-12, D-13)
-                    let quality = filters::run_filters(&result, &registry);
+                    let registry_guard = registry.read().await;
+                    let quality = filters::run_filters(&result, &registry_guard);
+                    drop(registry_guard);
                     let rejection_reason = if quality.passed {
                         None
                     } else {

@@ -17,6 +17,8 @@ use tracing::info;
 
 use tokio_util::sync::CancellationToken;
 
+use tokio::sync::RwLock;
+
 use crate::memory_tool::SharedMemoryManager;
 use crate::registry::{Tool, ToolRegistry};
 
@@ -106,7 +108,7 @@ pub trait SubagentRunner: Send + Sync {
     /// The callback receives (tool_name, args_preview) for each tool execution.
     async fn run_child(
         &self,
-        registry: Arc<ToolRegistry>,
+        registry: Arc<RwLock<ToolRegistry>>,
         system_prompt: String,
         max_iterations: usize,
         model_override: Option<&str>,
@@ -263,7 +265,7 @@ impl DelegateTaskTool {
                 let result = tokio::time::timeout(
                     Duration::from_secs(config.timeout_secs),
                     runner.run_child(
-                        Arc::new(child_registry),
+                        Arc::new(RwLock::new(child_registry)),
                         system_prompt,
                         config.max_iterations,
                         config.model.as_deref(),
@@ -545,7 +547,7 @@ impl Tool for DelegateTaskTool {
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.timeout_secs),
             self.runner.run_child(
-                Arc::new(child_registry),
+                Arc::new(RwLock::new(child_registry)),
                 system_prompt,
                 self.config.max_iterations,
                 self.config.model.as_deref(),
@@ -736,7 +738,7 @@ mod tests {
     impl SubagentRunner for MockRunner {
         async fn run_child(
             &self,
-            _registry: Arc<ToolRegistry>,
+            _registry: Arc<RwLock<ToolRegistry>>,
             _system_prompt: String,
             _max_iterations: usize,
             _model_override: Option<&str>,
@@ -863,7 +865,7 @@ mod tests {
         impl SubagentRunner for SlowRunner {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 _system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
@@ -901,7 +903,7 @@ mod tests {
         impl SubagentRunner for NoResponseRunner {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 _system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
@@ -1070,7 +1072,7 @@ mod tests {
         impl SubagentRunner for PromptCapture {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
@@ -1109,7 +1111,7 @@ mod tests {
         impl SubagentRunner for ModelCapture {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 _system_prompt: String,
                 _max_iterations: usize,
                 model_override: Option<&str>,
@@ -1195,7 +1197,7 @@ mod tests {
     impl SubagentRunner for OrderedMockRunner {
         async fn run_child(
             &self,
-            _registry: Arc<ToolRegistry>,
+            _registry: Arc<RwLock<ToolRegistry>>,
             system_prompt: String,
             _max_iterations: usize,
             _model_override: Option<&str>,
@@ -1281,7 +1283,7 @@ mod tests {
         impl SubagentRunner for ReverseOrderRunner {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
@@ -1352,7 +1354,7 @@ mod tests {
         impl SubagentRunner for CountingRunner {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 _system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,
@@ -1442,7 +1444,7 @@ mod tests {
         impl SubagentRunner for ContextCapture {
             async fn run_child(
                 &self,
-                _registry: Arc<ToolRegistry>,
+                _registry: Arc<RwLock<ToolRegistry>>,
                 system_prompt: String,
                 _max_iterations: usize,
                 _model_override: Option<&str>,

@@ -9,6 +9,7 @@ use ironhermes_tools::ToolRegistry;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt_with_reserve, finish_prompt_with_reserve};
@@ -398,7 +399,7 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     }
     registry.set_error_detail(hooks_config.error_detail.clone());
 
-    let registry = Arc::new(registry);
+    let registry = Arc::new(RwLock::new(registry));
 
     // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
@@ -695,7 +696,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     }
     registry.set_error_detail(hooks_config.error_detail.clone());
 
-    let registry = Arc::new(registry);
+    let registry = Arc::new(RwLock::new(registry));
 
     // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
@@ -1022,7 +1023,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_turn(
     client: &AnyClient,
-    registry: Arc<ToolRegistry>,
+    registry: Arc<RwLock<ToolRegistry>>,
     messages: &mut Vec<ChatMessage>,
     max_turns: usize,
     config: &Config,
@@ -1206,7 +1207,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
     registry.set_error_detail(hooks_config.error_detail.clone());
 
-    let registry = Arc::new(registry);
+    let registry = Arc::new(RwLock::new(registry));
 
     // Build HookRegistry
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());

@@ -9,7 +9,7 @@
 //! (which ignores the config threshold).
 
 use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 
 use ironhermes_core::{Config, ProviderResolver};
 use ironhermes_hooks::HookRegistry;
@@ -84,7 +84,7 @@ mod tests {
             "test".to_string(),
             "test-model",
         ));
-        AgentLoop::new(client, Arc::new(ToolRegistry::new()), 4)
+        AgentLoop::new(client, Arc::new(RwLock::new(ToolRegistry::new())), 4)
     }
 
     #[test]
