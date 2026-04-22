@@ -179,6 +179,14 @@ async fn cmd_add(
                     return Err(anyhow::anyhow!("Command is required for stdio transport"));
                 }
             };
+            // GAP-3: when the user selected `npx`, show an example of valid MCP args so
+            // they don't leave args empty and land on the GAP-1 hang path.
+            if entered_command.trim() == "npx" {
+                println!(
+                    "  {}",
+                    "Example: -y @modelcontextprotocol/server-filesystem /tmp".dimmed()
+                );
+            }
             let args_str = prompt_line("Arguments (space-separated, or empty)", "");
             let entered_args: Vec<String> = if args_str.trim().is_empty() {
                 vec![]
@@ -235,20 +243,39 @@ async fn cmd_add(
     print!("  {}", format!("Connecting to '{}'...", name).cyan());
     io::stdout().flush().ok();
 
-    let tools = attempt_connect_and_list_with_timeout(&server_config).await;
-    println!(); // newline after the connecting message
+    // Attempt the connection in a loop so Retry can re-run it.
+    let (discovered_tools, tool_count) = loop {
+        // NOTE: Task 1 already swapped the call site to `_with_timeout`; keep that here.
+        let tools = attempt_connect_and_list_with_timeout(&server_config).await;
+        println!(); // newline after the connecting message (preserved from original)
 
-    let (discovered_tools, tool_count) = match tools {
-        Ok(t) => {
-            let n = t.len();
-            println!("  {}", format!("Found {} tool(s)", n).green());
-            (t, n)
-        }
-        Err(e) => {
-            let sanitized = sanitize_error(&e.to_string());
-            println!("  {}", format!("Failed to connect: {}", sanitized).red());
-            // Still allow adding — user may fix server config later
-            (vec![], 0)
+        match tools {
+            Ok(t) => {
+                let n = t.len();
+                println!("  {}", format!("Found {} tool(s)", n).green());
+                break (t, n);
+            }
+            Err(e) => {
+                let sanitized = sanitize_error(&e.to_string());
+                println!("  {}", format!("Failed to connect: {}", sanitized).red());
+                match prompt_retry_save_abort() {
+                    RetrySaveAbort::Retry => {
+                        // loop back and re-attempt the connection
+                        print!("  {}", format!("Connecting to '{}'...", name).cyan());
+                        io::stdout().flush().ok();
+                        continue;
+                    }
+                    RetrySaveAbort::SaveAnyway => {
+                        // Preserves the legacy "user may fix server config later" escape hatch,
+                        // but ONLY when the user explicitly opts in.
+                        break (vec![], 0);
+                    }
+                    RetrySaveAbort::Abort => {
+                        println!("{}", "Cancelled.".dimmed());
+                        return Ok(());
+                    }
+                }
+            }
         }
     };
 
@@ -625,6 +652,30 @@ fn prompt_yn(prompt: &str, default_yes: bool) -> bool {
     }
 }
 
+/// Three-way outcome from the post-failure prompt in `cmd_add` (GAP-2).
+#[derive(Debug, PartialEq, Eq)]
+enum RetrySaveAbort {
+    Retry,
+    SaveAnyway,
+    Abort,
+}
+
+/// GAP-2: prompt the user after a failed MCP connection in `cmd_add`.
+/// Default is Abort (safest — do not persist a broken entry without consent).
+/// Accepted inputs (case-insensitive): `r`/`retry` → Retry; `s`/`save` → SaveAnyway;
+/// `a`/`abort` or empty → Abort.
+fn prompt_retry_save_abort() -> RetrySaveAbort {
+    print!("Connection failed. [R]etry / [S]ave anyway / [A]bort? [A]: ");
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).ok();
+    match line.trim().to_lowercase().as_str() {
+        "r" | "retry" => RetrySaveAbort::Retry,
+        "s" | "save" | "save anyway" => RetrySaveAbort::SaveAnyway,
+        _ => RetrySaveAbort::Abort,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -686,6 +737,35 @@ mod tests {
         assert!(re_read.contains("default: gpt-4"), "original model key should be preserved");
         assert!(re_read.contains("test_server"), "new mcp server should be written");
         assert!(re_read.contains("npx"), "command should be present");
+    }
+
+    #[test]
+    fn prompt_retry_save_abort_variants_are_distinct() {
+        // Compile-time + discrimination check — guards against accidental merge of variants.
+        assert_ne!(RetrySaveAbort::Retry, RetrySaveAbort::SaveAnyway);
+        assert_ne!(RetrySaveAbort::SaveAnyway, RetrySaveAbort::Abort);
+        assert_ne!(RetrySaveAbort::Retry, RetrySaveAbort::Abort);
+    }
+
+    #[test]
+    fn mcp_config_carries_gap2_prompt_literal() {
+        // Regression test: the exact prompt string promised to the human UAT
+        // reviewer must appear verbatim in the source of this module.
+        let src = include_str!("mcp_config.rs");
+        assert!(
+            src.contains("Connection failed. [R]etry / [S]ave anyway / [A]bort?"),
+            "GAP-2: module must contain the exact 3-way prompt copy"
+        );
+    }
+
+    #[test]
+    fn mcp_config_carries_gap3_npx_example_literal() {
+        // Regression test: the exact GAP-3 hint string must appear verbatim.
+        let src = include_str!("mcp_config.rs");
+        assert!(
+            src.contains("Example: -y @modelcontextprotocol/server-filesystem /tmp"),
+            "GAP-3: module must contain the exact npx example hint"
+        );
     }
 
     #[tokio::test]
