@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.8-01-PLAN.md
-last_updated: "2026-04-22T11:16:45.678Z"
+stopped_at: Completed 21.8-02-PLAN.md
+last_updated: "2026-04-22T11:28:23.865Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 38
-  completed_plans: 29
-  percent: 76
+  completed_plans: 30
+  percent: 79
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.8 (skill-remote-download-and-install-from-skills-sh) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [████████░░] 76%
+Progress: [████████░░] 79%
 
 ## Performance Metrics
 
@@ -104,6 +104,7 @@ Progress: [████████░░] 76%
 | Phase 21.6 P02 | 13 | 2 tasks | 2 files |
 | Phase 21.6 P03 | 4 | 2 tasks | 2 files |
 | Phase 21.8 P01 | 7 | 3 tasks | 7 files |
+| Phase 21.8 P02 | 7 | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,10 @@ Recent decisions affecting current work:
 - [Phase 21.8]: Plan 01 — sanitize_name preserves underscore (NON_SAFE=[^a-z0-9._]+) while to_skill_slug strips it (NON_SLUG=[^a-z0-9-]); contrast locked via test
 - [Phase 21.8]: Plan 01 — C1 control byte tests use \u{XX} not \xXX (Rust string-literal restriction for bytes > 0x7f)
 - [Phase 21.8]: Plan 01 — pre-existing workspace clippy warnings outside scope; logged to deferred-items.md and left unmodified
+- Phase 21.8 Plan 02: Added GitHubSource::auth() accessor (Rule 2) — sibling adapters reuse Phase 19.1 auth machinery
+- Phase 21.8 Plan 02: Hand-rolled urlencoding() helper (~15 lines) in blob.rs — zero new workspace deps mandate
+- Phase 21.8 Plan 02: SkillsShBlobSource.{github_api_base,raw_content_base} test-override fields added (Rule 2) — plan 05 wiremock needs all three hops redirectable
+- Phase 21.8 Plan 02: ENV_LOCK is per-module — lock.rs + manifest.rs can race on HERMES_HOME under parallel tests; passes 100% single-threaded
 
 ### Roadmap Evolution
 
@@ -232,8 +237,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T11:16:45.675Z
-Stopped at: Completed 21.8-01-PLAN.md
+Last session: 2026-04-22T11:28:23.862Z
+Stopped at: Completed 21.8-02-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z

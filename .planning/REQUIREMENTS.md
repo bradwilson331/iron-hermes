@@ -14,7 +14,8 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [x] **MEM-03**: Memory tool supports substring matching for replace/remove operations (old_text identifies target entry)
 - [x] **MEM-04**: Memory stores display capacity usage in system prompt header (e.g., "67% — 1,474/2,200 chars")
 - [x] **MEM-05**: Memory entries are security scanned for injection/exfiltration patterns before acceptance
-- [ ] **MEM-06**: Memory snapshots are frozen at session start and injected into system prompt — mid-session writes persist to disk but do not mutate the active prompt
+- [x] **MEM-06
+**: Memory snapshots are frozen at session start and injected into system prompt — mid-session writes persist to disk but do not mutate the active prompt
 - [x] **MEM-07**: MemoryProvider trait defines lifecycle hooks (initialize, prefetch, sync_turn, on_session_end, shutdown) with Send + Sync + 'static bounds
 - [x] **MEM-08**: Built-in file-based MemoryStore implements MemoryProvider as the default backend
 - [x] **MEM-09**: SQLite memory provider stores facts with FTS5 search capability
@@ -75,7 +76,8 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [x] **SKILL-05**: Skills declare config settings (metadata.hermes.config) stored in config.yaml under skills.config namespace
 - [x] **SKILL-06**: Skills declare required_credential_files for OAuth tokens; existence checked on load, files mounted into sandboxes
 - [x] **SKILL-07**: Skill content security scanned before injection into system prompt (same patterns as context file scanning)
-- [ ] **SKILL-08**: Skills Hub: publish skills to external repos, install from GitHub/skills.sh/well-known endpoints
+- [x] **SKILL-08
+**: Skills Hub: publish skills to external repos, install from GitHub/skills.sh/well-known endpoints
 - [ ] **SKILL-09**: Trust levels for installed skills: builtin (shipped), official (optional-skills/), trusted (known repos), community (security-gated)
 - [x] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
 - [x] **SKILL-11**: Skill env vars automatically passed through to execute_code and terminal sandboxes when set
