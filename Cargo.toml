@@ -10,6 +10,7 @@ members = [
     "crates/ironhermes-hooks",
     "crates/ironhermes-exec",
     "crates/ironhermes-hub",
+    "crates/ironhermes-mcp",
     "providers/memory-sqlite",
     "providers/memory-grafeo",
     "providers/memory-duckdb",
