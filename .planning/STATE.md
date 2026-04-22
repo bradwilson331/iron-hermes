@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.2-02-PLAN.md (Arc<RwLock<ToolRegistry>> migration + register_dynamic/unregister_by_prefix)
-last_updated: "2026-04-22T19:34:44.566Z"
+stopped_at: Completed 21.2-03-PLAN.md (McpManager + server tasks + tool dispatch)
+last_updated: "2026-04-22T19:43:16.730Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 10
   total_plans: 39
-  completed_plans: 36
-  percent: 92
+  completed_plans: 37
+  percent: 95
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [█████████░] 92%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
@@ -112,6 +112,7 @@ Progress: [█████████░] 92%
 | Phase 21.8-skill-remote-download-and-install-from-skills-sh P06 | 15 | 2 tasks | 4 files |
 | Phase 21.2 P01 | 5 | 2 tasks | 6 files |
 | Phase 21.2 P02 | 8 | 2 tasks | 9 files |
+| Phase 21.2-mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl P03 | 5 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -235,6 +236,9 @@ Recent decisions affecting current work:
 - mcp_servers in Config stored as HashMap<String, serde_yaml::Value> to avoid circular dep; parsed by ironhermes-mcp at runtime (D-21)
 - Phase 21.2 Plan 02: rpc_registry in execute_code.rs preserved as Arc<ToolRegistry> (no RwLock) — read-only safe subset per D-10 Pitfall 3
 - Phase 21.2 Plan 02: tokio::sync::RwLock used throughout for Arc<RwLock<ToolRegistry>> (not std::sync) for async compatibility
+- transport-streamable-http-client-reqwest feature required for from_uri (not -client alone) — reqwest backend required, confirmed from rmcp source
+- CallToolRequestParams is non_exhaustive: must use .new().with_arguments() builder pattern
+- ServerTaskResult.failure_reason data contract: sanitized error string when retries exhausted, None on clean cancellation (Plan 04 D-12 dependency)
 
 ### Roadmap Evolution
 
@@ -264,8 +268,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T19:34:44.563Z
-Stopped at: Completed 21.2-02-PLAN.md (Arc<RwLock<ToolRegistry>> migration + register_dynamic/unregister_by_prefix)
+Last session: 2026-04-22T19:43:16.727Z
+Stopped at: Completed 21.2-03-PLAN.md (McpManager + server tasks + tool dispatch)
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
