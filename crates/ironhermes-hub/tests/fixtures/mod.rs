@@ -164,3 +164,39 @@ pub fn well_known_index_json() -> &'static str {
   }
 ]"#
 }
+
+// ============================================================================
+// Phase 21.8 — golden-vector fixture loaders
+// ============================================================================
+
+/// Deserialize `slug_vectors.json` into `(input, expected)` pairs for
+/// byte-for-byte comparison against the reference `to_skill_slug`
+/// (blob.ts:55-62).
+pub fn load_slug_vectors() -> Vec<(String, String)> {
+    let raw = include_str!("slug_vectors.json");
+    let pairs: Vec<[String; 2]> = serde_json::from_str(raw).expect("parse slug_vectors.json");
+    pairs
+        .into_iter()
+        .map(|p| {
+            let [i, e] = p;
+            (i, e)
+        })
+        .collect()
+}
+
+/// A single terminal-escape vector: raw bytes encoded as hex + expected
+/// post-strip output.
+#[derive(serde::Deserialize)]
+pub struct EscapeVector {
+    pub category: String,
+    pub input_hex: String,
+    pub expected: String,
+}
+
+/// Deserialize `terminal_escape_vectors.json`. Each vector is a hex-encoded
+/// raw byte string so CSI/OSC/DCS/PM/APC/C1/control sequences can be
+/// expressed unambiguously in JSON.
+pub fn load_terminal_escape_vectors() -> Vec<EscapeVector> {
+    let raw = include_str!("terminal_escape_vectors.json");
+    serde_json::from_str(raw).expect("parse terminal_escape_vectors.json")
+}

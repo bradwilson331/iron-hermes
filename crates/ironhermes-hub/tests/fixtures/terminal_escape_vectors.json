@@ -1,0 +1,62 @@
+[
+  {
+    "category": "CSI_red",
+    "input_hex": "1b5b33316d7265641b5b306d",
+    "expected": "red"
+  },
+  {
+    "category": "CSI_clear_screen",
+    "input_hex": "1b5b324a68656c6c6f",
+    "expected": "hello"
+  },
+  {
+    "category": "OSC_BEL_terminator",
+    "input_hex": "1b5d303b7469746c650772657374",
+    "expected": "rest"
+  },
+  {
+    "category": "OSC_ST_terminator",
+    "input_hex": "1b5d383b3b6c696e6b1b5c74657874",
+    "expected": "text"
+  },
+  {
+    "category": "DCS",
+    "input_hex": "1b507061796c6f61641b5c6b656570",
+    "expected": "keep"
+  },
+  {
+    "category": "PM",
+    "input_hex": "1b5e707269761b5c6f6b",
+    "expected": "ok"
+  },
+  {
+    "category": "APC",
+    "input_hex": "1b5f6170701b5c6f6b",
+    "expected": "ok"
+  },
+  {
+    "category": "simple_esc",
+    "input_hex": "1b4b6b6565702074686973",
+    "expected": "keep this"
+  },
+  {
+    "category": "C1_NEL",
+    "input_hex": "618562",
+    "expected": "ab"
+  },
+  {
+    "category": "control_chars",
+    "input_hex": "000168656c6c6f0708",
+    "expected": "hello"
+  },
+  {
+    "category": "control_preserve_tab_nl",
+    "input_hex": "68656c6c6f09776f726c640a",
+    "expected": "hello\tworld\n"
+  },
+  {
+    "category": "plain",
+    "input_hex": "706c61696e20746578742e",
+    "expected": "plain text."
+  }
+]
