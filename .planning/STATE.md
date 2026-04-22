@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 21.6-03-PLAN.md
-last_updated: "2026-04-22T02:05:00.918Z"
+stopped_at: Phase 21.8 context gathered
+last_updated: "2026-04-22T04:08:09.459Z"
 last_activity: 2026-04-22
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 9
   total_plans: 33
   completed_plans: 28
@@ -209,6 +209,7 @@ Recent decisions affecting current work:
 - Phase 21.5 inserted after Phase 21: Memory Provider Plugin (INSERTED)
 - Phase 21.6 inserted after Phase 21: Port deployment setup files from hermes-agent (INSERTED)
 - Phase 21.7 inserted after Phase 21: Multi-agent and autonomous agents and sandbox status (INSERTED)
+- Phase 21.8 inserted after Phase 21: skill remote download and install from skills.sh (URGENT)
 
 ### Pending Todos
 
@@ -226,6 +227,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T01:50:48.706Z
-Stopped at: Completed 21.6-03-PLAN.md
-Resume file: None
+Last session: --stopped-at
+Stopped at: Phase 21.8 context gathered
+Resume file: --resume-file
