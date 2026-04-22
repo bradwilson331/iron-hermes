@@ -29,6 +29,7 @@ mod batch;
 mod memory_cmd;
 mod memory_setup;
 mod models_cmd;
+mod mcp_config;
 mod tui;
 use ironhermes_cli::skills_cmd;
 
@@ -111,6 +112,11 @@ enum Commands {
         #[command(subcommand)]
         command: models_cmd::ModelsSubcommand,
     },
+    /// Manage MCP server connections
+    Mcp {
+        #[command(subcommand)]
+        action: mcp_config::McpAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -174,6 +180,15 @@ async fn main() -> Result<()> {
             memory_cmd::handle_memory_off().await
         }
         Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
+        Some(Commands::Mcp { action }) => {
+            match mcp_config::handle_mcp_command(action).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    eprintln!("{}: {}", "Error".red().bold(), e);
+                    std::process::exit(1);
+                }
+            }
+        },
         None => {
             if let Some(ref prompt) = cli.execute {
                 run_single(&cli, prompt.clone()).await
@@ -1638,5 +1653,13 @@ mod mcp_wiring_tests {
             src.contains("MCP: connecting to"),
             "MCP startup message must be printed to stderr"
         );
+    }
+
+    /// INV-21.2-06: Commands enum has Mcp variant and dispatches to handle_mcp_command (D-13, D-14)
+    #[test]
+    fn commands_enum_has_mcp_variant() {
+        let src = include_str!("main.rs");
+        assert!(src.contains("Commands::Mcp"), "Commands enum must have Mcp variant");
+        assert!(src.contains("handle_mcp_command"), "main must dispatch to handle_mcp_command");
     }
 }
