@@ -51,3 +51,5 @@ regex = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 async-trait = { workspace = true }
+wiremock = { workspace = true }
+hex = { workspace = true }

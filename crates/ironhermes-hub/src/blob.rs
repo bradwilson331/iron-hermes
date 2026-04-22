@@ -55,6 +55,37 @@ fn resolve_download_base_url() -> String {
     std::env::var("SKILLS_DOWNLOAD_URL").unwrap_or_else(|_| DEFAULT_DOWNLOAD_BASE_URL.to_string())
 }
 
+/// Optional test overrides for the GitHub-facing hops so CLI subprocess
+/// integration tests can re-target ALL THREE hops (Trees API + raw +
+/// /api/download) at a single wiremock origin without using the in-process
+/// `new_http_for_tests` + `with_upstream_bases` fluent builder.
+///
+/// Prod defaults are applied when the env var is unset. These are read at
+/// construction time only; a restart of the process is required to change
+/// them at runtime (matches the skills.sh mirror-override convention).
+fn resolve_github_api_base() -> String {
+    std::env::var("GITHUB_API_BASE").unwrap_or_else(|_| "https://api.github.com".to_string())
+}
+
+fn resolve_raw_content_base() -> String {
+    std::env::var("GITHUB_RAW_CONTENT_BASE")
+        .unwrap_or_else(|_| "https://raw.githubusercontent.com".to_string())
+}
+
+/// If any of the three hop bases were overridden to an `http://` URL
+/// (typical for wiremock / local mirrors), relax the HTTPS-only constraint.
+/// Without this, `SkillsShBlobSource::new` rejects the wiremock hop at the
+/// reqwest layer because `https_only(true)` refuses plain-HTTP URIs.
+/// Test mirrors are responsible for operating on loopback / private networks;
+/// SSRF defense remains intact for production (default) URIs.
+fn any_override_is_http() -> bool {
+    let is_http =
+        |s: &str| s.starts_with("http://");
+    is_http(&resolve_download_base_url())
+        || is_http(&resolve_github_api_base())
+        || is_http(&resolve_raw_content_base())
+}
+
 // ============================================================================
 // Types (RESEARCH.md §Type Definitions — verbatim)
 // ============================================================================
@@ -119,20 +150,28 @@ pub struct SkillsShBlobSource {
 
 impl SkillsShBlobSource {
     /// Production constructor — HTTPS-only reqwest client with D-22 User-Agent and D-08 timeout.
+    ///
+    /// Env-driven URL overrides for all three hops are honored (D-07 +
+    /// GITHUB_API_BASE / GITHUB_RAW_CONTENT_BASE). If any override points to
+    /// an `http://` URL (typical for wiremock / local mirrors), `https_only`
+    /// is relaxed so the subprocess-based integration tests can drive the
+    /// full pipeline against a local mock server; for production (default)
+    /// URIs the HTTPS-only constraint remains active.
     pub fn new(github: Arc<GitHubSource>) -> Self {
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .user_agent(user_agent_string())
-            .https_only(true)
-            .timeout(FETCH_TIMEOUT)
-            .build()
-            .expect("reqwest client");
+            .timeout(FETCH_TIMEOUT);
+        if !any_override_is_http() {
+            builder = builder.https_only(true);
+        }
+        let http = builder.build().expect("reqwest client");
         Self {
             http,
             github,
             download_base_url: resolve_download_base_url(),
             test_mode: false,
-            github_api_base: "https://api.github.com".to_string(),
-            raw_content_base: "https://raw.githubusercontent.com".to_string(),
+            github_api_base: resolve_github_api_base(),
+            raw_content_base: resolve_raw_content_base(),
         }
     }
 
