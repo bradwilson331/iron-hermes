@@ -11,14 +11,16 @@
 mod fixtures;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use ironhermes_hub::{
     install, uninstall, update, AlwaysBlockedScanner, AlwaysCleanScanner, GitHubAuth,
-    GitHubSource, HubError, HubErrorKind, SkillLock,
+    GitHubSource, HubError, HubErrorKind, SkillLock, SkillsShBlobSource,
 };
 
-use wiremock::matchers::{method, path};
+use fixtures::{sample_blob_response_json, sample_skill_md_frontmatter, sample_tree_json};
+use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -389,6 +391,150 @@ async fn uninstall_cleans_empty_parent_category() {
         !category_dir.exists(),
         "empty category dir should be removed: {:?}",
         category_dir
+    );
+
+    restore_env(prev);
+}
+
+// ── Update: server/client hash divergence is advisory (UAT gap 21.8-06) ────
+
+/// Build a SkillsShBlobSource pointing at `server` for all three upstream hops.
+/// Mirrors the helper in skills_sh_blob_adapter.rs (not pub, so reproduced here).
+fn build_blob_source_for_update_test(server: &MockServer) -> SkillsShBlobSource {
+    let gh = Arc::new(GitHubSource::new(
+        GitHubAuth::anonymous(),
+        HashSet::new(),
+        vec![],
+    ));
+    SkillsShBlobSource::new_http_for_tests(gh, server.uri())
+        .with_upstream_bases(server.uri(), server.uri())
+}
+
+/// Mount the standard three-hop wiremock for ascii-art with a caller-supplied hash.
+async fn mount_three_hop_mocks(server: &MockServer, server_hash: &str) {
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/.+/.+/git/trees/.+$"))
+        .and(query_param("recursive", "1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_tree_json("ascii-art/SKILL.md")),
+        )
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/.+/.+/.+/ascii-art/SKILL\.md$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sample_skill_md_frontmatter()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/download/.+/.+/.+$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_blob_response_json(server_hash)),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn update_tolerates_server_client_hash_divergence() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("HERMES_HOME").ok();
+    let (_tmp, skills_root) = setup_test_env();
+
+    // Step 1 — prime: install ascii-art with a matching server hash so the
+    // pre-state is a clean happy-path lock entry (no advisory trigger on install).
+    // Use the same D-13 algorithm to derive the expected hash from the fixture files.
+    let skill_md = sample_skill_md_frontmatter().as_bytes();
+    let helper_py = b"print('hi')\n" as &[u8];
+    use sha2::{Digest, Sha256};
+    let server_hash_v1 = {
+        let mut files: Vec<(String, &[u8])> = vec![
+            ("SKILL.md".to_string(), skill_md),
+            ("helper.py".to_string(), helper_py),
+        ];
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut h = Sha256::new();
+        for (path, content) in &files {
+            h.update(path.as_bytes());
+            h.update(content);
+        }
+        hex::encode(h.finalize())
+    };
+
+    let server1 = MockServer::start().await;
+    mount_three_hop_mocks(&server1, &server_hash_v1).await;
+
+    unsafe { std::env::set_var("SKILLS_DOWNLOAD_URL", server1.uri()); }
+    let src1 = build_blob_source_for_update_test(&server1);
+    ironhermes_hub::install(&src1, "foo/bar/ascii-art", &AlwaysCleanScanner, &skills_root, true)
+        .await
+        .expect("prime install for update divergence test");
+
+    // Step 2 — remount a new server with a divergent hash AND content-changed blob.
+    // The content delta ensures bundle_folder_hash != old snapshot -> drift detected.
+    let server_hash_v2 = "divergent-update-server-hash-21-8-06".to_string();
+    let server2 = MockServer::start().await;
+
+    // Three-hop: Trees + raw frontmatter unchanged; /api/download returns new hash + extra file.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/.+/.+/git/trees/.+$"))
+        .and(query_param("recursive", "1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_tree_json("ascii-art/SKILL.md")),
+        )
+        .mount(&server2)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/.+/.+/.+/ascii-art/SKILL\.md$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sample_skill_md_frontmatter()))
+        .mount(&server2)
+        .await;
+
+    // Blob with content delta: helper.py has one extra byte so D-13 folder hash changes.
+    let updated_blob = serde_json::json!({
+        "files": [
+            {"path": "SKILL.md", "contents": sample_skill_md_frontmatter()},
+            {"path": "helper.py", "contents": "print('hi')\nX"}
+        ],
+        "hash": server_hash_v2
+    });
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/download/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&updated_blob))
+        .mount(&server2)
+        .await;
+
+    unsafe { std::env::set_var("SKILLS_DOWNLOAD_URL", server2.uri()); }
+    let src2 = build_blob_source_for_update_test(&server2);
+
+    // Step 3 — update: must succeed despite server hash != D-13 folder hash.
+    let outcome = update(&src2, "ascii-art", &AlwaysCleanScanner, &skills_root, false)
+        .await
+        .expect("update must succeed on divergence (UAT gap 21.8-06)");
+
+    // Step 4 — assert advisory posture preserved all invariants.
+    let lock = SkillLock::load_or_default().unwrap();
+    let entry = lock.get("ascii-art").expect("updated entry");
+
+    // D-14: round-trip on update path.
+    assert_eq!(
+        entry.snapshot_hash, server_hash_v2,
+        "update() MUST round-trip the new server snapshotHash verbatim even on divergence"
+    );
+
+    // D-13: refreshed computed_hash on update path.
+    let disk_hash = ironhermes_hub::compute_folder_hash(&outcome.install_path).unwrap();
+    assert_eq!(
+        disk_hash, entry.computed_hash,
+        "update() MUST refresh entry.computed_hash to match compute_folder_hash(resolved_final)"
+    );
+
+    // Advisory: directory survived.
+    assert!(
+        outcome.install_path.exists(),
+        "update advisory branch MUST NOT cleanup resolved_final on divergence"
     );
 
     restore_env(prev);

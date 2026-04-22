@@ -563,6 +563,84 @@ async fn local_tamper_detection_via_folder_hash() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Test 5c: Regression guard — install succeeds when server hash diverges from
+//          client D-13 hash (UAT gap 21.8-06, ShaMismatch blocker on live installs).
+//          Realigns code with D-14 opaque-hash intent: server hash round-trips
+//          verbatim; local D-13 folder hash remains the drift sentinel; mismatch
+//          is log-only.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Regression guard for UAT gap 21.8-06 (ShaMismatch blocker on live installs).
+// Realigns code with D-14 opaque-hash intent: server hash round-trips verbatim;
+// local D-13 folder hash remains the drift sentinel; mismatch is log-only.
+#[tokio::test]
+async fn install_succeeds_when_server_hash_diverges_from_client_hash() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/.+/.+/git/trees/.+$"))
+        .and(query_param("recursive", "1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_tree_json("ascii-art/SKILL.md")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/.+/.+/.+/ascii-art/SKILL\.md$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sample_skill_md_frontmatter()))
+        .mount(&server)
+        .await;
+
+    // Server returns a hash that will NOT match the locally-computed D-13 folder hash.
+    // On the old strict code this would have failed with ShaMismatch; advisory posture
+    // (21.8-06 G-01) must let the install proceed and round-trip the value verbatim.
+    let server_hash = "server-side-opaque-value-that-does-not-match-d13".to_string();
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/download/.+/.+/.+$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_blob_response_json(&server_hash)),
+        )
+        .mount(&server)
+        .await;
+
+    let hermes_home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::new(&[
+        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
+    ]);
+
+    let src = build_blob_source_pointing_at(&server);
+    let skills_root = hermes_home.path().join("skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    let scanner = AlwaysCleanScanner;
+
+    let outcome = ironhermes_hub::install(&src, "foo/bar/ascii-art", &scanner, &skills_root, true)
+        .await
+        .expect("install must succeed when server hash diverges (advisory posture, UAT gap 21.8-06)");
+
+    let lock = SkillLock::load_or_default().unwrap();
+    let entry = lock.get("ascii-art").expect("lock entry present");
+
+    // D-14: server hash round-trips verbatim even when it doesn't match our D-13 algorithm.
+    assert_eq!(entry.snapshot_hash, server_hash,
+        "D-14 opaque contract: server snapshotHash MUST round-trip verbatim regardless of parity with compute_folder_hash");
+
+    // D-13: local computed hash still matches the on-disk folder.
+    let disk_hash = ironhermes_hub::compute_folder_hash(&outcome.install_path).unwrap();
+    assert_eq!(disk_hash, entry.computed_hash,
+        "D-13: SkillLockEntry.computed_hash MUST equal compute_folder_hash(install_path)");
+
+    // Divergence precondition — if equal, the test is vacuous.
+    assert_ne!(disk_hash, server_hash,
+        "test precondition: server hash MUST differ from client D-13 hash — if equal, this test is vacuous");
+
+    // Advisory posture: install dir survives the (now log-only) mismatch branch.
+    assert!(outcome.install_path.exists(),
+        "advisory branch MUST NOT cleanup the final install path on divergence");
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Test 6: SKILLS_DOWNLOAD_URL override drives the /api/download hop
 // ────────────────────────────────────────────────────────────────────────────
 
