@@ -249,24 +249,27 @@ pub async fn cmd_install(cfg: &Config, identifier: &str) -> anyhow::Result<i32> 
             .find(|s| s.source_id() == "skills-sh")
             .map(|s| s.as_ref())
             .ok_or_else(|| anyhow::anyhow!("skills-sh source not available"))?
-    } else {
-        // GitHub: must look like owner/repo/...
-        if !identifier.contains('/') {
-            eprintln!(
-                "error: unknown identifier format '{}'. Expected owner/repo/path, well-known:..., or skills-sh:...",
-                identifier
-            );
-            return Ok(1);
-        }
+    } else if identifier.contains('/') {
+        // GitHub: owner/repo/... format
         sources
             .iter()
             .find(|s| s.source_id() == "github")
             .map(|s| s.as_ref())
             .ok_or_else(|| anyhow::anyhow!("github source not available"))?
+    } else {
+        // Bare name (e.g. "ascii-art") — resolve via skills-sh registry
+        sources
+            .iter()
+            .find(|s| s.source_id() == "skills-sh")
+            .map(|s| s.as_ref())
+            .ok_or_else(|| anyhow::anyhow!(
+                "skills-sh source not available — try 'skills-sh:{identifier}' or 'owner/repo/path' format"
+            ))?
     };
 
     let scanner = CoreSkillScanner;
-    match hub_install(source, identifier, &scanner, &skills_root).await {
+    // skip_audit=false: CLI does not yet surface --skip-audit (plan 21.8-04).
+    match hub_install(source, identifier, &scanner, &skills_root, false).await {
         Ok(outcome) => {
             println!(
                 "installed '{}' ({}) — trust: {} — hash: {}",
@@ -427,7 +430,8 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32>
             }
         };
 
-        match hub_update(source, skill_name, &scanner, &skills_root).await {
+        // skip_audit=false: CLI does not yet surface --skip-audit (plan 21.8-04).
+        match hub_update(source, skill_name, &scanner, &skills_root, false).await {
             Ok(outcome) => {
                 println!(
                     "updated '{}': {} → {} ({})",

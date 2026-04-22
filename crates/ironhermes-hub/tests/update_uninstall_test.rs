@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use ironhermes_hub::{
     install, uninstall, update, AlwaysBlockedScanner, AlwaysCleanScanner, GitHubAuth,
-    GitHubSource, HubError, HubErrorKind, HubManifest,
+    GitHubSource, HubError, HubErrorKind, SkillLock,
 };
 
 use wiremock::matchers::{method, path};
@@ -114,15 +114,24 @@ async fn update_detects_hash_drift_and_replaces() {
     let source1 = test_github_source(&server1.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome1 = install(
+    let _outcome1 = install(
         &source1,
         "anthropics/skills/tenor-gif",
         &scanner,
         &skills_root,
+        false,
     )
     .await
     .expect("install v1");
-    let old_hash = outcome1.content_hash.clone();
+    // The pre-update hash is the SkillLockEntry.computed_hash (D-13 folder hash),
+    // NOT InstallOutcome.content_hash (the pre-21.8 bundle_content_hash). The
+    // UpdateOutcome surfaces computed_hash so old_hash here must come from the lock.
+    let old_hash = SkillLock::load_or_default()
+        .expect("lock")
+        .get("tenor-gif")
+        .expect("lock entry")
+        .computed_hash
+        .clone();
 
     // Update with v2 (different content -> different hash)
     let server2 = MockServer::start().await;
@@ -134,6 +143,7 @@ async fn update_detects_hash_drift_and_replaces() {
         "tenor-gif",
         &scanner,
         &skills_root,
+        false,
     )
     .await
     .expect("update should succeed");
@@ -143,11 +153,15 @@ async fn update_detects_hash_drift_and_replaces() {
     assert_ne!(update_outcome.old_hash, update_outcome.new_hash, "hashes should differ");
     assert_eq!(update_outcome.scan_verdict, "clean");
 
-    // Verify manifest was updated
-    let manifest = HubManifest::load_or_default().expect("manifest");
-    let entry = &manifest.installed["tenor-gif"];
-    assert_eq!(entry.content_hash, update_outcome.new_hash);
-    assert!(entry.updated_at.is_some(), "updated_at should be set");
+    // Verify skills-lock.json was updated (SkillLockEntry.computed_hash is
+    // the post-rename folder hash matching UpdateOutcome.new_hash).
+    let lock = SkillLock::load_or_default().expect("lock");
+    let entry = lock
+        .get("tenor-gif")
+        .expect("lock entry for tenor-gif should exist");
+    assert_eq!(entry.computed_hash, update_outcome.new_hash);
+    assert_eq!(entry.source, "github");
+    assert_eq!(entry.identifier, "anthropics/skills/tenor-gif");
 
     // Verify files exist
     assert!(update_outcome.install_path.join("SKILL.md").exists());
@@ -176,16 +190,22 @@ async fn update_noop_when_hash_matches() {
     let source1 = test_github_source(&server1.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    install(&source1, "anthropics/skills/tenor-gif", &scanner, &skills_root)
-        .await
-        .expect("install");
+    install(
+        &source1,
+        "anthropics/skills/tenor-gif",
+        &scanner,
+        &skills_root,
+        false,
+    )
+    .await
+    .expect("install");
 
     // Update with same content
     let server2 = MockServer::start().await;
     mount_github_mocks(&server2, tarball).await;
     let source2 = test_github_source(&server2.uri(), HashSet::new());
 
-    let err = update(&source2, "tenor-gif", &scanner, &skills_root)
+    let err = update(&source2, "tenor-gif", &scanner, &skills_root, false)
         .await
         .expect_err("should report already up to date");
 
@@ -215,7 +235,7 @@ async fn update_errors_for_unknown_skill() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let err = update(&source, "nonexistent-skill", &scanner, &skills_root)
+    let err = update(&source, "nonexistent-skill", &scanner, &skills_root, false)
         .await
         .expect_err("should fail");
 
@@ -249,6 +269,7 @@ async fn update_rejects_community_scan_blocked() {
         "anthropics/skills/tenor-gif",
         &clean_scanner,
         &skills_root,
+        false,
     )
     .await
     .expect("install v1");
@@ -264,6 +285,7 @@ async fn update_rejects_community_scan_blocked() {
         "tenor-gif",
         &blocked_scanner,
         &skills_root,
+        false,
     )
     .await
     .expect_err("should be blocked");
@@ -276,10 +298,14 @@ async fn update_rejects_community_scan_blocked() {
         other => panic!("expected ScanBlocked, got: {:?}", other),
     }
 
-    // Verify the old version is still intact (atomic: scan failure = no replace)
-    let manifest = HubManifest::load_or_default().expect("manifest");
-    let entry = &manifest.installed["tenor-gif"];
-    assert_eq!(entry.scan_verdict, "clean", "old scan verdict preserved");
+    // Verify the old version is still intact (atomic: scan failure = no replace).
+    // SkillLock has no scan_verdict column (removed in 21.8) — we assert the
+    // original entry is still registered in the lock.
+    let lock = SkillLock::load_or_default().expect("lock");
+    assert!(
+        lock.get("tenor-gif").is_some(),
+        "old lock entry must remain after failed update (atomicity)"
+    );
 
     restore_env(prev);
 }
@@ -298,7 +324,7 @@ async fn uninstall_removes_dir_and_manifest() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect("install");
     assert!(outcome.install_path.exists());
@@ -308,9 +334,9 @@ async fn uninstall_removes_dir_and_manifest() {
     assert_eq!(un_outcome.name, "tenor-gif");
     assert!(!un_outcome.removed_path.exists(), "directory should be removed");
 
-    // Verify manifest is clean
-    let manifest = HubManifest::load_or_default().expect("manifest");
-    assert!(!manifest.installed.contains_key("tenor-gif"));
+    // Verify skills-lock.json is clean
+    let lock = SkillLock::load_or_default().expect("lock");
+    assert!(lock.get("tenor-gif").is_none());
 
     restore_env(prev);
 }
@@ -348,7 +374,7 @@ async fn uninstall_cleans_empty_parent_category() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect("install");
 

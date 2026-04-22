@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use ironhermes_hub::{
     install, bundle_content_hash, AlwaysBlockedScanner, AlwaysCleanScanner,
-    GitHubAuth, GitHubSource, HubError, HubErrorKind, HubManifest, SkillScanner,
+    GitHubAuth, GitHubSource, HubError, HubErrorKind, SkillLock, SkillScanner,
 };
 
 use wiremock::matchers::{method, path, path_regex};
@@ -83,7 +83,7 @@ async fn install_github_happy_path() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect("install should succeed");
 
@@ -95,15 +95,22 @@ async fn install_github_happy_path() {
     assert_eq!(outcome.scan_verdict, "clean");
     assert!(!outcome.content_hash.is_empty());
 
-    // Verify manifest was written
-    let manifest = HubManifest::load_or_default().expect("manifest load");
-    assert!(manifest.installed.contains_key("tenor-gif"));
-    let entry = &manifest.installed["tenor-gif"];
+    // Verify skills-lock.json was written with the new SkillLock schema.
+    let lock = SkillLock::load_or_default().expect("lock load");
+    let entry = lock
+        .get("tenor-gif")
+        .expect("lock entry for tenor-gif should exist");
     assert_eq!(entry.source, "github");
     assert_eq!(entry.identifier, "anthropics/skills/tenor-gif");
-    assert_eq!(entry.content_hash, outcome.content_hash);
-    assert_eq!(entry.scan_verdict, "clean");
-    assert_eq!(entry.files.len(), 2); // SKILL.md + handler.py
+    assert_eq!(entry.computed_hash.len(), 64, "SHA-256 hex is 64 chars");
+    assert!(
+        entry.snapshot_hash.is_empty(),
+        "github source populates snapshot_hash=None -> empty string in lock"
+    );
+    assert!(
+        !entry.repo_path.is_empty(),
+        "repo_path should be populated from first bundle file"
+    );
 
     restore_env(prev);
 }
@@ -123,12 +130,12 @@ async fn install_rejects_already_installed() {
     let scanner = AlwaysCleanScanner;
 
     // First install succeeds
-    install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect("first install");
 
     // Second install should fail with AlreadyInstalled
-    let err = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let err = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect_err("should fail");
 
@@ -154,7 +161,7 @@ async fn install_community_scan_blocked() {
     let source = test_github_source(&server.uri(), HashSet::new()); // no trusted repos = Community
     let scanner = AlwaysBlockedScanner::new("injection pattern detected");
 
-    let err = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let err = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect_err("should be blocked");
 
@@ -175,9 +182,9 @@ async fn install_community_scan_blocked() {
         assert_eq!(name.to_str().unwrap(), ".hub", "only .hub should exist, found: {:?}", name);
     }
 
-    // Verify manifest has no entry
-    let manifest = HubManifest::load_or_default().expect("manifest load");
-    assert!(!manifest.installed.contains_key("tenor-gif"));
+    // Verify skills-lock.json has no entry
+    let lock = SkillLock::load_or_default().expect("lock load");
+    assert!(lock.get("tenor-gif").is_none());
 
     restore_env(prev);
 }
@@ -199,7 +206,7 @@ async fn install_trusted_scan_warn_but_load() {
     let scanner = AlwaysBlockedScanner::new("suspicious pattern");
 
     // Should succeed despite scan hit because the repo is trusted
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect("trusted install should succeed despite scan hit");
 
@@ -208,10 +215,13 @@ async fn install_trusted_scan_warn_but_load() {
     assert!(outcome.scan_verdict.contains("blocked"));
     assert_eq!(outcome.trust_level, ironhermes_core::SkillSource::Trusted);
 
-    // Verify manifest records the scan verdict
-    let manifest = HubManifest::load_or_default().expect("manifest load");
-    let entry = &manifest.installed["tenor-gif"];
-    assert!(entry.scan_verdict.contains("blocked"));
+    // Verify lock file records the install (SkillLock schema has no scan_verdict —
+    // the scan outcome is asserted via the `InstallOutcome` above).
+    let lock = SkillLock::load_or_default().expect("lock load");
+    let entry = lock
+        .get("tenor-gif")
+        .expect("lock entry for tenor-gif should exist");
+    assert_eq!(entry.source, "github");
 
     restore_env(prev);
 }
@@ -244,7 +254,7 @@ async fn install_failure_leaves_no_partial_state() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let err = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let err = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await;
     assert!(err.is_err(), "fetch failure should propagate");
 
@@ -256,9 +266,9 @@ async fn install_failure_leaves_no_partial_state() {
         }
     }
 
-    // Verify manifest is clean
-    let manifest = HubManifest::load_or_default().expect("manifest load");
-    assert!(manifest.installed.is_empty());
+    // Verify lock file is clean
+    let lock = SkillLock::load_or_default().expect("lock load");
+    assert!(lock.skills.is_empty());
 
     restore_env(prev);
 }
@@ -277,7 +287,7 @@ async fn install_content_hash_matches_bundle_hash() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root)
+    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
         .await
         .expect("install");
 
@@ -318,7 +328,7 @@ async fn install_uses_category_from_frontmatter() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/my-tool", &scanner, &skills_root)
+    let outcome = install(&source, "anthropics/skills/my-tool", &scanner, &skills_root, false)
         .await
         .expect("install");
 
