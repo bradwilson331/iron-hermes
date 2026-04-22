@@ -624,22 +624,39 @@ fn write_bundle_to_dir(dir: &Path, bundle: &SkillBundle) -> Result<(), HubError>
     Ok(())
 }
 
-/// D-20: never call `remove_dir_all` on a path not contained in `env::temp_dir()`.
-/// Missing or unresolvable temp paths are logged and skipped — never allow
-/// `fs::remove_dir_all` to follow a swapped symlink out of `/tmp`.
+/// D-20: never call `remove_dir_all` on a path not contained in a known-safe
+/// root. Two roots are accepted:
+///   - `env::temp_dir()` (traditional tmp-based quarantine)
+///   - `<skills_root>/.hub/quarantine/` (our actual quarantine location; see
+///     `paths::quarantine_dir`). `tempfile::tempdir_in(quarantine_root)`
+///     places the tmp dir here, which is NOT under `env::temp_dir()` on
+///     macOS, so gating on temp_dir alone refused every legitimate cleanup.
+/// Symlink-swap defense is preserved: we still canonicalize and verify
+/// containment before any `remove_dir_all`.
 fn cleanup_quarantine_safely(p: &Path) {
-    match crate::sanitize::assert_temp_contained(p) {
-        Ok(()) => {
-            let _ = std::fs::remove_dir_all(p);
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %p.display(),
-                error = %e,
-                "refusing to remove_dir_all — path not contained in temp_dir (D-20)"
-            );
+    if is_in_accepted_cleanup_root(p) {
+        let _ = std::fs::remove_dir_all(p);
+    } else {
+        tracing::warn!(
+            path = %p.display(),
+            "refusing to remove_dir_all — path not contained in temp_dir or quarantine_dir (D-20)"
+        );
+    }
+}
+
+/// True iff `p` canonicalizes under `env::temp_dir()` OR under the configured
+/// `.hub/quarantine/` root. Either containment satisfies the D-20 symlink-swap
+/// guard because both roots are install-controlled.
+fn is_in_accepted_cleanup_root(p: &Path) -> bool {
+    if crate::sanitize::assert_temp_contained(p).is_ok() {
+        return true;
+    }
+    if let Ok(qroot) = crate::paths::quarantine_dir() {
+        if let Ok(true) = crate::sanitize::is_path_safe(&qroot, p) {
+            return true;
         }
     }
+    false
 }
 
 /// Cleanup of the final install directory on post-rename failure (ShaMismatch).
@@ -923,6 +940,38 @@ mod tests {
         let _ = tmp.keep();
         cleanup_quarantine_safely(&path);
         assert!(!path.exists(), "temp-contained path should be removed");
+    }
+
+    #[test]
+    fn test_cleanup_quarantine_safely_removes_under_quarantine_root() {
+        // Regression test for the macOS false-positive where HERMES_HOME lives
+        // outside env::temp_dir(). The fix accepts paths under
+        // `<skills_root>/.hub/quarantine/` as a second safe root.
+        let fake_home = tempfile::tempdir().unwrap();
+        let prev = std::env::var("HERMES_HOME").ok();
+        unsafe {
+            std::env::set_var("HERMES_HOME", fake_home.path());
+        }
+
+        let qroot = crate::paths::quarantine_dir().unwrap();
+        std::fs::create_dir_all(&qroot).unwrap();
+        let quarantine_tmp = tempfile::tempdir_in(&qroot).unwrap();
+        let path = quarantine_tmp.path().to_path_buf();
+        let _ = quarantine_tmp.keep();
+
+        assert!(path.exists());
+        cleanup_quarantine_safely(&path);
+        assert!(
+            !path.exists(),
+            "path under quarantine_dir() must be cleaned by D-20 gate"
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HERMES_HOME", v),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
+        }
     }
 
     #[test]
