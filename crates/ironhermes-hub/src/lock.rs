@@ -380,3 +380,173 @@ mod tests {
         );
     }
 }
+
+// ============================================================================
+// Migration from Phase 19.1 HubManifest (D-15)
+// ============================================================================
+
+/// D-15 migration outcome — caller logs, but never treats `NothingToMigrate` as an error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MigrationOutcome {
+    NothingToMigrate,
+    /// Count of entries migrated.
+    Migrated(usize),
+}
+
+/// Idempotent one-way migration of `$HERMES_HOME/skills/.hub/lock.json` (19.1 `HubManifest`)
+/// into `$HERMES_HOME/skills-lock.json` (21.8 `SkillLock`).
+///
+/// Guards:
+///   1. If `skills-lock.json` exists AND has ≥1 entry → `NothingToMigrate` (idempotent).
+///   2. If `.hub/lock.json` does not exist → `NothingToMigrate`.
+///   3. On write failure → leave both files; `Err` propagated; re-runs on next call.
+///
+/// Cleanup: after successful `save_atomic`, delete `.hub/lock.json`; `rmdir .hub/` if empty.
+pub fn migrate_from_hub_manifest() -> anyhow::Result<MigrationOutcome> {
+    // Guard 1: skip if new lock already has content.
+    let new_lock = SkillLock::load_or_default()?;
+    if !new_lock.skills.is_empty() {
+        return Ok(MigrationOutcome::NothingToMigrate);
+    }
+
+    // Guard 2: no old manifest to migrate.
+    let manifest_path = crate::paths::manifest_path()?;
+    if !manifest_path.exists() {
+        return Ok(MigrationOutcome::NothingToMigrate);
+    }
+
+    // Read old manifest (one-way).
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let old: crate::manifest::HubManifest = serde_json::from_str(&raw)?;
+    let count = old.installed.len();
+
+    // Map each old entry → SkillLockEntry.
+    let mut new = SkillLock::default();
+    for (_key, entry) in old.installed.into_iter() {
+        let repo_path = entry.files.first().cloned().unwrap_or_default();
+        new.add_or_replace(SkillLockEntry {
+            name: entry.name,
+            source: entry.source,
+            identifier: entry.identifier,
+            repo_path,
+            // backfilled on next `hermes skills update`
+            snapshot_hash: String::new(),
+            // carried from 19.1
+            computed_hash: entry.content_hash,
+            installed_at: entry.installed_at,
+            extras: entry.extras,
+        });
+    }
+
+    // Atomic write of new file.
+    new.save_atomic()?;
+
+    // Cleanup old manifest (only after successful write).
+    let _ = std::fs::remove_file(&manifest_path);
+    if let Some(parent) = manifest_path.parent() {
+        // rmdir — succeeds only if empty
+        let _ = std::fs::remove_dir(parent);
+    }
+
+    Ok(MigrationOutcome::Migrated(count))
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use chrono::Utc;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    static ENV_LOCK_MIG: Mutex<()> = Mutex::new(());
+
+    fn with_test_hermes_home<F: FnOnce(&std::path::Path)>(f: F) {
+        let _guard = ENV_LOCK_MIG.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("HERMES_HOME").ok();
+        unsafe {
+            std::env::set_var("HERMES_HOME", tmp.path());
+        }
+        f(tmp.path());
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HERMES_HOME", v),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
+        }
+    }
+
+    fn write_old_manifest(home: &std::path::Path, entries: Vec<(&str, &str)>) {
+        let hub_dir = home.join("skills").join(".hub");
+        std::fs::create_dir_all(&hub_dir).unwrap();
+        let mut m = crate::manifest::HubManifest::default();
+        for (name, id) in entries {
+            m.installed.insert(
+                name.to_string(),
+                crate::manifest::ManifestEntry {
+                    name: name.to_string(),
+                    source: "skills-sh".to_string(),
+                    identifier: id.to_string(),
+                    content_hash: "old-hash".to_string(),
+                    scan_verdict: "clean".to_string(),
+                    install_path: PathBuf::from("/x"),
+                    files: vec![format!("skills/{name}/SKILL.md")],
+                    installed_at: Utc::now(),
+                    updated_at: None,
+                    metadata: serde_json::Value::Null,
+                    extras: Default::default(),
+                },
+            );
+        }
+        std::fs::write(
+            hub_dir.join("lock.json"),
+            serde_json::to_string_pretty(&m).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migrates_entries_and_deletes_old_manifest() {
+        with_test_hermes_home(|home| {
+            write_old_manifest(home, vec![("zeta", "z"), ("alpha", "a")]);
+            let outcome = migrate_from_hub_manifest().expect("migrate ok");
+            assert_eq!(outcome, MigrationOutcome::Migrated(2));
+
+            let new = SkillLock::load_or_default().unwrap();
+            assert_eq!(new.skills.len(), 2);
+            assert_eq!(new.skills[0].name, "alpha");
+            assert_eq!(new.skills[1].name, "zeta");
+            assert_eq!(new.skills[0].computed_hash, "old-hash");
+            assert_eq!(new.skills[0].snapshot_hash, "");
+
+            // Old manifest gone.
+            assert!(!home.join("skills").join(".hub").join("lock.json").exists());
+        });
+    }
+
+    #[test]
+    fn idempotent_second_run_is_noop() {
+        with_test_hermes_home(|home| {
+            write_old_manifest(home, vec![("a", "a")]);
+            let _ = migrate_from_hub_manifest().unwrap();
+            let snapshot = std::fs::read_to_string(home.join("skills-lock.json")).unwrap();
+
+            // Second run must not touch the file and must report NothingToMigrate.
+            let outcome2 = migrate_from_hub_manifest().unwrap();
+            assert_eq!(outcome2, MigrationOutcome::NothingToMigrate);
+
+            let after = std::fs::read_to_string(home.join("skills-lock.json")).unwrap();
+            assert_eq!(
+                snapshot, after,
+                "file must be byte-identical after idempotent 2nd run"
+            );
+        });
+    }
+
+    #[test]
+    fn no_source_returns_nothing_to_migrate() {
+        with_test_hermes_home(|_home| {
+            let outcome = migrate_from_hub_manifest().unwrap();
+            assert_eq!(outcome, MigrationOutcome::NothingToMigrate);
+        });
+    }
+}

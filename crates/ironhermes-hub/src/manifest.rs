@@ -1,3 +1,12 @@
+//! Phase 19.1 HubManifest — DEPRECATED in 21.8.
+//!
+//! Retained ONLY for one-way migration to `SkillLock` (see
+//! `lock::migrate_from_hub_manifest`). `HubManifest::save()` is `#[deprecated]` —
+//! no new call sites permitted. Read path (`HubManifest::load_or_default`) stays
+//! functional for migration.
+//!
+//! Scheduled for deletion in phase 21.9 once 19.1 → 21.8 migration has settled.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,6 +47,9 @@ impl HubManifest {
         Ok(serde_json::from_str(&std::fs::read_to_string(p)?)?)
     }
 
+    #[deprecated(
+        note = "Use SkillLock::save_atomic. HubManifest is migration-read-only in 21.8."
+    )]
     pub fn save(&self) -> anyhow::Result<()> {
         let p = crate::paths::manifest_path()?;
         if let Some(parent) = p.parent() {
@@ -51,6 +63,7 @@ impl HubManifest {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // HubManifest::save is deprecated but tests still exercise it for migration parity.
 mod tests {
     use super::*;
 

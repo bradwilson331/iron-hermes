@@ -4,6 +4,7 @@
 //! Publish flows are deferred per D-12; this crate covers install / search /
 //! update / uninstall / trust-management only.
 
+pub mod audit;
 pub mod auth;
 pub mod blob;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod source;
 pub mod tarball;
 pub mod well_known;
 
+pub use audit::{fetch_audit, AuditData, PartnerAudit};
 pub use auth::GitHubAuth;
 pub use blob::{BlobSkill, RepoTree, SkillDownloadResponse, SkillSnapshotFile, SkillsShBlobSource, TreeEntry};
 pub use error::{HubError, HubErrorKind};
@@ -27,7 +29,7 @@ pub use installer::{
     bundle_content_hash, install, uninstall, update, InstallOutcome, UninstallOutcome,
     UpdateOutcome,
 };
-pub use lock::{compute_folder_hash, SkillLock, SkillLockEntry};
+pub use lock::{compute_folder_hash, migrate_from_hub_manifest, MigrationOutcome, SkillLock, SkillLockEntry};
 pub use manifest::{HubManifest, ManifestEntry};
 pub use sanitize::{
     assert_temp_contained, is_contained_in, is_path_safe, sanitize_metadata, sanitize_name,
