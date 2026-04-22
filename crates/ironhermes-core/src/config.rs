@@ -86,6 +86,11 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub custom_providers: Vec<CustomProviderConfig>,
+    /// MCP server configurations (Phase 21.2, D-21).
+    /// Stored as raw YAML values to avoid circular dependency (ironhermes-mcp -> ironhermes-core).
+    /// Parsed into McpServerConfig by ironhermes-mcp at the integration layer.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, serde_yaml::Value>,
 }
 
 // =============================================================================
@@ -971,6 +976,61 @@ model:
         let compression = &config.model.roles["compression"];
         assert_eq!(compression.provider, "main");
         assert!(compression.model.is_none());
+    }
+
+    // =========================================================================
+    // Phase 21.2 Plan 01: mcp_servers field round-trip tests (D-21)
+    // =========================================================================
+
+    #[test]
+    fn test_mcp_servers_config_round_trip() {
+        let yaml = r#"
+mcp_servers:
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+  filesystem:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 2);
+        assert!(config.mcp_servers.contains_key("github"));
+        assert!(config.mcp_servers.contains_key("filesystem"));
+    }
+
+    #[test]
+    fn test_mcp_servers_defaults_to_empty_map() {
+        // Backward compat: existing config.yaml files without mcp_servers must parse cleanly.
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.mcp_servers.is_empty(),
+            "mcp_servers should default to empty HashMap when absent"
+        );
+    }
+
+    #[test]
+    fn test_mcp_servers_round_trips_through_serde() {
+        let yaml = r#"
+mcp_servers:
+  myserver:
+    url: "https://mcp.example.com/v1"
+    timeout: 30
+    enabled: false
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        // Serialize and deserialize again
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.mcp_servers.len(), 1);
+        assert!(reparsed.mcp_servers.contains_key("myserver"));
     }
 
     // =========================================================================
