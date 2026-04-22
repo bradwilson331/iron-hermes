@@ -669,3 +669,219 @@ async fn user_agent_advertises_openclaw_ride() {
         "D-22 requires openclaw ride tag in UA: {ua}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test 8: Bare-name resolution — `install ascii-art` hits /api/search first
+// ────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn install_bare_name_resolves_via_search() {
+    let server = MockServer::start().await;
+
+    // /api/search?q=ascii-art → returns canonical id (owner/repo/slug).
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .and(query_param("q", "ascii-art"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "query": "ascii-art",
+            "skills": [
+                {"id": "foo/bar/ascii-art", "skillId": "ascii-art", "name": "ascii-art"}
+            ],
+            "count": 1
+        })))
+        .mount(&server)
+        .await;
+
+    // Subsequent three hops work as normal once the bare name is resolved.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/.+/.+/git/trees/.+$"))
+        .and(query_param("recursive", "1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_tree_json("ascii-art/SKILL.md")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/.+/.+/.+/ascii-art/SKILL\.md$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sample_skill_md_frontmatter()))
+        .mount(&server)
+        .await;
+    let server_hash = expected_happy_path_hash();
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/download/.+/.+/.+$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_blob_response_json(&server_hash)),
+        )
+        .mount(&server)
+        .await;
+
+    let hermes_home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::new(&[
+        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
+    ]);
+
+    let src = build_blob_source_pointing_at(&server);
+    let skills_root = hermes_home.path().join("skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    let scanner = AlwaysCleanScanner;
+
+    let outcome = ironhermes_hub::install(&src, "ascii-art", &scanner, &skills_root, true)
+        .await
+        .expect("bare-name install must succeed");
+    assert_eq!(outcome.name, "ascii-art");
+
+    // Confirm /api/search was actually called exactly once.
+    let requests = server.received_requests().await.unwrap();
+    let search_count = requests
+        .iter()
+        .filter(|r| r.url.path() == "/api/search")
+        .count();
+    assert_eq!(search_count, 1, "bare name must hit /api/search once; got {search_count}");
+}
+
+#[tokio::test]
+async fn install_bare_name_prefers_exact_match_over_fuzzy() {
+    let server = MockServer::start().await;
+
+    // /api/search returns a fuzzy hit FIRST (higher installs) then the exact
+    // hit — the resolver must pick the exact one by skillId/name.
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .and(query_param("q", "ascii-art"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "query": "ascii-art",
+            "skills": [
+                {"id": "other/repo/ascii-art-diagram-creator", "skillId": "ascii-art-diagram-creator", "name": "ascii-art-diagram-creator"},
+                {"id": "foo/bar/ascii-art", "skillId": "ascii-art", "name": "ascii-art"}
+            ],
+            "count": 2
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/foo/bar/git/trees/.+$"))
+        .and(query_param("recursive", "1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_tree_json("ascii-art/SKILL.md")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/foo/bar/.+/ascii-art/SKILL\.md$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sample_skill_md_frontmatter()))
+        .mount(&server)
+        .await;
+    let server_hash = expected_happy_path_hash();
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/download/foo/bar/.+$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sample_blob_response_json(&server_hash)),
+        )
+        .mount(&server)
+        .await;
+
+    let hermes_home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::new(&[
+        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
+    ]);
+
+    let src = build_blob_source_pointing_at(&server);
+    let skills_root = hermes_home.path().join("skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    let scanner = AlwaysCleanScanner;
+
+    let outcome = ironhermes_hub::install(&src, "ascii-art", &scanner, &skills_root, true)
+        .await
+        .expect("exact-match preference must route to foo/bar/ascii-art");
+    assert_eq!(outcome.name, "ascii-art");
+
+    // Confirm trees API was called for foo/bar (exact hit) not other/repo (fuzzy hit).
+    let requests = server.received_requests().await.unwrap();
+    let trees_path = requests
+        .iter()
+        .find(|r| r.url.path().contains("/git/trees/"))
+        .map(|r| r.url.path().to_string())
+        .expect("trees API must be called");
+    assert!(
+        trees_path.contains("/foo/bar/"),
+        "expected trees call on foo/bar (exact hit); got {trees_path}"
+    );
+}
+
+#[tokio::test]
+async fn install_bare_name_not_found_returns_error() {
+    let server = MockServer::start().await;
+
+    // Empty search results → NotFound.
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .and(query_param("q", "does-not-exist"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "query": "does-not-exist",
+            "skills": [],
+            "count": 0
+        })))
+        .mount(&server)
+        .await;
+
+    let hermes_home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::new(&[
+        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
+    ]);
+
+    let src = build_blob_source_pointing_at(&server);
+    let skills_root = hermes_home.path().join("skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    let scanner = AlwaysCleanScanner;
+
+    let err = ironhermes_hub::install(&src, "does-not-exist", &scanner, &skills_root, true)
+        .await
+        .expect_err("empty search hits must surface as NotFound");
+    match err {
+        HubError::Typed { kind: HubErrorKind::NotFound, .. } => {}
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn install_bare_name_rejects_unsafe_id_from_search() {
+    let server = MockServer::start().await;
+
+    // Registry returns a path-traversal-shaped id — must be rejected before any
+    // downstream HTTP.
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .and(query_param("q", "evil"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "query": "evil",
+            "skills": [
+                {"id": "../../../etc/passwd", "skillId": "evil", "name": "evil"}
+            ],
+            "count": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let hermes_home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::new(&[
+        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
+    ]);
+
+    let src = build_blob_source_pointing_at(&server);
+    let skills_root = hermes_home.path().join("skills");
+    std::fs::create_dir_all(&skills_root).unwrap();
+    let scanner = AlwaysCleanScanner;
+
+    let err = ironhermes_hub::install(&src, "evil", &scanner, &skills_root, true)
+        .await
+        .expect_err("unsafe id must be rejected");
+    match err {
+        HubError::Typed { kind: HubErrorKind::InvalidIdentifier, .. } => {}
+        other => panic!("expected InvalidIdentifier, got {other:?}"),
+    }
+}

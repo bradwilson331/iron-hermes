@@ -119,6 +119,25 @@ pub struct SkillDownloadResponse {
     pub hash: String, // maps to snapshotHash in the lock file (D-14)
 }
 
+/// Single hit returned from `/api/search?q=<name>`. `id` is `"owner/repo/slug"`.
+/// `skill_id` and `name` are used to prefer exact-name matches over fuzzy ones
+/// when the user types a bare skill name.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillSearchHit {
+    pub id: String,
+    #[serde(rename = "skillId", default)]
+    pub skill_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Response shape for `/api/search?q=<name>` (skills.sh fuzzy search).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillSearchResponse {
+    #[serde(default)]
+    pub skills: Vec<SkillSearchHit>,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlobSkill {
     pub name: String,
@@ -220,12 +239,21 @@ impl SkillsShBlobSource {
     // frontmatter → extract `name` → compute slug → fetch /api/download → sanitize → return.
     #[tracing::instrument(skip(self), fields(identifier))]
     async fn fetch_blob_skill(&self, identifier: &str) -> Result<BlobSkill, HubError> {
+        // Bare-name resolution: if identifier has no '/', look it up via skills.sh
+        // /api/search?q=<name> and take the top hit's `id` (owner/repo/slug).
+        // This gives `hermes skills install ascii-art` parity with the Python tool.
+        let resolved = if identifier.contains('/') {
+            identifier.to_string()
+        } else {
+            self.resolve_bare_name(identifier).await?
+        };
+
         // Parse identifier: "owner/repo/skill_path" (at least 3 components).
-        let parts: Vec<&str> = identifier.splitn(3, '/').collect();
+        let parts: Vec<&str> = resolved.splitn(3, '/').collect();
         if parts.len() < 3 {
             return Err(typed(
                 HubErrorKind::InvalidIdentifier,
-                format!("identifier must be 'owner/repo/skill_path', got: {identifier}"),
+                format!("identifier must be 'owner/repo/skill_path', got: {resolved}"),
             ));
         }
         let owner = parts[0];
@@ -236,23 +264,24 @@ impl SkillsShBlobSource {
         // Hop 1: GitHub Trees API
         let tree = self.fetch_repo_tree(&owner_repo, None).await?;
 
-        // Locate the SKILL.md file within the requested skill path.
+        // Locate the SKILL.md file within the requested skill path. The
+        // skills.sh `id` shape `owner/repo/slug` doesn't always map to a
+        // directory: single-skill repos keep `SKILL.md` at root, multi-skill
+        // repos nest under arbitrary prefixes (e.g.
+        // `optional-skills/creative/ascii-video/`, `cli-tool/components/skills/<cat>/<slug>/`).
+        // Walk the tree and pick the best match by priority:
+        //   1. exact `<folder>/SKILL.md`
+        //   2. shallowest `*/<folder>/SKILL.md`
+        //   3. root `SKILL.md`
         let folder_norm = skill_path.trim_end_matches('/').replace('\\', "/");
-        let skill_md_path = if folder_norm.is_empty() {
-            "SKILL.md".to_string()
-        } else {
-            format!("{folder_norm}/SKILL.md")
-        };
-        let skill_md_entry = tree
-            .tree
-            .iter()
-            .find(|e| e.entry_type == "blob" && e.path == skill_md_path)
-            .ok_or_else(|| {
-                typed(
-                    HubErrorKind::NotFound,
-                    format!("SKILL.md not found at '{skill_md_path}' in {owner_repo}"),
-                )
-            })?;
+        let skill_md_entry = find_skill_md_in_tree(&tree.tree, &folder_norm).ok_or_else(|| {
+            typed(
+                HubErrorKind::NotFound,
+                format!(
+                    "SKILL.md not found for slug '{folder_norm}' in {owner_repo}"
+                ),
+            )
+        })?;
 
         // Hop 2: raw.githubusercontent
         let raw_content = self
@@ -453,6 +482,84 @@ impl SkillsShBlobSource {
         with_one_retry(op).await
     }
 
+    /// Build the `/api/search?q=<query>` URL against the configured download base.
+    pub(crate) fn build_search_url(&self, query: &str) -> String {
+        format!(
+            "{}/api/search?q={}",
+            self.download_base_url.trim_end_matches('/'),
+            urlencoding(query),
+        )
+    }
+
+    /// Resolve a bare skill name (e.g. `ascii-art`) to a canonical
+    /// `owner/repo/slug` identifier via skills.sh `/api/search?q=<name>`.
+    ///
+    /// Returns the top hit's `id`. Errors with `NotFound` if no hits.
+    /// The returned id is validated to be exactly three slash-separated
+    /// segments of URL-safe characters — defense-in-depth so a compromised
+    /// registry can't inject a traversal-shaped identifier downstream.
+    async fn resolve_bare_name(&self, query: &str) -> Result<String, HubError> {
+        if query.is_empty() {
+            return Err(typed(
+                HubErrorKind::InvalidIdentifier,
+                "bare skill name must be non-empty",
+            ));
+        }
+        let url = self.build_search_url(query);
+        let http = self.http.clone();
+
+        let op = || {
+            let url = url.clone();
+            let http = http.clone();
+            async move {
+                let resp = http.get(&url).send().await.map_err(HubError::Reqwest)?;
+                let status = resp.status();
+                if !status.is_success() {
+                    return Err(typed(
+                        HubErrorKind::Network,
+                        format!("GET {url} returned {status}"),
+                    ));
+                }
+                resp.json::<SkillSearchResponse>()
+                    .await
+                    .map_err(HubError::Reqwest)
+            }
+        };
+
+        let body = with_one_retry(op).await?;
+        // Prefer a hit whose skillId or name matches the query exactly over the
+        // first fuzzy hit. skills.sh ranks by install count, so a popular hit
+        // for a *different* skill can outrank the exact name the user typed.
+        let id = body
+            .skills
+            .iter()
+            .find(|h| h.skill_id == query || h.name == query)
+            .or_else(|| body.skills.first())
+            .map(|h| h.id.clone())
+            .ok_or_else(|| {
+                typed(
+                    HubErrorKind::NotFound,
+                    format!("no skill matched bare name '{query}' on skills.sh"),
+                )
+            })?;
+
+        let segments: Vec<&str> = id.split('/').collect();
+        let safe = segments.len() == 3
+            && segments.iter().all(|s| {
+                !s.is_empty()
+                    && s.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+                    })
+            });
+        if !safe {
+            return Err(typed(
+                HubErrorKind::InvalidIdentifier,
+                format!("search returned unsafe id '{id}' for '{query}'"),
+            ));
+        }
+        Ok(id)
+    }
+
     /// Hop 3: skills.sh /api/download path-based URL.
     async fn fetch_skill_download(
         &self,
@@ -509,6 +616,41 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+/// Locate the best SKILL.md entry in a GitHub tree for the given skill slug.
+///
+/// Matching priority (first hit wins):
+///   1. `<folder>/SKILL.md` direct
+///   2. Shallowest `*/<folder>/SKILL.md` — handles deep nesting like
+///      `optional-skills/creative/ascii-video/SKILL.md` or
+///      `cli-tool/components/skills/ai-research/excalidraw/SKILL.md`
+///   3. Root `SKILL.md` — single-skill repos like `neethanwu/ascii-art`
+///
+/// Returns `None` if the tree contains no SKILL.md at all.
+pub(crate) fn find_skill_md_in_tree<'a>(
+    tree: &'a [TreeEntry],
+    folder: &str,
+) -> Option<&'a TreeEntry> {
+    let blobs = || tree.iter().filter(|e| e.entry_type == "blob");
+
+    if !folder.is_empty() {
+        let direct = format!("{folder}/SKILL.md");
+        if let Some(e) = blobs().find(|e| e.path == direct) {
+            return Some(e);
+        }
+
+        let needle = format!("/{folder}/SKILL.md");
+        let mut nested: Vec<&TreeEntry> = blobs()
+            .filter(|e| e.path.ends_with(&needle))
+            .collect();
+        if !nested.is_empty() {
+            nested.sort_by_key(|e| e.path.matches('/').count());
+            return nested.first().copied();
+        }
+    }
+
+    blobs().find(|e| e.path == "SKILL.md")
 }
 
 /// Parse SKILL.md frontmatter; return `(name, description, metadata)` or error if missing.
@@ -712,6 +854,57 @@ mod tests {
     }
 
     #[test]
+    fn build_search_url_is_query_string_based() {
+        let s = SkillsShBlobSource::new(fake_github());
+        let url = s.build_search_url("ascii-art");
+        assert!(url.ends_with("/api/search?q=ascii-art"), "got {url}");
+    }
+
+    #[test]
+    fn build_search_url_encodes_unsafe_chars() {
+        let s = SkillsShBlobSource::new(fake_github());
+        let url = s.build_search_url("foo bar/baz");
+        // space -> %20, slash -> %2F
+        assert!(url.ends_with("/api/search?q=foo%20bar%2Fbaz"), "got {url}");
+    }
+
+    #[test]
+    fn skill_search_response_deserializes() {
+        let j = r#"{"query":"ascii-art","skills":[{"id":"neethanwu/ascii-art/ascii-art","skillId":"ascii-art","name":"ascii-art","installs":31,"source":"neethanwu/ascii-art"}],"count":1}"#;
+        let r: SkillSearchResponse = serde_json::from_str(j).unwrap();
+        assert_eq!(r.skills.len(), 1);
+        assert_eq!(r.skills[0].id, "neethanwu/ascii-art/ascii-art");
+        assert_eq!(r.skills[0].skill_id, "ascii-art");
+        assert_eq!(r.skills[0].name, "ascii-art");
+    }
+
+    #[test]
+    fn skill_search_response_defaults_missing_name_fields() {
+        // Degraded response: only `id` present — skill_id/name default to empty.
+        let j = r#"{"query":"x","skills":[{"id":"a/b/c"}],"count":1}"#;
+        let r: SkillSearchResponse = serde_json::from_str(j).unwrap();
+        assert_eq!(r.skills[0].id, "a/b/c");
+        assert_eq!(r.skills[0].skill_id, "");
+        assert_eq!(r.skills[0].name, "");
+    }
+
+    #[test]
+    fn skill_search_response_deserializes_empty() {
+        let j = r#"{"query":"nothing","skills":[],"count":0}"#;
+        let r: SkillSearchResponse = serde_json::from_str(j).unwrap();
+        assert!(r.skills.is_empty());
+    }
+
+    #[test]
+    fn skill_search_response_tolerates_missing_skills_field() {
+        // Defensive: if skills.sh ever omits the field (degraded response),
+        // `#[serde(default)]` gives us an empty Vec rather than a parse error.
+        let j = r#"{"query":"x","count":0}"#;
+        let r: SkillSearchResponse = serde_json::from_str(j).unwrap();
+        assert!(r.skills.is_empty());
+    }
+
+    #[test]
     fn skill_download_response_deserializes() {
         let j = r#"{"files":[{"path":"SKILL.md","contents":"---\nname:x\n---\n"}],"hash":"abc"}"#;
         let r: SkillDownloadResponse = serde_json::from_str(j).unwrap();
@@ -851,6 +1044,97 @@ mod tests {
     fn parse_frontmatter_fields_missing_closing_delim_errors() {
         let md = "---\nname: x\n";
         assert!(parse_frontmatter_fields(md).is_err());
+    }
+
+    fn blob(path: &str) -> TreeEntry {
+        TreeEntry {
+            path: path.to_string(),
+            entry_type: "blob".to_string(),
+            sha: "0".to_string(),
+            size: Some(0),
+        }
+    }
+
+    #[test]
+    fn find_skill_md_direct_match() {
+        let tree = vec![
+            blob("README.md"),
+            blob("ascii-art/SKILL.md"),
+            blob("ascii-art/helper.py"),
+        ];
+        let got = find_skill_md_in_tree(&tree, "ascii-art").unwrap();
+        assert_eq!(got.path, "ascii-art/SKILL.md");
+    }
+
+    #[test]
+    fn find_skill_md_deeply_nested() {
+        // Matches the real nousresearch/hermes-agent layout.
+        let tree = vec![
+            blob("README.md"),
+            blob("optional-skills/creative/ascii-video/SKILL.md"),
+            blob("optional-skills/creative/ascii-video/helper.py"),
+        ];
+        let got = find_skill_md_in_tree(&tree, "ascii-video").unwrap();
+        assert_eq!(got.path, "optional-skills/creative/ascii-video/SKILL.md");
+    }
+
+    #[test]
+    fn find_skill_md_root_fallback_for_single_skill_repo() {
+        // Matches the real neethanwu/ascii-art layout (SKILL.md at root, slug
+        // matches repo name — no `<slug>/` subdir).
+        let tree = vec![
+            blob("SKILL.md"),
+            blob("scripts/convert.py"),
+        ];
+        let got = find_skill_md_in_tree(&tree, "ascii-art").unwrap();
+        assert_eq!(got.path, "SKILL.md");
+    }
+
+    #[test]
+    fn find_skill_md_prefers_shallowest_nested_match() {
+        let tree = vec![
+            blob("SKILL.md"),
+            blob("a/b/c/d/ascii-video/SKILL.md"),
+            blob("x/ascii-video/SKILL.md"),
+        ];
+        let got = find_skill_md_in_tree(&tree, "ascii-video").unwrap();
+        assert_eq!(
+            got.path, "x/ascii-video/SKILL.md",
+            "shallowest nested match wins over deeper"
+        );
+    }
+
+    #[test]
+    fn find_skill_md_returns_none_when_absent() {
+        let tree = vec![blob("README.md"), blob("src/main.rs")];
+        assert!(find_skill_md_in_tree(&tree, "ascii-art").is_none());
+    }
+
+    #[test]
+    fn find_skill_md_direct_beats_nested() {
+        let tree = vec![
+            blob("ascii-art/SKILL.md"),
+            blob("other/ascii-art/SKILL.md"),
+        ];
+        let got = find_skill_md_in_tree(&tree, "ascii-art").unwrap();
+        assert_eq!(got.path, "ascii-art/SKILL.md", "direct match must win");
+    }
+
+    #[test]
+    fn find_skill_md_ignores_tree_entries() {
+        // Directory entries (type = "tree") with the right path must not match —
+        // only blobs count. The real GitHub trees API returns both.
+        let tree = vec![
+            TreeEntry {
+                path: "ascii-art/SKILL.md".to_string(),
+                entry_type: "tree".to_string(),
+                sha: "0".to_string(),
+                size: None,
+            },
+            blob("SKILL.md"),
+        ];
+        let got = find_skill_md_in_tree(&tree, "ascii-art").unwrap();
+        assert_eq!(got.path, "SKILL.md", "tree-type entries are skipped");
     }
 
     #[test]
