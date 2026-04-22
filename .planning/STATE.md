@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 21.2-05-PLAN.md
-last_updated: "2026-04-22T20:02:18.254Z"
+status: executing
+stopped_at: Completed 21.2-06-PLAN.md
+last_updated: "2026-04-22T21:06:44.656Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
-  completed_phases: 11
-  total_plans: 39
-  completed_plans: 39
-  percent: 100
+  completed_phases: 10
+  total_plans: 41
+  completed_plans: 40
+  percent: 98
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
+Plan: 2 of 7
+Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [██████████] 100%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -115,6 +115,7 @@ Progress: [██████████] 100%
 | Phase 21.2-mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl P03 | 5 | 2 tasks | 7 files |
 | Phase 21.2 P04 | 9 | 2 tasks | 9 files |
 | Phase 21.2 P05 | 4 | 2 tasks | 2 files |
+| Phase 21.2 P06 | 4 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -246,6 +247,9 @@ Recent decisions affecting current work:
 - build_mcp_manager() helper extracted — DRY across run_chat, run_single, run_gateway wiring sites
 - colored crate limitation: pad raw string before colorizing ({:<N} format width requires &str/String, not ColoredString)
 - mcp_config.rs module in ironhermes-cli: all 5 hermes mcp subcommands live here (D-14)
+- Phase 21.2 Plan 06: attempt_connect_and_list_with_timeout wraps tokio::time::timeout around config.connect_timeout (default 60s); used at all 3 call sites (cmd_add/cmd_test/cmd_configure) closing GAP-1
+- Phase 21.2 Plan 06: RetrySaveAbort 3-way prompt defaults to Abort (return Ok(()) with 'Cancelled.' dimmed before save); SaveAnyway keeps legacy vec![],0 escape hatch but requires explicit consent; Retry re-enters the connect loop — closes GAP-2
+- Phase 21.2 Plan 06: literal-copy regression tests via include_str! lock user-facing prompt strings against silent drift (GAP-2 + GAP-3 regression tests)
 
 ### Roadmap Evolution
 
@@ -275,8 +279,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T20:02:13.662Z
-Stopped at: Completed 21.2-05-PLAN.md
+Last session: 2026-04-22T21:06:31.253Z
+Stopped at: Completed 21.2-06-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
