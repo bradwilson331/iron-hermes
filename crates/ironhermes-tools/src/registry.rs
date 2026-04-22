@@ -40,6 +40,23 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Register a tool dynamically (e.g., from MCP discovery). Per D-10.
+    /// Functionally identical to register() -- the name distinction is semantic
+    /// (dynamic = runtime MCP vs static = startup built-in).
+    pub fn register_dynamic(&mut self, tool: Box<dyn Tool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Remove all tools whose name starts with `{server_name}__`.
+    /// Called on /reload-mcp to clear one server's tools before re-registering.
+    /// Returns the number of tools removed.
+    pub fn unregister_by_prefix(&mut self, server_name: &str) -> usize {
+        let prefix = format!("{server_name}__");
+        let before = self.tools.len();
+        self.tools.retain(|name, _| !name.starts_with(&prefix));
+        before - self.tools.len()
+    }
+
     /// Add a guardrail hook that will be checked before every tool dispatch.
     /// Guardrails are checked in registration order.
     /// Per D-05: register BlocklistGuardrail first, custom trait hooks second.
@@ -386,6 +403,81 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(MockTool { tool_name }));
         registry
+    }
+
+    // ---------------------------------------------------------------------------
+    // register_dynamic tests (D-10)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_register_dynamic_inserts_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "dyn_tool" }));
+        assert!(registry.get("dyn_tool").is_some(), "dynamically registered tool must be retrievable by name");
+    }
+
+    #[test]
+    fn test_register_dynamic_overwrites_existing() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "my_tool" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "my_tool" }));
+        // Should still be exactly one tool named "my_tool"
+        let names = registry.list_tools();
+        let count = names.iter().filter(|&&n| n == "my_tool").count();
+        assert_eq!(count, 1, "register_dynamic must overwrite, not duplicate");
+    }
+
+    // ---------------------------------------------------------------------------
+    // unregister_by_prefix tests (D-10)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_unregister_by_prefix_removes_matching_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "server__tool_a" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "server__tool_b" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "other__tool_c" }));
+
+        let removed = registry.unregister_by_prefix("server");
+        assert_eq!(removed, 2, "must remove both 'server__' prefixed tools");
+        assert!(registry.get("server__tool_a").is_none(), "server__tool_a must be removed");
+        assert!(registry.get("server__tool_b").is_none(), "server__tool_b must be removed");
+    }
+
+    #[test]
+    fn test_unregister_by_prefix_does_not_remove_other_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "server__tool_a" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "other__tool_c" }));
+
+        registry.unregister_by_prefix("server");
+        assert!(registry.get("other__tool_c").is_some(), "other__tool_c must NOT be removed");
+    }
+
+    #[test]
+    fn test_unregister_by_prefix_returns_count() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "srv__a" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "srv__b" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "srv__c" }));
+
+        let count = registry.unregister_by_prefix("srv");
+        assert_eq!(count, 3, "unregister_by_prefix must return count of removed tools");
+    }
+
+    #[test]
+    fn test_unregister_by_prefix_empty_registry_returns_zero() {
+        let mut registry = ToolRegistry::new();
+        let count = registry.unregister_by_prefix("server");
+        assert_eq!(count, 0, "unregister_by_prefix on empty registry must return 0");
+    }
+
+    #[test]
+    fn test_unregister_by_prefix_no_match_returns_zero() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "other__tool" }));
+        let count = registry.unregister_by_prefix("x");
+        assert_eq!(count, 0, "unregister_by_prefix with no matching prefix must return 0");
     }
 
     // ---------------------------------------------------------------------------
