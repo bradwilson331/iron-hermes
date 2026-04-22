@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 21.2-04-PLAN.md (/reload-mcp handler + McpManager CLI wiring)
-last_updated: "2026-04-22T19:55:47.329Z"
+status: verifying
+stopped_at: Completed 21.2-05-PLAN.md
+last_updated: "2026-04-22T20:02:18.254Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 39
-  completed_plans: 38
-  percent: 97
+  completed_plans: 39
+  percent: 100
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-22
 
-Progress: [██████████] 97%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -114,6 +114,7 @@ Progress: [██████████] 97%
 | Phase 21.2 P02 | 8 | 2 tasks | 9 files |
 | Phase 21.2-mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl P03 | 5 | 2 tasks | 7 files |
 | Phase 21.2 P04 | 9 | 2 tasks | 9 files |
+| Phase 21.2 P05 | 4 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -243,6 +244,8 @@ Recent decisions affecting current work:
 - McpReloader trait in ironhermes-core/commands/context.rs (not ironhermes-mcp) avoids circular dep; matches MemoryManagerHandle pattern from Phase 20
 - dyn McpReloader coercion before reload() call to disambiguate from McpManager::reload(new_configs) concrete method
 - build_mcp_manager() helper extracted — DRY across run_chat, run_single, run_gateway wiring sites
+- colored crate limitation: pad raw string before colorizing ({:<N} format width requires &str/String, not ColoredString)
+- mcp_config.rs module in ironhermes-cli: all 5 hermes mcp subcommands live here (D-14)
 
 ### Roadmap Evolution
 
@@ -272,8 +275,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T19:55:47.325Z
-Stopped at: Completed 21.2-04-PLAN.md (/reload-mcp handler + McpManager CLI wiring)
+Last session: 2026-04-22T20:02:13.662Z
+Stopped at: Completed 21.2-05-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
