@@ -25,6 +25,10 @@ pub use installer::{
     UpdateOutcome,
 };
 pub use manifest::{HubManifest, ManifestEntry};
+pub use sanitize::{
+    assert_temp_contained, is_contained_in, is_path_safe, sanitize_metadata, sanitize_name,
+    sanitize_subpath, strict_yaml_delimiter, strip_terminal_escapes, to_skill_slug,
+};
 pub use scanner::{
     enforce_trust_gate, AlwaysBlockedScanner, AlwaysCleanScanner, CoreSkillScanner, ScanVerdict,
     SkillScanner,
