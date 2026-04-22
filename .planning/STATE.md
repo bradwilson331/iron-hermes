@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 21.6-02-PLAN.md
-last_updated: "2026-04-21T22:17:03.877Z"
-last_activity: 2026-04-21
+status: verifying
+stopped_at: Completed 21.6-03-PLAN.md
+last_updated: "2026-04-22T01:50:48.708Z"
+last_activity: 2026-04-22
 progress:
   total_phases: 12
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 33
-  completed_plans: 27
-  percent: 82
+  completed_plans: 28
+  percent: 85
 ---
 
 # Project State
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 21.6 (port-deployment-setup-files-from-hermes-agent) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
-Last activity: 2026-04-21
+Status: Phase complete — ready for verification
+Last activity: 2026-04-22
 
 Progress: [██████████] 100%
 
@@ -101,6 +101,7 @@ Progress: [██████████] 100%
 | Phase 21.5 P04 | 2min | 1 tasks | 1 files |
 | Phase 21.6 P01 | 5 | 2 tasks | 5 files |
 | Phase 21.6 P02 | 13 | 2 tasks | 2 files |
+| Phase 21.6 P03 | 4 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -194,6 +195,8 @@ Recent decisions affecting current work:
 - [Phase 21.6]: gosu from tianon/gosu:1.19 image (not apt) per RESEARCH.md anti-pattern
 - [Phase 21.6]: debian:bookworm-slim over distroless (needs python3 + bash for entrypoint)
 - [Phase 21.6]: chmod 600 on .env in entrypoint for credential protection (T-21.6-06)
+- [Phase 21.6]: install.sh downloads from GitHub Releases first, falls back to cargo install for end users
+- [Phase 21.6]: setup-ironhermes.sh uses ln -sf symlink for rebuild-friendly developer workflow
 
 ### Roadmap Evolution
 
@@ -222,6 +225,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-21T22:17:03.875Z
-Stopped at: Completed 21.6-02-PLAN.md
+Last session: 2026-04-22T01:50:48.706Z
+Stopped at: Completed 21.6-03-PLAN.md
 Resume file: None
