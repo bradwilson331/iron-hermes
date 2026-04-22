@@ -15,6 +15,12 @@ pub enum HubErrorKind {
     Parse,
     Internal,
     // Phase 21.8 additions per D-24.
+    /// Local drift-detection sentinel: emitted by callers that compare a
+    /// fresh `compute_folder_hash(install_path)` against the stored
+    /// `SkillLockEntry.computed_hash`. NOT raised by the install or update
+    /// pipelines on server/client parity (D-14 is opaque). Retained for
+    /// tamper-detection call sites (`list --verify`, future strict mode).
+    ///
     /// Local folder SHA-256 does not match the `computedHash` stored in
     /// `skills-lock.json`. Used by `list` / `update` to detect filesystem
     /// tampering. Emitted as a warning on `list` per D-13; as a pre-update

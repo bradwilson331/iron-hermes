@@ -15,9 +15,11 @@
 //!   in `write_bundle_to_dir` to reject server-originated path traversal.
 //! - D-20: `sanitize::assert_temp_contained` gates every `remove_dir_all` on
 //!   a quarantine path (symlink-swap guard).
-//! - D-13/D-14: after atomic rename, `compute_folder_hash(final_path)` is compared
-//!   against `bundle.snapshot_hash`; mismatch raises `HubErrorKind::ShaMismatch`
-//!   and the final path is cleaned.
+//! - D-13/D-14: after atomic rename, `compute_folder_hash(final_path)` is observed
+//!   against `bundle.snapshot_hash` as ADVISORY telemetry; mismatch logs a
+//!   `tracing::warn!` and proceeds. Client-authoritative drift detection uses the
+//!   stored `SkillLockEntry.computed_hash` on subsequent `update()` calls, NOT
+//!   server/client parity (per D-14, `snapshotHash` is opaque).
 //! - D-19: soft-fail audit endpoint call between fetch and quarantine (never blocks install).
 
 use std::path::{Path, PathBuf};
@@ -207,10 +209,10 @@ fn typed(kind: HubErrorKind, msg: impl Into<String>) -> HubError {
 /// 5. **Scan** — run the skill scanner and apply D-15 trust enforcement. On
 ///    failure, cleanup quarantine via `cleanup_quarantine_safely` (D-20 gate).
 /// 6. **Atomic rename** — `rename` (or copy+remove) from quarantine to final path.
-/// 7. **Post-install hash verification (D-13/D-14)** — `compute_folder_hash` the
-///    final path and, if `bundle.snapshot_hash` is `Some(non_empty)`, compare
-///    against it; mismatch raises `HubErrorKind::ShaMismatch` and the final
-///    path is cleaned.
+/// 7. **Post-install hash observation (D-13/D-14, advisory)** — `compute_folder_hash`
+///    the final path; if `bundle.snapshot_hash` is `Some(non_empty)` and differs,
+///    emit `tracing::warn!` and proceed. The install dir is NOT cleaned and no
+///    error is returned — mismatch is telemetry only (D-14 opaque contract).
 /// 8. **Lock file write** — `SkillLock::load_or_default` → `add_or_replace` →
 ///    `save_atomic` (replaces the legacy 19.1 manifest write).
 pub async fn install(
@@ -292,21 +294,33 @@ pub async fn install(
     // Consume the TempDir without running its destructor (the dir was moved).
     let _ = quarantine.keep();
 
-    // ── Step 7: Post-install hash verification (D-13/D-14) ─────────────────
+    // ── Step 7: Post-install hash observation (D-13/D-14 — advisory) ────
+    //
+    // D-14 declares `snapshotHash` OPAQUE: the server may hash the skill
+    // bundle with any algorithm it chooses, and the client MUST NOT
+    // recompute it or enforce byte-for-byte equality. We keep the
+    // local D-13 `compute_folder_hash` for two reasons:
+    //   1. It is the value that flows into `SkillLockEntry.computed_hash`
+    //      (the client-authoritative drift-detection hash used by
+    //      `update()` and `list`-side tamper checks).
+    //   2. When it disagrees with the server-returned snapshot, that is
+    //      ONLY telemetry — the install has already succeeded on disk
+    //      and the opaque server value still round-trips verbatim into
+    //      `SkillLockEntry.snapshot_hash` at Step 8.
+    //
+    // UAT blocker (21.8-06): skills.sh's production hash algorithm is not
+    // our D-13 no-separator SHA-256, so 100% of live installs tripped the
+    // previous strict equality check. Strict-mode gating is deferred
+    // (not built in this plan); see decisions G-01/G-02 in 21.8-06-PLAN.md.
     let computed = compute_folder_hash(&final_path)?;
     if let Some(server_hash) = &server_snapshot_hash {
         if !server_hash.is_empty() && &computed != server_hash {
-            // NOTE: if the server uses a different algorithm than compute_folder_hash
-            // (see RESEARCH.md O-2), this check will always trip. In that case the
-            // server hash contract must be updated in CONTEXT.md D-13 before
-            // callers can rely on equality. For now, mismatch -> ShaMismatch.
-            cleanup_final_path_safely(&final_path);
-            return Err(typed(
-                HubErrorKind::ShaMismatch,
-                format!(
-                    "computed_hash {computed} != server snapshot_hash {server_hash}"
-                ),
-            ));
+            tracing::warn!(
+                computed_hash = %computed,
+                server_snapshot_hash = %server_hash,
+                skill = %name,
+                "server snapshotHash differs from local folder hash — advisory only, install proceeding (D-14 opaque contract)"
+            );
         }
     }
 
@@ -454,15 +468,16 @@ pub async fn update(
     atomic_move(quarantine.path(), &resolved_final)?;
     let _ = quarantine.keep();
 
-    // Post-install hash verification (D-13/D-14).
+    // Post-install hash observation (D-13/D-14 — advisory; see install() Step 7 for rationale).
     let computed = compute_folder_hash(&resolved_final)?;
     if let Some(server_hash) = &server_snapshot_hash {
         if !server_hash.is_empty() && &computed != server_hash {
-            cleanup_final_path_safely(&resolved_final);
-            return Err(typed(
-                HubErrorKind::ShaMismatch,
-                format!("computed_hash {computed} != server snapshot_hash {server_hash}"),
-            ));
+            tracing::warn!(
+                computed_hash = %computed,
+                server_snapshot_hash = %server_hash,
+                skill = %skill_name,
+                "server snapshotHash differs from local folder hash on update — advisory only, replacement proceeding (D-14 opaque contract)"
+            );
         }
     }
 
@@ -1008,5 +1023,194 @@ mod tests {
             std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(),
             "bbb"
         );
+    }
+
+    // ── Advisory-path unit tests (21.8-06) ────────────────────────────────────
+
+    /// Minimal in-process HubSource test double for advisory-path unit tests.
+    /// Returns a fixed SkillBundle with a caller-supplied snapshot_hash.
+    struct FixedBundleSource {
+        bundle: crate::source::SkillBundle,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::source::HubSource for FixedBundleSource {
+        fn source_id(&self) -> &str {
+            "test-fixed"
+        }
+
+        fn trust_level_for(&self, _identifier: &str) -> ironhermes_core::SkillSource {
+            ironhermes_core::SkillSource::Official
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<crate::source::SkillMeta>, crate::HubError> {
+            Ok(vec![])
+        }
+
+        async fn fetch(&self, _identifier: &str) -> Result<crate::source::SkillBundle, crate::HubError> {
+            Ok(crate::source::SkillBundle {
+                name: self.bundle.name.clone(),
+                identifier: self.bundle.identifier.clone(),
+                source_id: self.bundle.source_id.clone(),
+                files: self.bundle.files.clone(),
+                skill_md: self.bundle.skill_md.clone(),
+                metadata: self.bundle.metadata.clone(),
+                snapshot_hash: self.bundle.snapshot_hash.clone(),
+            })
+        }
+    }
+
+    fn make_advisory_bundle(snapshot_hash: Option<String>) -> crate::source::SkillBundle {
+        crate::source::SkillBundle {
+            name: "advisory-skill".to_string(),
+            identifier: "test/repo/advisory-skill".to_string(),
+            source_id: "test-fixed".to_string(),
+            files: vec![
+                BundleFile {
+                    path: "SKILL.md".to_string(),
+                    bytes: b"---\nname: advisory-skill\n---\nbody".to_vec(),
+                },
+                BundleFile {
+                    path: "helper.py".to_string(),
+                    bytes: b"print('advisory')\n".to_vec(),
+                },
+            ],
+            skill_md: "---\nname: advisory-skill\n---\nbody".to_string(),
+            metadata: serde_json::json!({}),
+            snapshot_hash,
+        }
+    }
+
+    /// install() must return Ok even when the server-returned snapshot_hash does
+    /// not match the locally-computed D-13 folder hash. The advisory branch emits
+    /// a tracing::warn but MUST NOT cleanup the install dir or return ShaMismatch.
+    #[tokio::test]
+    async fn post_install_compare_is_advisory_when_hashes_diverge() {
+        let hermes_home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HERMES_HOME").ok();
+        unsafe {
+            std::env::set_var("HERMES_HOME", hermes_home.path());
+        }
+
+        let skills_root = hermes_home.path().join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+
+        let server_hash = "opaque-server-hash-that-does-not-match".to_string();
+        let bundle = make_advisory_bundle(Some(server_hash.clone()));
+        let src = FixedBundleSource { bundle };
+        let scanner = crate::scanner::AlwaysCleanScanner;
+
+        let outcome = install(&src, "test/repo/advisory-skill", &scanner, &skills_root, true)
+            .await
+            .expect("install() MUST return Ok when server hash diverges (advisory posture, UAT gap 21.8-06)");
+
+        // Advisory posture: install dir must survive the mismatch branch.
+        assert!(
+            outcome.install_path.exists(),
+            "advisory branch MUST NOT cleanup the final install path on divergence"
+        );
+
+        // D-14: server hash round-trips verbatim.
+        let lock = crate::lock::SkillLock::load_or_default()
+            .expect("lock load");
+        let entry = lock.get("advisory-skill").expect("lock entry present");
+        assert_eq!(
+            entry.snapshot_hash, server_hash,
+            "D-14 opaque contract: server snapshotHash MUST round-trip verbatim"
+        );
+
+        // D-13: computed_hash matches on-disk folder.
+        let disk_hash = compute_folder_hash(&outcome.install_path)
+            .expect("compute_folder_hash on install_path");
+        assert_eq!(
+            disk_hash, entry.computed_hash,
+            "D-13: SkillLockEntry.computed_hash MUST equal compute_folder_hash(install_path)"
+        );
+
+        // The hashes must actually differ (test precondition — otherwise the test is vacuous).
+        assert_ne!(
+            disk_hash, server_hash,
+            "test precondition: server hash MUST differ from D-13 folder hash"
+        );
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HERMES_HOME", v),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
+        }
+    }
+
+    /// update() must return Ok even when the fresh server snapshot_hash does not
+    /// match the locally-computed D-13 folder hash. The advisory branch emits
+    /// a tracing::warn but MUST NOT cleanup resolved_final or return ShaMismatch.
+    #[tokio::test]
+    async fn update_post_rename_compare_is_advisory_when_hashes_diverge() {
+        let hermes_home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HERMES_HOME").ok();
+        unsafe {
+            std::env::set_var("HERMES_HOME", hermes_home.path());
+        }
+
+        let skills_root = hermes_home.path().join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+
+        // Step 1 — prime: install with the D-13 folder hash as the server hash so
+        // the initial lock entry is clean (no advisory trigger on first install).
+        // We derive the expected hash after the fact by computing it from the bundle.
+        let bundle_v1 = make_advisory_bundle(None); // None -> server_snapshot_hash stays empty
+        let src_v1 = FixedBundleSource { bundle: bundle_v1 };
+        let scanner = crate::scanner::AlwaysCleanScanner;
+
+        install(&src_v1, "test/repo/advisory-skill", &scanner, &skills_root, true)
+            .await
+            .expect("prime install");
+
+        // Step 2 — remount with a divergent server hash.
+        // Use a new bundle with slightly different content so drift is also detected.
+        let server_hash_v2 = "divergent-update-server-hash-advisory-unit-test".to_string();
+        let mut bundle_v2 = make_advisory_bundle(Some(server_hash_v2.clone()));
+        // Mutate one file to ensure bundle_folder_hash differs from v1 -> drift detected.
+        bundle_v2.files[1].bytes = b"print('updated advisory')\n".to_vec();
+        let src_v2 = FixedBundleSource { bundle: bundle_v2 };
+
+        // Step 3 — update with divergent server hash.
+        let outcome = update(&src_v2, "advisory-skill", &scanner, &skills_root, true)
+            .await
+            .expect("update() MUST return Ok when server hash diverges (advisory posture, UAT gap 21.8-06)");
+
+        // Advisory: resolved_final must survive.
+        assert!(
+            outcome.install_path.exists(),
+            "advisory branch MUST NOT cleanup resolved_final on divergence"
+        );
+
+        // D-14: round-trip on update path.
+        let lock = crate::lock::SkillLock::load_or_default()
+            .expect("lock load");
+        let entry = lock.get("advisory-skill").expect("updated entry present");
+        assert_eq!(
+            entry.snapshot_hash, server_hash_v2,
+            "update() MUST round-trip the new server snapshotHash verbatim even on divergence"
+        );
+
+        // D-13: refreshed computed_hash on update path.
+        let disk_hash = compute_folder_hash(&outcome.install_path)
+            .expect("compute_folder_hash on install_path");
+        assert_eq!(
+            disk_hash, entry.computed_hash,
+            "update() MUST refresh entry.computed_hash to match compute_folder_hash(resolved_final)"
+        );
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HERMES_HOME", v),
+                None => std::env::remove_var("HERMES_HOME"),
+            }
+        }
     }
 }
