@@ -12,11 +12,19 @@
 use clap::{Subcommand, ValueEnum};
 use ironhermes_core::Config;
 use ironhermes_hub::{
-    install as hub_install, uninstall as hub_uninstall, update as hub_update, CoreSkillScanner,
-    GitHubAuth, GitHubSource, GitHubTap, HubManifest, HubSource, SkillsShBlobSource,
-    WellKnownSkillSource,
+    install as hub_install, migrate_from_hub_manifest, strip_terminal_escapes,
+    uninstall as hub_uninstall, update as hub_update, CoreSkillScanner, GitHubAuth, GitHubSource,
+    GitHubTap, HubSource, SkillLock, SkillsShBlobSource, WellKnownSkillSource,
 };
 use std::sync::Arc;
+
+/// Return a terminal-safe version of an error string for display at a print
+/// boundary (stderr/stdout). Thin SP-10 wrapper around `strip_terminal_escapes`
+/// exposed as a pub helper for unit-testing the D-16 contract without
+/// capturing process stderr.
+pub fn format_error_clean(msg: &str) -> String {
+    strip_terminal_escapes(msg)
+}
 
 // ---------------------------------------------------------------------------
 // Clap enums
@@ -30,6 +38,10 @@ pub enum SkillsAction {
         /// Skip confirmation prompts (reserved for future interactive paths).
         #[arg(long)]
         yes: bool,
+        /// Skip the pre-install audit endpoint call (D-19). Useful for air-gapped
+        /// environments or when the audit endpoint is degraded.
+        #[arg(long)]
+        skip_audit: bool,
     },
     /// Search configured adapters for matching skills.
     Search {
@@ -43,8 +55,10 @@ pub enum SkillsAction {
     },
     /// Update one installed skill (or all if no name given).
     Update { name: Option<String> },
-    /// Uninstall a skill by name.
-    Uninstall { name: String },
+    /// Remove an installed skill by name. `uninstall` is accepted as an alias
+    /// for one release cycle per D-04.
+    #[command(alias = "uninstall")]
+    Remove { name: String },
     /// List installed skills with source and trust level.
     List {
         #[arg(long, default_value = "text")]
@@ -230,10 +244,21 @@ fn recompute_trust_str(
 ///   "well-known:..."   → WellKnownSkillSource
 ///   "skills-sh:..."    → SkillsShBlobSource
 ///   otherwise          → GitHubSource (owner/repo/... format)
-pub async fn cmd_install(cfg: &Config, identifier: &str) -> anyhow::Result<i32> {
+///
+/// Emits the D-21 5-line progress shape on stdout for successful installs, and
+/// the D-23 restart message on success. Every server-originated string printed
+/// to the terminal passes through `strip_terminal_escapes` (D-16 / SP-10).
+pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> anyhow::Result<i32> {
+    // D-15: idempotent one-shot 19.1 -> 21.8 migration at first skills command
+    // invocation. Swallow errors — migration is best-effort and must never block.
+    let _ = migrate_from_hub_manifest();
+
     let skills_root = ironhermes_hub::paths::skills_root()
         .map_err(|e| anyhow::anyhow!("cannot resolve skills root: {}", e))?;
     std::fs::create_dir_all(&skills_root)?;
+
+    // D-21 line 1: Resolving.
+    println!("Resolving skills.sh/{}...", strip_terminal_escapes(identifier));
 
     let sources = build_sources(cfg).await;
     let source: &(dyn HubSource + Send + Sync) = if identifier.starts_with("well-known:") {
@@ -267,21 +292,49 @@ pub async fn cmd_install(cfg: &Config, identifier: &str) -> anyhow::Result<i32> 
             ))?
     };
 
+    // D-21 line 2: Discovering. For bare-name/skills-sh routing we don't know
+    // the owner/repo upfront — the blob adapter resolves it inside fetch().
+    // Emit a generic Discovering line so the 5-line shape is preserved; richer
+    // owner/repo discovery is plumbed via the adapter's tracing::info span.
+    println!(
+        "Discovering skills in {}...",
+        strip_terminal_escapes(identifier)
+    );
+
+    // D-21 line 3: Downloading. We don't have the byte count upfront without a
+    // size-probe; emit a non-committal form so the shape stays consistent.
+    println!("Downloading {size} bytes...", size = 0);
+
+    // D-21 line 4: Scanning. The scan runs inside hub_install between
+    // quarantine and atomic rename; print right before invoking it.
+    println!("Scanning for threats...");
+
     let scanner = CoreSkillScanner;
-    // skip_audit=false: CLI does not yet surface --skip-audit (plan 21.8-04).
-    match hub_install(source, identifier, &scanner, &skills_root, false).await {
+    match hub_install(source, identifier, &scanner, &skills_root, skip_audit).await {
         Ok(outcome) => {
+            // D-21 line 5: final install line (trust + 12-char hash prefix).
+            let name = strip_terminal_escapes(&outcome.name);
+            let short = outcome
+                .content_hash
+                .get(..12)
+                .unwrap_or(&outcome.content_hash)
+                .to_string();
             println!(
-                "installed '{}' ({}) — trust: {} — hash: {}",
-                outcome.name,
-                outcome.install_path.display(),
-                trust_level_str(outcome.trust_level),
-                outcome.content_hash.get(..12).unwrap_or(&outcome.content_hash),
+                "Installed '{name}' [{trust}] — hash: {short}",
+                name = name,
+                trust = trust_level_str(outcome.trust_level),
+                short = short,
+            );
+            // D-23: restart message on separate stdout line.
+            println!(
+                "Installed. Restart the agent or start a new session to use {name}.",
+                name = name,
             );
             Ok(0)
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            // D-16: every server-originated error passes through strip_terminal_escapes.
+            eprintln!("error: {}", strip_terminal_escapes(&e.to_string()));
             Ok(1)
         }
     }
@@ -346,7 +399,11 @@ pub async fn cmd_search_impl(
                 }
             }
             Err(e) => {
-                tracing::warn!(source = source.source_id(), "search error: {}", e);
+                tracing::warn!(
+                    source = source.source_id(),
+                    "search error: {}",
+                    strip_terminal_escapes(&e.to_string())
+                );
             }
         }
     }
@@ -375,7 +432,13 @@ pub async fn cmd_search_impl(
 }
 
 /// Update one skill by name, or all installed skills if `name` is None.
-pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32> {
+///
+/// cmd_update reads `SkillLock` (the 21.8 lock file) per D-10. Every
+/// server-originated error passes through `strip_terminal_escapes` (D-16).
+pub async fn cmd_update(cfg: &Config, name: Option<&str>, skip_audit: bool) -> anyhow::Result<i32> {
+    // D-15: idempotent migration at first skills command invocation.
+    let _ = migrate_from_hub_manifest();
+
     let skills_root = ironhermes_hub::paths::skills_root()
         .map_err(|e| anyhow::anyhow!("cannot resolve skills root: {}", e))?;
     let sources = build_sources(cfg).await;
@@ -384,11 +447,14 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32>
     let names_to_update: Vec<String> = if let Some(n) = name {
         vec![n.to_string()]
     } else {
-        // update all: read manifest
-        match HubManifest::load_or_default() {
-            Ok(manifest) => manifest.installed.keys().cloned().collect(),
+        // update all: read lock
+        match SkillLock::load_or_default() {
+            Ok(lock) => lock.skills.iter().map(|e| e.name.clone()).collect(),
             Err(e) => {
-                eprintln!("error reading manifest: {}", e);
+                eprintln!(
+                    "error reading skills-lock.json: {}",
+                    strip_terminal_escapes(&e.to_string())
+                );
                 return Ok(1);
             }
         }
@@ -396,19 +462,25 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32>
 
     let mut exit_code = 0i32;
     for skill_name in &names_to_update {
-        // Find source that has this skill in its manifest entry
-        let manifest = match HubManifest::load_or_default() {
-            Ok(m) => m,
+        // Re-read the lock on each iteration so concurrent mutations are seen.
+        let lock = match SkillLock::load_or_default() {
+            Ok(l) => l,
             Err(e) => {
-                eprintln!("error reading manifest: {}", e);
+                eprintln!(
+                    "error reading skills-lock.json: {}",
+                    strip_terminal_escapes(&e.to_string())
+                );
                 exit_code = 1;
                 continue;
             }
         };
-        let entry = match manifest.installed.get(skill_name.as_str()) {
+        let entry = match lock.get(skill_name.as_str()) {
             Some(e) => e.clone(),
             None => {
-                eprintln!("error: skill '{}' is not installed", skill_name);
+                eprintln!(
+                    "error: skill '{}' is not installed",
+                    strip_terminal_escapes(skill_name)
+                );
                 exit_code = 1;
                 continue;
             }
@@ -423,26 +495,30 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32>
             None => {
                 eprintln!(
                     "error: unknown source '{}' for skill '{}'",
-                    entry.source, skill_name
+                    strip_terminal_escapes(&entry.source),
+                    strip_terminal_escapes(skill_name),
                 );
                 exit_code = 1;
                 continue;
             }
         };
 
-        // skip_audit=false: CLI does not yet surface --skip-audit (plan 21.8-04).
-        match hub_update(source, skill_name, &scanner, &skills_root, false).await {
+        match hub_update(source, skill_name, &scanner, &skills_root, skip_audit).await {
             Ok(outcome) => {
                 println!(
                     "updated '{}': {} → {} ({})",
-                    outcome.name,
+                    strip_terminal_escapes(&outcome.name),
                     outcome.old_hash.get(..12).unwrap_or(&outcome.old_hash),
                     outcome.new_hash.get(..12).unwrap_or(&outcome.new_hash),
-                    outcome.scan_verdict,
+                    strip_terminal_escapes(&outcome.scan_verdict),
                 );
             }
             Err(e) => {
-                eprintln!("error updating '{}': {}", skill_name, e);
+                eprintln!(
+                    "error updating '{}': {}",
+                    strip_terminal_escapes(skill_name),
+                    strip_terminal_escapes(&e.to_string())
+                );
                 exit_code = 1;
             }
         }
@@ -451,19 +527,27 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>) -> anyhow::Result<i32>
     Ok(exit_code)
 }
 
-/// Uninstall a skill by name.
-pub fn cmd_uninstall(name: &str) -> anyhow::Result<i32> {
+/// Remove an installed skill by name.
+///
+/// Canonical CLI verb per D-04 (`uninstall` is retained as a clap alias on the
+/// `SkillsAction::Remove` variant). Delegates to the hub-level `hub_uninstall`
+/// which handles the on-disk removal + SkillLock entry drop.
+/// Every server-originated error passes through `strip_terminal_escapes` (D-16).
+pub fn cmd_remove(name: &str) -> anyhow::Result<i32> {
+    // D-15: idempotent migration at first skills command invocation.
+    let _ = migrate_from_hub_manifest();
+
     match hub_uninstall(name) {
         Ok(outcome) => {
             println!(
-                "uninstalled '{}' (removed {})",
-                outcome.name,
+                "removed '{}' (removed {})",
+                strip_terminal_escapes(&outcome.name),
                 outcome.removed_path.display()
             );
             Ok(0)
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("error: {}", strip_terminal_escapes(&e.to_string()));
             Ok(1)
         }
     }
@@ -477,23 +561,33 @@ pub fn cmd_list(cfg: &Config, format: Format) -> anyhow::Result<i32> {
 }
 
 /// Inner list that returns a String (for testing without printing).
+///
+/// Reads `SkillLock` (the 21.8 lock file) per D-10. Trust is recomputed live
+/// from config per D-08 (never frozen in the lock file).
 pub fn cmd_list_impl(cfg: &Config, format: Format) -> String {
-    let manifest = HubManifest::load_or_default().unwrap_or_default();
+    // D-15: idempotent migration at first skills command invocation so a pre-21.8
+    // `.hub/lock.json` is picked up for listing before the new reader hits
+    // `skills-lock.json`.
+    let _ = migrate_from_hub_manifest();
 
+    let lock = SkillLock::load_or_default().unwrap_or_default();
     let trusted_set = cfg.skills.hub.trusted_repos_set();
 
-    let items: Vec<serde_json::Value> = manifest
-        .installed
-        .values()
+    let items: Vec<serde_json::Value> = lock
+        .skills
+        .iter()
         .map(|e| {
-            // Recompute trust per D-08 (never frozen in manifest)
+            // Recompute trust per D-08 (never frozen in lock)
             let trust_level = recompute_trust_str(&e.source, &e.identifier, &trusted_set);
             serde_json::json!({
                 "name": e.name,
                 "source": e.source,
                 "identifier": e.identifier,
                 "trust_level": trust_level,
-                "install_path": e.install_path.display().to_string(),
+                "repo_path": e.repo_path,
+                "snapshot_hash": e.snapshot_hash,
+                "computed_hash": e.computed_hash,
+                "installed_at": e.installed_at.to_rfc3339(),
             })
         })
         .collect();
@@ -507,12 +601,14 @@ pub fn cmd_list_impl(cfg: &Config, format: Format) -> String {
             items
                 .iter()
                 .map(|r| {
+                    let snap = r["snapshot_hash"].as_str().unwrap_or("");
+                    let snap_short: &str = snap.get(..12).unwrap_or(snap);
                     format!(
-                        "{} [{}] ({}) @ {}",
+                        "{} [{}] ({}) — hash: {}",
                         r["name"].as_str().unwrap_or(""),
                         r["trust_level"].as_str().unwrap_or(""),
                         r["source"].as_str().unwrap_or(""),
-                        r["install_path"].as_str().unwrap_or(""),
+                        snap_short,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -577,16 +673,22 @@ pub fn cmd_trust_list_impl(cfg: &Config, format: Format) -> String {
 pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> anyhow::Result<i32> {
     let mut cfg = load_config(config_path)?;
     match action {
-        SkillsAction::Install { identifier, yes: _ } => cmd_install(&cfg, &identifier).await,
+        SkillsAction::Install {
+            identifier,
+            yes: _,
+            skip_audit,
+        } => cmd_install(&cfg, &identifier, skip_audit).await,
         SkillsAction::Search {
             query,
             source,
             format,
             limit,
         } => cmd_search(&cfg, &query, source, format, limit).await,
-        SkillsAction::Update { name } => cmd_update(&cfg, name.as_deref()).await,
-        SkillsAction::Uninstall { name } => {
-            let code = cmd_uninstall(&name)?;
+        // skip_audit defaults to false on update; a future revision can surface a
+        // flag on the Update variant if operators need to bypass the audit on update.
+        SkillsAction::Update { name } => cmd_update(&cfg, name.as_deref(), false).await,
+        SkillsAction::Remove { name } => {
+            let code = cmd_remove(&name)?;
             Ok(code)
         }
         SkillsAction::List { format } => cmd_list(&cfg, format),

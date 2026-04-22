@@ -308,9 +308,10 @@ fn cli_skills_action_enum_has_all_verbs() {
     let _install = SkillsAction::Install {
         identifier: "foo/bar/baz".to_string(),
         yes: false,
+        skip_audit: false,
     };
     let _update = SkillsAction::Update { name: None };
-    let _uninstall = SkillsAction::Uninstall {
+    let _remove = SkillsAction::Remove {
         name: "tenor-gif".to_string(),
     };
     let _trust = SkillsAction::Trust {
@@ -318,4 +319,178 @@ fn cli_skills_action_enum_has_all_verbs() {
             format: ironhermes_cli::skills_cmd::Format::Text,
         },
     };
+}
+
+// ---------------------------------------------------------------------------
+// Plan 21.8-04 Wave 3 tests
+// ---------------------------------------------------------------------------
+
+// Minimal clap Parser wrapping SkillsAction so we can exercise parsing.
+#[derive(clap::Parser, Debug)]
+#[command(name = "skills-test", no_binary_name = true)]
+struct SkillsTestCli {
+    #[command(subcommand)]
+    action: ironhermes_cli::skills_cmd::SkillsAction,
+}
+
+/// Test 1 (D-04 alias): `skills uninstall foo` resolves to SkillsAction::Remove.
+#[test]
+fn skills_action_accepts_uninstall_alias() {
+    use clap::Parser;
+    let parsed = SkillsTestCli::try_parse_from(["uninstall", "foo"]).expect("parse uninstall");
+    match parsed.action {
+        ironhermes_cli::skills_cmd::SkillsAction::Remove { name } => {
+            assert_eq!(name, "foo");
+        }
+        other => panic!("expected Remove via uninstall alias, got {:?}", other),
+    }
+}
+
+/// Test 2 (D-04 canonical): `skills remove foo` resolves to SkillsAction::Remove.
+#[test]
+fn skills_action_accepts_remove_canonical() {
+    use clap::Parser;
+    let parsed = SkillsTestCli::try_parse_from(["remove", "bar"]).expect("parse remove");
+    match parsed.action {
+        ironhermes_cli::skills_cmd::SkillsAction::Remove { name } => {
+            assert_eq!(name, "bar");
+        }
+        other => panic!("expected Remove for canonical verb, got {:?}", other),
+    }
+}
+
+/// Test 3 (D-19): `skills install foo --skip-audit` parses `skip_audit = true`.
+#[test]
+fn skills_action_install_parses_skip_audit() {
+    use clap::Parser;
+    let parsed = SkillsTestCli::try_parse_from(["install", "foo", "--skip-audit"])
+        .expect("parse install --skip-audit");
+    match parsed.action {
+        ironhermes_cli::skills_cmd::SkillsAction::Install {
+            identifier,
+            yes,
+            skip_audit,
+        } => {
+            assert_eq!(identifier, "foo");
+            assert!(!yes);
+            assert!(skip_audit);
+        }
+        other => panic!("expected Install, got {:?}", other),
+    }
+}
+
+/// Test 4 (D-19 default): `skills install foo` defaults `skip_audit` to `false`.
+#[test]
+fn skills_action_install_defaults_skip_audit_false() {
+    use clap::Parser;
+    let parsed =
+        SkillsTestCli::try_parse_from(["install", "foo"]).expect("parse install no flags");
+    match parsed.action {
+        ironhermes_cli::skills_cmd::SkillsAction::Install { skip_audit, .. } => {
+            assert!(!skip_audit, "default skip_audit should be false");
+        }
+        other => panic!("expected Install, got {:?}", other),
+    }
+}
+
+/// Test 5 (D-10): `cmd_list_impl` reads `skills-lock.json` (not the 19.1 manifest)
+/// and returns installed entries.
+#[test]
+fn cmd_list_reads_from_lock() {
+    use ironhermes_hub::{SkillLock, SkillLockEntry};
+
+    with_hermes_home(|home| {
+        let config_path = home.join("config.yaml");
+        write_config(&config_path, &[]);
+
+        // Seed a SkillLock with 2 entries under HERMES_HOME/skills-lock.json.
+        let mut lock = SkillLock::default();
+        lock.add_or_replace(SkillLockEntry {
+            name: "alpha".to_string(),
+            source: "skills-sh".to_string(),
+            identifier: "alpha".to_string(),
+            repo_path: "foo/bar/alpha".to_string(),
+            snapshot_hash: "a".repeat(64),
+            computed_hash: "b".repeat(64),
+            installed_at: chrono::Utc::now(),
+            extras: Default::default(),
+        });
+        lock.add_or_replace(SkillLockEntry {
+            name: "beta".to_string(),
+            source: "skills-sh".to_string(),
+            identifier: "beta".to_string(),
+            repo_path: "foo/bar/beta".to_string(),
+            snapshot_hash: "c".repeat(64),
+            computed_hash: "d".repeat(64),
+            installed_at: chrono::Utc::now(),
+            extras: Default::default(),
+        });
+        lock.save_atomic().expect("save lock");
+
+        let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
+        let json_out = ironhermes_cli::skills_cmd::cmd_list_impl(
+            &cfg,
+            ironhermes_cli::skills_cmd::Format::Json,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_out).expect("list json parses");
+        let arr = parsed.as_array().expect("json array");
+        let names: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect();
+        assert!(names.contains(&"alpha"), "list missing alpha: {names:?}");
+        assert!(names.contains(&"beta"), "list missing beta: {names:?}");
+
+        // Each item must expose snapshot_hash + computed_hash + installed_at
+        // fields (plan 21.8-04 — list reads SkillLock, not HubManifest).
+        for item in arr {
+            assert!(item.get("snapshot_hash").is_some(), "missing snapshot_hash");
+            assert!(item.get("computed_hash").is_some(), "missing computed_hash");
+            assert!(item.get("installed_at").is_some(), "missing installed_at");
+        }
+    });
+}
+
+/// Test 6: `cmd_list_impl` returns empty JSON when no lock file exists.
+#[test]
+fn cmd_list_empty_when_no_lock() {
+    with_hermes_home(|home| {
+        let config_path = home.join("config.yaml");
+        write_config(&config_path, &[]);
+        // no skills-lock.json written
+
+        let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
+        let json_out = ironhermes_cli::skills_cmd::cmd_list_impl(
+            &cfg,
+            ironhermes_cli::skills_cmd::Format::Json,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_out).expect("list json parses");
+        let arr = parsed.as_array().expect("array");
+        assert!(
+            arr.is_empty(),
+            "expected empty list with no lock file, got: {arr:?}"
+        );
+    });
+}
+
+/// Test 7 (D-16 / SP-10): `format_error_clean` strips ANSI escape codes from
+/// server-originated error messages before they hit stderr.
+#[test]
+fn error_printer_strips_ansi() {
+    let raw = "\x1b[31mmalicious\x1b[0m error body";
+    let cleaned = ironhermes_cli::skills_cmd::format_error_clean(raw);
+    assert!(
+        !cleaned.contains('\x1b'),
+        "cleaned string must not contain ESC bytes: {cleaned:?}"
+    );
+    assert!(
+        cleaned.contains("malicious"),
+        "payload text should survive; got: {cleaned:?}"
+    );
+    assert!(
+        cleaned.contains("error body"),
+        "trailing text should survive; got: {cleaned:?}"
+    );
 }
