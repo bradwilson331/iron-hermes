@@ -143,6 +143,11 @@ pub enum CommandResult {
     NewSession { message: String },
     /// Not a built-in command; pass input to agent as normal message
     PassThrough,
+    /// Request the caller to perform an MCP reload (async operation).
+    /// The caller (REPL loop) dispatches to McpReloader and formats the output
+    /// per UI-SPEC. Returned when `ctx.mcp_reloader` is Some; the handler
+    /// returns `Output("MCP not configured.")` when it is None.
+    McpReload,
 }
 
 // =============================================================================

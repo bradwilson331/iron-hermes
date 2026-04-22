@@ -860,6 +860,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                             eprintln!("{}", format!("Error: {}", msg).red());
                             continue;
                         }
+                        // Phase 21.2 Plan 04: MCP reload — handled below after mcp_manager wired.
+                        // This arm is unreachable until Task 2 wires mcp_manager into CommandContext;
+                        // when mcp_reloader is None, cmd_reload_mcp returns Output("MCP not configured.")
+                        // instead of McpReload, so this arm won't fire yet.
+                        CommandResult::McpReload => {
+                            // TODO(plan-04-task-2): replaced by full reload handler in Task 2
+                            println!("{}", "MCP not configured.".dimmed());
+                            continue;
+                        }
                     }
                 }
 

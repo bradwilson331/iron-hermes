@@ -268,6 +268,12 @@ impl GatewayMessageHandler {
                         // Fall through to agent as normal message, preserving attachments
                         return self.run_agent(event, adapter, cancel, processed).await;
                     }
+                    CoreCommandResult::McpReload => {
+                        // MCP reload not wired on gateway (mcp_reloader is None in
+                        // gateway CommandContext); the handler will have returned
+                        // Output("MCP not configured.") before reaching this arm.
+                        // This arm exists for exhaustiveness only.
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {

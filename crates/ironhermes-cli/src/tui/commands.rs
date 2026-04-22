@@ -126,6 +126,8 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
             }
         }
         CoreCommandResult::PassThrough => CommandResult::Error("Unknown command.".to_string()),
+        // Phase 21.2 Plan 04: MCP reload — pass through to REPL loop for async dispatch.
+        CoreCommandResult::McpReload => CommandResult::McpReload,
     }
 }
 

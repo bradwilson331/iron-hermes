@@ -51,6 +51,11 @@ pub fn dispatch(
         "skills" => cmd_skills(ctx),
 
         // -------------------------------------------------------------------
+        // MCP commands (Phase 21.2 Plan 04)
+        // -------------------------------------------------------------------
+        "reload-mcp" | "reload_mcp" | "reload" => cmd_reload_mcp(ctx),
+
+        // -------------------------------------------------------------------
         // TODO stubs — everything without backing infrastructure
         // -------------------------------------------------------------------
         name => todo_stub(name),
@@ -362,6 +367,26 @@ fn cmd_models_help() -> CommandResult {
 }
 
 // =============================================================================
+// MCP handlers (Phase 21.2 Plan 04)
+// =============================================================================
+
+/// /reload-mcp and /reload handler (D-12).
+///
+/// When `ctx.mcp_reloader` is Some, returns `CommandResult::McpReload` so the
+/// REPL loop can perform the async reload and format the UI-SPEC status string
+/// (including partial failure display via McpReloadResult.failed).
+///
+/// When `ctx.mcp_reloader` is None (MCP not configured), returns a plain
+/// "MCP not configured." message.
+fn cmd_reload_mcp(ctx: &CommandContext) -> CommandResult {
+    if ctx.mcp_reloader.is_some() {
+        CommandResult::McpReload
+    } else {
+        CommandResult::Output("MCP not configured.".to_string())
+    }
+}
+
+// =============================================================================
 // TODO stubs
 // =============================================================================
 
@@ -387,8 +412,6 @@ fn todo_stub(name: &str) -> CommandResult {
         "tools" => "No tool enable/disable management",
         "toolsets" => "No toolset listing",
         "cron" => "No cron management UI",
-        "reload-mcp" | "reload_mcp" => "No MCP reload",
-        "reload" => "No MCP reload",
         "browser" => "No browser tools",
         "plugins" => "No plugin system",
         "paste" => "No clipboard integration",
@@ -651,6 +674,38 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_reload_mcp_no_reloader_says_not_configured() {
+        let ctx = make_ctx(false);
+        let router = make_router();
+        let cmd = find_cmd("reload-mcp");
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("MCP not configured"),
+                "Expected 'MCP not configured', got: {}",
+                s
+            ),
+            other => panic!("Expected Output, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_reload_returns_same_as_reload_mcp() {
+        let ctx = make_ctx(false);
+        let router = make_router();
+        let cmd = find_cmd("reload");
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("MCP not configured"),
+                "Expected 'MCP not configured', got: {}",
+                s
+            ),
+            other => panic!("Expected Output, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn dispatch_all_todo_stubs_return_not_yet_available() {
         let todo_commands = [
             "voice",
@@ -673,8 +728,7 @@ mod tests {
             "tools",
             "toolsets",
             "cron",
-            "reload-mcp",
-            "reload",
+            // "reload-mcp" and "reload" removed — now have real handlers (Phase 21.2 Plan 04)
             "browser",
             "plugins",
             "paste",

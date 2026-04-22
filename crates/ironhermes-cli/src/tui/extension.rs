@@ -122,6 +122,10 @@ pub enum CommandResult {
     Quit,
     /// Clear session history (maps from core `ClearSession` / `NewSession`).
     ClearSession(String),
+    /// Request the REPL loop to perform an async MCP reload (Phase 21.2 Plan 04).
+    /// Maps from `CoreCommandResult::McpReload`. The REPL loop calls McpReloader
+    /// and formats the UI-SPEC status string including partial failure display.
+    McpReload,
 }
 
 // ---------------------------------------------------------------------------
