@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.8-02-PLAN.md
-last_updated: "2026-04-22T11:28:23.865Z"
+stopped_at: Completed 21.8-03-PLAN.md
+last_updated: "2026-04-22T11:47:15.730Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 38
-  completed_plans: 30
-  percent: 79
+  completed_plans: 31
+  percent: 82
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.8 (skill-remote-download-and-install-from-skills-sh) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [████████░░] 79%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -105,6 +105,7 @@ Progress: [████████░░] 79%
 | Phase 21.6 P03 | 4 | 2 tasks | 2 files |
 | Phase 21.8 P01 | 7 | 3 tasks | 7 files |
 | Phase 21.8 P02 | 7 | 2 tasks | 8 files |
+| Phase 21.8 P03 | 14 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -208,6 +209,11 @@ Recent decisions affecting current work:
 - Phase 21.8 Plan 02: Hand-rolled urlencoding() helper (~15 lines) in blob.rs — zero new workspace deps mandate
 - Phase 21.8 Plan 02: SkillsShBlobSource.{github_api_base,raw_content_base} test-override fields added (Rule 2) — plan 05 wiremock needs all three hops redirectable
 - Phase 21.8 Plan 02: ENV_LOCK is per-module — lock.rs + manifest.rs can race on HERMES_HOME under parallel tests; passes 100% single-threaded
+- Phase 21.8 Plan 03: added bundle_folder_hash helper (Rule 2) — drift detection against SkillLockEntry.computed_hash must use D-13 no-separator algorithm; bundle_content_hash (0x00-separated) cannot substitute
+- Phase 21.8 Plan 03: UpdateOutcome.old_hash surfaces SkillLockEntry.computed_hash (D-13 folder hash) not pre-21.8 bundle_content_hash; tests updated to read old_hash from lock
+- Phase 21.8 Plan 03: AuditUrlGuard uses Drop-implementing RAII struct so MutexGuard lifetime extends across .await points in wiremock-backed async tests
+- Phase 21.8 Plan 03: migrate_from_hub_manifest called idempotently at top of install/update/uninstall — covers both CLI and agent-tool paths with one placement
+- Phase 21.8 Plan 03: extract_owner_repo returns empty for https:// / well-known: / <2-segment identifiers; caller treats empty as 'do not audit'
 
 ### Roadmap Evolution
 
@@ -237,8 +243,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T11:28:23.862Z
-Stopped at: Completed 21.8-02-PLAN.md
+Last session: 2026-04-22T11:46:40.350Z
+Stopped at: Completed 21.8-03-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
