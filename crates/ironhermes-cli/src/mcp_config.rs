@@ -235,7 +235,7 @@ async fn cmd_add(
     print!("  {}", format!("Connecting to '{}'...", name).cyan());
     io::stdout().flush().ok();
 
-    let tools = attempt_connect_and_list(&server_config).await;
+    let tools = attempt_connect_and_list_with_timeout(&server_config).await;
     println!(); // newline after the connecting message
 
     let (discovered_tools, tool_count) = match tools {
@@ -367,7 +367,7 @@ async fn cmd_test(name: String) -> anyhow::Result<()> {
     // Connecting
     println!("  {}", "Connecting...".dimmed());
 
-    match attempt_connect_and_list(&server).await {
+    match attempt_connect_and_list_with_timeout(&server).await {
         Ok(tools) => {
             let n = tools.len();
             println!("  {}", format!("Connected \u{2014} {} tool(s) available", n).green());
@@ -426,7 +426,7 @@ async fn cmd_configure(name: String) -> anyhow::Result<()> {
 
     // Connect and discover tools
     println!("  {}", "Connecting to discover tools...".dimmed());
-    let tools = match attempt_connect_and_list(&server).await {
+    let tools = match attempt_connect_and_list_with_timeout(&server).await {
         Ok(t) => t,
         Err(e) => {
             let sanitized = sanitize_error(&e.to_string());
@@ -472,6 +472,28 @@ async fn cmd_configure(name: String) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 // Connection helper: connect, list tools, disconnect
 // ---------------------------------------------------------------------------
+
+/// Wraps `attempt_connect_and_list` in `tokio::time::timeout` using the
+/// server's configured `connect_timeout` (default 60s, per McpServerConfig::default()).
+/// Closes GAP-1: without this wrapper, a child process that is alive but not
+/// responding to MCP initialize will block forever.
+async fn attempt_connect_and_list_with_timeout(
+    config: &McpServerConfig,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let secs = config.connect_timeout;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(secs),
+        attempt_connect_and_list(config),
+    )
+    .await
+    {
+        Ok(inner) => inner,
+        Err(_elapsed) => Err(anyhow::anyhow!(
+            "Timed out waiting for MCP initialize response after {}s. Check command and args.",
+            secs
+        )),
+    }
+}
 
 /// Connect to a server, list discovered tools (name + description), then disconnect.
 /// Used by cmd_test, cmd_add (wizard), and cmd_configure.
@@ -664,6 +686,27 @@ mod tests {
         assert!(re_read.contains("default: gpt-4"), "original model key should be preserved");
         assert!(re_read.contains("test_server"), "new mcp server should be written");
         assert!(re_read.contains("npx"), "command should be present");
+    }
+
+    #[tokio::test]
+    async fn attempt_connect_and_list_with_timeout_returns_elapsed_error_when_config_demands_instant() {
+        use ironhermes_mcp::McpServerConfig;
+        // A config with connect_timeout=0 and a stdio command that will never produce an
+        // MCP initialize response fast enough. We don't need it to be reachable — the
+        // 0-second timeout fires before transport has a chance to complete.
+        let mut cfg = McpServerConfig::default();
+        cfg.command = Some("sleep".to_string());
+        cfg.args = vec!["30".to_string()];
+        cfg.connect_timeout = 0;
+        let result = attempt_connect_and_list_with_timeout(&cfg).await;
+        assert!(result.is_err(), "zero-timeout must surface an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Timed out waiting for MCP initialize response after"),
+            "error message must begin with the literal GAP-1 contract string; got: {msg}"
+        );
+        assert!(msg.contains("Check command and args."),
+            "error message must carry the user-actionable hint; got: {msg}");
     }
 
     #[test]
