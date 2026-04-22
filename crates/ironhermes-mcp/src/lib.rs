@@ -20,4 +20,4 @@ pub use config::{interpolate_config, interpolate_env, McpServerConfig, SamplingC
 pub use manager::{McpManager, StartResult};
 pub use sampling::SamplingHandler;
 pub use security::{build_safe_env, sanitize_error, CREDENTIAL_PATTERN};
-pub use tool::{make_prefixed_name, McpCallRequest, McpTool};
+pub use tool::{make_prefixed_name, sanitize_server_name, McpCallRequest, McpTool};
