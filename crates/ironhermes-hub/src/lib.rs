@@ -8,6 +8,7 @@ pub mod auth;
 pub mod error;
 pub mod github;
 pub mod installer;
+pub mod lock;
 pub mod manifest;
 pub mod paths;
 pub mod sanitize;
@@ -24,6 +25,7 @@ pub use installer::{
     bundle_content_hash, install, uninstall, update, InstallOutcome, UninstallOutcome,
     UpdateOutcome,
 };
+pub use lock::{compute_folder_hash, SkillLock, SkillLockEntry};
 pub use manifest::{HubManifest, ManifestEntry};
 pub use sanitize::{
     assert_temp_contained, is_contained_in, is_path_safe, sanitize_metadata, sanitize_name,
