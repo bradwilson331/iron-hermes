@@ -10,6 +10,7 @@ pub mod github;
 pub mod installer;
 pub mod manifest;
 pub mod paths;
+pub mod sanitize;
 pub mod scanner;
 pub mod skills_sh;
 pub mod source;
