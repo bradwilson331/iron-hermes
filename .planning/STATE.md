@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.2-06-PLAN.md
-last_updated: "2026-04-22T21:06:44.656Z"
+stopped_at: Completed 21.2-07-PLAN.md
+last_updated: "2026-04-22T21:11:41.033Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 41
-  completed_plans: 40
-  percent: 98
+  completed_plans: 41
+  percent: 100
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -116,6 +116,7 @@ Progress: [██████████] 98%
 | Phase 21.2 P04 | 9 | 2 tasks | 9 files |
 | Phase 21.2 P05 | 4 | 2 tasks | 2 files |
 | Phase 21.2 P06 | 4 | 2 tasks | 1 files |
+| Phase 21.2 P07 | 2 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -250,6 +251,7 @@ Recent decisions affecting current work:
 - Phase 21.2 Plan 06: attempt_connect_and_list_with_timeout wraps tokio::time::timeout around config.connect_timeout (default 60s); used at all 3 call sites (cmd_add/cmd_test/cmd_configure) closing GAP-1
 - Phase 21.2 Plan 06: RetrySaveAbort 3-way prompt defaults to Abort (return Ok(()) with 'Cancelled.' dimmed before save); SaveAnyway keeps legacy vec![],0 escape hatch but requires explicit consent; Retry re-enters the connect loop — closes GAP-2
 - Phase 21.2 Plan 06: literal-copy regression tests via include_str! lock user-facing prompt strings against silent drift (GAP-2 + GAP-3 regression tests)
+- Phase 21.2 Plan 07: sanitize_server_name is single source of truth; make_prefixed_name delegates to it; sanitizer now covers @ and / in addition to - and . — closes GAP-4 / CR-01 with symmetric register/unregister contract
 
 ### Roadmap Evolution
 
@@ -279,8 +281,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T21:06:31.253Z
-Stopped at: Completed 21.2-06-PLAN.md
+Last session: 2026-04-22T21:11:41.030Z
+Stopped at: Completed 21.2-07-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
