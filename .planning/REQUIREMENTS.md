@@ -189,7 +189,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MEM-03 | Phase 17 | Complete |
 | MEM-04 | Phase 17 | Complete |
 | MEM-05 | Phase 17 | Complete |
-| MEM-06 | Phase 15 | Pending |
+| MEM-06 | Phase 15 | Complete |
 | MEM-07 | Phase 11 | Complete |
 | MEM-08 | Phase 11 | Complete |
 | MEM-09 | Phase 17 | Complete |
@@ -238,7 +238,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKILL-05 | Phase 19 | Complete |
 | SKILL-06 | Phase 19 | Complete |
 | SKILL-07 | Phase 19 | Complete |
-| SKILL-08 | Phase 19.1 | Pending |
+| SKILL-08 | Phase 19.1 | Complete |
 | SKILL-09 | Phase 19.1 | Pending |
 | SKILL-10 | Phase 19 | Complete |
 | SKILL-11 | Phase 19 | Complete |

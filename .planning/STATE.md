@@ -4,8 +4,8 @@ milestone: v2.0
 milestone_name: milestone
 status: executing
 stopped_at: Completed 21.8-06-PLAN.md (gap-closure advisory hash observe)
-last_updated: "2026-04-22T19:00:57.165Z"
-last_activity: 2026-04-22 -- Phase --phase execution started
+last_updated: "2026-04-22T19:09:19.498Z"
+last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 10
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: --phase (21.8) — EXECUTING
-Plan: 1 of --name
+Phase: 22
+Plan: Not started
 Status: Executing Phase --phase
-Last activity: 2026-04-22 -- Phase --phase execution started
+Last activity: 2026-04-22
 
 Progress: [█████████░] 87%
 
@@ -36,7 +36,7 @@ Progress: [█████████░] 87%
 
 **Velocity:**
 
-- Total plans completed: 55
+- Total plans completed: 61
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -57,6 +57,7 @@ Progress: [█████████░] 87%
 | 21.4 | 3 | - | - |
 | 21.5 | 4 | - | - |
 | 21.6 | 3 | - | - |
+| 21.8 | 6 | - | - |
 
 **Recent Trend:**
 
