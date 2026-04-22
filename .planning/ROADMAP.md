@@ -103,7 +103,7 @@ Plans:
 
 **Requirements:** SKILL-08, MEM-06
 **Depends on:** Phase 21
-**Plans:** 5/5 plans complete
+**Plans:** 6/6 plans complete (plan 06 is a gap-closure addendum from UAT)
 
 Plans:
 - [x] 21.8-01-PLAN.md — Wave 0 test infra: create `sanitize.rs` with 9 pure-function security primitives (D-16/D-17/D-18/D-20), extend `HubErrorKind` with ShaMismatch/ScanHit/PathTraversal/Audit (D-24), add `to_skill_slug` golden-vector integration test (20+ cases, reference TS byte-for-byte match).
@@ -111,6 +111,7 @@ Plans:
 - [x] 21.8-03-PLAN.md — Wave 2 pipeline rework: create `audit.rs` (fetch_audit soft-fail, D-19 3s timeout), add `migrate_from_hub_manifest` to lock.rs (D-15 idempotent 19.1->21.8), rework installer.rs to write SkillLock (not HubManifest), insert audit between fetch+quarantine, gate remove_dir_all with assert_temp_contained, verify post-rename computed_hash vs server snapshot_hash (ShaMismatch path), deprecate HubManifest::save.
 - [x] 21.8-04-PLAN.md — Wave 3 CLI rework: delete skills_sh.rs + skills_sh_adapter_test.rs (D-01), swap skills_cmd.rs:136 and skills_tool.rs:382 call sites to SkillsShBlobSource, rename SkillsAction::Uninstall -> Remove with `#[command(alias = "uninstall")]` (D-04), add `--skip-audit` flag (D-19), emit D-21 5-line progress + D-23 restart message, route every server-originated stderr/stdout through strip_terminal_escapes (D-16 at print boundary), wire migrate_from_hub_manifest at CLI startup (D-15).
 - [x] 21.8-05-PLAN.md — Wave 4 end-to-end integration: create wiremock integration test suite covering happy path, exactly-once retry on 5xx, no retry on 404 / PathTraversal, path-traversal rejection before disk write, User-Agent openclaw ride capture, audit soft-fail (timeout/5xx/non-json), --skip-audit zero-network bypass, idempotent migration (byte-identical on re-run), cmd_install -> cmd_list -> cmd_remove round-trip; full `cargo test --workspace` green gate.
+- [ ] 21.8-06-PLAN.md — Wave 5 gap closure: realign installer post-install hash compare with D-14 opaque contract — make server-vs-client snapshotHash equality ADVISORY (tracing::warn, not ShaMismatch) in install()/update(), preserve D-13 compute_folder_hash as the client-authoritative drift sentinel, add unit + wiremock integration tests locking the divergence path; unblocks UAT Tests 3 + 4 which 100% failed on live skills.sh due to server/client hash algorithm divergence (G-01).
 
 **Wave structure:**
 - Wave 1: 21.8-01 (sanitize.rs + HubErrorKind + slug golden vectors — autonomous)
@@ -118,6 +119,7 @@ Plans:
 - Wave 3: 21.8-03 (audit.rs + installer.rs rework + migration + manifest deprecation — depends on 01, 02, autonomous)
 - Wave 4: 21.8-04 (delete skills_sh.rs, CLI rework, call-site swaps, D-21/D-23 UX, strip at print boundary — depends on 01, 02, 03, autonomous)
 - Wave 5: 21.8-05 (wiremock e2e + audit/migration/CLI integration tests — depends on 01, 02, 03, 04, autonomous)
+- Wave 5: 21.8-06 (gap closure: advisory snapshotHash compare — realigns with D-14; no structural deps on prior waves, autonomous)
 
 **Phase directory:** `.planning/phases/21.8-skill-remote-download-and-install-from-skills-sh/`
 
