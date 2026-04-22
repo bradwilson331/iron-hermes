@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.8-03-PLAN.md
-last_updated: "2026-04-22T11:47:15.730Z"
+stopped_at: Completed 21.8-04-PLAN.md
+last_updated: "2026-04-22T13:41:41.631Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 38
-  completed_plans: 31
-  percent: 82
+  completed_plans: 32
+  percent: 84
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.8 (skill-remote-download-and-install-from-skills-sh) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [████████░░] 82%
+Progress: [████████░░] 84%
 
 ## Performance Metrics
 
@@ -106,6 +106,7 @@ Progress: [████████░░] 82%
 | Phase 21.8 P01 | 7 | 3 tasks | 7 files |
 | Phase 21.8 P02 | 7 | 2 tasks | 8 files |
 | Phase 21.8 P03 | 14 | 2 tasks | 9 files |
+| Phase 21.8 P04 | 104 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -214,6 +215,10 @@ Recent decisions affecting current work:
 - Phase 21.8 Plan 03: AuditUrlGuard uses Drop-implementing RAII struct so MutexGuard lifetime extends across .await points in wiremock-backed async tests
 - Phase 21.8 Plan 03: migrate_from_hub_manifest called idempotently at top of install/update/uninstall — covers both CLI and agent-tool paths with one placement
 - Phase 21.8 Plan 03: extract_owner_repo returns empty for https:// / well-known: / <2-segment identifiers; caller treats empty as 'do not audit'
+- Phase 21.8 Plan 04: CLI Task 1 swaps (import + line 136 + doc comments) landed with the hub-level deletion to keep the workspace compiling — plan's Task 1 acceptance grep demands both call-site swaps in one assertion
+- Phase 21.8 Plan 04: D-21 lines 2 (Discovering) and 3 (Downloading) emit with identifier/0 placeholders — installer doesn't surface owner/repo + byte count before install() returns; deferred to plan 05 wiremock wiring
+- Phase 21.8 Plan 04: added pub format_error_clean wrapper around strip_terminal_escapes — D-16 print-boundary contract needs a testable seam that doesn't capture process stderr
+- Phase 21.8 Plan 04: migrate_from_hub_manifest called belt-and-braces at the top of cmd_install, cmd_update, cmd_remove, AND cmd_list_impl — installer.rs already calls it; idempotent second run is a plan 03 invariant
 
 ### Roadmap Evolution
 
@@ -243,8 +248,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T11:46:40.350Z
-Stopped at: Completed 21.8-03-PLAN.md
+Last session: 2026-04-22T13:41:34.419Z
+Stopped at: Completed 21.8-04-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
