@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.8-06-PLAN.md (gap-closure advisory hash observe)
-last_updated: "2026-04-22T19:09:19.498Z"
+stopped_at: Completed 21.2-01-PLAN.md (ironhermes-mcp crate skeleton + Config.mcp_servers)
+last_updated: "2026-04-22T19:23:29.032Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 13
   completed_phases: 10
   total_plans: 39
-  completed_plans: 34
-  percent: 87
+  completed_plans: 35
+  percent: 90
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase --phase — 21.8
+**Current focus:** Phase 21.2 — mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl
 
 ## Current Position
 
-Phase: 22
-Plan: Not started
-Status: Executing Phase --phase
+Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [█████████░] 87%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -110,6 +110,7 @@ Progress: [█████████░] 87%
 | Phase 21.8 P04 | 104 | 2 tasks | 5 files |
 | Phase 21.8 P05 | 22 | 2 tasks | 5 files |
 | Phase 21.8-skill-remote-download-and-install-from-skills-sh P06 | 15 | 2 tasks | 4 files |
+| Phase 21.2 P01 | 5 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -229,6 +230,8 @@ Recent decisions affecting current work:
 - Phase 21.8 Plan 05: expected_happy_path_hash computed inline from known fixture bytes with sha2 (workspace dep) — avoids exposing installer-private helpers for test-only hash computation
 - G-01: post-install server-vs-client hash equality is ADVISORY (log-only, never fails install) — D-14 opaque contract enforced in code
 - G-02: HubErrorKind::ShaMismatch variant KEPT, narrowed to drift-detection semantics only; no longer raised on server/client parity
+- rmcp feature flag is transport-streamable-http-client (not transport-streamable-http) — verified from crates.io API
+- mcp_servers in Config stored as HashMap<String, serde_yaml::Value> to avoid circular dep; parsed by ironhermes-mcp at runtime (D-21)
 
 ### Roadmap Evolution
 
@@ -258,8 +261,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T19:00:57.162Z
-Stopped at: Completed 21.8-06-PLAN.md (gap-closure advisory hash observe)
+Last session: 2026-04-22T19:23:29.029Z
+Stopped at: Completed 21.2-01-PLAN.md (ironhermes-mcp crate skeleton + Config.mcp_servers)
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
