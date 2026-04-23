@@ -67,6 +67,15 @@ struct Cli {
     /// Quiet mode (less output)
     #[arg(short, long)]
     quiet: bool,
+
+    /// Phase 21.7 Plan 08 (D-11 / D-12): enable autonomous (yolo) mode.
+    /// Blanket-bypasses dangerous-command approval. Iteration budget /
+    /// fatal errors / user interrupt (G-01/G-04/G-09) still halt.
+    /// Only honored on the batch (`-e`) and `chat` entry points — the
+    /// `gateway` subcommand deliberately does NOT expose this flag
+    /// (INV-21.7-05 / D-12). Top-level + Chat-subcommand flags OR together.
+    #[arg(long, global = false)]
+    yolo: bool,
 }
 
 #[derive(Subcommand)]
@@ -75,6 +84,11 @@ enum Commands {
     Chat {
         /// Initial message to send
         message: Option<String>,
+        /// Phase 21.7 Plan 08 (D-11 / D-12): enable autonomous (yolo) mode
+        /// for this chat session. OR'd with the top-level `--yolo` flag and
+        /// `autonomous.yolo` config key; CLI wins over config (D-12).
+        #[arg(long)]
+        yolo: bool,
     },
     /// Show current configuration and status
     Status,
@@ -174,7 +188,14 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => cmd_status(),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Version) => cmd_version(),
-        Some(Commands::Chat { ref message }) => run_chat(&cli, message.clone()).await,
+        Some(Commands::Chat { ref message, yolo: ref chat_yolo }) => {
+            // Phase 21.7 Plan 08 (D-12): OR top-level + subcommand yolo flags.
+            // `cli.yolo` captures `hermes --yolo chat ...`; `chat_yolo` captures
+            // `hermes chat --yolo ...`. Either path reaches the REPL with the
+            // same effective state.
+            let cli_yolo_flag = cli.yolo || *chat_yolo;
+            run_chat(&cli, message.clone(), cli_yolo_flag).await
+        }
         Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
         Some(Commands::Batch { command }) => batch::handle_batch_command(command).await,
@@ -206,9 +227,14 @@ async fn main() -> Result<()> {
         },
         None => {
             if let Some(ref prompt) = cli.execute {
-                run_single(&cli, prompt.clone()).await
+                // Phase 21.7 Plan 08 (D-12): `-e` batch mode honors top-level
+                // `--yolo` only (no per-invocation subcommand). The config
+                // value is OR'd inside `run_single` via `resolve_yolo`.
+                run_single(&cli, prompt.clone(), cli.yolo).await
             } else {
-                run_chat(&cli, None).await
+                // Bare `hermes` -> `run_chat`. Top-level `--yolo` flows
+                // through here unchanged.
+                run_chat(&cli, None, cli.yolo).await
             }
         }
     }
@@ -343,8 +369,14 @@ fn print_check(name: &str, ok: bool) {
 }
 
 /// Run a single prompt and exit.
-async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
+async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
     let (client, config, resolver) = build_client(cli)?;
+    // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo from CLI + config,
+    // print the banner ONCE per session. `run_single` is batch mode — a single
+    // `-e "prompt"` invocation — so "per session" means "per process".
+    let (yolo_enabled, _yolo_source) =
+        ironhermes_cli::resolve_yolo(cli_yolo_flag, config.autonomous.yolo);
+    ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Phase 21.3: initialize global token estimator from model's encoding
     let main_ep = resolver.resolve_for_main();
@@ -632,7 +664,11 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 }
 
 /// Run interactive chat mode.
-async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
+async fn run_chat(
+    cli: &Cli,
+    initial_message: Option<String>,
+    cli_yolo_flag: bool,
+) -> Result<()> {
     print_banner();
     // GAP-5: force banner to hit the terminal BEFORE any async MCP startup
     // message can interleave on stderr. Without this flush, the stdout buffer
@@ -642,6 +678,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     io::stderr().flush().ok();
 
     let (client, config, resolver) = build_client(cli)?;
+    // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo + emit the
+    // bold-red stderr banner ONCE per REPL session before we enter the
+    // main loop. CLI flag wins over config; gateway reads config only
+    // (see run_gateway below and INV-21.7-05).
+    let (yolo_enabled, _yolo_source) =
+        ironhermes_cli::resolve_yolo(cli_yolo_flag, config.autonomous.yolo);
+    ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Phase 21.3: initialize global token estimator from model's encoding
     let main_ep = resolver.resolve_for_main();
@@ -1407,6 +1450,13 @@ async fn run_agent_turn(
 /// Start the Telegram gateway bot.
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config, resolver) = build_client(cli)?;
+    // Phase 21.7 Plan 08 (D-12 / INV-21.7-05): gateway reads yolo from the
+    // on-disk config ONLY. NO per-request field, NO CLI flag — the clap
+    // `Gateway` variant intentionally omits `--yolo`. `resolve_yolo(false, ...)`
+    // locks the flag source to `"config"` when enabled.
+    let (yolo_enabled, _yolo_source) =
+        ironhermes_cli::resolve_yolo(false, config.autonomous.yolo);
+    ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Plan 20-02 / GAP-4: build the MemoryManager once — returns None when
     // config.memory.memory_enabled=false (T-21.4-02). All consumers guard

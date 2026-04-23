@@ -21,7 +21,12 @@ pub mod tui; // Existing module (render_status_line etc.) — re-exported for Pl
 // tests exercise the factory + MemoryManager path directly rather than
 // re-entering the binary's Cli surface.
 
-// Intentional: do NOT re-export main-only internals
-// (resolve_yolo, maybe_print_yolo_banner, io_gate, etc.). Plan 08
-// promotes those to `pub` AFTER this file exists and will add them
-// here (or via a `pub mod yolo;` wrapper) at that time.
+// Phase 21.7 Plan 08 (ISS-06 / ISS-07 / ISS-08): yolo + io_gate + cli_args
+// re-exports for integration tests and lib-consumers. `main.rs` imports
+// from these same modules so production + test code share one code path.
+pub mod cli_args;
+pub mod io_gate;
+pub mod yolo;
+
+pub use io_gate::{can_prompt, is_terminal_stdin};
+pub use yolo::{maybe_print_yolo_banner, print_yolo_banner_to_stderr, resolve_yolo};

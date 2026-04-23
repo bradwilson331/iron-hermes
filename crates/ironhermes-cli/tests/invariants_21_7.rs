@@ -174,3 +174,24 @@ fn invariant_21_7_11_pill_refresh_uses_send_modify_and_no_await_on_render_path()
         send_sites
     );
 }
+
+#[test]
+fn invariant_21_7_10_gateway_subcommand_rejects_yolo_flag() {
+    // ISS-06 / D-12: gateway CLI subcommand does NOT accept --yolo.
+    // Parse-level assertion via clap — robust to formatting / field reordering.
+    use clap::Parser;
+    let err = ironhermes_cli::cli_args::Cli::try_parse_from([
+        "hermes", "gateway", "--yolo",
+    ])
+    .unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument
+                | clap::error::ErrorKind::InvalidSubcommand
+        ),
+        "INV-21.7-10 / D-12 / ISS-06: `hermes gateway --yolo` must fail at \
+         the clap parser. Got kind: {:?}",
+        err.kind()
+    );
+}

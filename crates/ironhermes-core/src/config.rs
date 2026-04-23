@@ -91,6 +91,29 @@ pub struct Config {
     /// Parsed into McpServerConfig by ironhermes-mcp at the integration layer.
     #[serde(default)]
     pub mcp_servers: HashMap<String, serde_yaml::Value>,
+    /// Phase 21.7 Plan 08 (D-11 / D-12): autonomous-mode configuration.
+    /// Pre-21.7 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub autonomous: AutonomousConfig,
+}
+
+// =============================================================================
+// AutonomousConfig (Phase 21.7 Plan 08, D-11 / D-12 / D-14)
+// =============================================================================
+
+/// Autonomous-mode (yolo) configuration.
+///
+/// D-11: `yolo: true` blanket-bypasses dangerous-command approval.
+/// D-12: config is one of two input sources; the CLI `--yolo` flag wins
+/// when both are set. Gateway reads this config value only — it MUST NOT
+/// read a per-request yolo field (INV-21.7-05).
+/// D-14: yolo is additive; the full approval queue is deferred.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutonomousConfig {
+    /// When true, skip dangerous-command approval prompts. Budget 100% /
+    /// fatal error / user interrupt remain unskippable (G-01/G-04/G-09).
+    pub yolo: bool,
 }
 
 // =============================================================================
