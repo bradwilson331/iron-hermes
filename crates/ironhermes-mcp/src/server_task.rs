@@ -4,6 +4,7 @@ use crate::tool::{McpCallRequest, McpTool};
 use crate::transport;
 use ironhermes_tools::registry::Tool;
 use ironhermes_tools::ToolRegistry;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
@@ -44,6 +45,7 @@ pub async fn run_server_task(
     mut config: McpServerConfig,
     registry: Arc<RwLock<ToolRegistry>>,
     cancel_token: CancellationToken,
+    connected: Arc<AtomicBool>,
 ) -> ServerTaskResult {
     // D-18: interpolate ${ENV_VAR} placeholders in config fields
     crate::config::interpolate_config(&mut config);
@@ -54,7 +56,7 @@ pub async fn run_server_task(
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match connect_and_serve(&name, &config, &registry, &cancel_token).await {
+        match connect_and_serve(&name, &config, &registry, &cancel_token, &connected).await {
             Ok(names) => {
                 registered_names = names;
                 failure_reason = None; // connected successfully; clean exit
@@ -71,6 +73,11 @@ pub async fn run_server_task(
                         "MCP server exhausted {} retries",
                         MAX_RETRIES
                     );
+                    // GAP-7: on retry exhaustion, explicitly unset the flag so a
+                    // late reader cannot observe a stale true from a brief prior
+                    // success within the same task. The flag is the authoritative
+                    // signal consulted by McpManager::connected_server_names().
+                    connected.store(false, Ordering::SeqCst);
                     // D-12: capture failure reason for reload reporting
                     failure_reason = Some(sanitized);
                     break;
@@ -92,6 +99,10 @@ pub async fn run_server_task(
         }
     }
 
+    // GAP-7: on clean task exit (cancel or normal break), unset the flag so
+    // `connected_server_names()` readers don't return a shut-down server.
+    connected.store(false, Ordering::SeqCst);
+
     ServerTaskResult {
         server_name: name,
         tool_names: registered_names,
@@ -109,6 +120,7 @@ async fn connect_and_serve(
     config: &McpServerConfig,
     registry: &Arc<RwLock<ToolRegistry>>,
     cancel_token: &CancellationToken,
+    connected: &Arc<AtomicBool>,
 ) -> anyhow::Result<Vec<String>> {
     // Connect via appropriate transport
     let client = if config.command.is_some() {
@@ -123,7 +135,13 @@ async fn connect_and_serve(
     };
 
     // Discover tools via the rmcp Peer (RunningService Derefs to Peer<RoleClient>)
+    // This is the initialize-and-discover gate. Its successful resolution is the
+    // authoritative signal that the rmcp `initialize` handshake completed AND tool
+    // discovery succeeded. GAP-7: flip the connected flag HERE — not at spawn time,
+    // not at transport-open time. Any earlier error above propagates via `?` and
+    // the flag stays `false` — exactly what connected_server_names() needs to read.
     let mcp_tools = client.list_all_tools().await?;
+    connected.store(true, Ordering::SeqCst);
     tracing::info!(
         server = %name,
         tool_count = mcp_tools.len(),

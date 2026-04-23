@@ -564,6 +564,12 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 /// Run interactive chat mode.
 async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     print_banner();
+    // GAP-5: force banner to hit the terminal BEFORE any async MCP startup
+    // message can interleave on stderr. Without this flush, the stdout buffer
+    // can be deferred until rustyline repaints on first keystroke, making the
+    // CLI look frozen when mcp_servers is configured (violates D-07).
+    io::stdout().flush().ok();
+    io::stderr().flush().ok();
 
     let (client, config, resolver) = build_client(cli)?;
 
@@ -826,6 +832,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     }
 
     let mut exit_cleanly = false;
+    // GAP-5: belt-and-braces flush — if any later synchronous println/eprintln
+    // happened between the banner and here (e.g., context injection, token
+    // estimator init, rustyline setup), force it to the terminal before we
+    // block inside rl.readline. The background MCP task's eprintln! has already
+    // raced with this point by the time we get here; flushing guarantees the
+    // user sees the prompt line rather than waiting on a keystroke.
+    io::stdout().flush().ok();
+    io::stderr().flush().ok();
     loop {
         // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
@@ -1590,6 +1604,51 @@ mod tui_extension_wiring_tests {
         assert!(
             until_next_fn.contains("on_session_end"),
             "run_chat must call on_session_end on clean exit (GAP-6)"
+        );
+    }
+
+    /// GAP-5: run_chat must flush stdout after print_banner() so the
+    /// banner reaches the terminal before rl.readline blocks on stdin.
+    /// Without this flush, the CLI appears frozen when mcp_servers is
+    /// configured (violates D-07 non-blocking-startup contract).
+    #[test]
+    fn initial_prompt_flush_precedes_readline() {
+        let src = include_str!("main.rs");
+
+        // The flush call must appear in the file (at least one of the two new sites).
+        assert!(
+            src.contains("io::stdout().flush().ok();"),
+            "GAP-5: run_chat must call io::stdout().flush().ok() to force the banner paint"
+        );
+
+        // Ordering: at least one stdout flush must appear BEFORE the main REPL
+        // `let readline = rl.readline(` call site. Using byte-offset comparison
+        // of the first match of each literal.
+        let flush_idx = src
+            .find("io::stdout().flush().ok();")
+            .expect("flush call must exist somewhere in main.rs");
+        let readline_idx = src
+            .find("let readline = rl.readline(")
+            .expect("run_chat must still call rl.readline for the REPL");
+        assert!(
+            flush_idx < readline_idx,
+            "GAP-5: io::stdout().flush().ok() must appear in source order BEFORE \
+             the `let readline = rl.readline(` site so the banner paints before \
+             the first stdin block. flush_idx={flush_idx}, readline_idx={readline_idx}"
+        );
+    }
+
+    /// GAP-5 companion: stderr flush must also exist (complements GAP-6 plan 09)
+    /// so the synchronous `MCP: connecting to N server(s) in background...`
+    /// line is not left in stderr's buffer behind the banner paint.
+    #[test]
+    fn initial_prompt_flushes_stderr_too() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("io::stderr().flush().ok();"),
+            "GAP-5: run_chat must also call io::stderr().flush().ok() after \
+             print_banner() so the 'MCP: connecting ...' dimmed line is not \
+             left buffered behind the prompt"
         );
     }
 }
