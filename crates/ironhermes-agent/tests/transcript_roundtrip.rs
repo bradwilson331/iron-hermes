@@ -93,14 +93,20 @@ async fn writer_appends_three_lines_and_reads_back() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("sub123.jsonl");
     let w = TranscriptWriter::open(&path);
+    // The real cancel path sequences prior writes before the Cancelled
+    // marker (D-07: cancel occurs only after user interrupt, at which
+    // point no new turn-events fire). Mirror that ordering here with a
+    // drain between the prior writes and the terminal Cancelled append:
+    // each tokio::spawn completes on its own task, so without a drain
+    // step the three fire-and-forget appends may interleave.
     w.append(TranscriptLine::now_stream_delta("a"));
     w.append(TranscriptLine::now_stream_delta("b"));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     w.append(TranscriptLine::now_cancelled("user"));
-    // Drain fire-and-forget.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let body = std::fs::read_to_string(&path).unwrap();
     let lines: Vec<&str> = body.lines().collect();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 3, "all 3 fire-and-forget writes must land");
     // Last line is cancelled (E-08 / D-07).
     let last: TranscriptLine = serde_json::from_str(lines[2]).unwrap();
     assert!(
