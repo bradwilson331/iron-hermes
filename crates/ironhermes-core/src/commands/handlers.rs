@@ -21,6 +21,7 @@ pub fn dispatch(
         "new" => cmd_new(args, ctx),
         "clear" => cmd_clear(ctx),
         "stop" => cmd_stop(ctx),
+        "agents" => cmd_agents(args, ctx),
         "status" => cmd_status(ctx),
         "title" => cmd_title(args, ctx),
         "compress" => cmd_compress(args, ctx),
@@ -83,17 +84,147 @@ fn cmd_quit(_ctx: &CommandContext) -> CommandResult {
     CommandResult::Quit
 }
 
+/// Phase 21.7 Plan 08 (D-26 / G-06): `/stop` drains & kills every background
+/// process tracked by the session's ProcessRegistry.
+///
+/// The pre-Plan-08 stub at this function body only announced agent-running
+/// state without doing any work. This version asks the ProcessRegistry for
+/// its current tracked count, awaits `drain_and_kill()`, and reports the
+/// count killed. The bridge from sync handler to async drain uses
+/// `block_in_place` + `Handle::current().block_on` — identical to
+/// `cmd_reload_mcp` below.
+///
+/// Budget 100% / fatal error / user interrupt (G-01/G-04/G-09) are enforced
+/// upstream and are unaffected by yolo. `/stop` is the complementary
+/// operator-driven killswitch for background processes (G-06).
 fn cmd_stop(ctx: &CommandContext) -> CommandResult {
-    // NOTE: On the CLI, /stop can only be entered at the readline prompt when
-    // the agent is idle (the REPL is single-threaded), so agent_running is
-    // always false. On the gateway, agent_running is not yet wired. In-flight
-    // cancellation is handled by ctrl-c (CLI) or platform-level mechanisms.
-    // TODO: Wire CancellationToken into CommandContext to enable true /stop.
-    if ctx.agent_running.load(Ordering::SeqCst) {
-        CommandResult::Output("Stopping agent... (note: cancellation token not yet wired — agent may continue)".to_string())
-    } else {
-        CommandResult::Output("No agent is currently running. Use Ctrl-C to cancel an in-flight turn.".to_string())
+    let pr = match &ctx.process_registry {
+        Some(p) => p.clone(),
+        None => {
+            // No ProcessRegistry wired — fall back to the pre-Plan-08
+            // agent-running advisory so /stop is not silent.
+            if ctx.agent_running.load(Ordering::SeqCst) {
+                return CommandResult::Output(
+                    "Stopping agent... (note: cancellation token not yet \
+                     wired \u{2014} agent may continue)"
+                        .to_string(),
+                );
+            }
+            return CommandResult::Output(
+                "No agent is currently running. Use Ctrl-C to cancel an \
+                 in-flight turn."
+                    .to_string(),
+            );
+        }
+    };
+    // D-26 drain-and-kill semantics: every previously tracked child is
+    // signalled to die; we use the pre-drain tracked count as the "killed"
+    // number because the post-drain count is definitionally 0.
+    let count_before = pr.tracked();
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(pr.drain_and_kill());
+    });
+    CommandResult::Output(format!(
+        "Stopped {} background process(es).",
+        count_before
+    ))
+}
+
+/// Phase 21.7 Plan 08 (D-03 / D-09): `/agents list|kill|logs`.
+///
+/// Dispatches on `args[0]`:
+/// - `None | Some("list")` → summarizes all active subagents
+/// - `Some("kill")` + id   → cancels the subagent's CancellationToken
+/// - `Some("logs")` + id   → returns a bounded tail of the transcript file
+///
+/// The underlying `SubagentListSnapshot` trait-object is populated by
+/// `CommandContext::with_subagent_registry(...)` at the run_chat +
+/// gateway sites (Plan 07). Handlers here are SYNC; the trait impl does
+/// any async-to-sync bridging for the tokio RwLock read/write.
+fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let reg = match &ctx.subagent_registry {
+        Some(r) => r.clone(),
+        None => return CommandResult::Output("Subagent registry not wired.".to_string()),
+    };
+    match args.first().copied() {
+        None | Some("list") => {
+            let entries = reg.list_summary();
+            if entries.is_empty() {
+                return CommandResult::Output("No active subagents.".to_string());
+            }
+            let body = entries
+                .iter()
+                .map(|(id, summary, uptime)| {
+                    format!(
+                        "- {} ({}) \u{2014} {}s",
+                        id,
+                        truncate_ellipsis(summary, 80),
+                        uptime.as_secs()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            CommandResult::Output(format!("Active subagents:\n{}", body))
+        }
+        Some("kill") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/agents kill <id>: missing id".to_string(),
+                    )
+                }
+            };
+            if reg.kill(id) {
+                CommandResult::Output(format!("Cancelled subagent {}.", id))
+            } else {
+                CommandResult::Output(format!("No active subagent with id {}.", id))
+            }
+        }
+        Some("logs") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/agents logs <id>: missing id".to_string(),
+                    )
+                }
+            };
+            let path = match reg.transcript_path(id) {
+                Some(p) => p,
+                None => {
+                    return CommandResult::Output(format!("No transcript for id {}.", id))
+                }
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(body) => {
+                    // Bounded tail: last 200 lines, preserved in original order.
+                    let mut tail: Vec<&str> =
+                        body.lines().rev().take(200).collect::<Vec<_>>();
+                    tail.reverse();
+                    CommandResult::Output(tail.join("\n"))
+                }
+                Err(e) => CommandResult::Error(format!("Cannot read transcript: {}", e)),
+            }
+        }
+        Some(other) => {
+            CommandResult::Error(format!("Unknown /agents subcommand: {}", other))
+        }
     }
+}
+
+/// Char-boundary-safe truncate with a trailing ellipsis when truncated.
+/// Used by `cmd_agents` to keep the `list_summary` lines at a predictable
+/// width without panicking on multi-byte UTF-8.
+fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut idx = max;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    format!("{}\u{2026}", &s[..idx])
 }
 
 fn cmd_status(ctx: &CommandContext) -> CommandResult {

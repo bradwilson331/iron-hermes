@@ -33,6 +33,14 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[number]")
             .platform(Universal),
         CommandDef::new("stop", "Stop the running agent", Session).platform(Universal),
+        // Phase 21.7 Plan 08 (D-03): /agents list|kill|logs surface.
+        CommandDef::new(
+            "agents",
+            "List, kill, or tail logs for active subagents",
+            Session,
+        )
+        .args_hint("[list|kill <id>|logs <id>]")
+        .platform(Universal),
         CommandDef::new("approve", "Approve a pending dangerous command", Session)
             .args_hint("[session|always]")
             .platform(GatewayOnly),
