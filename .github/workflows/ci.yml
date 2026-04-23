@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Phase 21.7 gate — static-grep + cargo-test CI gates that lock the four
+  # AI-SPEC eval invariants (E-05 SeqCst, E-08 transcript no-unwrap,
+  # E-09 three-site wiring parity, D-12 no per-request yolo).
+  # ---------------------------------------------------------------------------
+  phase-21-7-gates:
+    name: Phase 21.7 CI gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run scripts/ci-gates.sh
+        run: bash scripts/ci-gates.sh
+
+  # ---------------------------------------------------------------------------
+  # Insta workspace snapshot gate — blocks merges that leave orphan .snap
+  # files in the repo (the `--unreferenced=reject` flag) and ensures every
+  # committed snapshot still matches the producing code.
+  # ---------------------------------------------------------------------------
+  insta-snapshots:
+    name: insta snapshots up-to-date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-insta
+        run: cargo install cargo-insta --locked
+
+      - name: cargo insta test (reject unreferenced)
+        run: cargo insta test --unreferenced=reject --workspace
+
+  # ---------------------------------------------------------------------------
+  # Full workspace test — catches regressions across every crate.
+  # ---------------------------------------------------------------------------
+  workspace-tests:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-features
+
+  # ---------------------------------------------------------------------------
+  # Lint + format — workspace hygiene; regression gates outside the phase
+  # focus but cheap to run.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: cargo fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable) with components
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
