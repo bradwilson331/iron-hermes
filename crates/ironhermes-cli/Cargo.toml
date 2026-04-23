@@ -54,3 +54,8 @@ tempfile = "3"
 async-trait = { workspace = true }
 wiremock = { workspace = true }
 hex = { workspace = true }
+# Phase 21.7 Wave 0 — dev-deps consumed by Wave 1+ tests
+insta = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tracing-test = { workspace = true }

@@ -36,3 +36,6 @@ memory-duckdb = { path = "../../providers/memory-duckdb", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Phase 21.7 Wave 0 — BudgetHandle + transcript + pressure tests
+tracing-test = { workspace = true }
+insta = { workspace = true }
