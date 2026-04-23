@@ -66,3 +66,60 @@ impl SubagentRegistry {
         self.active.get(id)
     }
 }
+
+/// Plan 21.7-07 (D-03 / D-09): newtype wrapper around
+/// `Arc<RwLock<SubagentRegistry>>` implementing `SubagentListSnapshot`.
+/// Newtype required by Rust's orphan rule (foreign trait on foreign type).
+///
+/// All methods are SYNC by the trait definition, but the underlying lock is
+/// `tokio::sync::RwLock`. We use `tokio::task::block_in_place` +
+/// `Handle::current().block_on` to bridge — the same pattern used by
+/// `ironhermes-core/src/commands/handlers.rs` for `/models refresh`. Safe on
+/// the tokio multi-thread runtime; locks uncontended in practice
+/// (single-session registry).
+#[derive(Clone)]
+pub struct SubagentRegistryHandle(pub std::sync::Arc<tokio::sync::RwLock<SubagentRegistry>>);
+
+impl SubagentRegistryHandle {
+    pub fn new(reg: std::sync::Arc<tokio::sync::RwLock<SubagentRegistry>>) -> Self {
+        Self(reg)
+    }
+}
+
+impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegistryHandle {
+    fn active_count(&self) -> usize {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { self.0.read().await.active_count() })
+        })
+    }
+
+    fn list_summary(&self) -> Vec<(String, String, std::time::Duration)> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let guard = self.0.read().await;
+                guard
+                    .list()
+                    .into_iter()
+                    .map(|info| {
+                        let uptime = info.started_at.elapsed();
+                        (info.id, info.task_summary, uptime)
+                    })
+                    .collect()
+            })
+        })
+    }
+
+    fn kill(&self, id: &str) -> bool {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { self.0.write().await.kill(id) })
+        })
+    }
+
+    fn transcript_path(&self, id: &str) -> Option<PathBuf> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { self.0.read().await.transcript_path(id) })
+        })
+    }
+}

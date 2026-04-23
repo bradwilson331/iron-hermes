@@ -101,6 +101,26 @@ impl BudgetHandle {
     }
 }
 
+/// Plan 21.7-07 (D-17): let `CommandContext` consume the budget via a
+/// trait-object handle without forcing `ironhermes-core` to depend on
+/// `ironhermes-agent`.
+impl ironhermes_core::commands::context::BudgetSnapshot for BudgetHandle {
+    fn iterations_used(&self) -> usize {
+        self.used()
+    }
+    fn iterations_max(&self) -> usize {
+        self.max()
+    }
+    fn pressure_label(&self) -> &'static str {
+        match self.pressure() {
+            PressureTier::None => "none",
+            PressureTier::Caution70 => "caution70",
+            PressureTier::Warning90 => "warning90",
+            PressureTier::Stop100 => "stop100",
+        }
+    }
+}
+
 /// Helper for Plan 05 turn-boundary injection.
 /// Returns the exact advisory text for a tier (None for None/Stop — Stop
 /// terminates before the next provider call, so no injection needed).
