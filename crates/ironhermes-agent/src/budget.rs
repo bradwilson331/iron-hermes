@@ -64,10 +64,20 @@ impl BudgetHandle {
         self.max.saturating_sub(self.remaining())
     }
 
-    /// Wave-1 Plan 02 fills this in. Shell panics on use so accidental
-    /// production callers fail loudly rather than silently under-counting.
+    /// Decrement. Returns Some(new_remaining) on success; None when budget
+    /// was already 0 at entry (D-15 Stop100 tier).
+    ///
+    /// SeqCst ordering (AI-SPEC Pitfall 9 / E-05): reader on `hermes status`
+    /// sees the post-decrement value.
     pub fn consume(&self) -> Option<usize> {
-        unimplemented!("BudgetHandle::consume — implemented in Plan 02 (Wave 1)")
+        let prev = self.remaining.fetch_sub(1, Ordering::SeqCst);
+        if prev == 0 {
+            // Compensate: fetch_sub on 0 wraps to usize::MAX; restore to 0.
+            self.remaining.fetch_add(1, Ordering::SeqCst);
+            None
+        } else {
+            Some(prev - 1)
+        }
     }
 
     /// Wave-1 Plan 02 fills this in.
@@ -81,3 +91,59 @@ pub const CAUTION_ADVISORY: &str = "You have used approximately 70% of your iter
 
 /// Advisory string appended to the prompt when pressure hits the 90% mark.
 pub const WARNING_ADVISORY: &str = "You have used approximately 90% of your iteration budget. Respond with your final answer now.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consume_from_fresh_decrements_by_one() {
+        let b = BudgetHandle::new(100);
+        assert_eq!(b.consume(), Some(99));
+        assert_eq!(b.remaining(), 99);
+    }
+
+    #[test]
+    fn consume_at_zero_returns_none_and_does_not_underflow() {
+        let b = BudgetHandle::new(2);
+        assert_eq!(b.consume(), Some(1));
+        assert_eq!(b.consume(), Some(0));
+        assert_eq!(b.consume(), None);
+        assert_eq!(b.remaining(), 0, "must not underflow past 0");
+        // Repeated calls at 0 stay at 0.
+        assert_eq!(b.consume(), None);
+        assert_eq!(b.remaining(), 0);
+    }
+
+    #[test]
+    fn used_reflects_decrements() {
+        let b = BudgetHandle::new(10);
+        b.consume();
+        b.consume();
+        b.consume();
+        assert_eq!(b.used(), 3);
+        assert_eq!(b.remaining(), 7);
+    }
+
+    #[test]
+    fn clone_shares_same_counter() {
+        let a = BudgetHandle::new(5);
+        let b = a.clone();
+        a.consume();
+        a.consume();
+        assert_eq!(b.remaining(), 3, "clones share the Arc<AtomicUsize>");
+    }
+
+    #[test]
+    fn new_from_arc_round_trips() {
+        let original = BudgetHandle::new(20);
+        let raw = original.inner();
+        let reconstructed = BudgetHandle::new_from_arc(raw, 20);
+        original.consume();
+        assert_eq!(
+            reconstructed.remaining(),
+            19,
+            "new_from_arc shares the same Arc<AtomicUsize>"
+        );
+    }
+}
