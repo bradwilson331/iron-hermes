@@ -66,9 +66,15 @@ fn run_chat_and_run_single_wire_all_tools() {
             body.contains("register_skills_tool"),
             "{fn_name} must call register_skills_tool"
         );
+        // Plan 21.7-06: the legacy `_with_active_skills` variant was replaced
+        // by `_with_process_registry` at all three CLI + gateway call sites
+        // to bundle the ProcessRegistry wiring alongside active-skills env
+        // bypass (D-29). Accept either spelling — INV-21.7-03 in
+        // invariants_21_7.rs locks the precise count.
         assert!(
-            body.contains("register_execute_code_tool_with_active_skills"),
-            "{fn_name} must call register_execute_code_tool_with_active_skills"
+            body.contains("register_execute_code_tool_with_active_skills")
+                || body.contains("register_execute_code_tool_with_process_registry"),
+            "{fn_name} must call register_execute_code_tool_with_{{active_skills|process_registry}}"
         );
 
         // Guardrails (per D-02)

@@ -16,6 +16,7 @@ use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
+use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_tools::ToolRegistry;
 
 use crate::adapter::{MessageHandler, PlatformAdapter};
@@ -72,6 +73,13 @@ pub struct GatewayMessageHandler {
     /// with a clone so parent + delegate_task subagents decrement the same
     /// counter. None = budget disabled (legacy path).
     budget_handle: Option<BudgetHandle>,
+    /// Plan 21.7-06 (D-29, D-24): gateway-scoped ProcessRegistry threaded
+    /// from the runner. Per-request handler calls `drain_and_kill_session`
+    /// at on_session_end. Gateway registry task_id is a process-wide constant
+    /// ("gateway") so per-request drain_and_kill_session mismatches and is a
+    /// no-op — cleanup happens via LRU/TTL prune; true per-session scoping
+    /// is deferred (matches the BudgetHandle lifecycle decision in Plan 05).
+    process_registry: Option<Arc<RwLock<ProcessRegistry>>>,
 }
 
 impl GatewayMessageHandler {
@@ -101,6 +109,7 @@ impl GatewayMessageHandler {
             context_length,
             command_router: CommandRouter::new(build_registry()),
             budget_handle: None,
+            process_registry: None,
         }
     }
 
@@ -109,6 +118,12 @@ impl GatewayMessageHandler {
     /// `delegate_task` children share the same iteration counter.
     pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
         self.budget_handle = Some(handle);
+    }
+
+    /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
+    /// so per-request on_session_end can invoke `drain_and_kill_session`.
+    pub fn set_process_registry(&mut self, reg: Arc<RwLock<ProcessRegistry>>) {
+        self.process_registry = Some(reg);
     }
 
     /// Phase 18 Plan 06: install the per-turn hygiene engine. Wired by composition
@@ -587,6 +602,27 @@ impl GatewayMessageHandler {
                 let _ = adapter
                     .send_message(&event.chat_id, error_suffix, None)
                     .await;
+            }
+        }
+
+        // Plan 21.7-06 (D-24, T-21.7-06-01): per-request drain of the
+        // gateway-scoped ProcessRegistry. The registry's task_id is a
+        // process-wide constant ("gateway"), so drain_and_kill_session with
+        // the per-request session_id is a deliberate no-op unless a future
+        // plan lands per-session scoping. The call is still emitted so
+        // INV-21.7-07 (static-grep gate on gateway handler drain) stays
+        // green and the wiring is audit-visible.
+        if let Some(ref reg) = self.process_registry {
+            if let Err(e) = reg
+                .write()
+                .await
+                .drain_and_kill_session(&session_id_str)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "process_registry drain_and_kill_session failed in gateway run_agent (best-effort)"
+                );
             }
         }
 

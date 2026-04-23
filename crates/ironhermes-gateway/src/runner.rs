@@ -8,6 +8,7 @@ use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::context_engine::ContextEngine;
+use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_core::{ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_mcp::McpManager;
@@ -48,6 +49,11 @@ pub struct GatewayRunner {
     /// the handler so per-request AgentLoops share the same counter with the
     /// AgentSubagentRunner registered on the tool registry.
     budget_handle: Option<BudgetHandle>,
+    /// Plan 21.7-06 (D-29, D-24): gateway-scoped ProcessRegistry for
+    /// terminal/execute_code background spawns. Mirrors the BudgetHandle
+    /// plumbing pattern. `build_gateway_handler` clones it into the handler
+    /// so per-request on_session_end can invoke drain_and_kill_session.
+    process_registry: Option<Arc<RwLock<ProcessRegistry>>>,
     cancel: CancellationToken,
 }
 
@@ -71,6 +77,7 @@ impl GatewayRunner {
             active_skills: None,
             mcp_manager: None, // GAP-8: wired by run_gateway before start()
             budget_handle: None, // Plan 21.7-05: wired by run_gateway before start()
+            process_registry: None, // Plan 21.7-06: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -83,6 +90,13 @@ impl GatewayRunner {
     /// parent + child subagent loops a shared counter.
     pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
         self.budget_handle = Some(handle);
+    }
+
+    /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
+    /// so `build_gateway_handler` can clone it into the handler. Caller is
+    /// `run_gateway` in ironhermes-cli.
+    pub fn set_process_registry(&mut self, reg: Arc<RwLock<ProcessRegistry>>) {
+        self.process_registry = Some(reg);
     }
 
     /// Plan 20-02: set the `MemoryManager` handle used by the gateway runner,
@@ -150,6 +164,11 @@ impl GatewayRunner {
         // per-request AgentLoops see the same counter as AgentSubagentRunner.
         if let Some(ref handle) = self.budget_handle {
             handler.set_budget_handle(handle.clone());
+        }
+        // Plan 21.7-06 (D-29, D-24): thread the gateway-scoped ProcessRegistry
+        // so per-request on_session_end can invoke drain_and_kill_session.
+        if let Some(ref reg) = self.process_registry {
+            handler.set_process_registry(reg.clone());
         }
 
         // Phase 21.3: initialize global token estimator from model's encoding
