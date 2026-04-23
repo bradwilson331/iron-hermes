@@ -1674,11 +1674,14 @@ mod tui_extension_wiring_tests {
 #[cfg(test)]
 mod ensure_home_dirs_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_ensure_home_dirs_creates_all_subdirs() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
         ensure_home_dirs().unwrap();
 
@@ -1686,9 +1689,7 @@ mod ensure_home_dirs_tests {
             assert!(tmp.path().join(sub).is_dir(), "Missing directory: {}", sub);
         }
 
-        // Idempotent: calling again should not error
         ensure_home_dirs().unwrap();
-        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
         unsafe { std::env::remove_var("IRONHERMES_HOME"); }
     }
 
@@ -1698,17 +1699,15 @@ mod ensure_home_dirs_tests {
     /// checks.
     #[test]
     fn home_dirs_includes_subagent_transcripts() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
         ensure_home_dirs().unwrap();
         assert!(
             tmp.path().join("subagent-transcripts").is_dir(),
             "D-05: $HERMES_HOME/subagent-transcripts must exist after first-run scaffold"
         );
-        // Idempotency: running twice must not error.
         ensure_home_dirs().unwrap();
-        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
         unsafe { std::env::remove_var("IRONHERMES_HOME"); }
     }
 }
