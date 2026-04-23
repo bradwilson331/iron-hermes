@@ -83,19 +83,36 @@ impl DeepProbe for NoopDeepProbe {
     }
 }
 
-/// Real probe impl — placeholder body. Plan 09 fills each method.
+/// Real probe impl (Phase 21.7 Plan 09 Task 9-03).
 ///
-/// Each method returns the literal string
-/// `LiveDeepProbe::<method> not yet implemented — Plan 09`
-/// so Plan 09's executor can `grep -rn "LiveDeepProbe::" crates/ironhermes-cli`
-/// to locate the three bail sites.
+/// Each method performs a bounded, timeout-wrapped round-trip against the
+/// corresponding subsystem:
+/// - `provider_health`: `reqwest` HEAD against a canonical endpoint URL.
+/// - `fts5_integrity`: `rusqlite` `PRAGMA integrity_check` via spawn_blocking.
+/// - `mcp_server`: reports unreachable with latency=0 (ISS-11 fallback —
+///   requires McpManager plumbing that 21.7 scope does not include; a
+///   future phase wires rmcp `list_all_tools`).
+///
+/// Every method emits `tracing::info!(target="ironhermes_cli::status",
+/// component, ok, latency_ms)` so FW-05 / M-05 observers can aggregate
+/// deep-probe outcomes from the same log stream.
 #[cfg(not(test))]
-pub struct LiveDeepProbe;
+pub struct LiveDeepProbe {
+    http: reqwest::Client,
+}
 
 #[cfg(not(test))]
 impl LiveDeepProbe {
     pub fn new() -> Self {
-        Self
+        // Outer client timeout is a safety belt; the per-call `timeout`
+        // parameter is the primary deadline. We set a 5s upper bound on
+        // the client itself so connection-establishment doesn't hang
+        // indefinitely even when the caller passes a longer timeout.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { http }
     }
 }
 
@@ -111,24 +128,130 @@ impl Default for LiveDeepProbe {
 impl DeepProbe for LiveDeepProbe {
     async fn provider_health(
         &self,
-        _provider_name: &str,
-        _timeout: Duration,
+        provider_name: &str,
+        timeout: Duration,
     ) -> anyhow::Result<bool> {
-        anyhow::bail!("LiveDeepProbe::provider_health not yet implemented — Plan 09")
+        let url = match provider_probe_url(provider_name) {
+            Some(u) => u,
+            None => {
+                tracing::info!(
+                    target: "ironhermes_cli::status",
+                    component = "provider",
+                    provider = provider_name,
+                    "no probe URL configured; reporting unhealthy"
+                );
+                return Ok(false);
+            }
+        };
+
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(timeout, self.http.head(&url).send()).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let ok = match result {
+            Ok(Ok(resp)) => {
+                let s = resp.status();
+                // 2xx means healthy; 401/403 means the endpoint is reachable
+                // (we're unauthenticated on a HEAD — that's fine for liveness).
+                // 3xx redirects also indicate the endpoint is serving.
+                s.is_success()
+                    || s.is_redirection()
+                    || s.as_u16() == 401
+                    || s.as_u16() == 403
+            }
+            Ok(Err(_)) | Err(_) => false,
+        };
+
+        tracing::info!(
+            target: "ironhermes_cli::status",
+            component = "provider",
+            provider = provider_name,
+            ok,
+            latency_ms,
+            "deep probe complete"
+        );
+        Ok(ok)
     }
+
     async fn fts5_integrity(
         &self,
-        _db_path: &std::path::Path,
-        _timeout: Duration,
+        db_path: &std::path::Path,
+        timeout: Duration,
     ) -> anyhow::Result<bool> {
-        anyhow::bail!("LiveDeepProbe::fts5_integrity not yet implemented — Plan 09")
+        let path_clone = db_path.to_path_buf();
+        let start = std::time::Instant::now();
+
+        // rusqlite is sync; hop to a blocking thread and bound wall clock
+        // via tokio::time::timeout. `PRAGMA integrity_check` returns
+        // exactly "ok" on healthy DBs — any other string means corrupt.
+        let blocking = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            if !path_clone.exists() {
+                // A missing state.db is "not unhealthy" — it just hasn't
+                // been populated. Return false so the status line shows
+                // a distinct state from a validated-ok DB; the text layer
+                // surfaces "bad" for operator attention.
+                return Ok(false);
+            }
+            let conn = rusqlite::Connection::open(&path_clone)?;
+            let res: String =
+                conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+            Ok(res == "ok")
+        });
+
+        let outcome = tokio::time::timeout(timeout, blocking).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let ok = match outcome {
+            Ok(Ok(Ok(b))) => b,
+            _ => false,
+        };
+        tracing::info!(
+            target: "ironhermes_cli::status",
+            component = "fts5",
+            ok,
+            latency_ms,
+            "deep probe complete"
+        );
+        Ok(ok)
     }
+
     async fn mcp_server(
         &self,
-        _name: &str,
+        name: &str,
         _timeout: Duration,
     ) -> anyhow::Result<McpProbeResult> {
-        anyhow::bail!("LiveDeepProbe::mcp_server not yet implemented — Plan 09")
+        // ISS-11 (21.7 MVP): `hermes status` does not construct an
+        // McpManager for a one-shot probe. Reporting `reachable=false`
+        // honestly is better than lying with `reachable=true` (FM-5 —
+        // false-negative masking outage). A future phase threads the
+        // McpManager handle through `status_cmd::run_status` so this
+        // path can do a real `list_all_tools` round-trip.
+        tracing::warn!(
+            target: "ironhermes_cli::status",
+            component = "mcp",
+            server = name,
+            ok = false,
+            latency_ms = 0_u64,
+            "LiveDeepProbe::mcp_server wiring deferred — reporting \
+             unreachable honestly (ISS-11)"
+        );
+        Ok(McpProbeResult {
+            name: name.into(),
+            reachable: false,
+            tool_count: 0,
+            latency_ms: 0,
+        })
+    }
+}
+
+/// Provider-name → canonical probe URL. Returns `None` for providers
+/// without a known health endpoint; the caller maps that to `Ok(false)`.
+#[cfg(not(test))]
+fn provider_probe_url(name: &str) -> Option<String> {
+    match name {
+        "anthropic" => Some("https://api.anthropic.com/v1/messages".into()),
+        "openai" => Some("https://api.openai.com/v1/models".into()),
+        "openrouter" => Some("https://openrouter.ai/api/v1/models".into()),
+        _ => None,
     }
 }
 

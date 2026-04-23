@@ -90,8 +90,10 @@ enum Commands {
         #[arg(long)]
         yolo: bool,
     },
-    /// Show current configuration and status
-    Status,
+    /// Show current configuration and status.
+    ///
+    /// Phase 21.7 Plan 09 (D-18..D-22): `--all`, `--deep`, `--json` flags.
+    Status(ironhermes_cli::status_cmd::StatusArgs),
     /// Check configuration and dependencies
     Doctor,
     /// Show version information
@@ -185,7 +187,7 @@ async fn main() -> Result<()> {
     ironhermes_core::warm_tiktoken_singletons();
 
     match cli.command {
-        Some(Commands::Status) => cmd_status(),
+        Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat { ref message, yolo: ref chat_yolo }) => {
@@ -271,54 +273,11 @@ fn ensure_home_dirs() -> Result<()> {
     Ok(())
 }
 
-fn cmd_status() -> Result<()> {
-    let config = Config::load().unwrap_or_default();
-
-    println!("{}", "IronHermes Status".bold().cyan());
-    println!("{}", "─".repeat(40));
-    println!(
-        "  Home:     {}",
-        ironhermes_core::display_hermes_home()
-    );
-    println!("  Model:    {}", config.model.default);
-    println!("  Provider: {}", config.model.provider);
-    println!("  Terminal: {}", config.terminal.backend);
-    println!("  Web:      {}", config.web.backend);
-
-    // Check API keys
-    let has_openrouter = std::env::var("OPENROUTER_API_KEY").is_ok();
-    let has_anthropic = std::env::var("ANTHROPIC_API_KEY").is_ok();
-    let has_openai = std::env::var("OPENAI_API_KEY").is_ok();
-
-    println!();
-    println!("{}", "API Keys".bold());
-    println!(
-        "  OpenRouter:  {}",
-        if has_openrouter {
-            "configured".green()
-        } else {
-            "not set".red()
-        }
-    );
-    println!(
-        "  Anthropic:   {}",
-        if has_anthropic {
-            "configured".green()
-        } else {
-            "not set".red()
-        }
-    );
-    println!(
-        "  OpenAI:      {}",
-        if has_openai {
-            "configured".green()
-        } else {
-            "not set".red()
-        }
-    );
-
-    Ok(())
-}
+// Phase 21.7 Plan 09 Task 9-02: the previous `cmd_status` stub has been
+// replaced by `ironhermes_cli::status_cmd::run_status`, which reads the
+// full D-18..D-22 status surface (provider, memory, gateway, subagents,
+// processes, MCP, yolo) and supports `--all`, `--deep`, `--json` flags.
+// The dispatch arm in `main()` calls `run_status(args).await`.
 
 fn cmd_doctor() -> Result<()> {
     println!("{}", "IronHermes Doctor".bold().cyan());

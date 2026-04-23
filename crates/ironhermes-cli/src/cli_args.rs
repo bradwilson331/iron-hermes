@@ -13,6 +13,7 @@
 //! to match — the `invariant_21_7_10_gateway_subcommand_rejects_yolo_flag`
 //! test is the canary.
 
+use crate::status_cmd::StatusArgs;
 use clap::{Parser, Subcommand};
 
 /// Top-level CLI surface (lib-reachable mirror of `main::Cli`).
@@ -78,7 +79,9 @@ pub enum Commands {
         yolo: bool,
     },
     /// Show current configuration and status.
-    Status,
+    ///
+    /// Phase 21.7 Plan 09 (D-18..D-22): `--all`, `--deep`, `--json` flags.
+    Status(StatusArgs),
     /// Check configuration and dependencies.
     Doctor,
     /// Show version information.
