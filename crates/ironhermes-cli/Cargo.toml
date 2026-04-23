@@ -50,6 +50,10 @@ uuid = { workspace = true }
 dotenvy = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true }
+# Phase 21.7 Plan 09 Task 9-03 (D-21): LiveDeepProbe uses reqwest for
+# provider HEAD probes and rusqlite for FTS5 `PRAGMA integrity_check`.
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
