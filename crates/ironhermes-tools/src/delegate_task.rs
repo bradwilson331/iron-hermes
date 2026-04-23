@@ -494,6 +494,20 @@ impl Tool for DelegateTaskTool {
                 wait_duration.as_millis()
             );
         }
+        // Phase 21.7 Plan 08 (D-09 / E-11 / T-21.7-08-05): 2s debounced
+        // semaphore-wait warn. Fires once per blocked task that took more
+        // than 2 seconds to acquire — the operator sees it via
+        // `RUST_LOG=warn` (which is the default level the CLI promotes
+        // to stderr). Target + message are locked by the grep gate in
+        // `tests/delegate_task_semaphore_warn.rs` — if you refactor,
+        // keep both literals verbatim.
+        if wait_duration >= std::time::Duration::from_secs(2) {
+            tracing::warn!(
+                target: "ironhermes_tools::delegate_task",
+                elapsed_ms = wait_duration.as_millis() as u64,
+                "semaphore wait exceeded 2s threshold"
+            );
+        }
 
         // Build child registry (D-01..D-05)
         let child_registry = build_child_registry(

@@ -32,3 +32,10 @@ tokio-util = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]
+# Phase 21.7 Plan 08 Task 8-03: tracing-test with `no-env-filter` so
+# `#[traced_test]` captures logs from any target (not just the test
+# binary crate). Required because the production warn target is
+# `ironhermes_tools::delegate_task`, which would otherwise be filtered
+# out by the default `{crate}=trace` env filter.
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
