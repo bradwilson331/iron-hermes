@@ -1373,6 +1373,15 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     runner.set_skill_registry(skill_registry);
     runner.set_hook_registry(hook_registry);
     runner.set_active_skills(active_skills);
+    // GAP-8 (Phase 21.2 Plan 11): wire MCP manager into runner's shutdown
+    // path so Ctrl+C actually returns when stdio MCP servers are connected.
+    // build_mcp_manager returns Option<Arc<McpManager>>; pass the Arc clone
+    // if Some. Without this, `ironhermes gateway` hangs indefinitely on
+    // Ctrl+C because the tokio process reaper keeps the runtime alive until
+    // MCP children are reaped.
+    if let Some(ref mgr) = mcp_manager {
+        runner.set_mcp_manager(mgr.clone());
+    }
     runner.start().await
 }
 

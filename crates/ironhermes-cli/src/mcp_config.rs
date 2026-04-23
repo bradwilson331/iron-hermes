@@ -528,9 +528,14 @@ async fn attempt_connect_and_list_with_timeout(
 async fn attempt_connect_and_list(
     config: &McpServerConfig,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    use ironhermes_mcp::transport::{connect_stdio, connect_http};
+    use ironhermes_mcp::transport::{connect_http, connect_stdio};
 
-    let client = if config.command.is_some() {
+    // GAP-8 (Phase 21.2 Plan 11): connect_stdio/connect_http now return
+    // (RunningService, Option<tokio::process::Child>). The Child handle is
+    // exposed so McpManager::shutdown_all can hard-kill it during graceful
+    // shutdown; this call site uses a short-lived probe and drops both so
+    // the Child's kill_on_drop(true) reaps the stdio process at end-of-scope.
+    let (client, child) = if config.command.is_some() {
         connect_stdio(config).await?
     } else if config.url.is_some() {
         connect_http(config).await?
@@ -551,8 +556,10 @@ async fn attempt_connect_and_list(
         })
         .collect();
 
-    // Drop client (disconnects)
+    // Drop client (disconnects rmcp transport) and Child handle
+    // (kill_on_drop(true) reaps the stdio child at end-of-scope).
     drop(client);
+    drop(child);
 
     Ok(tools)
 }

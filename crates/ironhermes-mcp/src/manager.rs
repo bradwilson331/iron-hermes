@@ -29,8 +29,25 @@ pub struct StartResult {
 /// filtering via enabled_tools (D-08), and reload (D-09).
 pub struct McpManager {
     registry: Arc<RwLock<ToolRegistry>>,
-    /// Active task handles and their cancellation tokens, keyed by server name.
-    tasks: Mutex<HashMap<String, (JoinHandle<ServerTaskResult>, CancellationToken)>>,
+    /// Active task handles, cancellation tokens, AND per-server child-process
+    /// slots, keyed by server name.
+    ///
+    /// GAP-8: the third tuple element is an `Arc<Mutex<Option<tokio::process::Child>>>`
+    /// populated by `server_task::connect_and_serve` after `connect_stdio` succeeds.
+    /// `shutdown_all` reaches into it to call `Child::start_kill()` BEFORE the
+    /// bounded `tokio::time::timeout(2s, handle)` await, so the gateway exits
+    /// in bounded time on Ctrl+C even when the stdio child ignores parent-pipe
+    /// EOF. Under the plan-11 Option B fallback the slot typically stays `None`
+    /// (rmcp 1.5's `TokioChildProcess` owns the child internally), but the
+    /// bounded timeout + `kill_on_drop(true)` in `connect_stdio` still close
+    /// GAP-8 at the user-facing level. When rmcp later exposes a pre-spawned-
+    /// Child constructor, the slot becomes load-bearing without any manager
+    /// changes (Option A upgrade).
+    tasks: Mutex<HashMap<String, (
+        JoinHandle<ServerTaskResult>,
+        CancellationToken,
+        Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+    )>>,
     /// Last-known configs for each active server (used by reconnect/reload).
     configs: Mutex<HashMap<String, McpServerConfig>>,
     /// GAP-7: per-server connected flag flipped to `true` by `server_task::connect_and_serve`
@@ -70,14 +87,22 @@ impl McpManager {
             // GAP-7: allocate per-server connected flag; server_task flips it to
             // true ONLY after list_all_tools() succeeds.
             let connected = Arc::new(AtomicBool::new(false));
+            // GAP-8: per-server child-process slot. server_task parks the
+            // spawned tokio::process::Child here on connect_stdio success;
+            // shutdown_all reaches in to start_kill() it on graceful shutdown.
+            // Under Option B fallback the slot stays None — bounded timeout
+            // + kill_on_drop(true) still close GAP-8 at the user-facing level.
+            let child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>> =
+                Arc::new(tokio::sync::Mutex::new(None));
             let handle = tokio::spawn(server_task::run_server_task(
                 name.clone(),
                 config.clone(),
                 self.registry.clone(),
                 cancel.clone(),
                 connected.clone(),
+                child_slot.clone(),
             ));
-            tasks.insert(name.clone(), (handle, cancel));
+            tasks.insert(name.clone(), (handle, cancel, child_slot));
             flags.insert(name.clone(), connected);
             stored_configs.insert(name, config);
         }
@@ -105,15 +130,19 @@ impl McpManager {
                 // GAP-7: allocate per-server connected flag; server_task flips it to
                 // true ONLY after list_all_tools() succeeds.
                 let connected = Arc::new(AtomicBool::new(false));
+                // GAP-8: per-server child-process slot (see start_all for rationale).
+                let child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>> =
+                    Arc::new(tokio::sync::Mutex::new(None));
                 let handle = tokio::spawn(server_task::run_server_task(
                     name.clone(),
                     config.clone(),
                     self.registry.clone(),
                     cancel.clone(),
                     connected.clone(),
+                    child_slot.clone(),
                 ));
                 task_names.push(name.clone());
-                tasks.insert(name.clone(), (handle, cancel));
+                tasks.insert(name.clone(), (handle, cancel, child_slot));
                 flags.insert(name.clone(), connected);
                 stored_configs.insert(name, config);
             }
@@ -138,7 +167,7 @@ impl McpManager {
                     .get(name)
                     .map(|f| f.load(Ordering::SeqCst))
                     .unwrap_or(false);
-                if let Some((handle, _cancel)) = tasks.get(name) {
+                if let Some((handle, _cancel, _child_slot)) = tasks.get(name) {
                     // GAP-4: registered tools use the SANITIZED prefix (make_prefixed_name
                     // replaces `-`/`.`/`@`/`/` with `_`), so the lookup must sanitize too.
                     let sanitized_prefix = format!("{}__", sanitize_server_name(name));
@@ -168,28 +197,83 @@ impl McpManager {
 
     /// Shutdown all running server tasks and unregister their tools.
     ///
-    /// Cancels each task's `CancellationToken`, waits for completion, then
+    /// Cancels each task's `CancellationToken`, hard-kills any stdio child
+    /// process (GAP-8), then awaits the task's `JoinHandle` with a bounded
+    /// 2-second ceiling so the gateway's Ctrl+C path can never hang. Finally
     /// removes the server's tools from the registry via `unregister_by_prefix`.
+    ///
+    /// GAP-8 (Phase 21.2 Plan 11): before this fix, `ironhermes gateway` hung
+    /// indefinitely on Ctrl+C when stdio MCP servers were connected. Root
+    /// cause: the rmcp `TokioChildProcess` parent->child pipe closure did not
+    /// cause a misbehaving child (e.g. Node runtime blocked on stdin) to
+    /// exit, and tokio's process reaper kept the runtime alive until the
+    /// child was reaped. The fix here has two parts working together:
+    ///   1. `Child::start_kill()` sends SIGKILL if a child handle is parked
+    ///      (currently a no-op under the plan-11 Option B fallback where
+    ///      rmcp owns the child — `kill_on_drop(true)` in `connect_stdio`
+    ///      covers this path via tokio's drop-kill).
+    ///   2. `tokio::time::timeout(Duration::from_secs(2), handle)` bounds the
+    ///      JoinHandle await so shutdown always returns — the operator's
+    ///      Ctrl+C returns within ~2s/server regardless of child behavior.
     pub async fn shutdown_all(&self) -> Vec<ServerTaskResult> {
+        use tokio::time::{Duration, timeout};
+
         let mut tasks = self.tasks.lock().await;
         let mut flags = self.connected_flags.lock().await;
         let mut results = Vec::new();
 
-        for (name, (handle, cancel)) in tasks.drain() {
+        for (name, (handle, cancel, child_slot)) in tasks.drain() {
             tracing::info!(server = %name, "Shutting down MCP server");
+
+            // 1. Cancel the task's cancellation token (tells the serve loop to break).
             cancel.cancel();
-            if let Ok(result) = handle.await {
-                results.push(result);
+
+            // 2. GAP-8: hard-kill the stdio child (if any). start_kill() is
+            //    non-blocking — it sets the SIGKILL flag on the child. The
+            //    subsequent timeout(2s, handle) does the actual bounded wait.
+            //    Under plan-11 Option B this branch is typically a no-op —
+            //    rmcp owns the child internally and the slot holds None — but
+            //    `kill_on_drop(true)` in connect_stdio gives us the same OS-
+            //    level kill guarantee when rmcp's transport drops. Either way,
+            //    the bounded timeout below is the load-bearing guarantee.
+            if let Some(mut child) = child_slot.lock().await.take() {
+                match child.start_kill() {
+                    Ok(()) => tracing::debug!(server = %name, "Sent SIGKILL to MCP stdio child"),
+                    Err(e) => tracing::warn!(
+                        server = %name,
+                        error = %e,
+                        "Failed to SIGKILL MCP stdio child (may already be reaped)"
+                    ),
+                }
             }
-            // Unregister tools for this server (D-09: rebuild registry on reload)
-            // GAP-4: unregister_by_prefix appends "__" to its argument; we must pass the
-            // already-sanitized server name so the match finds the tools we registered.
+
+            // 3. GAP-8: await the JoinHandle with a bounded 2-second ceiling.
+            //    If the task is genuinely stuck, we log a warning and proceed
+            //    — never blocking the gateway's Ctrl+C return.
+            match timeout(Duration::from_secs(2), handle).await {
+                Ok(Ok(result)) => results.push(result),
+                Ok(Err(join_err)) => tracing::warn!(
+                    server = %name,
+                    error = %join_err,
+                    "MCP server task panicked during shutdown"
+                ),
+                Err(_elapsed) => tracing::warn!(
+                    server = %name,
+                    "MCP server task did not join within 2s of cancel+SIGKILL; proceeding"
+                ),
+            }
+
+            // 4. Unregister tools for this server (D-09: rebuild registry on reload)
+            //    GAP-4: unregister_by_prefix appends "__" to its argument; we must
+            //    pass the already-sanitized server name so the match finds the
+            //    tools we registered.
             let mut guard = self.registry.write().await;
             let removed = guard.unregister_by_prefix(&sanitize_server_name(&name));
             tracing::debug!(server = %name, removed, "Unregistered MCP tools");
             drop(guard); // explicitly drop before next iteration to avoid holding write lock
-            // GAP-7: remove the connected flag alongside the task handle so no
-            // stale reads of `connected_server_names()` survive shutdown.
+
+            // 5. GAP-7: remove the connected flag alongside the task handle so
+            //    no stale reads of `connected_server_names()` survive shutdown.
             flags.remove(&name);
         }
         results
@@ -302,9 +386,17 @@ impl ironhermes_core::commands::context::McpReloader for McpManager {
 
 impl Drop for McpManager {
     fn drop(&mut self) {
-        // Cancel all tasks on drop to avoid orphaned background tasks
+        // Cancel all tasks on drop to avoid orphaned background tasks.
+        //
+        // GAP-8: Drop is sync and cannot await a JoinHandle or async-kill a
+        // Child. The actual hard-kill path is `shutdown_all`, which is now
+        // invoked by `GatewayRunner::start` BEFORE the runner returns (so
+        // this Drop only runs after all children are already killed via the
+        // bounded-timeout path). The `child_slot` is bound to `_` here because
+        // a synchronous drop cannot take/start_kill it — Option B's
+        // `kill_on_drop(true)` in connect_stdio covers any residual case.
         if let Ok(tasks) = self.tasks.try_lock() {
-            for (_, (_, cancel)) in tasks.iter() {
+            for (_, (_, cancel, _child_slot)) in tasks.iter() {
                 cancel.cancel();
             }
         }
@@ -408,7 +500,7 @@ mod tests {
                 .tasks
                 .lock()
                 .await
-                .insert(server_name.to_string(), (handle, cancel));
+                .insert(server_name.to_string(), (handle, cancel, Arc::new(tokio::sync::Mutex::new(None))));
         }
 
         // Pre-condition: both tools visible under sanitized prefix.
@@ -574,7 +666,7 @@ mod tests {
                 .tasks
                 .lock()
                 .await
-                .insert(server_name.to_string(), (handle, cancel));
+                .insert(server_name.to_string(), (handle, cancel, Arc::new(tokio::sync::Mutex::new(None))));
         }
 
         // Cycle 1: register + shutdown (simulates one reload iteration)
@@ -603,5 +695,64 @@ mod tests {
             "GAP-4: two reload cycles must not leave duplicates; residue={:?}",
             residue.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()
         );
+    }
+
+    /// GAP-8: `shutdown_all` must return within a bounded time even when
+    /// a stdio MCP child process is long-lived and not responding to
+    /// parent-pipe EOF. Before this fix, `ironhermes gateway` hung on
+    /// Ctrl+C because the tokio process reaper kept the runtime alive
+    /// until the child was reaped.
+    ///
+    /// Test shape: spawn a long-running stdio "server" (`sleep 300` on
+    /// unix). Give it ~500ms to attach. Call `shutdown_all()` wrapped in
+    /// an OUTER `tokio::time::timeout(5s, ...)`. The outer timeout MUST
+    /// NOT fire — i.e., shutdown_all returns in well under 5 seconds.
+    /// Internally, manager.rs bounds each task to 2s via
+    /// `tokio::time::timeout`, so for 1 server this should be well under
+    /// 3s in the worst case even when the child never responds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_all_returns_within_timeout_when_stdio_child_blocks() {
+        use std::time::Duration;
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let manager = McpManager::new(registry.clone());
+
+        let mut cfg = McpServerConfig::default();
+        cfg.command = Some("sleep".to_string());
+        cfg.args = vec!["300".to_string()];
+        cfg.enabled = true;
+        // Short connect_timeout so server_task doesn't burn full 60s retrying
+        // (note: `sleep 300` never speaks MCP, so server_task will fail the
+        // initialize handshake repeatedly and retry with backoff — tight
+        // connect_timeout keeps the test window small).
+        cfg.connect_timeout = 1;
+
+        let mut configs = HashMap::new();
+        configs.insert("sleepy".to_string(), cfg);
+
+        manager.start_all(configs).await;
+        // Give the Child time to actually spawn and be parked in child_slot
+        // (or, under Option B, to at least be live under rmcp's internal
+        // ownership).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // The crucial assertion: shutdown_all must return within the OUTER
+        // 5-second test timeout. Internally, manager.rs bounds each task
+        // to 2s via tokio::time::timeout, so for 1 server this should be
+        // well under 3s in the worst case.
+        let shutdown_result =
+            tokio::time::timeout(Duration::from_secs(5), manager.shutdown_all()).await;
+        assert!(
+            shutdown_result.is_ok(),
+            "GAP-8: shutdown_all MUST return within 5s even when the stdio \
+             child is long-lived. If this test hangs, the bounded-timeout \
+             + hard-kill wire in shutdown_all is regressed."
+        );
+
+        // Post-condition: the manager's task map is empty (drained) and
+        // the connected_server_names reports empty.
+        let names = manager.connected_server_names();
+        assert!(names.is_empty(), "GAP-8: post-shutdown, connected_server_names must be empty");
     }
 }

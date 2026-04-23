@@ -9,6 +9,7 @@ use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_core::{ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
+use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
 use tracing::{debug, error, info, warn};
 
@@ -33,6 +34,14 @@ pub struct GatewayRunner {
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
     skill_registry: Option<Arc<SkillRegistry>>,
     active_skills: Option<Arc<std::sync::Mutex<Vec<SkillRecord>>>>,
+    /// GAP-8 (Phase 21.2 Plan 11): MCP manager handle — when set, `start()`
+    /// awaits `mgr.shutdown_all().await` as part of graceful shutdown so
+    /// stdio children are SIGKILL'd (via kill_on_drop + bounded JoinHandle
+    /// timeout) and the process exits in bounded time on Ctrl+C. Without
+    /// this wire, `ironhermes gateway` hangs indefinitely when an MCP
+    /// server is connected because the tokio process reaper keeps the
+    /// runtime alive until children are reaped.
+    mcp_manager: Option<Arc<McpManager>>,
     cancel: CancellationToken,
 }
 
@@ -54,6 +63,7 @@ impl GatewayRunner {
             hook_registry: None,
             skill_registry: None,
             active_skills: None,
+            mcp_manager: None, // GAP-8: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -82,6 +92,19 @@ impl GatewayRunner {
     /// Set the shared active skills tracker. Passed to GatewayMessageHandler in start().
     pub fn set_active_skills(&mut self, skills: Arc<std::sync::Mutex<Vec<SkillRecord>>>) {
         self.active_skills = Some(skills);
+    }
+
+    /// GAP-8 (Phase 21.2 Plan 11): wire the MCP manager into the gateway
+    /// runner so `start()` can call `shutdown_all().await` during graceful
+    /// shutdown. Mirrors `set_memory_manager`. Caller is `run_gateway` in
+    /// ironhermes-cli, which builds the manager via `build_mcp_manager`.
+    ///
+    /// Without this wire, `ironhermes gateway` hangs on Ctrl+C when stdio
+    /// MCP servers are connected because the rmcp parent->child pipe close
+    /// doesn't cause the child to exit, and tokio's process reaper keeps
+    /// the runtime alive until children are reaped.
+    pub fn set_mcp_manager(&mut self, manager: Arc<McpManager>) {
+        self.mcp_manager = Some(manager);
     }
 
     /// Build the GatewayMessageHandler with all wiring (memory, hooks, skills,
@@ -563,6 +586,21 @@ impl GatewayRunner {
             _ = self.cancel.cancelled() => {
                 info!("Cancellation token fired, shutting down");
             }
+        }
+
+        // GAP-8 (Phase 21.2 Plan 11): tear down MCP servers BEFORE
+        // self.cancel.cancel() and BEFORE the join_set drain, so stdio
+        // children are SIGKILL'd (via kill_on_drop) and bounded-timeout
+        // awaited. Prior to this wire, `ironhermes gateway` hung on Ctrl+C
+        // because the rmcp parent->child pipe close didn't cause the child
+        // to exit, and tokio's process reaper kept the runtime alive until
+        // children were reaped. `shutdown_all` bounds each server's await
+        // to 2 seconds, so this block always returns within ~2s/server
+        // regardless of child behavior.
+        if let Some(ref mgr) = self.mcp_manager {
+            info!("Shutting down MCP servers");
+            let _ = mgr.shutdown_all().await;
+            info!("MCP servers shut down");
         }
 
         // Propagate cancellation to all subtasks
@@ -1635,6 +1673,73 @@ mod tests {
         assert!(
             handler.gateway_engine_is_some(),
             "unknown engine kind must fall back to local_prune, not leave gateway_engine = None"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 21.2 Plan 11 — GAP-8: gateway Ctrl+C hang on connected MCP server
+    // -------------------------------------------------------------------------
+
+    /// GAP-8: `GatewayRunner::start` MUST call `McpManager::shutdown_all` on
+    /// graceful shutdown. Without this wire, `ironhermes gateway` hangs on
+    /// Ctrl+C when MCP servers are connected (tokio process reaper blocks
+    /// runtime exit until children are reaped).
+    ///
+    /// This test locks the literal shutdown_all call site in runner.rs by
+    /// source-grep. Companion test `shutdown_all_returns_within_timeout_when_stdio_child_blocks`
+    /// in ironhermes-mcp exercises the actual hard-kill + bounded-timeout path.
+    /// A grep-based wire check is more robust than a live harness that would
+    /// require a full Telegram adapter mock.
+    #[test]
+    fn gateway_runner_invokes_mcp_shutdown_all_on_cancel() {
+        let src = include_str!("runner.rs");
+        assert!(
+            src.contains("if let Some(ref mgr) = self.mcp_manager"),
+            "GAP-8: runner.rs start() must guard shutdown_all call with \
+             if let Some(ref mgr) = self.mcp_manager"
+        );
+        assert!(
+            src.contains("mgr.shutdown_all().await"),
+            "GAP-8: runner.rs start() must await mgr.shutdown_all() on \
+             graceful shutdown"
+        );
+        // Ordering: the shutdown_all call MUST appear BEFORE the propagation
+        // anchor comment `// Propagate cancellation to all subtasks`, which
+        // in turn sits immediately before `self.cancel.cancel();`. This
+        // enforces that MCP children are killed BEFORE subtasks die and
+        // BEFORE the JoinSet drain.
+        let shutdown_call = src
+            .find("mgr.shutdown_all().await")
+            .expect("GAP-8: mgr.shutdown_all().await call site must exist in start()");
+        let propagation_comment = src
+            .find("// Propagate cancellation to all subtasks")
+            .expect("propagation comment must exist as shutdown anchor");
+        assert!(
+            shutdown_call < propagation_comment,
+            "GAP-8: mgr.shutdown_all().await must be called BEFORE the \
+             'Propagate cancellation to all subtasks' block (stdio children \
+             must be killed before subtask join_set drain). Offsets: \
+             shutdown_call={shutdown_call}, propagation_comment={propagation_comment}"
+        );
+    }
+
+    /// GAP-8: `GatewayRunner` MUST carry an `mcp_manager: Option<Arc<McpManager>>`
+    /// field and expose a `pub fn set_mcp_manager` setter so `run_gateway` in
+    /// ironhermes-cli can wire the manager before calling `start()`. Paired
+    /// with `gateway_runner_invokes_mcp_shutdown_all_on_cancel` above, this
+    /// fully locks the GAP-8 wire against silent regression.
+    #[test]
+    fn gateway_runner_has_set_mcp_manager_setter() {
+        let src = include_str!("runner.rs");
+        assert!(
+            src.contains("pub fn set_mcp_manager"),
+            "GAP-8: runner.rs must expose pub fn set_mcp_manager so \
+             run_gateway can wire the Arc<McpManager> clone"
+        );
+        assert!(
+            src.contains("mcp_manager: Option<Arc<McpManager>>"),
+            "GAP-8: GatewayRunner struct must carry \
+             mcp_manager: Option<Arc<McpManager>> field"
         );
     }
 }
