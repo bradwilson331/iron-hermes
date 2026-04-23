@@ -65,3 +65,8 @@ insta = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tracing-test = { workspace = true }
+# Phase 21.7 Plan 10 — cascade-cancel scenarios (S-01/S-02) need sysinfo
+# for PID-liveness oracle; scenarios_yolo_guardrails walks the agent/tool
+# source tree for the S-08 stdin gate.
+sysinfo = { workspace = true }
+walkdir = "2"
