@@ -35,5 +35,5 @@ pub mod yolo;
 pub mod repl_input;
 
 pub use io_gate::{can_prompt, is_terminal_stdin};
-pub use repl_input::{PromptRequest, ReplInputChannel, ReplLine};
+pub use repl_input::{ExternalPrinterHandle, PromptRequest, ReplInputChannel, ReplLine};
 pub use yolo::{maybe_print_yolo_banner, print_yolo_banner_to_stderr, resolve_yolo};

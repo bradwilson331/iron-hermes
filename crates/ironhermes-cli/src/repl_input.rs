@@ -50,7 +50,58 @@
 //!   module does not inspect line contents.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+
+/// Post-plan-11 fix: thread-safe handle over a rustyline `ExternalPrinter`.
+///
+/// Rustyline owns the terminal in raw mode while `readline` is active —
+/// direct `eprintln!` / `println!` from other threads (e.g. the
+/// `SubagentProgressCallback` ticker) corrupts the prompt row and
+/// fragments user input (observed in Phase 21.7 UAT follow-up).
+///
+/// `rustyline::Editor::create_external_printer()` returns a printer that
+/// buffers lines and paints them ABOVE the prompt row without disturbing
+/// what the user is typing. The concrete type is `Send` but not `Sync`,
+/// and its `print` method takes `&mut self`, so we wrap it in
+/// `Arc<Mutex<Box<dyn rustyline::ExternalPrinter + Send>>>` to allow
+/// cheap `Clone` and safe sharing across tasks.
+///
+/// When no TTY is attached (tests, piped I/O, headless runs),
+/// `create_external_printer()` errors; we fall back to a dummy printer
+/// that writes directly to stderr. Production-correct (preserves
+/// visibility in non-interactive contexts) and lets unit tests run
+/// without a real TTY.
+#[derive(Clone)]
+pub struct ExternalPrinterHandle {
+    inner: Arc<Mutex<Box<dyn rustyline::ExternalPrinter + Send>>>,
+}
+
+impl ExternalPrinterHandle {
+    /// Print a line above the rustyline prompt without corrupting the
+    /// user's in-progress input. Fire-and-forget: the terminal may be
+    /// non-interactive (redirected to a file, no tty) or rustyline may
+    /// have already shut down, in which case this silently no-ops.
+    pub fn println(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        if let Ok(mut guard) = self.inner.lock() {
+            let _ = guard.print(msg);
+        }
+    }
+}
+
+/// Fallback printer used when rustyline's `create_external_printer()`
+/// fails (no TTY attached). Writes lines directly to stderr — the same
+/// destination the pre-plan-11 ticker used, so headless runs behave
+/// exactly as before this fix.
+struct StderrFallbackPrinter;
+
+impl rustyline::ExternalPrinter for StderrFallbackPrinter {
+    fn print(&mut self, msg: String) -> rustyline::Result<()> {
+        eprintln!("{}", msg);
+        Ok(())
+    }
+}
 
 /// One outcome from a `rl.readline(prefix)` call, mirroring rustyline's
 /// result shape 1:1 so the REPL caller can route each variant to the same
@@ -114,7 +165,9 @@ impl ReplInputChannel {
     /// `history_path` is reserved for future history-persistence work; the
     /// current implementation only uses in-memory history (matching the
     /// pre-plan-11 rustyline behavior). Pass `None` to keep parity.
-    pub fn spawn(history_path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn spawn(
+        history_path: Option<PathBuf>,
+    ) -> anyhow::Result<(Self, ExternalPrinterHandle)> {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
         let (line_tx, line_rx) = mpsc::unbounded_channel::<ReplLine>();
 
@@ -122,6 +175,17 @@ impl ReplInputChannel {
         // receiver. Owns its own mpsc between worker-side oneshots and the
         // main receiver so the public API is a simple `recv_line().await`.
         let worker_line_tx = line_tx.clone();
+
+        // Post-plan-11 UAT follow-up: the worker creates rustyline's
+        // ExternalPrinter alongside the editor and sends it back to the
+        // main task so the `SubagentProgressCallback` (and future
+        // concurrent-output sites) can paint lines ABOVE the prompt row.
+        // std::sync::mpsc::sync_channel(1) bounds the handshake to a
+        // single message, matches the `std::thread::spawn` ownership model
+        // (no tokio::runtime::Handle required inside the OS thread), and
+        // delivers a clear init-failure signal via `recv()` error.
+        let (printer_tx, printer_rx) =
+            std::sync::mpsc::sync_channel::<Box<dyn rustyline::ExternalPrinter + Send>>(1);
 
         let worker = std::thread::Builder::new()
             .name("ironhermes-repl-input".to_string())
@@ -134,11 +198,31 @@ impl ReplInputChannel {
                         // Best-effort: report the error once and exit. No
                         // prompts will ever be serviced; the first call to
                         // `request_prompt` will see a closed line channel.
+                        // Also drop `printer_tx` so the main task's recv()
+                        // fails cleanly with Disconnected.
+                        drop(printer_tx);
                         let _ = worker_line_tx
                             .send(ReplLine::Error(format!("readline init failed: {}", e)));
                         return;
                     }
                 };
+
+                // Create the external printer FIRST so the main task can
+                // proceed regardless of whether any prompt is ever issued.
+                // If this fails (typically: no TTY attached — tests, piped
+                // I/O, headless CI), fall back to a dummy printer that
+                // writes to stderr. spawn() always succeeds; callers get
+                // a working (if terminal-unaware) printer either way.
+                let boxed_printer: Box<dyn rustyline::ExternalPrinter + Send> =
+                    match rl.create_external_printer() {
+                        Ok(p) => Box::new(p),
+                        Err(_) => Box::new(StderrFallbackPrinter),
+                    };
+                if printer_tx.send(boxed_printer).is_err() {
+                    // Main task hung up before we could send; nothing
+                    // left to do — just exit the worker cleanly.
+                    return;
+                }
 
                 // If a history path is provided in future, load it here. For
                 // the plan-11 landing we keep in-memory parity.
@@ -198,11 +282,29 @@ impl ReplInputChannel {
             }
         });
 
-        Ok(Self {
-            cmd_tx: CmdAndReplyTx::install(cmd_tx, reply_tx),
-            line_rx,
-            worker: Some(worker),
-        })
+        // Receive the ExternalPrinter the worker created alongside the
+        // editor. `recv()` blocks the spawning task briefly — only until
+        // the OS thread has initialized rustyline + printer. If the worker
+        // failed to init, `recv()` returns `Err(Disconnected)` because the
+        // worker dropped `printer_tx`; surface that as a clear error.
+        let boxed_printer = printer_rx.recv().map_err(|_| {
+            anyhow::anyhow!(
+                "repl input worker failed to create rustyline ExternalPrinter \
+                 (no TTY attached or rustyline init failed)"
+            )
+        })?;
+        let external_printer = ExternalPrinterHandle {
+            inner: Arc::new(Mutex::new(boxed_printer)),
+        };
+
+        Ok((
+            Self {
+                cmd_tx: CmdAndReplyTx::install(cmd_tx, reply_tx),
+                line_rx,
+                worker: Some(worker),
+            },
+            external_printer,
+        ))
     }
 
     /// Request a new prompt from the worker.
@@ -312,10 +414,11 @@ mod tests {
     /// shutdown command, and we can re-construct the channel safely.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_and_shutdown_cleanly() {
-        let chan = ReplInputChannel::spawn(None).expect("spawn should succeed");
+        let (chan, _printer) = ReplInputChannel::spawn(None).expect("spawn should succeed");
         chan.shutdown();
         // Re-spawn to prove the first shutdown released the terminal cleanly.
-        let chan2 = ReplInputChannel::spawn(None).expect("second spawn should succeed");
+        let (chan2, _printer2) =
+            ReplInputChannel::spawn(None).expect("second spawn should succeed");
         chan2.shutdown();
     }
 
@@ -324,7 +427,7 @@ mod tests {
     /// deadlock when there are no pending prompts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_then_drain_is_fast() {
-        let mut chan = ReplInputChannel::spawn(None).expect("spawn");
+        let (mut chan, _printer) = ReplInputChannel::spawn(None).expect("spawn");
         // Send an explicit Shutdown through the internal adapter so the
         // worker exits its loop promptly. Using cmd_tx directly (rather
         // than shutdown(self)) lets us observe the channel is still
@@ -344,18 +447,7 @@ mod tests {
     /// no-op path when the worker has already exited.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn add_history_after_shutdown_is_noop() {
-        let chan = ReplInputChannel::spawn(None).expect("spawn");
-        // Use a clone of the command sender via a raw test handle: we just
-        // shut down and then call add_history on the dropped-tx path. Since
-        // shutdown consumes self, we test the close-channel behavior via
-        // drop instead.
-        let mut chan = chan;
-        // Simulate worker exit by dropping the command sender before
-        // add_history. We do this by replacing cmd_tx with a fresh dropped
-        // sender — for simplicity we just call add_history after the
-        // forwarder task has had time to run. A truly closed channel
-        // should cause add_history to silently no-op, which is the
-        // contract we assert.
+        let (mut chan, _printer) = ReplInputChannel::spawn(None).expect("spawn");
         // First — explicit: send Shutdown, then call add_history.
         let _ = chan
             .cmd_tx
@@ -370,9 +462,30 @@ mod tests {
     /// block. Ensures the post-turn drain hook is safe on an idle channel.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drain_buffered_is_nonblocking_and_zero_on_idle() {
-        let mut chan = ReplInputChannel::spawn(None).expect("spawn");
+        let (mut chan, _printer) = ReplInputChannel::spawn(None).expect("spawn");
         let n = chan.drain_buffered();
         assert_eq!(n, 0);
+        chan.shutdown();
+    }
+
+    /// U-05 (post-UAT fix): ExternalPrinterHandle is returned from spawn()
+    /// and is Send + Sync + Clone so it can be captured by the
+    /// SubagentProgressCallback closure and shared across tokio tasks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_printer_is_send_sync_clone() {
+        let (chan, printer) = ReplInputChannel::spawn(None).expect("spawn");
+        let p2 = printer.clone();
+        // Call println from two tasks concurrently — Mutex serializes the
+        // underlying &mut self calls, so no data race is observable.
+        let h1 = tokio::spawn(async move {
+            p2.println("hello from task 1".to_string());
+        });
+        let p3 = printer.clone();
+        let h2 = tokio::spawn(async move {
+            p3.println("hello from task 2".to_string());
+        });
+        let _ = h1.await;
+        let _ = h2.await;
         chan.shutdown();
     }
 }

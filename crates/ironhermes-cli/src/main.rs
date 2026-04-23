@@ -795,6 +795,19 @@ async fn run_chat(
     let mut emergency_first_press: Option<Instant> = None;
     let mut emergency_press_count: u32 = 0;
 
+    // Phase 21.7 Plan 11 (GAP-21.7-01) + post-UAT fix:
+    // `ReplInputChannel::spawn` hosts the blocking DefaultEditor on a
+    // dedicated OS thread so run_chat's mid-turn tokio::select! loop can
+    // poll a third arm (slash-command input) alongside the in-flight
+    // agent turn future. The spawn also returns an `ExternalPrinterHandle`
+    // which paints lines ABOVE the rustyline prompt without corrupting
+    // what the user is typing — we thread it into the
+    // SubagentProgressCallback below so the `[subagent-N] ...` ticker no
+    // longer fragments mid-turn input (observed in Phase 21.7 UAT 1
+    // re-run: "/ag  [subagent-3] Running: ...  ent"-style line breakage).
+    let (mut repl_input, external_printer) = ironhermes_cli::ReplInputChannel::spawn(None)
+        .context("Failed to initialize concurrent readline channel")?;
+
     // D-19 / Plan 21.7-07 (D-04 / ISS-05 / Pitfall 8): CLI tree-view progress
     // callback for subagent tool calls + status-line pill refresh.
     //
@@ -803,26 +816,38 @@ async fn run_chat(
     // to update `state.active_subagents`. The render path itself never awaits on
     // the registry — it only reads the copied usize from the watch channel.
     // INV-21.7-11 locks this invariant statically.
+    //
+    // Post-plan-11 UAT fix: ticker output goes through the rustyline
+    // ExternalPrinter so mid-turn typing is preserved.
     let status_tx = tui.status_tx_handle();
     let reg_for_cb = subagent_registry.clone();
+    let printer_for_cb = external_printer.clone();
     let subagent_progress: ironhermes_tools::delegate_task::SubagentProgressCallback =
         Arc::new(move |index, event| {
             use ironhermes_tools::delegate_task::SubagentProgress;
             let tag = format!("[subagent-{}]", index + 1);
             match &event {
                 SubagentProgress::Started { task_summary } => {
-                    eprintln!("  {} {}", tag.clone().cyan().dimmed(), task_summary.dimmed());
+                    printer_for_cb.println(format!(
+                        "  {} {}",
+                        tag.clone().cyan().dimmed(),
+                        task_summary.dimmed()
+                    ));
                 }
                 SubagentProgress::ToolCall { tool_name } => {
-                    eprintln!(
+                    printer_for_cb.println(format!(
                         "  {} {} {}",
                         tag.clone().cyan().dimmed(),
                         "Running:".dimmed(),
                         tool_name.yellow().dimmed(),
-                    );
+                    ));
                 }
                 SubagentProgress::Completed => {
-                    eprintln!("  {} {}", tag.clone().cyan().dimmed(), "Done.".dimmed());
+                    printer_for_cb.println(format!(
+                        "  {} {}",
+                        tag.clone().cyan().dimmed(),
+                        "Done.".dimmed()
+                    ));
                 }
             }
             // Pill refresh fires on Started and Completed (ToolCall is a
@@ -963,14 +988,11 @@ async fn run_chat(
     let command_router = CommandRouter::new(build_command_registry());
     let agent_running = Arc::new(AtomicBool::new(false));
 
-    // Phase 21.7 Plan 11 (GAP-21.7-01): concurrent rustyline input.
-    // `ReplInputChannel::spawn` hosts the blocking DefaultEditor on a
-    // dedicated OS thread so run_chat's mid-turn tokio::select! loop can
-    // poll a third arm (slash-command input) alongside the in-flight
-    // agent turn future. Fixes GAP-21.7-01: `/agents list` while
-    // delegate_task subagents are live.
-    let mut repl_input = ironhermes_cli::ReplInputChannel::spawn(None)
-        .context("Failed to initialize concurrent readline channel")?;
+    // Plan 11 spawn relocated earlier in run_chat (before the
+    // SubagentProgressCallback construction) so the ExternalPrinterHandle
+    // is available when the callback captures its printer clone. See the
+    // spawn site above; `repl_input` and `external_printer` are already
+    // live here.
 
     // Handle initial message if provided
     if let Some(msg) = initial_message {
