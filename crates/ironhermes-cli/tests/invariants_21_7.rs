@@ -50,17 +50,16 @@ fn invariant_21_7_03_three_register_execute_code_sites() {
 
 #[test]
 fn invariant_21_7_04_budget_handle_threaded_through_all_three_sites() {
-    // After Plan 05 (Wave 2), every AgentSubagentRunner::new( call passes a
-    // BudgetHandle (or an Arc<AtomicUsize> wrapped into one). This test gates
-    // drift post-Plan-05. Wave 0 skip-path: BudgetHandle not yet threaded.
+    // Plan 05 (Wave 2): every AgentSubagentRunner::new( call passes a
+    // BudgetHandle. The skip-path has been removed — this is now a strict
+    // regression gate. BudgetHandle must appear in run_chat, run_single,
+    // and run_gateway (and also in at least one shared helper such as
+    // run_agent_turn). Minimum count = 3 across all three sites.
     let marker = MAIN_RS.matches("BudgetHandle").count();
-    if marker == 0 {
-        eprintln!("INV-21.7-04 pending Plan 05 (Wave 2) — BudgetHandle not yet threaded.");
-        return;
-    }
     assert!(
         marker >= 3,
-        "INV-21.7-04: BudgetHandle must appear in run_chat, run_single, and run_gateway. Found {} mentions.",
+        "INV-21.7-04 / E-09: BudgetHandle must appear in all 3 registration sites \
+         (run_single, run_chat, run_gateway). Found {}.",
         marker
     );
 }

@@ -3,7 +3,6 @@ use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;

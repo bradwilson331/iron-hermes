@@ -13,6 +13,7 @@ use ironhermes_core::commands::{
 use ironhermes_core::commands::context::CommandContext;
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
+use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
 use ironhermes_tools::ToolRegistry;
@@ -66,6 +67,11 @@ pub struct GatewayMessageHandler {
     context_length: usize,
     /// Phase 21.1 Plan 02: unified slash command router.
     command_router: CommandRouter,
+    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): shared BudgetHandle threaded from
+    /// the gateway runner. Per-request AgentLoops call `.with_budget(...)`
+    /// with a clone so parent + delegate_task subagents decrement the same
+    /// counter. None = budget disabled (legacy path).
+    budget_handle: Option<BudgetHandle>,
 }
 
 impl GatewayMessageHandler {
@@ -94,7 +100,15 @@ impl GatewayMessageHandler {
             gateway_engine: None,
             context_length,
             command_router: CommandRouter::new(build_registry()),
+            budget_handle: None,
         }
+    }
+
+    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install a shared BudgetHandle.
+    /// Clones are threaded into each per-request `AgentLoop` so parent + any
+    /// `delegate_task` children share the same iteration counter.
+    pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
+        self.budget_handle = Some(handle);
     }
 
     /// Phase 18 Plan 06: install the per-turn hygiene engine. Wired by composition
@@ -477,6 +491,15 @@ impl GatewayMessageHandler {
             .with_streaming(stream_callback)
             .with_tool_progress(tool_callback)
             .with_active_skills(self.active_skills.clone());
+
+        // Plan 21.7-05 (PROV-09/PROV-10/D-15): thread the gateway-scoped
+        // BudgetHandle into the per-request AgentLoop so top-of-turn
+        // consume() fires and pressure-tier advisories inject on crossings.
+        // The same handle is shared with AgentSubagentRunner (see main.rs
+        // run_gateway), giving PROV-10 parent/child shared decrement.
+        if let Some(ref handle) = self.budget_handle {
+            agent = agent.with_budget(handle.clone());
+        }
 
         // Wire fallback for main agent path
         let main_endpoint = self.resolver.resolve_for_main();
