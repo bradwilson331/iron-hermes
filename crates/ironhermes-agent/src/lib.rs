@@ -17,6 +17,7 @@ pub mod engine_factory;
 pub mod agent_wiring;
 pub mod subagent_runner;
 pub mod subagent_registry;
+pub mod transcript;
 pub mod anthropic_client;
 pub mod any_client;
 
