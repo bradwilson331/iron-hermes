@@ -1278,13 +1278,80 @@ async fn run_chat(
                         Some(slash_line) = repl_input.recv_line() => {
                             let input = match slash_line {
                                 ironhermes_cli::ReplLine::Line(s) => s.trim().to_string(),
-                                // ctrl-c / EOF / errors during in-flight
-                                // readline: treat as empty and re-prime.
-                                // ctrl-c is handled by the dedicated ctrl_c
-                                // arm above (tokio::signal::ctrl_c fires in
-                                // parallel); this arm only owns the line
-                                // channel.
-                                _ => {
+                                // Plan 21.7-11 post-UAT fix: when rustyline
+                                // owns the terminal in raw mode, ctrl-c is
+                                // delivered as a 0x03 keystroke to rustyline
+                                // (which returns Err(Interrupted)) — NOT as
+                                // a SIGINT to the process. That means the
+                                // `tokio::signal::ctrl_c()` arm above does
+                                // not fire while a mid-turn readline is in
+                                // flight, so Interrupted / Eof must be
+                                // routed through the same double_ctrl_c
+                                // state machine here.
+                                ironhermes_cli::ReplLine::Interrupted => {
+                                    let now = Instant::now();
+                                    emergency_press_count += 1;
+                                    if emergency_first_press.is_none() {
+                                        emergency_first_press = Some(now);
+                                    }
+                                    if let Some(first) = emergency_first_press
+                                        && emergency_press_count >= 3
+                                        && now.duration_since(first)
+                                            <= std::time::Duration::from_secs(3)
+                                    {
+                                        eprintln!("{}", "^C×3 — emergency exit".red());
+                                        tui.cleanup_on_exit();
+                                        std::process::exit(130);
+                                    }
+                                    match double_ctrl_c.on_ctrl_c(
+                                        now,
+                                        /* in_flight = */ true,
+                                    ) {
+                                        CtrlCDecision::CancelTurn => {
+                                            chat_cancel_token.cancel();
+                                            println!("{}", "^C — turn cancelled".dimmed());
+                                            tui.set_activity(ActivityState::Idle);
+                                            let _ = repl_input.request_prompt(
+                                                ironhermes_cli::PromptRequest {
+                                                    prefix: String::new(),
+                                                    in_turn: true,
+                                                }
+                                            );
+                                            continue 'turn;
+                                        }
+                                        CtrlCDecision::ExitCleanly => {
+                                            chat_cancel_token.cancel();
+                                            println!("{}", "Goodbye!".dimmed());
+                                            tui.cleanup_on_exit();
+                                            let _ = state_store
+                                                .end_session(&session_id, "interrupted");
+                                            exit_cleanly = true;
+                                            break 'turn None;
+                                        }
+                                        CtrlCDecision::ShowPromptHint => {
+                                            let _ = repl_input.request_prompt(
+                                                ironhermes_cli::PromptRequest {
+                                                    prefix: String::new(),
+                                                    in_turn: true,
+                                                }
+                                            );
+                                            continue 'turn;
+                                        }
+                                    }
+                                }
+                                ironhermes_cli::ReplLine::Eof => {
+                                    // ctrl-d mid-turn: cancel the current
+                                    // turn and exit cleanly (same as the
+                                    // post-turn Eof path at line ~1441).
+                                    chat_cancel_token.cancel();
+                                    println!("{}", "Goodbye!".dimmed());
+                                    tui.cleanup_on_exit();
+                                    let _ = state_store
+                                        .end_session(&session_id, "eof");
+                                    exit_cleanly = true;
+                                    break 'turn None;
+                                }
+                                ironhermes_cli::ReplLine::Error(_msg) => {
                                     let _ = repl_input.request_prompt(
                                         ironhermes_cli::PromptRequest {
                                             prefix: String::new(),
