@@ -16,6 +16,10 @@ use colored::Colorize;
 ///
 /// Revision R1 BLOCKER 2: `tokens_used` / `tokens_limit` are `usize`, matching
 /// `ironhermes_agent::AggregatedUsage { total_tokens: usize }` to avoid cast noise.
+///
+/// Plan 21.7-07 (D-04): `active_subagents` / `max_subagents` drive the
+/// `agents: N/M` pill. The pill is HIDDEN when `active_subagents == 0`
+/// (Pitfall 8 / R-8 — no visual noise when no subagents are running).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusLineState {
     pub mode: String,
@@ -24,6 +28,13 @@ pub struct StatusLineState {
     pub tokens_used: usize,
     pub tokens_limit: usize,
     pub hint: String,
+    /// Plan 21.7-07 (D-04): live count of registered subagents.
+    /// Populated off the render path via a spawned task + watch::send_modify
+    /// (Pitfall 8: NEVER awaits RwLock on the render path).
+    pub active_subagents: usize,
+    /// Plan 21.7-07 (D-04): denominator of the `agents: N/M` pill.
+    /// Seeded once from `config.subagent.max_subagents`.
+    pub max_subagents: usize,
 }
 
 impl Default for StatusLineState {
@@ -35,6 +46,8 @@ impl Default for StatusLineState {
             tokens_used: 0,
             tokens_limit: 128_000,
             hint: "ctrl+c cancel · /help commands".to_string(),
+            active_subagents: 0,
+            max_subagents: 0,
         }
     }
 }
@@ -70,12 +83,22 @@ pub fn render_status_line(state: &StatusLineState) -> String {
         pct
     );
 
-    let pills: Vec<String> = vec![
+    let mut pills: Vec<String> = vec![
         state.mode.clone(),
         state.model_short.clone(),
         state.provider.clone(),
         tokens_cell,
     ];
+
+    // Plan 21.7-07 (D-04 / Pitfall 8 / R-8 / E-11): insert the `agents: N/M`
+    // pill AFTER the tokens pill. ONLY render when active_subagents > 0 —
+    // zero must drop the pill entirely so idle users see no visual noise.
+    if state.active_subagents > 0 {
+        pills.push(format!(
+            "agents: {}/{}",
+            state.active_subagents, state.max_subagents
+        ));
+    }
 
     let hint = if state.hint.is_empty() { None } else { Some(state.hint.as_str()) };
     let colored_cells = rotate_pill_colors(&pills, hint);
@@ -129,6 +152,8 @@ mod tests {
             tokens_used: 107_700,
             tokens_limit: 200_000,
             hint: "ctrl+p commands".to_string(),
+            active_subagents: 0,
+            max_subagents: 4,
         };
         let out = render_status_line(&state);
         assert!(out.contains("Agent"), "missing Agent: {}", out);
@@ -172,11 +197,112 @@ mod tests {
             tokens_used: 0,
             tokens_limit: 100,
             hint: String::new(),
+            active_subagents: 0,
+            max_subagents: 0,
         };
         let out = render_status_line(&state);
         // With empty hint, rotate_pill_colors gets None; resulting pill count
         // should be 4 (mode, model, provider, tokens) — so 3 separators.
         let sep_count = out.matches('·').count();
         assert_eq!(sep_count, 3, "expected 3 dots for 4 pills, got: {}", out);
+    }
+
+    // ── Plan 21.7-07 (D-04 / Pitfall 8 / R-8 / E-11): agents pill ────────────
+
+    /// E-11 / Pitfall 8: the `agents: N/M` pill MUST NOT render when
+    /// `active_subagents == 0`. Idle users should see zero visual noise.
+    #[test]
+    fn agents_pill_hides_at_zero_active() {
+        let state = StatusLineState {
+            mode: "chat".into(),
+            model_short: "sonnet".into(),
+            provider: "anthropic".into(),
+            tokens_used: 100,
+            tokens_limit: 1000,
+            hint: String::new(),
+            active_subagents: 0,
+            max_subagents: 4,
+        };
+        let out = render_status_line(&state);
+        assert!(
+            !out.contains("agents:"),
+            "E-11 / Pitfall 8: pill MUST be hidden when active_subagents == 0. Got: {}",
+            out
+        );
+    }
+
+    /// D-04: when active_subagents > 0, the pill renders as `agents: N/M`.
+    #[test]
+    fn agents_pill_shows_active_slash_max_when_positive() {
+        let state = StatusLineState {
+            mode: "chat".into(),
+            model_short: "sonnet".into(),
+            provider: "anthropic".into(),
+            tokens_used: 100,
+            tokens_limit: 1000,
+            hint: String::new(),
+            active_subagents: 2,
+            max_subagents: 4,
+        };
+        let out = render_status_line(&state);
+        assert!(
+            out.contains("agents: 2/4"),
+            "D-04: pill format must be 'agents: N/M'. Got: {}",
+            out
+        );
+    }
+
+    /// D-04: ordering — tokens pill → agents pill → hint pill.
+    #[test]
+    fn agents_pill_placement_after_tokens() {
+        let state = StatusLineState {
+            mode: "chat".into(),
+            model_short: "sonnet".into(),
+            provider: "anthropic".into(),
+            tokens_used: 100,
+            tokens_limit: 1000,
+            hint: "running".into(),
+            active_subagents: 1,
+            max_subagents: 4,
+        };
+        let out = render_status_line(&state);
+        // Tokens pill renders as "100/1.0K (10%)"; match the leading 100.
+        let tokens_idx = out.find("100").expect("tokens pill present");
+        let agents_idx = out.find("agents:").expect("agents pill present");
+        let hint_idx = out.find("running").expect("hint pill present");
+        assert!(
+            tokens_idx < agents_idx && agents_idx < hint_idx,
+            "D-04: ordering must be tokens → agents → hint. Got: {}",
+            out
+        );
+    }
+
+    /// Separator count parity: with 1 active subagent + hint, we have 6
+    /// pills (mode, model, provider, tokens, agents, hint) = 5 separators.
+    #[test]
+    fn agents_pill_contributes_one_separator_when_shown() {
+        let state_off = StatusLineState {
+            mode: "m".into(),
+            model_short: "s".into(),
+            provider: "p".into(),
+            tokens_used: 0,
+            tokens_limit: 100,
+            hint: "h".into(),
+            active_subagents: 0,
+            max_subagents: 4,
+        };
+        let state_on = StatusLineState {
+            active_subagents: 1,
+            ..state_off.clone()
+        };
+        let off = render_status_line(&state_off).matches('·').count();
+        let on = render_status_line(&state_on).matches('·').count();
+        assert_eq!(
+            on - off,
+            1,
+            "adding the agents pill must add exactly one '·' separator (off={}, on={})",
+            off,
+            on
+        );
     }
 }

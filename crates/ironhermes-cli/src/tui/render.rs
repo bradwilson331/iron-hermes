@@ -230,6 +230,23 @@ impl TuiHandle {
         let _ = self.status_tx.send(state);
     }
 
+    /// Plan 21.7-07 (D-04 / Pitfall 8): clone of the status-line watch sender
+    /// so off-render-path tasks can `send_modify` a single field (e.g. the
+    /// subagent pill) without clobbering unrelated state like token counts.
+    /// `send_modify` is sync — it never awaits — so the caller can invoke it
+    /// from any task without leaking an `.await` into the render path.
+    pub fn status_tx_handle(&self) -> watch::Sender<StatusLineState> {
+        self.status_tx.clone()
+    }
+
+    /// Plan 21.7-07 (D-04): snapshot of the current status state. Used when
+    /// a caller needs to reconstruct the full `StatusLineState` on a
+    /// full-write path (e.g. `set_status` after a turn) and wants to preserve
+    /// fields updated out-of-band by the pill-refresh path.
+    pub fn status_snapshot(&self) -> StatusLineState {
+        self.status_tx.borrow().clone()
+    }
+
     /// Return a clone of the event sender, if available. Extensions or callers
     /// use this to push `TuiEvent`s to the render loop at runtime.
     pub fn event_sender(&self) -> Option<mpsc::UnboundedSender<TuiEvent>> {
@@ -745,6 +762,8 @@ mod tests {
             tokens_used: 50,
             tokens_limit: 100,
             hint: String::new(),
+            active_subagents: 0,
+            max_subagents: 0,
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(rx.borrow().tokens_used, 50);

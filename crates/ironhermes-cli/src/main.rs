@@ -662,6 +662,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         tokens_used: 0,
         tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
+        // Plan 21.7-07 (D-04): pill starts hidden (active=0); seed the
+        // denominator from config so the pill renders as "N/M" the moment
+        // a subagent registers.
+        active_subagents: 0,
+        max_subagents: config.subagent.max_subagents,
     };
     // Phase 22.1: construct TuiHandle with extensions (empty vec for now --
     // no extensions are registered yet, but the hook mechanism is active).
@@ -1282,6 +1287,11 @@ async fn run_agent_turn(
     tui.set_activity(ActivityState::Idle);
 
     // Update the status line with post-turn token count (D-05).
+    // Plan 21.7-07 (D-04): re-seed the pill fields from config each turn; the
+    // live count comes from the registry via a spawned send_modify in the
+    // SubagentProgressCallback, so full `set_status` writes that don't know
+    // about the live count would zero it otherwise. Reading the current
+    // watch state and preserving `active_subagents` avoids that regression.
     tui.set_status(StatusLineState {
         mode: "Chat".to_string(),
         model_short: client.model().to_string(),
@@ -1289,6 +1299,8 @@ async fn run_agent_turn(
         tokens_used: result.total_usage.total_tokens,
         tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
+        active_subagents: tui.status_snapshot().active_subagents,
+        max_subagents: config.subagent.max_subagents,
     });
 
     // Phase 18-14: persist the post-turn compression_count back into the
