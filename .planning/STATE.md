@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.2-07-PLAN.md
-last_updated: "2026-04-22T21:11:41.033Z"
-last_activity: 2026-04-22
+stopped_at: Completed 21.2-09-PLAN.md
+last_updated: "2026-04-23T00:30:00.000Z"
+last_activity: 2026-04-23 -- Phase 21.2 plan 09 (GAP-6 close) complete
 progress:
   total_phases: 13
-  completed_phases: 11
-  total_plans: 41
+  completed_phases: 10
+  total_plans: 45
   completed_plans: 41
-  percent: 100
+  percent: 91
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.2 — mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl
+**Current focus:** Phase --phase — 21.2
 
 ## Current Position
 
-Phase: 21.2 (mcp-client-tool-and-fold-in-slash-commands-related-to-mcp-cl) — EXECUTING
-Plan: 3 of 7
-Status: Ready to execute
-Last activity: 2026-04-22
+Phase: --phase (21.2) — EXECUTING
+Plan: 1 of --name
+Status: Executing Phase --phase
+Last activity: 2026-04-22 -- Phase --phase execution started
 
 Progress: [██████████] 100%
 
@@ -117,6 +117,7 @@ Progress: [██████████] 100%
 | Phase 21.2 P05 | 4 | 2 tasks | 2 files |
 | Phase 21.2 P06 | 4 | 2 tasks | 1 files |
 | Phase 21.2 P07 | 2 | 2 tasks | 3 files |
+| Phase 21.2 P09 | 8 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -252,6 +253,10 @@ Recent decisions affecting current work:
 - Phase 21.2 Plan 06: RetrySaveAbort 3-way prompt defaults to Abort (return Ok(()) with 'Cancelled.' dimmed before save); SaveAnyway keeps legacy vec![],0 escape hatch but requires explicit consent; Retry re-enters the connect loop — closes GAP-2
 - Phase 21.2 Plan 06: literal-copy regression tests via include_str! lock user-facing prompt strings against silent drift (GAP-2 + GAP-3 regression tests)
 - Phase 21.2 Plan 07: sanitize_server_name is single source of truth; make_prefixed_name delegates to it; sanitizer now covers @ and / in addition to - and . — closes GAP-4 / CR-01 with symmetric register/unregister contract
+- Phase 21.2 Plan 09: GAP-6a close — tracing init now branches on interactive REPL (Chat subcommand OR bare hermes WITHOUT -e) vs other entry points; interactive default = EnvFilter::new("error"); non-interactive keeps legacy ironhermes=info add_directive; RUST_LOG always wins via from_default_env
+- Phase 21.2 Plan 09: GAP-6b close — cmd.stderr(std::process::Stdio::piped()) inside connect_stdio's configure closure so child stderr no longer inherits parent terminal fd; inline std::process::Stdio::piped() spelling kept (no top-of-file use import) to match grep acceptance verbatim
+- Phase 21.2 Plan 09: runtime regression test spawns std::process::Command directly (not TokioChildProcess) to isolate the Stdio::piped() contract — zero dependency on a live MCP server; cfg(unix)/cfg(not(unix)) split covers macOS+Linux+Windows
+- Phase 21.2 Plan 09: dotenv + ensure_home_dirs + Cli::parse() moved ABOVE tracing_subscriber::init so the filter branch can read cli.command / cli.execute; clap derive parse is pure/idempotent — safe reorder
 
 ### Roadmap Evolution
 
@@ -281,8 +286,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-22T21:11:41.030Z
-Stopped at: Completed 21.2-07-PLAN.md
+Last session: 2026-04-23T00:30:00.000Z
+Stopped at: Completed 21.2-09-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z

@@ -214,16 +214,22 @@ Plans:
 ### Phase 21.2: MCP client tool and fold in slash commands related to MCP client use (INSERTED)
 
 **Goal:** Port hermes-agent's MCP client infrastructure to IronHermes: new `ironhermes-mcp` crate using the official `rmcp` SDK for stdio and HTTP/StreamableHTTP transports, per-server tokio tasks with exponential backoff reconnection, tool discovery and registration into a dynamically-mutable `Arc<RwLock<ToolRegistry>>`, sampling support, credential stripping, safe env filtering, `/reload-mcp` slash command, and `hermes mcp add/remove/list/test/configure` CLI subcommands. D-01..D-21 from CONTEXT.md serve as requirements.
-**Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13, D-14, D-15, D-16, D-17, D-18, D-19, D-20, D-21
+**Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13, D-14, D-15, D-16, D-17, D-18, D-19, D-20, D-21, GAP-5, GAP-6, GAP-7, GAP-8
 **Depends on:** Phase 21
-**Plans:** 5 plans
+**Plans:** 8/11 plans complete
 
 Plans:
-- [ ] 21.2-01-PLAN.md — Create ironhermes-mcp crate scaffold with rmcp dependency, McpServerConfig (hermes-agent-compatible YAML schema), env var interpolation, build_safe_env allowlist, sanitize_error credential stripping, and mcp_servers field on Config struct
-- [ ] 21.2-02-PLAN.md — Add register_dynamic/unregister_by_prefix to ToolRegistry and migrate all Arc<ToolRegistry> callsites to Arc<RwLock<ToolRegistry>> across 6 files (rpc_registry stays Arc<ToolRegistry> for safe subset isolation)
-- [ ] 21.2-03-PLAN.md — Implement McpManager orchestrating per-server tokio tasks, McpTool (Tool trait impl with channel-based dispatch), stdio/HTTP transport helpers via rmcp SDK, sampling handler with rate limiting, exponential backoff reconnection (5 retries, max 60s), tool naming (server__tool), description prefixing ([MCP: server_name]), enabled_tools filtering, and reload capability
-- [ ] 21.2-04-PLAN.md — Add McpReloader trait to CommandContext (circular-dep resolution), wire /reload-mcp and /reload handlers replacing todo stubs, integrate McpManager into run_chat/run_single/run_gateway with background discovery, handle McpReload CommandResult in REPL loop
-- [ ] 21.2-05-PLAN.md — Implement hermes mcp add/remove/list/test/configure CLI subcommands in mcp_config.rs with interactive wizard, config.yaml persistence, test connection via rmcp, and UI-SPEC styled output (colored crate matching cron.rs patterns)
+- [x] 21.2-01-PLAN.md — Create ironhermes-mcp crate scaffold with rmcp dependency, McpServerConfig (hermes-agent-compatible YAML schema), env var interpolation, build_safe_env allowlist, sanitize_error credential stripping, and mcp_servers field on Config struct
+- [x] 21.2-02-PLAN.md — Add register_dynamic/unregister_by_prefix to ToolRegistry and migrate all Arc<ToolRegistry> callsites to Arc<RwLock<ToolRegistry>> across 6 files (rpc_registry stays Arc<ToolRegistry> for safe subset isolation)
+- [x] 21.2-03-PLAN.md — Implement McpManager orchestrating per-server tokio tasks, McpTool (Tool trait impl with channel-based dispatch), stdio/HTTP transport helpers via rmcp SDK, sampling handler with rate limiting, exponential backoff reconnection (5 retries, max 60s), tool naming (server__tool), description prefixing ([MCP: server_name]), enabled_tools filtering, and reload capability
+- [x] 21.2-04-PLAN.md — Add McpReloader trait to CommandContext (circular-dep resolution), wire /reload-mcp and /reload handlers replacing todo stubs, integrate McpManager into run_chat/run_single/run_gateway with background discovery, handle McpReload CommandResult in REPL loop
+- [x] 21.2-05-PLAN.md — Implement hermes mcp add/remove/list/test/configure CLI subcommands in mcp_config.rs with interactive wizard, config.yaml persistence, test connection via rmcp, and UI-SPEC styled output (colored crate matching cron.rs patterns)
+- [x] 21.2-06-PLAN.md — GAP-1/2/3 close: attempt_connect_and_list_with_timeout, RetrySaveAbort 3-way prompt, literal-copy regression tests
+- [x] 21.2-07-PLAN.md — GAP-4 close: sanitize_server_name single source, broadened sanitizer (@/), symmetric register/unregister
+- [ ] 21.2-08-PLAN.md — GAP-5 close: flush banner to stdout before prompt (pending sequential execution)
+- [x] 21.2-09-PLAN.md — GAP-6 close: context-aware tracing init (interactive REPL → error filter) + stdio child stderr piped (Stdio::piped) + 2 regression tests
+- [ ] 21.2-10-PLAN.md — GAP-7 close: pending
+- [ ] 21.2-11-PLAN.md — GAP-8 close: ironhermes gateway Ctrl+C hang (pending)
 
 **Wave structure:**
 - Wave 1: 21.2-01 and 21.2-02 in parallel (crate scaffold + registry migration — both autonomous)
