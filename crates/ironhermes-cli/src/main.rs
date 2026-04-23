@@ -131,16 +131,9 @@ enum MemorySubcommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("ironhermes=info".parse().unwrap()),
-        )
-        .with_target(false)
-        .init();
-
-    // Load .env file
+    // Load .env file — must happen BEFORE Cli::parse() if any env var would
+    // influence parsing; it is already safe to run here because nothing in
+    // the clap derivation reads env.
     let env_path = Config::env_path();
     if env_path.exists() {
         dotenvy::from_path(&env_path).ok();
@@ -150,6 +143,27 @@ async fn main() -> Result<()> {
     ensure_home_dirs().context("Failed to initialize IronHermes home directory")?;
 
     let cli = Cli::parse();
+
+    // GAP-6a: interactive REPL entry points (`hermes chat`, bare `hermes`) get a
+    // minimal log filter so the WARN flood from SkillRegistry / Cron / provider
+    // diagnostics does not bury the prompt. Non-interactive entry points keep
+    // today's default (`ironhermes=info` add_directive) so operators running
+    // `hermes gateway` / `hermes agent` still see the diagnostics they expect.
+    // RUST_LOG in the environment ALWAYS wins (via EnvFilter::try_from_default_env).
+    // Interactive = `hermes chat` subcommand, OR bare `hermes` with no `-e/--execute` flag.
+    // `hermes -e "prompt"` enters `run_single` via the `None` arm — that's batch, NOT interactive.
+    let is_interactive_repl =
+        matches!(cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
+    let env_filter = match std::env::var("RUST_LOG") {
+        Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
+        Err(_) if is_interactive_repl => tracing_subscriber::EnvFilter::new("error"),
+        Err(_) => tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("ironhermes=info".parse().unwrap()),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(false)
+        .init();
 
     // Phase 21.3: eagerly initialize tiktoken BPE tables to avoid ~100ms
     // latency on first token count.
