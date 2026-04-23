@@ -160,26 +160,56 @@ async fn s04_on_session_end_during_subagent_leaves_cancelled_marker() {
     let path = transcript_path_for(tmp.path(), "sess-s04", "sub-1");
 
     let w = TranscriptWriter::open(&path);
-    // Simulate a mid-turn sequence.
+    // Simulate a mid-turn sequence. `TranscriptWriter::append` is
+    // fire-and-forget (tokio::spawn per append); each spawn races to
+    // open + write. To make the test deterministic we yield between
+    // appends so each spawned task gets a turn to start its open()
+    // before the next one is queued. After the Cancelled marker is
+    // appended we poll the file until it contains all 3 lines AND the
+    // last line parses as a Cancelled event (rather than sleeping a
+    // fixed duration that may be insufficient on a loaded runner).
     w.append(TranscriptLine::now_stream_delta("partial output"));
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     w.append(TranscriptLine::now_tool_call("exec", "ls"));
-    // ...then on_session_end fires and writes the cancel marker (D-07).
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // on_session_end fires and writes the cancel marker (D-07).
     w.append(TranscriptLine::now_cancelled("on_session_end during turn"));
 
-    // Fire-and-forget writes are tokio::spawn'd; drain before reading.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Poll until the transcript reflects the expected terminal state
+    // (3+ lines, last is Cancelled). Budget: 5s wall clock.
+    let mut last_observed: Option<TranscriptLine> = None;
+    let mut line_count = 0usize;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let body = match std::fs::read_to_string(&path) {
+            Ok(b) => b,
+            Err(_) => continue, // file may not exist yet on the first polls
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        line_count = lines.len();
+        if lines.len() < 3 {
+            continue;
+        }
+        let parsed: Result<TranscriptLine, _> =
+            serde_json::from_str(lines.last().unwrap());
+        if let Ok(l) = parsed {
+            last_observed = Some(l.clone());
+            if matches!(l, TranscriptLine::Cancelled { .. }) {
+                break;
+            }
+        }
+    }
 
-    let body = std::fs::read_to_string(&path).expect("transcript file");
-    let lines: Vec<&str> = body.lines().collect();
     assert!(
-        lines.len() >= 3,
-        "S-04: transcript must contain >= 3 lines, got {}",
-        lines.len()
+        line_count >= 3,
+        "S-04: transcript must contain >= 3 lines within 5s, got {}",
+        line_count
     );
-
-    let last: TranscriptLine =
-        serde_json::from_str(lines.last().expect("at least one line"))
-            .expect("last line must be valid TranscriptLine JSON");
+    let last = last_observed.expect("transcript must contain at least one parseable line");
     assert!(
         matches!(last, TranscriptLine::Cancelled { .. }),
         "S-04 / D-07: last line on cancel path MUST be Cancelled, got {:?}",
