@@ -40,18 +40,21 @@ pub struct ProcessSession {
     pub(crate) cancel: CancellationToken,
 }
 
+/// Watch-pattern rate-limiter state. Timing uses `tokio::time::Instant`
+/// (not `std::time::Instant`) so tests can drive the window via
+/// `tokio::time::pause()` + `advance()`.
 #[derive(Debug, Clone)]
 pub struct WatchState {
-    pub window_start: Instant,
+    pub window_start: tokio::time::Instant,
     pub window_hits: u32,
-    pub overload_since: Option<Instant>,
+    pub overload_since: Option<tokio::time::Instant>,
     pub disabled: bool,
 }
 
 impl Default for WatchState {
     fn default() -> Self {
         Self {
-            window_start: Instant::now(),
+            window_start: tokio::time::Instant::now(),
             window_hits: 0,
             overload_since: None,
             disabled: false,
@@ -418,6 +421,110 @@ impl ProcessRegistry {
     #[doc(hidden)]
     pub fn insert_fake_running(&mut self, s: ProcessSession) {
         self.running.insert(s.id.clone(), s);
+    }
+
+    /// Test-only: insert a bare fake running session identified by `id`
+    /// with the given `pid`. Shorthand for the rate-limit integration tests.
+    #[doc(hidden)]
+    pub fn insert_fake_running_minimal(&mut self, id: &str, pid: u32) {
+        let s = fake_process_session(
+            id,
+            self.task_id.clone(),
+            "test",
+            Some(pid),
+            Instant::now(),
+            None,
+            None,
+        );
+        self.running.insert(s.id.clone(), s);
+    }
+
+    /// Test-only accessor for watch-state introspection.
+    #[doc(hidden)]
+    pub fn watch_state_for(&self, id: &str) -> Option<&WatchState> {
+        self.running.get(id).map(|s| &s.watch_state)
+    }
+
+    /// D-27 / Pitfall 7: Rate-limit decision for a single watch-pattern match
+    /// on `id`. Mutates the entry's `watch_state` in place.
+    ///
+    /// Semantics (hermes-agent process_registry.py:162-250):
+    ///  - Maintain a rolling `WATCH_WINDOW_SECONDS` (10s) window per process.
+    ///  - First `WATCH_MAX_PER_WINDOW` (8) calls in the window return `Fire`.
+    ///  - 9th+ calls in the same window return `Drop` and emit `tracing::warn`.
+    ///  - If the window stays saturated for `WATCH_OVERLOAD_KILL_SECONDS` (45s)
+    ///    consecutively, latch `watch_state.disabled = true`, emit a
+    ///    `tracing::warn` with `"watch overload disabled"`, and return
+    ///    `AutoDisable` exactly once.
+    ///  - Once disabled, every subsequent call returns `Drop` silently.
+    ///  - Scope is per-process — disabling one entry does not affect peers.
+    pub fn rate_limit_check(&mut self, id: &str) -> RateDecision {
+        // tokio::time::Instant respects tokio::time::pause()/advance() so the
+        // rate-limit tests can drive rolling-window transitions deterministically.
+        let now = tokio::time::Instant::now();
+        let s = match self.running.get_mut(id) {
+            Some(s) => s,
+            None => return RateDecision::Drop, // process gone — drop silently
+        };
+        let pid = s.pid;
+
+        // Already disabled — every call is Drop (AutoDisable was already emitted).
+        if s.watch_state.disabled {
+            return RateDecision::Drop;
+        }
+
+        // Roll the window when WATCH_WINDOW_SECONDS elapsed since window_start.
+        // IMPORTANT: `overload_since` must persist across window rolls so that
+        // sustained-cap (45s) detection accumulates. It is cleared only when
+        // a full window passes WITHOUT exceeding the cap (see the end branch).
+        if now.duration_since(s.watch_state.window_start)
+            >= Duration::from_secs(WATCH_WINDOW_SECONDS)
+        {
+            // If the previous window stayed under cap, the overload has cooled;
+            // reset the sustained-cap anchor.
+            if s.watch_state.window_hits <= WATCH_MAX_PER_WINDOW {
+                s.watch_state.overload_since = None;
+            }
+            s.watch_state.window_start = now;
+            s.watch_state.window_hits = 0;
+        }
+
+        s.watch_state.window_hits += 1;
+
+        if s.watch_state.window_hits <= WATCH_MAX_PER_WINDOW {
+            return RateDecision::Fire;
+        }
+
+        // Over cap — record the start of the sustained-cap condition.
+        if s.watch_state.overload_since.is_none() {
+            s.watch_state.overload_since = Some(now);
+        }
+        let dropped_count = s.watch_state.window_hits - WATCH_MAX_PER_WINDOW;
+        tracing::warn!(
+            target: "ironhermes_exec::process_registry",
+            pid = ?pid,
+            dropped_count,
+            "watch pattern backpressure: dropped {} match(es) in last {}s",
+            dropped_count,
+            WATCH_WINDOW_SECONDS
+        );
+
+        // Check sustained-overload auto-disable threshold.
+        if let Some(overload_since) = s.watch_state.overload_since {
+            if now.duration_since(overload_since)
+                >= Duration::from_secs(WATCH_OVERLOAD_KILL_SECONDS)
+            {
+                s.watch_state.disabled = true;
+                tracing::warn!(
+                    target: "ironhermes_exec::process_registry",
+                    pid = ?pid,
+                    "watch overload disabled after {}s sustained at cap",
+                    WATCH_OVERLOAD_KILL_SECONDS
+                );
+                return RateDecision::AutoDisable;
+            }
+        }
+        RateDecision::Drop
     }
 }
 
