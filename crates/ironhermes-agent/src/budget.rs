@@ -80,9 +80,35 @@ impl BudgetHandle {
         }
     }
 
-    /// Wave-1 Plan 02 fills this in.
+    /// Compute the current pressure tier (D-15).
+    /// Uses integer arithmetic (floor-division) to avoid float drift.
+    /// No transient tier reads during clone/fork — SeqCst load provides a
+    /// globally-ordered view.
     pub fn pressure(&self) -> PressureTier {
-        unimplemented!("BudgetHandle::pressure — implemented in Plan 02 (Wave 1)")
+        if self.max == 0 {
+            return PressureTier::None;
+        }
+        let used = self.used();
+        // Integer pct = used * 100 / max, floor.
+        // Multiplication order avoids overflow for realistic max (< 2^56).
+        let used_pct = (used * 100) / self.max;
+        match used_pct {
+            p if p >= 100 => PressureTier::Stop100,
+            p if p >= 90 => PressureTier::Warning90,
+            p if p >= 70 => PressureTier::Caution70,
+            _ => PressureTier::None,
+        }
+    }
+}
+
+/// Helper for Plan 05 turn-boundary injection.
+/// Returns the exact advisory text for a tier (None for None/Stop — Stop
+/// terminates before the next provider call, so no injection needed).
+pub fn advisory_text(tier: PressureTier) -> Option<&'static str> {
+    match tier {
+        PressureTier::Caution70 => Some(CAUTION_ADVISORY),
+        PressureTier::Warning90 => Some(WARNING_ADVISORY),
+        PressureTier::None | PressureTier::Stop100 => None,
     }
 }
 
@@ -145,5 +171,86 @@ mod tests {
             19,
             "new_from_arc shares the same Arc<AtomicUsize>"
         );
+    }
+
+    #[test]
+    fn pressure_none_below_70() {
+        let b = BudgetHandle::new(100);
+        for _ in 0..69 {
+            b.consume();
+        }
+        assert_eq!(b.pressure(), PressureTier::None);
+        assert_eq!(b.used(), 69);
+    }
+
+    #[test]
+    fn pressure_caution70_at_exactly_70() {
+        let b = BudgetHandle::new(100);
+        for _ in 0..70 {
+            b.consume();
+        }
+        assert_eq!(b.pressure(), PressureTier::Caution70);
+        assert_eq!(b.used(), 70);
+    }
+
+    #[test]
+    fn pressure_warning90_at_exactly_90() {
+        let b = BudgetHandle::new(100);
+        for _ in 0..90 {
+            b.consume();
+        }
+        assert_eq!(b.pressure(), PressureTier::Warning90);
+    }
+
+    #[test]
+    fn pressure_stop100_at_exhaustion() {
+        let b = BudgetHandle::new(100);
+        for _ in 0..100 {
+            b.consume();
+        }
+        assert_eq!(b.pressure(), PressureTier::Stop100);
+        assert!(b.consume().is_none());
+        assert_eq!(b.pressure(), PressureTier::Stop100);
+    }
+
+    #[test]
+    fn pressure_handles_zero_max_without_panic() {
+        let b = BudgetHandle::new(0);
+        assert_eq!(b.pressure(), PressureTier::None);
+        assert!(b.consume().is_none());
+    }
+
+    #[test]
+    fn pressure_non_100_max_tiers_correct() {
+        // max=50 — 70%=35, 90%=45, 100%=50
+        let b = BudgetHandle::new(50);
+        for _ in 0..34 {
+            b.consume();
+        }
+        assert_eq!(b.pressure(), PressureTier::None);
+        b.consume(); // 35
+        assert_eq!(b.pressure(), PressureTier::Caution70);
+        for _ in 0..10 {
+            b.consume();
+        } // 45
+        assert_eq!(b.pressure(), PressureTier::Warning90);
+        for _ in 0..5 {
+            b.consume();
+        } // 50
+        assert_eq!(b.pressure(), PressureTier::Stop100);
+    }
+
+    #[test]
+    fn advisory_text_for_each_tier() {
+        assert_eq!(advisory_text(PressureTier::None), None);
+        assert_eq!(
+            advisory_text(PressureTier::Caution70),
+            Some(CAUTION_ADVISORY)
+        );
+        assert_eq!(
+            advisory_text(PressureTier::Warning90),
+            Some(WARNING_ADVISORY)
+        );
+        assert_eq!(advisory_text(PressureTier::Stop100), None);
     }
 }
