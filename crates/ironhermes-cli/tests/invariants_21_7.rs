@@ -73,3 +73,35 @@ fn invariant_21_7_05_gateway_does_not_read_per_request_yolo() {
         "INV-21.7-05 / D-12: gateway path must NOT read a per-request yolo field."
     );
 }
+
+#[test]
+fn invariant_21_7_06_drain_and_kill_session_at_all_on_session_end_sites() {
+    // Plan 06 (Wave 2) / T-21.7-06-01: both CLI `on_session_end` sites
+    // (run_single at L549, run_chat at L1135) must call
+    // `drain_and_kill_session(&session_id)` alongside the existing
+    // memory-provider on_session_end so background processes tracked by
+    // the ProcessRegistry are reaped before the session exits. Minimum
+    // count = 2 across the two CLI sites (the gateway drain is gated
+    // separately by INV-21.7-07).
+    let count = MAIN_RS.matches("drain_and_kill_session(&session_id)").count();
+    assert!(
+        count >= 2,
+        "INV-21.7-06: both on_session_end sites in main.rs must call \
+         drain_and_kill_session(&session_id). Found {}.",
+        count
+    );
+}
+
+#[test]
+fn invariant_21_7_07_gateway_drain_and_kill_session() {
+    // Plan 06 (Wave 2) / T-21.7-06-01: the third on_session_end site lives
+    // in ironhermes-gateway::handler::run_agent and must also drain its
+    // gateway-scoped ProcessRegistry. Implemented as a separate static
+    // grep because `include_str!` only sees ../src/main.rs from this crate.
+    const GW_HANDLER: &str = include_str!("../../ironhermes-gateway/src/handler.rs");
+    assert!(
+        GW_HANDLER.contains("drain_and_kill_session"),
+        "INV-21.7-07: gateway handler.rs on_session_end site must call \
+         drain_and_kill_session so the third Plan 06 drain gate closes."
+    );
+}

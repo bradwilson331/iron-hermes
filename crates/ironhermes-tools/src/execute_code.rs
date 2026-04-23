@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironhermes_core::{ExecConfig, SkillRecord, ToolSchema};
+use ironhermes_exec::process_registry::{ProcessRegistry, SpawnSpec};
 use ironhermes_exec::{CancellationToken, Sandbox, SandboxConfig, ToolDispatch};
 use serde_json::json;
+use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::registry::{Tool, ToolRegistry};
@@ -60,6 +62,12 @@ pub struct ExecuteCodeTool {
     /// skill-declared keys bypass the secret-strip in `Sandbox::build_env`.
     /// `None` when wired without skill support (tests / legacy construction).
     active_skills: Option<Arc<std::sync::Mutex<Vec<SkillRecord>>>>,
+    /// Plan 21.7-06 (D-29): optional `ProcessRegistry` handle for the
+    /// `background=true` branch. When set AND background=true, the tool
+    /// spawns the Python command line into the registry (same SpawnSpec
+    /// shape as terminal) instead of running via the sandbox. Foreground
+    /// mode (default) is unchanged.
+    process_registry: Option<Arc<RwLock<ProcessRegistry>>>,
 }
 
 impl ExecuteCodeTool {
@@ -78,6 +86,7 @@ impl ExecuteCodeTool {
             config,
             cancel_token,
             active_skills: None,
+            process_registry: None,
         }
     }
 
@@ -95,7 +104,16 @@ impl ExecuteCodeTool {
             config,
             cancel_token,
             active_skills: Some(active_skills),
+            process_registry: None,
         }
+    }
+
+    /// Plan 21.7-06 (D-29): install a shared `ProcessRegistry` handle so
+    /// `background=true` calls are tracked + drained on session end.
+    /// Foreground (sandbox) dispatch is unchanged regardless of this setter.
+    pub fn with_process_registry(mut self, reg: Arc<RwLock<ProcessRegistry>>) -> Self {
+        self.process_registry = Some(reg);
+        self
     }
 }
 
@@ -112,7 +130,8 @@ impl Tool for ExecuteCodeTool {
     fn description(&self) -> &str {
         "Execute a Python script in an isolated sandbox. The script can call agent tools \
          (read_file, web_search, etc.) via 'from hermes_tools import <tool>'. Returns \
-         stdout, stderr, and exit code."
+         stdout, stderr, and exit code. Set background=true to run as a tracked \
+         background process (no sandbox; returns {process_id, pid} immediately)."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -125,6 +144,17 @@ impl Tool for ExecuteCodeTool {
                     "code": {
                         "type": "string",
                         "description": "Python script source code to execute."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "When true, spawn the script as a tracked background process (no sandbox, no RPC). Returns {process_id, pid} instead of captured output. Drained + killed on session end.",
+                        "default": false
+                    },
+                    "watch_patterns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Regex patterns to match against stdout/stderr lines (background mode only). Matches are fanned out via the process registry watch channel (rate-limited 8/10s).",
+                        "default": []
                     }
                 },
                 "required": ["code"]
@@ -136,6 +166,89 @@ impl Tool for ExecuteCodeTool {
         let code = args["code"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: code"))?;
+
+        // --- Plan 21.7-06 / D-29: background branch. ---
+        let background = args
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if background {
+            let reg_arc = self.process_registry.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "execute_code: background=true requires a ProcessRegistry to be wired via with_process_registry"
+                )
+            })?;
+
+            let watch_patterns: Vec<String> = args
+                .get("watch_patterns")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Persist the script to a tempfile and invoke the configured
+            // python interpreter on it. The tempfile is intentionally leaked
+            // (into_temp_path + keep) so the background child can still read
+            // it after this function returns; the file is small (the script)
+            // and fully tied to session lifetime via the process registry
+            // drain on session end.
+            let tmp = tempfile::Builder::new()
+                .prefix("execute_code-bg-")
+                .suffix(".py")
+                .tempfile()
+                .map_err(|e| anyhow::anyhow!("execute_code: failed to create tempfile: {}", e))?;
+            std::fs::write(tmp.path(), code)
+                .map_err(|e| anyhow::anyhow!("execute_code: failed to write script: {}", e))?;
+            let script_path = tmp.into_temp_path().keep().map_err(|e| {
+                anyhow::anyhow!("execute_code: failed to persist tempfile: {}", e)
+            })?;
+
+            // shell_words-safe: quote the path with single-quotes; paths from
+            // tempfile::Builder do not contain single-quotes on unix.
+            let command = format!(
+                "{} '{}'",
+                self.config.python_path,
+                script_path.display()
+            );
+
+            let spec = SpawnSpec {
+                command,
+                cwd: None,
+                env: vec![],
+                watch_patterns,
+            };
+
+            let id = {
+                let mut r = reg_arc.write().await;
+                r.spawn(spec).await?
+            };
+
+            if let Err(e) = ProcessRegistry::start_output_drain(reg_arc.clone(), &id).await {
+                tracing::warn!(
+                    id = %id,
+                    error = %e,
+                    "execute_code: failed to attach output drain task (process still tracked)"
+                );
+            }
+
+            let pid_opt = {
+                let r = reg_arc.read().await;
+                r.poll(&id).await.and_then(|s| s.pid)
+            };
+
+            return Ok(json!({
+                "background": true,
+                "process_id": id,
+                "pid": pid_opt,
+            })
+            .to_string());
+        }
+
+        // --- Foreground (sandbox) path — unchanged from pre-21.7-06. ---
 
         debug!("Executing Python script ({} bytes)", code.len());
 
@@ -306,5 +419,57 @@ mod tests {
             result.unwrap_err().to_string().contains("code"),
             "error should mention 'code'"
         );
+    }
+
+    // --- Plan 21.7-06 / D-29 — background path tests ------------------------
+
+    /// background=true without a registry must error — defensive wiring gate.
+    #[tokio::test]
+    async fn background_without_registry_errors() {
+        let rpc_registry = Arc::new(ToolRegistry::new());
+        let config = ExecConfig::default();
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
+        let result = tool
+            .execute(json!({"code": "print('x')", "background": true}))
+            .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("ProcessRegistry"),
+            "error must mention ProcessRegistry: {msg}"
+        );
+    }
+
+    /// background=true with a registry spawns into the registry and returns
+    /// structured JSON with process_id + pid.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn background_true_spawns_into_registry() {
+        let rpc_registry = Arc::new(ToolRegistry::new());
+        let config = ExecConfig::default();
+        let reg = Arc::new(RwLock::new(ProcessRegistry::new_for_session(
+            "t-execute_code-bg",
+        )));
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None)
+            .with_process_registry(reg.clone());
+
+        let resp = tool
+            .execute(
+                json!({"code": "import time\nprint('hi')\ntime.sleep(30)\n", "background": true}),
+            )
+            .await
+            .expect("background spawn");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("JSON");
+        assert_eq!(parsed["background"], true);
+        assert!(parsed["process_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("proc_"));
+        assert!(parsed["pid"].as_u64().is_some());
+        {
+            let r = reg.read().await;
+            assert_eq!(r.running_count(), 1);
+        }
+        reg.write().await.drain_and_kill().await.ok();
     }
 }

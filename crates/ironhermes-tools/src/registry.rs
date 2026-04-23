@@ -332,6 +332,42 @@ impl ToolRegistry {
             active_skills,
         )));
     }
+
+    /// Phase 21.7-06 (D-29): register execute_code with BOTH active-skills
+    /// bypass AND a shared `ProcessRegistry` handle for the `background=true`
+    /// branch. Replaces the `_with_active_skills` registration at the three
+    /// CLI + gateway call sites so INV-21.7-03 totals 3 new + 0 legacy after
+    /// Plan 06 wiring lands. Foreground (sandbox) mode is unchanged.
+    pub fn register_execute_code_tool_with_process_registry(
+        &mut self,
+        rpc_registry: Arc<ToolRegistry>,
+        config: ironhermes_core::ExecConfig,
+        active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+        process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
+    ) {
+        use crate::execute_code::ExecuteCodeTool;
+        let tool = ExecuteCodeTool::with_active_skills(
+            rpc_registry,
+            config,
+            None,
+            active_skills,
+        )
+        .with_process_registry(process_registry);
+        self.register(Box::new(tool));
+    }
+
+    /// Phase 21.7-06 (D-29): register a `TerminalTool` whose `background=true`
+    /// branch is wired to the session-scoped `ProcessRegistry`. Foreground
+    /// behaviour is unchanged. Called from the three CLI sites + gateway
+    /// runner when background spawning is desired.
+    pub fn register_terminal_tool_with_process_registry(
+        &mut self,
+        process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
+    ) {
+        use crate::terminal::TerminalTool;
+        let tool = TerminalTool::new().with_process_registry(process_registry);
+        self.register(Box::new(tool));
+    }
 }
 
 impl Default for ToolRegistry {

@@ -23,6 +23,8 @@ memory-grafeo = ["ironhermes-agent/memory-grafeo"]
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Plan 21.7-06 (D-29): ProcessRegistry constructor at the three main.rs call sites
+ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-gateway = { path = "../ironhermes-gateway" }
 ironhermes-cron = { path = "../ironhermes-cron" }

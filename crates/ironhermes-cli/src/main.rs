@@ -368,7 +368,15 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     // drains per-turn (Caution70 at 70% used, Warning90 at 90%, Stop100 at
     // 100%). Parent + subagents clone the handle and share the counter.
     let budget = BudgetHandle::new(config.agent.max_iterations);
-    let mut registry = build_registry();
+    // Plan 21.7-06 (D-29, D-24): session-scoped ProcessRegistry for
+    // terminal/execute_code `background=true` spawns. Kept in scope so
+    // on_session_end can call drain_and_kill_session below.
+    let process_registry = Arc::new(tokio::sync::RwLock::new(
+        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(
+            session_id.clone(),
+        ),
+    ));
+    let mut registry = build_registry_with_process_registry(process_registry.clone());
 
     // Plan 20-03 Fix 2 / GAP-4: build memory manager — returns None when
     // config.memory.memory_enabled=false (T-21.4-02). All downstream
@@ -428,11 +436,14 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     }
     let rpc_registry = Arc::new(rpc_registry);
 
-    // Phase 22: execute_code with active_skills for skill env var bypass (per D-02)
-    registry.register_execute_code_tool_with_active_skills(
+    // Phase 22 / Plan 21.7-06: execute_code with active_skills bypass AND the
+    // session-scoped ProcessRegistry so `background=true` spawns are tracked
+    // and drained on on_session_end (D-24, D-29).
+    registry.register_execute_code_tool_with_process_registry(
         rpc_registry,
         config.exec.clone(),
         active_skills.clone(),
+        process_registry.clone(),
     );
 
     // Phase 22: guardrails (per D-02, D-08 — before Arc wrap)
@@ -541,6 +552,23 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     let result = agent.run(messages).await?;
 
+    // Plan 21.7-06 (D-24, T-21.7-06-01): drain + kill any background processes
+    // tracked by this session's ProcessRegistry before exit. Best-effort —
+    // matches the surrounding on_session_end pattern (log-and-continue). If
+    // this is skipped on a crash path, LRU + TTL prune will catch up
+    // eventually, but the right-by-construction route is explicit drain.
+    if let Err(e) = process_registry
+        .write()
+        .await
+        .drain_and_kill_session(&session_id)
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            "process_registry drain_and_kill_session failed in run_single (best-effort)"
+        );
+    }
+
     // GAP-6: notify provider of session end on natural exit (best-effort).
     // Uses default MemoryEntries — providers use their own internal state.
     if let Some(ref mgr) = memory_manager {
@@ -609,13 +637,21 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     // via BudgetHandle::clone; the per-turn run_agent_turn() inherits
     // the same handle and decrements it at turn-top.
     let budget = BudgetHandle::new(config.agent.max_iterations);
+    // Plan 21.7-06 (D-29, D-24): session-scoped ProcessRegistry for
+    // terminal/execute_code `background=true` spawns. Cloned into the tool
+    // registration below and drained on natural REPL exit.
+    let process_registry = Arc::new(tokio::sync::RwLock::new(
+        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(
+            session_id.clone(),
+        ),
+    ));
     // Phase 18-14: session-scoped PressureTracker + compression_count.
     // Constructed once per REPL session so hysteresis (above_threshold,
     // pending_transient) and the summarizing engine's prior-summary chain
     // survive across all run_agent_turn calls within this session.
     let pressure_tracker = Arc::new(PressureTracker::new());
     let compression_count = Arc::new(AtomicUsize::new(0));
-    let mut registry = build_registry();
+    let mut registry = build_registry_with_process_registry(process_registry.clone());
 
     // Plan 21-03: spawn the bottom-bar TUI (status line + knight-rider scanner).
     // Activity is Idle at startup; turns publish ActivityState::Streaming/ToolCall.
@@ -738,11 +774,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     }
     let rpc_registry = Arc::new(rpc_registry);
 
-    // Phase 22: execute_code with active_skills for skill env var bypass (per D-02)
-    registry.register_execute_code_tool_with_active_skills(
+    // Phase 22 / Plan 21.7-06: execute_code with active_skills bypass AND the
+    // session-scoped ProcessRegistry so `background=true` spawns are tracked
+    // and drained on REPL exit (D-24, D-29).
+    registry.register_execute_code_tool_with_process_registry(
         rpc_registry,
         config.exec.clone(),
         active_skills.clone(),
+        process_registry.clone(),
     );
 
     // Phase 22: guardrails (per D-02, D-08 — before Arc wrap)
@@ -1125,6 +1164,22 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         Err(_) => tracing::debug!("tui: Arc still has outstanding clones at clean-exit — skipping explicit shutdown"),
     }
 
+    // Plan 21.7-06 (D-24, T-21.7-06-01): drain + kill any background processes
+    // tracked by this session's ProcessRegistry before exit. Best-effort —
+    // matches the surrounding on_session_end pattern (log-and-continue). Same
+    // considerations as run_single's drain site.
+    if let Err(e) = process_registry
+        .write()
+        .await
+        .drain_and_kill_session(&session_id)
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            "process_registry drain_and_kill_session failed in run_chat (best-effort)"
+        );
+    }
+
     // GAP-6: notify provider of clean session end (best-effort).
     // Only fires on natural REPL exit (EOF or /quit) — not on ctrl-c
     // (that path calls std::process::exit(0) above, preserving the
@@ -1256,8 +1311,20 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>> =
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory).await?;
 
+    // Plan 21.7-06 (D-29, D-24): gateway-scoped ProcessRegistry. Same
+    // lifecycle trade-off as the BudgetHandle decision in Plan 05 — a true
+    // per-session registry requires SessionStore plumbing deferred to Plan 09.
+    // task_id = "gateway" so drain_and_kill_session(&gw_session_id) at the
+    // per-request end site is a documented no-op (session_id mismatch);
+    // LRU + FINISHED_TTL prune handles cleanup across long-running bots.
+    let process_registry = Arc::new(tokio::sync::RwLock::new(
+        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(
+            "gateway".to_string(),
+        ),
+    ));
+
     // Build registry and register memory tool before Arc wrapping
-    let mut registry = build_registry();
+    let mut registry = build_registry_with_process_registry(process_registry.clone());
     if let Some(ref mgr) = memory_manager {
         registry.register_memory_tool(mgr.clone());
     }
@@ -1294,12 +1361,13 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let rpc_registry = Arc::new(rpc_registry);
 
     // Register execute_code tool with the RPC dispatch registry.
-    // Phase 19 Plan 06 (D-05): pass active_skills so skill-declared env vars
-    // bypass the sandbox secret-strip in `Sandbox::build_env`.
-    registry.register_execute_code_tool_with_active_skills(
+    // Phase 19 Plan 06 (D-05) + Plan 21.7-06 (D-29): active_skills env-var
+    // bypass AND the gateway-scoped ProcessRegistry for background spawns.
+    registry.register_execute_code_tool_with_process_registry(
         rpc_registry,
         config.exec.clone(),
         active_skills.clone(),
+        process_registry.clone(),
     );
 
     // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
@@ -1400,6 +1468,11 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // runner so each per-request AgentLoop shares the counter with the
     // registered AgentSubagentRunner (PROV-10 parent/child shared).
     runner.set_budget_handle(budget.clone());
+    // Plan 21.7-06 (D-29, D-24): thread the gateway-scoped ProcessRegistry
+    // into the runner so the per-request handler can call
+    // drain_and_kill_session at on_session_end (grep-gate satisfied; no-op
+    // in practice for the gateway-scoped task_id — see construction comment).
+    runner.set_process_registry(process_registry.clone());
     if let Some(mgr) = memory_manager {
         runner.set_memory_manager(mgr);
     }
@@ -1439,6 +1512,29 @@ fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
 fn build_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register_defaults();
+    registry
+}
+
+/// Plan 21.7-06 (D-29): build a ToolRegistry with a TerminalTool that is
+/// wired to the session-scoped ProcessRegistry so `terminal background=true`
+/// spawns flow through `drain_and_kill_session` at on_session_end. All other
+/// default tools register identically to `build_registry`.
+fn build_registry_with_process_registry(
+    process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
+) -> ToolRegistry {
+    use ironhermes_tools::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+    use ironhermes_tools::web_read::WebReadTool;
+    use ironhermes_tools::web_search::WebSearchTool;
+    let mut registry = ToolRegistry::new();
+    // Terminal with ProcessRegistry wiring.
+    registry.register_terminal_tool_with_process_registry(process_registry.clone());
+    // Other defaults mirror `register_defaults()` sans the plain TerminalTool.
+    registry.register(Box::new(ReadFileTool));
+    registry.register(Box::new(WriteFileTool));
+    registry.register(Box::new(PatchFileTool));
+    registry.register(Box::new(SearchFilesTool));
+    registry.register(Box::new(WebSearchTool));
+    registry.register(Box::new(WebReadTool));
     registry
 }
 
