@@ -1,0 +1,30 @@
+---
+source: crates/ironhermes-cli/tests/status_cmd_integration.rs
+expression: text
+---
+=== IronHermes Status ===
+
+Provider
+  name:       anthropic
+  model:      claude-sonnet-4
+  api_mode:   messages
+  fallback:   anthropic -> openai
+
+Memory
+  provider:   file
+  MEMORY.md:  12 entries, 4210 / 20000 chars
+  USER.md:    3 entries, 512 / 8000 chars
+  sessions:   47
+  state.db:   1048576 bytes
+
+Gateway
+  running:    yes
+  platforms:  ["telegram"]
+  allowlist:  3 entries
+  tg_authed:  yes
+
+Subagents + Processes + MCP
+  subagents:  1 / 4 active
+  iterations: 23 / 50 (caution)
+  processes:  2 tracked
+  mcp:        3 server(s), 18 tools
