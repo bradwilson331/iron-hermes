@@ -195,3 +195,45 @@ fn invariant_21_7_10_gateway_subcommand_rejects_yolo_flag() {
         err.kind()
     );
 }
+
+#[test]
+fn invariant_21_7_12_mid_turn_slash_dispatch_arm_exists() {
+    // Plan 11 / GAP-21.7-01: run_chat's mid-turn tokio::select! loop must
+    // have an arm that polls the ReplInputChannel so slash commands
+    // dispatch while the agent turn is in flight. The arm is the sole
+    // cure for the "subagents already unregistered by the time the user
+    // types /agents list" defect.
+    //
+    // Accept either the legacy channel-name spelling (`slash_input_rx`)
+    // or the canonical production spelling (`repl_input.recv_line()`) —
+    // either one proves the arm exists. The static grep matches across
+    // the entire main.rs (the actual arm sits inside the `'turn: loop`
+    // select, but substring match is sufficient here).
+    let slash_spelling = MAIN_RS.matches("slash_input_rx.recv()").count();
+    let repl_spelling = MAIN_RS.matches("repl_input.recv_line()").count();
+    assert!(
+        slash_spelling >= 1 || repl_spelling >= 1,
+        "INV-21.7-12 / GAP-21.7-01: run_chat must have a mid-turn select arm \
+         polling the ReplInputChannel so `/agents list` works during an \
+         in-flight turn. Expected >=1 match of `slash_input_rx.recv()` OR \
+         `repl_input.recv_line()`; found slash={}, repl={}.",
+        slash_spelling,
+        repl_spelling,
+    );
+}
+
+#[test]
+fn invariant_21_7_13_repl_input_channel_spawned() {
+    // Plan 11 / GAP-21.7-01: run_chat must spawn a ReplInputChannel at
+    // startup so rustyline's blocking DefaultEditor lives on a dedicated
+    // thread. Without this, tokio::select! cannot race the user's input
+    // against the agent turn future.
+    let count = MAIN_RS.matches("ReplInputChannel::spawn").count();
+    assert!(
+        count >= 1,
+        "INV-21.7-13 / GAP-21.7-01: run_chat must call \
+         `ReplInputChannel::spawn` so the rustyline editor runs off the \
+         main tokio task. Found {}.",
+        count
+    );
+}

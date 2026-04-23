@@ -28,5 +28,12 @@ pub mod cli_args;
 pub mod io_gate;
 pub mod yolo;
 
+// Phase 21.7 Plan 11 (GAP-21.7-01): concurrent rustyline input channel.
+// Hosts the blocking DefaultEditor on a dedicated OS thread so `run_chat`
+// can poll for user input from a `tokio::select!` arm alongside the
+// in-flight agent turn future (mid-turn `/agents list|kill|logs` dispatch).
+pub mod repl_input;
+
 pub use io_gate::{can_prompt, is_terminal_stdin};
+pub use repl_input::{PromptRequest, ReplInputChannel, ReplLine};
 pub use yolo::{maybe_print_yolo_banner, print_yolo_banner_to_stderr, resolve_yolo};

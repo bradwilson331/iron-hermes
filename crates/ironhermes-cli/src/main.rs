@@ -622,6 +622,48 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     Ok(())
 }
 
+/// Plan 21.7-11 (GAP-21.7-01): build a `CommandContext` for run_chat's
+/// slash dispatch sites. Called from BOTH the prompt-time branch AND the
+/// mid-turn slash dispatch arm so the two sites stay in lock-step on
+/// registry handle identity (INV-21.7-08 / D-03 / D-04). Extracting this
+/// fixes the duplication that previously existed between the single
+/// prompt-time builder and the (now added) mid-turn builder.
+fn build_cmd_ctx(
+    session_id: &str,
+    agent_running: Arc<AtomicBool>,
+    mcp_manager: Option<&Arc<McpManager>>,
+    subagent_registry: Arc<RwLock<ironhermes_agent::subagent_registry::SubagentRegistry>>,
+    process_registry: Arc<RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
+    budget: BudgetHandle,
+    subagent_semaphore: Arc<tokio::sync::Semaphore>,
+    max_subagents: usize,
+) -> CommandContext {
+    let base = CommandContext::new(
+        Platform::Local,
+        session_id.to_string(),
+        agent_running,
+    );
+    let base = if let Some(mgr) = mcp_manager {
+        base.with_mcp_reloader(mgr.clone())
+    } else {
+        base
+    };
+    base
+        .with_subagent_registry(Arc::new(
+            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
+                subagent_registry,
+            ),
+        ))
+        .with_process_registry(Arc::new(
+            ironhermes_exec::process_registry::ProcessRegistryHandle::new(
+                process_registry,
+            ),
+        ))
+        .with_budget(Arc::new(budget))
+        .with_subagent_semaphore(subagent_semaphore)
+        .with_max_subagents(max_subagents)
+}
+
 /// Run interactive chat mode.
 async fn run_chat(
     cli: &Cli,
@@ -921,8 +963,14 @@ async fn run_chat(
     let command_router = CommandRouter::new(build_command_registry());
     let agent_running = Arc::new(AtomicBool::new(false));
 
-    // Use rustyline for readline with history
-    let mut rl = rustyline::DefaultEditor::new().context("Failed to initialize readline")?;
+    // Phase 21.7 Plan 11 (GAP-21.7-01): concurrent rustyline input.
+    // `ReplInputChannel::spawn` hosts the blocking DefaultEditor on a
+    // dedicated OS thread so run_chat's mid-turn tokio::select! loop can
+    // poll a third arm (slash-command input) alongside the in-flight
+    // agent turn future. Fixes GAP-21.7-01: `/agents list` while
+    // delegate_task subagents are live.
+    let mut repl_input = ironhermes_cli::ReplInputChannel::spawn(None)
+        .context("Failed to initialize concurrent readline channel")?;
 
     // Handle initial message if provided
     if let Some(msg) = initial_message {
@@ -962,9 +1010,9 @@ async fn run_chat(
     // GAP-5: belt-and-braces flush — if any later synchronous println/eprintln
     // happened between the banner and here (e.g., context injection, token
     // estimator init, rustyline setup), force it to the terminal before we
-    // block inside rl.readline. The background MCP task's eprintln! has already
-    // raced with this point by the time we get here; flushing guarantees the
-    // user sees the prompt line rather than waiting on a keystroke.
+    // issue the first prompt request. The background MCP task's eprintln! has
+    // already raced with this point by the time we get here; flushing guarantees
+    // the user sees the prompt line rather than waiting on a keystroke.
     io::stdout().flush().ok();
     io::stderr().flush().ok();
     loop {
@@ -990,9 +1038,40 @@ async fn run_chat(
             }
         }
 
+        // Plan 11 plan-checker advisory: row-reserve math must happen on the
+        // paint thread (the main tokio task), not on the rustyline worker
+        // thread. prepare/finish brackets the prompt-request cycle rather
+        // than the worker-side readline call.
         prepare_prompt_with_reserve(tui.reserved_row_count());
-        let readline = rl.readline(&format!("{} ", "You:".bold().green()));
+        if let Err(e) = repl_input.request_prompt(ironhermes_cli::PromptRequest {
+            prefix: format!("{} ", "You:".bold().green()),
+            in_turn: false,
+        }) {
+            eprintln!("Error: readline channel closed: {}", e);
+            break;
+        }
+        let readline_line = repl_input.recv_line().await;
         finish_prompt_with_reserve(tui.reserved_row_count());
+        // Map ReplLine → the same Result shape the old rl.readline match
+        // consumed (Ok(String) / Err(Interrupted) / Err(Eof) / Err(other))
+        // so the below match arms are unchanged in semantics.
+        let readline: Result<String, rustyline::error::ReadlineError> = match readline_line {
+            Some(ironhermes_cli::ReplLine::Line(s)) => Ok(s),
+            Some(ironhermes_cli::ReplLine::Interrupted) => {
+                Err(rustyline::error::ReadlineError::Interrupted)
+            }
+            Some(ironhermes_cli::ReplLine::Eof) => {
+                Err(rustyline::error::ReadlineError::Eof)
+            }
+            Some(ironhermes_cli::ReplLine::Error(msg)) => {
+                Err(rustyline::error::ReadlineError::Io(std::io::Error::other(msg)))
+            }
+            None => {
+                // Worker exited unexpectedly — treat as EOF so the outer
+                // REPL cleanup fires.
+                Err(rustyline::error::ReadlineError::Eof)
+            }
+        };
         match readline {
             Ok(line) => {
                 let input = line.trim().to_string();
@@ -1009,39 +1088,22 @@ async fn run_chat(
                     let cmd = parts[0];
                     let args = &parts[1..];
 
-                    // Build CommandContext for this turn (Phase 21.2: wire mcp_reloader D-15).
-                    // Plan 21.7-07: wire subagent_registry / process_registry /
-                    // budget / subagent_semaphore + max_subagents handles so
-                    // Plan 08 (/agents list/kill/logs) and Plan 09 (hermes status)
-                    // consumers have live state to read. Each handle is a
-                    // trait-object so ironhermes-core stays a leaf crate.
-                    let cmd_ctx = {
-                        let base = CommandContext::new(
-                            Platform::Local,
-                            session_id.clone(),
-                            agent_running.clone(),
-                        );
-                        let base = if let Some(ref mgr) = mcp_manager {
-                            base.with_mcp_reloader(mgr.clone())
-                        } else {
-                            base
-                        };
-                        let base = base
-                            .with_subagent_registry(Arc::new(
-                                ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
-                                    subagent_registry.clone(),
-                                ),
-                            ))
-                            .with_process_registry(Arc::new(
-                                ironhermes_exec::process_registry::ProcessRegistryHandle::new(
-                                    process_registry.clone(),
-                                ),
-                            ))
-                            .with_budget(Arc::new(budget.clone()))
-                            .with_subagent_semaphore(subagent_semaphore.clone())
-                            .with_max_subagents(config.subagent.max_subagents);
-                        base
-                    };
+                    // Build CommandContext for this turn. Plan 21.7-11
+                    // extracts the builder into `build_cmd_ctx` so both the
+                    // prompt-time branch (here) and the mid-turn slash
+                    // dispatch arm call the same code path, guaranteeing
+                    // identical registry handle identity across dispatch
+                    // sites (INV-21.7-08 / D-03 / D-04).
+                    let cmd_ctx = build_cmd_ctx(
+                        &session_id,
+                        agent_running.clone(),
+                        mcp_manager.as_ref(),
+                        subagent_registry.clone(),
+                        process_registry.clone(),
+                        budget.clone(),
+                        subagent_semaphore.clone(),
+                        config.subagent.max_subagents,
+                    );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
                     match dispatch_command(tui.extensions(), cmd, args, &command_router, &cmd_ctx) {
@@ -1116,7 +1178,7 @@ async fn run_chat(
                     }
                 }
 
-                let _ = rl.add_history_entry(&input);
+                repl_input.add_history(&input);
                 let user_msg = ChatMessage::user(&input);
                 let _ = state_store.add_message(&session_id, &user_msg);
                 messages.push(user_msg);
@@ -1146,6 +1208,18 @@ async fn run_chat(
                     context_length, // Phase 21.3
                     memory_manager.clone(), // GAP-1: wire queue_prefetch
                 ));
+
+                // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
+                // so the rustyline worker is ready to accept a slash command
+                // while the agent turn is in flight. Every time the mid-turn
+                // select arm fires, it re-primes this prompt before
+                // `continue 'turn`. No prefix paint — the prompt is invisible
+                // from the user's perspective; they just see their typed
+                // characters appear on the current line.
+                let _ = repl_input.request_prompt(ironhermes_cli::PromptRequest {
+                    prefix: String::new(),
+                    in_turn: true,
+                });
 
                 let response: Option<String> = 'turn: loop {
                     tokio::select! {
@@ -1189,11 +1263,141 @@ async fn run_chat(
                                 }
                             }
                         }
+                        // Plan 21.7-11 (GAP-21.7-01): mid-turn slash-command
+                        // dispatch arm. The rustyline worker is polled
+                        // concurrently so `/agents list|kill|logs` and `/stop`
+                        // work while delegate_task subagents are live. This
+                        // arm MUST NOT cancel the in-flight agent turn —
+                        // slash commands are purely observability.
+                        //
+                        // Biased ordering guarantees ctrl_c wins races against
+                        // slash input (critical for emergency-exit semantics),
+                        // and slash input wins races against run_fut (so a
+                        // burst of tool output doesn't starve the user's
+                        // typed command).
+                        Some(slash_line) = repl_input.recv_line() => {
+                            let input = match slash_line {
+                                ironhermes_cli::ReplLine::Line(s) => s.trim().to_string(),
+                                // ctrl-c / EOF / errors during in-flight
+                                // readline: treat as empty and re-prime.
+                                // ctrl-c is handled by the dedicated ctrl_c
+                                // arm above (tokio::signal::ctrl_c fires in
+                                // parallel); this arm only owns the line
+                                // channel.
+                                _ => {
+                                    let _ = repl_input.request_prompt(
+                                        ironhermes_cli::PromptRequest {
+                                            prefix: String::new(),
+                                            in_turn: true,
+                                        }
+                                    );
+                                    continue 'turn;
+                                }
+                            };
+                            if input.is_empty() {
+                                let _ = repl_input.request_prompt(
+                                    ironhermes_cli::PromptRequest {
+                                        prefix: String::new(),
+                                        in_turn: true,
+                                    }
+                                );
+                                continue 'turn;
+                            }
+                            if input.starts_with('/') {
+                                let parts: Vec<&str> =
+                                    input[1..].split_whitespace().collect();
+                                if !parts.is_empty() {
+                                    let cmd = parts[0];
+                                    let args = &parts[1..];
+                                    let cmd_ctx = build_cmd_ctx(
+                                        &session_id,
+                                        agent_running.clone(),
+                                        mcp_manager.as_ref(),
+                                        subagent_registry.clone(),
+                                        process_registry.clone(),
+                                        budget.clone(),
+                                        subagent_semaphore.clone(),
+                                        config.subagent.max_subagents,
+                                    );
+                                    match dispatch_command(
+                                        tui.extensions(),
+                                        cmd,
+                                        args,
+                                        &command_router,
+                                        &cmd_ctx,
+                                    ) {
+                                        CommandResult::Handled(output) => {
+                                            println!("{}", output);
+                                        }
+                                        CommandResult::Silent => {}
+                                        CommandResult::ClearSession(_) => {
+                                            // Mid-turn ClearSession is a
+                                            // no-op with a dimmed notice —
+                                            // we MUST NOT truncate the
+                                            // in-flight agent's messages
+                                            // vec from under its feet.
+                                            println!(
+                                                "{}",
+                                                "/clear ignored mid-turn — use after the turn ends"
+                                                    .dimmed()
+                                            );
+                                        }
+                                        CommandResult::Quit => {
+                                            // Defer: mark for exit after the
+                                            // turn ends naturally. We do not
+                                            // cancel the turn.
+                                            println!(
+                                                "{}",
+                                                "/quit queued — will exit after the turn completes"
+                                                    .dimmed()
+                                            );
+                                            exit_cleanly = true;
+                                        }
+                                        CommandResult::Error(msg) => {
+                                            eprintln!(
+                                                "{}",
+                                                format!("Error: {}", msg).red()
+                                            );
+                                        }
+                                        CommandResult::McpReload => {
+                                            // Mid-turn MCP reload is
+                                            // deferred — too disruptive
+                                            // while the agent is mid-call.
+                                            println!(
+                                                "{}",
+                                                "/mcp reload ignored mid-turn — retry after the turn ends"
+                                                    .dimmed()
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!(
+                                    "{}",
+                                    "turn in flight — slash commands only; input discarded"
+                                        .dimmed()
+                                );
+                            }
+                            // Re-prime the prompt for the next mid-turn line.
+                            let _ = repl_input.request_prompt(
+                                ironhermes_cli::PromptRequest {
+                                    prefix: String::new(),
+                                    in_turn: true,
+                                }
+                            );
+                            continue 'turn;
+                        }
                         r = &mut run_fut => { break 'turn r?; }
                     }
                 };
 
                 agent_running.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                // Plan 21.7-11 (T-21.7-11-01): drain any buffered mid-turn
+                // input that arrived AFTER the turn resolved but before this
+                // point. Prevents stale lines from leaking into the next
+                // prompt cycle.
+                let _ = repl_input.drain_buffered();
 
                 // Only reset the double-ctrl-c window on clean completion.
                 // After CancelTurn, keep the window open so a second ctrl-c
@@ -1884,9 +2088,17 @@ mod tui_extension_wiring_tests {
     }
 
     /// GAP-5: run_chat must flush stdout after print_banner() so the
-    /// banner reaches the terminal before rl.readline blocks on stdin.
-    /// Without this flush, the CLI appears frozen when mcp_servers is
-    /// configured (violates D-07 non-blocking-startup contract).
+    /// banner reaches the terminal before the ReplInputChannel issues the
+    /// first prompt request. Without this flush, the CLI appears frozen
+    /// when mcp_servers is configured (violates D-07 non-blocking-startup
+    /// contract).
+    ///
+    /// Plan 21.7-11 (GAP-21.7-01): the pre-plan-11 anchor was the inline
+    /// `let readline = rl.readline(` call site; plan-11 moved the blocking
+    /// readline onto a ReplInputChannel worker thread. The ordering gate
+    /// now tracks the first `repl_input.request_prompt` call instead —
+    /// semantically equivalent because `request_prompt` is the new
+    /// "first stdin-blocking site" the banner must precede.
     #[test]
     fn initial_prompt_flush_precedes_readline() {
         let src = include_str!("main.rs");
@@ -1898,18 +2110,18 @@ mod tui_extension_wiring_tests {
         );
 
         // Ordering: at least one stdout flush must appear BEFORE the main REPL
-        // `let readline = rl.readline(` call site. Using byte-offset comparison
+        // `repl_input.request_prompt(` call site. Using byte-offset comparison
         // of the first match of each literal.
         let flush_idx = src
             .find("io::stdout().flush().ok();")
             .expect("flush call must exist somewhere in main.rs");
         let readline_idx = src
-            .find("let readline = rl.readline(")
-            .expect("run_chat must still call rl.readline for the REPL");
+            .find("repl_input.request_prompt(")
+            .expect("run_chat must issue the first ReplInputChannel prompt request");
         assert!(
             flush_idx < readline_idx,
             "GAP-5: io::stdout().flush().ok() must appear in source order BEFORE \
-             the `let readline = rl.readline(` site so the banner paints before \
+             the first `repl_input.request_prompt(` site so the banner paints before \
              the first stdin block. flush_idx={flush_idx}, readline_idx={readline_idx}"
         );
     }
