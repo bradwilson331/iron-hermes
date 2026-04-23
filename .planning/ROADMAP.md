@@ -125,13 +125,37 @@ Plans:
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 21
-**Plans:** 0 plans
+**Goal:** Close four v2.0 hermes-agent parity gaps scoped to "minimum viable parity": (a) surface the existing `delegate_task` subagent system with `/agents`, status-line pill, persistent JSONL transcripts, cascade cancellation, wall-clock timeout, concurrency surface, and parent/child iteration-budget inheritance; (b) add `--yolo` non-interactive mode that bypasses dangerous-command approvals while the iteration budget, ctrl-c cascade, and fatal-error halt remain unskippable; (c) add `hermes status [--all] [--deep] [--json]` component diagnostics; (d) add an in-memory session-scoped `ProcessRegistry` for `terminal(background=true)` / `execute_code` with spawn/poll/wait/kill, 200KB rolling output buffer, `/stop` slash, watch patterns with rate-limited notifications, and cleanup on session end. Explicit exclusions (deferred to own phases): worktree-parallel mode, toolsets grouping, terminal backends, full gateway session mirror, plugin discovery sources, full approval queue. 29 locked CONTEXT decisions (D-01..D-29), 12 eval dimensions (E-01..E-12), 18 scenario fixtures (S-01..S-18), 10 online guardrails (G-01..G-10) — 5 of which remain unskippable under `--yolo` per the Replit-July-2025 anti-pattern anchor.
+
+**Requirements:** PROV-09, PROV-10
+
+**Depends on:** Phase 21, Phase 21.1, Phase 21.2, Phase 21.4, Phase 21.6
+
+**Plans:** 11 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 21.7 to break down)
+- [ ] 21.7-00-wave0-test-infra-PLAN.md — Wave 0 test infra + dev-deps (insta/assert_cmd/tracing-test/sysinfo/nix) + `ensure_home_dirs()` extension for `subagent-transcripts/` + `BudgetHandle` type shell + three static-grep regression gates (E-05/E-08/E-09)
+- [ ] 21.7-01-budget-handle-pressure-tiers-PLAN.md — `BudgetHandle` impl (consume/pressure/advisory_text) with SeqCst atomics + 10k-loop concurrent-consume stress test (E-05/S-13) — PROV-09/PROV-10 type foundation
+- [ ] 21.7-02-process-registry-module-PLAN.md — `ProcessRegistry` + `ProcessSession` module (`ironhermes-exec/src/process_registry.rs`): constants verbatim from hermes-agent, spawn/poll/wait/kill/logs, LRU prune at 64, TTL 30min, watch-pattern rate limiter with sustained-overload auto-disable (D-23..D-29, E-03/E-04)
+- [ ] 21.7-03-subagent-registry-transcript-PLAN.md — `SubagentRegistry` (D-03/D-04/D-09) + `TranscriptWriter` fire-and-forget JSONL with cancellation marker (D-05/D-07, E-08)
+- [ ] 21.7-04-status-cmd-skeleton-deepprobe-PLAN.md — `status_cmd` module skeleton + v1 JSON schema locked via insta snapshot + `DeepProbe` trait seam with `LiveDeepProbe` stubs + `MockDeepProbe` for fault injection (D-18..D-22, E-06/E-07)
+- [ ] 21.7-05-budget-handle-three-site-wiring-PLAN.md — Wire BudgetHandle through `AgentSubagentRunner` + `AgentLoop::run_agent_turn` decrement-at-top + pressure-advisory injection on tier crossings + three `main.rs` registration sites + gateway (PROV-09/PROV-10 integration, E-12)
+- [ ] 21.7-06-process-registry-wiring-PLAN.md — Wire ProcessRegistry into `terminal(background=true)` + `execute_code(background=true)` + three `on_session_end` call sites (CLI + gateway) + stdout-drain tasks that feed `ingest_output` (D-24/D-27/D-29, E-03 end-to-end with `sysinfo`+`waitpid` no-zombie assertion)
+- [ ] 21.7-07-subagent-registry-pill-transcript-wiring-PLAN.md — Extend `CommandContext` with 4 new handles (process/subagent/budget/semaphore via `ironhermes-core` trait objects) + `agents: N/M` status-line pill with hide-at-zero (Pitfall 8) + thread SubagentRegistry + TranscriptWriter through AgentSubagentRunner lifecycle (D-03/D-04/D-05/D-07/D-09, E-11)
+- [ ] 21.7-08-yolo-and-slash-handlers-PLAN.md — `--yolo` CLI flag + `autonomous.yolo` config key (CLI wins) + one-shot stderr banner + approval skip-under-yolo gate + non-TTY `IsTerminal` gate + fill `/agents list|kill|logs` and `/stop` handlers + 2s debounced semaphore-wait warn (D-09/D-11/D-12/D-13/D-14/D-26, E-02/E-10, G-08/G-10, Pitfall 10)
+- [ ] 21.7-09-hermes-status-cli-wiring-PLAN.md — Wire `hermes status` into `Commands::Status` + fill `StatusReport::collect` for all four D-18 sections + implement `LiveDeepProbe` real probes (provider HEAD + FTS5 integrity + MCP honest-unreachable fallback) + **D-08 fix**: `delegate_task.rs:265-283 / :547-579` timeout arms now explicitly call `child_cancel_token.cancel()` BEFORE bail (AI-SPEC Pitfall 5) + `timeout_seconds` schema field for per-call override
+- [ ] 21.7-10-eval-scenarios-and-ci-gates-PLAN.md — S-01..S-18 scenario tests (cascade-cancel, yolo-guardrails, process-registry) + M-01 cascade-cancel p95 < 500ms bench + `scripts/ci-gates.sh` with four static-grep gates (E-05/E-08/E-09/D-12) + `cargo insta test --unreferenced=reject --workspace` + optional CI workflow edit
+
+**Wave structure:**
+- Wave 0: 21.7-00 (test infra + dev-deps + home-dirs + static-grep gates + BudgetHandle shell — autonomous; blocks all downstream)
+- Wave 1: 21.7-01, 21.7-02, 21.7-03, 21.7-04 in parallel (new types: BudgetHandle impl, ProcessRegistry, SubagentRegistry+transcript, status_cmd skeleton — all autonomous, all depend on Wave 0)
+- Wave 2: 21.7-05, 21.7-06, 21.7-07 in parallel (integration: BudgetHandle three-site, ProcessRegistry wiring + on_session_end, SubagentRegistry+pill+transcript wiring — all autonomous, depend on Wave 1 respective foundations)
+- Wave 3: 21.7-08, 21.7-09 in parallel (CLI surface: --yolo + /agents + /stop + banner + non-TTY gate; hermes status + --deep + D-08 timeout fix — both autonomous, depend on Wave 2)
+- Wave 4: 21.7-10 (eval scenarios + p95 bench + CI gates — autonomous, depends on Waves 0-3)
+
+**AI integration:** Framework is IronHermes itself (Rust; no new framework per AI-SPEC §2). 5 critical failure modes, 12 eval dimensions, 18 scenario fixtures, 10 guardrails (6 online + 4 offline), `tracing`-based observability with 4 new structured event targets. Replit-July-2025 incident cited as anti-pattern anchor for `--yolo` safety contract.
+
+**Phase directory:** `.planning/phases/21.7-multi-agent-and-autonomous-agents-and-sandbox-status/`
 
 ### Phase 21.6: Port deployment setup files from hermes-agent (INSERTED)
 
