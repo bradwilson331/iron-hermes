@@ -1,5 +1,6 @@
 pub mod client;
 pub mod agent_loop;
+pub mod budget;
 pub mod memory;
 pub mod session_search;
 pub mod context_loader;
