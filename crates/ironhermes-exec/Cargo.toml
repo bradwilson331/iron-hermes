@@ -14,10 +14,17 @@ uuid = { workspace = true }
 tempfile = "3"
 libc = "0.2"
 tokio-util = { workspace = true }
+# Phase 21.7 Plan 02 — ProcessRegistry runtime deps
+regex = { workspace = true }
+shell-words = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
 # Phase 21.7 Wave 0 — sandbox-status + process-group tests
 sysinfo = { workspace = true }
 nix = { workspace = true }
-tracing-test = { workspace = true }
+# Plan 02 Task 2-03 — watch rate-limit tests assert warn events emitted from
+# library code; `no-env-filter` disables the default crate-scoped filter so
+# `logs_contain` can see `ironhermes_exec::process_registry` target events
+# from the integration-test binary.
+tracing-test = { workspace = true, features = ["no-env-filter"] }
