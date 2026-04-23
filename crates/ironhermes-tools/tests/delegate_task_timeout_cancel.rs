@@ -3,14 +3,15 @@
 //! Proves the `tokio::time::timeout` arm inside `DelegateTaskTool::execute`
 //! hard-cancels the child subagent's `CancellationToken` before returning
 //! the timeout error. Regression-locks the Pitfall 5 fix: `tokio::time::timeout`
-//! alone does NOT cancel the inner future — the child agent would keep running
-//! unless the timeout arm explicitly calls `.cancel()` on the child token.
+//! alone does NOT cancel the inner future in a way the child's detached
+//! sub-tasks can observe — the child agent would keep running unless the
+//! timeout arm explicitly calls `.cancel()` on the shared token.
 //!
-//! The test runs in real wall-clock (no `start_paused`) with a 1-second
-//! timeout and a child that awaits `tokio::select!` on either a 10s sleep
-//! or the cancel signal. If the fix is correct, the test finishes in
-//! ~1.1s and the atomic flag is `true`. Before the fix, the test would
-//! hang the full 10s (and miss the cancel signal entirely).
+//! The runner spawns a DETACHED `tokio::spawn` task that outlives the outer
+//! `run_child` future and flips the atomic when the cancel token fires. This
+//! simulates real AgentLoop behaviour where inner tasks (provider calls,
+//! tool execution) run on spawned tasks whose lifetime is controlled by the
+//! shared cancel token, NOT by `Drop` of the outer future.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,14 +26,16 @@ use ironhermes_tools::{Tool, ToolRegistry};
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-/// Mock runner that reports (via an atomic) whether its CancellationToken
-/// was cancelled before the runner's own 10s sleep fired.
-struct SleepRunner {
+/// Mock runner that spawns a DETACHED task watching the cancel token, then
+/// sleeps on the foreground path. The detached task flips the atomic when
+/// the token is cancelled — proving the token was explicitly `.cancel()`ed
+/// rather than merely dropped by `tokio::time::timeout`.
+struct DetachedSleepRunner {
     observed_cancelled: Arc<AtomicBool>,
 }
 
 #[async_trait]
-impl SubagentRunner for SleepRunner {
+impl SubagentRunner for DetachedSleepRunner {
     async fn run_child(
         &self,
         _registry: Arc<RwLock<ToolRegistry>>,
@@ -47,22 +50,29 @@ impl SubagentRunner for SleepRunner {
             "D-08 regression test: delegate_task must pass a CancellationToken \
              through to run_child so the timeout arm has something to cancel",
         );
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                Ok(Some("never".to_string()))
-            }
-            _ = cancel.cancelled() => {
-                observed.store(true, Ordering::SeqCst);
-                anyhow::bail!("cancelled via parent token")
-            }
-        }
+
+        // Detached watcher — a clone of the token lives past `run_child`
+        // being dropped by `tokio::time::timeout`. The only way the
+        // watcher's `cancelled().await` returns is via an explicit
+        // `.cancel()` call on the shared token.
+        let watcher_cancel = cancel.clone();
+        tokio::spawn(async move {
+            watcher_cancel.cancelled().await;
+            observed.store(true, Ordering::SeqCst);
+        });
+
+        // Foreground: long sleep that `tokio::time::timeout` will drop when
+        // the deadline fires. The detached watcher above is what actually
+        // observes the cancel.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(Some("never".to_string()))
     }
 }
 
 #[tokio::test]
 async fn timeout_arm_hard_cancels_child_token_within_grace() {
     let observed = Arc::new(AtomicBool::new(false));
-    let runner: Arc<dyn SubagentRunner> = Arc::new(SleepRunner {
+    let runner: Arc<dyn SubagentRunner> = Arc::new(DetachedSleepRunner {
         observed_cancelled: observed.clone(),
     });
 
@@ -113,12 +123,19 @@ async fn timeout_arm_hard_cancels_child_token_within_grace() {
         "D-08 / Pitfall 5: timeout path must return in ~1s+grace (< 2.5s), \
          not wait for the 10s sleep. Elapsed: {elapsed:?}"
     );
+
+    // Give the detached watcher task a scheduler tick to observe the
+    // cancel signal. Cancellation is synchronous on the sender side
+    // (watch-channel semantic) but the spawned task needs to poll.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     assert!(
         observed.load(Ordering::SeqCst),
         "D-08 / Pitfall 5: child CancellationToken MUST have been cancelled \
          by the timeout arm BEFORE returning. The observed-cancelled atomic \
-         was false, which means tokio::time::timeout fired but the inner \
-         future was never cancelled."
+         was false, which means tokio::time::timeout fired but the shared \
+         token was never `.cancel()`ed — a detached child sub-task would \
+         keep running with provider access despite the parent timeout."
     );
 }
 
@@ -127,7 +144,7 @@ async fn timeout_seconds_per_call_overrides_config_default() {
     // Sibling contract test: prove the schema-exposed per-call override
     // wins over config.timeout_secs.
     let observed = Arc::new(AtomicBool::new(false));
-    let runner: Arc<dyn SubagentRunner> = Arc::new(SleepRunner {
+    let runner: Arc<dyn SubagentRunner> = Arc::new(DetachedSleepRunner {
         observed_cancelled: observed.clone(),
     });
 
@@ -162,4 +179,52 @@ async fn timeout_seconds_per_call_overrides_config_default() {
         "per-call timeout_seconds=1 must override config.timeout_secs=3600. \
          Elapsed: {elapsed:?}"
     );
+}
+
+#[tokio::test]
+async fn schema_exposes_timeout_seconds_field() {
+    // Schema contract: consumers must see `timeout_seconds` as an optional
+    // integer property on the delegate_task schema.
+    struct DummyRunner;
+    #[async_trait]
+    impl SubagentRunner for DummyRunner {
+        async fn run_child(
+            &self,
+            _registry: Arc<RwLock<ToolRegistry>>,
+            _system_prompt: String,
+            _max_iterations: usize,
+            _model_override: Option<&str>,
+            _cancel_token: Option<CancellationToken>,
+            _tool_progress: Option<ChildToolProgressCallback>,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+    let tool = DelegateTaskTool::new(
+        Arc::new(DummyRunner),
+        Arc::new(Semaphore::new(1)),
+        None,
+        SubagentConfig::default(),
+        None,
+    );
+    let schema = tool.schema();
+    let props = &schema.function.parameters["properties"];
+    assert!(
+        props.get("timeout_seconds").is_some(),
+        "D-08: schema must expose optional `timeout_seconds` property"
+    );
+    assert_eq!(
+        props["timeout_seconds"]["type"].as_str(),
+        Some("integer"),
+        "D-08: timeout_seconds must be typed as integer"
+    );
+    // Must NOT be in `required` — per-call override is optional.
+    let required = schema.function.parameters["required"].as_array().unwrap();
+    for v in required {
+        assert_ne!(
+            v.as_str(),
+            Some("timeout_seconds"),
+            "D-08: timeout_seconds is optional, must not be in required"
+        );
+    }
 }

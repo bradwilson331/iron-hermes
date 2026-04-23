@@ -225,6 +225,15 @@ impl DelegateTaskTool {
                     }) as ChildToolProgressCallback
                 });
 
+            // Phase 21.7 Plan 09 Task 9-01 (D-08): per-task `timeout_seconds`
+            // override. Falls back to config.timeout_secs when absent. Read
+            // here (outside the spawned task) so we don't have to re-parse
+            // the task_obj JSON inside the async block.
+            let per_task_timeout_secs = task_obj
+                .get("timeout_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(config.timeout_secs);
+
             let handle = tokio::spawn(async move {
                 // D-19: Emit Started progress event
                 if let Some(ref cb) = progress_cb {
@@ -262,8 +271,14 @@ impl DelegateTaskTool {
                 // Append structured summary instructions (D-10)
                 system_prompt.push_str(STRUCTURED_SUMMARY_INSTRUCTIONS);
 
+                // D-08 / AI-SPEC Pitfall 5: clone the child's cancel token so
+                // the timeout arm can call `.cancel()` on it after handing
+                // the original to `run_child`. Both sides share the same
+                // underlying token via `CancellationToken::clone()`.
+                let timeout_cancel = child_cancel_token.clone();
+
                 let result = tokio::time::timeout(
-                    Duration::from_secs(config.timeout_secs),
+                    Duration::from_secs(per_task_timeout_secs),
                     runner.run_child(
                         Arc::new(RwLock::new(child_registry)),
                         system_prompt,
@@ -278,7 +293,21 @@ impl DelegateTaskTool {
                 let response = match result {
                     Ok(Ok(resp)) => resp.unwrap_or_else(|| "(no response)".to_string()),
                     Ok(Err(e)) => format!("Error: {}", e),
-                    Err(_) => format!("Subagent timed out after {}s", config.timeout_secs),
+                    Err(_) => {
+                        // D-08 / AI-SPEC Pitfall 5: hard-cancel the inner
+                        // future. `tokio::time::timeout` only returns on
+                        // expiry — the child keeps running unless we
+                        // cancel its token. Skip when detach=true (None).
+                        if let Some(tok) = timeout_cancel.as_ref() {
+                            tok.cancel();
+                        }
+                        tracing::info!(
+                            target: "ironhermes_tools::delegate_task",
+                            timeout_secs = per_task_timeout_secs,
+                            "subagent cancelled via timeout"
+                        );
+                        format!("Subagent timed out after {}s", per_task_timeout_secs)
+                    }
                 };
 
                 // D-19: Emit Completed progress event
@@ -428,6 +457,11 @@ impl Tool for DelegateTaskTool {
                         "type": "boolean",
                         "description": "If true, child survives parent interrupt. Default: false.",
                         "default": false
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Per-call wall-clock timeout override in seconds. Defaults to subagent.timeout_secs from config (D-08)."
                     }
                 },
                 "required": []
@@ -557,9 +591,23 @@ impl Tool for DelegateTaskTool {
                 }) as ChildToolProgressCallback
             });
 
+        // Phase 21.7 Plan 09 Task 9-01 (D-08): per-call `timeout_seconds`
+        // override via the schema-exposed arg; falls back to config default.
+        let effective_timeout_secs = args
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.config.timeout_secs);
+
+        // D-08 / AI-SPEC Pitfall 5: clone the child cancel token so the
+        // timeout arm can call `.cancel()` on it after handing the
+        // original to `run_child`. `tokio::time::timeout` alone does NOT
+        // cancel the inner future — without this explicit cancel, the
+        // child keeps running past the deadline despite our Err return.
+        let timeout_cancel = child_cancel_token.clone();
+
         // Run child agent with timeout (D-08) and model override (D-23)
         let result = tokio::time::timeout(
-            Duration::from_secs(self.config.timeout_secs),
+            Duration::from_secs(effective_timeout_secs),
             self.runner.run_child(
                 Arc::new(RwLock::new(child_registry)),
                 system_prompt,
@@ -585,9 +633,20 @@ impl Tool for DelegateTaskTool {
             }
             Ok(Err(e)) => return Err(e),
             Err(_) => {
+                // D-08 / AI-SPEC Pitfall 5: hard-cancel the inner future.
+                // Must call `.cancel()` BEFORE bail! so the child token is
+                // fired before we return control to the caller.
+                if let Some(tok) = timeout_cancel.as_ref() {
+                    tok.cancel();
+                }
+                tracing::info!(
+                    target: "ironhermes_tools::delegate_task",
+                    timeout_secs = effective_timeout_secs,
+                    "subagent cancelled via timeout"
+                );
                 return Err(anyhow::anyhow!(
                     "Subagent timed out after {}s",
-                    self.config.timeout_secs
+                    effective_timeout_secs
                 ));
             }
         };
