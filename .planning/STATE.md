@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 21.2-09-PLAN.md
-last_updated: "2026-04-23T00:30:00.000Z"
-last_activity: 2026-04-23 -- Phase 21.2 plan 09 (GAP-6 close) complete
+stopped_at: Completed 21.2-11-PLAN.md
+last_updated: "2026-04-23T01:00:00.000Z"
+last_activity: 2026-04-23 -- Phase 21.2 plan 11 (GAP-8 close) complete
 progress:
   total_phases: 13
   completed_phases: 10
@@ -118,6 +118,7 @@ Progress: [██████████] 100%
 | Phase 21.2 P06 | 4 | 2 tasks | 1 files |
 | Phase 21.2 P07 | 2 | 2 tasks | 3 files |
 | Phase 21.2 P09 | 8 | 2 tasks | 2 files |
+| Phase 21.2 P11 | 25 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -257,6 +258,11 @@ Recent decisions affecting current work:
 - Phase 21.2 Plan 09: GAP-6b close — cmd.stderr(std::process::Stdio::piped()) inside connect_stdio's configure closure so child stderr no longer inherits parent terminal fd; inline std::process::Stdio::piped() spelling kept (no top-of-file use import) to match grep acceptance verbatim
 - Phase 21.2 Plan 09: runtime regression test spawns std::process::Command directly (not TokioChildProcess) to isolate the Stdio::piped() contract — zero dependency on a live MCP server; cfg(unix)/cfg(not(unix)) split covers macOS+Linux+Windows
 - Phase 21.2 Plan 09: dotenv + ensure_home_dirs + Cli::parse() moved ABOVE tracing_subscriber::init so the filter branch can read cli.command / cli.execute; clap derive parse is pure/idempotent — safe reorder
+- Phase 21.2 Plan 11: GAP-8 close — Option B plan-blessed fallback chosen per orchestrator directive. connect_stdio returns (RunningService, None) for Child handle under rmcp 1.5; cmd.kill_on_drop(true) in configure closure + tokio::time::timeout(Duration::from_secs(2), handle) in McpManager::shutdown_all together guarantee ironhermes gateway exits in ~2s/server on Ctrl+C. Signature change + child_slot plumbing STILL land so Option A upgrade is a single-line future delta.
+- Phase 21.2 Plan 11: McpManager.tasks value tuple widens from (JoinHandle, CancellationToken) to 3-tuple (JoinHandle, CancellationToken, Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>); cleaner than second map lookup; Drop impl pattern widens to 3-tuple sync-safe (sync-context can't await Child::kill).
+- Phase 21.2 Plan 11: GatewayRunner::start calls mcp_manager.shutdown_all().await BEFORE self.cancel.cancel() and BEFORE JoinSet drain — enforced by source-grep regression test locking call-site < propagation-anchor ordering.
+- Phase 21.2 Plan 11: Rule 3 auto-fix — crates/ironhermes-cli/src/mcp_config.rs destructures (client, child) tuple after connect_stdio/connect_http signature change; dropping child at end-of-scope relies on kill_on_drop(true) for stdio reaper.
+- Phase 21.2 Plan 11: regression test shutdown_all_returns_within_timeout_when_stdio_child_blocks pass time 2.51s vs 5s outer bound proves kill_on_drop + 2s JoinHandle timeout fully close GAP-8 at user-facing level under Option B.
 
 ### Roadmap Evolution
 
@@ -286,8 +292,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-23T00:30:00.000Z
-Stopped at: Completed 21.2-09-PLAN.md
+Last session: 2026-04-23T01:00:00.000Z
+Stopped at: Completed 21.2-11-PLAN.md
 Resume file: None
 
 **Planned Phase:** 21.8 (skill-remote-download-and-install-from-skills-sh) — 5 plans — 2026-04-22T09:25:32.347Z
