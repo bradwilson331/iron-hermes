@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use tokio::process::Child;
-use tokio::sync::{broadcast, Mutex};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 // -- hermes-agent parity constants (verified against process_registry.py:57-64) --
@@ -38,6 +39,12 @@ pub struct ProcessSession {
     pub watch_state: WatchState,
     pub(crate) child: Arc<Mutex<Option<Child>>>,
     pub(crate) cancel: CancellationToken,
+    /// Plan 21.7-06: stdout/stderr pipes kept on the session until a caller
+    /// invokes `start_output_drain`; the drain tasks take these out and feed
+    /// `ingest_output` as bytes arrive. `None` indicates the pipes were
+    /// already handed to a drain task (or the child was spawned without them).
+    pub(crate) stdout_pipe: Arc<Mutex<Option<ChildStdout>>>,
+    pub(crate) stderr_pipe: Arc<Mutex<Option<ChildStderr>>>,
 }
 
 /// Watch-pattern rate-limiter state. Timing uses `tokio::time::Instant`
@@ -203,13 +210,14 @@ impl ProcessRegistry {
         let cancel = CancellationToken::new();
         let id = format!("proc_{}", random_hex_12());
 
-        // Plan 06 wiring: drain stdout/stderr off the Child here; for this plan
-        // we take them so they're dropped (else the pipe buffers could fill).
-        // The stdout-drain task lives in Plan 06 where the tool caller has the
-        // join_handle for `append_bounded_utf8` + `rate_limit_check` routing.
+        // Plan 21.7-06: KEEP stdout/stderr on the session so a subsequent
+        // `start_output_drain(reg, &id)` call can take them and spawn the
+        // drain tasks that feed `ingest_output`. Dropping them here would
+        // fill the kernel pipe buffer and deadlock the child once it wrote
+        // past ~64KB. If the caller never wires a drain, the pipes stay
+        // readable on the session until kill/drain_and_kill reaps the child.
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let _ = (stdout, stderr);
 
         let child_arc = Arc::new(Mutex::new(Some(child)));
         let session = ProcessSession {
@@ -226,6 +234,8 @@ impl ProcessRegistry {
             watch_state: WatchState::default(),
             child: child_arc.clone(),
             cancel: cancel.clone(),
+            stdout_pipe: Arc::new(Mutex::new(stdout)),
+            stderr_pipe: Arc::new(Mutex::new(stderr)),
         };
         self.running.insert(id.clone(), session);
         Ok(id)
@@ -371,6 +381,157 @@ impl ProcessRegistry {
     pub fn broadcast_watch_event(&self, event: WatchEvent) {
         // `send` errors only when there are zero active receivers; safe to ignore.
         let _ = self.watch_tx.send(event);
+    }
+
+    /// Plan 21.7-06: Feed a chunk of child output (already decoded UTF-8-safe or
+    /// replaced) into the process's rolling buffer, scan for watch-pattern
+    /// matches, consult the rate limiter, and broadcast matched events on
+    /// `RateDecision::Fire`. 9+ matches per 10s window become `Drop` (with
+    /// tracing::warn) and 45s sustained cap latches `AutoDisable`.
+    ///
+    /// Called by the stdout/stderr drain tasks spawned in
+    /// `start_output_drain`. No-op for unknown `id` (process already drained).
+    pub fn ingest_output(&mut self, id: &str, chunk: &str) {
+        // Clone watch patterns up-front so we can release the &mut borrow on
+        // self.running before invoking rate_limit_check (which also needs
+        // &mut self). Empty chunk is a no-op.
+        if chunk.is_empty() {
+            return;
+        }
+        let patterns_snapshot: Vec<Regex> = match self.running.get(id) {
+            Some(s) => s.watch_patterns.clone(),
+            None => return,
+        };
+
+        // Always append to the rolling buffer, whether patterns are configured
+        // or not — logs() consumers need the raw stream.
+        if let Some(s) = self.running.get_mut(id) {
+            append_bounded_utf8(&mut s.output_buffer, chunk, MAX_OUTPUT_CHARS);
+        }
+
+        if patterns_snapshot.is_empty() {
+            return;
+        }
+
+        // Scan each line for the first matching pattern; forward through the
+        // rate limiter and broadcast on Fire. One match per line is enough
+        // (hermes-agent parity: we don't fire multiple events for one line).
+        for line in chunk.lines() {
+            for (idx, pat) in patterns_snapshot.iter().enumerate() {
+                if pat.is_match(line) {
+                    let decision = self.rate_limit_check(id);
+                    if matches!(decision, RateDecision::Fire) {
+                        let pid_opt = self.running.get(id).and_then(|s| s.pid);
+                        if let Some(pid) = pid_opt {
+                            let event = WatchEvent {
+                                session_id: id.to_string(),
+                                pid,
+                                matched_line: line.to_string(),
+                                pattern_index: idx,
+                            };
+                            self.broadcast_watch_event(event);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Plan 21.7-06: Take the stdout/stderr pipes from a tracked session and
+    /// spawn two background drain tasks that read lines into
+    /// `ingest_output` until EOF. The pipes are removed from the session on
+    /// first call; subsequent calls are no-ops.
+    ///
+    /// Takes `Arc<RwLock<Self>>` so the drain tasks can `write()` a lock
+    /// and call `ingest_output` for each line received. The caller (tool
+    /// layer) passes `reg.clone()` after `spawn()` returns.
+    ///
+    /// The tasks exit cleanly on EOF (child stdout/stderr closes on exit).
+    /// No `JoinHandle` is returned — the tasks are fire-and-forget; shutdown
+    /// happens naturally via EOF when `drain_and_kill` kills the child.
+    pub async fn start_output_drain(
+        reg: Arc<RwLock<Self>>,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        let (stdout_pipe_arc, stderr_pipe_arc) = {
+            let r = reg.read().await;
+            let s = r
+                .running
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("no such running process: {}", id))?;
+            (s.stdout_pipe.clone(), s.stderr_pipe.clone())
+        };
+
+        // Take ownership of each pipe (if still present).
+        let stdout_opt = {
+            let mut g = stdout_pipe_arc.lock().await;
+            g.take()
+        };
+        let stderr_opt = {
+            let mut g = stderr_pipe_arc.lock().await;
+            g.take()
+        };
+
+        if let Some(stdout) = stdout_opt {
+            let reg_clone = reg.clone();
+            let id_owned = id.to_string();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stdout).lines();
+                loop {
+                    match reader.next_line().await {
+                        Ok(Some(line)) => {
+                            // Append line + newline so the buffer preserves
+                            // line boundaries for pattern scanning + logs tail.
+                            let mut r = reg_clone.write().await;
+                            let mut chunk = line;
+                            chunk.push('\n');
+                            r.ingest_output(&id_owned, &chunk);
+                        }
+                        Ok(None) => break, // EOF — child closed stdout
+                        Err(e) => {
+                            tracing::debug!(
+                                target: "ironhermes_exec::process_registry",
+                                id = %id_owned,
+                                error = %e,
+                                "stdout drain read error; ending task"
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        if let Some(stderr) = stderr_opt {
+            let reg_clone = reg.clone();
+            let id_owned = id.to_string();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                loop {
+                    match reader.next_line().await {
+                        Ok(Some(line)) => {
+                            let mut r = reg_clone.write().await;
+                            let mut chunk = line;
+                            chunk.push('\n');
+                            r.ingest_output(&id_owned, &chunk);
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            tracing::debug!(
+                                target: "ironhermes_exec::process_registry",
+                                id = %id_owned,
+                                error = %e,
+                                "stderr drain read error; ending task"
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(())
     }
 
     // ---- internal helpers ----
@@ -555,6 +716,8 @@ pub fn fake_process_session(
         watch_state: WatchState::default(),
         child: Arc::new(Mutex::new(None)),
         cancel: CancellationToken::new(),
+        stdout_pipe: Arc::new(Mutex::new(None)),
+        stderr_pipe: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -590,7 +753,11 @@ fn random_hex_12() -> String {
 }
 
 // Output-buffer truncation helper (Pitfall 8 — UTF-8 char boundary).
-pub(crate) fn append_bounded_utf8(buf: &mut String, incoming: &str, max: usize) {
+//
+// Plan 21.7-06: promoted from `pub(crate)` → `pub` so stdout/stderr drain
+// tasks spawned outside this module (e.g., Plan 06 tool layer) can reuse
+// the canonical char-boundary-safe append without re-implementing it.
+pub fn append_bounded_utf8(buf: &mut String, incoming: &str, max: usize) {
     buf.push_str(incoming);
     if buf.len() <= max {
         return;
@@ -659,5 +826,68 @@ mod tests {
         let r = ProcessRegistry::new_for_session("t");
         let _rx = r.watch_subscribe();
         // Compile-check: the type is broadcast::Receiver<WatchEvent>
+    }
+
+    /// Plan 21.7-06 Task 6-01 — E-04: ingest_output broadcasts the first 8
+    /// matching lines in a 10s window and drops the rest (9+). The rolling
+    /// buffer stays bounded. Unknown process IDs are a no-op (no panic).
+    #[tokio::test(start_paused = true)]
+    async fn ingest_output_broadcasts_first_eight_matches_then_drops() {
+        let mut reg = ProcessRegistry::new_for_session("t-ingest");
+        reg.insert_fake_running_minimal("proc_a", 42);
+        if let Some(s) = reg.running.get_mut("proc_a") {
+            s.watch_patterns.push(Regex::new(r"MATCH").unwrap());
+        }
+
+        let mut rx = reg.watch_subscribe();
+
+        let chunk = "MATCH 1\nMATCH 2\nMATCH 3\nMATCH 4\nMATCH 5\nMATCH 6\nMATCH 7\nMATCH 8\nMATCH 9\nMATCH 10\nMATCH 11\nMATCH 12\n";
+        reg.ingest_output("proc_a", chunk);
+
+        let mut fire_count = 0;
+        while rx.try_recv().is_ok() {
+            fire_count += 1;
+        }
+        assert_eq!(fire_count, 8, "E-04: first 8 fire, rest drop");
+
+        // Rolling buffer must contain the full ingested chunk (well below MAX_OUTPUT_CHARS).
+        let s = reg.running.get("proc_a").unwrap();
+        assert!(
+            s.output_buffer.contains("MATCH 12"),
+            "output_buffer must retain full ingested chunk: len={}",
+            s.output_buffer.len()
+        );
+        assert!(s.output_buffer.len() <= MAX_OUTPUT_CHARS);
+    }
+
+    /// Unknown id is a silent no-op (drain tasks may race drain_and_kill).
+    #[tokio::test(start_paused = true)]
+    async fn ingest_output_unknown_id_is_noop() {
+        let mut reg = ProcessRegistry::new_for_session("t-miss");
+        reg.ingest_output("proc_ghost", "hello\n");
+        // No panic, no broadcast channel reference needed.
+    }
+
+    /// Empty chunk is a no-op (drain task may send 0-byte reads).
+    #[tokio::test(start_paused = true)]
+    async fn ingest_output_empty_chunk_is_noop() {
+        let mut reg = ProcessRegistry::new_for_session("t-empty");
+        reg.insert_fake_running_minimal("proc_a", 42);
+        reg.ingest_output("proc_a", "");
+        let s = reg.running.get("proc_a").unwrap();
+        assert!(s.output_buffer.is_empty());
+    }
+
+    /// No watch pattern configured → appends to buffer but no broadcast.
+    #[tokio::test(start_paused = true)]
+    async fn ingest_output_no_patterns_appends_only() {
+        let mut reg = ProcessRegistry::new_for_session("t-quiet");
+        reg.insert_fake_running_minimal("proc_a", 42);
+        let mut rx = reg.watch_subscribe();
+        reg.ingest_output("proc_a", "some data\nmore data\n");
+        assert!(rx.try_recv().is_err(), "no broadcast without patterns");
+        let s = reg.running.get("proc_a").unwrap();
+        assert!(s.output_buffer.contains("some data"));
+        assert!(s.output_buffer.contains("more data"));
     }
 }
