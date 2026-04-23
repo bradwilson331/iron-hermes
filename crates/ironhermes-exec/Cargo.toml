@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Plan 21.7-07: ProcessRegistrySnapshotHandle trait lives in ironhermes-core
+# (leaf crate); ironhermes-exec impls it for Arc<RwLock<ProcessRegistry>>.
+# No cycle — ironhermes-core has no back-dep on ironhermes-exec.
+ironhermes-core = { path = "../ironhermes-core" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

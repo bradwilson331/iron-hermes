@@ -16,6 +16,7 @@ use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
+use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_tools::ToolRegistry;
 
@@ -80,6 +81,11 @@ pub struct GatewayMessageHandler {
     /// no-op — cleanup happens via LRU/TTL prune; true per-session scoping
     /// is deferred (matches the BudgetHandle lifecycle decision in Plan 05).
     process_registry: Option<Arc<RwLock<ProcessRegistry>>>,
+    /// Plan 21.7-07 (D-03 / D-04 / D-05): gateway-scoped SubagentRegistry
+    /// threaded from the runner. Shared with the delegate_task runner via
+    /// main.rs so lifecycle events update state. Per-request on_session_end
+    /// sleeps 200ms to drain pending fire-and-forget transcript writes.
+    subagent_registry: Option<Arc<RwLock<SubagentRegistry>>>,
 }
 
 impl GatewayMessageHandler {
@@ -110,6 +116,7 @@ impl GatewayMessageHandler {
             command_router: CommandRouter::new(build_registry()),
             budget_handle: None,
             process_registry: None,
+            subagent_registry: None,
         }
     }
 
@@ -124,6 +131,13 @@ impl GatewayMessageHandler {
     /// so per-request on_session_end can invoke `drain_and_kill_session`.
     pub fn set_process_registry(&mut self, reg: Arc<RwLock<ProcessRegistry>>) {
         self.process_registry = Some(reg);
+    }
+
+    /// Plan 21.7-07 (D-03 / D-04 / D-05): install the gateway-scoped
+    /// SubagentRegistry. Per-request on_session_end drains pending
+    /// fire-and-forget transcript writes (sleep 200ms).
+    pub fn set_subagent_registry(&mut self, reg: Arc<RwLock<SubagentRegistry>>) {
+        self.subagent_registry = Some(reg);
     }
 
     /// Phase 18 Plan 06: install the per-turn hygiene engine. Wired by composition
@@ -624,6 +638,17 @@ impl GatewayMessageHandler {
                     "process_registry drain_and_kill_session failed in gateway run_agent (best-effort)"
                 );
             }
+        }
+
+        // Plan 21.7-07 (D-05): drain pending fire-and-forget transcript
+        // writes before returning from the per-request handler. Matches
+        // the Plan 03 recommendation (real writes complete in <10ms).
+        // Guard with subagent_registry to avoid an unconditional 200ms
+        // penalty in tests that don't wire the registry.
+        if let Some(ref reg) = self.subagent_registry {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Touch the registry so the borrow lives through the sleep.
+            let _ = reg.read().await.active_count();
         }
 
         // GAP-6: notify memory provider of session end (best-effort).

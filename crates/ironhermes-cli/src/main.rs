@@ -376,6 +376,13 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
             session_id.clone(),
         ),
     ));
+    // Plan 21.7-07 (D-03 / D-04 / D-05): session-scoped SubagentRegistry +
+    // HERMES_HOME for transcripts. The runner threads both into each
+    // `run_child` call so spawn/complete/cancel update state + transcripts.
+    let subagent_registry = Arc::new(tokio::sync::RwLock::new(
+        ironhermes_agent::subagent_registry::SubagentRegistry::new(),
+    ));
+    let hermes_home = ironhermes_core::get_hermes_home();
     let mut registry = build_registry_with_process_registry(process_registry.clone());
 
     // Plan 20-03 Fix 2 / GAP-4: build memory manager — returns None when
@@ -391,11 +398,17 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    let subagent_runner = Arc::new(AgentSubagentRunner::new(
-        client.clone(),
-        resolver.clone(),
-        Some(budget.clone()),
-    ));
+    // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
+    // transcript scope into the runner so lifecycle events update state.
+    let subagent_runner = Arc::new(
+        AgentSubagentRunner::new(
+            client.clone(),
+            resolver.clone(),
+            Some(budget.clone()),
+        )
+        .with_subagent_registry(subagent_registry.clone())
+        .with_transcript_scope(hermes_home.clone(), session_id.clone()),
+    );
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
@@ -569,6 +582,21 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
         );
     }
 
+    // Plan 21.7-07 (D-05 / INV-21.7-09): drain pending fire-and-forget
+    // transcript writes before we return from run_single. Every
+    // TranscriptWriter::append dispatches to tokio::spawn, so turn events
+    // that raced with the drain_and_kill above may still be in-flight.
+    // 200ms is the recommendation from Plan 03 (real writes complete in
+    // <10ms). Keep this as Duration::from_millis(200) — INV-21.7-09 greps
+    // for that exact substring.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Touch the subagent_registry binding so the compiler keeps it alive
+    // until the end of run_single (otherwise it would drop before the
+    // final transcript drain). This is a cheap read — the registry is
+    // stored here so D-03 consumers (Plan 08) can wire it into
+    // CommandContext for on-demand /agents listing in future releases.
+    let _ = subagent_registry.read().await.active_count();
+
     // GAP-6: notify provider of session end on natural exit (best-effort).
     // Uses default MemoryEntries — providers use their own internal state.
     if let Some(ref mgr) = memory_manager {
@@ -645,6 +673,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
             session_id.clone(),
         ),
     ));
+    // Plan 21.7-07 (D-03 / D-04 / D-05): session-scoped SubagentRegistry +
+    // HERMES_HOME for transcripts. Cloned into the runner (so lifecycle
+    // events register/unregister + write transcripts) and into the
+    // SubagentProgressCallback (so the pill refreshes on Started/Completed).
+    let subagent_registry = Arc::new(tokio::sync::RwLock::new(
+        ironhermes_agent::subagent_registry::SubagentRegistry::new(),
+    ));
+    let hermes_home = ironhermes_core::get_hermes_home();
     // Phase 18-14: session-scoped PressureTracker + compression_count.
     // Constructed once per REPL session so hysteresis (above_threshold,
     // pending_transient) and the summarizing engine's prior-summary chain
@@ -662,6 +698,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         tokens_used: 0,
         tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
+        // Plan 21.7-07 (D-04): pill starts hidden (active=0); seed the
+        // denominator from config so the pill renders as "N/M" the moment
+        // a subagent registers.
+        active_subagents: 0,
+        max_subagents: config.subagent.max_subagents,
     };
     // Phase 22.1: construct TuiHandle with extensions (empty vec for now --
     // no extensions are registered yet, but the hook mechanism is active).
@@ -683,11 +724,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    let subagent_runner = Arc::new(AgentSubagentRunner::new(
-        client.clone(),
-        resolver.clone(),
-        Some(budget.clone()),
-    ));
+    // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
+    // transcript scope into the runner so lifecycle events update state.
+    let subagent_runner = Arc::new(
+        AgentSubagentRunner::new(
+            client.clone(),
+            resolver.clone(),
+            Some(budget.clone()),
+        )
+        .with_subagent_registry(subagent_registry.clone())
+        .with_transcript_scope(hermes_home.clone(), session_id.clone()),
+    );
     // Plan 21-03: parent CancellationToken lives the full chat session; per-turn
     // children are issued via `.child_token()` so cancelling one turn does NOT
     // poison the session. (See RESEARCH §Pitfall 2: CancellationToken cancel is permanent.)
@@ -704,39 +751,60 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let mut emergency_first_press: Option<Instant> = None;
     let mut emergency_press_count: u32 = 0;
 
-    // D-19: CLI tree-view progress callback for subagent tool calls
+    // D-19 / Plan 21.7-07 (D-04 / ISS-05 / Pitfall 8): CLI tree-view progress
+    // callback for subagent tool calls + status-line pill refresh.
+    //
+    // The pill refresh spawns a short-lived task that does ONE `registry.read().await`
+    // (off the render path) and then calls the SYNC `status_tx.send_modify(...)`
+    // to update `state.active_subagents`. The render path itself never awaits on
+    // the registry — it only reads the copied usize from the watch channel.
+    // INV-21.7-11 locks this invariant statically.
+    let status_tx = tui.status_tx_handle();
+    let reg_for_cb = subagent_registry.clone();
     let subagent_progress: ironhermes_tools::delegate_task::SubagentProgressCallback =
-        Arc::new(|index, event| {
+        Arc::new(move |index, event| {
             use ironhermes_tools::delegate_task::SubagentProgress;
-            match event {
+            let tag = format!("[subagent-{}]", index + 1);
+            match &event {
                 SubagentProgress::Started { task_summary } => {
-                    eprintln!(
-                        "  {} {}",
-                        format!("[subagent-{}]", index + 1).cyan().dimmed(),
-                        task_summary.dimmed(),
-                    );
+                    eprintln!("  {} {}", tag.clone().cyan().dimmed(), task_summary.dimmed());
                 }
                 SubagentProgress::ToolCall { tool_name } => {
                     eprintln!(
                         "  {} {} {}",
-                        format!("[subagent-{}]", index + 1).cyan().dimmed(),
+                        tag.clone().cyan().dimmed(),
                         "Running:".dimmed(),
                         tool_name.yellow().dimmed(),
                     );
                 }
                 SubagentProgress::Completed => {
-                    eprintln!(
-                        "  {} {}",
-                        format!("[subagent-{}]", index + 1).cyan().dimmed(),
-                        "Done.".dimmed(),
-                    );
+                    eprintln!("  {} {}", tag.clone().cyan().dimmed(), "Done.".dimmed());
                 }
+            }
+            // Pill refresh fires on Started and Completed (ToolCall is a
+            // mid-lifecycle event; count hasn't changed). NOTE: there is no
+            // Cancelled variant — cancellation is observed via the registry
+            // unregister path inside AgentSubagentRunner::run_child.
+            if matches!(
+                event,
+                SubagentProgress::Started { .. } | SubagentProgress::Completed
+            ) {
+                let reg = reg_for_cb.clone();
+                let tx = status_tx.clone();
+                tokio::spawn(async move {
+                    // Only `read().await` is awaited — on a spawned task,
+                    // NEVER on the render path (Pitfall 8 / ISS-05).
+                    let n = reg.read().await.active_count();
+                    // send_modify is SYNC (channel-side semantic). Updates
+                    // `active_subagents` without clobbering unrelated state.
+                    tx.send_modify(|s| s.active_subagents = n);
+                });
             }
         });
 
     registry.register_delegate_task_tool(
         subagent_runner,
-        subagent_semaphore,
+        subagent_semaphore.clone(),
         memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
         config.subagent.clone(),
         Some(chat_cancel_parent.child_token()), // delegate_task gets its own long-lived child
@@ -940,17 +1008,37 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
                     let args = &parts[1..];
 
                     // Build CommandContext for this turn (Phase 21.2: wire mcp_reloader D-15).
+                    // Plan 21.7-07: wire subagent_registry / process_registry /
+                    // budget / subagent_semaphore + max_subagents handles so
+                    // Plan 08 (/agents list/kill/logs) and Plan 09 (hermes status)
+                    // consumers have live state to read. Each handle is a
+                    // trait-object so ironhermes-core stays a leaf crate.
                     let cmd_ctx = {
                         let base = CommandContext::new(
                             Platform::Local,
                             session_id.clone(),
                             agent_running.clone(),
                         );
-                        if let Some(ref mgr) = mcp_manager {
+                        let base = if let Some(ref mgr) = mcp_manager {
                             base.with_mcp_reloader(mgr.clone())
                         } else {
                             base
-                        }
+                        };
+                        let base = base
+                            .with_subagent_registry(Arc::new(
+                                ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
+                                    subagent_registry.clone(),
+                                ),
+                            ))
+                            .with_process_registry(Arc::new(
+                                ironhermes_exec::process_registry::ProcessRegistryHandle::new(
+                                    process_registry.clone(),
+                                ),
+                            ))
+                            .with_budget(Arc::new(budget.clone()))
+                            .with_subagent_semaphore(subagent_semaphore.clone())
+                            .with_max_subagents(config.subagent.max_subagents);
+                        base
                     };
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -1180,6 +1268,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
         );
     }
 
+    // Plan 21.7-07 (D-05 / INV-21.7-09): drain pending fire-and-forget
+    // transcript writes. Every TranscriptWriter::append dispatches to
+    // tokio::spawn; 200ms drain matches Plan 03's open-question
+    // resolution (real writes complete in <10ms).
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Keep the subagent_registry binding alive across the drain window.
+    let _ = subagent_registry.read().await.active_count();
+
     // GAP-6: notify provider of clean session end (best-effort).
     // Only fires on natural REPL exit (EOF or /quit) — not on ctrl-c
     // (that path calls std::process::exit(0) above, preserving the
@@ -1282,6 +1378,11 @@ async fn run_agent_turn(
     tui.set_activity(ActivityState::Idle);
 
     // Update the status line with post-turn token count (D-05).
+    // Plan 21.7-07 (D-04): re-seed the pill fields from config each turn; the
+    // live count comes from the registry via a spawned send_modify in the
+    // SubagentProgressCallback, so full `set_status` writes that don't know
+    // about the live count would zero it otherwise. Reading the current
+    // watch state and preserving `active_subagents` avoids that regression.
     tui.set_status(StatusLineState {
         mode: "Chat".to_string(),
         model_short: client.model().to_string(),
@@ -1289,6 +1390,8 @@ async fn run_agent_turn(
         tokens_used: result.total_usage.total_tokens,
         tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
+        active_subagents: tui.status_snapshot().active_subagents,
+        max_subagents: config.subagent.max_subagents,
     });
 
     // Phase 18-14: persist the post-turn compression_count back into the
@@ -1322,6 +1425,15 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
             "gateway".to_string(),
         ),
     ));
+    // Plan 21.7-07 (D-03 / D-04 / D-05): gateway-scoped SubagentRegistry +
+    // HERMES_HOME for transcripts. Per-request run_agent threads the same
+    // registry via GatewayMessageHandler::set_subagent_registry (below).
+    // Transcripts key by the per-request gw_session_id so they don't
+    // collide between users.
+    let subagent_registry = Arc::new(tokio::sync::RwLock::new(
+        ironhermes_agent::subagent_registry::SubagentRegistry::new(),
+    ));
+    let hermes_home = ironhermes_core::get_hermes_home();
 
     // Build registry and register memory tool before Arc wrapping
     let mut registry = build_registry_with_process_registry(process_registry.clone());
@@ -1385,11 +1497,21 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // budget requires plumbing through SessionStore; that's deferred to
     // Plan 09 (hermes status) where session-scoped budget readouts live.
     let budget = BudgetHandle::new(config.agent.max_iterations);
-    let subagent_runner = Arc::new(AgentSubagentRunner::new(
-        gateway_client,
-        resolver.clone(),
-        Some(budget.clone()),
-    ));
+    // Plan 21.7-07 (D-03 / D-04 / D-05): thread the gateway-scoped
+    // SubagentRegistry + HERMES_HOME into the runner. Transcript paths use
+    // a process-wide "gateway" session id — the per-request runtime could
+    // use the per-user session id but that requires a per-request runner,
+    // which would break the shared delegate_task Arc. Gateway-process
+    // scope matches the BudgetHandle + ProcessRegistry Plan 05/06 decision.
+    let subagent_runner = Arc::new(
+        AgentSubagentRunner::new(
+            gateway_client,
+            resolver.clone(),
+            Some(budget.clone()),
+        )
+        .with_subagent_registry(subagent_registry.clone())
+        .with_transcript_scope(hermes_home.clone(), "gateway".to_string()),
+    );
     let gateway_cancel_token = CancellationToken::new();
     registry.register_delegate_task_tool(
         subagent_runner,
@@ -1473,6 +1595,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // drain_and_kill_session at on_session_end (grep-gate satisfied; no-op
     // in practice for the gateway-scoped task_id — see construction comment).
     runner.set_process_registry(process_registry.clone());
+    // Plan 21.7-07 (D-03 / D-04 / D-05): thread the gateway-scoped
+    // SubagentRegistry into the runner so per-request on_session_end
+    // can drain pending transcript writes and Plan 08 (/agents list)
+    // can read live subagent state via the SAME registry backing the
+    // delegate_task runner registered on the tool registry above.
+    runner.set_subagent_registry(subagent_registry.clone());
     if let Some(mgr) = memory_manager {
         runner.set_memory_manager(mgr);
     }

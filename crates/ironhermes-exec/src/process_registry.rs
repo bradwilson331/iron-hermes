@@ -689,6 +689,48 @@ impl ProcessRegistry {
     }
 }
 
+/// Plan 21.7-07 (D-26): newtype wrapper around `Arc<RwLock<ProcessRegistry>>`
+/// that implements `ProcessRegistrySnapshotHandle`. Newtype required by Rust's
+/// orphan rule (can't impl foreign trait on foreign type `Arc<RwLock<_>>`).
+///
+/// Sync trait methods bridge to the async `tokio::sync::RwLock` via
+/// `block_in_place` + `Handle::current().block_on` — same pattern used in
+/// `ironhermes-core/src/commands/handlers.rs` for `/models refresh`.
+#[derive(Clone)]
+pub struct ProcessRegistryHandle(pub Arc<tokio::sync::RwLock<ProcessRegistry>>);
+
+impl ProcessRegistryHandle {
+    pub fn new(reg: Arc<tokio::sync::RwLock<ProcessRegistry>>) -> Self {
+        Self(reg)
+    }
+}
+
+impl ironhermes_core::commands::context::ProcessRegistrySnapshotHandle for ProcessRegistryHandle {
+    fn tracked(&self) -> usize {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { self.0.read().await.snapshot().tracked })
+        })
+    }
+
+    fn snapshot_json(&self) -> serde_json::Value {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let snap = self.0.read().await.snapshot();
+                serde_json::to_value(&snap).unwrap_or_else(|_| serde_json::json!({}))
+            })
+        })
+    }
+
+    fn drain_and_kill<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = self.0.write().await.drain_and_kill().await;
+        })
+    }
+}
+
 /// Test-only builder for `ProcessSession`. Not part of the public runtime
 /// surface — exists so integration tests can construct sessions without a
 /// real `tokio::process::Child`.

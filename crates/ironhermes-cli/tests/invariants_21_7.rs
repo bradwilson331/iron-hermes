@@ -105,3 +105,72 @@ fn invariant_21_7_07_gateway_drain_and_kill_session() {
          drain_and_kill_session so the third Plan 06 drain gate closes."
     );
 }
+
+#[test]
+fn invariant_21_7_08_subagent_registry_on_context_and_runner_sites() {
+    // Plan 07 (Wave 2) / D-03 / D-04: every AgentSubagentRunner::new site
+    // must thread a SubagentRegistry via `.with_subagent_registry(...)`,
+    // AND the CommandContext::new site in run_chat must also install the
+    // registry handle for Plan 08 (/agents list/kill/logs) consumers.
+    //
+    // Expected count: 3 runner sites (run_single, run_chat, run_gateway) +
+    // 1 CommandContext site (run_chat) = at least 4.
+    let count = MAIN_RS.matches("with_subagent_registry").count();
+    assert!(
+        count >= 4,
+        "INV-21.7-08 / D-03 / D-04: subagent_registry must be threaded \
+         through 3 AgentSubagentRunner::new sites + CommandContext::new \
+         in run_chat. Found {}.",
+        count
+    );
+}
+
+#[test]
+fn invariant_21_7_09_transcript_flush_on_session_end() {
+    // Plan 07 (Wave 2) / D-05: both CLI `on_session_end` sites (run_single
+    // and run_chat) must sleep 200ms before returning so pending
+    // fire-and-forget TranscriptWriter::append futures can drain. This is
+    // the Plan 03 open-question resolution (real writes complete in <10ms;
+    // 200ms is cheap at session exit). `Duration::from_millis(200)` is the
+    // exact substring because there's no other 200ms drain in main.rs.
+    let count = MAIN_RS.matches("Duration::from_millis(200)").count();
+    assert!(
+        count >= 2,
+        "INV-21.7-09 / D-05: transcript-flush drain must exist at both \
+         on_session_end sites (run_single, run_chat). Found {}.",
+        count
+    );
+}
+
+#[test]
+fn invariant_21_7_11_pill_refresh_uses_send_modify_and_no_await_on_render_path() {
+    // Plan 07 / D-04 / Pitfall 8 / ISS-05: the render path
+    // (`crates/ironhermes-cli/src/tui/status_line.rs`) must NEVER await
+    // `registry.read().await` or `registry.write().await`. The pill reads
+    // `state.active_subagents: usize`, copied from a send_modify performed
+    // by a spawned task OFF the render path.
+    const STATUS_LINE: &str = include_str!("../src/tui/status_line.rs");
+    let await_reads = STATUS_LINE.matches("registry.read().await").count();
+    let await_writes = STATUS_LINE.matches("registry.write().await").count();
+    assert_eq!(
+        await_reads, 0,
+        "ISS-05 / Pitfall 8: status_line.rs must not contain \
+         `registry.read().await` — move to a spawned task."
+    );
+    assert_eq!(
+        await_writes, 0,
+        "ISS-05 / Pitfall 8: status_line.rs must not contain \
+         `registry.write().await`."
+    );
+
+    // And main.rs's SubagentProgressCallback must emit
+    // `status_tx.send_modify` at least once in a spawned task so the pill
+    // refresh is sync (channel-side) on the emission side.
+    let send_sites = MAIN_RS.matches("status_tx.send_modify").count();
+    assert!(
+        send_sites >= 1,
+        "ISS-05 / D-04: pill refresh must use status_tx.send_modify (sync) \
+         at least once in main.rs. Found {}.",
+        send_sites
+    );
+}

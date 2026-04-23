@@ -8,6 +8,7 @@ use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::context_engine::ContextEngine;
+use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_core::{ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
@@ -54,6 +55,10 @@ pub struct GatewayRunner {
     /// plumbing pattern. `build_gateway_handler` clones it into the handler
     /// so per-request on_session_end can invoke drain_and_kill_session.
     process_registry: Option<Arc<RwLock<ProcessRegistry>>>,
+    /// Plan 21.7-07 (D-03 / D-04 / D-05): gateway-scoped SubagentRegistry.
+    /// Cloned into `build_gateway_handler` so per-request handlers see
+    /// live subagent state + can drain transcripts on session end.
+    subagent_registry: Option<Arc<RwLock<SubagentRegistry>>>,
     cancel: CancellationToken,
 }
 
@@ -78,6 +83,7 @@ impl GatewayRunner {
             mcp_manager: None, // GAP-8: wired by run_gateway before start()
             budget_handle: None, // Plan 21.7-05: wired by run_gateway before start()
             process_registry: None, // Plan 21.7-06: wired by run_gateway before start()
+            subagent_registry: None, // Plan 21.7-07: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -97,6 +103,14 @@ impl GatewayRunner {
     /// `run_gateway` in ironhermes-cli.
     pub fn set_process_registry(&mut self, reg: Arc<RwLock<ProcessRegistry>>) {
         self.process_registry = Some(reg);
+    }
+
+    /// Plan 21.7-07 (D-03 / D-04 / D-05): install the gateway-scoped
+    /// SubagentRegistry. `build_gateway_handler` clones it into the handler
+    /// so per-request run_agent sees live subagent state + drains transcripts
+    /// on session end. Caller is `run_gateway` in ironhermes-cli.
+    pub fn set_subagent_registry(&mut self, reg: Arc<RwLock<SubagentRegistry>>) {
+        self.subagent_registry = Some(reg);
     }
 
     /// Plan 20-02: set the `MemoryManager` handle used by the gateway runner,
@@ -169,6 +183,12 @@ impl GatewayRunner {
         // so per-request on_session_end can invoke drain_and_kill_session.
         if let Some(ref reg) = self.process_registry {
             handler.set_process_registry(reg.clone());
+        }
+        // Plan 21.7-07 (D-03 / D-04 / D-05): thread the gateway-scoped
+        // SubagentRegistry so per-request on_session_end drains transcript
+        // writes and the delegate_task runner shares state across requests.
+        if let Some(ref reg) = self.subagent_registry {
+            handler.set_subagent_registry(reg.clone());
         }
 
         // Phase 21.3: initialize global token estimator from model's encoding
