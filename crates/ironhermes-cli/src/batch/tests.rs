@@ -91,6 +91,7 @@ fn test_batch_entry_with_optional_fields() {
 // =============================================================================
 
 use ironhermes_agent::{AgentResult, AggregatedUsage};
+use ironhermes_agent::agent_loop::StopReason;
 use ironhermes_core::{ChatMessage, FunctionCall, ToolCall};
 use ironhermes_tools::ToolRegistry;
 use super::filters::*;
@@ -104,6 +105,9 @@ fn mock_agent_result(messages: Vec<ChatMessage>, final_response: Option<String>)
         final_response,
         total_usage: AggregatedUsage::default(),
         compression_count_after: 0,
+        // Plan 21.7-05: new required field; batch filter tests are
+        // structural — a natural-completion stop reason is correct.
+        stop_reason: StopReason::Natural,
     }
 }
 

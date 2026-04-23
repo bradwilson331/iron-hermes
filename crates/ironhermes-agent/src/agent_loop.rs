@@ -3,19 +3,33 @@ use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::any_client::AnyClient;
+use crate::budget::{advisory_text, BudgetHandle, PressureTier};
 use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::{estimate_messages_tokens, ContextCompressor};
 use crate::context_engine::{ContextEngine, ContextStats};
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::subdir_discovery::SubdirDiscovery;
+
+/// Why the agent loop stopped (D-15 / G-01 / Plan 21.7-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// Natural completion — LLM produced a response with no tool calls.
+    Natural,
+    /// Local `max_iterations` ceiling reached (legacy fallback).
+    MaxIterations,
+    /// Shared `BudgetHandle` exhausted at the top of a turn (100% / Stop100).
+    /// This path is unskippable — no yolo check bypasses it (G-01).
+    BudgetExhausted,
+    /// Cancellation token fired (operator / parent stop).
+    Cancelled,
+}
 
 /// Result of an agent loop execution.
 #[derive(Debug)]
@@ -34,6 +48,30 @@ pub struct AgentResult {
     /// The CLI REPL persists this back into its shared AtomicUsize so that the
     /// summarizing engine's prior-summary chain is continuous across turns.
     pub compression_count_after: usize,
+    /// Why the loop stopped (Plan 21.7-05 / D-15 / G-01).
+    /// Legacy callers that don't inspect this field continue to work — the
+    /// default for pre-21.7 paths is `Natural` or `MaxIterations` as before.
+    pub stop_reason: StopReason,
+}
+
+impl AgentResult {
+    /// Construct the canonical "budget exhausted" result (Plan 21.7-05 / G-01).
+    ///
+    /// Used when `BudgetHandle::consume()` returns `None` at the top of a
+    /// turn. The loop returns this instead of panicking or calling
+    /// `process::exit` — the 100% hard-stop is a clean Ok(...) return so
+    /// callers can log + continue rather than dying.
+    pub fn budget_exhausted(messages: Vec<ChatMessage>, turns_used: usize) -> Self {
+        Self {
+            messages,
+            turns_used,
+            finished_naturally: false,
+            final_response: None,
+            total_usage: AggregatedUsage::default(),
+            compression_count_after: 0,
+            stop_reason: StopReason::BudgetExhausted,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -72,10 +110,19 @@ pub struct AgentLoop {
     /// Optional cancellation token for cooperative shutdown (D-21).
     /// When cancelled, the loop returns early with "Cancelled by parent".
     cancel_token: Option<CancellationToken>,
-    /// Shared iteration budget counter (PROV-09, PROV-10).
-    /// Tracks total turns across parent + child agents.
-    /// None = use local turns_used only (backward compat).
-    budget: Option<Arc<AtomicUsize>>,
+    /// Shared iteration budget handle (PROV-09, PROV-10, D-15).
+    /// Tracks total turns across parent + child agents and exposes the
+    /// pressure-tier ladder (None / Caution70 / Warning90 / Stop100) via
+    /// `BudgetHandle::pressure()`. Plan 21.7-05 replaced the bare
+    /// `Arc<AtomicUsize>` with the handle so parent + child decrement the
+    /// same counter and tier transitions are observed consistently.
+    /// None = use local `max_iterations` only (backward compat).
+    budget: Option<BudgetHandle>,
+    /// Plan 21.7-05: last pressure tier injected as an advisory system
+    /// message. Used to fire `CAUTION_ADVISORY` / `WARNING_ADVISORY` EXACTLY
+    /// ONCE per tier crossing (T-21.7-05-02 no-spam mitigation) — never on
+    /// steady-state turns.
+    last_pressure_tier_seen: PressureTier,
     /// Fallback client to swap to on qualifying errors (PROV-07).
     /// Set via with_fallback(). None = no fallback available.
     fallback_client: Option<AnyClient>,
@@ -124,6 +171,7 @@ impl AgentLoop {
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             cancel_token: None,
             budget: None,
+            last_pressure_tier_seen: PressureTier::None,
             fallback_client: None,
             fallback_activated: false,
             subdir_discovery: None,
@@ -253,15 +301,19 @@ impl AgentLoop {
         self
     }
 
-    /// Set a shared iteration budget counter (PROV-09, PROV-10).
-    /// When set, the budget is incremented per turn and checked for hard stop at 100%.
-    pub fn with_budget(mut self, budget: Arc<AtomicUsize>) -> Self {
+    /// Set a shared iteration budget handle (PROV-09, PROV-10, D-15).
+    ///
+    /// Plan 21.7-05: accepts [`BudgetHandle`] rather than a bare
+    /// `Arc<AtomicUsize>`. The handle's `consume()` is called at the top of
+    /// every turn (Stop100 → clean-stop via `AgentResult::budget_exhausted`);
+    /// `pressure()` drives the advisory-injection ladder (Caution70/Warning90).
+    pub fn with_budget(mut self, budget: BudgetHandle) -> Self {
         self.budget = Some(budget);
         self
     }
 
-    /// Get the budget counter for sharing with child agents (PROV-10).
-    pub fn budget(&self) -> Option<Arc<AtomicUsize>> {
+    /// Get the budget handle for sharing with child agents (PROV-10).
+    pub fn budget(&self) -> Option<BudgetHandle> {
         self.budget.clone()
     }
 
@@ -273,25 +325,26 @@ impl AgentLoop {
         self
     }
 
-    /// Check budget threshold and return system prompt injection if needed.
-    /// Returns None if below 70%, Some(message) at 70%+ and 90%+.
-    fn check_budget_threshold(&self) -> Option<&'static str> {
-        let budget = match &self.budget {
-            Some(b) => b,
-            None => return None,
-        };
-        let used = budget.load(Ordering::SeqCst);
-        let pct = if self.max_iterations > 0 {
-            used * 100 / self.max_iterations
-        } else {
-            0
-        };
-        match pct {
-            100.. => None, // hard stop handled separately
-            90..=99 => Some("[Warning] You are at 90% of your iteration budget. Respond to the user now with a summary of your progress. Do not start new tool calls."),
-            70..=89 => Some("[Caution] You are at 70% of your iteration budget. Consolidate your work and avoid unnecessary tool calls."),
-            _ => None,
+    /// Check the current pressure tier and return advisory text if this
+    /// turn crosses into a new tier (Plan 21.7-05 / D-15 / T-21.7-05-02).
+    ///
+    /// Returns `None` when:
+    /// - No budget is wired.
+    /// - Current tier equals the last tier seen (steady-state, no spam).
+    /// - Tier is `None` or `Stop100` (no advisory text — Stop100 ends the loop
+    ///   before the next provider call, so there is nothing to inject).
+    ///
+    /// Side effect: advances `self.last_pressure_tier_seen` when a new tier is
+    /// observed. This is the ONLY place the tier-seen cell is mutated to
+    /// guarantee exactly-once injection per tier crossing.
+    fn check_budget_threshold(&mut self) -> Option<&'static str> {
+        let budget = self.budget.as_ref()?;
+        let tier = budget.pressure();
+        if tier == self.last_pressure_tier_seen {
+            return None;
         }
+        self.last_pressure_tier_seen = tier;
+        advisory_text(tier)
     }
 
     /// Classify an error for fallback decision-making.
@@ -432,6 +485,7 @@ impl AgentLoop {
                         final_response: Some("Cancelled by parent".to_string()),
                         total_usage,
                         compression_count_after: self.compression_count,
+                        stop_reason: StopReason::Cancelled,
                     });
                 }
             }
@@ -441,12 +495,26 @@ impl AgentLoop {
                 break;
             }
 
-            // PROV-09: Check shared budget hard stop at 100%
-            if let Some(ref budget) = self.budget {
-                let used = budget.load(Ordering::SeqCst);
-                if used >= self.max_iterations {
-                    warn!(budget_used = used, max = self.max_iterations, "Shared budget exhausted");
-                    break;
+            // Plan 21.7-05 / D-15 / G-01: top-of-turn shared BudgetHandle check.
+            // consume() is SeqCst decrement; None means Stop100 → clean terminate
+            // (NEVER panic, NEVER process::exit — this is the unskippable yolo
+            // guardrail). Parent + child subagents share the same counter.
+            if let Some(ref handle) = self.budget {
+                if handle.consume().is_none() {
+                    info!(
+                        target: "ironhermes_agent::budget",
+                        used = handle.used(), max = handle.max(),
+                        "iteration budget exhausted; stopping cleanly (Stop100)"
+                    );
+                    return Ok(AgentResult {
+                        messages,
+                        turns_used,
+                        finished_naturally: false,
+                        final_response: None,
+                        total_usage,
+                        compression_count_after: self.compression_count,
+                        stop_reason: StopReason::BudgetExhausted,
+                    });
                 }
             }
 
@@ -461,15 +529,23 @@ impl AgentLoop {
             }
 
             turns_used += 1;
-            // Increment shared budget counter if present (PROV-09, PROV-10)
-            if let Some(ref budget) = self.budget {
-                budget.fetch_add(1, Ordering::SeqCst);
-            }
             debug!(turn = turns_used, messages = messages.len(), "Agent loop turn");
 
-            // PROV-09: Inject budget threshold message if needed
-            if let Some(injection) = self.check_budget_threshold() {
-                messages.push(ChatMessage::system(injection));
+            // Plan 21.7-05 / D-15 / T-21.7-05-02: inject pressure-tier advisory
+            // EXACTLY ONCE per tier crossing — never on steady-state turns.
+            // check_budget_threshold() mutates last_pressure_tier_seen to guarantee
+            // no-spam semantics.
+            if let Some(advisory) = self.check_budget_threshold() {
+                let prev_tier = match self.budget.as_ref() {
+                    Some(h) => h.pressure(),
+                    None => PressureTier::None,
+                };
+                info!(
+                    target: "ironhermes_agent::budget",
+                    to = ?prev_tier,
+                    "pressure tier crossed; injecting advisory"
+                );
+                messages.push(ChatMessage::system(advisory));
             }
 
             // Call LLM with retry and fallback support
@@ -495,6 +571,7 @@ impl AgentLoop {
                                 final_response: Some("Cancelled by parent".to_string()),
                                 total_usage,
                                 compression_count_after: self.compression_count,
+                                stop_reason: StopReason::Cancelled,
                             });
                         }
                     }
@@ -598,13 +675,20 @@ impl AgentLoop {
         // (handler.rs for Telegram, runner.rs for cron) which knows the real platform
         // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
+        let finished_naturally = turns_used < self.max_iterations;
+        let stop_reason = if finished_naturally {
+            StopReason::Natural
+        } else {
+            StopReason::MaxIterations
+        };
         Ok(AgentResult {
             messages,
             turns_used,
-            finished_naturally: turns_used < self.max_iterations,
+            finished_naturally,
             final_response,
             total_usage,
             compression_count_after: self.compression_count,
+            stop_reason,
         })
     }
 
@@ -1417,7 +1501,7 @@ mod hooks_ordering_tests {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use crate::budget::{BudgetHandle, CAUTION_ADVISORY, WARNING_ADVISORY};
     use std::sync::Arc;
 
     fn make_agent(max_iterations: usize) -> AgentLoop {
@@ -1428,54 +1512,112 @@ mod budget_tests {
         AgentLoop::new(client, registry, max_iterations)
     }
 
+    /// Drive a handle to a target `used` count (used by the tier tests below).
+    fn drive_used(handle: &BudgetHandle, used: usize) {
+        for _ in 0..used {
+            handle.consume();
+        }
+    }
+
     #[test]
     fn test_budget_threshold_below_70() {
-        let budget = Arc::new(AtomicUsize::new(5));
-        let agent = make_agent(10).with_budget(budget);
-        // 5/10 = 50% — below 70%
+        let handle = BudgetHandle::new(10);
+        drive_used(&handle, 5); // 50% → None tier → no advisory
+        let mut agent = make_agent(10).with_budget(handle);
         assert_eq!(agent.check_budget_threshold(), None);
     }
 
     #[test]
     fn test_budget_threshold_at_70() {
-        let budget = Arc::new(AtomicUsize::new(7));
-        let agent = make_agent(10).with_budget(budget);
+        let handle = BudgetHandle::new(10);
+        drive_used(&handle, 7); // 70% → Caution70 → first observation injects
+        let mut agent = make_agent(10).with_budget(handle);
         let result = agent.check_budget_threshold();
-        assert!(result.is_some(), "expected Some at 70%");
-        assert!(result.unwrap().contains("[Caution]"), "expected [Caution] at 70%");
+        assert_eq!(result, Some(CAUTION_ADVISORY), "expected CAUTION_ADVISORY at 70%");
+        // Exactly-once: second call at steady-state returns None (no spam).
+        assert_eq!(
+            agent.check_budget_threshold(),
+            None,
+            "steady-state at Caution70 must NOT re-inject"
+        );
     }
 
     #[test]
     fn test_budget_threshold_at_90() {
-        let budget = Arc::new(AtomicUsize::new(9));
-        let agent = make_agent(10).with_budget(budget);
+        let handle = BudgetHandle::new(10);
+        drive_used(&handle, 9); // 90% → Warning90 → first observation injects
+        let mut agent = make_agent(10).with_budget(handle);
         let result = agent.check_budget_threshold();
-        assert!(result.is_some(), "expected Some at 90%");
-        assert!(result.unwrap().contains("[Warning]"), "expected [Warning] at 90%");
+        assert_eq!(result, Some(WARNING_ADVISORY), "expected WARNING_ADVISORY at 90%");
     }
 
     #[test]
     fn test_shared_budget_increment() {
-        let budget = Arc::new(AtomicUsize::new(0));
-        let parent_budget = budget.clone();
-        let child_budget = budget.clone();
+        // Parent + child share the same underlying counter via BudgetHandle::clone.
+        let parent = BudgetHandle::new(10);
+        let child = parent.clone();
         for _ in 0..5 {
-            parent_budget.fetch_add(1, Ordering::SeqCst);
+            parent.consume();
         }
         for _ in 0..3 {
-            child_budget.fetch_add(1, Ordering::SeqCst);
+            child.consume();
         }
-        assert_eq!(budget.load(Ordering::SeqCst), 8);
+        assert_eq!(parent.used(), 8);
+        assert_eq!(child.used(), 8, "clones share the same counter (PROV-10)");
     }
 
     #[test]
-    fn test_budget_getter_returns_arc() {
-        let budget = Arc::new(AtomicUsize::new(0));
-        let agent = make_agent(10).with_budget(budget.clone());
+    fn test_budget_getter_returns_handle() {
+        let handle = BudgetHandle::new(10);
+        let agent = make_agent(10).with_budget(handle.clone());
         let retrieved = agent.budget();
         assert!(retrieved.is_some(), "budget() should return Some after with_budget");
-        retrieved.unwrap().fetch_add(1, Ordering::SeqCst);
-        assert_eq!(budget.load(Ordering::SeqCst), 1);
+        retrieved.unwrap().consume();
+        assert_eq!(handle.used(), 1, "retrieved handle shares the same counter");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan 21.7-05 additions (D-15 / G-01 / T-21.7-05-02).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tier_crossing_injects_advisory_exactly_once_then_goes_quiet() {
+        // max=10 → Caution70 at used=7.
+        let handle = BudgetHandle::new(10);
+        let mut agent = make_agent(10).with_budget(handle.clone());
+        // Below threshold — no advisory.
+        drive_used(&handle, 6);
+        assert_eq!(agent.check_budget_threshold(), None);
+        // Cross to Caution70 — first observation returns CAUTION_ADVISORY.
+        handle.consume();
+        assert_eq!(agent.check_budget_threshold(), Some(CAUTION_ADVISORY));
+        // Still Caution70 — steady-state returns None (T-21.7-05-02 no-spam).
+        assert_eq!(agent.check_budget_threshold(), None);
+        // Cross to Warning90 — returns WARNING_ADVISORY once.
+        drive_used(&handle, 2);
+        assert_eq!(agent.check_budget_threshold(), Some(WARNING_ADVISORY));
+        assert_eq!(agent.check_budget_threshold(), None);
+    }
+
+    #[test]
+    fn stop100_pressure_returns_none_from_check_budget_threshold() {
+        // Plan 21.7-05: advisory_text(Stop100) is None by design — the loop
+        // terminates before the next provider call, so there is nothing to inject.
+        let handle = BudgetHandle::new(2);
+        drive_used(&handle, 2);
+        let mut agent = make_agent(2).with_budget(handle);
+        // Tier is Stop100; we crossed from the last-seen tier, but
+        // advisory_text(Stop100)=None → no injection.
+        assert_eq!(agent.check_budget_threshold(), None);
+    }
+
+    #[test]
+    fn budget_exhausted_constructor_sets_expected_fields() {
+        let result = AgentResult::budget_exhausted(vec![], 7);
+        assert_eq!(result.turns_used, 7);
+        assert!(!result.finished_naturally);
+        assert!(result.final_response.is_none());
+        assert_eq!(result.stop_reason, StopReason::BudgetExhausted);
     }
 }
 

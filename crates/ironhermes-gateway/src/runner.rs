@@ -4,6 +4,7 @@ use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client};
+use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::context_engine::ContextEngine;
@@ -42,6 +43,11 @@ pub struct GatewayRunner {
     /// server is connected because the tokio process reaper keeps the
     /// runtime alive until children are reaped.
     mcp_manager: Option<Arc<McpManager>>,
+    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): shared BudgetHandle threaded
+    /// from `run_gateway` at startup. `build_gateway_handler` clones it into
+    /// the handler so per-request AgentLoops share the same counter with the
+    /// AgentSubagentRunner registered on the tool registry.
+    budget_handle: Option<BudgetHandle>,
     cancel: CancellationToken,
 }
 
@@ -64,8 +70,19 @@ impl GatewayRunner {
             skill_registry: None,
             active_skills: None,
             mcp_manager: None, // GAP-8: wired by run_gateway before start()
+            budget_handle: None, // Plan 21.7-05: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install the shared BudgetHandle
+    /// to thread into the handler. Caller (run_gateway in ironhermes-cli)
+    /// constructs one `BudgetHandle::new(config.agent.max_iterations)` at
+    /// startup and passes the same handle here AND into the
+    /// `AgentSubagentRunner` registered on the tool registry, giving
+    /// parent + child subagent loops a shared counter.
+    pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
+        self.budget_handle = Some(handle);
     }
 
     /// Plan 20-02: set the `MemoryManager` handle used by the gateway runner,
@@ -128,6 +145,11 @@ impl GatewayRunner {
         }
         if let Some(ref skills) = self.active_skills {
             handler.set_active_skills(skills.clone());
+        }
+        // Plan 21.7-05: thread the shared BudgetHandle into the handler so
+        // per-request AgentLoops see the same counter as AgentSubagentRunner.
+        if let Some(ref handle) = self.budget_handle {
+            handler.set_budget_handle(handle.clone());
         }
 
         // Phase 21.3: initialize global token estimator from model's encoding

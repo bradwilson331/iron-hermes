@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
+use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_gateway::GatewayRunner;
@@ -362,7 +363,11 @@ async fn run_single(cli: &Cli, prompt: String) -> Result<()> {
     let session_id = uuid::Uuid::new_v4().to_string();
     state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
         .context("failed to create CLI session")?;
-    let budget = Arc::new(AtomicUsize::new(0));
+    // Plan 21.7-05 (PROV-09/PROV-10/D-15): construct BudgetHandle seeded from
+    // config.agent.max_iterations so the shared counter starts FULL and
+    // drains per-turn (Caution70 at 70% used, Warning90 at 90%, Stop100 at
+    // 100%). Parent + subagents clone the handle and share the counter.
+    let budget = BudgetHandle::new(config.agent.max_iterations);
     let mut registry = build_registry();
 
     // Plan 20-03 Fix 2 / GAP-4: build memory manager — returns None when
@@ -599,7 +604,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>) -> Result<()> {
     let session_id = uuid::Uuid::new_v4().to_string();
     state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
         .context("failed to create CLI session")?;
-    let budget = Arc::new(AtomicUsize::new(0));
+    // Plan 21.7-05 (PROV-09/PROV-10/D-15): BudgetHandle seeded from
+    // config.agent.max_iterations. Parent + subagents share the counter
+    // via BudgetHandle::clone; the per-turn run_agent_turn() inherits
+    // the same handle and decrements it at turn-top.
+    let budget = BudgetHandle::new(config.agent.max_iterations);
     // Phase 18-14: session-scoped PressureTracker + compression_count.
     // Constructed once per REPL session so hysteresis (above_threshold,
     // pending_transient) and the summarizing engine's prior-summary chain
@@ -1143,7 +1152,7 @@ async fn run_agent_turn(
     max_turns: usize,
     config: &Config,
     resolver: &ProviderResolver,
-    budget: &Arc<AtomicUsize>,
+    budget: &BudgetHandle,
     session_id: &str,
     pressure_tracker: Arc<PressureTracker>,
     compression_count: Arc<AtomicUsize>,
@@ -1296,10 +1305,22 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let gateway_client = build_main_client(&resolver)?;
+    // Plan 21.7-05 (PROV-09/PROV-10/D-15 + RESEARCH Open Q#4): construct a
+    // BudgetHandle at gateway startup seeded from config.agent.max_iterations
+    // and thread it into the shared AgentSubagentRunner. Per-request handler
+    // code builds its per-message AgentLoop via GatewayMessageHandler::new,
+    // which receives the SAME handle via with_budget (see handler.rs
+    // GatewayMessageHandler::with_budget_handle). All clones share the
+    // underlying counter so parent + subagents decrement together (PROV-10).
+    //
+    // Lifecycle: gateway-scoped (not per-user-session). A true per-session
+    // budget requires plumbing through SessionStore; that's deferred to
+    // Plan 09 (hermes status) where session-scoped budget readouts live.
+    let budget = BudgetHandle::new(config.agent.max_iterations);
     let subagent_runner = Arc::new(AgentSubagentRunner::new(
         gateway_client,
         resolver.clone(),
-        None, // gateway budget wired per-request in handler
+        Some(budget.clone()),
     ));
     let gateway_cancel_token = CancellationToken::new();
     registry.register_delegate_task_tool(
@@ -1375,6 +1396,10 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     info!("Starting IronHermes Telegram Gateway");
     let mut runner = GatewayRunner::new(config, resolver, registry);
+    // Plan 21.7-05: thread the same BudgetHandle constructed above into the
+    // runner so each per-request AgentLoop shares the counter with the
+    // registered AgentSubagentRunner (PROV-10 parent/child shared).
+    runner.set_budget_handle(budget.clone());
     if let Some(mgr) = memory_manager {
         runner.set_memory_manager(mgr);
     }

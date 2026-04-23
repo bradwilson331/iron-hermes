@@ -200,6 +200,8 @@ impl Default for ModelConfig {
     }
 }
 
+fn default_agent_max_iterations() -> usize { 50 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
@@ -219,6 +221,13 @@ pub struct AgentConfig {
     /// PRMT-14 (Phase 18): fraction of context_length at which agent loop compresses.
     #[serde(default = "default_agent_threshold")]
     pub compression_threshold: f32,
+    /// Plan 21.7-05 (PROV-09 / D-15): maximum iterations the shared
+    /// [`BudgetHandle`] counter is seeded to. Controls pressure-tier ladder
+    /// thresholds (Caution70 at 70%, Warning90 at 90%, Stop100 at 100%).
+    /// Default: 50. Pre-21.7 configs without this key load cleanly via
+    /// `#[serde(default)]`.
+    #[serde(default = "default_agent_max_iterations")]
+    pub max_iterations: usize,
 }
 
 impl Default for AgentConfig {
@@ -231,6 +240,7 @@ impl Default for AgentConfig {
             system_message: String::new(),
             context_engine: default_agent_engine(),
             compression_threshold: default_agent_threshold(),
+            max_iterations: default_agent_max_iterations(),
         }
     }
 }

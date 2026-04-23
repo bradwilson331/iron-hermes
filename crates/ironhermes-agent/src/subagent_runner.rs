@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::any_client::AnyClient;
 use crate::agent_loop::AgentLoop;
+use crate::budget::BudgetHandle;
 
 /// Concrete `SubagentRunner` that spawns child `AgentLoop` instances.
 ///
@@ -26,15 +27,19 @@ pub struct AgentSubagentRunner {
     client: AnyClient,
     /// Provider resolver for constructing override clients.
     resolver: ProviderResolver,
-    /// Optional budget counter shared with the parent AgentLoop.
-    budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Optional shared iteration budget handle (PROV-10 / D-15).
+    /// Plan 21.7-05 switched this from `Arc<AtomicUsize>` to [`BudgetHandle`];
+    /// clones of the handle share the underlying counter so parent + child
+    /// subagent loops decrement the SAME budget and observe the same
+    /// pressure-tier ladder.
+    budget: Option<BudgetHandle>,
 }
 
 impl AgentSubagentRunner {
     pub fn new(
         client: AnyClient,
         resolver: ProviderResolver,
-        budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        budget: Option<BudgetHandle>,
     ) -> Self {
         Self {
             client,
