@@ -568,7 +568,7 @@ mod tests {
             ep.model_metadata.is_some(),
             "main endpoint should have model_metadata"
         );
-        assert_eq!(ep.context_length(), 200_000);
+        assert_eq!(ep.context_length(), 1_000_000);
     }
 
     #[test]

@@ -604,7 +604,7 @@ mod tests {
         match result {
             CommandResult::Output(text) => {
                 assert!(text.contains("claude-sonnet-4"), "missing model name");
-                assert!(text.contains("200,000"), "missing context length: {}", text);
+                assert!(text.contains("1,000,000"), "missing context length: {}", text);
                 assert!(text.contains("cl100k_base"), "missing tokenizer: {}", text);
             }
             _ => panic!("expected Output variant"),
