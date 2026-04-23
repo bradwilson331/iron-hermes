@@ -17,3 +17,7 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+# Phase 21.7 Wave 0 — sandbox-status + process-group tests
+sysinfo = { workspace = true }
+nix = { workspace = true }
+tracing-test = { workspace = true }

@@ -228,7 +228,16 @@ fn cmd_version() -> Result<()> {
 /// Idempotent -- safe to call on every startup (D-21 belt-and-suspenders).
 fn ensure_home_dirs() -> Result<()> {
     let home = ironhermes_core::get_hermes_home();
-    for sub in &["cron", "sessions", "logs", "hooks", "memories", "skills", "workspace"] {
+    for sub in &[
+        "cron",
+        "sessions",
+        "logs",
+        "hooks",
+        "memories",
+        "skills",
+        "workspace",
+        "subagent-transcripts", // D-05 (Phase 21.7): JSONL transcript store for subagent runs.
+    ] {
         std::fs::create_dir_all(home.join(sub))
             .with_context(|| format!("Failed to create {}/{}", home.display(), sub))?;
     }
@@ -1678,6 +1687,26 @@ mod ensure_home_dirs_tests {
         }
 
         // Idempotent: calling again should not error
+        ensure_home_dirs().unwrap();
+        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
+        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+    }
+
+    /// D-05 (Phase 21.7): `$HERMES_HOME/subagent-transcripts/` must be part of
+    /// the first-run scaffold so downstream writers can
+    /// `tokio::fs::write(subagent_transcripts_dir.join(...))` without existence
+    /// checks.
+    #[test]
+    fn home_dirs_includes_subagent_transcripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
+        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        ensure_home_dirs().unwrap();
+        assert!(
+            tmp.path().join("subagent-transcripts").is_dir(),
+            "D-05: $HERMES_HOME/subagent-transcripts must exist after first-run scaffold"
+        );
+        // Idempotency: running twice must not error.
         ensure_home_dirs().unwrap();
         // SAFETY: test runs with --test-threads=1 so no concurrent env mutation.
         unsafe { std::env::remove_var("IRONHERMES_HOME"); }

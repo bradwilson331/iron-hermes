@@ -87,3 +87,12 @@ tempfile = "3"
 flate2 = "1.1"
 tar = "0.4"
 wiremock = "0.6"
+# Phase 21.7 Wave 0 additions
+insta = { version = "1", features = ["yaml"] }
+assert_cmd = "2"
+predicates = "3"
+tracing-test = "0.2"
+sysinfo = "0.30"
+nix = { version = "0.29", features = ["process"] }
+# ISS-10: shell-words workspace dep (Plan 02 Task 2-02 consumer)
+shell-words = "1"
