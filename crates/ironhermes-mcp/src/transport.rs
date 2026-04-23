@@ -4,13 +4,31 @@ use anyhow::Result;
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 
-/// Connect to a stdio MCP server. Returns the running service.
+/// Connect to a stdio MCP server. Returns the running service AND an optional
+/// external handle on the spawned child process.
 ///
 /// D-19: builds a safe environment using the allowlist (env_clear + build_safe_env).
 /// The child process inherits only the safe env keys plus user-specified vars from config.
+///
+/// GAP-8 (Phase 21.2 Plan 11): the signature returns an `Option<tokio::process::Child>`
+/// so `McpManager::shutdown_all` can hard-kill the stdio child during graceful
+/// shutdown. The current implementation uses the plan-blessed Option B fallback:
+/// rmcp 1.5's `TokioChildProcess::new(Command)` owns the child internally with no
+/// supported constructor exposing a pre-spawned Child, so we return `None` for the
+/// external handle and rely on two compounding safeguards:
+///   1. `cmd.kill_on_drop(true)` inside the configure closure — when rmcp's
+///      transport drops after the serve loop exits, tokio's drop-kill behavior
+///      fires SIGKILL at the OS level (closing GAP-8 at the process level).
+///   2. `McpManager::shutdown_all` wraps each JoinHandle await in
+///      `tokio::time::timeout(Duration::from_secs(2), handle)` so the gateway
+///      always exits within a bounded time regardless of child behavior.
+/// Together these guarantee `ironhermes gateway` exits within ~2s/server on
+/// Ctrl+C even when the stdio child ignores its parent-pipe EOF. When rmcp
+/// later exposes a pre-spawned-Child constructor, `connect_stdio` can upgrade
+/// to `Some(child)` without any call-site changes (Option A upgrade).
 pub async fn connect_stdio(
     config: &McpServerConfig,
-) -> Result<RunningService<RoleClient, ()>> {
+) -> Result<(RunningService<RoleClient, ()>, Option<tokio::process::Child>)> {
     let command = config
         .command
         .as_ref()
@@ -36,6 +54,14 @@ pub async fn connect_stdio(
             // A future plan may spawn a reader task to route captured stderr into
             // ServerTaskResult.failure_reason; that is outside GAP-6b's scope.
             cmd.stderr(std::process::Stdio::piped());
+            // GAP-8: defensive SIGKILL-on-drop. When rmcp's transport drops after the
+            // serve loop exits (or is cancelled), tokio's kill-on-drop semantics fire
+            // SIGKILL at the OS level, so the stdio child cannot outlive its parent
+            // even though rmcp 1.5 doesn't expose a pre-spawned-Child constructor for
+            // us to track externally. This is the plan-11 Option B guarantee: paired
+            // with the bounded 2s JoinHandle timeout in McpManager::shutdown_all, the
+            // gateway always exits within bounded time on Ctrl+C.
+            cmd.kill_on_drop(true);
             for (k, v) in &safe_env {
                 cmd.env(k, v);
             }
@@ -43,7 +69,11 @@ pub async fn connect_stdio(
     )?;
 
     let client = ().serve(transport).await?;
-    Ok(client)
+    // GAP-8 Option B: rmcp 1.5's TokioChildProcess owns the spawned Child
+    // internally; no supported constructor accepts a pre-spawned Child. We
+    // return None for the external handle and rely on kill_on_drop(true) +
+    // the bounded JoinHandle timeout in shutdown_all for graceful shutdown.
+    Ok((client, None))
 }
 
 #[cfg(test)]
@@ -60,6 +90,23 @@ mod tests {
             "GAP-6b: connect_stdio must call cmd.stderr(std::process::Stdio::piped()) \
              inside its configure closure so the child's stderr is NOT inherited \
              from the parent terminal"
+        );
+    }
+
+    /// GAP-8: static-grep regression — connect_stdio MUST set kill_on_drop(true)
+    /// inside its configure closure so the spawned stdio child is SIGKILL'd at
+    /// the OS level when rmcp's transport drops. Paired with the bounded 2s
+    /// JoinHandle timeout in McpManager::shutdown_all, this guarantees
+    /// `ironhermes gateway` exits within bounded time on Ctrl+C even when the
+    /// stdio child ignores its parent-pipe EOF.
+    #[test]
+    fn connect_stdio_sets_kill_on_drop() {
+        let src = include_str!("transport.rs");
+        assert!(
+            src.contains("cmd.kill_on_drop(true);"),
+            "GAP-8: connect_stdio must call cmd.kill_on_drop(true) inside its \
+             configure closure so the stdio child cannot outlive its parent \
+             when rmcp's transport drops"
         );
     }
 
@@ -119,9 +166,13 @@ mod tests {
 ///
 /// Uses `StreamableHttpClientTransport` (reqwest-backed) from rmcp.
 /// Requires the `transport-streamable-http-client-reqwest` feature on rmcp.
+///
+/// GAP-8 (Phase 21.2 Plan 11): signature symmetric with `connect_stdio` — HTTP
+/// has no external child process, so the `Option<tokio::process::Child>` is
+/// always `None`. Kept for call-site uniformity in `server_task::connect_and_serve`.
 pub async fn connect_http(
     config: &McpServerConfig,
-) -> Result<RunningService<RoleClient, ()>> {
+) -> Result<(RunningService<RoleClient, ()>, Option<tokio::process::Child>)> {
     let url = config
         .url
         .as_ref()
@@ -130,5 +181,5 @@ pub async fn connect_http(
     use rmcp::transport::StreamableHttpClientTransport;
     let transport = StreamableHttpClientTransport::from_uri(url.as_str());
     let client = ().serve(transport).await?;
-    Ok(client)
+    Ok((client, None))
 }

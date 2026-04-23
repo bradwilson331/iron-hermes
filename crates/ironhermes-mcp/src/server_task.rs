@@ -46,6 +46,7 @@ pub async fn run_server_task(
     registry: Arc<RwLock<ToolRegistry>>,
     cancel_token: CancellationToken,
     connected: Arc<AtomicBool>,
+    child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
 ) -> ServerTaskResult {
     // D-18: interpolate ${ENV_VAR} placeholders in config fields
     crate::config::interpolate_config(&mut config);
@@ -56,7 +57,7 @@ pub async fn run_server_task(
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match connect_and_serve(&name, &config, &registry, &cancel_token, &connected).await {
+        match connect_and_serve(&name, &config, &registry, &cancel_token, &connected, &child_slot).await {
             Ok(names) => {
                 registered_names = names;
                 failure_reason = None; // connected successfully; clean exit
@@ -64,6 +65,17 @@ pub async fn run_server_task(
             }
             Err(_) if cancel_token.is_cancelled() => break,
             Err(e) => {
+                // GAP-8: a prior attempt may have parked a Child here; clear it before
+                // the next attempt so shutdown_all never sees a stale handle whose
+                // process is already exited. Under the plan-11 Option B fallback this
+                // is a belt-and-braces guard — connect_stdio currently parks None, so
+                // the slot is typically already empty. When Option A lands and
+                // connect_stdio parks Some(child), this path becomes load-bearing.
+                if let Ok(mut slot) = child_slot.try_lock() {
+                    if let Some(mut old_child) = slot.take() {
+                        let _ = old_child.start_kill();
+                    }
+                }
                 retries += 1;
                 let sanitized = sanitize_error(&e.to_string());
                 if retries > MAX_RETRIES {
@@ -121,9 +133,10 @@ async fn connect_and_serve(
     registry: &Arc<RwLock<ToolRegistry>>,
     cancel_token: &CancellationToken,
     connected: &Arc<AtomicBool>,
+    child_slot: &Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
 ) -> anyhow::Result<Vec<String>> {
     // Connect via appropriate transport
-    let client = if config.command.is_some() {
+    let (client, child_opt) = if config.command.is_some() {
         transport::connect_stdio(config).await?
     } else if config.url.is_some() {
         transport::connect_http(config).await?
@@ -133,6 +146,17 @@ async fn connect_and_serve(
             name
         ));
     };
+
+    // GAP-8: park the stdio child handle (if any) in the shared slot so
+    // McpManager::shutdown_all can reach it to call start_kill() during
+    // graceful shutdown. Under the plan-11 Option B fallback, connect_stdio
+    // currently returns None (rmcp 1.5 owns the child internally), so this
+    // line is a no-op today — but the plumbing is in place so Option A can
+    // upgrade cleanly when rmcp exposes a pre-spawned-Child constructor.
+    // HTTP transport always has child_opt=None.
+    if let Some(child) = child_opt {
+        *child_slot.lock().await = Some(child);
+    }
 
     // Discover tools via the rmcp Peer (RunningService Derefs to Peer<RoleClient>)
     // This is the initialize-and-discover gate. Its successful resolution is the
