@@ -152,11 +152,16 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
             if entries.is_empty() {
                 return CommandResult::Output("No active subagents.".to_string());
             }
+            // Post-UAT fix: show the 1-indexed alias (subagent-N) alongside
+            // the full registry id so users know which labels /agents kill
+            // accepts. The alias is the ticker's visible label.
             let body = entries
                 .iter()
-                .map(|(id, summary, uptime)| {
+                .enumerate()
+                .map(|(idx, (id, summary, uptime))| {
                     format!(
-                        "- {} ({}) \u{2014} {}s",
+                        "- subagent-{} ({}) ({}) \u{2014} {}s",
+                        idx + 1,
                         id,
                         truncate_ellipsis(summary, 80),
                         uptime.as_secs()
@@ -167,7 +172,7 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
             CommandResult::Output(format!("Active subagents:\n{}", body))
         }
         Some("kill") => {
-            let id = match args.get(1) {
+            let token = match args.get(1) {
                 Some(s) => *s,
                 None => {
                     return CommandResult::Error(
@@ -175,14 +180,32 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
                     )
                 }
             };
-            if reg.kill(id) {
-                CommandResult::Output(format!("Cancelled subagent {}.", id))
-            } else {
-                CommandResult::Output(format!("No active subagent with id {}.", id))
+            let entries = reg.list_summary();
+            match resolve_subagent_id(token, &entries) {
+                Resolve::Exact(id) => {
+                    if reg.kill(&id) {
+                        CommandResult::Output(format!("Cancelled subagent {}.", id))
+                    } else {
+                        // Race: resolution succeeded but the subagent
+                        // unregistered between list_summary() and kill().
+                        CommandResult::Output(format!(
+                            "No active subagent with id {}.",
+                            id
+                        ))
+                    }
+                }
+                Resolve::None => {
+                    CommandResult::Output(format!("No active subagent with id {}.", token))
+                }
+                Resolve::Ambiguous(candidates) => CommandResult::Error(format!(
+                    "Ambiguous id '{}'; matches: {}",
+                    token,
+                    candidates.join(", ")
+                )),
             }
         }
         Some("logs") => {
-            let id = match args.get(1) {
+            let token = match args.get(1) {
                 Some(s) => *s,
                 None => {
                     return CommandResult::Error(
@@ -190,10 +213,30 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
                     )
                 }
             };
-            let path = match reg.transcript_path(id) {
+            let entries = reg.list_summary();
+            let resolved = match resolve_subagent_id(token, &entries) {
+                Resolve::Exact(id) => id,
+                Resolve::None => {
+                    return CommandResult::Output(format!(
+                        "No active subagent with id {}.",
+                        token
+                    ))
+                }
+                Resolve::Ambiguous(candidates) => {
+                    return CommandResult::Error(format!(
+                        "Ambiguous id '{}'; matches: {}",
+                        token,
+                        candidates.join(", ")
+                    ))
+                }
+            };
+            let path = match reg.transcript_path(&resolved) {
                 Some(p) => p,
                 None => {
-                    return CommandResult::Output(format!("No transcript for id {}.", id))
+                    return CommandResult::Output(format!(
+                        "No transcript for id {}.",
+                        resolved
+                    ))
                 }
             };
             match std::fs::read_to_string(&path) {
@@ -225,6 +268,80 @@ fn truncate_ellipsis(s: &str, max: usize) -> String {
         idx -= 1;
     }
     format!("{}\u{2026}", &s[..idx])
+}
+
+/// Post-UAT helper: what a user-supplied `/agents kill|logs <token>`
+/// argument resolves to against the current registry snapshot.
+enum Resolve {
+    /// Unique match — kill/logs should operate on this full registry id.
+    Exact(String),
+    /// No entry matched the token.
+    None,
+    /// Multiple entries matched (user-facing error listing candidate ids).
+    Ambiguous(Vec<String>),
+}
+
+/// Resolve a user-supplied subagent token to exactly one full registry id.
+///
+/// The ticker renders subagents as `[subagent-1]`, `[subagent-2]`, ... by
+/// spawn-index, but the registry keys entries by a random `sub_xxxxxxxx`
+/// id. Users naturally try to kill by the ticker label — this function
+/// bridges that gap. Accepts (in precedence order):
+///
+/// 1. Exact id match — `sub_77747e6e20c2` → `sub_77747e6e20c2`.
+/// 2. Position alias — `subagent-N` or bare `N` (1-indexed), where N
+///    refers to the nth entry of the current `list_summary()` in its
+///    stable iteration order. `subagent-1` picks the first listed
+///    subagent, `subagent-2` the second, and so on.
+/// 3. Prefix match — any id for which `token` is a prefix of the id OR
+///    of the hex suffix after `sub_`. `77747` matches
+///    `sub_77747e6e20c2`; `sub_777` also matches. Multiple matches
+///    return `Ambiguous`.
+///
+/// The entries argument is the same `Vec<(id, summary, uptime)>` produced
+/// by `list_summary()` so position-aliases use the identical ordering
+/// the user sees in `/agents list`.
+fn resolve_subagent_id(
+    token: &str,
+    entries: &[(String, String, std::time::Duration)],
+) -> Resolve {
+    let token = token.trim();
+    if token.is_empty() {
+        return Resolve::None;
+    }
+    // 1. Exact full-id match takes precedence (avoids false positives
+    //    from prefix overlap when two ids share a prefix).
+    for (id, _, _) in entries {
+        if id == token {
+            return Resolve::Exact(id.clone());
+        }
+    }
+    // 2. Position alias: `subagent-N` or bare `N`. 1-indexed against the
+    //    current list order. Out-of-range → None.
+    let numeric = token
+        .strip_prefix("subagent-")
+        .unwrap_or(token);
+    if let Ok(n) = numeric.parse::<usize>() {
+        if n >= 1 && n <= entries.len() {
+            return Resolve::Exact(entries[n - 1].0.clone());
+        }
+        // Numeric token out of range — fall through to prefix match so
+        // a numeric-looking hex token like `12345` can still match an id
+        // suffix.
+    }
+    // 3. Prefix match against full id or the hex suffix after `sub_`.
+    let mut matches: Vec<String> = Vec::new();
+    for (id, _, _) in entries {
+        let hex_suffix = id.strip_prefix("sub_").unwrap_or(id);
+        if id.starts_with(token) || hex_suffix.starts_with(token) {
+            matches.push(id.clone());
+        }
+    }
+    match matches.len() {
+        0 => Resolve::None,
+        1 => Resolve::Exact(matches.into_iter().next().unwrap()),
+        _ => Resolve::Ambiguous(matches),
+    }
 }
 
 fn cmd_status(ctx: &CommandContext) -> CommandResult {
@@ -893,6 +1010,139 @@ mod tests {
                     name, other
                 ),
             }
+        }
+    }
+
+    // =========================================================================
+    // resolve_subagent_id — post-UAT fix for /agents kill|logs ergonomics
+    // =========================================================================
+
+    fn make_entries(
+        ids: &[&str],
+    ) -> Vec<(String, String, std::time::Duration)> {
+        ids.iter()
+            .map(|id| {
+                (
+                    id.to_string(),
+                    format!("summary for {}", id),
+                    std::time::Duration::from_secs(5),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resolve_exact_full_id_wins() {
+        let entries = make_entries(&["sub_abc123456789", "sub_def987654321"]);
+        match resolve_subagent_id("sub_abc123456789", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_abc123456789"),
+            r => panic!("expected Exact, got {:?}", match r {
+                Resolve::None => "None",
+                Resolve::Ambiguous(_) => "Ambiguous",
+                _ => "?",
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_alias_subagent_1_returns_first_entry() {
+        let entries = make_entries(&["sub_first111111", "sub_secondzzzzz"]);
+        match resolve_subagent_id("subagent-1", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_first111111"),
+            _ => panic!("expected Exact(sub_first111111)"),
+        }
+    }
+
+    #[test]
+    fn resolve_alias_subagent_2_returns_second_entry() {
+        let entries = make_entries(&["sub_first111111", "sub_secondzzzzz"]);
+        match resolve_subagent_id("subagent-2", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_secondzzzzz"),
+            _ => panic!("expected Exact(sub_secondzzzzz)"),
+        }
+    }
+
+    #[test]
+    fn resolve_bare_numeric_works_as_alias() {
+        let entries = make_entries(&["sub_first111111", "sub_secondzzzzz"]);
+        match resolve_subagent_id("2", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_secondzzzzz"),
+            _ => panic!("expected Exact(sub_secondzzzzz)"),
+        }
+    }
+
+    #[test]
+    fn resolve_alias_out_of_range_falls_through_to_prefix() {
+        // alias-99 is out of range; falls through to prefix match.
+        // Nothing starts with "99" or "subagent-99" so → None.
+        let entries = make_entries(&["sub_first111111", "sub_secondzzzzz"]);
+        match resolve_subagent_id("subagent-99", &entries) {
+            Resolve::None => (),
+            _ => panic!("expected None for out-of-range alias"),
+        }
+    }
+
+    #[test]
+    fn resolve_hex_suffix_prefix_matches() {
+        // Users copy the short hex from /agents list. "77747" should
+        // match "sub_77747e6e20c2".
+        let entries = make_entries(&["sub_77747e6e20c2", "sub_67951e109d3b"]);
+        match resolve_subagent_id("77747", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_77747e6e20c2"),
+            _ => panic!("expected Exact on hex prefix"),
+        }
+    }
+
+    #[test]
+    fn resolve_full_id_prefix_matches() {
+        // `sub_777` is a prefix of the full id; single match → Exact.
+        let entries = make_entries(&["sub_77747e6e20c2", "sub_67951e109d3b"]);
+        match resolve_subagent_id("sub_777", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_77747e6e20c2"),
+            _ => panic!("expected Exact on full-id prefix"),
+        }
+    }
+
+    #[test]
+    fn resolve_ambiguous_prefix_returns_candidates() {
+        // Two ids share a prefix → Ambiguous with both candidates.
+        let entries = make_entries(&["sub_aabbccddeeff", "sub_aa99887766"]);
+        match resolve_subagent_id("sub_aa", &entries) {
+            Resolve::Ambiguous(candidates) => {
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates.contains(&"sub_aabbccddeeff".to_string()));
+                assert!(candidates.contains(&"sub_aa99887766".to_string()));
+            }
+            _ => panic!("expected Ambiguous"),
+        }
+    }
+
+    #[test]
+    fn resolve_empty_token_is_none() {
+        let entries = make_entries(&["sub_abc"]);
+        match resolve_subagent_id("   ", &entries) {
+            Resolve::None => (),
+            _ => panic!("expected None for empty token"),
+        }
+    }
+
+    #[test]
+    fn resolve_empty_registry_is_none() {
+        match resolve_subagent_id("anything", &[]) {
+            Resolve::None => (),
+            _ => panic!("expected None for empty registry"),
+        }
+    }
+
+    #[test]
+    fn resolve_exact_wins_over_prefix_that_would_be_ambiguous() {
+        // Edge case: one id is a strict prefix of another. The shorter
+        // id should resolve to itself via the exact-match pass, not
+        // Ambiguous via prefix-match.
+        let entries = make_entries(&["sub_abc", "sub_abc123"]);
+        match resolve_subagent_id("sub_abc", &entries) {
+            Resolve::Exact(id) => assert_eq!(id, "sub_abc"),
+            _ => panic!("exact match must beat prefix ambiguity"),
         }
     }
 }
