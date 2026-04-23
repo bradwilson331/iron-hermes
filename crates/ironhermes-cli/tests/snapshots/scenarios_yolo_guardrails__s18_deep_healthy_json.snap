@@ -1,0 +1,72 @@
+---
+source: crates/ironhermes-cli/tests/scenarios_yolo_guardrails.rs
+assertion_line: 191
+expression: json
+---
+{
+  "provider": {
+    "name": "anthropic",
+    "model": "claude-sonnet-4",
+    "api_mode": "messages",
+    "fallback_chain": [
+      "anthropic",
+      "openai"
+    ],
+    "healthy": true
+  },
+  "memory": {
+    "provider": "file",
+    "memory_md": {
+      "entries": 12,
+      "chars_used": 4210,
+      "chars_max": 20000
+    },
+    "user_md": {
+      "entries": 3,
+      "chars_used": 512,
+      "chars_max": 8000
+    },
+    "sessions": 47,
+    "state_db_bytes": 1048576,
+    "state_db_healthy": true
+  },
+  "gateway": {
+    "running": true,
+    "pid": 12345,
+    "platforms": [
+      "telegram"
+    ],
+    "allowlist_count": 3,
+    "telegram_authed": true
+  },
+  "subagents": {
+    "active": 1,
+    "max": 4,
+    "budget": {
+      "iterations_used": 23,
+      "iterations_max": 50,
+      "pressure": "caution70"
+    }
+  },
+  "processes": {
+    "tracked": 2,
+    "entries": [
+      {
+        "id": "proc_a1b2c3d4e5f6",
+        "pid": 67890,
+        "task_id": "sess-abc",
+        "command": "cargo watch -x test",
+        "uptime_secs": 42
+      }
+    ]
+  },
+  "mcp": {
+    "servers": 3,
+    "tools_total": 18,
+    "connected": 3
+  },
+  "yolo": {
+    "enabled": false,
+    "source": "disabled"
+  }
+}
