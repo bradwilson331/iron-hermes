@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 22.3-06-PLAN.md — Phase 22.3 final plan, six static-grep invariants GREEN
-last_updated: "2026-04-24T04:30:25.044Z"
-last_activity: 2026-04-24
+status: executing
+stopped_at: Completed 22.3-08-PLAN.md — WR-02 closed, stdout flush prepended to reset_terminal_visual
+last_updated: "2026-04-24T08:17:22.185Z"
+last_activity: 2026-04-24 -- Phase --phase execution started
 progress:
   total_phases: 14
-  completed_phases: 13
-  total_plans: 64
-  completed_plans: 64
-  percent: 100
+  completed_phases: 12
+  total_plans: 70
+  completed_plans: 67
+  percent: 96
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22.3 — repl-ux-hardening-visual-stability-reset-unified-history
+**Current focus:** Phase --phase — 22.3
 
 ## Current Position
 
-Phase: 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — EXECUTING
-Plan: 6 of 6
-Status: Phase complete — ready for verification
-Last activity: 2026-04-24
+Phase: --phase (22.3) — EXECUTING
+Plan: 1 of --name
+Status: Executing Phase --phase
+Last activity: 2026-04-24 -- Phase --phase execution started
 
-Progress: [██████████] 100%
+Progress: [██████████] 96%
 
 ## Performance Metrics
 
@@ -125,6 +125,7 @@ Progress: [██████████] 100%
 | Phase 22.3 P4 | 15 | 3 tasks | 5 files |
 | Phase 22.3 P5 | 545 | 3 tasks | 5 files |
 | Phase 22.3 P6 | 8 | 1 tasks | 1 files |
+| Phase 22.3 P8 | 3 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -280,6 +281,8 @@ Recent decisions affecting current work:
 - ALIAS-2 error-copy deferred to plan 22.3-06 — variable context mismatch at handlers.rs:254
 - 22.3-06: INV-22.3-02 uses print_banner(); (with semicolon) to count only call sites, not fn definition or doc comments
 - 22.3-06: INV-22.3-05 wrong-API guards use receiver-call form rl.set_history_duplicates( and import form to avoid false-positive on Plan 22.3-03 educational comment at repl_input.rs:249
+- 22.3-08 (WR-02): stdout flush prepended to reset_terminal_visual BEFORE is_tty guard — unconditional flush drains buffered streaming tokens even when stderr is piped but stdout is a TTY
+- 22.3-08: flush placed AFTER in-function `use std::io::Write as _;` (trait import already present) and BEFORE `let mut out = stderr();` — zero new use-statements, zero reordering of pre-existing lines
 
 ### Roadmap Evolution
 
@@ -310,8 +313,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T04:30:25.040Z
-Stopped at: Completed 22.3-06-PLAN.md — Phase 22.3 final plan, six static-grep invariants GREEN
+Last session: 2026-04-24T08:17:12.122Z
+Stopped at: Completed 22.3-08-PLAN.md — WR-02 closed, stdout flush prepended to reset_terminal_visual
 Resume file: None
 
-**Planned Phase:** 22.3 (REPL UX hardening (visual stability + reset + unified history)) — 6 plans — 2026-04-24T03:45:21.397Z
+**Planned Phase:** 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — 12 plans — 2026-04-24T05:26:03.531Z
