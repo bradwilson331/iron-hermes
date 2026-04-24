@@ -25,7 +25,7 @@ use crossterm::{
 };
 use std::collections::HashMap;
 use std::io::{stderr, Write};
-use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -103,6 +103,17 @@ pub struct TuiHandle {
     /// Shared reserved row count, updated by the render loop when widgets
     /// are added/removed at runtime (WR-01 fix: AtomicU16 replaces stale cache).
     reserved: Arc<AtomicU16>,
+    /// Plan 21.7-12 (GAP-21.7-02): readline barrier. When `true`, the
+    /// render loop skips the single status-row write
+    /// (`MoveTo(0, bottom) + Clear + Print(status_str)`) so the 100ms
+    /// ticker's `SavePosition`/`MoveTo(0, bottom)`/`RestorePosition`
+    /// cannot race the rustyline worker's prompt paint. Scanner row +
+    /// BelowScanner/AboveStatus widget rows continue to paint normally
+    /// (they live ABOVE the prompt row and cannot collide with the
+    /// prompt cursor). Toggled by run_chat around the prompt-time
+    /// `request_prompt` + `recv_line` pair; mid-turn invisible prompts
+    /// MUST NOT toggle the barrier.
+    readline_active: Arc<AtomicBool>,
 }
 
 impl TuiHandle {
@@ -187,6 +198,12 @@ impl TuiHandle {
         // Create mpsc event channel for runtime widget updates.
         let (event_tx, event_rx) = mpsc::unbounded_channel::<TuiEvent>();
 
+        // Plan 21.7-12 (GAP-21.7-02): readline barrier. Initialize to
+        // false; run_chat flips it true around the prompt-time
+        // request_prompt + recv_line pair.
+        let readline_active = Arc::new(AtomicBool::new(false));
+        let readline_active_for_loop = readline_active.clone();
+
         let task = tokio::spawn(async move {
             render_loop(
                 activity_rx,
@@ -195,6 +212,7 @@ impl TuiHandle {
                 widgets,
                 merged_styles,
                 reserved_atomic,
+                readline_active_for_loop,
                 task_shutdown,
             )
             .await;
@@ -208,6 +226,7 @@ impl TuiHandle {
             task: Some(task),
             extensions,
             reserved,
+            readline_active,
         }
     }
 
@@ -257,6 +276,20 @@ impl TuiHandle {
     /// render loop when widgets are added/removed at runtime (WR-01 fix).
     pub fn reserved_row_count(&self) -> u16 {
         self.reserved.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Plan 21.7-12 (GAP-21.7-02): clone of the readline-barrier flag.
+    ///
+    /// Callers set `true` BEFORE issuing a prompt-time `request_prompt`
+    /// and `false` AFTER `recv_line().await` resolves. The render loop
+    /// reads this flag each tick and skips the status-row write when
+    /// set, preventing the 100ms ticker from racing the rustyline
+    /// worker's prompt paint.
+    ///
+    /// Mid-turn invisible prompts MUST NOT toggle this flag — the
+    /// barrier gates only the inter-turn prompt window.
+    pub fn readline_active_handle(&self) -> Arc<AtomicBool> {
+        self.readline_active.clone()
     }
 
     /// Return a reference to the registered extensions slice.
@@ -420,6 +453,7 @@ async fn render_loop(
     mut widgets: HashMap<String, (LayoutSlot, Widget)>,
     style_overrides: StyleOverrides,
     reserved_atomic: Arc<AtomicU16>,
+    readline_active: Arc<AtomicBool>,
     shutdown: CancellationToken,
 ) {
     // D-17 graceful degradation: non-tty stderr (pipe/ssh/CI) → no-op loop.
@@ -506,7 +540,20 @@ async fn render_loop(
                 let activity = activity_rx.borrow().clone();
                 let status = status_rx.borrow().clone();
 
-                if let Err(e) = redraw_with_extensions(tick, &activity, &status, &widgets, &style_overrides, &flash_hint) {
+                // Plan 21.7-12: snapshot barrier once per frame so a
+                // mid-frame toggle can't half-paint the status row.
+                let readline_is_active =
+                    readline_active.load(AtomicOrdering::Relaxed);
+
+                if let Err(e) = redraw_with_extensions(
+                    tick,
+                    &activity,
+                    &status,
+                    &widgets,
+                    &style_overrides,
+                    &flash_hint,
+                    readline_is_active,
+                ) {
                     // Re-query size on next tick; log and continue (T-21-08).
                     tracing::debug!(error = %e, "tui: redraw failed — continuing");
                 }
@@ -537,6 +584,7 @@ fn redraw_with_extensions(
     widgets: &HashMap<String, (LayoutSlot, Widget)>,
     style_overrides: &StyleOverrides,
     flash_hint: &Option<(String, u16)>,
+    readline_active: bool,
 ) -> std::io::Result<()> {
     let (_cols, rows) = size()?;
     // Need at least 3 rows: prompt + scanner + status. On tiny terminals (<4 rows)
@@ -702,14 +750,29 @@ fn redraw_with_extensions(
     }
 
     // Status row.
-    queue!(
-        out,
-        MoveTo(0, bottom),
-        Clear(ClearType::CurrentLine),
-        Print(&status_str),
-        Show,
-        RestorePosition
-    )?;
+    //
+    // Plan 21.7-12 (GAP-21.7-02): when the readline barrier is active,
+    // SKIP the status-row paint. The 100ms ticker's
+    // SavePosition/MoveTo(0, bottom)/RestorePosition sequence races the
+    // rustyline worker's prompt paint; suppressing it during the
+    // inter-turn prompt window closes that race. Scanner + widget rows
+    // above continue to paint normally (they live above the prompt row
+    // and cannot collide).
+    //
+    // Show + RestorePosition MUST still fire unconditionally here:
+    // cursor hygiene does not depend on readline state, and the scanner
+    // row paint above this point has already moved the cursor. Without
+    // RestorePosition, a mid-typing user would see the cursor snap to
+    // the scanner row.
+    if !readline_active {
+        queue!(
+            out,
+            MoveTo(0, bottom),
+            Clear(ClearType::CurrentLine),
+            Print(&status_str),
+        )?;
+    }
+    queue!(out, Show, RestorePosition)?;
     out.flush()
 }
 
@@ -750,7 +813,15 @@ fn build_scanner_frame(tick: u64, lit_color: &str, trail_color: &str) -> String 
 /// Per §Pitfall 3: Hide/Show wraps the frame to prevent cursor flicker.
 #[allow(dead_code)]
 fn redraw(tick: u64, activity: &ActivityState, status: &StatusLineState) -> std::io::Result<()> {
-    redraw_with_extensions(tick, activity, status, &HashMap::new(), &StyleOverrides::new(), &None)
+    redraw_with_extensions(
+        tick,
+        activity,
+        status,
+        &HashMap::new(),
+        &StyleOverrides::new(),
+        &None,
+        /* readline_active = */ false,
+    )
 }
 
 // ---------------------------------------------------------------------------
