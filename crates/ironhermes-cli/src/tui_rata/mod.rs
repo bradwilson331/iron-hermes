@@ -9,4 +9,5 @@
 //! `stream_events`, `app`, `event_loop`, `ui`.
 
 pub mod double_ctrl_c;
+pub mod keybindings;
 pub mod knight_rider;
