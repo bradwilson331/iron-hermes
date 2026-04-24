@@ -77,6 +77,15 @@ struct Cli {
     /// (INV-21.7-05 / D-12). Top-level + Chat-subcommand flags OR together.
     #[arg(long, global = false)]
     yolo: bool,
+
+    /// Use the classic (crossterm+rustyline) REPL instead of the Phase 22.4
+    /// ratatui-backed REPL. Can also be set via the `IRONHERMES_CLASSIC_TUI=1`
+    /// env var; CLI flag wins if both are present. Non-TTY sessions (piped
+    /// stdin / redirected stdout / CI) automatically fall back to the classic
+    /// path per Phase 22.4 D-04 — this flag is only for explicit opt-out on
+    /// a live TTY.
+    #[arg(long = "classic-tui")]
+    classic_tui: bool,
 }
 
 #[derive(Subcommand)]
