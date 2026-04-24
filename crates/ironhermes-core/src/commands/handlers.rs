@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::commands::context::CommandContext;
+use crate::commands::typo::suggest_typo;
 use crate::commands::{CommandDef, CommandResult, CommandRouter};
 
 /// Dispatch a resolved command to its handler.
@@ -255,7 +256,16 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
             }
         }
         Some(other) => {
-            CommandResult::Error(format!("Unknown /agents subcommand: {}", other))
+            // Phase 22.3 D-10 / UI-SPEC TYPO-3: append Levenshtein-2 suggestion
+            // when a known subcommand is close. Candidates locked by UI-SPEC.
+            let candidates: &[&str] = &["list", "kill", "logs"];
+            let suffix = suggest_typo(other, candidates)
+                .map(|s| format!(" {}", s))
+                .unwrap_or_default();
+            CommandResult::Error(format!(
+                "Unknown /agents subcommand: {}{}",
+                other, suffix
+            ))
         }
     }
 }

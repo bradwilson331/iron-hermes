@@ -13,6 +13,7 @@ use ironhermes_core::commands::{
 };
 use ironhermes_core::commands::context::CommandContext;
 use ironhermes_core::commands::registry::build_registry;
+use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::types::Platform;
 
 // ---------------------------------------------------------------------------
@@ -98,10 +99,18 @@ pub fn dispatch_command(
                     return CommandResult::Handled(format!("Activating skill: {}", cmd));
                 }
             }
-            CommandResult::Error(format!(
-                "Unknown command: /{}. Type /help for available commands.",
-                cmd
-            ))
+            // Phase 22.3 D-10 / UI-SPEC TYPO-4: append Levenshtein-2 suggestion
+            // when a known top-level command is close. Candidates derived from
+            // the router's platform-filtered command set.
+            let known: Vec<&str> = router
+                .commands_for_platform(&ctx.platform)
+                .iter()
+                .map(|c| c.name)
+                .collect();
+            let suffix = suggest_typo(cmd, &known)
+                .map(|s| format!(" {}", s))
+                .unwrap_or_else(|| " Type /help for available commands.".to_string());
+            CommandResult::Error(format!("Unknown command: /{}.{}", cmd, suffix))
         }
     }
 }
