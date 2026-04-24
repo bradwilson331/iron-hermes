@@ -16,3 +16,4 @@ pub mod keybindings;
 pub mod knight_rider;
 pub mod status_line;
 pub mod stream_events;
+pub mod ui;
