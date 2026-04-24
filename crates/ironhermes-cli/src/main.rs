@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
 use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
+use crate::tui::reset_terminal_visual;
 use crate::tui::extension::{KeyContext, TuiExtension};
 use crate::tui::commands::build_cli_router;
 use ironhermes_core::commands::{CommandResult as CoreCommandResult, CommandRouter};
@@ -1127,6 +1128,13 @@ async fn run_chat(
                     let cmd = parts[0];
                     let args = &parts[1..];
 
+                    // Phase 22.3 D-09 / UI-SPEC HIST-2: record slash command in
+                    // unified rustyline history at the prompt-time dispatch site.
+                    // Mirrors the existing chat-prompt call below at line ~1221.
+                    // Mid-turn slash dispatch (the inner select arm) does NOT add
+                    // history per HIST-8 / INV-22.3-06.
+                    repl_input.add_history(&input);
+
                     // Build CommandContext for this turn. Plan 21.7-11
                     // extracts the builder into `build_cmd_ctx` so both the
                     // prompt-time branch (here) and the mid-turn slash
@@ -1157,6 +1165,14 @@ async fn run_chat(
                         CommandResult::ClearSession(output) => {
                             messages.truncate(1); // Keep system message
                             println!("{}", output.dimmed());
+                            continue;
+                        }
+                        CommandResult::ResetTerminal => {
+                            // Phase 22.3 D-11 / UI-SPEC CLR-1..CLR-4 + CLR-7:
+                            // TTY visual reset only — does NOT mutate `messages`
+                            // (that is `/new`'s ClearSession semantic above).
+                            // Locked by INV-22.3-03 (Plan 22.3-06 grep gate).
+                            reset_terminal_visual(tui.reserved_row_count());
                             continue;
                         }
                         CommandResult::Silent => {
@@ -1477,6 +1493,21 @@ async fn run_chat(
                                             println!(
                                                 "{}",
                                                 "/mcp reload ignored mid-turn — retry after the turn ends"
+                                                    .dimmed()
+                                            );
+                                        }
+                                        CommandResult::ResetTerminal => {
+                                            // Phase 22.3 D-14 / RESEARCH §Pitfall 5:
+                                            // /clear is a no-op mid-turn (cursor
+                                            // ownership is contested with the
+                                            // in-flight agent's ExternalPrinter
+                                            // writes). Dimmed notice mirrors the
+                                            // existing ClearSession mid-turn arm.
+                                            // INV-22.3-06 enforces NO add_history
+                                            // call in this mid-turn arm.
+                                            println!(
+                                                "{}",
+                                                "/clear ignored mid-turn — use after the turn ends"
                                                     .dimmed()
                                             );
                                         }

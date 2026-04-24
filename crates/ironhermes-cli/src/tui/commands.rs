@@ -329,14 +329,14 @@ mod tests {
 
     #[test]
     fn dispatch_no_extensions_clear_handled() {
+        // Phase 22.3 D-06: /clear now returns ResetTerminal (TTY visual reset only)
+        // NOT ClearSession (which would truncate messages). Updated from ClearSession
+        // expectation after Wave 1 Plan 22.3-04 changed cmd_clear's return value.
         let exts: Vec<Box<dyn TuiExtension>> = vec![];
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "clear", &[], &router, &ctx);
-        assert_eq!(
-            result,
-            CommandResult::ClearSession("Conversation cleared.".to_string())
-        );
+        assert_eq!(result, CommandResult::ResetTerminal);
     }
 
     #[test]
