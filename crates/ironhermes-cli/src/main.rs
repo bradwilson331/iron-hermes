@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle, prepare_prompt_with_reserve, finish_prompt_with_reserve};
+use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
 use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
 use crate::tui::extension::{KeyContext, TuiExtension};
 use crate::tui::commands::build_cli_router;
@@ -1060,20 +1060,30 @@ async fn run_chat(
             }
         }
 
-        // Plan 11 plan-checker advisory: row-reserve math must happen on the
-        // paint thread (the main tokio task), not on the rustyline worker
-        // thread. prepare/finish brackets the prompt-request cycle rather
-        // than the worker-side readline call.
-        prepare_prompt_with_reserve(tui.reserved_row_count());
+        // Plan 21.7-12 (GAP-21.7-02): close the floating-prompt race
+        // introduced by Plan 11. The main-task `prepare_prompt_with_reserve`
+        // + `finish_prompt_with_reserve` bracketing is REMOVED — its work
+        // moves into the rustyline worker thread via the
+        // `PromptRequest.reserved_rows` field (Task 12-01). Additionally
+        // we toggle the TUI readline barrier around the request so the
+        // 100ms render-loop ticker cannot race the worker's prompt paint
+        // by stomping the cursor with its status-row `SavePosition` /
+        // `MoveTo(0, bottom)` / `RestorePosition` sequence. Mid-turn
+        // invisible prompts do NOT toggle the barrier — the gate is
+        // only for the inter-turn prompt window.
+        let readline_barrier = tui.readline_active_handle();
+        readline_barrier.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = repl_input.request_prompt(ironhermes_cli::PromptRequest {
             prefix: format!("{} ", "You:".bold().green()),
             in_turn: false,
+            reserved_rows: Some(tui.reserved_row_count()),
         }) {
+            readline_barrier.store(false, std::sync::atomic::Ordering::Relaxed);
             eprintln!("Error: readline channel closed: {}", e);
             break;
         }
         let readline_line = repl_input.recv_line().await;
-        finish_prompt_with_reserve(tui.reserved_row_count());
+        readline_barrier.store(false, std::sync::atomic::Ordering::Relaxed);
         // Map ReplLine → the same Result shape the old rl.readline match
         // consumed (Ok(String) / Err(Interrupted) / Err(Eof) / Err(other))
         // so the below match arms are unchanged in semantics.
@@ -1241,6 +1251,7 @@ async fn run_chat(
                 let _ = repl_input.request_prompt(ironhermes_cli::PromptRequest {
                     prefix: String::new(),
                     in_turn: true,
+                    reserved_rows: None,
                 });
 
                 let response: Option<String> = 'turn: loop {
@@ -1337,6 +1348,7 @@ async fn run_chat(
                                                 ironhermes_cli::PromptRequest {
                                                     prefix: String::new(),
                                                     in_turn: true,
+                                                    reserved_rows: None,
                                                 }
                                             );
                                             continue 'turn;
@@ -1355,6 +1367,7 @@ async fn run_chat(
                                                 ironhermes_cli::PromptRequest {
                                                     prefix: String::new(),
                                                     in_turn: true,
+                                                    reserved_rows: None,
                                                 }
                                             );
                                             continue 'turn;
@@ -1378,6 +1391,7 @@ async fn run_chat(
                                         ironhermes_cli::PromptRequest {
                                             prefix: String::new(),
                                             in_turn: true,
+                                            reserved_rows: None,
                                         }
                                     );
                                     continue 'turn;
@@ -1388,6 +1402,7 @@ async fn run_chat(
                                     ironhermes_cli::PromptRequest {
                                         prefix: String::new(),
                                         in_turn: true,
+                                        reserved_rows: None,
                                     }
                                 );
                                 continue 'turn;
@@ -1472,6 +1487,7 @@ async fn run_chat(
                                 ironhermes_cli::PromptRequest {
                                     prefix: String::new(),
                                     in_turn: true,
+                                    reserved_rows: None,
                                 }
                             );
                             continue 'turn;
@@ -2095,13 +2111,29 @@ mod tui_extension_wiring_tests {
         );
     }
 
-    /// INV-22.1-04: run_chat uses prepare_prompt_with_reserve
+    /// INV-22.1-04 (Plan 21.7-12 update): run_chat uses worker-side prompt
+    /// anchoring. `readline_active_handle()` gates the render loop's
+    /// status-row write, and the prompt-time PromptRequest carries
+    /// `reserved_rows: Some(..)` so the rustyline worker positions the
+    /// cursor on the SAME thread that paints the prompt (closing the
+    /// floating-prompt race GAP-21.7-02 described).
+    ///
+    /// Pre-Plan-12 this test asserted `prepare_prompt_with_reserve` at
+    /// the main-task call site. That call is REMOVED in Plan 12 — the
+    /// positioning moved into the worker via PromptRequest.reserved_rows.
     #[test]
     fn run_chat_uses_dynamic_prompt_reserve() {
         let src = include_str!("main.rs");
         assert!(
-            src.contains("prepare_prompt_with_reserve"),
-            "run_chat must use dynamic prompt reserve, not hardcoded prepare_prompt()"
+            src.contains("readline_active_handle()"),
+            "INV-22.1-04 (Plan 12): run_chat must gate the TUI status-row \
+             paint on the readline barrier via `tui.readline_active_handle()`"
+        );
+        assert!(
+            src.contains("reserved_rows: Some("),
+            "INV-22.1-04 (Plan 12): prompt-time PromptRequest must carry \
+             `reserved_rows: Some(..)` so the worker anchors the prompt on \
+             its own thread"
         );
     }
 
