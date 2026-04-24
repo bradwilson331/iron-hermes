@@ -157,7 +157,7 @@ impl SubagentRunner for AgentSubagentRunner {
                     // can stat the file the moment the alias appears in `/agents list`.
                     // (RESEARCH correction: ordering must be open → touch → register,
                     // NOT open → register → touch as CONTEXT D-07 originally suggested.)
-                    writer.touch();
+                    writer.touch().await;
                     Some(writer)
                 }
                 _ => None,
