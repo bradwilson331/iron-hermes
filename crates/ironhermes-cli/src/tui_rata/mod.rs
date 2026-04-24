@@ -19,4 +19,6 @@ pub mod status_line;
 pub mod stream_events;
 pub mod ui;
 
+pub use app::App;
 pub use event_loop::run_chat_ratatui;
+pub use stream_events::StreamEvent;
