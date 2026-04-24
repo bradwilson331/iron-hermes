@@ -8,6 +8,8 @@
 //! as subsequent plans land `keybindings`, `status_line`, `history`,
 //! `stream_events`, `app`, `event_loop`, `ui`.
 
+pub mod app;
+pub mod commands;
 pub mod double_ctrl_c;
 pub mod history;
 pub mod keybindings;

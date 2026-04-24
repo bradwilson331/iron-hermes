@@ -325,6 +325,21 @@ impl AgentLoop {
         self
     }
 
+    /// Phase 22.4 — minimal test-only constructor for tui_rata snapshot tests.
+    /// The returned value MUST NOT drive a real LLM turn; snapshot tests render
+    /// state only and never call run_agent_turn.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests() -> Self {
+        use ironhermes_tools::ToolRegistry;
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:11434",
+            "test-key",
+            "test-model",
+        ));
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        Self::new(client, registry, 1)
+    }
+
     /// Check the current pressure tier and return advisory text if this
     /// turn crosses into a new tier (Plan 21.7-05 / D-15 / T-21.7-05-02).
     ///

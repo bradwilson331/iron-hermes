@@ -18,6 +18,7 @@ path = "src/lib.rs"
 memory-sqlite = ["ironhermes-agent/memory-sqlite"]
 memory-duckdb = ["ironhermes-agent/memory-duckdb"]
 memory-grafeo = ["ironhermes-agent/memory-grafeo"]
+test-support = ["ironhermes-agent/test-support"]
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }

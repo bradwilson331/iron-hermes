@@ -10,6 +10,7 @@ description = "Agent loop and LLM client for IronHermes"
 memory-sqlite = ["dep:memory-sqlite"]
 memory-duckdb = ["dep:memory-duckdb"]
 memory-grafeo = ["dep:memory-grafeo"]
+test-support = []
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
