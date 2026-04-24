@@ -285,7 +285,20 @@ impl GatewayMessageHandler {
                             .await?;
                     }
                     CoreCommandResult::ClearSession => {
-                        // /clear: wipe messages but keep session alive
+                        // Phase 22.3 WR-04 (review fix): No built-in command
+                        // currently routes here.
+                        //   - `/clear` returns `CoreCommandResult::ResetTerminal`
+                        //     (handlers.rs::cmd_clear, Phase 22.3 D-06) and is
+                        //     handled by the `ResetTerminal` arm a few cases
+                        //     below (no-op on the gateway since there is no TTY).
+                        //   - `/new` returns `CoreCommandResult::NewSession { .. }`
+                        //     and is handled by its own `NewSession` arm above.
+                        // This `ClearSession` arm is preserved for forward
+                        // compatibility: a future built-in or extension command
+                        // may legitimately emit `CoreCommandResult::ClearSession`
+                        // with the semantic "wipe session messages, send
+                        // confirmation", and the runtime body below is the
+                        // correct gateway behavior for that semantic.
                         {
                             let mut store = self.session_store.write().await;
                             if let Some(session) = store.get_mut(&session_key) {
