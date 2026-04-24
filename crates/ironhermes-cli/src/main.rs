@@ -251,6 +251,12 @@ async fn main() -> Result<()> {
                 if cli_yolo_flag {
                     ironhermes_cli::print_yolo_banner_to_stderr(true);
                 }
+                // D-03 (Phase 22.4): print_banner() fires BEFORE ratatui::init() so
+                // the banner lands in scrollback pre-TUI. Mirror of classic run_chat
+                // at line 758 (same GAP-5 double-flush — see INV-22.4-25).
+                print_banner();
+                io::stdout().flush().ok();
+                io::stderr().flush().ok();
                 // Build a cli_args::Cli (lib-reachable mirror) for run_chat_ratatui.
                 let rata_cli = ironhermes_cli::cli_args::Cli {
                     command: None,
@@ -309,6 +315,12 @@ async fn main() -> Result<()> {
                     if cli.yolo {
                         ironhermes_cli::print_yolo_banner_to_stderr(true);
                     }
+                    // D-03 (Phase 22.4): print_banner() fires BEFORE ratatui::init() so
+                    // the banner lands in scrollback pre-TUI. Mirror of classic run_chat
+                    // at line 758 (same GAP-5 double-flush — see INV-22.4-25).
+                    print_banner();
+                    io::stdout().flush().ok();
+                    io::stderr().flush().ok();
                     // Build a cli_args::Cli (lib-reachable mirror) for run_chat_ratatui.
                     let rata_cli = ironhermes_cli::cli_args::Cli {
                         command: None,
