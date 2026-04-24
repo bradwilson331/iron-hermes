@@ -317,6 +317,10 @@ impl GatewayMessageHandler {
                         // Output("MCP not configured.") before reaching this arm.
                         // This arm exists for exhaustiveness only.
                     }
+                    CoreCommandResult::ResetTerminal => {
+                        // Phase 22.3 D-06: TTY visual reset — not meaningful on the
+                        // gateway (no TTY). Ignore silently. Added for exhaustiveness.
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {

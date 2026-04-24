@@ -126,6 +126,9 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
             }
         }
         CoreCommandResult::PassThrough => CommandResult::Error("Unknown command.".to_string()),
+        // Phase 22.3 D-05 / UI-SPEC CLR-8: pass-through map of the new core
+        // ResetTerminal variant to the TUI ResetTerminal variant. Both unit.
+        CoreCommandResult::ResetTerminal => CommandResult::ResetTerminal,
         // Phase 21.2 Plan 04: MCP reload — pass through to REPL loop for async dispatch.
         CoreCommandResult::McpReload => CommandResult::McpReload,
     }
