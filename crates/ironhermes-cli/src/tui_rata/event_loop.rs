@@ -418,8 +418,11 @@ fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rec
 /// addition in plan 22.4-07). This is the "duplicate 30 LOC" fallback from the
 /// plan's §AgentLoop Integration three approaches.
 ///
-/// Streaming deltas flow via `UnboundedSender<StreamEvent>`. All 4 terminal
-/// variants (Started/Finished/Cancelled/Error) are emitted (D-17 / D-18 item 1).
+/// Streaming deltas + tool lifecycle flow via `UnboundedSender<StreamEvent>`.
+/// All 8 D-17 canonical variants are emitted (Phase 22.4 gap closure Plan 22.4-12):
+///   - Lifecycle: Started, Finished, Cancelled, Error
+///   - Streaming: Delta
+///   - Tool: ToolCall, ToolProgress, ToolResult
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
     let client = app.client.clone();
     let registry = app.registry.clone();
@@ -437,11 +440,38 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     tokio::spawn(async move {
         let _ = tx.send(StreamEvent::Started);
 
-        // Build a per-turn AgentLoop with a streaming callback that sends Deltas.
+        // Build a per-turn AgentLoop with streaming + tool callbacks that send StreamEvents.
         let tx_delta = tx.clone();
         let streaming_cb: ironhermes_agent::agent_loop::StreamCallback = Box::new(move |chunk: &str| {
             let _ = tx_delta.send(StreamEvent::Delta(chunk.to_string()));
         });
+
+        // Phase 22.4 D-17 / CR-02 gap closure: forward every tool invocation
+        // to the UI event loop. The (name, preview) pair is authored by
+        // AgentLoop::execute_tool_call as (tool_name, args_preview). Emit BOTH
+        // ToolCall (for the status-pill hint) AND ToolProgress (for any consumer
+        // that wants the args preview as a phase string).
+        let tx_tool_progress = tx.clone();
+        let tool_progress_cb: ironhermes_agent::agent_loop::ToolProgressCallback =
+            Box::new(move |name: &str, phase: &str| {
+                let _ = tx_tool_progress.send(StreamEvent::ToolCall { name: name.to_string() });
+                let _ = tx_tool_progress.send(StreamEvent::ToolProgress {
+                    name: name.to_string(),
+                    phase: phase.to_string(),
+                });
+            });
+
+        // Phase 22.4 D-17 / CR-02 gap closure: forward every tool completion
+        // to the UI event loop. Fires once per call at every ToolCompleted
+        // site in AgentLoop (6 sites; see Plan 22.4-12 Task 1).
+        let tx_tool_result = tx.clone();
+        let tool_result_cb: ironhermes_agent::agent_loop::ToolResultCallback =
+            Box::new(move |name: &str, ok: bool| {
+                let _ = tx_tool_result.send(StreamEvent::ToolResult {
+                    name: name.to_string(),
+                    ok,
+                });
+            });
 
         let mut agent = ironhermes_agent::agent_loop::AgentLoop::new(
             client,
@@ -452,7 +482,9 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         .with_cancellation_token(cancel_token.clone())
         .with_hook_registry(hook_registry)
         .with_compression(context_length, config_compression)
-        .with_streaming(streaming_cb);
+        .with_streaming(streaming_cb)
+        .with_tool_progress(tool_progress_cb)
+        .with_tool_result(tool_result_cb);
 
         if let Some(mm) = memory_manager {
             agent = agent.with_memory_manager(mm);
