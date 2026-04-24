@@ -406,6 +406,15 @@ pub fn prompt_position_ansi(rows: u16, reserved: u16) -> Option<Vec<u8>> {
 ///           returns the pane size, so the math is correct as-is.
 pub fn reset_terminal_visual(reserved: u16) {
     use std::io::Write as _;
+    // Phase 22.3 WR-02 (review fix): flush stdout BEFORE writing the
+    // scrollback-erase escape to stderr. Streaming token writes
+    // (`print!("{}", delta)` in run_agent_turn) buffer on stdout; if
+    // the user types `/clear` between the last token and the next
+    // prompt, any pending bytes would otherwise be erased without
+    // ever being displayed. The flush is unconditional (not gated on
+    // is_tty) so it still drains correctly when stderr is piped but
+    // stdout is the tty. A flush of an empty buffer is a no-op.
+    let _ = std::io::stdout().flush();
     let mut out = stderr();
     if !out.is_tty() {
         return;
