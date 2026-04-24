@@ -54,7 +54,7 @@ Plans:
 
 **Depends on:** Phase 22, Phase 22.1 (TuiExtension retired in tui_rata/ per D-09 but trait kept exported for classic-tui), Phase 22.3 (`$HERMES_HOME/repl_history` contract + D-08 codec reuse)
 
-**Plans:** 11 plans
+**Plans:** 13 plans (11 original + 2 gap-closure for D-03 banner + D-17 tool-progress wiring)
 
 Plans:
 - [ ] 22.4-00-PLAN.md — Wave 0: Workspace dep floor bump (crossterm 0.28 → 0.29 with event-stream feature; ratatui 0.30, tui-textarea 0.7, ansi-to-tui 8, tui-logger 0.18 workspace + crate deps) + cargo-tree spike confirming single ratatui compile unit (Pitfall §1). Checkpoint if spike fails → tui-textarea-2 fallback approval.
@@ -68,6 +68,8 @@ Plans:
 - [ ] 22.4-08-PLAN.md — Wave 8: `main.rs` integration — add `classic_tui: bool` to Cli struct with `#[arg(long = "classic-tui")]`; `should_use_classic_tui(cli)` helper implementing D-03/D-04 precedence (CLI flag > env var > non-TTY IsTerminal gate). Replace `Commands::Chat` arm body + bare-hermes arm body with four-way branch routing to `tui_rata::run_chat_ratatui` vs classic `run_chat`. Gate the existing `tracing_subscriber::fmt().init()` so ratatui-for-chat path defers to `run_chat_ratatui` (Pitfall 2). `print_yolo_banner_to_stderr` fires pre-alt-screen in ratatui branch. `run_single` + `run_gateway` UNTOUCHED (D-02 + 22.3 D-15 run_chat-only precedent).
 - [ ] 22.4-09-PLAN.md — Wave 9: `crates/ironhermes-cli/tests/invariants_22_4.rs` — 23 static-grep regression gates INV-22.4-01..23 per D-19 Layer 1 + RESEARCH §INV-22.4 anchor table + PATTERNS.md 23-row map. Locks all 14 D-18 parity-list wiring call sites + structural invariants (ratatui init/restore pair, EventStream local to event_loop, KeyEventKind::Press filter, mouse-capture pair, unit-separator codec, CancellationToken cascade ≥ 2 child tokens). Sibling file pattern following invariants_22_3_streaming.rs. Zero new dev-deps.
 - [ ] 22.4-10-PLAN.md — Wave 9: `crates/ironhermes-cli/tests/tui_rata_snapshots.rs` — 8 canonical-frame ratatui `TestBackend` + `insta` snapshot tests per D-19 Layer 2: empty transcript, 2-message conversation, in-flight streaming partial delta, tool-call activity row, scroll-active indicator, double-Ctrl-C pending-exit warning, error banner, 3-line multi-line input. Gated on `test-support` feature. Checkpoint for operator `cargo insta review` + visual verification before snapshot acceptance.
+- [ ] 22.4-11-PLAN.md — Wave 10 (gap closure, D-03): insert `print_banner(); io::stdout().flush().ok(); io::stderr().flush().ok();` in BOTH ratatui dispatch arms in main.rs (Commands::Chat arm + bare-hermes arm), mirroring the classic run_chat line 758-764 GAP-5 pattern. Add INV-22.4-25 to static-grep-lock print_banner co-occurrence with run_chat_ratatui at the dispatch layer. Closes VERIFICATION.md Gap 1.
+- [ ] 22.4-12-PLAN.md — Wave 10 (gap closure, D-17 / CR-02): wire `AgentLoop::with_tool_progress(...)` + new `AgentLoop::with_tool_result(...)` builder on per-turn AgentLoop in `spawn_turn` so all 8 D-17 canonical StreamEvent variants (adding ToolCall, ToolProgress, ToolResult) are emitted from production — not just from direct-inject snapshot tests. Adds a small symmetric `ToolResultCallback = Box<dyn Fn(&str, bool) + Send + Sync>` type to agent_loop.rs + 6 callback-firing sites at existing `fire_hook(HookEventKind::ToolCompleted { success, .. })` locations. Adds INV-22.4-26 (with_tool_progress / with_tool_result chained) + INV-22.4-27 (all 3 variants constructed in event_loop.rs). Closes VERIFICATION.md Gap 2 + REVIEW.md CR-02.
 
 **Wave structure:**
 - Wave 0: 22.4-00 (workspace dep floor + spike checkpoint — autonomous except checkpoint)
@@ -80,8 +82,9 @@ Plans:
 - Wave 7: 22.4-07 (event_loop + run_chat_ratatui — depends on 06, autonomous)
 - Wave 8: 22.4-08 (main.rs Commands::Chat dispatch — depends on 07, autonomous)
 - Wave 9 parallel: 22.4-09 (INV regression tests — depends on 08, autonomous) + 22.4-10 (snapshot tests — depends on 08, NOT autonomous — human insta review checkpoint)
+- Wave 10 parallel (gap closure, depends on Wave 9 — all earlier plans already executed): 22.4-11 (D-03 print_banner in ratatui dispatch arms + INV-22.4-25; touches main.rs + invariants_22_4.rs) + 22.4-12 (D-17 / CR-02 tool-progress + tool-result wiring + INV-22.4-26/27; touches agent_loop.rs + event_loop.rs + invariants_22_4.rs). Both plans touch invariants_22_4.rs so in strict parallel mode they contend — the executor MUST sequentialise the tests/invariants_22_4.rs writes (append-only, no reordering) or run the two plans serially. Source file modifications are disjoint (main.rs vs agent_loop.rs+event_loop.rs).
 
-Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-ownership conflicts force a linear chain. Waves 0–1 and 9's two plans are the only genuinely-parallel opportunities.
+Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-ownership conflicts force a linear chain. Waves 0–1, 9, and 10 are the genuinely-parallel opportunities (subject to the invariants_22_4.rs append-only constraint in Wave 10).
 
 **Live-TTY HUMAN-UAT:** Per CONTEXT D-19 Layer 3, after all 11 plans land the operator re-runs the 3-concurrent-subagent LoRA-research scenario from `22.3-UAT-EVIDENCE.md` against `tui_rata/` and records pass/fail in `22.4-HUMAN-UAT.md`. Gates the follow-up phase (22.5) that deletes classic-tui.
 
