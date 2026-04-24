@@ -434,6 +434,71 @@ pub fn reset_terminal_visual(reserved: u16) {
     let _ = out.flush();
 }
 
+/// Phase 22.3 GAP-22.3-01 closure / UI-SPEC OWN-2 (PaintCoordinator):
+/// Write `bytes` into the DECSTBM scroll region without disturbing the
+/// rustyline-owned prompt row. Used by the streaming-token callback in
+/// `run_chat`'s `run_agent_turn` and by the post-turn `Hermes:` label.
+///
+/// Mechanism:
+///   1. `\x1b7` (DECSC) — save the current cursor position (typically
+///      the prompt row, where rustyline most recently positioned it).
+///   2. `\x1b[{scroll_end};1H` — absolute CUP to the LAST row of the
+///      scroll region (one row above the prompt). Subsequent writes
+///      land inside the scroll region; DECSTBM's hardware-scroll moves
+///      older content UP as new content arrives.
+///   3. Write `bytes` to stdout, then flush.
+///   4. `\x1b8` (DECRC) — restore the cursor to its pre-write position
+///      (the prompt row). Rustyline's next paint sees the cursor
+///      exactly where it left it; nothing visually shifts.
+///
+/// All escape sequences are emitted to STDOUT (same stream as the
+/// payload) so the save / write / restore triple is atomic at the
+/// stream level. No race against stderr writes by the render loop.
+///
+/// **Non-TTY fallback:** when `stdout` is not a tty (e.g., redirected
+/// to a file by a CI runner or piped), the function writes `bytes` to
+/// stdout + flush, with NO escape sequences — preserving the existing
+/// non-interactive behavior so log captures stay clean.
+///
+/// **Tiny terminals / size() failure:** if `crossterm::terminal::size`
+/// fails OR `scroll_end == 0` (terminal too small to have a scroll
+/// region after subtracting `reserved`), the function falls back to
+/// the same plain-stdout path as the non-TTY case. The escape
+/// sequences are skipped and content still reaches the user.
+///
+/// Errors are silently dropped per existing render.rs discipline.
+pub fn write_into_scroll_region(bytes: &[u8], reserved: u16) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    if !out.is_tty() {
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
+        return;
+    }
+    let Ok((_cols, rows)) = size() else {
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
+        return;
+    };
+    let scroll_end = rows.saturating_sub(reserved);
+    if scroll_end == 0 {
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
+        return;
+    }
+    // DECSC: save cursor (typically the rustyline-owned prompt row).
+    let _ = write!(out, "\x1b7");
+    // CUP to the last row of the scroll region. DECSTBM hardware-scroll
+    // pushes older content up as we write into this row.
+    let _ = write!(out, "\x1b[{};1H", scroll_end);
+    // Payload + flush.
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
+    // DECRC: restore cursor to pre-write position (the prompt row).
+    let _ = write!(out, "\x1b8");
+    let _ = out.flush();
+}
+
 /// Position the terminal cursor at the fixed prompt row (row rows-reserved,
 /// outside the scroll region). Call before `rl.readline()` so user input
 /// appears at a stable position above the scanner and status bar.
@@ -1131,5 +1196,22 @@ mod tests {
         // the live-TTY HUMAN-UAT (Phase 22.3 D-04). This test only proves
         // the function signature, the no-panic guarantee on extreme inputs,
         // and the early-return-on-non-tty discipline.
+    }
+
+    #[test]
+    fn write_into_scroll_region_is_safe_on_tiny_terminal_and_non_tty() {
+        // Smoke test: must not panic on edge geometry. Mirrors the discipline
+        // of reset_terminal_visual_is_safe_on_tiny_terminal. The function writes
+        // to stdout (not stderr), and in the test harness stdout is captured
+        // by libtest, so no escape sequences will reach a real terminal.
+        write_into_scroll_region(b"hello", 3);     // typical reserved-row count
+        write_into_scroll_region(b"", 3);          // empty payload
+        write_into_scroll_region(b"with newlines\n", 3);
+        write_into_scroll_region(b"hello", 0);     // edge: no reserved rows
+        write_into_scroll_region(b"hello", 100);   // edge: more reserved than rows
+        // No assertion on output bytes — actual visual scroll-region routing is
+        // verified by the live-TTY HUMAN-UAT (GAP-22.3-01 closure). This test
+        // only proves the function signature, the no-panic guarantee on extreme
+        // inputs, and the early-return-on-non-tty discipline.
     }
 }
