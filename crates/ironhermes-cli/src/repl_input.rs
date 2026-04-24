@@ -437,12 +437,34 @@ impl ReplInputChannel {
         let _ = self.cmd_tx.send_command_only(Command::AddHistory(line.to_string()));
     }
 
-    /// Shut down the worker. Equivalent to `drop(self)` except that this
-    /// consumes self and makes the shutdown explicit.
-    pub fn shutdown(self) {
+    /// Shut down the worker. Consumes self and makes the shutdown explicit.
+    ///
+    /// **Phase 22.3 WR-03 (review fix):** joins the worker thread after
+    /// sending `Command::Shutdown` so `rl.save_history(path)` (the
+    /// worker's last act before `break`) completes BEFORE this method
+    /// returns. Without the join, the OS may schedule the worker after
+    /// the spawning thread has already returned from `run_chat`,
+    /// causing the history save to be clipped by `std::process::exit`
+    /// in the emergency-exit path. The previous implementation relied
+    /// on `Drop` to release the command sender — correct in steady
+    /// state, but unreliable under fast shutdown.
+    ///
+    /// Send-then-join ordering is mandatory: the worker is blocked on
+    /// `cmd_rx.blocking_recv()`. We must send Shutdown first so the
+    /// worker observes the command and runs the save_history branch
+    /// before terminating; only then is the join meaningful.
+    pub fn shutdown(mut self) {
+        // Phase 22.3 WR-03: send Shutdown, then join — guarantees the
+        // worker's `rl.save_history(path)` call completes before return.
         let _ = self.cmd_tx.send_command_only(Command::Shutdown);
-        // Dropping `self` releases the command sender; the worker's
-        // `cmd_rx.blocking_recv()` returns None and the loop exits.
+        if let Some(handle) = self.worker.take() {
+            // Best-effort: if the worker panicked, join returns Err and we
+            // cannot recover the history. There is no other path that could.
+            let _ = handle.join();
+        }
+        // Dropping `self` after the join releases the command sender; by
+        // this point the worker has already exited, so the closed-channel
+        // observation is moot.
     }
 }
 
