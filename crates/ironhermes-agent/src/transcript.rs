@@ -124,6 +124,28 @@ impl TranscriptWriter {
         &self.path
     }
 
+    /// Phase 22.3 D-07 / UI-SPEC ALIAS-1:
+    /// Create the transcript file on disk if it does not exist.
+    /// No-op if it already exists. Called immediately after `open()`
+    /// (in `subagent_runner.rs`) so the file is stat-able BEFORE
+    /// `SubagentRegistry::register(info)` makes the alias queryable
+    /// via `/agents list` and `/agents logs <alias>`.
+    ///
+    /// Sync (not async) — mirrors `open()`'s sync `create_dir_all`
+    /// style. The operation is a single short syscall; safe inside
+    /// async contexts because it does not block on user IO.
+    ///
+    /// Errors are silently dropped: if the parent directory creation
+    /// in `open()` failed, this open will also fail and a subsequent
+    /// `append()` will surface the error via the existing
+    /// `tracing::warn!` path. We do not double-report.
+    pub fn touch(&self) {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path);
+    }
+
     /// Fire-and-forget append. Never panics, never bubbles. Serialization,
     /// open, and write errors all resolve to `tracing::warn` and are
     /// otherwise swallowed (Pitfall 3 / E-08).
