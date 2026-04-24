@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 22.3-09-PLAN.md — WR-03 closed, ReplInputChannel::shutdown now joins worker thread
-last_updated: "2026-04-24T08:25:00Z"
-last_activity: 2026-04-24 -- Phase 22.3 Plan 09 completed (WR-03 closed)
+stopped_at: "Completed 22.3-11-PLAN.md — GAP-22.3-01 structurally closed (streaming callback + Hermes: label routed through write_into_scroll_region)"
+last_updated: "2026-04-24T09:32:51.814Z"
+last_activity: 2026-04-24
 progress:
   total_phases: 14
   completed_phases: 12
   total_plans: 70
-  completed_plans: 68
-  percent: 96
+  completed_plans: 69
+  percent: 99
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 22.3 — EXECUTING
-Plan: 9 of 12
-Status: Executing Phase 22.3 (WR-03 closed via Plan 22.3-09)
-Last activity: 2026-04-24 -- Phase 22.3 Plan 09 completed (WR-03 closed)
+Plan: 11 of 12
+Status: Ready to execute
+Last activity: 2026-04-24
 
-Progress: [██████████] 96%
+Progress: [██████████] 99%
 
 ## Performance Metrics
 
@@ -127,6 +127,7 @@ Progress: [██████████] 96%
 | Phase 22.3 P6 | 8 | 1 tasks | 1 files |
 | Phase 22.3 P8 | 3 | 1 tasks | 1 files |
 | Phase 22.3 P9 | 3 | 1 tasks | 1 files |
+| Phase 22.3 P11 | 52 | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -286,6 +287,9 @@ Recent decisions affecting current work:
 - 22.3-08: flush placed AFTER in-function `use std::io::Write as _;` (trait import already present) and BEFORE `let mut out = stderr();` — zero new use-statements, zero reordering of pre-existing lines
 - 22.3-09 (WR-03): ReplInputChannel::shutdown signature widened from `self` to `mut self` (binding-mode only — no call-site edits required) so `self.worker.take()` can extract the JoinHandle for explicit `handle.join()` after the Shutdown command send; send-then-join ordering is mandatory because the worker is blocked on `cmd_rx.blocking_recv()` until it observes Shutdown
 - 22.3-09: in-body `// Phase 22.3 WR-03` tag added (in addition to doc-comment WR-03 reference) so the acceptance awk range from signature to closing brace contains the marker — future readers can trace the fix without chasing doc-comment refactors
+- 22.3-11 (GAP-22.3-01): wrote pub fn write_into_scroll_region(bytes, reserved) in tui/render.rs wrapping DECSC + absolute CUP to scroll_end + payload/flush + DECRC; non-TTY + tiny-terminal fallbacks collapse to plain stdout write; re-exported through tui/mod.rs
+- 22.3-11: run_chat with_streaming callback + post-turn Hermes: label both routed through write_into_scroll_region using tui_stream.reserved_row_count() / tui.reserved_row_count(); run_single's streaming callback left untouched per CONTEXT D-15 scope (no persistent rustyline prompt to clobber)
+- 22.3-11: DECSC (\x1b7) / DECRC (\x1b8) / DECSTBM (\x1b[1;) byte sequences remain encapsulated in tui/render.rs only — main.rs contains zero inline escape bytes; acceptance grep guards enforce this invariant for future refactors
 
 ### Roadmap Evolution
 
@@ -316,8 +320,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T08:25:00Z
-Stopped at: Completed 22.3-09-PLAN.md — WR-03 closed, ReplInputChannel::shutdown now joins worker thread
+Last session: 2026-04-24T09:32:39.093Z
+Stopped at: Completed 22.3-11-PLAN.md — GAP-22.3-01 structurally closed (streaming callback + Hermes: label routed through write_into_scroll_region)
 Resume file: None
 
 **Planned Phase:** 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — 12 plans — 2026-04-24T05:26:03.531Z
