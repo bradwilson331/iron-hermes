@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 21.7 gap-closure (GAP-21.7-02) complete — awaiting HUMAN-UAT re-run
-last_updated: "2026-04-24T00:25:00Z"
-last_activity: 2026-04-24 -- Plan 21.7-12 merged; GAP-21.7-02 closed at code level
+status: completed
+stopped_at: Phase 22.3 context gathered
+last_updated: "2026-04-24T02:49:15.336Z"
+last_activity: 2026-04-24 -- Plan 21.7-12 merged (commit a3c1843); GAP-21.7-02 code-level fix verified by INV-21.7-14/15
 progress:
-  total_phases: 13
-  completed_phases: 11
+  total_phases: 14
+  completed_phases: 12
   total_plans: 58
   completed_plans: 58
   percent: 100
@@ -275,6 +275,7 @@ Recent decisions affecting current work:
 - Phase 21.6 inserted after Phase 21: Port deployment setup files from hermes-agent (INSERTED)
 - Phase 21.7 inserted after Phase 21: Multi-agent and autonomous agents and sandbox status (INSERTED)
 - Phase 21.8 inserted after Phase 21: skill remote download and install from skills.sh (URGENT)
+- Phase 22.3 inserted after Phase 22: REPL UX hardening (visual stability + reset + unified history) (URGENT)
 
 ### Pending Todos
 
@@ -293,7 +294,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: --stopped-at
-Stopped at: Phase 21.7 context gathered
+Stopped at: Phase 22.3 context gathered
 Resume file: --resume-file
 
 **Planned Phase:** 21.7 (Multi-agent and autonomous agents and sandbox status) — 11 plans — 2026-04-23T04:36:12.730Z
