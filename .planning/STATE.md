@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 22.3-11-PLAN.md — GAP-22.3-01 structurally closed (streaming callback + Hermes: label routed through write_into_scroll_region)"
-last_updated: "2026-04-24T09:32:51.814Z"
+stopped_at: Completed 22.3-12-PLAN.md — GAP-22.3-01 structurally locked via INV-22.3-07/08/09 static-grep gates
+last_updated: "2026-04-24T10:37:16.844Z"
 last_activity: 2026-04-24
 progress:
   total_phases: 14
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 70
-  completed_plans: 69
-  percent: 99
+  completed_plans: 70
+  percent: 100
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 22.3 — EXECUTING
-Plan: 11 of 12
+Plan: 12 of 12
 Status: Ready to execute
 Last activity: 2026-04-24
 
-Progress: [██████████] 99%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -128,6 +128,7 @@ Progress: [██████████] 99%
 | Phase 22.3 P8 | 3 | 1 tasks | 1 files |
 | Phase 22.3 P9 | 3 | 1 tasks | 1 files |
 | Phase 22.3 P11 | 52 | 3 tasks | 3 files |
+| Phase 22.3 P12 | 11 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -290,6 +291,9 @@ Recent decisions affecting current work:
 - 22.3-11 (GAP-22.3-01): wrote pub fn write_into_scroll_region(bytes, reserved) in tui/render.rs wrapping DECSC + absolute CUP to scroll_end + payload/flush + DECRC; non-TTY + tiny-terminal fallbacks collapse to plain stdout write; re-exported through tui/mod.rs
 - 22.3-11: run_chat with_streaming callback + post-turn Hermes: label both routed through write_into_scroll_region using tui_stream.reserved_row_count() / tui.reserved_row_count(); run_single's streaming callback left untouched per CONTEXT D-15 scope (no persistent rustyline prompt to clobber)
 - 22.3-11: DECSC (\x1b7) / DECRC (\x1b8) / DECSTBM (\x1b[1;) byte sequences remain encapsulated in tui/render.rs only — main.rs contains zero inline escape bytes; acceptance grep guards enforce this invariant for future refactors
+- 22.3-12: INV-22.3-07/08/09 use raw string literals r"\x1b[1;" for source-text grep — include_str! loads source TEXT so escape literals render.rs compile-time produces are 7-char ASCII not ESC byte
+- 22.3-12: sibling test file invariants_22_3_streaming.rs (not appended to invariants_22_3.rs) preserves Plan 22.3-06 closed 6-test deliverable per preservation gate
+- 22.3-12: INV-22.3-08 scope-sanity asserts print!("{}", delta) is STILL present in main.rs (run_single at ~528) — catches future out-of-scope regression per CONTEXT D-15
 
 ### Roadmap Evolution
 
@@ -320,8 +324,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T09:32:39.093Z
-Stopped at: Completed 22.3-11-PLAN.md — GAP-22.3-01 structurally closed (streaming callback + Hermes: label routed through write_into_scroll_region)
+Last session: 2026-04-24T10:37:16.840Z
+Stopped at: Completed 22.3-12-PLAN.md — GAP-22.3-01 structurally locked via INV-22.3-07/08/09 static-grep gates
 Resume file: None
 
 **Planned Phase:** 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — 12 plans — 2026-04-24T05:26:03.531Z
