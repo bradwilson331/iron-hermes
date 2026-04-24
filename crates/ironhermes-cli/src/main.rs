@@ -156,6 +156,33 @@ enum MemorySubcommand {
     Off,
 }
 
+/// Backend selection per Phase 22.4 D-03 + D-04.
+///
+/// Returns `true` when the classic (crossterm+rustyline) REPL should be
+/// used. Returns `false` when the ratatui REPL should be used.
+///
+/// Precedence:
+/// 1. `cli.classic_tui` (CLI flag) — highest priority
+/// 2. `IRONHERMES_CLASSIC_TUI=1` env var
+/// 3. Non-TTY stdin OR stdout — silent fallback to classic (D-04)
+/// 4. Otherwise — ratatui
+fn should_use_classic_tui(cli: &Cli) -> bool {
+    use std::io::IsTerminal;
+    if cli.classic_tui {
+        return true;
+    }
+    if std::env::var("IRONHERMES_CLASSIC_TUI")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return true;
+    }
+    false
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file — must happen BEFORE Cli::parse() if any env var would
@@ -187,10 +214,19 @@ async fn main() -> Result<()> {
         Err(_) => tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("ironhermes=info".parse().unwrap()),
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .init();
+    // Phase 22.4 D-03/D-04 + Pitfall 2: ratatui chat path defers subscriber
+    // install to run_chat_ratatui (which installs TuiTracingSubscriberLayer).
+    // All other paths (non-chat commands + chat-when-classic-wins) install the
+    // standard fmt subscriber here.
+    let is_chat_or_bare = matches!(&cli.command, Some(Commands::Chat { .. }) | None)
+        && cli.execute.is_none();
+    let will_use_ratatui_for_chat = is_chat_or_bare && !should_use_classic_tui(&cli);
+    if !will_use_ratatui_for_chat {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .init();
+    }
 
     // Phase 21.3: eagerly initialize tiktoken BPE tables to avoid ~100ms
     // latency on first token count.
@@ -206,7 +242,28 @@ async fn main() -> Result<()> {
             // `hermes chat --yolo ...`. Either path reaches the REPL with the
             // same effective state.
             let cli_yolo_flag = cli.yolo || *chat_yolo;
-            run_chat(&cli, message.clone(), cli_yolo_flag).await
+            // Phase 22.4 D-03/D-04: default to ratatui REPL; classic opt-out via
+            // --classic-tui flag, IRONHERMES_CLASSIC_TUI=1 env var, or non-TTY.
+            if should_use_classic_tui(&cli) {
+                run_chat(&cli, message.clone(), cli_yolo_flag).await
+            } else {
+                // Yolo banner fires BEFORE ratatui::init() so it lands in scrollback (D-18 item 11).
+                if cli_yolo_flag {
+                    ironhermes_cli::print_yolo_banner_to_stderr(true);
+                }
+                // Build a cli_args::Cli (lib-reachable mirror) for run_chat_ratatui.
+                let rata_cli = ironhermes_cli::cli_args::Cli {
+                    command: None,
+                    model: cli.model.clone(),
+                    provider: cli.provider.clone(),
+                    stream: cli.stream,
+                    max_turns: cli.max_turns,
+                    execute: cli.execute.clone(),
+                    quiet: cli.quiet,
+                    yolo: cli_yolo_flag,
+                };
+                ironhermes_cli::tui_rata::run_chat_ratatui(&rata_cli, message.clone(), cli_yolo_flag).await
+            }
         }
         Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
@@ -244,9 +301,27 @@ async fn main() -> Result<()> {
                 // value is OR'd inside `run_single` via `resolve_yolo`.
                 run_single(&cli, prompt.clone(), cli.yolo).await
             } else {
-                // Bare `hermes` -> `run_chat`. Top-level `--yolo` flows
-                // through here unchanged.
-                run_chat(&cli, None, cli.yolo).await
+                // Bare `hermes` -> default chat REPL (ratatui per D-03, classic fallback per D-04).
+                if should_use_classic_tui(&cli) {
+                    run_chat(&cli, None, cli.yolo).await
+                } else {
+                    // Yolo banner fires BEFORE ratatui::init() so it lands in scrollback (D-18 item 11).
+                    if cli.yolo {
+                        ironhermes_cli::print_yolo_banner_to_stderr(true);
+                    }
+                    // Build a cli_args::Cli (lib-reachable mirror) for run_chat_ratatui.
+                    let rata_cli = ironhermes_cli::cli_args::Cli {
+                        command: None,
+                        model: cli.model.clone(),
+                        provider: cli.provider.clone(),
+                        stream: cli.stream,
+                        max_turns: cli.max_turns,
+                        execute: cli.execute.clone(),
+                        quiet: cli.quiet,
+                        yolo: cli.yolo,
+                    };
+                    ironhermes_cli::tui_rata::run_chat_ratatui(&rata_cli, None, cli.yolo).await
+                }
             }
         }
     }
