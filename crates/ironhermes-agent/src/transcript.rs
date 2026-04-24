@@ -124,26 +124,31 @@ impl TranscriptWriter {
         &self.path
     }
 
-    /// Phase 22.3 D-07 / UI-SPEC ALIAS-1:
+    /// Phase 22.3 D-07 / UI-SPEC ALIAS-1 + Phase 22.3 WR-01 (review fix):
     /// Create the transcript file on disk if it does not exist.
     /// No-op if it already exists. Called immediately after `open()`
     /// (in `subagent_runner.rs`) so the file is stat-able BEFORE
     /// `SubagentRegistry::register(info)` makes the alias queryable
     /// via `/agents list` and `/agents logs <alias>`.
     ///
-    /// Sync (not async) — mirrors `open()`'s sync `create_dir_all`
-    /// style. The operation is a single short syscall; safe inside
-    /// async contexts because it does not block on user IO.
+    /// **Async** (Phase 22.3 WR-01): uses `tokio::fs::OpenOptions` so the
+    /// call does not block a tokio runtime worker thread on slow or
+    /// remote filesystems (NFS, SSHFS, Docker overlay) where a single
+    /// `open()` for file creation can otherwise stall the executor for
+    /// tens of milliseconds. The previous sync `std::fs` implementation
+    /// was technically safe on local SSDs but did not honor the async
+    /// contract of the surrounding `run_child` task.
     ///
     /// Errors are silently dropped: if the parent directory creation
     /// in `open()` failed, this open will also fail and a subsequent
     /// `append()` will surface the error via the existing
     /// `tracing::warn!` path. We do not double-report.
-    pub fn touch(&self) {
-        let _ = std::fs::OpenOptions::new()
+    pub async fn touch(&self) {
+        let _ = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path);
+            .open(&self.path)
+            .await;
     }
 
     /// Fire-and-forget append. Never panics, never bubbles. Serialization,

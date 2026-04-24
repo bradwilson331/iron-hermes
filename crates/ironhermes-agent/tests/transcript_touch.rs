@@ -5,12 +5,12 @@
 use ironhermes_agent::transcript::TranscriptWriter;
 use std::fs;
 
-#[test]
-fn transcript_file_exists_after_touch() {
+#[tokio::test]
+async fn transcript_file_exists_after_touch() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("sub_abc123.jsonl");
     let writer = TranscriptWriter::open(path.clone());
-    writer.touch();
+    writer.touch().await;
     assert!(
         fs::metadata(&path).is_ok(),
         "INV-22.3-05: transcript file must exist on disk after touch(), \
@@ -19,14 +19,14 @@ fn transcript_file_exists_after_touch() {
     );
 }
 
-#[test]
-fn touch_is_idempotent_does_not_truncate() {
+#[tokio::test]
+async fn touch_is_idempotent_does_not_truncate() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("sub_def456.jsonl");
     let writer = TranscriptWriter::open(path.clone());
-    writer.touch();
+    writer.touch().await;
     fs::write(&path, b"existing-content\n").expect("write");
-    writer.touch(); // second touch should NOT truncate
+    writer.touch().await; // second touch should NOT truncate
     let content = fs::read(&path).expect("read");
     assert_eq!(
         content, b"existing-content\n",
