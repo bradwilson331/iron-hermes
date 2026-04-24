@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: completed
-stopped_at: Phase 22.3 context gathered
-last_updated: "2026-04-24T02:49:15.336Z"
-last_activity: 2026-04-24 -- Plan 21.7-12 merged (commit a3c1843); GAP-21.7-02 code-level fix verified by INV-21.7-14/15
+status: executing
+stopped_at: Completed 22.3-01-PLAN.md — typo suggester module
+last_updated: "2026-04-24T03:53:02.494Z"
+last_activity: 2026-04-24
 progress:
   total_phases: 14
   completed_phases: 12
-  total_plans: 58
-  completed_plans: 58
-  percent: 100
+  total_plans: 64
+  completed_plans: 59
+  percent: 92
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.7 — multi-agent-and-autonomous-agents-and-sandbox-status
+**Current focus:** Phase 22.3 — repl-ux-hardening-visual-stability-reset-unified-history
 
 ## Current Position
 
-Phase: 21.7 (multi-agent-and-autonomous-agents-and-sandbox-status) — NEEDS REVIEW
-Plan: 13 of 13
-Status: Gap-closure run complete (Plan 21.7-12 closes GAP-21.7-02); awaiting HUMAN-UAT re-run on live TTY
-Last activity: 2026-04-24 -- Plan 21.7-12 merged (commit a3c1843); GAP-21.7-02 code-level fix verified by INV-21.7-14/15
+Phase: 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — EXECUTING
+Plan: 2 of 6
+Status: Ready to execute
+Last activity: 2026-04-24
 
-Progress: [██████████] 100%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
@@ -119,6 +119,7 @@ Progress: [██████████] 100%
 | Phase 21.2 P07 | 2 | 2 tasks | 3 files |
 | Phase 21.2 P09 | 8 | 2 tasks | 2 files |
 | Phase 21.2 P11 | 25 | 2 tasks | 7 files |
+| Phase 22.3 P1 | 2 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -263,6 +264,7 @@ Recent decisions affecting current work:
 - Phase 21.2 Plan 11: GatewayRunner::start calls mcp_manager.shutdown_all().await BEFORE self.cancel.cancel() and BEFORE JoinSet drain — enforced by source-grep regression test locking call-site < propagation-anchor ordering.
 - Phase 21.2 Plan 11: Rule 3 auto-fix — crates/ironhermes-cli/src/mcp_config.rs destructures (client, child) tuple after connect_stdio/connect_http signature change; dropping child at end-of-scope relies on kill_on_drop(true) for stdio reaper.
 - Phase 21.2 Plan 11: regression test shutdown_all_returns_within_timeout_when_stdio_child_blocks pass time 2.51s vs 5s outer bound proves kill_on_drop + 2s JoinHandle timeout fully close GAP-8 at user-facing level under Option B.
+- 22.3-01: suggest_typo placed in commands/typo.rs (not inline in handlers.rs) for testability per CONTEXT Claude's Discretion
 
 ### Roadmap Evolution
 
@@ -293,8 +295,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: --stopped-at
-Stopped at: Phase 22.3 context gathered
-Resume file: --resume-file
+Last session: 2026-04-24T03:53:02.490Z
+Stopped at: Completed 22.3-01-PLAN.md — typo suggester module
+Resume file: None
 
-**Planned Phase:** 21.7 (Multi-agent and autonomous agents and sandbox status) — 11 plans — 2026-04-23T04:36:12.730Z
+**Planned Phase:** 22.3 (REPL UX hardening (visual stability + reset + unified history)) — 6 plans — 2026-04-24T03:45:21.397Z

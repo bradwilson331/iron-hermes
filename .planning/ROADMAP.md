@@ -46,6 +46,29 @@ Plans:
 
 **Phase directory:** `.planning/phases/22-cli-feature-parity/`
 
+### Phase 22.3: REPL UX hardening (visual stability + reset + unified history) (INSERTED)
+
+**Goal:** Close six concrete TTY-UX defects (D-1 ticker/output clobber, D-2 typo suggestions, D-3 alias→transcript race, D-4 banner bleed, D-6 `/clear` visual reset, D-7 unified persistent history) captured verbatim in 22.3-UAT-EVIDENCE.md, and re-pass the UAT scenario on a live TTY. UI-SPEC-locked contract (22.3-UI-SPEC.md): PaintCoordinator discipline, slash output block format, `/clear` (TTY visual reset, no history mutation), unified history at `$HERMES_HOME/repl_history` with rustyline 15 API (set_history_ignore_dups not HistoryDuplicates::Prev), TranscriptWriter touch-on-register, hand-rolled Levenshtein typo suggester (no new crate per Phase 21 D-18), and six static-grep regression invariants INV-22.3-01..06. Fix-up phase — no REQ-IDs map; UI-SPEC + UAT re-run serve as the requirements set.
+**Requirements:** (none — UI-SPEC.md + 22.3-UAT-EVIDENCE.md serve as the requirements set; CONTEXT D-01..D-15 are locked decisions)
+**Depends on:** Phase 22, Phase 22.1 (DECSTBM reserved-row formula), Phase 21.7 (readline barrier + transcript writer)
+**Plans:** 6 plans
+
+Plans:
+- [ ] 22.3-01-PLAN.md — Wave 1: Levenshtein typo suggester pure function (`commands::typo::suggest_typo`) with 10 unit tests; module declaration in `commands/mod.rs`. No new crate dep.
+- [ ] 22.3-02-PLAN.md — Wave 1: `TranscriptWriter::touch()` (sync std::fs OpenOptions create+append) called from `subagent_runner.rs` BEFORE `reg.write().await.register(info)` (corrected ordering — RESEARCH inverted CONTEXT D-07); integration test asserting file exists immediately after touch.
+- [ ] 22.3-03-PLAN.md — Wave 1: rustyline 15 history activation in `repl_input.rs` (corrected API: `set_history_ignore_dups(true)`, NotFound on first run silently ignored, `set_max_history_size(1000)`, save on Shutdown); `run_chat` passes `Some($HERMES_HOME/repl_history)` to `ReplInputChannel::spawn` (run_chat-only per CONTEXT D-15).
+- [ ] 22.3-04-PLAN.md — Wave 1: `CommandResult::ResetTerminal` unit variant added to BOTH core and TUI enums + mapper arm in `tui/commands.rs:map_core_to_tui`; `cmd_clear` switched from `ClearSession` to `ResetTerminal` (cmd_new unchanged — preserves /new truncate semantics).
+- [ ] 22.3-05-PLAN.md — Wave 2: `run_chat` integration — new `tui::render::reset_terminal_visual(reserved)` helper (DECSTBM-aware scrollback wipe + prompt re-anchor); ResetTerminal arms in prompt-time + mid-turn matches (RESEARCH §Pitfall 5 exhaustive-match closure); slash-side `repl_input.add_history(&input)` at prompt-time site (mid-turn skipped per HIST-8/INV-22.3-06); `suggest_typo` plugged into `cmd_agents` `Some(other)` arm (locked candidates `["list","kill","logs"]`) and `dispatch_command` `ResolveResult::NotFound` arm (router-derived candidates with `Type /help` fallback). Closes the workspace-build-failure gap that Plan 04 deliberately opened.
+- [ ] 22.3-06-PLAN.md — Wave 2: Six static-grep invariants `crates/ironhermes-cli/tests/invariants_22_3.rs` (INV-22.3-01..06): ResetTerminal arm exists, banner called once before TUI init, cmd_clear returns ResetTerminal + cmd_new unchanged, slash add_history after starts_with('/'), correct rustyline 15 API used + wrong API names absent, total add_history count == 2 (mid-turn has none). Pairs with Plan 22.3-02's runtime transcript-touch test for INV-22.3-05's behavioral half. No new dev-deps (Phase 21 D-18, CONTEXT D-03).
+
+**Wave structure:**
+- Wave 1 (parallel, autonomous): 22.3-01 (typo helper), 22.3-02 (transcript touch), 22.3-03 (rustyline history activation), 22.3-04 (ResetTerminal enum + mapper). Zero file overlap between Wave 1 plans.
+- Wave 2 (sequential, autonomous, depends on all Wave 1): 22.3-05 (`run_chat` integration — uses suggest_typo from 01, ResetTerminal variants from 04, history-spawn-path wiring from 03), then 22.3-06 (INV regression tests — depends on 05's wiring being in place).
+
+**Live-TTY HUMAN-UAT:** Per CONTEXT D-04, after Plan 22.3-06 lands, the operator re-runs the exact 3-concurrent-subagent LoRA-research scenario from `22.3-UAT-EVIDENCE.md` and records pass/fail for D-1..D-7 (minus D-5) in `22.3-HUMAN-UAT.md`. Operator task — NOT in any plan's scope.
+
+**Phase directory:** `.planning/phases/22.3-repl-ux-hardening-visual-stability-reset-unified-history/`
+
 ### Phase 22.1: TUI Extension Hooks
 
 **Goal:** Create a Rust extension mechanism for the CLI TUI so that external code (plugins, custom builds, future crates) can add widgets, keybindings, layout sections, command handlers, and style overrides -- the Rust equivalent of hermes-agent's subclassable CliManager. Implements a hybrid three-layer architecture: TuiExtension trait (static contract), mpsc message bus (dynamic updates), and command registry (extension-first dispatch). Slot-based layout with dynamic DECSTBM scroll region adjustment. No new dependencies.
