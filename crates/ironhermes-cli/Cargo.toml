@@ -45,7 +45,7 @@ crossterm = { workspace = true }
 ansi-to-tui = { workspace = true }
 ratatui = { workspace = true }
 tui-logger = { workspace = true }
-tui-textarea = { workspace = true }
+tui-textarea-2 = { workspace = true }
 colored = { workspace = true }
 indicatif = { workspace = true }
 rustyline = { workspace = true }
