@@ -77,7 +77,11 @@ fn cmd_new(args: &[&str], _ctx: &CommandContext) -> CommandResult {
 }
 
 fn cmd_clear(_ctx: &CommandContext) -> CommandResult {
-    CommandResult::ClearSession
+    // Phase 22.3 D-06 / UI-SPEC CLR-8: `/clear` is a TTY VISUAL RESET, not a
+    // session-history wipe. The REPL loop in main.rs matches ResetTerminal
+    // and calls `tui::render::reset_terminal_visual(reserved_row_count)`.
+    // For session-history truncation, use `/new` (still returns NewSession).
+    CommandResult::ResetTerminal
 }
 
 fn cmd_quit(_ctx: &CommandContext) -> CommandResult {
@@ -731,13 +735,15 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_clear_returns_clear_session() {
+    fn dispatch_clear_returns_reset_terminal() {
+        // Phase 22.3 D-06: /clear now returns ResetTerminal (TTY visual reset),
+        // NOT ClearSession (session-history wipe). ClearSession is /new's domain.
         let ctx = make_ctx(false);
         let router = make_router();
         let cmd = find_cmd("clear");
         assert_eq!(
             dispatch(&cmd, &[], &ctx, &router),
-            CommandResult::ClearSession
+            CommandResult::ResetTerminal
         );
     }
 
