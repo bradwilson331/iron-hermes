@@ -273,3 +273,51 @@ fn invariant_22_4_24_registration_order_parity() {
          Status at {status_pos}; App::new at {app_new_pos}."
     );
 }
+
+/// INV-22.4-25 (Phase 22.4 gap closure — D-03): print_banner() must fire
+/// in BOTH ratatui dispatch sites (Commands::Chat arm + bare-hermes arm)
+/// BEFORE run_chat_ratatui() is called, so the banner lands in scrollback
+/// pre-alt-screen. This is the static-grep companion to INV-22.4-14
+/// (which locks the yolo banner). See 22.4-VERIFICATION.md Gap 1.
+#[test]
+fn invariant_22_4_25_print_banner_pre_ratatui() {
+    // There must be at least 3 print_banner() call sites in main.rs:
+    //   - classic run_chat (existing, line ~758)
+    //   - Commands::Chat ratatui arm (new, Phase 22.4 plan 11)
+    //   - bare-hermes ratatui arm (new, Phase 22.4 plan 11)
+    let call_count = MAIN_RS.matches("print_banner();").count();
+    assert!(
+        call_count >= 3,
+        "INV-22.4-25: main.rs must contain print_banner() in classic run_chat + \
+         both ratatui dispatch branches (≥ 3 total call sites). Found {call_count}."
+    );
+
+    // Every run_chat_ratatui(...) dispatch site must be preceded by a print_banner()
+    // call earlier in the file. Verified via first-occurrence ordering.
+    let first_print_banner = MAIN_RS.find("print_banner();").expect(
+        "INV-22.4-25: main.rs must contain print_banner();"
+    );
+    let first_run_chat_ratatui = MAIN_RS.find("run_chat_ratatui(").expect(
+        "INV-22.4-25: main.rs must call tui_rata::run_chat_ratatui(...)"
+    );
+    assert!(
+        first_print_banner < first_run_chat_ratatui,
+        "INV-22.4-25: the first print_banner() must appear BEFORE the first \
+         run_chat_ratatui( in main.rs. Found print_banner at {first_print_banner}, \
+         run_chat_ratatui at {first_run_chat_ratatui}. D-03 requires banner \
+         pre-alt-screen."
+    );
+
+    // The GAP-5 flush rationale is cross-cut: every new ratatui dispatch site
+    // that calls print_banner() must also flush stdout + stderr. Grep-lock both.
+    assert!(
+        MAIN_RS.contains("io::stdout().flush().ok();"),
+        "INV-22.4-25: main.rs must flush stdout after print_banner() (GAP-5, \
+         classic run_chat line 763 precedent)."
+    );
+    assert!(
+        MAIN_RS.contains("io::stderr().flush().ok();"),
+        "INV-22.4-25: main.rs must flush stderr after print_banner() (GAP-5, \
+         classic run_chat line 764 precedent)."
+    );
+}
