@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
 use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
-use crate::tui::reset_terminal_visual;
+use crate::tui::{reset_terminal_visual, write_into_scroll_region};
 use crate::tui::extension::{KeyContext, TuiExtension};
 use crate::tui::commands::build_cli_router;
 use ironhermes_core::commands::{CommandResult as CoreCommandResult, CommandRouter};
@@ -1677,10 +1677,22 @@ async fn run_agent_turn(
         .with_compression(context_length, config.agent.context_compression)
         .with_compression_count(starting_count)
         .with_streaming(Box::new(move |delta| {
-            // Stream tokens directly to stdout (D-22: stream appears inline above the prompt).
-            // Keep on stdout per RESEARCH §Pitfall 5 — ExternalPrinter is too high-frequency.
-            print!("{}", delta);
-            io::stdout().flush().ok();
+            // Phase 22.3 GAP-22.3-01 closure (Plan 22.3-11):
+            // Route every streamed token through write_into_scroll_region so
+            // the cursor is saved (DECSC), absolutely positioned to the bottom
+            // row of the DECSTBM scroll region, the payload is written +
+            // flushed, and the cursor is restored (DECRC) to its prior
+            // position (the rustyline-owned prompt row). This eliminates the
+            // streaming-clobber UAT defect: tokens land inside the scroll
+            // region instead of stomping the prompt row.
+            //
+            // Previous implementation used a raw stdout write with
+            // io::stdout().flush().ok() and had no cursor discipline: it
+            // wrote wherever the cursor had last been left (typically on
+            // the prompt row, by rustyline). The helper handles both
+            // flushing and the non-TTY fallback so log captures and CI
+            // runs are unaffected.
+            write_into_scroll_region(delta.as_bytes(), tui_stream.reserved_row_count());
             // Publish coarse activity state (best-effort; watch coalesces rapid updates).
             tui_stream.set_activity(ActivityState::Streaming);
         }))
