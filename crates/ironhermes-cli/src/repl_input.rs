@@ -123,12 +123,27 @@ pub enum ReplLine {
 /// `in_turn` is purely informational — this module does NOT change behavior
 /// based on it. The caller uses it to decide how to route the resulting
 /// [`ReplLine::Line`] (slash dispatch vs. normal input vs. discard).
+///
+/// Plan 21.7-12 (GAP-21.7-02): `reserved_rows` enables worker-thread cursor
+/// positioning. When `Some(N)` AND `in_turn == false`, the worker emits
+/// absolute-positioning ANSI for row `(terminal_rows - N)` IMMEDIATELY
+/// BEFORE `rl.readline(&prefix)` on the SAME thread as the readline paint —
+/// closing the race window between the main task and the worker. When
+/// `None` OR `in_turn == true`, the worker skips positioning (preserves
+/// the invisible mid-turn prompt behavior).
 #[derive(Debug, Clone)]
 pub struct PromptRequest {
     /// The prompt prefix string rustyline will paint (e.g. `"You: "`).
     pub prefix: String,
     /// `true` during an in-flight agent turn; `false` otherwise. Informational.
     pub in_turn: bool,
+    /// Plan 21.7-12 (GAP-21.7-02): reserved-row count for worker-thread
+    /// cursor positioning. `Some(N)` asks the worker to emit
+    /// absolute-positioning ANSI for row `(terminal_rows - N)` immediately
+    /// before `rl.readline(&prefix)` on the same thread as the readline
+    /// paint. `None` (or `in_turn: true`) skips positioning and preserves
+    /// the invisible mid-turn prompt behavior.
+    pub reserved_rows: Option<u16>,
 }
 
 /// Internal command envelope delivered to the blocking worker.
@@ -232,6 +247,37 @@ impl ReplInputChannel {
                 while let Some(cmd) = cmd_rx.blocking_recv() {
                     match cmd {
                         Command::Prompt(req, reply) => {
+                            // Plan 21.7-12 (GAP-21.7-02): worker-thread
+                            // cursor positioning. When `reserved_rows` is
+                            // Some AND we're NOT in a mid-turn invisible
+                            // prompt, emit absolute-positioning ANSI
+                            // IMMEDIATELY before `rl.readline` on THIS
+                            // thread so the cursor-move and the readline
+                            // paint cannot be separated by any other
+                            // thread's stderr writes. This is the
+                            // structural fix for the floating-prompt race
+                            // introduced when Plan 11 moved rustyline to
+                            // a worker thread: main-task positioning +
+                            // worker-thread readline left a window for
+                            // stray stdout/stderr (including the TUI
+                            // ticker) to move the cursor between the two.
+                            if let Some(reserved) = req.reserved_rows
+                                && !req.in_turn
+                            {
+                                use crossterm::tty::IsTty as _;
+                                use std::io::Write as _;
+                                let mut err = std::io::stderr();
+                                if err.is_tty()
+                                    && let Ok((_cols, rows)) =
+                                        crossterm::terminal::size()
+                                    && let Some(bytes) =
+                                        crate::tui::prompt_position_ansi(rows, reserved)
+                                {
+                                    let _ = err.write_all(&bytes);
+                                    let _ = err.flush();
+                                }
+                            }
+
                             let outcome = match rl.readline(&req.prefix) {
                                 Ok(s) => ReplLine::Line(s),
                                 Err(rustyline::error::ReadlineError::Interrupted) => {
@@ -486,6 +532,50 @@ mod tests {
         });
         let _ = h1.await;
         let _ = h2.await;
+        chan.shutdown();
+    }
+
+    /// Plan 21.7-12 P-01: `PromptRequest` round-trips `reserved_rows: Some(..)`
+    /// — schema-level regression gate that the new field carries from the
+    /// caller into the channel without being silently dropped.
+    #[test]
+    fn prompt_request_carries_reserved_rows() {
+        let req = PromptRequest {
+            prefix: "You: ".to_string(),
+            in_turn: false,
+            reserved_rows: Some(3),
+        };
+        assert_eq!(req.reserved_rows, Some(3));
+        assert_eq!(req.prefix, "You: ");
+        assert!(!req.in_turn);
+    }
+
+    /// Plan 21.7-12 P-02: `PromptRequest` with `reserved_rows: None`
+    /// preserves the mid-turn invisible-prompt shape. The default-shape
+    /// literal must still compile and the field must read back as None.
+    #[test]
+    fn prompt_request_none_reserved_rows_default_preserved() {
+        let req = PromptRequest {
+            prefix: String::new(),
+            in_turn: true,
+            reserved_rows: None,
+        };
+        assert_eq!(req.reserved_rows, None);
+        assert!(req.in_turn);
+    }
+
+    /// Plan 21.7-12 P-03: U-05 regression re-run under the new field —
+    /// proves the ExternalPrinter handoff was not regressed by adding
+    /// `reserved_rows` to PromptRequest (separate from the worker-side
+    /// positioning change, which only runs on a real TTY).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_printer_still_send_sync_clone() {
+        let (chan, printer) = ReplInputChannel::spawn(None).expect("spawn");
+        let p2 = printer.clone();
+        let h1 = tokio::spawn(async move {
+            p2.println("hello after reserved_rows".to_string());
+        });
+        let _ = h1.await;
         chan.shutdown();
     }
 }

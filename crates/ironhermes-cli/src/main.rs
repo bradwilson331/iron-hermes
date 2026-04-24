@@ -1068,6 +1068,7 @@ async fn run_chat(
         if let Err(e) = repl_input.request_prompt(ironhermes_cli::PromptRequest {
             prefix: format!("{} ", "You:".bold().green()),
             in_turn: false,
+            reserved_rows: Some(tui.reserved_row_count()),
         }) {
             eprintln!("Error: readline channel closed: {}", e);
             break;
@@ -1241,6 +1242,7 @@ async fn run_chat(
                 let _ = repl_input.request_prompt(ironhermes_cli::PromptRequest {
                     prefix: String::new(),
                     in_turn: true,
+                    reserved_rows: None,
                 });
 
                 let response: Option<String> = 'turn: loop {
@@ -1337,6 +1339,7 @@ async fn run_chat(
                                                 ironhermes_cli::PromptRequest {
                                                     prefix: String::new(),
                                                     in_turn: true,
+                                                    reserved_rows: None,
                                                 }
                                             );
                                             continue 'turn;
@@ -1355,6 +1358,7 @@ async fn run_chat(
                                                 ironhermes_cli::PromptRequest {
                                                     prefix: String::new(),
                                                     in_turn: true,
+                                                    reserved_rows: None,
                                                 }
                                             );
                                             continue 'turn;
@@ -1378,6 +1382,7 @@ async fn run_chat(
                                         ironhermes_cli::PromptRequest {
                                             prefix: String::new(),
                                             in_turn: true,
+                                            reserved_rows: None,
                                         }
                                     );
                                     continue 'turn;
@@ -1388,6 +1393,7 @@ async fn run_chat(
                                     ironhermes_cli::PromptRequest {
                                         prefix: String::new(),
                                         in_turn: true,
+                                        reserved_rows: None,
                                     }
                                 );
                                 continue 'turn;
@@ -1472,6 +1478,7 @@ async fn run_chat(
                                 ironhermes_cli::PromptRequest {
                                     prefix: String::new(),
                                     in_turn: true,
+                                    reserved_rows: None,
                                 }
                             );
                             continue 'turn;

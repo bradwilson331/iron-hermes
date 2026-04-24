@@ -318,6 +318,39 @@ fn reset_scroll_region() {
 // Prompt positioning helpers
 // ---------------------------------------------------------------------------
 
+/// Plan 21.7-12 (GAP-21.7-02): pure helper returning the ANSI byte
+/// sequence that positions the cursor at the fixed prompt row for the
+/// given `(rows, reserved)` geometry. Same inputs always produce the
+/// same bytes (deterministic; no scroll state, no TTY dependency), so
+/// this function is testable without a live terminal.
+///
+/// Returns `None` when positioning is not meaningful:
+/// - `rows < 4`: terminal too tiny (same guard as `redraw_with_extensions`).
+/// - `reserved >= rows`: reserved area overflows the terminal.
+///
+/// The returned bytes are:
+/// - `\x1b[{row};1H` (CUP — Cursor Position, 1-based row, column 1)
+/// - `\x1b[2K` (Erase-Line entire line — safer than CurrentLine because
+///   the worker does not know what may have been painted there since the
+///   last frame).
+///
+/// The worker thread writes these bytes directly to `stderr` and flushes
+/// immediately before calling `rl.readline(&prefix)`, closing the
+/// cross-thread positioning race Plan 11 opened.
+pub fn prompt_position_ansi(rows: u16, reserved: u16) -> Option<Vec<u8>> {
+    if rows < 4 || reserved >= rows {
+        return None;
+    }
+    let prompt_row = rows.saturating_sub(reserved);
+    // crossterm's MoveTo is 0-based; CUP is 1-based — so we emit
+    // `prompt_row + 1` to match the same row `prepare_prompt_with_reserve`
+    // paints when it calls `MoveTo(0, prompt_row)`.
+    let mut out = Vec::with_capacity(16);
+    use std::io::Write as _;
+    let _ = write!(&mut out, "\x1b[{};1H\x1b[2K", prompt_row + 1);
+    Some(out)
+}
+
 /// Position the terminal cursor at the fixed prompt row (row rows-reserved,
 /// outside the scroll region). Call before `rl.readline()` so user input
 /// appears at a stable position above the scanner and status bar.
@@ -901,5 +934,66 @@ mod tests {
     #[allow(dead_code)]
     fn _use_command_result() -> CommandResult {
         CommandResult::Silent
+    }
+
+    // ---- Plan 21.7-12 prompt_position_ansi tests ----
+
+    /// Plan 21.7-12: pure helper is deterministic — same inputs produce
+    /// identical bytes on every call. This is the structural property
+    /// that, combined with worker-thread emission, gives GAP-21.7-02 its
+    /// fix (floating prompt can no longer happen because the positioning
+    /// bytes are (a) deterministic, (b) emitted on the same thread as
+    /// `rl.readline`).
+    #[test]
+    fn prompt_position_ansi_is_deterministic() {
+        let a = prompt_position_ansi(30, 3).expect("valid geometry");
+        let b = prompt_position_ansi(30, 3).expect("valid geometry");
+        assert_eq!(
+            a, b,
+            "prompt_position_ansi must be pure: same (rows, reserved) MUST produce identical bytes"
+        );
+        // rows=30, reserved=3 -> prompt_row=27 (0-based) -> CUP row 28 (1-based).
+        let s = std::str::from_utf8(&a).expect("utf-8");
+        assert!(
+            s.contains("\x1b[28;1H"),
+            "expected CUP to row 28 for rows=30 reserved=3; got: {:?}",
+            s
+        );
+        assert!(
+            s.contains("\x1b[2K"),
+            "expected erase-line (\\x1b[2K); got: {:?}",
+            s
+        );
+    }
+
+    /// Plan 21.7-12: refuses invalid geometry so the worker skips the
+    /// write entirely rather than emitting a broken ANSI sequence.
+    #[test]
+    fn prompt_position_ansi_refuses_invalid_geometry() {
+        assert_eq!(
+            prompt_position_ansi(3, 3),
+            None,
+            "rows<4 must return None (tiny-terminal guard)"
+        );
+        assert_eq!(
+            prompt_position_ansi(2, 1),
+            None,
+            "rows<4 must return None even when reserved<rows"
+        );
+        assert_eq!(
+            prompt_position_ansi(5, 5),
+            None,
+            "reserved==rows must return None (reserved area overflows)"
+        );
+        assert_eq!(
+            prompt_position_ansi(5, 6),
+            None,
+            "reserved>rows must return None"
+        );
+        // Sanity: just-barely-valid geometry returns Some.
+        assert!(
+            prompt_position_ansi(4, 3).is_some(),
+            "rows=4 reserved=3 is valid (row 1 / CUP row 2)"
+        );
     }
 }
