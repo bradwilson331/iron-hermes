@@ -1031,7 +1031,16 @@ async fn run_chat(
             let assistant_msg = ChatMessage::assistant(text);
             let _ = state_store.add_message(&session_id, &assistant_msg);
             println!();
-            println!("{} {}", "Hermes:".bold().cyan(), text);
+            // Phase 22.3 GAP-22.3-01 closure (Plan 22.3-11):
+            // Route the post-turn assistant label through the same scroll-region
+            // helper as streaming tokens. Without this, when a mid-turn rustyline
+            // prompt is primed (request_prompt in_turn: true at ~main.rs:1274),
+            // this println would land on or near the prompt row and produce the
+            // same clobber the streaming-token rewrite at run_agent_turn
+            // eliminated. Append a trailing newline so the line completes inside
+            // the scroll region; DECSTBM hardware-scroll handles the rest.
+            let hermes_line = format!("{} {}\n", "Hermes:".bold().cyan(), text);
+            write_into_scroll_region(hermes_line.as_bytes(), tui.reserved_row_count());
         }
         println!();
     }
