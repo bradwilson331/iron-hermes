@@ -46,6 +46,47 @@ Plans:
 
 **Phase directory:** `.planning/phases/22-cli-feature-parity/`
 
+### Phase 22.4: ratatui-backed REPL (tmon architecture) (INSERTED)
+
+**Goal:** Replace `hermes chat`'s custom crossterm + rustyline + raw-ANSI REPL (~3,126 LOC in `crates/ironhermes-cli/src/tui/`) with a ratatui-driven REPL modelled after the `tmon` reference architecture at `/Users/twilson/code/tmon/`. Lands as a side-by-side `tui_rata/` module that defaults on for interactive TTY sessions while preserving the classic path as an explicit `--classic-tui` opt-out + `IRONHERMES_CLASSIC_TUI=1` env var + `IsTerminal` non-TTY fall-back for one cycle (D-02, D-03, D-04). Full feature parity with the existing `run_chat` wiring: AgentLoop streaming, HookRegistry (JSONL + webhook), MCP manager + `/reload-mcp`, memory_manager + MemoryTool, SubagentRegistry + TranscriptWriter, ProcessRegistry + `/agents` + `/stop`, 49-command slash router, typo suggester, BlocklistGuardrail, cron/skills/execute_code tools, `--yolo` gate + banner, CancellationToken cascade, double-Ctrl-C state machine, status pills, knight-rider scanner — 14-item parity locked by D-18. Workspace crossterm bump 0.28 → 0.29 (D-13). New deps: ratatui 0.30, tui-textarea 0.7, ansi-to-tui 8, tui-logger 0.18 (D-14). Dual-layer testing: 23-row INV-22.4-* static-grep regression suite + 8-frame ratatui TestBackend + insta snapshot suite (D-19). 19 CONTEXT decisions (D-01..D-19) serve as the requirements set — no new REQ-IDs map (Phase 21 / 22.3 precedent).
+
+**Requirements:** (none — D-01..D-19 from 22.4-CONTEXT.md are the requirements)
+
+**Depends on:** Phase 22, Phase 22.1 (TuiExtension retired in tui_rata/ per D-09 but trait kept exported for classic-tui), Phase 22.3 (`$HERMES_HOME/repl_history` contract + D-08 codec reuse)
+
+**Plans:** 11 plans
+
+Plans:
+- [ ] 22.4-00-PLAN.md — Wave 0: Workspace dep floor bump (crossterm 0.28 → 0.29 with event-stream feature; ratatui 0.30, tui-textarea 0.7, ansi-to-tui 8, tui-logger 0.18 workspace + crate deps) + cargo-tree spike confirming single ratatui compile unit (Pitfall §1). Checkpoint if spike fails → tui-textarea-2 fallback approval.
+- [ ] 22.4-01-PLAN.md — Wave 1: tui_rata/ scaffold + verbatim-lift pure cores (knight_rider.rs + double_ctrl_c.rs); create lib.rs target so integration tests can `use ironhermes_cli::tui_rata::*`.
+- [ ] 22.4-02-PLAN.md — Wave 2: port `tui/keybindings.rs` → `tui_rata/keybindings.rs` with TuiExtension dep surgically removed per D-09 (widget-slot system retired in tui_rata/).
+- [ ] 22.4-03-PLAN.md — Wave 3: port `tui/status_line.rs` + `tui/pills.rs` → `tui_rata/status_line.rs`; swap `colored::ColoredString` output for ratatui `Line<'static>` of styled `Span`s; pill palette Cyan/Magenta/Green/Yellow locked by regression test.
+- [ ] 22.4-04-PLAN.md — Wave 4: `tui_rata/stream_events.rs` (D-17 canonical 8-variant enum — Started, Delta, ToolCall, ToolProgress, ToolResult, Finished, Error, Cancelled) + `tui_rata/history.rs` (ReplHistory with U+001F unit-separator codec per D-08, 1000-entry cap per D-07, dedupe-consecutive, rustyline-compatible load/save).
+- [ ] 22.4-05-PLAN.md — Wave 5: `tui_rata/app.rs` — central App struct with all 14 D-18 parity-list fields (AgentLoop/HookRegistry/McpManager/MemoryManager/SubagentRegistry/ProcessRegistry/CommandRouter Arc handles + CancellationToken cascade + StatusLineState + knight_rider_tick + DoubleCtrlCState + ReplHistory + yolo_enabled). Verbatim scroll math from tmon (scroll_up/scroll_down/scroll_indicator/reconcile_scroll/transcript_max_scroll/transcript_line_count/wrapped_line_count). Event handlers (handle_key with D-06 Up/Down=history-recall + D-08 Enter=submit + KeyEventKind::Press filter per Pitfall 7; handle_mouse; handle_stream_event 8-variant match; handle_ctrl_c_key / handle_ctrl_c_signal; on_tick; submit stubs channel + cancel_child). Test-only constructors `App::new_test_empty()` + `App::new_test_with_messages()` gated on `test-support` feature for plan 22.4-10 snapshots.
+- [ ] 22.4-06-PLAN.md — Wave 6: `tui_rata/ui.rs` pure frame render — 4-chunk Vertical Layout (Min(5) transcript + Length(1) knight-rider + Length(1) status pills + Length(3) tui-textarea input per CONTEXT §specifics); transcript Paragraph with scroll((transcript_scroll, 0)) + Wrap{trim:false} + bordered block titled `Chat [{scroll_indicator}]`; knight-rider via `ansi_to_tui::IntoText`; status pills via `render_status_line_ratatui`; cursor via `frame.set_cursor_position`.
+- [ ] 22.4-07-PLAN.md — Wave 7: `tui_rata/event_loop.rs` + `run_chat_ratatui` async entry point. `ratatui::init()` / `ratatui::restore()` D-15 primary path + RAII MouseCaptureGuard per D-01. `TuiTracingSubscriberLayer` installed before `ratatui::init()` per Pitfall 2. 14-item D-18 parity wiring ported from classic `main.rs::run_chat` (lines 669–1800) preserving registration order. 4-arm `tokio::select!` main loop over EventStream + pending_rx + ctrl_c (pinned once per Pitfall 6) + 100ms tick per D-16 canonical shape. Per-turn `tokio::spawn` bridge with `UnboundedSender<StreamEvent>` per D-17. SIGWINCH tolerance via per-iteration `terminal.size()?` re-query. EventStream local to event_loop function per Pitfall 10.
+- [ ] 22.4-08-PLAN.md — Wave 8: `main.rs` integration — add `classic_tui: bool` to Cli struct with `#[arg(long = "classic-tui")]`; `should_use_classic_tui(cli)` helper implementing D-03/D-04 precedence (CLI flag > env var > non-TTY IsTerminal gate). Replace `Commands::Chat` arm body + bare-hermes arm body with four-way branch routing to `tui_rata::run_chat_ratatui` vs classic `run_chat`. Gate the existing `tracing_subscriber::fmt().init()` so ratatui-for-chat path defers to `run_chat_ratatui` (Pitfall 2). `print_yolo_banner_to_stderr` fires pre-alt-screen in ratatui branch. `run_single` + `run_gateway` UNTOUCHED (D-02 + 22.3 D-15 run_chat-only precedent).
+- [ ] 22.4-09-PLAN.md — Wave 9: `crates/ironhermes-cli/tests/invariants_22_4.rs` — 23 static-grep regression gates INV-22.4-01..23 per D-19 Layer 1 + RESEARCH §INV-22.4 anchor table + PATTERNS.md 23-row map. Locks all 14 D-18 parity-list wiring call sites + structural invariants (ratatui init/restore pair, EventStream local to event_loop, KeyEventKind::Press filter, mouse-capture pair, unit-separator codec, CancellationToken cascade ≥ 2 child tokens). Sibling file pattern following invariants_22_3_streaming.rs. Zero new dev-deps.
+- [ ] 22.4-10-PLAN.md — Wave 9: `crates/ironhermes-cli/tests/tui_rata_snapshots.rs` — 8 canonical-frame ratatui `TestBackend` + `insta` snapshot tests per D-19 Layer 2: empty transcript, 2-message conversation, in-flight streaming partial delta, tool-call activity row, scroll-active indicator, double-Ctrl-C pending-exit warning, error banner, 3-line multi-line input. Gated on `test-support` feature. Checkpoint for operator `cargo insta review` + visual verification before snapshot acceptance.
+
+**Wave structure:**
+- Wave 0: 22.4-00 (workspace dep floor + spike checkpoint — autonomous except checkpoint)
+- Wave 1: 22.4-01 (tui_rata/ scaffold + pure-core lifts — autonomous)
+- Wave 2: 22.4-02 (keybindings port — depends on 01, autonomous)
+- Wave 3: 22.4-03 (status_line port — depends on 02, autonomous)
+- Wave 4: 22.4-04 (stream_events + history — depends on 03, autonomous)
+- Wave 5: 22.4-05 (App struct + scroll math + handlers — depends on 04, autonomous)
+- Wave 6: 22.4-06 (ui.rs frame render — depends on 05, autonomous)
+- Wave 7: 22.4-07 (event_loop + run_chat_ratatui — depends on 06, autonomous)
+- Wave 8: 22.4-08 (main.rs Commands::Chat dispatch — depends on 07, autonomous)
+- Wave 9 parallel: 22.4-09 (INV regression tests — depends on 08, autonomous) + 22.4-10 (snapshot tests — depends on 08, NOT autonomous — human insta review checkpoint)
+
+Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-ownership conflicts force a linear chain. Waves 0–1 and 9's two plans are the only genuinely-parallel opportunities.
+
+**Live-TTY HUMAN-UAT:** Per CONTEXT D-19 Layer 3, after all 11 plans land the operator re-runs the 3-concurrent-subagent LoRA-research scenario from `22.3-UAT-EVIDENCE.md` against `tui_rata/` and records pass/fail in `22.4-HUMAN-UAT.md`. Gates the follow-up phase (22.5) that deletes classic-tui.
+
+**Phase directory:** `.planning/phases/22.4-ratatui-backed-repl-tmon-architecture/`
+
 ### Phase 22.3: REPL UX hardening (visual stability + reset + unified history) (INSERTED)
 
 **Goal:** Close six concrete TTY-UX defects (D-1 ticker/output clobber, D-2 typo suggestions, D-3 alias→transcript race, D-4 banner bleed, D-6 `/clear` visual reset, D-7 unified persistent history) captured verbatim in 22.3-UAT-EVIDENCE.md, and re-pass the UAT scenario on a live TTY. UI-SPEC-locked contract (22.3-UI-SPEC.md): PaintCoordinator discipline, slash output block format, `/clear` (TTY visual reset, no history mutation), unified history at `$HERMES_HOME/repl_history` with rustyline 15 API (set_history_ignore_dups not HistoryDuplicates::Prev), TranscriptWriter touch-on-register, hand-rolled Levenshtein typo suggester (no new crate per Phase 21 D-18), and six static-grep regression invariants INV-22.3-01..06. Fix-up phase — no REQ-IDs map; UI-SPEC + UAT re-run serve as the requirements set.
