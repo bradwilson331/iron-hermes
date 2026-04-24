@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 22.3-08-PLAN.md — WR-02 closed, stdout flush prepended to reset_terminal_visual
-last_updated: "2026-04-24T08:17:22.185Z"
-last_activity: 2026-04-24 -- Phase --phase execution started
+stopped_at: Completed 22.3-09-PLAN.md — WR-03 closed, ReplInputChannel::shutdown now joins worker thread
+last_updated: "2026-04-24T08:25:00Z"
+last_activity: 2026-04-24 -- Phase 22.3 Plan 09 completed (WR-03 closed)
 progress:
   total_phases: 14
   completed_phases: 12
   total_plans: 70
-  completed_plans: 67
+  completed_plans: 68
   percent: 96
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: --phase (22.3) — EXECUTING
-Plan: 1 of --name
-Status: Executing Phase --phase
-Last activity: 2026-04-24 -- Phase --phase execution started
+Phase: 22.3 — EXECUTING
+Plan: 9 of 12
+Status: Executing Phase 22.3 (WR-03 closed via Plan 22.3-09)
+Last activity: 2026-04-24 -- Phase 22.3 Plan 09 completed (WR-03 closed)
 
 Progress: [██████████] 96%
 
@@ -126,6 +126,7 @@ Progress: [██████████] 96%
 | Phase 22.3 P5 | 545 | 3 tasks | 5 files |
 | Phase 22.3 P6 | 8 | 1 tasks | 1 files |
 | Phase 22.3 P8 | 3 | 1 tasks | 1 files |
+| Phase 22.3 P9 | 3 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -283,6 +284,8 @@ Recent decisions affecting current work:
 - 22.3-06: INV-22.3-05 wrong-API guards use receiver-call form rl.set_history_duplicates( and import form to avoid false-positive on Plan 22.3-03 educational comment at repl_input.rs:249
 - 22.3-08 (WR-02): stdout flush prepended to reset_terminal_visual BEFORE is_tty guard — unconditional flush drains buffered streaming tokens even when stderr is piped but stdout is a TTY
 - 22.3-08: flush placed AFTER in-function `use std::io::Write as _;` (trait import already present) and BEFORE `let mut out = stderr();` — zero new use-statements, zero reordering of pre-existing lines
+- 22.3-09 (WR-03): ReplInputChannel::shutdown signature widened from `self` to `mut self` (binding-mode only — no call-site edits required) so `self.worker.take()` can extract the JoinHandle for explicit `handle.join()` after the Shutdown command send; send-then-join ordering is mandatory because the worker is blocked on `cmd_rx.blocking_recv()` until it observes Shutdown
+- 22.3-09: in-body `// Phase 22.3 WR-03` tag added (in addition to doc-comment WR-03 reference) so the acceptance awk range from signature to closing brace contains the marker — future readers can trace the fix without chasing doc-comment refactors
 
 ### Roadmap Evolution
 
@@ -313,8 +316,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T08:17:12.122Z
-Stopped at: Completed 22.3-08-PLAN.md — WR-02 closed, stdout flush prepended to reset_terminal_visual
+Last session: 2026-04-24T08:25:00Z
+Stopped at: Completed 22.3-09-PLAN.md — WR-03 closed, ReplInputChannel::shutdown now joins worker thread
 Resume file: None
 
 **Planned Phase:** 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — 12 plans — 2026-04-24T05:26:03.531Z
