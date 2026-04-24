@@ -805,8 +805,15 @@ async fn run_chat(
     // SubagentProgressCallback below so the `[subagent-N] ...` ticker no
     // longer fragments mid-turn input (observed in Phase 21.7 UAT 1
     // re-run: "/ag  [subagent-3] Running: ...  ent"-style line breakage).
-    let (mut repl_input, external_printer) = ironhermes_cli::ReplInputChannel::spawn(None)
-        .context("Failed to initialize concurrent readline channel")?;
+    // Phase 22.3 D-08 / UI-SPEC HIST-4: persist REPL history across restarts
+    // at $HERMES_HOME/repl_history. Phase 21.6 ensure_home_dirs() guarantees
+    // $HERMES_HOME exists; rustyline creates the file on first save.
+    // Scope: run_chat only per CONTEXT D-15 (run_single / run_gateway have no
+    // interactive REPL with up-arrow history).
+    let (mut repl_input, external_printer) = ironhermes_cli::ReplInputChannel::spawn(Some(
+        hermes_home.join("repl_history"),
+    ))
+    .context("Failed to initialize concurrent readline channel")?;
 
     // D-19 / Plan 21.7-07 (D-04 / ISS-05 / Pitfall 8): CLI tree-view progress
     // callback for subagent tool calls + status-line pill refresh.
