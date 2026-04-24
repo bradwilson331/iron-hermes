@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 22.3-05-PLAN.md — integration wiring (run_chat), workspace build GREEN
-last_updated: "2026-04-24T04:21:47.671Z"
+status: verifying
+stopped_at: Completed 22.3-06-PLAN.md — Phase 22.3 final plan, six static-grep invariants GREEN
+last_updated: "2026-04-24T04:30:25.044Z"
 last_activity: 2026-04-24
 progress:
   total_phases: 14
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 64
-  completed_plans: 63
-  percent: 98
+  completed_plans: 64
+  percent: 100
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-24
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -124,6 +124,7 @@ Progress: [██████████] 98%
 | Phase 22.3 P3 | 176 | 2 tasks | 2 files |
 | Phase 22.3 P4 | 15 | 3 tasks | 5 files |
 | Phase 22.3 P5 | 545 | 3 tasks | 5 files |
+| Phase 22.3 P6 | 8 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -277,6 +278,8 @@ Recent decisions affecting current work:
 - Gateway gets silent no-op ResetTerminal arm — no TTY in gateway context, added for exhaustiveness
 - reset_terminal_visual placed in render.rs between prompt_position_ansi and prepare_prompt_with_reserve
 - ALIAS-2 error-copy deferred to plan 22.3-06 — variable context mismatch at handlers.rs:254
+- 22.3-06: INV-22.3-02 uses print_banner(); (with semicolon) to count only call sites, not fn definition or doc comments
+- 22.3-06: INV-22.3-05 wrong-API guards use receiver-call form rl.set_history_duplicates( and import form to avoid false-positive on Plan 22.3-03 educational comment at repl_input.rs:249
 
 ### Roadmap Evolution
 
@@ -307,8 +310,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T04:21:47.667Z
-Stopped at: Completed 22.3-05-PLAN.md — integration wiring (run_chat), workspace build GREEN
+Last session: 2026-04-24T04:30:25.040Z
+Stopped at: Completed 22.3-06-PLAN.md — Phase 22.3 final plan, six static-grep invariants GREEN
 Resume file: None
 
 **Planned Phase:** 22.3 (REPL UX hardening (visual stability + reset + unified history)) — 6 plans — 2026-04-24T03:45:21.397Z
