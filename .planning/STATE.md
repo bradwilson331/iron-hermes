@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 22.3-12-PLAN.md — GAP-22.3-01 structurally locked via INV-22.3-07/08/09 static-grep gates
-last_updated: "2026-04-24T10:37:16.844Z"
+stopped_at: Phase 22.4 context gathered
+last_updated: "2026-04-24T12:16:16.067Z"
 last_activity: 2026-04-24
 progress:
-  total_phases: 14
+  total_phases: 15
   completed_phases: 13
   total_plans: 70
   completed_plans: 70
@@ -307,6 +307,7 @@ Recent decisions affecting current work:
 - Phase 21.7 inserted after Phase 21: Multi-agent and autonomous agents and sandbox status (INSERTED)
 - Phase 21.8 inserted after Phase 21: skill remote download and install from skills.sh (URGENT)
 - Phase 22.3 inserted after Phase 22: REPL UX hardening (visual stability + reset + unified history) (URGENT)
+- Phase 22.4 inserted after Phase 22: ratatui-backed REPL (tmon architecture) (URGENT)
 
 ### Pending Todos
 
@@ -324,8 +325,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T10:37:16.840Z
-Stopped at: Completed 22.3-12-PLAN.md — GAP-22.3-01 structurally locked via INV-22.3-07/08/09 static-grep gates
-Resume file: None
+Last session: --stopped-at
+Stopped at: Phase 22.4 context gathered
+Resume file: --resume-file
 
 **Planned Phase:** 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — 12 plans — 2026-04-24T05:26:03.531Z
