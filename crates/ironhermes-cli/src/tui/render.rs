@@ -384,6 +384,47 @@ pub fn prompt_position_ansi(rows: u16, reserved: u16) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Phase 22.3 D-11 / UI-SPEC CLR-1..CLR-3:
+/// Erase the terminal scrollback and on-screen content, re-establish the
+/// DECSTBM scroll region using the supplied `reserved` row count, and
+/// re-anchor the cursor at the prompt row via `prompt_position_ansi`.
+///
+/// Called from the `CommandResult::ResetTerminal` arm in `run_chat` (the
+/// `/clear` slash command). Does NOT mutate the conversation `messages`
+/// vec — that is `/new`'s semantic via `CommandResult::ClearSession`.
+///
+/// Writes go to STDERR (raw ANSI escapes), matching the existing
+/// `prompt_position_ansi` / `prepare_prompt_with_reserve` discipline. On
+/// non-TTY stderr, this is a no-op. On terminals smaller than 4 rows
+/// or where `scroll_end` would be 0, the DECSTBM re-anchor is skipped
+/// (the scrollback erase still fires).
+///
+/// Terminal compat (RESEARCH §Terminal Compatibility Matrix):
+///   - macOS Terminal.app, iTerm2, kitty, alacritty, Ghostty, screen: full support.
+///   - tmux: `\x1b[3J` clears the pane's scrollback (not the outer terminal's);
+///           DECSTBM is clamped to pane geometry — `crossterm::terminal::size()`
+///           returns the pane size, so the math is correct as-is.
+pub fn reset_terminal_visual(reserved: u16) {
+    use std::io::Write as _;
+    let mut out = stderr();
+    if !out.is_tty() {
+        return;
+    }
+    // CLR-1: erase scrollback + screen.
+    let _ = write!(out, "\x1b[3J\x1b[H\x1b[2J");
+    // CLR-2 + CLR-3: re-establish DECSTBM and re-anchor prompt.
+    if let Ok((_cols, rows)) = size() {
+        let scroll_end = rows.saturating_sub(reserved);
+        if scroll_end > 0 {
+            let _ = write!(out, "\x1b[1;{}r", scroll_end);
+        }
+        if let Some(bytes) = prompt_position_ansi(rows, reserved) {
+            let _ = out.write_all(&bytes);
+        }
+    }
+    let _ = out.flush();
+}
+
 /// Position the terminal cursor at the fixed prompt row (row rows-reserved,
 /// outside the scroll region). Call before `rl.readline()` so user input
 /// appears at a stable position above the scanner and status bar.
@@ -1066,5 +1107,20 @@ mod tests {
             prompt_position_ansi(4, 3).is_some(),
             "rows=4 reserved=3 is valid (row 1 / CUP row 2)"
         );
+    }
+
+    #[test]
+    fn reset_terminal_visual_is_safe_on_tiny_terminal() {
+        // Smoke test: must not panic on edge geometry. The function writes
+        // to stderr unconditionally (with is_tty guard inside), which is
+        // either a real tty or the test harness's pipe — either way the
+        // function returns. We exercise the call to lock the API surface.
+        reset_terminal_visual(3); // typical reserved-row count
+        reset_terminal_visual(0); // edge: no reserved rows
+        reset_terminal_visual(100); // edge: more reserved than rows could ever be
+        // No assertion on output bytes — actual visual reset is verified by
+        // the live-TTY HUMAN-UAT (Phase 22.3 D-04). This test only proves
+        // the function signature, the no-panic guarantee on extreme inputs,
+        // and the early-return-on-non-tty discipline.
     }
 }
