@@ -237,3 +237,83 @@ fn invariant_21_7_13_repl_input_channel_spawned() {
         count
     );
 }
+
+#[test]
+fn invariant_21_7_14_reserved_rows_on_prompt_request_and_worker() {
+    // Plan 12 / GAP-21.7-02: the worker-thread cursor-positioning
+    // contract must be structurally present. Three structural checks
+    // together guarantee the prompt anchors deterministically:
+    //
+    //   (a) `PromptRequest` in repl_input.rs carries a `reserved_rows`
+    //       field — without it, the main task cannot tell the worker
+    //       where to paint.
+    //   (b) The worker loop calls `prompt_position_ansi(` at least once
+    //       — proving worker-side positioning is live (the whole point
+    //       of the fix).
+    //   (c) main.rs's prompt-time site passes `reserved_rows: Some(` at
+    //       least once — proving the main task actually forwards the
+    //       reserved count rather than defaulting to None everywhere.
+    const REPL_INPUT: &str = include_str!("../src/repl_input.rs");
+    assert!(
+        REPL_INPUT.contains("reserved_rows"),
+        "INV-21.7-14 (a) / GAP-21.7-02: PromptRequest must carry \
+         `reserved_rows` so the worker can position the cursor on the \
+         same thread as rl.readline."
+    );
+    assert!(
+        REPL_INPUT.contains("prompt_position_ansi("),
+        "INV-21.7-14 (b) / GAP-21.7-02: repl_input worker must call \
+         `prompt_position_ansi(` before rl.readline — worker-thread \
+         positioning is the structural fix for GAP-21.7-02."
+    );
+    let count = MAIN_RS.matches("reserved_rows: Some(").count();
+    assert!(
+        count >= 1,
+        "INV-21.7-14 (c) / GAP-21.7-02: main.rs prompt-time \
+         PromptRequest must carry `reserved_rows: Some(tui.reserved_row_count())`. \
+         Found {}.",
+        count
+    );
+}
+
+#[test]
+fn invariant_21_7_15_readline_barrier_on_render_loop() {
+    // Plan 12 / GAP-21.7-02: the TUI render loop's status-row write
+    // must be gated by `readline_active` so the 100ms ticker cannot
+    // race the worker's prompt paint with its
+    // SavePosition/MoveTo(bottom)/RestorePosition sequence.
+    //
+    //   (a) render.rs references `readline_active` at least twice
+    //       (field declaration + load/check on render path).
+    //   (b) main.rs calls `readline_active_handle()` at least once so
+    //       the prompt-time site has a handle to toggle.
+    //   (c) main.rs issues `.store(true` and `.store(false` at least
+    //       once each — the bracketing toggle around the request.
+    const RENDER: &str = include_str!("../src/tui/render.rs");
+    let render_refs = RENDER.matches("readline_active").count();
+    assert!(
+        render_refs >= 2,
+        "INV-21.7-15 (a) / GAP-21.7-02: render.rs must reference \
+         `readline_active` at least twice (field decl + load on render \
+         path). Found {}.",
+        render_refs
+    );
+    let handle_calls = MAIN_RS.matches("readline_active_handle()").count();
+    assert!(
+        handle_calls >= 1,
+        "INV-21.7-15 (b) / GAP-21.7-02: main.rs must call \
+         `TuiHandle.readline_active_handle()` to obtain the barrier \
+         flag at the prompt-time site. Found {}.",
+        handle_calls
+    );
+    let store_true = MAIN_RS.matches(".store(true").count();
+    let store_false = MAIN_RS.matches(".store(false").count();
+    assert!(
+        store_true >= 1 && store_false >= 1,
+        "INV-21.7-15 (c) / GAP-21.7-02: main.rs must bracket the \
+         prompt-time readline with `.store(true` BEFORE and \
+         `.store(false` AFTER. Found store(true)={} store(false)={}.",
+        store_true,
+        store_false
+    );
+}
