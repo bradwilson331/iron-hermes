@@ -95,6 +95,12 @@ pub type StreamCallback = Box<dyn Fn(&str) + Send + Sync>;
 /// Callback for tool execution progress.
 pub type ToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 
+/// Phase 22.4 D-17 / CR-02 gap closure. Fired on every tool completion
+/// (success OR failure), matching the 6 fire_hook(HookEventKind::ToolCompleted)
+/// sites in execute_tool_call. Consumed by the tui_rata REPL to emit
+/// StreamEvent::ToolResult { name, ok } to the UI event loop. `bool` = success.
+pub type ToolResultCallback = Box<dyn Fn(&str, bool) + Send + Sync>;
+
 /// The main agent loop that orchestrates LLM calls and tool execution.
 pub struct AgentLoop {
     client: AnyClient,
@@ -103,6 +109,10 @@ pub struct AgentLoop {
     compressor: Option<Mutex<ContextCompressor>>,
     stream_callback: Option<StreamCallback>,
     tool_progress_callback: Option<ToolProgressCallback>,
+    /// Phase 22.4 D-17 / CR-02 gap closure: per-tool completion callback for
+    /// the tui_rata REPL's StreamEvent::ToolResult wiring. Parallel to
+    /// tool_progress_callback (which fires pre-execution with args preview).
+    tool_result_callback: Option<ToolResultCallback>,
     streaming: bool,
     hook_registry: Option<Arc<HookRegistry>>,
     request_id: String,
@@ -165,6 +175,7 @@ impl AgentLoop {
             compressor: None,
             stream_callback: None,
             tool_progress_callback: None,
+            tool_result_callback: None,
             streaming: false,
             hook_registry: None,
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -293,6 +304,15 @@ impl AgentLoop {
 
     pub fn with_tool_progress(mut self, callback: ToolProgressCallback) -> Self {
         self.tool_progress_callback = Some(callback);
+        self
+    }
+
+    /// Phase 22.4 D-17 / CR-02 gap closure. Callback fires after every tool
+    /// completion with `(tool_name, success)`. Use to drive UI elements that
+    /// surface per-call success/failure (e.g. tui_rata REPL's ToolResult
+    /// StreamEvent). Parallel to `with_tool_progress` (which fires pre-execution).
+    pub fn with_tool_result(mut self, callback: ToolResultCallback) -> Self {
+        self.tool_result_callback = Some(callback);
         self
     }
 
@@ -878,6 +898,9 @@ impl AgentLoop {
                         result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
                         duration_ms: 0,
                     });
+                    if let Some(ref cb) = self.tool_result_callback {
+                        cb(name, false);
+                    }
 
                     return err_msg;
                 }
@@ -909,6 +932,9 @@ impl AgentLoop {
                     result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
                     duration_ms: 0,
                 });
+                if let Some(ref cb) = self.tool_result_callback {
+                    cb(name, false);
+                }
 
                 // Return the formatted error as the tool_result so the LLM sees the
                 // same error-shaped string it saw pre-07.4.
@@ -970,6 +996,9 @@ impl AgentLoop {
                                     result_preview: ironhermes_hooks::event::preview(&s, 200),
                                     duration_ms: tool_duration,
                                 });
+                                if let Some(ref cb) = self.tool_result_callback {
+                                    cb(name, true);
+                                }
                                 s
                             }
                             Err(e) => {
@@ -979,6 +1008,9 @@ impl AgentLoop {
                                     result_preview: ironhermes_hooks::event::preview(&e, 200),
                                     duration_ms: tool_duration,
                                 });
+                                if let Some(ref cb) = self.tool_result_callback {
+                                    cb(name, false);
+                                }
                                 e
                             }
                         };
@@ -997,6 +1029,9 @@ impl AgentLoop {
                             result_preview: ironhermes_hooks::event::preview(&result, 200),
                             duration_ms,
                         });
+                        if let Some(ref cb) = self.tool_result_callback {
+                            cb(name, true);
+                        }
 
                         // CTX-03/CTX-04: progressive subdirectory discovery for file-access tools
                         let mut final_result = result;
@@ -1025,6 +1060,9 @@ impl AgentLoop {
                             result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
                             duration_ms,
                         });
+                        if let Some(ref cb) = self.tool_result_callback {
+                            cb(name, false);
+                        }
                         err_msg
                     }
                 }
