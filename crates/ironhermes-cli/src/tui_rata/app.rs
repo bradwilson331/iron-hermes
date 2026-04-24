@@ -27,13 +27,16 @@ use crate::tui_rata::stream_events::StreamEvent;
 
 // Concrete paths — grep-verified iteration 2.
 use ironhermes_agent::agent_loop::AgentLoop;
+use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
+use ironhermes_agent::AnyClient;
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::types::{ChatMessage, MessageContent, Role};
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
+use ironhermes_tools::ToolRegistry;
 
 // ── AppDeps ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +57,13 @@ pub struct AppDeps {
     pub status_initial: StatusLineState,
     pub yolo_enabled: bool,
     pub cancel_parent: CancellationToken,
+    // Plan 22.4-07 additions: needed by spawn_turn to build per-turn AgentLoops
+    pub client: AnyClient,
+    pub registry: Arc<RwLock<ToolRegistry>>,
+    pub budget: BudgetHandle,
+    pub context_length: usize,
+    pub config_compression: f64,
+    pub max_turns: usize,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -102,6 +112,13 @@ pub struct App {
     pub subagent_registry: Arc<RwLock<SubagentRegistry>>,
     pub process_registry: Arc<RwLock<ProcessRegistry>>,
     pub command_router: Arc<CommandRouter>,
+    // Plan 22.4-07: spawn_turn needs these to build per-turn AgentLoops
+    pub client: AnyClient,
+    pub registry: Arc<RwLock<ToolRegistry>>,
+    pub budget: BudgetHandle,
+    pub context_length: usize,
+    pub config_compression: f64,
+    pub max_turns: usize,
 }
 
 impl App {
@@ -138,6 +155,12 @@ impl App {
             subagent_registry: deps.subagent_registry,
             process_registry: deps.process_registry,
             command_router: deps.command_router,
+            client: deps.client,
+            registry: deps.registry,
+            budget: deps.budget,
+            context_length: deps.context_length,
+            config_compression: deps.config_compression,
+            max_turns: deps.max_turns,
         }
     }
 
@@ -637,7 +660,18 @@ fn test_message(role: &str, body: &str) -> ChatMessage {
 
 #[cfg(feature = "test-support")]
 fn test_deps() -> AppDeps {
+    use ironhermes_agent::{AnyClient, agent_loop::AgentLoop};
+    use ironhermes_agent::budget::BudgetHandle;
     use ironhermes_core::commands::registry::build_registry;
+    use ironhermes_tools::ToolRegistry;
+
+    let test_client = AnyClient::ChatCompletions(ironhermes_agent::client::LlmClient::new(
+        "http://localhost:11434",
+        "test-key",
+        "test-model",
+    ));
+    let test_registry = Arc::new(tokio::sync::RwLock::new(ToolRegistry::new()));
+
     AppDeps {
         agent_loop: Arc::new(AgentLoop::for_tests()),
         hook_registry: Arc::new(HookRegistry::new(ironhermes_hooks::HooksConfig::default())),
@@ -656,6 +690,12 @@ fn test_deps() -> AppDeps {
         status_initial: StatusLineState::default(),
         yolo_enabled: false,
         cancel_parent: CancellationToken::new(),
+        client: test_client,
+        registry: test_registry,
+        budget: BudgetHandle::new(10),
+        context_length: 8192,
+        config_compression: 0.8,
+        max_turns: 10,
     }
 }
 

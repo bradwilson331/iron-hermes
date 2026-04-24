@@ -11,9 +11,12 @@
 pub mod app;
 pub mod commands;
 pub mod double_ctrl_c;
+pub mod event_loop;
 pub mod history;
 pub mod keybindings;
 pub mod knight_rider;
 pub mod status_line;
 pub mod stream_events;
 pub mod ui;
+
+pub use event_loop::run_chat_ratatui;
