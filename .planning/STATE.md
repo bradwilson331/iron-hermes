@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 22.3-02-PLAN.md — transcript touch on registration
-last_updated: "2026-04-24T03:57:06.601Z"
+stopped_at: Completed 22.3-03-PLAN.md — rustyline persistent history activation
+last_updated: "2026-04-24T04:02:43.397Z"
 last_activity: 2026-04-24
 progress:
   total_phases: 14
   completed_phases: 12
   total_plans: 64
-  completed_plans: 60
-  percent: 94
+  completed_plans: 61
+  percent: 95
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-04-24
 
-Progress: [█████████░] 94%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
@@ -121,6 +121,7 @@ Progress: [█████████░] 94%
 | Phase 21.2 P11 | 25 | 2 tasks | 7 files |
 | Phase 22.3 P1 | 2 | 1 tasks | 2 files |
 | Phase 22.3 P2 | 2 | 3 tasks | 3 files |
+| Phase 22.3 P3 | 176 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -268,6 +269,8 @@ Recent decisions affecting current work:
 - 22.3-01: suggest_typo placed in commands/typo.rs (not inline in handlers.rs) for testability per CONTEXT Claude's Discretion
 - 22.3 Plan 02: tempfile variant A chosen — tempfile already a dev-dep in ironhermes-agent; no new dep per Phase 21 D-18
 - 22.3 Plan 02: touch() fires BEFORE SubagentRegistry::register — corrects CONTEXT D-07 inversion per RESEARCH §Wiring Sites §1
+- 22.3-03: Corrected rustyline 15 API — set_history_ignore_dups(true) not set_history_duplicates(HistoryDuplicates::Prev) (non-existent)
+- 22.3-03: Added use rustyline::config::Configurer import (Configurer trait required for history config methods)
 
 ### Roadmap Evolution
 
@@ -298,8 +301,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T03:57:06.597Z
-Stopped at: Completed 22.3-02-PLAN.md — transcript touch on registration
+Last session: 2026-04-24T04:02:43.393Z
+Stopped at: Completed 22.3-03-PLAN.md — rustyline persistent history activation
 Resume file: None
 
 **Planned Phase:** 22.3 (REPL UX hardening (visual stability + reset + unified history)) — 6 plans — 2026-04-24T03:45:21.397Z
