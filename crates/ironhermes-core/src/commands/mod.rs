@@ -140,6 +140,12 @@ pub enum CommandResult {
     Quit,
     /// Clear session history
     ClearSession,
+    /// Phase 22.3 D-06 / UI-SPEC CLR-8: TTY visual reset (scrollback wipe +
+    /// DECSTBM re-anchor + prompt re-anchor). Does NOT mutate `messages` —
+    /// that is `ClearSession`/`NewSession` semantics for `/new`. The REPL
+    /// loop in `main.rs` matches this variant and calls
+    /// `tui::render::reset_terminal_visual(reserved_row_count)`.
+    ResetTerminal,
     /// Start a new session, display message
     NewSession { message: String },
     /// Not a built-in command; pass input to agent as normal message
@@ -439,6 +445,7 @@ mod tests {
         let _error = CommandResult::Error("err".to_string());
         let _quit = CommandResult::Quit;
         let _clear = CommandResult::ClearSession;
+        let _reset = CommandResult::ResetTerminal;
         let _new = CommandResult::NewSession {
             message: "msg".to_string(),
         };
