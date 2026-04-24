@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 22.3-01-PLAN.md — typo suggester module
-last_updated: "2026-04-24T03:53:02.494Z"
+stopped_at: Completed 22.3-02-PLAN.md — transcript touch on registration
+last_updated: "2026-04-24T03:57:06.601Z"
 last_activity: 2026-04-24
 progress:
   total_phases: 14
   completed_phases: 12
   total_plans: 64
-  completed_plans: 59
-  percent: 92
+  completed_plans: 60
+  percent: 94
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 22.3 (repl-ux-hardening-visual-stability-reset-unified-history) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-04-24
 
-Progress: [█████████░] 92%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -120,6 +120,7 @@ Progress: [█████████░] 92%
 | Phase 21.2 P09 | 8 | 2 tasks | 2 files |
 | Phase 21.2 P11 | 25 | 2 tasks | 7 files |
 | Phase 22.3 P1 | 2 | 1 tasks | 2 files |
+| Phase 22.3 P2 | 2 | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -265,6 +266,8 @@ Recent decisions affecting current work:
 - Phase 21.2 Plan 11: Rule 3 auto-fix — crates/ironhermes-cli/src/mcp_config.rs destructures (client, child) tuple after connect_stdio/connect_http signature change; dropping child at end-of-scope relies on kill_on_drop(true) for stdio reaper.
 - Phase 21.2 Plan 11: regression test shutdown_all_returns_within_timeout_when_stdio_child_blocks pass time 2.51s vs 5s outer bound proves kill_on_drop + 2s JoinHandle timeout fully close GAP-8 at user-facing level under Option B.
 - 22.3-01: suggest_typo placed in commands/typo.rs (not inline in handlers.rs) for testability per CONTEXT Claude's Discretion
+- 22.3 Plan 02: tempfile variant A chosen — tempfile already a dev-dep in ironhermes-agent; no new dep per Phase 21 D-18
+- 22.3 Plan 02: touch() fires BEFORE SubagentRegistry::register — corrects CONTEXT D-07 inversion per RESEARCH §Wiring Sites §1
 
 ### Roadmap Evolution
 
@@ -295,8 +298,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-24T03:53:02.490Z
-Stopped at: Completed 22.3-01-PLAN.md — typo suggester module
+Last session: 2026-04-24T03:57:06.597Z
+Stopped at: Completed 22.3-02-PLAN.md — transcript touch on registration
 Resume file: None
 
 **Planned Phase:** 22.3 (REPL UX hardening (visual stability + reset + unified history)) — 6 plans — 2026-04-24T03:45:21.397Z
