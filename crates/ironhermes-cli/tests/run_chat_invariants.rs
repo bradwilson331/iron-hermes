@@ -157,10 +157,12 @@ fn inv_5_no_stdout_prints_in_tui_module() {
 #[test]
 fn inv_6_no_forbidden_new_deps_in_cargo_toml() {
     let cargo = read("Cargo.toml");
-    for forbidden in &["ratatui", "reedline", "ctrlc = ", "signal-hook"] {
+    // Phase 22.4 D-14 explicitly introduces `ratatui`; removed from the forbidden list.
+    // `reedline`, `ctrlc`, and `signal-hook` remain forbidden under the tmon architecture.
+    for forbidden in &["reedline", "ctrlc = ", "signal-hook"] {
         assert!(
             !cargo.contains(forbidden),
-            "INV-6: forbidden dep `{}` found in Cargo.toml (D-18: no new deps this phase)",
+            "INV-6: forbidden dep `{}` found in Cargo.toml",
             forbidden
         );
     }
