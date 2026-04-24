@@ -15,6 +15,10 @@ pub mod skills_cmd;
 pub mod status_cmd; // Plan 04 Task 4-01 replaces body; placeholder only in Wave 0.
 pub mod tui; // Existing module (render_status_line etc.) — re-exported for Plan 07 tests.
 
+// Phase 22.4 Plan 22.4-01: tui_rata module — ratatui-backed REPL (D-02 side-by-side).
+// `tests/tui_rata_snapshots.rs` uses `use ironhermes_cli::tui_rata::{App, ui, StreamEvent}`.
+pub mod tui_rata;
+
 // `memory_setup` is intentionally NOT re-exported from the library crate.
 // It references `crate::Cli` which lives in `main.rs` (the binary crate),
 // so the module is compiled as part of the binary only. The integration
