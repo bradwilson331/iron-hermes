@@ -96,3 +96,8 @@ sysinfo = "0.30"
 nix = { version = "0.29", features = ["process"] }
 # ISS-10: shell-words workspace dep (Plan 02 Task 2-02 consumer)
 shell-words = "1"
+# Phase 22.4: ratatui-backed REPL (tmon architecture) — D-13/D-14 dep floor
+ansi-to-tui = "8"
+ratatui = "0.30"
+tui-logger = { version = "0.18", features = ["tracing-support"] }
+tui-textarea = "0.7"
