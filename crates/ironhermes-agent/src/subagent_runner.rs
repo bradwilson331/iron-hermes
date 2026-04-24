@@ -151,7 +151,14 @@ impl SubagentRunner for AgentSubagentRunner {
             match (self.hermes_home.as_ref(), self.session_id.as_ref()) {
                 (Some(home), Some(sid)) => {
                     let path = transcript_path_for(home, sid, &subagent_id);
-                    Some(TranscriptWriter::open(path))
+                    let writer = TranscriptWriter::open(path);
+                    // Phase 22.3 D-07 / UI-SPEC ALIAS-1: touch the JSONL file BEFORE
+                    // SubagentRegistry::register(info) below so `/agents logs <alias>`
+                    // can stat the file the moment the alias appears in `/agents list`.
+                    // (RESEARCH correction: ordering must be open → touch → register,
+                    // NOT open → register → touch as CONTEXT D-07 originally suggested.)
+                    writer.touch();
+                    Some(writer)
                 }
                 _ => None,
             };
