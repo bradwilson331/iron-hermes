@@ -83,11 +83,13 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_cursor(frame: &mut Frame, app: &App, area: Rect) {
     let (row, col) = app.textarea.cursor();
-    // Plan 22.4-05 Task 1 constructs textarea without a Block — no +1 offset.
-    // If a block is later added (e.g., ta.set_block(...)), update this and
-    // re-snapshot plan 22.4-10.
-    let cursor_x = area.x.saturating_add(col as u16);
-    let cursor_y = area.y.saturating_add(row as u16);
+    // UAT Gap 1 (Phase 22.4 Plan 22.4-14): the textarea now wears
+    // Block::default().borders(Borders::ALL).title("Prompt"). The borders
+    // consume row 0 + column 0 of the chunk, so the typeable interior
+    // starts at (area.y + 1, area.x + 1). Bump both offsets by +1 so the
+    // visible caret lands inside the bordered region.
+    let cursor_x = area.x.saturating_add(col as u16).saturating_add(1);
+    let cursor_y = area.y.saturating_add(row as u16).saturating_add(1);
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 

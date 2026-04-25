@@ -15,6 +15,7 @@ use std::time::Instant;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -129,6 +130,10 @@ impl App {
             .unwrap_or_else(|_| ReplHistory::with_default_max());
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
+        // UAT Gap 1 (Phase 22.4 Plan 22.4-14): bordered "Prompt" block so the
+        // input area is visually defined. render_cursor in ui.rs adds +1/+1
+        // offsets to account for the top + left borders.
+        textarea.set_block(Block::default().borders(Borders::ALL).title("Prompt"));
 
         Self {
             history: Vec::new(),
@@ -517,12 +522,19 @@ impl App {
     fn clear_textarea(&mut self) {
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
+        // UAT Gap 1 (Phase 22.4 Plan 22.4-14): reinstall the bordered "Prompt"
+        // block on every reset so the visual frame survives submit + Esc + slash
+        // dispatch cycles.
+        self.textarea.set_block(Block::default().borders(Borders::ALL).title("Prompt"));
     }
 
     /// Load a history entry into the textarea (arrow-key recall).
     pub fn load_history_entry(&mut self, entry: &str) {
         let mut ta = TextArea::default();
         ta.set_cursor_line_style(Style::default());
+        // UAT Gap 1 (Phase 22.4 Plan 22.4-14): keep the bordered "Prompt" frame
+        // when arrow-key history recall replaces the textarea.
+        ta.set_block(Block::default().borders(Borders::ALL).title("Prompt"));
         for (i, line) in entry.lines().enumerate() {
             if i > 0 {
                 ta.insert_newline();
