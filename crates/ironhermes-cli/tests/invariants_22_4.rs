@@ -465,12 +465,16 @@ fn invariant_22_4_29_mouse_capture_paired_with_toggle() {
          startup so capture is on by default. See 22.4-UAT.md Gap 3."
     );
 
-    // (b) /mouse fast-path in dispatch_slash
+    // (b) /mouse fast-path RETIRED in Phase 22.4.1 Plan 01 (D-10/D-11)
     assert!(
-        TUI_RATA_COMMANDS.contains("input.strip_prefix(\"/mouse\")"),
-        "INV-22.4-29 (b): tui_rata/commands.rs must recognise the `/mouse` \
-         slash command via `input.strip_prefix(\"/mouse\")` at the top of \
-         dispatch_slash. See Plan 22.4-16 Task 2."
+        !TUI_RATA_COMMANDS.contains("input.strip_prefix(\"/mouse\")"),
+        "INV-22.4-29 (b) [INVERTED — Plan 22.4.1-01]: tui_rata/commands.rs \
+         dispatch_slash must NOT contain the literal \
+         `input.strip_prefix(\"/mouse\")` fast-path after Phase 22.4.1 \
+         re-port. /mouse is now registered in the core registry (Plan \
+         22.4.1-00) and routed via the post-router App-side hook \
+         `if def.name == \"mouse\"` per D-10/D-11/D-12. See Plan 22.4.1-01 \
+         and INV-22.4-34 for the complementary multi-name absence check."
     );
 
     // (c) DisableMouseCapture is reachable from the slash dispatcher
@@ -637,31 +641,34 @@ fn invariant_22_4_31_handler_coverage_high_traffic() {
          See Plan 22.4-18 Task 1."
     );
 
-    // Strategy 2 — dispatch_slash fast-path guards for /mcp, /sessions, /memory.
-    // Pattern: `input.strip_prefix("/X")` for each of the three names.
+    // Strategy 2 — fast-path guards for /mcp, /sessions, /memory RETIRED in
+    // Phase 22.4.1 Plan 01. The names are now in the core registry (Plan
+    // 22.4.1-00) and routed via invoke_handler arms.
     for cmd in &["/mcp", "/sessions", "/memory"] {
         let needle = format!("input.strip_prefix(\"{cmd}\")");
         assert!(
-            TUI_RATA_COMMANDS.contains(&needle),
-            "INV-22.4-31 (b): tui_rata/commands.rs dispatch_slash must \
-             contain a fast-path guard `{needle}` for the {cmd} slash \
-             command. {cmd} is NOT in the core 49-command set so the \
-             CommandRouter would NotFound it; the fast-path is required to \
-             deliver visible output. See Plan 22.4-18 Task 2."
+            !TUI_RATA_COMMANDS.contains(&needle),
+            "INV-22.4-31 (b) [INVERTED — Plan 22.4.1-01]: tui_rata/commands.rs \
+             dispatch_slash must NOT contain the fast-path guard `{needle}` \
+             after Phase 22.4.1 re-port. {cmd} is now in the core registry \
+             (Plan 22.4.1-00); the router routes it as ResolveResult::Exact \
+             and invoke_handler returns the canonical stub. See Plan \
+             22.4.1-01 and INV-22.4-34."
         );
     }
 
-    // Strategy 2b — handler helper fns exist for each fast-path.
-    for fn_name in &[
-        "fn handle_mcp_slash",
-        "fn handle_sessions_slash",
-        "fn handle_memory_slash",
-    ] {
+    // Strategy 2b — invoke_handler match arms for /mcp, /sessions, /memory
+    // are the new canonical home of the stub text after Plan 22.4.1-01
+    // deleted the fast-path helper fns as dead code.
+    for name in &["mcp", "sessions", "memory"] {
+        let needle = format!("\"{name}\" => CommandResult::Output(");
         assert!(
-            TUI_RATA_COMMANDS.contains(fn_name),
-            "INV-22.4-31 (b): tui_rata/commands.rs must define `{fn_name}` \
-             as the fast-path handler for the matching slash command. See \
-             Plan 22.4-18 Task 2."
+            TUI_RATA_COMMANDS.contains(&needle),
+            "INV-22.4-31 (b) [REPLACED — Plan 22.4.1-01]: tui_rata/commands.rs \
+             invoke_handler must contain `{needle}` after Phase 22.4.1 \
+             re-port. The pre-22.4.1 `fn handle_{name}_slash` helper is \
+             deleted as dead code; the new arm is the canonical home of \
+             the stub text. See Plan 22.4.1-01 Edit 4."
         );
     }
 
@@ -682,14 +689,10 @@ fn invariant_22_4_31_handler_coverage_high_traffic() {
         );
     }
 
-    // Sanity — the /mouse fast-path from Plan 22.4-16 is preserved.
-    assert!(
-        TUI_RATA_COMMANDS.contains("input.strip_prefix(\"/mouse\")"),
-        "INV-22.4-31 sanity: tui_rata/commands.rs must still contain the \
-         /mouse fast-path from Plan 22.4-16. INV-22.4-29 also covers this; \
-         repeating the assertion here so a regression cannot silently lose \
-         /mouse via this plan's edits."
-    );
+    // Sanity — the /mouse fast-path was retired in Phase 22.4.1 Plan 01.
+    // The absence assertion now lives in INV-22.4-34 (multi-name absence
+    // check); INV-22.4-29 sub-(b) is also inverted to assert /mouse absence.
+    // No redundant sanity needed here.
 
     // Sanity — the generic `not yet wired` fallback in invoke_handler stays
     // as the safety net for OTHER deferred commands (e.g. /config, /personality).
@@ -720,6 +723,38 @@ fn invariant_22_4_32_router_membership() {
             "INV-22.4-32: ironhermes-core/src/commands/registry.rs must \
              contain `{needle}` — the {name} command must be registered \
              in the core registry per Phase 22.4.1 Plan 00. See D-01."
+        );
+    }
+}
+
+/// INV-22.4-34 (Phase 22.4.1 Plan 01 — D-02 / D-11 / D-14): tui_rata/commands.rs
+/// must contain ZERO occurrences of the four retired literal fast-path strings.
+///
+/// Phase 22.4.1 Plan 01 retires the `strip_prefix` fast-paths for /mouse, /mcp,
+/// /sessions, /memory in `dispatch_slash`. The post-router App-side hook for
+/// /mouse uses `strip_prefix(&format!("/{{}}", def.name))` (D-11) — a NON-literal
+/// string interpolation that does NOT match the literal grep below. Therefore
+/// each of the four literal strings below must appear ZERO times in
+/// tui_rata/commands.rs after Plan 22.4.1-01 lands.
+///
+/// This is the multi-name companion to INV-22.4-29 sub-(b) (which only covers
+/// /mouse). Together they backstop D-02's "zero strip_prefix fast-paths"
+/// commitment.
+#[test]
+fn invariant_22_4_34_dispatch_slash_no_strip_prefix() {
+    for literal in &[
+        "strip_prefix(\"/mouse\")",
+        "strip_prefix(\"/mcp\")",
+        "strip_prefix(\"/sessions\")",
+        "strip_prefix(\"/memory\")",
+    ] {
+        assert!(
+            !TUI_RATA_COMMANDS.contains(literal),
+            "INV-22.4-34: tui_rata/commands.rs must NOT contain `{literal}` \
+             after Phase 22.4.1 Plan 01 re-port. The four slash fast-paths \
+             are retired; the surviving `def.name`-interpolated args extraction \
+             uses `strip_prefix(&format!(\"/{{}}\", def.name))` per D-11. See \
+             Plan 22.4.1-01."
         );
     }
 }
