@@ -511,3 +511,90 @@ fn invariant_22_4_29_mouse_capture_paired_with_toggle() {
          stays in sync with the executed crossterm command."
     );
 }
+
+/// INV-22.4-30 (Phase 22.4 gap closure — UAT Round 2 Gap 4): System messages
+/// must be VISIBLE in the rendered transcript, not silently dropped.
+///
+/// Bug history: through Plan 22.4-16, `role_style` in tui_rata/app.rs
+/// returned `None` for `Role::System`. The `transcript_text` loop's
+/// `let Some(color) = color else { continue };` short-circuit then SKIPPED
+/// every System message — including all four SlashOutcome variants
+/// (Handled, ClearSession, Unknown, Error) that `apply_slash_outcome` pushes
+/// as System rows. Result: /help, /clear "Conversation cleared.", /new
+/// "New session started.", /mouse on|off "Mouse capture: <state>", and the
+/// typo-suggester "Did you mean ...?" hint were ALL invisible to the user.
+///
+/// Plan 22.4-17 (Option B from the user's locked decision) made System
+/// visible: role_style returns `Some(Color::DarkGray)` for System and
+/// transcript_text applies `Modifier::DIM` for System rows so they read
+/// as metadata while remaining observable.
+///
+/// This invariant grep-locks both halves of the fix so a future refactor
+/// cannot accidentally re-suppress System rendering.
+#[test]
+fn invariant_22_4_30_system_messages_visible() {
+    // Half 1: role_style must NOT return None for any Role variant.
+    // The literal `Role::System => ("System".to_string(), None)` is the
+    // exact pattern the bug had — assert it is gone.
+    assert!(
+        !TUI_RATA_APP.contains("Role::System => (\"System\".to_string(), None)"),
+        "INV-22.4-30: tui_rata/app.rs role_style must NOT return `None` for \
+         Role::System. The let-else short-circuit in transcript_text would \
+         silently drop every System row (slash-command confirmations, typo \
+         suggester output, etc.). See 22.4-UAT.md Round 2 Gap 4 root_cause."
+    );
+
+    // Half 1b: role_style must explicitly return Some(Color::DarkGray) for
+    // Role::System per the locked Plan 22.4-17 spec.
+    assert!(
+        TUI_RATA_APP.contains("Role::System => (\"System\".to_string(), Some(Color::DarkGray))"),
+        "INV-22.4-30: tui_rata/app.rs role_style must return \
+         `Some(Color::DarkGray)` for Role::System (Plan 22.4-17 locked \
+         Option B fix). Distinct dim gray distinguishes System from User \
+         (Cyan) / Hermes (Green) / Tool (Yellow)."
+    );
+
+    // Half 2: transcript_text must apply Modifier::DIM for System rows so
+    // the row visually demotes as metadata. The conditional ensures only
+    // System gets DIM (User/Assistant/Tool stay full-bright).
+    assert!(
+        TUI_RATA_APP.contains("matches!(msg.role, Role::System)"),
+        "INV-22.4-30: tui_rata/app.rs transcript_text must conditionally \
+         apply DIM ONLY for Role::System rows via `matches!(msg.role, \
+         Role::System)`. See Plan 22.4-17 Task 1 Edit 3."
+    );
+    assert!(
+        TUI_RATA_APP.contains("add_modifier(Modifier::DIM)"),
+        "INV-22.4-30: tui_rata/app.rs transcript_text must apply \
+         `add_modifier(Modifier::DIM)` to the System Style so System rows \
+         render visually demoted from real conversation rows."
+    );
+
+    // Sanity: every other Role variant still returns Some(...) so the
+    // let-else passes for them too. This is the structural assertion that
+    // no Role variant accidentally regresses to None.
+    for role_arm in &[
+        "Role::User => (\"You\".to_string(), Some(Color::Cyan))",
+        "Role::Assistant => (\"Hermes\".to_string(), Some(Color::Green))",
+        "Role::Tool => (\"Tool\".to_string(), Some(Color::Yellow))",
+    ] {
+        assert!(
+            TUI_RATA_APP.contains(role_arm),
+            "INV-22.4-30 sanity: tui_rata/app.rs role_style must contain \
+             `{role_arm}` so the existing User/Hermes/Tool render paths \
+             are unchanged by Plan 22.4-17."
+        );
+    }
+
+    // Sanity: apply_slash_outcome still pushes Role::System for the four
+    // visible-output variants. If a future refactor stops setting the role,
+    // System rendering is moot.
+    let system_pushes = TUI_RATA_APP.matches("msg.role = Role::System;").count()
+                      + TUI_RATA_APP.matches("system.role = Role::System;").count();
+    assert!(
+        system_pushes >= 4,
+        "INV-22.4-30 sanity: tui_rata/app.rs apply_slash_outcome must push \
+         Role::System for at least 4 SlashOutcome arms (Handled, \
+         ClearSession, Unknown, Error). Found {system_pushes} sites."
+    );
+}
