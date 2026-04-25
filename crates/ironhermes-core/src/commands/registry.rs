@@ -64,6 +64,8 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[name]")
             .platform(Universal),
         CommandDef::new("start", "Start with an LLM greeting", Session).platform(GatewayOnly),
+        CommandDef::new("sessions", "List recent sessions", Session)
+            .platform(Universal),
 
         // -----------------------------------------------------------------------
         // CONFIGURATION
@@ -96,6 +98,9 @@ pub fn build_registry() -> Vec<CommandDef> {
             .platform(Universal),
         CommandDef::new("fast", "Toggle fast model preset", Configuration).platform(Universal),
         CommandDef::new("debug", "Toggle debug information", Configuration).platform(Universal),
+        CommandDef::new("mouse", "Toggle mouse capture", Configuration)
+            .args_hint("[on|off]")
+            .platform(CliOnly),
 
         // -----------------------------------------------------------------------
         // TOOLS AND SKILLS
@@ -116,6 +121,10 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[connect|disconnect|status]")
             .platform(CliOnly),
         CommandDef::new("plugins", "List installed plugins", ToolsAndSkills).platform(CliOnly),
+        CommandDef::new("mcp", "MCP server list and status", ToolsAndSkills)
+            .platform(Universal),
+        CommandDef::new("memory", "Memory provider status", ToolsAndSkills)
+            .platform(Universal),
 
         // -----------------------------------------------------------------------
         // INFO

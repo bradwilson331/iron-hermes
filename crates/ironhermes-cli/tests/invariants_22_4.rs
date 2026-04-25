@@ -17,6 +17,7 @@ const TUI_RATA_HISTORY: &str = include_str!("../src/tui_rata/history.rs");
 const TUI_RATA_STREAM: &str = include_str!("../src/tui_rata/stream_events.rs");
 const TUI_RATA_KB: &str = include_str!("../src/tui_rata/keybindings.rs");
 const TUI_RATA_COMMANDS: &str = include_str!("../src/tui_rata/commands.rs");
+const CORE_REGISTRY: &str = include_str!("../../ironhermes-core/src/commands/registry.rs");
 
 /// WARNING-NEW-04 (iteration 2): friendly sentinel for Task-4 completeness.
 /// Task 1 stub of commands.rs is ~500 bytes (SlashOutcome enum + stub fn).
@@ -700,4 +701,25 @@ fn invariant_22_4_31_handler_coverage_high_traffic() {
          safety net for OTHER deferred commands. The 5 newly-wired commands \
          have dedicated arms / fast-paths and never reach this fallback."
     );
+}
+
+/// INV-22.4-32 (Phase 22.4.1 Plan 00 — D-01 / D-14): the four new CommandDef
+/// entries (mouse, mcp, sessions, memory) added to the core CommandRouter
+/// registry MUST be present in registry.rs. Backstops D-01 — these names
+/// are required by Plan 22.4.1-01 (which retires the four `strip_prefix`
+/// fast-paths in tui_rata/dispatch_slash) and Plan 22.4.1-02 (which depends
+/// on the router resolving them as ResolveResult::Exact so invoke_handler
+/// receives the canonical def.name). A future refactor that removes any of
+/// these entries would silently regress the unified dispatch contract.
+#[test]
+fn invariant_22_4_32_router_membership() {
+    for name in &["mouse", "mcp", "sessions", "memory"] {
+        let needle = format!("CommandDef::new(\"{name}\"");
+        assert!(
+            CORE_REGISTRY.contains(&needle),
+            "INV-22.4-32: ironhermes-core/src/commands/registry.rs must \
+             contain `{needle}` — the {name} command must be registered \
+             in the core registry per Phase 22.4.1 Plan 00. See D-01."
+        );
+    }
 }
