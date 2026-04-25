@@ -598,3 +598,106 @@ fn invariant_22_4_30_system_messages_visible() {
          ClearSession, Unknown, Error). Found {system_pushes} sites."
     );
 }
+
+/// INV-22.4-31 (Phase 22.4 gap closure — UAT Round 2 Gap 5): the high-traffic
+/// deferred handlers from Plan 22.4-07 §Handler Coverage MUST be wired so
+/// Phase 22.4 does not ship with a discoverable empty surface.
+///
+/// User-locked decision (Plan 22.4-18): wire /agents, /skills, /mcp,
+/// /sessions, /memory with at minimum informative `CommandResult::Output`
+/// (or `SlashOutcome::Handled`) text. Two routing strategies:
+///   - /agents and /skills exist in the core CommandRouter (registry.rs:38
+///     and :107) so they reach `invoke_handler` as ResolveResult::Exact and
+///     get dedicated match arms.
+///   - /mcp, /sessions, /memory are NOT in the core 49-command set so they
+///     get fast-path guards in `dispatch_slash` BEFORE the CommandRouter
+///     call, mirroring the /mouse precedent from Plan 22.4-16.
+///
+/// This invariant grep-locks both strategies so a future refactor cannot
+/// silently regress the handler coverage.
+#[test]
+fn invariant_22_4_31_handler_coverage_high_traffic() {
+    // Strategy 1 — invoke_handler match arms for /agents and /skills.
+    // Pattern: `"agents" => CommandResult::Output(` and the same for skills.
+    assert!(
+        TUI_RATA_COMMANDS.contains("\"agents\" => CommandResult::Output("),
+        "INV-22.4-31 (a): tui_rata/commands.rs invoke_handler must contain \
+         a `\"agents\" => CommandResult::Output(...)` match arm. /agents is \
+         in the core CommandRouter (registry.rs:38) and resolves as Exact, \
+         so it must NOT fall through to the generic `not yet wired` arm. \
+         See Plan 22.4-18 Task 1."
+    );
+    assert!(
+        TUI_RATA_COMMANDS.contains("\"skills\" => CommandResult::Output("),
+        "INV-22.4-31 (a): tui_rata/commands.rs invoke_handler must contain \
+         a `\"skills\" => CommandResult::Output(...)` match arm. /skills is \
+         in the core CommandRouter (registry.rs:107) and resolves as Exact, \
+         so it must NOT fall through to the generic `not yet wired` arm. \
+         See Plan 22.4-18 Task 1."
+    );
+
+    // Strategy 2 — dispatch_slash fast-path guards for /mcp, /sessions, /memory.
+    // Pattern: `input.strip_prefix("/X")` for each of the three names.
+    for cmd in &["/mcp", "/sessions", "/memory"] {
+        let needle = format!("input.strip_prefix(\"{cmd}\")");
+        assert!(
+            TUI_RATA_COMMANDS.contains(&needle),
+            "INV-22.4-31 (b): tui_rata/commands.rs dispatch_slash must \
+             contain a fast-path guard `{needle}` for the {cmd} slash \
+             command. {cmd} is NOT in the core 49-command set so the \
+             CommandRouter would NotFound it; the fast-path is required to \
+             deliver visible output. See Plan 22.4-18 Task 2."
+        );
+    }
+
+    // Strategy 2b — handler helper fns exist for each fast-path.
+    for fn_name in &[
+        "fn handle_mcp_slash",
+        "fn handle_sessions_slash",
+        "fn handle_memory_slash",
+    ] {
+        assert!(
+            TUI_RATA_COMMANDS.contains(fn_name),
+            "INV-22.4-31 (b): tui_rata/commands.rs must define `{fn_name}` \
+             as the fast-path handler for the matching slash command. See \
+             Plan 22.4-18 Task 2."
+        );
+    }
+
+    // Sanity — render_help mentions all 5 newly-wired commands so /help
+    // discoverability covers the full Phase 22.4 visible surface.
+    for help_marker in &[
+        "/agents",
+        "/skills",
+        "/mcp",
+        "/sessions",
+        "/memory",
+    ] {
+        assert!(
+            TUI_RATA_COMMANDS.contains(help_marker),
+            "INV-22.4-31 sanity: tui_rata/commands.rs render_help must \
+             mention `{help_marker}` so the /help output documents the new \
+             handler. See Plan 22.4-18 Task 3."
+        );
+    }
+
+    // Sanity — the /mouse fast-path from Plan 22.4-16 is preserved.
+    assert!(
+        TUI_RATA_COMMANDS.contains("input.strip_prefix(\"/mouse\")"),
+        "INV-22.4-31 sanity: tui_rata/commands.rs must still contain the \
+         /mouse fast-path from Plan 22.4-16. INV-22.4-29 also covers this; \
+         repeating the assertion here so a regression cannot silently lose \
+         /mouse via this plan's edits."
+    );
+
+    // Sanity — the generic `not yet wired` fallback in invoke_handler stays
+    // as the safety net for OTHER deferred commands (e.g. /config, /personality).
+    // The 5 newly-wired commands MUST take precedence over this fallback.
+    assert!(
+        TUI_RATA_COMMANDS.contains("not yet wired in Phase 22.4"),
+        "INV-22.4-31 sanity: tui_rata/commands.rs invoke_handler must \
+         retain the generic `not yet wired in Phase 22.4` fallback as the \
+         safety net for OTHER deferred commands. The 5 newly-wired commands \
+         have dedicated arms / fast-paths and never reach this fallback."
+    );
+}
