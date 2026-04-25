@@ -9,6 +9,7 @@
 //! - `dispatch_slash` is a stub in `commands.rs`; plan 22.4-07 Task 4 fills it.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -69,6 +70,12 @@ pub struct AppDeps {
     /// PROV-07 parity with classic main.rs:631-637. spawn_turn clones this and
     /// chains `.with_fallback(fb)` on the per-turn AgentLoop when present.
     pub fallback_client: Option<AnyClient>,
+    /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — shared mouse-capture state.
+    /// `/mouse on|off` slash command flips this AtomicBool AND executes the
+    /// corresponding crossterm command. Initial value `true` matches the
+    /// EnableMouseCapture call at run_chat_ratatui startup. The
+    /// MouseCaptureGuard Drop impl unconditionally disables on REPL exit.
+    pub mouse_capture_enabled: Arc<AtomicBool>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -126,6 +133,8 @@ pub struct App {
     pub max_turns: usize,
     /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — see AppDeps.fallback_client.
     pub fallback_client: Option<AnyClient>,
+    /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — see AppDeps.mouse_capture_enabled.
+    pub mouse_capture_enabled: Arc<AtomicBool>,
 }
 
 impl App {
@@ -173,6 +182,7 @@ impl App {
             config_compression: deps.config_compression,
             max_turns: deps.max_turns,
             fallback_client: deps.fallback_client,
+            mouse_capture_enabled: deps.mouse_capture_enabled,
         }
     }
 
@@ -716,6 +726,7 @@ fn test_deps() -> AppDeps {
         config_compression: 0.8,
         max_turns: 10,
         fallback_client: None,
+        mouse_capture_enabled: Arc::new(AtomicBool::new(true)),
     }
 }
 

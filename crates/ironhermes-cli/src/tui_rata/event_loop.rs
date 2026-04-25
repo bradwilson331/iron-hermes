@@ -115,6 +115,13 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_core::commands::{CommandRouter, registry::build_registry as build_command_registry};
 
+    // UAT Gap 3 (Phase 22.4 Plan 22.4-16): shared mouse-capture state. Initial
+    // value `true` matches the EnableMouseCapture call at run_chat_ratatui.
+    // The `/mouse on|off` slash command flips this AtomicBool AND executes
+    // the corresponding crossterm command. The MouseCaptureGuard Drop impl
+    // is the final cleanup — it unconditionally disables on REPL exit.
+    let mouse_capture_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
     // D-18 item 11: yolo banner — fires before alt-screen if run_chat_ratatui is
     // called from plan 22.4-08's main.rs arm. Defensive fire here too (D-18 parity).
     if yolo {
@@ -344,6 +351,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         config_compression: config.agent.context_compression,
         max_turns: cli.max_turns.unwrap_or(config.agent.max_turns),
         fallback_client,
+        mouse_capture_enabled,
     })
 }
 

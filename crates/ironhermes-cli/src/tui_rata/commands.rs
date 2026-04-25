@@ -13,9 +13,12 @@
 //! - `SlashOutcome` variants mapped by `App::apply_slash_outcome` into
 //!   System-role transcript entries or `should_quit = true`.
 
-use std::sync::atomic::AtomicBool;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
 use ironhermes_core::commands::{CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::commands::context::CommandContext;
 use ironhermes_core::commands::typo::suggest_typo;
@@ -61,6 +64,15 @@ pub enum SlashOutcome {
 /// candidate pool (names + aliases) and surfaces "Did you mean `/X`?" per
 /// Phase 22.3 D-10 copy contract (D-18 item 8).
 pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
+    // UAT Gap 3 (Phase 22.4 Plan 22.4-16) — /mouse on|off fast-path.
+    // Bypasses the CommandRouter (which has no `mouse` command in the core
+    // 49-command set). Toggles the live mouse-capture state via crossterm
+    // and updates the shared AtomicBool so other consumers can observe state.
+    if let Some(rest) = input.strip_prefix("/mouse") {
+        let arg = rest.trim();
+        return handle_mouse_slash(app, arg);
+    }
+
     let platform = Platform::Local; // tui_rata runs under CLI/Local platform
     match app.command_router.resolve(input, &platform) {
         ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
@@ -92,6 +104,55 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
             };
             SlashOutcome::Unknown { input: input.to_string(), hint }
         }
+    }
+}
+
+// ── /mouse on|off live toggle (UAT Gap 3 / Plan 22.4-16) ─────────────────────
+
+/// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — /mouse {on|off} live toggle.
+///
+/// Honours the user-locked decision: capture stays ON by default; users
+/// can drop into terminal-native text selection by typing `/mouse off`,
+/// then re-enable scroll-wheel transcript scrolling with `/mouse on`.
+///
+/// The toggle invokes the appropriate crossterm command immediately AND
+/// stores the new state on the shared AtomicBool. The MouseCaptureGuard
+/// Drop impl is unaffected — it always disables on REPL exit (idempotent
+/// if already disabled).
+fn handle_mouse_slash(app: &mut App, arg: &str) -> SlashOutcome {
+    match arg {
+        "on" => {
+            if let Err(e) = execute!(io::stdout(), EnableMouseCapture) {
+                return SlashOutcome::Error(format!("/mouse on failed: {e}"));
+            }
+            app.mouse_capture_enabled.store(true, Ordering::SeqCst);
+            SlashOutcome::Handled(
+                "Mouse capture: on (scroll wheel + click events go to TUI)".to_string(),
+            )
+        }
+        "off" => {
+            if let Err(e) = execute!(io::stdout(), DisableMouseCapture) {
+                return SlashOutcome::Error(format!("/mouse off failed: {e}"));
+            }
+            app.mouse_capture_enabled.store(false, Ordering::SeqCst);
+            SlashOutcome::Handled(
+                "Mouse capture: off (terminal-native text selection re-enabled)".to_string(),
+            )
+        }
+        "" => {
+            let state = if app.mouse_capture_enabled.load(Ordering::SeqCst) {
+                "on"
+            } else {
+                "off"
+            };
+            SlashOutcome::Handled(format!(
+                "Mouse capture: {state}. Use /mouse on or /mouse off to toggle."
+            ))
+        }
+        other => SlashOutcome::Unknown {
+            input: format!("/mouse {other}"),
+            hint: "Usage: /mouse on  |  /mouse off  |  /mouse (status)".to_string(),
+        },
     }
 }
 
@@ -156,9 +217,11 @@ async fn invoke_handler(
 /// Render a brief help listing. Full command table rendered by the `help` handler
 /// in follow-up gap-closure.
 fn render_help() -> String {
-    "Slash commands: /help · /quit · /clear · /new · /reset · /reload-mcp\n\
+    "Slash commands: /help · /quit · /clear · /new · /reset · /reload-mcp · /mouse on|off\n\
      Type /help for this list. Phase 22.4 typo suggester will suggest corrections \
-     for unrecognised commands (D-10).".to_string()
+     for unrecognised commands (D-10).\n\
+     /mouse off drops into terminal-native text selection; /mouse on restores \
+     scroll-wheel transcript scrolling (UAT Gap 3 closure, Plan 22.4-16).".to_string()
 }
 
 /// Map a `ironhermes_core::commands::CommandResult` to a `SlashOutcome`.
