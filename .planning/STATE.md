@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 22.4 context gathered
-last_updated: "2026-04-24T20:04:39.118Z"
-last_activity: 2026-04-24 -- Phase --phase execution started
+stopped_at: Phase 22.4.1 context gathered
+last_updated: "2026-04-25T03:43:05.391Z"
+last_activity: 2026-04-25 -- Phase --phase execution started
 progress:
-  total_phases: 15
-  completed_phases: 13
-  total_plans: 83
-  completed_plans: 81
-  percent: 98
+  total_phases: 16
+  completed_phases: 14
+  total_plans: 89
+  completed_plans: 89
+  percent: 100
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 Phase: --phase (22.4) — EXECUTING
 Plan: 1 of --name
 Status: Executing Phase --phase
-Last activity: 2026-04-24 -- Phase --phase execution started
+Last activity: 2026-04-25 -- Phase --phase execution started
 
 Progress: [██████████] 100%
 
@@ -308,6 +308,7 @@ Recent decisions affecting current work:
 - Phase 21.8 inserted after Phase 21: skill remote download and install from skills.sh (URGENT)
 - Phase 22.3 inserted after Phase 22: REPL UX hardening (visual stability + reset + unified history) (URGENT)
 - Phase 22.4 inserted after Phase 22: ratatui-backed REPL (tmon architecture) (URGENT)
+- Phase 22.4.1 inserted after Phase 22.4: tui_rata handler re-port — closes Plan 22.4-07 §Handler Coverage deferral by routing dispatch_slash through ironhermes_core::commands::CommandRouter::resolve + existing registry handlers so every classic-TUI command works in the ratatui REPL (INSERTED)
 
 ### Pending Todos
 
@@ -326,7 +327,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: --stopped-at
-Stopped at: Phase 22.4 context gathered
+Stopped at: Phase 22.4.1 context gathered
 Resume file: --resume-file
 
 **Planned Phase:** 22.4 (ratatui-backed-repl-tmon-architecture) — 13 plans — 2026-04-24T20:02:05.664Z
