@@ -227,11 +227,10 @@ fn invariant_22_4_22_unit_separator_codec_present() {
     );
 }
 
-#[test]
-fn invariant_22_4_23_mouse_capture_paired() {
-    assert!(TUI_RATA_EVLOOP.contains("EnableMouseCapture"), "INV-22.4-23 enable");
-    assert!(TUI_RATA_EVLOOP.contains("DisableMouseCapture"), "INV-22.4-23 disable");
-}
+// INV-22.4-23 (mouse_capture_paired) was REPLACED by INV-22.4-29
+// (mouse_capture_paired_with_toggle) per Plan 22.4-16 / UAT Gap 3 closure.
+// The numbering set is now {00..22, 24..29} — non-contiguous; future plans
+// should pick up at INV-22.4-30, NOT 23.
 
 /// WARNING-NEW-03 (iteration 2): classic registration order preserved.
 /// Uses `.find()` for first-occurrence position comparison.
@@ -439,5 +438,76 @@ fn invariant_22_4_28_tool_registry_parity() {
         "INV-22.4-28 (d): the `fallback_client` identifier must appear >= 4 \
          times in event_loop.rs (build_app_deps let + AppDeps init + \
          spawn_turn clone + spawn_turn if-let). Found {fallback_count}."
+    );
+}
+
+/// INV-22.4-29 (Phase 22.4 gap closure — UAT Gap 3): replaces the
+/// pre-existing INV-22.4-23. The locked decision was: mouse capture stays
+/// ON by default, with `/mouse on` and `/mouse off` slash commands as the
+/// runtime escape hatch into terminal-native text selection. This invariant
+/// asserts the THREE wiring sites required to honour that contract:
+///   (a) EnableMouseCapture is invoked at run_chat_ratatui startup
+///       (capture-on by default — preserves existing scroll-wheel UX).
+///   (b) The `/mouse` slash command is recognised by dispatch_slash
+///       (fast-path guard with `input.strip_prefix("/mouse")` in commands.rs).
+///   (c) DisableMouseCapture is invoked from the slash dispatcher (i.e.
+///       it appears in tui_rata/commands.rs, not just in the RAII guard
+///       at event_loop.rs Drop impl).
+/// See 22.4-UAT.md Gap 3 root_cause + missing list.
+#[test]
+fn invariant_22_4_29_mouse_capture_paired_with_toggle() {
+    // (a) capture-on default at startup
+    assert!(
+        TUI_RATA_EVLOOP.contains("execute!(io::stdout(), EnableMouseCapture)"),
+        "INV-22.4-29 (a): tui_rata/event_loop.rs must call \
+         `execute!(io::stdout(), EnableMouseCapture)` at run_chat_ratatui \
+         startup so capture is on by default. See 22.4-UAT.md Gap 3."
+    );
+
+    // (b) /mouse fast-path in dispatch_slash
+    assert!(
+        TUI_RATA_COMMANDS.contains("input.strip_prefix(\"/mouse\")"),
+        "INV-22.4-29 (b): tui_rata/commands.rs must recognise the `/mouse` \
+         slash command via `input.strip_prefix(\"/mouse\")` at the top of \
+         dispatch_slash. See Plan 22.4-16 Task 2."
+    );
+
+    // (c) DisableMouseCapture is reachable from the slash dispatcher
+    assert!(
+        TUI_RATA_COMMANDS.contains("DisableMouseCapture"),
+        "INV-22.4-29 (c): tui_rata/commands.rs must invoke \
+         `DisableMouseCapture` inside the `/mouse off` arm so users can \
+         drop into terminal-native text selection without exiting the REPL. \
+         See Plan 22.4-16 Task 2."
+    );
+    assert!(
+        TUI_RATA_COMMANDS.contains("EnableMouseCapture"),
+        "INV-22.4-29 (c): tui_rata/commands.rs must invoke \
+         `EnableMouseCapture` inside the `/mouse on` arm so users can \
+         restore scroll-wheel scrolling after toggling off. See Plan 22.4-16 \
+         Task 2."
+    );
+
+    // Sanity: the old RAII guard's DisableMouseCapture in event_loop.rs is
+    // still present (final cleanup safety net — independent of slash state).
+    assert!(
+        TUI_RATA_EVLOOP.contains("DisableMouseCapture"),
+        "INV-22.4-29 sanity: tui_rata/event_loop.rs must still contain \
+         DisableMouseCapture in MouseCaptureGuard's Drop impl as the \
+         unconditional terminal-cleanup safety net."
+    );
+
+    // The shared state handle must be threaded through (Task 1 wiring).
+    assert!(
+        TUI_RATA_EVLOOP.contains("mouse_capture_enabled"),
+        "INV-22.4-29 sanity: tui_rata/event_loop.rs must construct the \
+         shared `mouse_capture_enabled: Arc<AtomicBool>` in build_app_deps \
+         and assign it to AppDeps."
+    );
+    assert!(
+        TUI_RATA_COMMANDS.contains("mouse_capture_enabled"),
+        "INV-22.4-29 sanity: tui_rata/commands.rs must reference \
+         `app.mouse_capture_enabled` from the slash handler so live state \
+         stays in sync with the executed crossterm command."
     );
 }
