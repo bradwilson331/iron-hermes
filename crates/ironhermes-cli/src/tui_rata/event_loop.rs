@@ -110,7 +110,7 @@ async fn run_with_deps(
 ///
 /// Concrete identifiers — grep-verified iteration 2. All 14 D-18 items below.
 async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDeps> {
-    use ironhermes_agent::{build_main_client, build_client as build_provider_client};
+    use ironhermes_agent::{build_main_client, build_client as build_provider_client, AgentSubagentRunner};
     use ironhermes_agent::budget::BudgetHandle;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_core::commands::{CommandRouter, registry::build_registry as build_command_registry};
@@ -153,6 +153,31 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let memory_manager = ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
         .await?;
 
+    // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — moved UP from later in build_app_deps so
+    // delegate_task and fallback_client (both need `client`) can be constructed before
+    // the registry block.
+    // D-18 item 1: client + budget + context_length for per-turn AgentLoop construction.
+    let client = if let Some(ref model) = cli.model {
+        let provider = cli.provider.as_deref().unwrap_or(resolver.main_provider());
+        build_provider_client(&resolver, provider, model)?
+    } else {
+        build_main_client(&resolver)?
+    };
+    let context_length = resolver.resolve_for_main().context_length();
+    let budget = BudgetHandle::new(
+        cli.max_turns.unwrap_or(config.agent.max_turns),
+    );
+
+    // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — PROV-07 fallback parity with classic
+    // main.rs:631-637. Resolve once per session; spawn_turn clones the
+    // Option<AnyClient> and chains .with_fallback(...) per turn.
+    let fallback_client: Option<ironhermes_agent::AnyClient> = {
+        let main_endpoint = resolver.resolve_for_main();
+        main_endpoint.fallback_providers.first().and_then(|fb_name| {
+            build_provider_client(&resolver, fb_name, &main_endpoint.default_model).ok()
+        })
+    };
+
     // D-18 item 10: ToolRegistry + tool registrations
     let cron_dir = hermes_home.join("cron");
     let job_store = Arc::new(Mutex::new(
@@ -178,6 +203,41 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     if let Some(ref mgr) = memory_manager {
         registry.register_memory_tool(mgr.clone());
     }
+
+    // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — full classic parity per user-locked
+    // decision. Three additions to the MAIN registry:
+    //   (a) delegate_task — subagent dispatch tool (classic main.rs:500 + :978)
+    //   (b) WebSearchTool on main — top-level web search visible to the LLM
+    //   (c) WebReadTool on main — top-level URL fetch visible to the LLM
+    // The (b)/(c) duplicates on the rpc_registry below are intentional —
+    // execute_code's safe subset still needs them.
+
+    // (a) delegate_task — D-18 item 5 / AGENT-01..05 (lift from main.rs:487-507)
+    let subagent_semaphore = Arc::new(
+        tokio::sync::Semaphore::new(config.subagent.max_subagents),
+    );
+    let subagent_runner = Arc::new(
+        AgentSubagentRunner::new(
+            client.clone(),
+            resolver.clone(),
+            Some(budget.clone()),
+        )
+        .with_subagent_registry(subagent_registry.clone())
+        .with_transcript_scope(hermes_home.clone(), session_id.clone()),
+    );
+    registry.register_delegate_task_tool(
+        subagent_runner,
+        subagent_semaphore,
+        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
+        config.subagent.clone(),
+        Some(cancel_parent.clone()),
+        None, // no progress callback in Phase 22.4 (status-pill integration is follow-up)
+    );
+
+    // (b) + (c) — Web tools on the MAIN registry so the LLM sees them as
+    // top-level callable tools (not just inside execute_code's safe subset).
+    registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
+    registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
 
     // RPC sub-registry (safe subset — no terminal, no execute_code)
     let mut rpc_registry = ironhermes_tools::ToolRegistry::new();
@@ -241,19 +301,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // D-18 item 7: CommandRouter from build_command_registry
     let command_router = Arc::new(CommandRouter::new(build_command_registry()));
 
-    // D-18 item 1: client + resolver for per-turn AgentLoop construction
-    let client = if let Some(ref model) = cli.model {
-        let provider = cli.provider.as_deref().unwrap_or(resolver.main_provider());
-        build_provider_client(&resolver, provider, model)?
-    } else {
-        build_main_client(&resolver)?
-    };
-    let context_length = resolver.resolve_for_main().context_length();
-    let budget = BudgetHandle::new(
-        cli.max_turns.unwrap_or(config.agent.max_turns),
-    );
-
     // D-18 item 1 (continued): AgentLoop — App stores Arc<AgentLoop> for integrations.
+    // (client + context_length + budget moved UP above the registry block — see Plan 22.4-15.)
     // Per-turn spawn in spawn_turn builds a fresh loop with streaming callback.
     let agent_loop_inst = ironhermes_agent::agent_loop::AgentLoop::new(
         client.clone(),
@@ -294,6 +343,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         context_length,
         config_compression: config.agent.context_compression,
         max_turns: cli.max_turns.unwrap_or(config.agent.max_turns),
+        fallback_client,
     })
 }
 
@@ -423,6 +473,10 @@ fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rec
 ///   - Lifecycle: Started, Finished, Cancelled, Error
 ///   - Streaming: Delta
 ///   - Tool: ToolCall, ToolProgress, ToolResult
+///
+/// Plan 22.4-15 (UAT Gap 2): per-turn AgentLoop also chains
+/// `.with_fallback(fb_client)` when the resolver exposes a first
+/// fallback provider, restoring PROV-07 parity with classic main.rs.
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
     let client = app.client.clone();
     let registry = app.registry.clone();
@@ -432,6 +486,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let config_compression = app.config_compression;
     let max_turns = app.max_turns;
     let memory_manager = app.memory_manager.clone();
+    let fallback_client = app.fallback_client.clone();
     let cancel_token = cancel.clone();
     let messages_snapshot = app.history.clone();
     let session_id = app.session_id.clone();
@@ -488,6 +543,15 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
 
         if let Some(mm) = memory_manager {
             agent = agent.with_memory_manager(mm);
+        }
+
+        // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — PROV-07 parity with classic
+        // main.rs:631-637. The fallback client was pre-resolved once per
+        // session in build_app_deps; chain it onto the per-turn AgentLoop
+        // when present so 429/5xx/401 from the primary provider triggers
+        // the one-shot fallback swap inside AgentLoop::run.
+        if let Some(fb) = fallback_client {
+            agent = agent.with_fallback(fb);
         }
 
         let result = agent.run(messages_snapshot).await;

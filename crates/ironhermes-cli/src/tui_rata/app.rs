@@ -65,6 +65,10 @@ pub struct AppDeps {
     pub context_length: usize,
     pub config_compression: f64,
     pub max_turns: usize,
+    /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — pre-resolved fallback client per
+    /// PROV-07 parity with classic main.rs:631-637. spawn_turn clones this and
+    /// chains `.with_fallback(fb)` on the per-turn AgentLoop when present.
+    pub fallback_client: Option<AnyClient>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -120,6 +124,8 @@ pub struct App {
     pub context_length: usize,
     pub config_compression: f64,
     pub max_turns: usize,
+    /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — see AppDeps.fallback_client.
+    pub fallback_client: Option<AnyClient>,
 }
 
 impl App {
@@ -166,6 +172,7 @@ impl App {
             context_length: deps.context_length,
             config_compression: deps.config_compression,
             max_turns: deps.max_turns,
+            fallback_client: deps.fallback_client,
         }
     }
 
@@ -708,6 +715,7 @@ fn test_deps() -> AppDeps {
         context_length: 8192,
         config_compression: 0.8,
         max_turns: 10,
+        fallback_client: None,
     }
 }
 
