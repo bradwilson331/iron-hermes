@@ -320,11 +320,27 @@ async fn invoke_handler(
 /// Render a brief help listing. Full command table rendered by the `help` handler
 /// in follow-up gap-closure.
 fn render_help() -> String {
-    "Slash commands: /help · /quit · /clear · /new · /reset · /reload-mcp · /mouse on|off\n\
-     Type /help for this list. Phase 22.4 typo suggester will suggest corrections \
-     for unrecognised commands (D-10).\n\
+    "Slash commands:\n\
+     · /help — show this help\n\
+     · /quit, /exit — exit the REPL\n\
+     · /clear — clear screen + start new session\n\
+     · /new — start new session (preserves screen)\n\
+     · /reset — terminal visual reset\n\
+     · /reload-mcp — reload MCP servers\n\
+     · /mouse on|off — toggle mouse capture (off = native text selection)\n\
+     · /agents — list, kill, or tail logs for active subagents [stub]\n\
+     · /skills — list installed skills [stub]\n\
+     · /mcp — MCP server list / status [stub]\n\
+     · /sessions — recent session list [stub]\n\
+     · /memory — memory provider status [stub]\n\
+     \n\
+     Phase 22.4 typo suggester surfaces `Did you mean /X?` for unrecognised \
+     commands (D-10). Stubs marked [stub] return informative output describing \
+     the command — full implementations land in a follow-up.\n\
      /mouse off drops into terminal-native text selection; /mouse on restores \
-     scroll-wheel transcript scrolling (UAT Gap 3 closure, Plan 22.4-16).".to_string()
+     scroll-wheel transcript scrolling (UAT Gap 3 closure, Plan 22.4-16).\n\
+     /help, /agents, /skills, /mcp, /sessions, /memory output is rendered as a \
+     dim-gray System row (UAT Round 2 Gap 4 closure, Plan 22.4-17).".to_string()
 }
 
 /// Map a `ironhermes_core::commands::CommandResult` to a `SlashOutcome`.
