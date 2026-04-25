@@ -73,6 +73,29 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
         return handle_mouse_slash(app, arg);
     }
 
+    // UAT Round 2 Gap 5 (Phase 22.4 Plan 22.4-18) — /mcp, /sessions, /memory
+    // fast-paths. These names are NOT in the core CommandRouter 49-command
+    // set (see registry.rs — only `reload-mcp` and `resume` exist), so the
+    // router would NotFound them. Fast-path here BEFORE the router call so
+    // the user gets informative stub output instead of a typo suggestion.
+    // The trailing-char guard (empty OR whitespace) prevents collision with
+    // future `/mcp-*` style aliases.
+    if let Some(rest) = input.strip_prefix("/mcp") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return handle_mcp_slash(app, rest.trim());
+        }
+    }
+    if let Some(rest) = input.strip_prefix("/sessions") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return handle_sessions_slash(app, rest.trim());
+        }
+    }
+    if let Some(rest) = input.strip_prefix("/memory") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return handle_memory_slash(app, rest.trim());
+        }
+    }
+
     let platform = Platform::Local; // tui_rata runs under CLI/Local platform
     match app.command_router.resolve(input, &platform) {
         ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
@@ -154,6 +177,66 @@ fn handle_mouse_slash(app: &mut App, arg: &str) -> SlashOutcome {
             hint: "Usage: /mouse on  |  /mouse off  |  /mouse (status)".to_string(),
         },
     }
+}
+
+// ── /mcp, /sessions, /memory fast-path handlers (UAT Round 2 Gap 5 / Plan 22.4-18) ──
+
+/// /mcp [args] — MCP server list / status stub.
+///
+/// `mcp` is NOT in the core 49-command set (only `reload-mcp` is). This
+/// fast-path provides visible output until a full MCP enumeration command
+/// lands in a follow-up phase.
+fn handle_mcp_slash(app: &mut App, _arg: &str) -> SlashOutcome {
+    let configured = if app.mcp_manager.is_some() {
+        "configured (use /reload-mcp to refresh)"
+    } else {
+        "NOT configured for this session"
+    };
+    SlashOutcome::Handled(format!(
+        "/mcp — MCP server list / status.\n\
+         Status: {configured}.\n\
+         Phase 22.4 stub: full server enumeration (transports, tool inventory, \
+         reconnect status) lands in a follow-up; use /reload-mcp to refresh \
+         the live manager."
+    ))
+}
+
+/// /sessions [args] — recent sessions list stub.
+///
+/// `sessions` is NOT in the core 49-command set (only `resume <name>` and
+/// `history` exist). This fast-path provides visible output until a full
+/// session-list command lands in a follow-up phase.
+fn handle_sessions_slash(app: &mut App, _arg: &str) -> SlashOutcome {
+    SlashOutcome::Handled(format!(
+        "/sessions — recent session list.\n\
+         Current session: {sid}.\n\
+         History persisted to: {hpath}.\n\
+         Phase 22.4 stub: full session enumeration (sessions on disk, last \
+         modified, message counts) lands in a follow-up; use /resume <name> \
+         to restore a known session by name.",
+        sid = app.session_id,
+        hpath = app.history_path.display(),
+    ))
+}
+
+/// /memory [args] — memory provider status stub.
+///
+/// `memory` is NOT in the core 49-command set. This fast-path provides
+/// visible output until a full memory-management command lands in a
+/// follow-up phase.
+fn handle_memory_slash(app: &mut App, _arg: &str) -> SlashOutcome {
+    let configured = if app.memory_manager.is_some() {
+        "configured (MemoryTool registered with the agent)"
+    } else {
+        "NOT configured for this session"
+    };
+    SlashOutcome::Handled(format!(
+        "/memory — memory provider status.\n\
+         Status: {configured}.\n\
+         Phase 22.4 stub: full memory inspection (recent writes, vector store \
+         counts, on_session_end policy) lands in a follow-up; the \
+         MemoryManager handle is wired and reachable from the App."
+    ))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
