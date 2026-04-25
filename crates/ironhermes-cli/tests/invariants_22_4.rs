@@ -372,3 +372,72 @@ fn invariant_22_4_27_tool_variants_constructed() {
         );
     }
 }
+
+/// INV-22.4-28 (Phase 22.4 gap closure — UAT Gap 2 / D-18 items 1+5+10):
+/// Locks the four new tool/registry wirings landed in Plan 22.4-15:
+///   (a) WebSearchTool on the MAIN registry (top-level visible to LLM)
+///   (b) WebReadTool on the MAIN registry (top-level visible to LLM)
+///   (c) register_delegate_task_tool called on the MAIN registry (subagents)
+///   (d) AgentLoop::with_fallback chained in spawn_turn (PROV-07 parity)
+/// See 22.4-UAT.md Gap 2 root_cause + missing list.
+#[test]
+fn invariant_22_4_28_tool_registry_parity() {
+    // (a) + (b) — Web tools on the MAIN registry. The string
+    // `registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool))`
+    // appears TWICE in event_loop.rs after Plan 22.4-15: once on the main
+    // `registry` and once on the `rpc_registry` sub-tree. Either count >= 2
+    // is acceptable; we assert >= 2 explicitly so the main-registry
+    // registration cannot silently regress.
+    let web_search_count = TUI_RATA_EVLOOP
+        .matches("registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool))")
+        .count();
+    assert!(
+        web_search_count >= 2,
+        "INV-22.4-28 (a): tui_rata/event_loop.rs must register WebSearchTool \
+         on BOTH the main `registry` AND the `rpc_registry` (>= 2 sites). \
+         Found {web_search_count}. See 22.4-UAT.md Gap 2 (a)."
+    );
+    let web_read_count = TUI_RATA_EVLOOP
+        .matches("registry.register(Box::new(ironhermes_tools::web_read::WebReadTool))")
+        .count();
+    assert!(
+        web_read_count >= 2,
+        "INV-22.4-28 (b): tui_rata/event_loop.rs must register WebReadTool \
+         on BOTH the main `registry` AND the `rpc_registry` (>= 2 sites). \
+         Found {web_read_count}. See 22.4-UAT.md Gap 2 (a)."
+    );
+
+    // (c) — register_delegate_task_tool called on the MAIN registry.
+    assert!(
+        TUI_RATA_EVLOOP.contains("registry.register_delegate_task_tool("),
+        "INV-22.4-28 (c): tui_rata/event_loop.rs must call \
+         registry.register_delegate_task_tool(...) inside build_app_deps to \
+         match classic main.rs:500 + :978 (D-18 item 5 / AGENT-01..05). \
+         See 22.4-UAT.md Gap 2 (b)."
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("AgentSubagentRunner::new("),
+        "INV-22.4-28 (c): tui_rata/event_loop.rs must construct \
+         AgentSubagentRunner inside build_app_deps so register_delegate_task_tool \
+         receives a real runner (not a stub). Mirrors classic main.rs:491-499."
+    );
+
+    // (d) — with_fallback chained in spawn_turn.
+    assert!(
+        TUI_RATA_EVLOOP.contains(".with_fallback("),
+        "INV-22.4-28 (d): tui_rata/event_loop.rs must chain \
+         .with_fallback(fb_client) on the per-turn AgentLoop builder inside \
+         spawn_turn so PROV-07 fallback parity with classic main.rs:631-637 \
+         is restored. See 22.4-UAT.md Gap 2 (c)."
+    );
+    // The fallback_client identifier must appear in event_loop.rs in BOTH
+    // build_app_deps (the let binding + AppDeps assignment) AND spawn_turn
+    // (the clone + the if-let guard). Total >= 4 occurrences.
+    let fallback_count = TUI_RATA_EVLOOP.matches("fallback_client").count();
+    assert!(
+        fallback_count >= 4,
+        "INV-22.4-28 (d): the `fallback_client` identifier must appear >= 4 \
+         times in event_loop.rs (build_app_deps let + AppDeps init + \
+         spawn_turn clone + spawn_turn if-let). Found {fallback_count}."
+    );
+}
