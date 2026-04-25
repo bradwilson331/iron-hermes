@@ -207,6 +207,26 @@ async fn invoke_handler(
         "help"          => CommandResult::Output(render_help()),
         "reset"         => CommandResult::ResetTerminal,
         "reload-mcp"    => CommandResult::McpReload,
+        // UAT Round 2 Gap 5 (Phase 22.4 Plan 22.4-18): high-traffic deferred
+        // handlers from Plan 22.4-07 §Handler Coverage. /agents and /skills
+        // are present in the core CommandRouter (registry.rs:38 + :107) so
+        // they reach this match arm via ResolveResult::Exact. Stub output
+        // returns informative descriptive text per the user-locked decision
+        // ("each handler at minimum returns CommandResult::Output(...) with
+        // informative text — full functionality can be incremental").
+        "agents" => CommandResult::Output(
+            "/agents — list, kill, or tail logs for active subagents.\n\
+             Args: [list | kill <id> | logs <id>]\n\
+             Phase 22.4 stub: full subcommand routing lands in a follow-up; \
+             the SubagentRegistry handle is wired and reachable from the App. \
+             Use status pill `agents N/M` for the live count.".to_string()
+        ),
+        "skills" => CommandResult::Output(
+            "/skills — list installed skills (active in this session).\n\
+             Phase 22.4 stub: full enumeration lands in a follow-up; the \
+             skills tool is registered and the active_skills Arc is shared \
+             with execute_code per Phase 22 Plan 22-01.".to_string()
+        ),
         other => CommandResult::Output(format!(
             "(tui_rata: /{other} not yet wired in Phase 22.4 — see plan 22.4-07 §Handler Coverage)"
         )),
