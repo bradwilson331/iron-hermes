@@ -758,3 +758,56 @@ fn invariant_22_4_34_dispatch_slash_no_strip_prefix() {
         );
     }
 }
+
+/// INV-22.4-33 (Phase 22.4.1 Plan 02 — D-05 / D-08 / D-14): every Session +
+/// Configuration category command added in Plan 02 must have an explicit
+/// `"<name>" => CommandResult::Output(` invoke_handler arm in
+/// tui_rata/commands.rs. Also asserts the `Phase 22.4.1 stub:` marker count
+/// — at least one occurrence per Plan-02 arm (gates D-08's stub-text format).
+///
+/// GatewayOnly names (approve, deny, sethome, start) are EXCLUDED from
+/// expected_arms per RESEARCH Pitfall 6 — they are filtered by the router's
+/// PlatformFilter::GatewayOnly on Platform::Local and never reach
+/// invoke_handler. Adding arms for them would create dead code.
+///
+/// Names already wired by Plan 22.4.1-01 (mouse, mcp, sessions, memory) and
+/// Phase 22.4 (agents, skills) are intentionally excluded — they are
+/// asserted by INV-22.4-31 Strategy 1 (agents, skills) and the inverted
+/// INV-22.4-31 Strategy 2b (mcp, sessions, memory). /mouse arm presence is
+/// covered by the Plan-01 acceptance grep (no INV directly asserts it).
+#[test]
+fn invariant_22_4_33_invoke_handler_arms() {
+    // 13 Session + 13 Configuration = 26 names. Source: RESEARCH Finding 2.
+    // Order matches build_registry() source order (registry.rs lines 22–98).
+    let expected_arms: &[&str] = &[
+        // Session category (13 net-new)
+        "history", "save", "retry", "undo", "title", "compress", "rollback", "stop",
+        "background", "btw", "queue", "status", "resume",
+        // Configuration category (13 net-new)
+        "config", "provider", "prompt", "personality", "statusbar", "verbose",
+        "yolo", "reasoning", "skin", "voice", "model", "fast", "debug",
+    ];
+
+    for name in expected_arms {
+        let needle = format!("\"{name}\" => CommandResult::Output(");
+        assert!(
+            TUI_RATA_COMMANDS.contains(&needle),
+            "INV-22.4-33: tui_rata/commands.rs invoke_handler must contain \
+             `{needle}`. Added by Phase 22.4.1 Plan 02 per D-05/D-08. \
+             The stub-text format is locked in CONTEXT D-08."
+        );
+    }
+
+    // D-08 stub-text marker count — must appear at least once per Plan-02 arm.
+    // (Plan-01 added 4 more occurrences for mouse/mcp/sessions/memory; this
+    // assertion only floors at 26 so the test stays robust to Plan-01's count
+    // — the full ≥ 30 grep is in Plan 02 acceptance criteria, not here.)
+    let stub_count = TUI_RATA_COMMANDS.matches("Phase 22.4.1 stub:").count();
+    assert!(
+        stub_count >= expected_arms.len(),
+        "INV-22.4-33: tui_rata/commands.rs must contain `Phase 22.4.1 stub:` \
+         at least {} times (one per Plan-02 arm). Found {}. See D-08.",
+        expected_arms.len(),
+        stub_count
+    );
+}
