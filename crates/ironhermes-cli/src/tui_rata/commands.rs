@@ -241,6 +241,128 @@ async fn invoke_handler(
              store counts, on_session_end policy) lands in a follow-up; \
              MemoryManager (Phase 20) owns implementation.".to_string()
         ),
+
+        // ── Phase 22.4.1 Plan 02: Session category bulk arms (D-05/D-08) ──────
+        "history" => CommandResult::Output(
+            "/history — Show conversation history.\n\
+             Phase 22.4.1 stub: StateStore FTS5 session history (Phase 13 SESS-01) owns implementation.".to_string()
+        ),
+        "save" => CommandResult::Output(
+            "/save — Save conversation to file.\n\
+             Phase 22.4.1 stub: Session export (Phase 13 SESS-08) owns implementation.".to_string()
+        ),
+        "retry" => CommandResult::Output(
+            "/retry — Retry the last message.\n\
+             Phase 22.4.1 stub: AgentLoop last-message retry (Phase 21 session control) owns implementation.".to_string()
+        ),
+        "undo" => CommandResult::Output(
+            "/undo — Undo the last exchange.\n\
+             Phase 22.4.1 stub: AgentLoop message-pair removal (Phase 21 session control) owns implementation.".to_string()
+        ),
+        "title" => CommandResult::Output(
+            "/title — Set session title.\n\
+             Args: [name]\n\
+             Phase 22.4.1 stub: StateStore session title (Phase 13 SESS-04) owns implementation.".to_string()
+        ),
+        "compress" => CommandResult::Output(
+            "/compress — Compress conversation context.\n\
+             Args: [focus]\n\
+             Phase 22.4.1 stub: ContextCompressor (Phase 18 PRMT-11) owns implementation.".to_string()
+        ),
+        "rollback" => CommandResult::Output(
+            "/rollback — Roll back to a checkpoint.\n\
+             Args: [number]\n\
+             Phase 22.4.1 stub: Session checkpoint rollback (Phase 21 session control) owns implementation.".to_string()
+        ),
+        "stop" => CommandResult::Output(
+            "/stop — Stop the running agent.\n\
+             Phase 22.4.1 stub: CancellationToken cascade (Phase 21 D-14) owns implementation.".to_string()
+        ),
+        "background" => CommandResult::Output(
+            "/background — Run a prompt in the background.\n\
+             Args: <prompt>\n\
+             Phase 22.4.1 stub: SubagentRunner background delegation (Phase 21.7 D-09) owns implementation.".to_string()
+        ),
+        "btw" => CommandResult::Output(
+            "/btw — Ask an ephemeral question.\n\
+             Args: <question>\n\
+             Phase 22.4.1 stub: Ephemeral single-turn query (Phase 21 session control) owns implementation.".to_string()
+        ),
+        "queue" => CommandResult::Output(
+            "/queue — Queue a prompt for after current turn.\n\
+             Args: <prompt>\n\
+             Phase 22.4.1 stub: Turn queue (Phase 21.7 D-29) owns implementation.".to_string()
+        ),
+        "status" => CommandResult::Output(
+            "/status — Show current session status.\n\
+             Phase 22.4.1 stub: hermes status diagnostics (Phase 21.7 D-18) owns implementation.".to_string()
+        ),
+        "resume" => CommandResult::Output(
+            "/resume — Resume a previous session.\n\
+             Args: [name]\n\
+             Phase 22.4.1 stub: StateStore session restore (Phase 13 SESS-04) owns implementation.".to_string()
+        ),
+
+        // ── Phase 22.4.1 Plan 02: Configuration category bulk arms (D-05/D-08) ─
+        "config" => CommandResult::Output(
+            "/config — Show configuration.\n\
+             Phase 22.4.1 stub: config.yaml reader (Phase 23 CFG-02) owns implementation.".to_string()
+        ),
+        "provider" => CommandResult::Output(
+            "/provider — Show current provider.\n\
+             Phase 22.4.1 stub: ProviderResolver current endpoint (Phase 12 PROV-01) owns implementation.".to_string()
+        ),
+        "prompt" => CommandResult::Output(
+            "/prompt — Set custom system prompt.\n\
+             Args: [text]\n\
+             Phase 22.4.1 stub: System prompt override (Phase 15 PRMT-06) owns implementation.".to_string()
+        ),
+        "personality" => CommandResult::Output(
+            "/personality — Apply a personality preset.\n\
+             Args: [name]\n\
+             Phase 22.4.1 stub: SOUL.md overlay (Phase 15 PRMT-06/PRMT-07) owns implementation.".to_string()
+        ),
+        "statusbar" => CommandResult::Output(
+            "/statusbar — Toggle status bar.\n\
+             Phase 22.4.1 stub: TUI status bar toggle (Phase 21 D-03) owns implementation.".to_string()
+        ),
+        "verbose" => CommandResult::Output(
+            "/verbose — Toggle verbose tool output.\n\
+             Phase 22.4.1 stub: Verbose tool output toggle (Phase 21 CLI config) owns implementation.".to_string()
+        ),
+        "yolo" => CommandResult::Output(
+            "/yolo — Toggle dangerous command auto-approval.\n\
+             Phase 22.4.1 stub: Dangerous command auto-approval (Phase 21.7 D-11) owns implementation.".to_string()
+        ),
+        "reasoning" => CommandResult::Output(
+            "/reasoning — Set reasoning level.\n\
+             Args: [level|show|hide]\n\
+             Phase 22.4.1 stub: Provider reasoning level (Phase 12 PROV-02) owns implementation.".to_string()
+        ),
+        "skin" => CommandResult::Output(
+            "/skin — Change color theme.\n\
+             Args: [name]\n\
+             Phase 22.4.1 stub: Color theme (Phase 22.3 skin config) owns implementation.".to_string()
+        ),
+        "voice" => CommandResult::Output(
+            "/voice — Voice/TTS settings.\n\
+             Args: [on|off|tts|status]\n\
+             Phase 22.4.1 stub: TTS/voice output (future phase) owns implementation.".to_string()
+        ),
+        "model" => CommandResult::Output(
+            "/model — Switch model for this session.\n\
+             Args: [provider:model] [--global]\n\
+             Phase 22.4.1 stub: ProviderResolver model switch (Phase 21.3) owns implementation.".to_string()
+        ),
+        "fast" => CommandResult::Output(
+            "/fast — Toggle fast model preset.\n\
+             Phase 22.4.1 stub: Fast model preset toggle (Phase 21.3 model config) owns implementation.".to_string()
+        ),
+        "debug" => CommandResult::Output(
+            "/debug — Toggle debug information.\n\
+             Phase 22.4.1 stub: Debug information toggle (Phase 21 CLI config) owns implementation.".to_string()
+        ),
+
         // UAT Round 2 Gap 5 (Phase 22.4 Plan 22.4-18): high-traffic deferred
         // handlers from Plan 22.4-07 §Handler Coverage. /agents and /skills
         // are present in the core CommandRouter (registry.rs:38 + :107) so
