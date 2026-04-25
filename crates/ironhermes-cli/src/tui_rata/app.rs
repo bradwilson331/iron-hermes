@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -572,7 +572,15 @@ impl App {
         for msg in &self.history {
             let (role_label, color) = role_style(msg);
             let Some(color) = color else { continue };
-            let style = Style::default().fg(color);
+            // UAT Round 2 Gap 4 (Phase 22.4 Plan 22.4-17): System rows render in
+            // dim DarkGray so slash-command confirmations (/help, /clear, /new,
+            // /mouse on|off, typo-suggester output) are observable yet visually
+            // demoted from real conversation rows. See role_style() above.
+            let style = if matches!(msg.role, Role::System) {
+                Style::default().fg(color).add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(color)
+            };
             let body = render_message_body(msg);
             for (i, line_text) in body.lines().enumerate() {
                 if i == 0 {
@@ -633,13 +641,24 @@ fn render_message_body(msg: &ChatMessage) -> String {
 }
 
 /// Map a message role to a display label and colour.
-/// `None` colour = suppress from transcript (System messages).
+///
+/// UAT Round 2 Gap 4 (Phase 22.4 Plan 22.4-17): `Role::System` previously
+/// returned `None` here, which caused the let-else short-circuit in
+/// `transcript_text` to silently drop every slash-command confirmation
+/// (/help, /clear, /new, /mouse on|off, typo suggester output) from the
+/// rendered transcript. The locked Option B fix returns `Some(Color::DarkGray)`
+/// so System rows render in a dim gray distinct from User (Cyan) / Hermes
+/// (Green) / Tool (Yellow). The DIM `Modifier` is applied at the
+/// `transcript_text` Style-construction site so System rows visually demote
+/// as metadata, not as conversation. The Option<Color> return type is kept
+/// in case a future Role variant truly should be hidden — no current
+/// variant uses None.
 fn role_style(msg: &ChatMessage) -> (String, Option<Color>) {
     match msg.role {
         Role::User => ("You".to_string(), Some(Color::Cyan)),
         Role::Assistant => ("Hermes".to_string(), Some(Color::Green)),
         Role::Tool => ("Tool".to_string(), Some(Color::Yellow)),
-        Role::System => ("System".to_string(), None),
+        Role::System => ("System".to_string(), Some(Color::DarkGray)),
     }
 }
 
