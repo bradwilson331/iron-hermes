@@ -309,6 +309,7 @@ Recent decisions affecting current work:
 - Phase 22.3 inserted after Phase 22: REPL UX hardening (visual stability + reset + unified history) (URGENT)
 - Phase 22.4 inserted after Phase 22: ratatui-backed REPL (tmon architecture) (URGENT)
 - Phase 22.4.1 inserted after Phase 22.4: tui_rata handler re-port — closes Plan 22.4-07 §Handler Coverage deferral by routing dispatch_slash through ironhermes_core::commands::CommandRouter::resolve + existing registry handlers so every classic-TUI command works in the ratatui REPL (INSERTED)
+- Phase 22.4.2 inserted after Phase 22.4: wire up slash commands — replace `Phase 22.4.x stub:` placeholders in `tui_rata` invoke_handler arms with real handlers delegating to owning subsystems (MemoryManager [Phase 20], SubagentRegistry, active_skills, session storage, McpManager); narrows generic `not yet wired` fallback (INSERTED)
 
 ### Pending Todos
 
