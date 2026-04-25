@@ -321,3 +321,54 @@ fn invariant_22_4_25_print_banner_pre_ratatui() {
          classic run_chat line 764 precedent)."
     );
 }
+
+/// INV-22.4-26 (Phase 22.4 gap closure — D-17 / CR-02): spawn_turn must
+/// chain `.with_tool_progress(...)` and `.with_tool_result(...)` on the
+/// per-turn AgentLoop builder so all 8 D-17 canonical StreamEvent variants
+/// are reachable from production (not just from snapshot tests that directly
+/// inject them via App::handle_stream_event). See 22.4-VERIFICATION.md Gap 2,
+/// 22.4-REVIEW.md CR-02, and Plan 22.4-12 Tasks 1+2 (commits 8a39eed +
+/// 8a9125b). This invariant is the carry-over from Plan 22.4-12 Task 3.
+#[test]
+fn invariant_22_4_26_tool_progress_wired() {
+    assert!(
+        TUI_RATA_EVLOOP.contains("with_tool_progress("),
+        "INV-22.4-26 (D-17 / CR-02): tui_rata/event_loop.rs must call \
+         AgentLoop::with_tool_progress(...) inside spawn_turn so the \
+         tool-progress callback forwards StreamEvent::ToolCall + \
+         StreamEvent::ToolProgress to the UI event loop. See Plan 22.4-12 \
+         Task 2 (commit 8a9125b)."
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("with_tool_result("),
+        "INV-22.4-26 (D-17 / CR-02): tui_rata/event_loop.rs must call \
+         AgentLoop::with_tool_result(...) inside spawn_turn so the \
+         tool-completion callback forwards StreamEvent::ToolResult to the \
+         UI event loop. See Plan 22.4-12 Task 1+2 (commits 8a39eed + 8a9125b)."
+    );
+}
+
+/// INV-22.4-27 (Phase 22.4 gap closure — D-17 / CR-02): the ToolCall,
+/// ToolProgress, and ToolResult StreamEvent variants must be CONSTRUCTED
+/// in tui_rata/event_loop.rs (i.e. in the production sender path), not only
+/// HANDLED in app.rs. Before Plan 22.4-12 closure, app.rs had handle_stream_event
+/// arms for all three but spawn_turn never sent them — so the production
+/// code path was dead. This invariant locks the production-path emission
+/// so a future refactor cannot silently break the contract. See
+/// 22.4-VERIFICATION.md Gap 2 Data-Flow Trace.
+#[test]
+fn invariant_22_4_27_tool_variants_constructed() {
+    for variant in &[
+        "StreamEvent::ToolCall",
+        "StreamEvent::ToolProgress",
+        "StreamEvent::ToolResult",
+    ] {
+        assert!(
+            TUI_RATA_EVLOOP.contains(variant),
+            "INV-22.4-27 (D-17 / CR-02): tui_rata/event_loop.rs must construct \
+             `{variant}` in a sender closure so the variant is emitted from \
+             the production spawn_turn path. Dead-code handlers in app.rs \
+             alone do not count. See Plan 22.4-12 Task 2 (commit 8a9125b)."
+        );
+    }
+}
