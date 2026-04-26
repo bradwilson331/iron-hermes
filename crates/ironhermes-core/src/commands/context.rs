@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::skills::SkillRegistry;
-use crate::types::Platform;
+use crate::types::{ChatMessage, Platform};
 
 // =============================================================================
 // McpReloader trait — D-15 (trait-object form, avoids circular dep)
@@ -83,6 +83,82 @@ pub trait ProcessRegistrySnapshotHandle: Send + Sync {
 }
 
 // =============================================================================
+// Phase 22.4.2 Plan 00 — D-04 handle traits
+// =============================================================================
+//
+// These trait objects extend `CommandContext` with handles for the eight new
+// subsystems (D-04). All traits are `Send + Sync` and defined here in core
+// to keep `ironhermes-core` a leaf crate. Concrete impls live in their home
+// crates and implement the relevant trait. Pattern mirrors `McpReloader`,
+// `SubagentListSnapshot`, `ProcessRegistrySnapshotHandle`, `BudgetSnapshot`.
+
+/// Handle for McpManager full server enumeration (D-04 — separate from
+/// `McpReloader` which only handles reload operations).
+pub trait McpManagerHandle: Send + Sync {
+    /// Names of currently connected MCP servers.
+    fn connected_server_names(&self) -> Vec<String>;
+}
+
+/// Handle for MemoryManager status inspection (D-04).
+pub trait MemoryManagerHandle: Send + Sync {
+    /// Returns a formatted status block showing active memory context.
+    /// Async work is bridged via `block_in_place + block_on` at the call site.
+    fn status_text(&self) -> String;
+}
+
+/// Handle for StateStore session operations (D-04).
+/// All methods are synchronous (rusqlite) — callers run inside `block_in_place`.
+pub trait StateStoreHandle: Send + Sync {
+    /// List recent sessions (up to `limit`). Returns formatted text.
+    fn list_sessions_text(&self, limit: usize) -> String;
+    /// Get history for `session_id` as formatted text.
+    fn history_text(&self, session_id: &str) -> String;
+    /// Export session as formatted text.
+    fn export_session_text(&self, session_id: &str) -> String;
+    /// Update session title. Returns Ok(()) or an error message.
+    fn update_title(&self, session_id: &str, title: &str) -> Result<(), String>;
+    /// Get a session by name or id. Returns `Some(session_id)` when found.
+    fn get_session_id(&self, name_or_id: &str) -> Option<String>;
+}
+
+/// Handle for ProviderResolver status and model information (D-04).
+pub trait ProviderResolverHandle: Send + Sync {
+    /// Current provider name.
+    fn main_provider(&self) -> String;
+    /// Current model name.
+    fn main_model(&self) -> String;
+    /// Formatted status text for `/provider`.
+    fn status_text(&self) -> String;
+    /// Validate a model string. Returns Ok(model_name) or Err(message).
+    fn validate_model(&self, model: &str) -> Result<String, String>;
+    /// Model listing text for `/model` with no args.
+    fn model_list_text(&self) -> String;
+}
+
+/// Handle for ContextCompressor operations (D-04).
+pub trait ContextCompressorHandle: Send + Sync {
+    /// Trigger compression. Returns a status message.
+    /// Async work is bridged via `block_in_place + block_on` at the call site.
+    fn compress_text(&self) -> String;
+    /// Status info for `/compress` with no args.
+    fn status_text(&self) -> String;
+}
+
+/// Handle for PersonalityRegistry (D-04).
+pub trait PersonalityHandle: Send + Sync {
+    /// Apply a named preset. Returns `Some(overlay_text)` if found.
+    fn get_preset(&self, name: &str) -> Option<String>;
+    /// List all available preset names.
+    fn list_presets(&self) -> Vec<String>;
+}
+
+/// Handle for AgentLoop spawn paths (D-04 — Tier D session control).
+pub trait AgentLoopHandle: Send + Sync {
+    /// Returns true if an agent turn is currently running.
+    fn is_running(&self) -> bool;
+}
+
+// =============================================================================
 // CommandContext
 // =============================================================================
 
@@ -117,6 +193,30 @@ pub struct CommandContext {
     pub subagent_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// D-04: Max concurrent subagents — denominator of the `agents: N/M` pill.
     pub max_subagents: Option<usize>,
+
+    // ---- Phase 22.4.2 Plan 00: D-04 eight new optional handles.
+    // All Option<Arc<...>> for backwards-compat — None when not wired.
+    // Guard pattern (D-05): every handler checks .is_some() before use.
+
+    /// D-04: McpManager handle for `/mcp` full server enumeration.
+    /// Separate from `mcp_reloader` (which only handles reload).
+    pub mcp_manager: Option<Arc<dyn McpManagerHandle>>,
+    /// D-04: MemoryManager handle for `/memory` status inspection.
+    pub memory_manager: Option<Arc<dyn MemoryManagerHandle>>,
+    /// D-04: StateStore handle for `/sessions` `/resume` `/save` `/history` `/title`.
+    pub state_store: Option<Arc<dyn StateStoreHandle>>,
+    /// D-04: ProviderResolver handle for `/model` `/provider` `/fast`.
+    pub provider_resolver: Option<Arc<dyn ProviderResolverHandle>>,
+    /// D-04: ContextCompressor handle for `/compress` `/rollback`.
+    pub context_compressor: Option<Arc<dyn ContextCompressorHandle>>,
+    /// D-04: PersonalityRegistry handle for `/personality`.
+    pub personality_overlay: Option<Arc<dyn PersonalityHandle>>,
+    /// D-04: History snapshot for `/history` `/retry` `/undo` `/rollback`.
+    /// Populated with a clone snapshot at `build_command_context` time.
+    /// Mutations (for `/retry`, `/undo`, `/rollback`) apply in the post-router hook.
+    pub history: Option<Arc<std::sync::RwLock<Vec<ChatMessage>>>>,
+    /// D-04: AgentLoop handle for Tier D session control spawn paths.
+    pub agent_loop: Option<Arc<dyn AgentLoopHandle>>,
 }
 
 impl CommandContext {
@@ -137,6 +237,15 @@ impl CommandContext {
             budget: None,
             subagent_semaphore: None,
             max_subagents: None,
+            // Phase 22.4.2 Plan 00: D-04 eight new optional handles.
+            mcp_manager: None,
+            memory_manager: None,
+            state_store: None,
+            provider_resolver: None,
+            context_compressor: None,
+            personality_overlay: None,
+            history: None,
+            agent_loop: None,
         }
     }
 
@@ -187,6 +296,60 @@ impl CommandContext {
     /// Denominator of the `agents: N/M` status-line pill.
     pub fn with_max_subagents(mut self, max: usize) -> Self {
         self.max_subagents = Some(max);
+        self
+    }
+
+    // ---- Phase 22.4.2 Plan 00: D-04 eight new builder methods.
+
+    /// Builder: attach McpManager handle for `/mcp` server enumeration (D-04).
+    pub fn with_mcp_manager(mut self, mgr: Arc<dyn McpManagerHandle>) -> Self {
+        self.mcp_manager = Some(mgr);
+        self
+    }
+
+    /// Builder: attach MemoryManager handle for `/memory` status (D-04).
+    pub fn with_memory_manager(mut self, mgr: Arc<dyn MemoryManagerHandle>) -> Self {
+        self.memory_manager = Some(mgr);
+        self
+    }
+
+    /// Builder: attach StateStore handle for session operations (D-04).
+    pub fn with_state_store(mut self, store: Arc<dyn StateStoreHandle>) -> Self {
+        self.state_store = Some(store);
+        self
+    }
+
+    /// Builder: attach ProviderResolver handle for `/model` `/provider` `/fast` (D-04).
+    pub fn with_provider_resolver(mut self, resolver: Arc<dyn ProviderResolverHandle>) -> Self {
+        self.provider_resolver = Some(resolver);
+        self
+    }
+
+    /// Builder: attach ContextCompressor handle for `/compress` `/rollback` (D-04).
+    pub fn with_context_compressor(mut self, engine: Arc<dyn ContextCompressorHandle>) -> Self {
+        self.context_compressor = Some(engine);
+        self
+    }
+
+    /// Builder: attach PersonalityRegistry handle for `/personality` (D-04).
+    pub fn with_personality_overlay(mut self, registry: Arc<dyn PersonalityHandle>) -> Self {
+        self.personality_overlay = Some(registry);
+        self
+    }
+
+    /// Builder: attach a history snapshot for `/history` `/retry` `/undo` (D-04).
+    /// Pass a clone snapshot; mutations apply in the tui_rata post-router hook.
+    pub fn with_history(
+        mut self,
+        history: Arc<std::sync::RwLock<Vec<ChatMessage>>>,
+    ) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// Builder: attach AgentLoop handle for Tier D session control (D-04).
+    pub fn with_agent_loop(mut self, agent_loop: Arc<dyn AgentLoopHandle>) -> Self {
+        self.agent_loop = Some(agent_loop);
         self
     }
 }

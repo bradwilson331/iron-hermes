@@ -331,6 +331,28 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         ..Default::default()
     };
 
+    // Phase 22.4.2 Plan 00: D-08 four subsystem handles
+    // StateStore: open the default session DB (session-scoped).
+    let state_store = ironhermes_state::StateStore::open_default()
+        .ok()
+        .map(|s| Arc::new(std::sync::Mutex::new(s)));
+
+    // PersonalityRegistry: load built-ins + any custom presets from hermes_home.
+    let personality_overlay = Arc::new(
+        ironhermes_agent::personality::PersonalityRegistry::load(
+            &std::collections::HashMap::new(),
+            &hermes_home,
+        )
+    );
+
+    // Phase 22.4.2 Plan 00: D-09 session-toggle Arc fields
+    let yolo_enabled = Arc::new(std::sync::atomic::AtomicBool::new(yolo));
+    let verbose_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let statusbar_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let debug_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fast_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let skin = Arc::new(std::sync::RwLock::new("default".to_string()));
+
     Ok(AppDeps {
         agent_loop,
         hook_registry,
@@ -342,7 +364,6 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         session_id,
         history_path,
         status_initial,
-        yolo_enabled: yolo,
         cancel_parent,
         client,
         registry,
@@ -352,6 +373,18 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         max_turns: cli.max_turns.unwrap_or(config.agent.max_turns),
         fallback_client,
         mouse_capture_enabled,
+        // Phase 22.4.2 Plan 00: D-08 subsystem handles
+        state_store,
+        resolver,
+        context_compressor: None,
+        personality_overlay,
+        // Phase 22.4.2 Plan 00: D-09 toggle Arcs
+        yolo_enabled,
+        verbose_enabled,
+        statusbar_enabled,
+        debug_enabled,
+        fast_enabled,
+        skin,
     })
 }
 

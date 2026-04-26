@@ -811,3 +811,97 @@ fn invariant_22_4_33_invoke_handler_arms() {
         stub_count
     );
 }
+
+const CORE_CONTEXT: &str =
+    include_str!("../../ironhermes-core/src/commands/context.rs");
+
+/// INV-22.4-35 (Phase 22.4.2 Plan 00 — D-04 / D-14): the eight new
+/// `Option<Arc<dyn ...>>` / `Option<Arc<std::sync::RwLock<...>>>` handle fields
+/// added to `CommandContext` in Plan 00 MUST be present in context.rs.
+///
+/// Backstops D-04 — a future refactor that removes any of these fields would
+/// silently break the plans that read them (Plans 01-04).
+#[test]
+fn invariant_22_4_35_command_context_field_membership() {
+    let expected_fields: &[&str] = &[
+        "mcp_manager",
+        "memory_manager",
+        "state_store",
+        "provider_resolver",
+        "context_compressor",
+        "personality_overlay",
+        "history",
+        "agent_loop",
+    ];
+    for field in expected_fields {
+        assert!(
+            CORE_CONTEXT.contains(field),
+            "INV-22.4-35: ironhermes-core/src/commands/context.rs must contain \
+             the field `{field}` added by Phase 22.4.2 Plan 00 (D-04). \
+             A future refactor must not remove it — Plans 01-04 read these \
+             handles in their handler bodies."
+        );
+    }
+    // Also assert the eight `with_<name>` builder methods exist.
+    let expected_builders: &[&str] = &[
+        "with_mcp_manager",
+        "with_memory_manager",
+        "with_state_store",
+        "with_provider_resolver",
+        "with_context_compressor",
+        "with_personality_overlay",
+        "with_history",
+        "with_agent_loop",
+    ];
+    for builder in expected_builders {
+        assert!(
+            CORE_CONTEXT.contains(builder),
+            "INV-22.4-35: ironhermes-core/src/commands/context.rs must contain \
+             builder `fn {builder}(...)` added by Phase 22.4.2 Plan 00 (D-04). \
+             Plans 01-04 use these builders in build_command_context."
+        );
+    }
+}
+
+/// INV-22.4-36 (Phase 22.4.2 Plan 00 — D-08 / D-09 / D-14): the ten new
+/// fields added to `App` and `AppDeps` in Plan 00 MUST be present in app.rs.
+///
+/// Four subsystem handles (D-08): `state_store`, `resolver`,
+/// `context_compressor`, `personality_overlay`.
+/// Six toggle Arcs (D-09): `yolo_enabled` (UPGRADED), `verbose_enabled`,
+/// `statusbar_enabled`, `debug_enabled`, `fast_enabled`, `skin`.
+///
+/// Backstops D-08 / D-09 — a future refactor that removes any of these fields
+/// would silently break Plans 01-04 that read them from App.
+#[test]
+fn invariant_22_4_36_app_field_membership() {
+    let expected_fields: &[&str] = &[
+        // D-08 four subsystem handles
+        "state_store",
+        "resolver",
+        "context_compressor",
+        "personality_overlay",
+        // D-09 six toggle Arcs (yolo_enabled is the upgrade; rest are new)
+        "verbose_enabled",
+        "statusbar_enabled",
+        "debug_enabled",
+        "fast_enabled",
+        "skin",
+    ];
+    for field in expected_fields {
+        assert!(
+            TUI_RATA_APP.contains(field),
+            "INV-22.4-36: crates/ironhermes-cli/src/tui_rata/app.rs must \
+             contain the field `{field}` added by Phase 22.4.2 Plan 00 \
+             (D-08/D-09). Plans 01-04 read these fields in build_command_context \
+             and the tui_rata post-router hook."
+        );
+    }
+    // yolo_enabled must be Arc<AtomicBool> (not plain bool) after the D-09 upgrade.
+    assert!(
+        TUI_RATA_APP.contains("yolo_enabled: Arc<AtomicBool>"),
+        "INV-22.4-36: app.rs must declare `yolo_enabled: Arc<AtomicBool>` \
+         (D-09 upgrade from plain `bool`). The post-router toggle hook uses \
+         fetch_xor on this AtomicBool."
+    );
+}
