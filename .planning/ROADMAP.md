@@ -100,6 +100,16 @@ Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-own
 Plans:
 - [x] TBD (run /gsd-plan-phase 22.4.2 to break down) (completed 2026-04-26)
 
+### Phase 22.4.2.2: Cron create defaults to TG origin when gateway active (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 22.4.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 22.4.2.2 to break down)
+
 ### Phase 22.4.2.1: Cron cmds and telegram delivery broken (INSERTED)
 
 **Goal:** [Urgent work - to be planned]

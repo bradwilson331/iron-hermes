@@ -4,10 +4,10 @@ milestone: v2.0
 milestone_name: milestone
 status: verifying
 stopped_at: Phase 22.4.2.1 context gathered
-last_updated: "2026-04-26T12:24:14.775Z"
+last_updated: "2026-04-26T13:10:01.652Z"
 last_activity: 2026-04-26
 progress:
-  total_phases: 18
+  total_phases: 19
   completed_phases: 17
   total_plans: 100
   completed_plans: 100
@@ -21,7 +21,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22.4.2.1 — cron-cmds-and-telegram-delivery-broken
+**Current focus:** Phase 22.4.2.2 — cron-create-defaults-to-tg-origin-when-gateway-active
 
 ## Current Position
 
@@ -320,6 +320,7 @@ Recent decisions affecting current work:
 - Phase 22.4.1 inserted after Phase 22.4: tui_rata handler re-port — closes Plan 22.4-07 §Handler Coverage deferral by routing dispatch_slash through ironhermes_core::commands::CommandRouter::resolve + existing registry handlers so every classic-TUI command works in the ratatui REPL (INSERTED)
 - Phase 22.4.2 inserted after Phase 22.4: wire up slash commands — replace `Phase 22.4.x stub:` placeholders in `tui_rata` invoke_handler arms with real handlers delegating to owning subsystems (MemoryManager [Phase 20], SubagentRegistry, active_skills, session storage, McpManager); narrows generic `not yet wired` fallback (INSERTED)
 - Phase 22.4.2.1 inserted after Phase 22.4.2: Cron cmds and telegram delivery broken (URGENT)
+- Phase 22.4.2.2 inserted after Phase 22.4.2: Cron create defaults to TG origin when gateway active (whitelist len==1) (URGENT)
 
 ### Pending Todos
 
