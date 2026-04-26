@@ -21,7 +21,7 @@ use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal;
 use crate::session::SessionStore;
-use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
+use crate::telegram::{TelegramAdapter, TgBotCommand, TgSendApi, tg_message_to_event};
 use crate::user_queue::UserQueueManager;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
@@ -433,7 +433,7 @@ impl GatewayRunner {
                                     // Send user-friendly error and skip this message
                                     let chat_id = event.chat_id.clone();
                                     let err_msg = format!("Could not process attachment: {}", e);
-                                    let _ = adapter_dispatch_mm.send_message(&chat_id, &err_msg, None).await;
+                                    let _ = PlatformAdapter::send_message(adapter_dispatch_mm.as_ref(), &chat_id, &err_msg, None).await;
                                     continue;
                                 }
                             }
@@ -550,6 +550,8 @@ impl GatewayRunner {
             let tool_registry_tick = self.tool_registry.clone();
             let memory_manager_tick = self.memory_manager.clone();
             let config_tick = self.config.clone();
+            // Phase 22.4.2.1 Plan 02: thread TG adapter for delivery dispatch
+            let adapter_tick = adapter.clone();
 
             join_set.spawn(async move {
                 let mut interval = tokio::time::interval(
@@ -614,6 +616,7 @@ impl GatewayRunner {
                                             &memory_manager_tick,
                                             &hook_registry_tick,
                                             &config_tick,
+                                            Some(adapter_tick.clone() as Arc<dyn TgSendApi>),
                                         )
                                         .await
                                         {
@@ -777,6 +780,50 @@ async fn fast_forward_backlog(
 /// Per D-14: `complete_job_run` success flag reflects AgentLoop::run() Result.
 /// Per T-07.3-03: agent errors are sanitized to "[Agent error: {display}]" — raw LLM payloads
 ///                never flow into JSONL/webhooks.
+/// Dispatch job output to a delivery platform (Phase 22.4.2.1 Plan 02).
+///
+/// Called after `complete_job_run` returns `Ok(Some(target))`. Separated into its own
+/// `pub` function so `tests/cron_delivery.rs` (integration test) can call it directly
+/// without running a full agent loop. D-03 test-coverage mandate.
+///
+/// Non-fatal per D-09: any send error is logged via `tracing::error!` and the function
+/// returns normally — `complete_job_run(success=true)` already fired.
+pub async fn dispatch_delivery(
+    target: Option<ironhermes_cron::DeliveryTarget>,
+    output: &str,
+    tg_client: &Option<Arc<dyn TgSendApi>>,
+    job_name: &str,
+) {
+    let Some(target) = target else {
+        // Ok(None) path — local delivery or [SILENT]
+        return;
+    };
+    if target.platform == "telegram" {
+        if let Some(tg) = tg_client {
+            if let Err(e) = tg
+                .send_message(&target.chat_id, output, target.thread_id.as_deref())
+                .await
+            {
+                error!(
+                    "Delivery failed for job {} -> telegram:{}: {}",
+                    job_name, target.chat_id, e
+                );
+                // D-09: delivery failure is non-fatal — complete_job_run already succeeded
+            }
+        } else {
+            warn!(
+                "Job {} has deliver=telegram but no TgClient wired",
+                job_name
+            );
+        }
+    } else {
+        warn!(
+            "Unsupported delivery platform '{}' for job {} — skipping (webhook deferred)",
+            target.platform, job_name
+        );
+    }
+}
+
 /// Per T-07.3-04: returns `Result<()>` so a single failing job does not panic the tick task.
 pub(crate) async fn execute_cron_job(
     job: &ironhermes_cron::CronJob,
@@ -786,6 +833,7 @@ pub(crate) async fn execute_cron_job(
     memory_manager: &Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: &Option<Arc<ironhermes_hooks::HookRegistry>>,
     config: &Config,
+    tg_client: Option<Arc<dyn TgSendApi>>,
 ) -> Result<()> {
     // D-02: full_input (no underscore); content unchanged from existing logic
     let full_input = if let Some(skill_reg) = skill_registry {
@@ -902,10 +950,19 @@ pub(crate) async fn execute_cron_job(
                 ));
             }
 
-            // D-03 / D-13: real output into complete_job_run; delivery routing unchanged
-            if let Err(e) = ironhermes_cron::complete_job_run(job_store, job, &output, true).await {
-                error!("Failed to complete job run: {}", e);
-                return Err(e);
+            // Phase 22.4.2.1 Plan 02: consume Result<Option<DeliveryTarget>> via match.
+            // D-03 / D-13: real output into complete_job_run; delivery dispatch follows.
+            match ironhermes_cron::complete_job_run(job_store, job, &output, true).await {
+                Err(e) => {
+                    error!("Failed to complete job run: {}", e);
+                    return Err(e);
+                }
+                Ok(None) => {
+                    // local delivery or [SILENT] — no platform dispatch
+                }
+                Ok(Some(target)) => {
+                    dispatch_delivery(Some(target), &output, &tg_client, &job.name).await;
+                }
             }
             Ok(())
         }
@@ -926,12 +983,19 @@ pub(crate) async fn execute_cron_job(
                 ));
             }
 
-            // D-14: success=false
-            if let Err(ce) =
-                ironhermes_cron::complete_job_run(job_store, job, &error_output, false).await
-            {
-                error!("Failed to complete job run after agent error: {}", ce);
-                return Err(ce);
+            // D-14: success=false; Phase 22.4.2.1 Plan 02: consume delivery target from error path too.
+            match ironhermes_cron::complete_job_run(job_store, job, &error_output, false).await {
+                Err(ce) => {
+                    error!("Failed to complete job run after agent error: {}", ce);
+                    return Err(ce);
+                }
+                Ok(None) => {
+                    // local delivery or [SILENT] — no platform dispatch
+                }
+                Ok(Some(target)) => {
+                    // D-09: best-effort delivery of error output; non-fatal
+                    dispatch_delivery(Some(target), &error_output, &tg_client, &job.name).await;
+                }
             }
             Ok(())
         }

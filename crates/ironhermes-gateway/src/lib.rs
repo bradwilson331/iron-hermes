@@ -14,6 +14,6 @@ pub use backoff::BackoffState;
 pub use handler::GatewayMessageHandler;
 pub use session::GatewaySession;
 pub use stream_consumer::StreamConsumer;
-pub use runner::GatewayRunner;
+pub use runner::{GatewayRunner, dispatch_delivery};
 pub use user_queue::UserQueueManager;
 pub use telegram::{TelegramAdapter, TgMessage, TgUser, TgChat, TgUpdate, TgBotCommand, TgFile, TgPhotoSize, TgDocument, TgSendApi};
