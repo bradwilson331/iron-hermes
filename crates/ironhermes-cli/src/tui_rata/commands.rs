@@ -236,16 +236,23 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
     let platform = Platform::Local; // tui_rata runs under CLI/Local platform
     match app.command_router.resolve(input, &platform) {
         ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+            // Extract args: strip the leading "/<name>" prefix and split remainder.
+            // D-11 from 22.4.1: use def.name-interpolated strip_prefix (not a literal).
+            let args_str = input
+                .strip_prefix(&format!("/{}", def.name))
+                .unwrap_or("")
+                .trim();
+            let args_vec: Vec<&str> = if args_str.is_empty() {
+                vec![]
+            } else {
+                args_str.split_whitespace().collect()
+            };
             let ctx = build_command_context(app);
-            match invoke_handler(def.name, &ctx, &app.command_router).await {
+            match invoke_handler(def.name, &ctx, &app.command_router, &args_vec).await {
                 Ok(result) => {
                     // D-10/D-11/D-12 post-router App-side hook for stateful /mouse.
                     if def.name == "mouse" {
-                        let args = input
-                            .strip_prefix(&format!("/{}", def.name))
-                            .unwrap_or("")
-                            .trim();
-                        handle_mouse_slash(app, args)
+                        handle_mouse_slash(app, args_str)
                     } else {
                         map_core_to_slash_outcome(result)
                     }
@@ -400,199 +407,25 @@ fn collect_known_command_names(router: &CommandRouter) -> Vec<String> {
     names
 }
 
-/// Minimum-viable command handler table for Phase 22.4.
+/// Phase 22.4.2 Plan 01 (D-01): delegate `invoke_handler` to `core::handlers::dispatch`.
 ///
-/// Routes by `def.name` to concrete `CommandResult` variants.
-/// The `other` arm returns an informative `Output` (not a panic/abort)
-/// for commands not yet wired — documented in SUMMARY §Handler Coverage.
+/// The 30-arm match table from Phase 22.4.1 Plan 02 collapses to a single delegation.
+/// Single source of truth across gateway + classic-tui + tui_rata. Real handler bodies
+/// in `ironhermes_core::commands::handlers` replace the per-command stub arms.
+/// The safety-net fallback in `dispatch()` covers `/voice` and `/prompt` which remain
+/// without backing infra (they still return the todo_stub informational text from core).
 async fn invoke_handler(
     name: &str,
-    _ctx: &CommandContext,
+    ctx: &CommandContext,
     router: &CommandRouter,
+    args: &[&str],
 ) -> Result<CommandResult, anyhow::Error> {
-    let result = match name {
-        "quit" | "exit" => CommandResult::Quit,
-        "clear"         => CommandResult::ClearSession,
-        "new"           => CommandResult::NewSession {
-            message: "New session started.".to_string(),
-        },
-        "help"          => CommandResult::Output(render_help_router(router, &Platform::Local)),
-        "reset"         => CommandResult::ResetTerminal,
-        "reload-mcp"    => CommandResult::McpReload,
-        "mouse" => CommandResult::Output(
-            "/mouse — Toggle mouse capture.\n\
-             Args: [on|off]\n\
-             Phase 22.4.1 stub: the actual crossterm capture toggle + AtomicBool \
-             flip runs in the post-router hook in dispatch_slash (D-10/D-11/D-12); \
-             this Output is unused for /mouse but is required so /help discovers \
-             the command via the router-driven enumerator.".to_string()
-        ),
-        "mcp" => CommandResult::Output(
-            "/mcp — MCP server list and status.\n\
-             Phase 22.4.1 stub: full server enumeration (transports, tool inventory, \
-             reconnect status) lands in a follow-up; use /reload-mcp to refresh the \
-             live manager. McpManager handle is wired and reachable from the App.".to_string()
-        ),
-        "sessions" => CommandResult::Output(
-            "/sessions — List recent sessions.\n\
-             Phase 22.4.1 stub: full session enumeration (on-disk sessions, last \
-             modified, message counts) lands in a follow-up; StateStore FTS5 \
-             (Phase 13 SESS-01) owns implementation. Use /resume <name> to \
-             restore a known session.".to_string()
-        ),
-        "memory" => CommandResult::Output(
-            "/memory — Memory provider status.\n\
-             Phase 22.4.1 stub: full memory inspection (recent writes, vector \
-             store counts, on_session_end policy) lands in a follow-up; \
-             MemoryManager (Phase 20) owns implementation.".to_string()
-        ),
-
-        // ── Phase 22.4.1 Plan 02: Session category bulk arms (D-05/D-08) ──────
-        "history" => CommandResult::Output(
-            "/history — Show conversation history.\n\
-             Phase 22.4.1 stub: StateStore FTS5 session history (Phase 13 SESS-01) owns implementation.".to_string()
-        ),
-        "save" => CommandResult::Output(
-            "/save — Save conversation to file.\n\
-             Phase 22.4.1 stub: Session export (Phase 13 SESS-08) owns implementation.".to_string()
-        ),
-        "retry" => CommandResult::Output(
-            "/retry — Retry the last message.\n\
-             Phase 22.4.1 stub: AgentLoop last-message retry (Phase 21 session control) owns implementation.".to_string()
-        ),
-        "undo" => CommandResult::Output(
-            "/undo — Undo the last exchange.\n\
-             Phase 22.4.1 stub: AgentLoop message-pair removal (Phase 21 session control) owns implementation.".to_string()
-        ),
-        "title" => CommandResult::Output(
-            "/title — Set session title.\n\
-             Args: [name]\n\
-             Phase 22.4.1 stub: StateStore session title (Phase 13 SESS-04) owns implementation.".to_string()
-        ),
-        "compress" => CommandResult::Output(
-            "/compress — Compress conversation context.\n\
-             Args: [focus]\n\
-             Phase 22.4.1 stub: ContextCompressor (Phase 18 PRMT-11) owns implementation.".to_string()
-        ),
-        "rollback" => CommandResult::Output(
-            "/rollback — Roll back to a checkpoint.\n\
-             Args: [number]\n\
-             Phase 22.4.1 stub: Session checkpoint rollback (Phase 21 session control) owns implementation.".to_string()
-        ),
-        "stop" => CommandResult::Output(
-            "/stop — Stop the running agent.\n\
-             Phase 22.4.1 stub: CancellationToken cascade (Phase 21 D-14) owns implementation.".to_string()
-        ),
-        "background" => CommandResult::Output(
-            "/background — Run a prompt in the background.\n\
-             Args: <prompt>\n\
-             Phase 22.4.1 stub: SubagentRunner background delegation (Phase 21.7 D-09) owns implementation.".to_string()
-        ),
-        "btw" => CommandResult::Output(
-            "/btw — Ask an ephemeral question.\n\
-             Args: <question>\n\
-             Phase 22.4.1 stub: Ephemeral single-turn query (Phase 21 session control) owns implementation.".to_string()
-        ),
-        "queue" => CommandResult::Output(
-            "/queue — Queue a prompt for after current turn.\n\
-             Args: <prompt>\n\
-             Phase 22.4.1 stub: Turn queue (Phase 21.7 D-29) owns implementation.".to_string()
-        ),
-        "status" => CommandResult::Output(
-            "/status — Show current session status.\n\
-             Phase 22.4.1 stub: hermes status diagnostics (Phase 21.7 D-18) owns implementation.".to_string()
-        ),
-        "resume" => CommandResult::Output(
-            "/resume — Resume a previous session.\n\
-             Args: [name]\n\
-             Phase 22.4.1 stub: StateStore session restore (Phase 13 SESS-04) owns implementation.".to_string()
-        ),
-
-        // ── Phase 22.4.1 Plan 02: Configuration category bulk arms (D-05/D-08) ─
-        "config" => CommandResult::Output(
-            "/config — Show configuration.\n\
-             Phase 22.4.1 stub: config.yaml reader (Phase 23 CFG-02) owns implementation.".to_string()
-        ),
-        "provider" => CommandResult::Output(
-            "/provider — Show current provider.\n\
-             Phase 22.4.1 stub: ProviderResolver current endpoint (Phase 12 PROV-01) owns implementation.".to_string()
-        ),
-        "prompt" => CommandResult::Output(
-            "/prompt — Set custom system prompt.\n\
-             Args: [text]\n\
-             Phase 22.4.1 stub: System prompt override (Phase 15 PRMT-06) owns implementation.".to_string()
-        ),
-        "personality" => CommandResult::Output(
-            "/personality — Apply a personality preset.\n\
-             Args: [name]\n\
-             Phase 22.4.1 stub: SOUL.md overlay (Phase 15 PRMT-06/PRMT-07) owns implementation.".to_string()
-        ),
-        "statusbar" => CommandResult::Output(
-            "/statusbar — Toggle status bar.\n\
-             Phase 22.4.1 stub: TUI status bar toggle (Phase 21 D-03) owns implementation.".to_string()
-        ),
-        "verbose" => CommandResult::Output(
-            "/verbose — Toggle verbose tool output.\n\
-             Phase 22.4.1 stub: Verbose tool output toggle (Phase 21 CLI config) owns implementation.".to_string()
-        ),
-        "yolo" => CommandResult::Output(
-            "/yolo — Toggle dangerous command auto-approval.\n\
-             Phase 22.4.1 stub: Dangerous command auto-approval (Phase 21.7 D-11) owns implementation.".to_string()
-        ),
-        "reasoning" => CommandResult::Output(
-            "/reasoning — Set reasoning level.\n\
-             Args: [level|show|hide]\n\
-             Phase 22.4.1 stub: Provider reasoning level (Phase 12 PROV-02) owns implementation.".to_string()
-        ),
-        "skin" => CommandResult::Output(
-            "/skin — Change color theme.\n\
-             Args: [name]\n\
-             Phase 22.4.1 stub: Color theme (Phase 22.3 skin config) owns implementation.".to_string()
-        ),
-        "voice" => CommandResult::Output(
-            "/voice — Voice/TTS settings.\n\
-             Args: [on|off|tts|status]\n\
-             Phase 22.4.1 stub: TTS/voice output (future phase) owns implementation.".to_string()
-        ),
-        "model" => CommandResult::Output(
-            "/model — Switch model for this session.\n\
-             Args: [provider:model] [--global]\n\
-             Phase 22.4.1 stub: ProviderResolver model switch (Phase 21.3) owns implementation.".to_string()
-        ),
-        "fast" => CommandResult::Output(
-            "/fast — Toggle fast model preset.\n\
-             Phase 22.4.1 stub: Fast model preset toggle (Phase 21.3 model config) owns implementation.".to_string()
-        ),
-        "debug" => CommandResult::Output(
-            "/debug — Toggle debug information.\n\
-             Phase 22.4.1 stub: Debug information toggle (Phase 21 CLI config) owns implementation.".to_string()
-        ),
-
-        // UAT Round 2 Gap 5 (Phase 22.4 Plan 22.4-18): high-traffic deferred
-        // handlers from Plan 22.4-07 §Handler Coverage. /agents and /skills
-        // are present in the core CommandRouter (registry.rs:38 + :107) so
-        // they reach this match arm via ResolveResult::Exact. Stub output
-        // returns informative descriptive text per the user-locked decision
-        // ("each handler at minimum returns CommandResult::Output(...) with
-        // informative text — full functionality can be incremental").
-        "agents" => CommandResult::Output(
-            "/agents — list, kill, or tail logs for active subagents.\n\
-             Args: [list | kill <id> | logs <id>]\n\
-             Phase 22.4 stub: full subcommand routing lands in a follow-up; \
-             the SubagentRegistry handle is wired and reachable from the App. \
-             Use status pill `agents N/M` for the live count.".to_string()
-        ),
-        "skills" => CommandResult::Output(
-            "/skills — list installed skills (active in this session).\n\
-             Phase 22.4 stub: full enumeration lands in a follow-up; the \
-             skills tool is registered and the active_skills Arc is shared \
-             with execute_code per Phase 22 Plan 22-01.".to_string()
-        ),
-        other => CommandResult::Output(format!(
-            "(tui_rata: /{other} not yet wired in Phase 22.4 — see plan 22.4-07 §Handler Coverage)"
-        )),
-    };
-    Ok(result)
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown command: {name}"))?;
+    Ok(ironhermes_core::commands::handlers::dispatch(def, args, ctx, router))
 }
 
 /// Render router-driven /help text — pure router-driven enumeration of the

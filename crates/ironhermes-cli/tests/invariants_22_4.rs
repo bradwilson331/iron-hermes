@@ -604,105 +604,71 @@ fn invariant_22_4_30_system_messages_visible() {
     );
 }
 
-/// INV-22.4-31 (Phase 22.4 gap closure — UAT Round 2 Gap 5): the high-traffic
-/// deferred handlers from Plan 22.4-07 §Handler Coverage MUST be wired so
-/// Phase 22.4 does not ship with a discoverable empty surface.
+/// INV-22.4-31 (Phase 22.4 gap closure — UAT Round 2 Gap 5, updated Phase 22.4.2 Plan 01):
+/// the high-traffic deferred handlers (/agents, /skills, /mcp, /sessions, /memory) MUST
+/// be reachable through the wired dispatch path.
 ///
-/// User-locked decision (Plan 22.4-18): wire /agents, /skills, /mcp,
-/// /sessions, /memory with at minimum informative `CommandResult::Output`
-/// (or `SlashOutcome::Handled`) text. Two routing strategies:
-///   - /agents and /skills exist in the core CommandRouter (registry.rs:38
-///     and :107) so they reach `invoke_handler` as ResolveResult::Exact and
-///     get dedicated match arms.
-///   - /mcp, /sessions, /memory are NOT in the core 49-command set so they
-///     get fast-path guards in `dispatch_slash` BEFORE the CommandRouter
-///     call, mirroring the /mouse precedent from Plan 22.4-16.
+/// Phase 22.4.2 Plan 01 (D-01) collapses `invoke_handler` from a 30-arm match to a
+/// single delegation to `core::handlers::dispatch`. After this change:
+///   - The per-name `"agents" => CommandResult::Output(` arms are GONE (collapsed).
+///   - The fast-path guards for /mcp, /sessions, /memory remain absent (already retired).
+///   - Core::handlers::dispatch is the single dispatch table — it handles agents, skills,
+///     mcp, sessions, memory via real handler bodies or todo_stub().
+///   - The `not yet wired in Phase 22.4` fallback in invoke_handler is GONE (replaced
+///     by the core dispatch fallback via `todo_stub`).
 ///
-/// This invariant grep-locks both strategies so a future refactor cannot
-/// silently regress the handler coverage.
+/// New assertions verify the D-01 architecture (one-line delegation).
 #[test]
 fn invariant_22_4_31_handler_coverage_high_traffic() {
-    // Strategy 1 — invoke_handler match arms for /agents and /skills.
-    // Pattern: `"agents" => CommandResult::Output(` and the same for skills.
+    // D-01 architecture assertion: invoke_handler must delegate to core::handlers::dispatch.
     assert!(
-        TUI_RATA_COMMANDS.contains("\"agents\" => CommandResult::Output("),
-        "INV-22.4-31 (a): tui_rata/commands.rs invoke_handler must contain \
-         a `\"agents\" => CommandResult::Output(...)` match arm. /agents is \
-         in the core CommandRouter (registry.rs:38) and resolves as Exact, \
-         so it must NOT fall through to the generic `not yet wired` arm. \
-         See Plan 22.4-18 Task 1."
-    );
-    assert!(
-        TUI_RATA_COMMANDS.contains("\"skills\" => CommandResult::Output("),
-        "INV-22.4-31 (a): tui_rata/commands.rs invoke_handler must contain \
-         a `\"skills\" => CommandResult::Output(...)` match arm. /skills is \
-         in the core CommandRouter (registry.rs:107) and resolves as Exact, \
-         so it must NOT fall through to the generic `not yet wired` arm. \
-         See Plan 22.4-18 Task 1."
+        TUI_RATA_COMMANDS.contains("ironhermes_core::commands::handlers::dispatch("),
+        "INV-22.4-31 (D-01): tui_rata/commands.rs invoke_handler must delegate to \
+         `ironhermes_core::commands::handlers::dispatch(...)` after Phase 22.4.2 \
+         Plan 01 collapse. The 30-arm match is replaced by one-line delegation."
     );
 
-    // Strategy 2 — fast-path guards for /mcp, /sessions, /memory RETIRED in
-    // Phase 22.4.1 Plan 01. The names are now in the core registry (Plan
-    // 22.4.1-00) and routed via invoke_handler arms.
+    // The per-name `"agents" => CommandResult::Output(` arms are GONE after collapse.
+    // These were present in Phase 22.4.1 Plans 02; Phase 22.4.2 Plan 01 removes them.
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"agents\" => CommandResult::Output("),
+        "INV-22.4-31 (a) [INVERTED — Plan 22.4.2-01]: tui_rata/commands.rs must NOT \
+         contain `\"agents\" => CommandResult::Output(` after invoke_handler collapse \
+         (D-01). /agents is dispatched via core::handlers::dispatch."
+    );
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"skills\" => CommandResult::Output("),
+        "INV-22.4-31 (a) [INVERTED — Plan 22.4.2-01]: tui_rata/commands.rs must NOT \
+         contain `\"skills\" => CommandResult::Output(` after invoke_handler collapse \
+         (D-01). /skills is dispatched via core::handlers::dispatch."
+    );
+
+    // fast-path guards for /mcp, /sessions, /memory remain absent (retired in Plan 22.4.1-01).
     for cmd in &["/mcp", "/sessions", "/memory"] {
         let needle = format!("input.strip_prefix(\"{cmd}\")");
         assert!(
             !TUI_RATA_COMMANDS.contains(&needle),
             "INV-22.4-31 (b) [INVERTED — Plan 22.4.1-01]: tui_rata/commands.rs \
-             dispatch_slash must NOT contain the fast-path guard `{needle}` \
-             after Phase 22.4.1 re-port. {cmd} is now in the core registry \
-             (Plan 22.4.1-00); the router routes it as ResolveResult::Exact \
-             and invoke_handler returns the canonical stub. See Plan \
-             22.4.1-01 and INV-22.4-34."
+             dispatch_slash must NOT contain the fast-path guard `{needle}`. \
+             See Plan 22.4.1-01 and INV-22.4-34."
         );
     }
 
-    // Strategy 2b — invoke_handler match arms for /mcp, /sessions, /memory
-    // are the new canonical home of the stub text after Plan 22.4.1-01
-    // deleted the fast-path helper fns as dead code.
-    for name in &["mcp", "sessions", "memory"] {
-        let needle = format!("\"{name}\" => CommandResult::Output(");
-        assert!(
-            TUI_RATA_COMMANDS.contains(&needle),
-            "INV-22.4-31 (b) [REPLACED — Plan 22.4.1-01]: tui_rata/commands.rs \
-             invoke_handler must contain `{needle}` after Phase 22.4.1 \
-             re-port. The pre-22.4.1 `fn handle_{name}_slash` helper is \
-             deleted as dead code; the new arm is the canonical home of \
-             the stub text. See Plan 22.4.1-01 Edit 4."
-        );
-    }
-
-    // Sanity — render_help mentions all 5 newly-wired commands so /help
-    // discoverability covers the full Phase 22.4 visible surface.
-    for help_marker in &[
-        "/agents",
-        "/skills",
-        "/mcp",
-        "/sessions",
-        "/memory",
-    ] {
-        assert!(
-            TUI_RATA_COMMANDS.contains(help_marker),
-            "INV-22.4-31 sanity: tui_rata/commands.rs render_help must \
-             mention `{help_marker}` so the /help output documents the new \
-             handler. See Plan 22.4-18 Task 3."
-        );
-    }
-
-    // Sanity — the /mouse fast-path was retired in Phase 22.4.1 Plan 01.
-    // The absence assertion now lives in INV-22.4-34 (multi-name absence
-    // check); INV-22.4-29 sub-(b) is also inverted to assert /mouse absence.
-    // No redundant sanity needed here.
-
-    // Sanity — the generic `not yet wired` fallback in invoke_handler stays
-    // as the safety net for OTHER deferred commands (e.g. /config, /personality).
-    // The 5 newly-wired commands MUST take precedence over this fallback.
+    // Sanity — render_help_router generates /help output from the core registry.
+    // It must still be present so /help discoverability covers the full surface.
     assert!(
-        TUI_RATA_COMMANDS.contains("not yet wired in Phase 22.4"),
-        "INV-22.4-31 sanity: tui_rata/commands.rs invoke_handler must \
-         retain the generic `not yet wired in Phase 22.4` fallback as the \
-         safety net for OTHER deferred commands. The 5 newly-wired commands \
-         have dedicated arms / fast-paths and never reach this fallback."
+        TUI_RATA_COMMANDS.contains("render_help_router("),
+        "INV-22.4-31 sanity: tui_rata/commands.rs must still call render_help_router \
+         so /help output is generated from the registry. See Plan 22.4.1 D-13."
+    );
+
+    // Sanity — `not yet wired in Phase 22.4` fallback REMOVED after invoke_handler collapse.
+    // The safety net is now core::handlers::dispatch's todo_stub() arm.
+    assert!(
+        !TUI_RATA_COMMANDS.contains("not yet wired in Phase 22.4"),
+        "INV-22.4-31 sanity [INVERTED — Plan 22.4.2-01]: tui_rata/commands.rs must NOT \
+         contain the `not yet wired in Phase 22.4` fallback after invoke_handler collapse. \
+         The core::handlers::dispatch fallback (todo_stub) is the new safety net."
     );
 }
 
@@ -759,56 +725,76 @@ fn invariant_22_4_34_dispatch_slash_no_strip_prefix() {
     }
 }
 
-/// INV-22.4-33 (Phase 22.4.1 Plan 02 — D-05 / D-08 / D-14): every Session +
-/// Configuration category command added in Plan 02 must have an explicit
-/// `"<name>" => CommandResult::Output(` invoke_handler arm in
-/// tui_rata/commands.rs. Also asserts the `Phase 22.4.1 stub:` marker count
-/// — at least one occurrence per Plan-02 arm (gates D-08's stub-text format).
+/// INV-22.4-33 (Phase 22.4.1 Plan 02 — D-05/D-08/D-14, INVERTED Phase 22.4.2 Plan 01 — D-01/D-10):
 ///
-/// GatewayOnly names (approve, deny, sethome, start) are EXCLUDED from
-/// expected_arms per RESEARCH Pitfall 6 — they are filtered by the router's
-/// PlatformFilter::GatewayOnly on Platform::Local and never reach
-/// invoke_handler. Adding arms for them would create dead code.
+/// Phase 22.4.1 Plan 02 originally asserted that 26 per-name
+/// `"<name>" => CommandResult::Output(` arms MUST be present in invoke_handler,
+/// and that `Phase 22.4.1 stub:` markers appeared at least 26 times.
 ///
-/// Names already wired by Plan 22.4.1-01 (mouse, mcp, sessions, memory) and
-/// Phase 22.4 (agents, skills) are intentionally excluded — they are
-/// asserted by INV-22.4-31 Strategy 1 (agents, skills) and the inverted
-/// INV-22.4-31 Strategy 2b (mcp, sessions, memory). /mouse arm presence is
-/// covered by the Plan-01 acceptance grep (no INV directly asserts it).
+/// Phase 22.4.2 Plan 01 (D-01) collapses invoke_handler from a 30-arm match to a
+/// one-line delegation to `core::handlers::dispatch`. After this change:
+///
+///   - All 26 per-name arm literals are GONE (invoke_handler has no match arms).
+///   - All `Phase 22.4.1 stub:` markers are GONE (the stub text moved to todo_stub()
+///     in core::handlers, which is NOT in tui_rata/commands.rs).
+///   - `/voice` and `/prompt` keep their stub text in core::handlers::todo_stub()
+///     (NOT in tui_rata/commands.rs).
+///
+/// This inverted test asserts:
+///   (a) The 24 wired-command per-name arm literals are ABSENT from tui_rata/commands.rs.
+///   (b) `Phase 22.4.1 stub:` appears ZERO times in tui_rata/commands.rs.
+///   (c) Real handler functions exist in core/handlers.rs for the 5 StateStore commands.
 #[test]
 fn invariant_22_4_33_invoke_handler_arms() {
-    // 13 Session + 13 Configuration = 26 names. Source: RESEARCH Finding 2.
-    // Order matches build_registry() source order (registry.rs lines 22–98).
-    let expected_arms: &[&str] = &[
-        // Session category (13 net-new)
+    // (a) All 26 per-name arm literals must be ABSENT after invoke_handler collapse.
+    // These names were in the Phase 22.4.1 Plan 02 expected_arms list.
+    let wired_names: &[&str] = &[
+        // Session category
         "history", "save", "retry", "undo", "title", "compress", "rollback", "stop",
         "background", "btw", "queue", "status", "resume",
-        // Configuration category (13 net-new)
+        // Configuration category
         "config", "provider", "prompt", "personality", "statusbar", "verbose",
         "yolo", "reasoning", "skin", "voice", "model", "fast", "debug",
     ];
-
-    for name in expected_arms {
+    for name in wired_names {
         let needle = format!("\"{name}\" => CommandResult::Output(");
         assert!(
-            TUI_RATA_COMMANDS.contains(&needle),
-            "INV-22.4-33: tui_rata/commands.rs invoke_handler must contain \
-             `{needle}`. Added by Phase 22.4.1 Plan 02 per D-05/D-08. \
-             The stub-text format is locked in CONTEXT D-08."
+            !TUI_RATA_COMMANDS.contains(&needle),
+            "INV-22.4-33 [INVERTED — Plan 22.4.2-01]: tui_rata/commands.rs must NOT \
+             contain `{needle}` after invoke_handler collapse (D-01). The 30-arm \
+             match is replaced by one-line delegation to core::handlers::dispatch. \
+             See Phase 22.4.2 Plan 01 D-01."
         );
     }
 
-    // D-08 stub-text marker count — must appear at least once per Plan-02 arm.
-    // (Plan-01 added 4 more occurrences for mouse/mcp/sessions/memory; this
-    // assertion only floors at 26 so the test stays robust to Plan-01's count
-    // — the full ≥ 30 grep is in Plan 02 acceptance criteria, not here.)
+    // (b) `Phase 22.4.1 stub:` must appear ZERO times in tui_rata/commands.rs.
+    // All stub text is now in core::handlers::todo_stub() — NOT in tui_rata/commands.rs.
     let stub_count = TUI_RATA_COMMANDS.matches("Phase 22.4.1 stub:").count();
     assert!(
-        stub_count >= expected_arms.len(),
-        "INV-22.4-33: tui_rata/commands.rs must contain `Phase 22.4.1 stub:` \
-         at least {} times (one per Plan-02 arm). Found {}. See D-08.",
-        expected_arms.len(),
-        stub_count
+        stub_count == 0,
+        "INV-22.4-33 [INVERTED — Plan 22.4.2-01]: tui_rata/commands.rs must contain \
+         ZERO occurrences of `Phase 22.4.1 stub:` after invoke_handler collapse. \
+         Found {stub_count}. The stub text lives in core::handlers::todo_stub() now."
+    );
+
+    // (c) Real handler function bodies exist in core handlers for the 5 StateStore commands.
+    // These are in a separate file so we include_str! it for the grep check.
+    const CORE_HANDLERS: &str =
+        include_str!("../../ironhermes-core/src/commands/handlers.rs");
+    for fn_name in &["cmd_sessions", "cmd_resume", "cmd_save", "cmd_history"] {
+        assert!(
+            CORE_HANDLERS.contains(fn_name),
+            "INV-22.4-33 (c): ironhermes-core/src/commands/handlers.rs must contain \
+             `{fn_name}` — the real handler body added by Phase 22.4.2 Plan 01. \
+             See D-03."
+        );
+    }
+    // cmd_title exists from before Plan 01; assert it reads ctx.state_store now.
+    assert!(
+        CORE_HANDLERS.contains("ctx.state_store"),
+        "INV-22.4-33 (c): ironhermes-core/src/commands/handlers.rs must contain \
+         `ctx.state_store` — cmd_title and the new StateStore handlers read this \
+         field (D-04/D-05). See Phase 22.4.2 Plan 01."
     );
 }
 
