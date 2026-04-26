@@ -100,6 +100,16 @@ Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-own
 Plans:
 - [x] TBD (run /gsd-plan-phase 22.4.2 to break down) (completed 2026-04-26)
 
+### Phase 22.4.2.1: Cron cmds and telegram delivery broken (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 22.4.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 22.4.2.1 to break down)
+
 ### Phase 22.4.1: tui_rata handler re-port — route dispatch_slash through CommandRouter and registry handlers (INSERTED)
 
 **Goal:** Re-port `crates/ironhermes-cli/src/tui_rata/commands.rs::dispatch_slash` so every visible-surface slash command resolves through `ironhermes_core::commands::CommandRouter`, retiring the four ad-hoc `strip_prefix` fast-paths added in Plans 22.4-16 (`/mouse`) and 22.4-18 (`/mcp`, `/sessions`, `/memory`). After this phase `dispatch_slash`'s shape is symmetric with `tui::commands::dispatch` (classic-tui) and `gateway::handler::handle_slash_command` — pure router-shell + one localised post-router App-side hook for `/mouse`'s state-mutation. Promote `mouse`/`mcp`/`sessions`/`memory` into `ironhermes-core::commands::registry::build_registry()` (4 new `CommandDef::new` entries). Bulk-fill `invoke_handler` with explicit `"<name>" => CommandResult::Output(...)` arms for every Platform::Local-reachable command in the Session and Configuration registry categories (~26 net-new arms following the locked D-08 stub-text format with `Phase 22.4.1 stub:` markers). Replace the 22-line hand-built `render_help()` with a router-driven `render_help_router(router, &Platform::Local)` lifted from `tui::commands::format_help`'s pure-text inner loop (D-13). Test ledger continues from {00..22, 24..31} = 31 invariants to {00..22, 24..34} = 34 invariants — INV-22.4-29 + INV-22.4-31 inverted in place per the 22.4-16/17/18 numbering precedent; INV-22.4-32 (router_membership), INV-22.4-33 (invoke_handler_arms), INV-22.4-34 (dispatch_slash_no_strip_prefix) appended. Pure refactor — no new behavior, snapshot suite predicted zero diffs (none of the 8 canonical frames render `/help` output). 15 locked CONTEXT decisions D-01..D-15 serve as the requirements set.

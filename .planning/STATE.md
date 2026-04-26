@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: milestone_complete
+status: Inserted (urgent), not planned yet
 stopped_at: Phase 22.4.2 context gathered
-last_updated: "2026-04-25T22:08:07.879Z"
-last_activity: 2026-04-25 -- Phase 22.4.1 execution started
+last_updated: "2026-04-26T10:39:27.189Z"
+last_activity: 2026-04-26
 progress:
-  total_phases: 17
+  total_phases: 18
   completed_phases: 16
-  total_plans: 92
-  completed_plans: 92
-  percent: 94
+  total_plans: 97
+  completed_plans: 97
+  percent: 100
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 22.4.2
+Phase: 22.4.2.1
 Plan: Not started
-Status: Milestone complete
+Status: Inserted (urgent), not planned yet
 Last activity: 2026-04-26
 
 Progress: [██████████] 100%
@@ -311,6 +311,7 @@ Recent decisions affecting current work:
 - Phase 22.4 inserted after Phase 22: ratatui-backed REPL (tmon architecture) (URGENT)
 - Phase 22.4.1 inserted after Phase 22.4: tui_rata handler re-port — closes Plan 22.4-07 §Handler Coverage deferral by routing dispatch_slash through ironhermes_core::commands::CommandRouter::resolve + existing registry handlers so every classic-TUI command works in the ratatui REPL (INSERTED)
 - Phase 22.4.2 inserted after Phase 22.4: wire up slash commands — replace `Phase 22.4.x stub:` placeholders in `tui_rata` invoke_handler arms with real handlers delegating to owning subsystems (MemoryManager [Phase 20], SubagentRegistry, active_skills, session storage, McpManager); narrows generic `not yet wired` fallback (INSERTED)
+- Phase 22.4.2.1 inserted after Phase 22.4.2: Cron cmds and telegram delivery broken (URGENT)
 
 ### Pending Todos
 
