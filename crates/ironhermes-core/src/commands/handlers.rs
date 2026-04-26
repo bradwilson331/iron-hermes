@@ -35,7 +35,9 @@ pub fn dispatch(
         // -------------------------------------------------------------------
         // Configuration commands
         // -------------------------------------------------------------------
+        "model" => cmd_model(args, ctx),
         "provider" => cmd_provider(ctx),
+        "fast" => cmd_fast(ctx),
         "config" => cmd_config(ctx),
         "profile" => cmd_profile(ctx),
         "yolo" => cmd_yolo(ctx),
@@ -517,8 +519,66 @@ fn cmd_start(_ctx: &CommandContext) -> CommandResult {
     }
 }
 
-fn cmd_provider(_ctx: &CommandContext) -> CommandResult {
-    CommandResult::Output("Provider: (use /model to view or change)".to_string())
+/// `/model [name]` — list available models or select a model.
+///
+/// With no args: lists all available models from the ProviderResolver's model registry.
+/// With one arg: validates the named model exists; returns confirmation text that the
+/// post-router hook (Plan 03) will use to trigger an AnyClient rebuild on App.
+///
+/// Guard pattern (D-05): when `ctx.provider_resolver` is None, returns informational text.
+/// V5.1: validates model name against registry before returning success.
+fn cmd_model(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let resolver = match &ctx.provider_resolver {
+        Some(r) => r.clone(),
+        None => return CommandResult::Output("Provider resolver not configured.".to_string()),
+    };
+    if args.is_empty() {
+        // List mode — enumerate available models from the registry.
+        CommandResult::Output(resolver.model_list_text())
+    } else {
+        // Validate mode — check the model exists, then return confirmation.
+        let target = args[0];
+        match resolver.validate_model(target) {
+            Ok(model_name) => CommandResult::Output(format!(
+                "Selected model: {model_name} (post-router hook will rebuild client)"
+            )),
+            Err(msg) => CommandResult::Error(msg),
+        }
+    }
+}
+
+/// `/provider` — display current provider/model/endpoint status.
+///
+/// Guard pattern (D-05): when `ctx.provider_resolver` is None, returns informational text.
+/// V8.1: api_key field is NEVER included in the Output text.
+fn cmd_provider(ctx: &CommandContext) -> CommandResult {
+    let resolver = match &ctx.provider_resolver {
+        Some(r) => r.clone(),
+        None => return CommandResult::Output("Provider resolver not configured.".to_string()),
+    };
+    CommandResult::Output(resolver.status_text())
+}
+
+/// `/fast` — display fast-role resolution result.
+///
+/// Returns informational text about what model would be used in fast mode.
+/// The actual Arc<AtomicBool> toggle on app.fast_enabled + AnyClient rebuild
+/// is owned by Plan 03's handle_subsystem_mutator (post-router hook).
+///
+/// Guard pattern (D-05): when `ctx.provider_resolver` is None, returns informational text.
+fn cmd_fast(ctx: &CommandContext) -> CommandResult {
+    let resolver = match &ctx.provider_resolver {
+        Some(r) => r.clone(),
+        None => return CommandResult::Output("Provider resolver not configured.".to_string()),
+    };
+    match resolver.fast_role_model() {
+        Some(model) => CommandResult::Output(format!(
+            "Fast mode: model swap to {model} (post-router hook will rebuild client)."
+        )),
+        None => CommandResult::Output(
+            "Fast role not configured (no fast preset in config).".to_string(),
+        ),
+    }
 }
 
 fn cmd_config(_ctx: &CommandContext) -> CommandResult {
@@ -811,9 +871,7 @@ fn todo_stub(name: &str) -> CommandResult {
         "skin" => "No theme system",
         "btw" => "No ephemeral query mechanism",
         "queue" => "No input queue",
-        "fast" => "No model preset",
         "debug" => "No debug info toggle",
-        "model" => "Model switching requires caller wiring",
         _ => "Not implemented",
     };
     CommandResult::Output(format!("/{} is not yet available. ({})", name, reason))
@@ -1130,9 +1188,9 @@ mod tests {
             "skin",
             "btw",
             "queue",
-            "fast",
+            // "fast" removed — now has real handler (Phase 22.4.2 Plan 02)
             "debug",
-            "model",
+            // "model" removed — now has real handler (Phase 22.4.2 Plan 02)
         ];
         let ctx = make_ctx(false);
         let router = make_router();

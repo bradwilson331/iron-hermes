@@ -71,10 +71,19 @@ impl ProviderResolverHandle for ProviderResolverAdapter {
             "No models available. Run /reload-mcp to refresh.".to_string()
         } else {
             let lines: Vec<String> = models.iter()
-                .map(|(id, _meta)| format!("  {id}"))
+                .take(20)
+                .map(|(id, meta)| format!("  - {} (ctx: {})", id, meta.context_length))
                 .collect();
-            format!("Available models:\n{}", lines.join("\n"))
+            let header = "Available models:".to_string();
+            let mut out = format!("{header}\n{}", lines.join("\n"));
+            if models.len() > 20 {
+                out.push_str("\n  ... (use /models for full list)");
+            }
+            out
         }
+    }
+    fn fast_role_model(&self) -> Option<String> {
+        self.0.resolve_role("fast").map(|ep| ep.default_model.clone())
     }
 }
 

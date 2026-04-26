@@ -128,11 +128,15 @@ pub trait ProviderResolverHandle: Send + Sync {
     /// Current model name.
     fn main_model(&self) -> String;
     /// Formatted status text for `/provider`.
+    /// V8.1: MUST NOT include api_key in the returned string.
     fn status_text(&self) -> String;
     /// Validate a model string. Returns Ok(model_name) or Err(message).
     fn validate_model(&self, model: &str) -> Result<String, String>;
     /// Model listing text for `/model` with no args.
     fn model_list_text(&self) -> String;
+    /// Resolve the "fast" role. Returns Some(model_name) if a fast preset is configured,
+    /// None if no fast role exists in the config.
+    fn fast_role_model(&self) -> Option<String>;
 }
 
 /// Handle for ContextCompressor operations (D-04).
