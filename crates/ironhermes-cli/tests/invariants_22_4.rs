@@ -1141,3 +1141,127 @@ fn invariant_22_4_44_fast_wired() {
          See Phase 22.4.2 Plan 02."
     );
 }
+
+// =============================================================================
+// Phase 22.4.2 Plan 03 — INV-22.4-45 through INV-22.4-52
+// Per-command static-grep INVs for toggle + personality + compress commands (D-10).
+// Each asserts:
+//   (a) The Phase 22.4.1 stub: marker is ABSENT from tui_rata/commands.rs (invoke_handler collapsed).
+//   (b) The real handler function exists in core/handlers.rs.
+// =============================================================================
+
+/// INV-22.4-45 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/yolo` wire-up.
+#[test]
+fn invariant_22_4_45_yolo_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /yolo"),
+        "INV-22.4-45 (a): stub marker for /yolo must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_yolo("),
+        "INV-22.4-45 (b): fn cmd_yolo must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+}
+
+/// INV-22.4-46 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/verbose` wire-up.
+#[test]
+fn invariant_22_4_46_verbose_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /verbose"),
+        "INV-22.4-46 (a): stub marker for /verbose must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_verbose("),
+        "INV-22.4-46 (b): fn cmd_verbose must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+}
+
+/// INV-22.4-47 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/statusbar` wire-up.
+#[test]
+fn invariant_22_4_47_statusbar_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /statusbar"),
+        "INV-22.4-47 (a): stub marker for /statusbar must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_statusbar("),
+        "INV-22.4-47 (b): fn cmd_statusbar must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+}
+
+/// INV-22.4-48 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/debug` wire-up.
+#[test]
+fn invariant_22_4_48_debug_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /debug"),
+        "INV-22.4-48 (a): stub marker for /debug must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_debug("),
+        "INV-22.4-48 (b): fn cmd_debug must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+}
+
+/// INV-22.4-49 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/skin` wire-up.
+#[test]
+fn invariant_22_4_49_skin_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /skin"),
+        "INV-22.4-49 (a): stub marker for /skin must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_skin("),
+        "INV-22.4-49 (b): fn cmd_skin must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+}
+
+/// INV-22.4-50 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/fast` wired (Plan 02 core + Plan 03 App-side toggle).
+///
+/// INV-22.4-50 is satisfied by Plan 02's cmd_fast in core AND Plan 03's
+/// handle_subsystem_mutator App-side toggle path. /fast is ONE wired command counted once.
+#[test]
+fn invariant_22_4_50_fast_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /fast"),
+        "INV-22.4-50 (a): stub marker for /fast must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_fast("),
+        "INV-22.4-50 (b): fn cmd_fast must exist in ironhermes-core/src/commands/handlers.rs \
+         (added by Phase 22.4.2 Plan 02)"
+    );
+}
+
+/// INV-22.4-51 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/personality` wire-up.
+#[test]
+fn invariant_22_4_51_personality_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /personality"),
+        "INV-22.4-51 (a): stub marker for /personality must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_personality("),
+        "INV-22.4-51 (b): fn cmd_personality must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("ctx.personality_overlay"),
+        "INV-22.4-51 (b): cmd_personality must reference ctx.personality_overlay (D-04/D-05)"
+    );
+}
+
+/// INV-22.4-52 (Phase 22.4.2 Plan 03 — D-03/D-06/D-10): `/compress` wire-up.
+#[test]
+fn invariant_22_4_52_compress_wired() {
+    assert!(
+        !TUI_RATA_COMMANDS.contains("Phase 22.4.1 stub: /compress"),
+        "INV-22.4-52 (a): stub marker for /compress must be absent from tui_rata/commands.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_compress("),
+        "INV-22.4-52 (b): fn cmd_compress must exist in ironhermes-core/src/commands/handlers.rs"
+    );
+    assert!(
+        CORE_HANDLERS.contains("ctx.context_compressor"),
+        "INV-22.4-52 (b): cmd_compress must reference ctx.context_compressor (D-04/D-05)"
+    );
+}
