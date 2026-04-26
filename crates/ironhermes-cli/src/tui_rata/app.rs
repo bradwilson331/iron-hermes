@@ -184,6 +184,10 @@ pub struct App {
     pub context_compressor: Option<Arc<dyn ContextEngine>>,
     /// PersonalityRegistry for `/personality` (Phase 15 PRMT-06/PRMT-07).
     pub personality_overlay: Arc<PersonalityRegistry>,
+    /// Pending personality overlay text to inject as system-prompt on next spawn_turn.
+    /// Set by tui_rata post-router hook `handle_subsystem_mutator` on `/personality <name>`.
+    /// Consumed (and cleared) by spawn_turn bootstrap (Plan 03 scope: set only; consume deferred).
+    pub next_turn_personality_overlay: Option<String>,
 }
 
 impl App {
@@ -243,6 +247,8 @@ impl App {
             resolver: deps.resolver,
             context_compressor: deps.context_compressor,
             personality_overlay: deps.personality_overlay,
+            // Phase 22.4.2 Plan 03: pending personality overlay for next spawn_turn
+            next_turn_personality_overlay: None,
         }
     }
 
