@@ -30,6 +30,9 @@ pub fn dispatch(
         "save" => cmd_save(args, ctx),
         "history" => cmd_history(args, ctx),
         "compress" => cmd_compress(args, ctx),
+        "personality" => cmd_personality(args, ctx),
+        "debug" => cmd_debug(ctx),
+        "skin" => cmd_skin(args, ctx),
         "start" => cmd_start(ctx),
 
         // -------------------------------------------------------------------
@@ -509,8 +512,70 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
     CommandResult::Output("Session storage not configured.".to_string())
 }
 
-fn cmd_compress(_args: &[&str], _ctx: &CommandContext) -> CommandResult {
-    CommandResult::Output("Compressing context...".to_string())
+fn cmd_compress(_args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let engine = match &ctx.context_compressor {
+        Some(e) => e.clone(),
+        None => return CommandResult::Output("Context compressor not configured.".to_string()),
+    };
+    // Per Plan 03 Task 1 deferral note (OQ-5): manual /compress mutation deferred —
+    // automatic compression in AgentLoop continues to fire on pressure.
+    CommandResult::Output(format!(
+        "Context compressor: {} (manual trigger not yet wired — automatic hook fires on pressure).",
+        engine.status_text()
+    ))
+}
+
+/// `/personality [name]` — list available personality presets or apply one.
+///
+/// With no args: lists all available preset names from PersonalityRegistry.
+/// With one arg: returns the overlay text for the named preset.
+/// Guard pattern (D-05): when `ctx.personality_overlay` is None, returns informational text.
+fn cmd_personality(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let registry = match &ctx.personality_overlay {
+        Some(r) => r.clone(),
+        None => return CommandResult::Output("Personality registry not configured.".to_string()),
+    };
+    if args.is_empty() {
+        // List mode — show all available preset names.
+        let presets = registry.list_presets();
+        if presets.is_empty() {
+            return CommandResult::Output("No personalities configured.".to_string());
+        }
+        let mut lines = Vec::with_capacity(presets.len() + 1);
+        lines.push(format!("Available personalities ({}):", presets.len()));
+        for name in &presets {
+            lines.push(format!("  - {}", name));
+        }
+        CommandResult::Output(lines.join("\n"))
+    } else {
+        // Apply mode — return overlay text; tui_rata post-router hook applies as system-prompt injection.
+        let name = args[0];
+        match registry.get_preset(name) {
+            Some(text) => CommandResult::Output(text),
+            None => CommandResult::Error(format!("Unknown personality: {name}")),
+        }
+    }
+}
+
+/// `/debug` — informational text returner (Cat-1F).
+///
+/// Real App-state mutation (flipping app.debug_enabled AtomicBool) happens in
+/// tui_rata's post-router hook `handle_toggle`. Core returns informational text
+/// for gateway compatibility.
+fn cmd_debug(_ctx: &CommandContext) -> CommandResult {
+    CommandResult::Output("Debug mode toggled.".to_string())
+}
+
+/// `/skin [name]` — informational text returner (Cat-1F).
+///
+/// Real App-state mutation (writing app.skin RwLock<String>) happens in
+/// tui_rata's post-router hook `handle_toggle`. Core returns informational text
+/// for gateway compatibility.
+fn cmd_skin(args: &[&str], _ctx: &CommandContext) -> CommandResult {
+    match args.first() {
+        Some(name) => CommandResult::Output(format!("Skin set to {name}.")),
+        None => CommandResult::Output("Usage: /skin <name>".to_string()),
+    }
 }
 
 fn cmd_start(_ctx: &CommandContext) -> CommandResult {
@@ -860,7 +925,6 @@ fn todo_stub(name: &str) -> CommandResult {
         "approve" => "No approval queue",
         "deny" => "No approval queue",
         "prompt" => "No custom system prompt injection",
-        "personality" => "Requires Phase 15",
         "tools" => "No tool enable/disable management",
         "toolsets" => "No toolset listing",
         "cron" => "No cron management UI",
@@ -868,10 +932,8 @@ fn todo_stub(name: &str) -> CommandResult {
         "plugins" => "No plugin system",
         "paste" => "No clipboard integration",
         "platforms" | "gateway" => "No platform status display",
-        "skin" => "No theme system",
         "btw" => "No ephemeral query mechanism",
         "queue" => "No input queue",
-        "debug" => "No debug info toggle",
         _ => "Not implemented",
     };
     CommandResult::Output(format!("/{} is not yet available. ({})", name, reason))
@@ -1176,7 +1238,6 @@ mod tests {
             // "history" removed — now has real handler (Phase 22.4.2 Plan 01)
             // "save" removed — now has real handler (Phase 22.4.2 Plan 01)
             "prompt",
-            "personality",
             "tools",
             "toolsets",
             "cron",
@@ -1185,12 +1246,13 @@ mod tests {
             "plugins",
             "paste",
             "platforms",
-            "skin",
             "btw",
             "queue",
             // "fast" removed — now has real handler (Phase 22.4.2 Plan 02)
-            "debug",
+            // "debug" removed — now has real handler (Phase 22.4.2 Plan 03)
             // "model" removed — now has real handler (Phase 22.4.2 Plan 02)
+            // "personality" removed — now has real handler (Phase 22.4.2 Plan 03)
+            // "skin" removed — now has real handler (Phase 22.4.2 Plan 03)
         ];
         let ctx = make_ctx(false);
         let router = make_router();
