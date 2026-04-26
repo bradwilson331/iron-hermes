@@ -1,6 +1,6 @@
 {
   "workflow": {
-    "_auto_chain_active": false,
+    "_auto_chain_active": true,
     "use_worktrees": true
   },
   "created_at": "2026-04-01",
