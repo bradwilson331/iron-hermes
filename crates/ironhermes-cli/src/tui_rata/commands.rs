@@ -405,6 +405,28 @@ fn build_command_context(app: &App) -> CommandContext {
             Arc::new(PersonalityAdapter(app.personality_overlay.clone()));
         ctx = ctx.with_personality_overlay(handle);
     }
+    // ProcessRegistry for /stop (Plan 04: thread into build_command_context).
+    // ProcessRegistryHandle is the newtype in ironhermes-exec that implements
+    // ProcessRegistrySnapshotHandle for Arc<RwLock<ProcessRegistry>>.
+    {
+        use ironhermes_core::commands::context::ProcessRegistrySnapshotHandle;
+        let handle: Arc<dyn ProcessRegistrySnapshotHandle> = Arc::new(
+            ironhermes_exec::process_registry::ProcessRegistryHandle::new(
+                app.process_registry.clone(),
+            ),
+        );
+        ctx = ctx.with_process_registry(handle);
+    }
+    // SubagentRegistry for /agents (already wired via cmd_agents in core).
+    {
+        use ironhermes_core::commands::context::SubagentListSnapshot;
+        let handle: Arc<dyn SubagentListSnapshot> = Arc::new(
+            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
+                app.subagent_registry.clone(),
+            ),
+        );
+        ctx = ctx.with_subagent_registry(handle);
+    }
     // History snapshot: clone current history for read-only handlers.
     // Mutations (/retry, /undo, /rollback) apply in the post-router hook.
     {
