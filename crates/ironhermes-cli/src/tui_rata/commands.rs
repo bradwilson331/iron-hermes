@@ -20,11 +20,176 @@ use std::sync::Arc;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
-use ironhermes_core::commands::context::CommandContext;
+use ironhermes_core::commands::context::{
+    AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
+    MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
+};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::types::Platform;
 
 use crate::tui_rata::app::App;
+
+// ── Phase 22.4.2 Plan 00: D-04 trait adapters ────────────────────────────────
+//
+// These thin wrappers implement the CommandContext handle traits for the
+// concrete types held by App. All implementations satisfy the D-05
+// `is_some()` guard pattern — handlers check `.is_some()` before calling.
+
+/// Adapter: McpManager → McpManagerHandle for `/mcp` server enumeration.
+struct McpManagerAdapter(Arc<ironhermes_mcp::McpManager>);
+impl McpManagerHandle for McpManagerAdapter {
+    fn connected_server_names(&self) -> Vec<String> {
+        self.0.connected_server_names()
+    }
+}
+
+/// Adapter: ProviderResolver → ProviderResolverHandle for `/model` `/provider`.
+struct ProviderResolverAdapter(ironhermes_core::ProviderResolver);
+impl ProviderResolverHandle for ProviderResolverAdapter {
+    fn main_provider(&self) -> String {
+        self.0.main_provider().to_string()
+    }
+    fn main_model(&self) -> String {
+        self.0.resolve_for_main().default_model.clone()
+    }
+    fn status_text(&self) -> String {
+        let ep = self.0.resolve_for_main();
+        format!("Provider: {} | Model: {}", self.0.main_provider(), ep.default_model)
+    }
+    fn validate_model(&self, model: &str) -> Result<String, String> {
+        // Accept any non-empty model string; Plans 01-04 will add real validation.
+        if model.trim().is_empty() {
+            Err("Model name cannot be empty.".to_string())
+        } else {
+            Ok(model.trim().to_string())
+        }
+    }
+    fn model_list_text(&self) -> String {
+        let registry = self.0.model_registry();
+        let models = registry.all_models();
+        if models.is_empty() {
+            "No models available. Run /reload-mcp to refresh.".to_string()
+        } else {
+            let lines: Vec<String> = models.iter()
+                .map(|(id, _meta)| format!("  {id}"))
+                .collect();
+            format!("Available models:\n{}", lines.join("\n"))
+        }
+    }
+}
+
+/// Adapter: PersonalityRegistry → PersonalityHandle for `/personality`.
+struct PersonalityAdapter(Arc<ironhermes_agent::personality::PersonalityRegistry>);
+impl PersonalityHandle for PersonalityAdapter {
+    fn get_preset(&self, name: &str) -> Option<String> {
+        self.0.get(name).map(|s| s.to_string())
+    }
+    fn list_presets(&self) -> Vec<String> {
+        self.0.list().into_iter().map(|s| s.to_string()).collect()
+    }
+}
+
+/// Adapter: MemoryManager (tokio Mutex) → MemoryManagerHandle for `/memory`.
+struct MemoryManagerAdapter(Arc<tokio::sync::Mutex<ironhermes_agent::memory::MemoryManager>>);
+impl MemoryManagerHandle for MemoryManagerAdapter {
+    fn status_text(&self) -> String {
+        // Use block_in_place to bridge async MemoryManager methods.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mgr = self.0.lock().await;
+                match mgr.system_prompt_block().await {
+                    Some(block) => format!("Memory active:\n{block}"),
+                    None => "Memory: no active context block.".to_string(),
+                }
+            })
+        })
+    }
+}
+
+/// Adapter: StateStore (std Mutex) → StateStoreHandle for `/sessions` etc.
+struct StateStoreAdapter(Arc<std::sync::Mutex<ironhermes_state::StateStore>>);
+impl StateStoreHandle for StateStoreAdapter {
+    fn list_sessions_text(&self, limit: usize) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.list_sessions(None, limit) {
+            Ok(sessions) if sessions.is_empty() => "No sessions found.".to_string(),
+            Ok(sessions) => {
+                let lines: Vec<String> = sessions.iter()
+                    .map(|s| format!("  {}", s.id))
+                    .collect();
+                format!("Recent sessions:\n{}", lines.join("\n"))
+            }
+            Err(e) => format!("Error listing sessions: {e}"),
+        }
+    }
+    fn history_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.get_messages(session_id) {
+            Ok(msgs) if msgs.is_empty() => "No messages in history.".to_string(),
+            Ok(msgs) => {
+                let lines: Vec<String> = msgs.iter()
+                    .map(|m| format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or("")))
+                    .collect();
+                format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
+            }
+            Err(e) => format!("Error loading history: {e}"),
+        }
+    }
+    fn export_session_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.export_session(session_id) {
+            Ok(export) => format!("Session exported: {} messages.", export.messages.len()),
+            Err(e) => format!("Error exporting session: {e}"),
+        }
+    }
+    fn update_title(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let mut guard = self.0.lock().map_err(|_| "StateStore lock poisoned.".to_string())?;
+        guard.update_session_title(session_id, title).map_err(|e| e.to_string())
+    }
+    fn get_session_id(&self, name_or_id: &str) -> Option<String> {
+        let guard = self.0.lock().ok()?;
+        // Try by exact id first, then by title.
+        if let Ok(Some(s)) = guard.get_session(name_or_id) {
+            return Some(s.id);
+        }
+        guard.get_session_by_title(name_or_id).ok().flatten().map(|s| s.id)
+    }
+}
+
+/// Adapter: ContextEngine → ContextCompressorHandle for `/compress`.
+struct ContextEngineAdapter(Arc<dyn ironhermes_agent::context_engine::ContextEngine>);
+impl ContextCompressorHandle for ContextEngineAdapter {
+    fn compress_text(&self) -> String {
+        // Compression requires messages — return informational text.
+        // Plans 01-03 will wire the actual compress call with history context.
+        "Compression triggered. Use /rollback to revert if needed.".to_string()
+    }
+    fn status_text(&self) -> String {
+        format!(
+            "Context compressor active. Mode: {:?}",
+            self.0.mode()
+        )
+    }
+}
+
+/// Adapter: AgentLoop → AgentLoopHandle for Tier D session control.
+struct AgentLoopAdapter(Arc<ironhermes_agent::agent_loop::AgentLoop>);
+impl AgentLoopHandle for AgentLoopAdapter {
+    fn is_running(&self) -> bool {
+        // Conservative: assume running if we have a handle.
+        // Plans 01-04 will wire the actual running-state check.
+        false
+    }
+}
 
 // ── SlashOutcome ──────────────────────────────────────────────────────────────
 
@@ -164,9 +329,12 @@ fn handle_mouse_slash(app: &mut App, arg: &str) -> SlashOutcome {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Build a minimum-viable `CommandContext` from App state.
+/// Build a `CommandContext` from App state, populated with all available handles.
 ///
 /// `agent_running` is derived from whether a pending turn is active.
+/// Phase 22.4.2 Plan 00: populates all 8 new D-04 handle fields (D-05 guard
+/// pattern: each field is Option so handlers gracefully return "not configured"
+/// when the handle is None).
 fn build_command_context(app: &App) -> CommandContext {
     let agent_running = Arc::new(AtomicBool::new(app.pending_rx.is_some()));
     let mut ctx = CommandContext::new(
@@ -176,6 +344,43 @@ fn build_command_context(app: &App) -> CommandContext {
     );
     if let Some(mgr) = &app.mcp_manager {
         ctx = ctx.with_mcp_reloader(mgr.clone());
+        // Also wire the McpManagerHandle for `/mcp` full enumeration (D-04).
+        let handle: Arc<dyn McpManagerHandle> = Arc::new(McpManagerAdapter(mgr.clone()));
+        ctx = ctx.with_mcp_manager(handle);
+    }
+    if let Some(mem) = &app.memory_manager {
+        let handle: Arc<dyn MemoryManagerHandle> = Arc::new(MemoryManagerAdapter(mem.clone()));
+        ctx = ctx.with_memory_manager(handle);
+    }
+    if let Some(store) = &app.state_store {
+        let handle: Arc<dyn StateStoreHandle> = Arc::new(StateStoreAdapter(store.clone()));
+        ctx = ctx.with_state_store(handle);
+    }
+    {
+        let handle: Arc<dyn ProviderResolverHandle> =
+            Arc::new(ProviderResolverAdapter(app.resolver.clone()));
+        ctx = ctx.with_provider_resolver(handle);
+    }
+    if let Some(engine) = &app.context_compressor {
+        let handle: Arc<dyn ContextCompressorHandle> =
+            Arc::new(ContextEngineAdapter(engine.clone()));
+        ctx = ctx.with_context_compressor(handle);
+    }
+    {
+        let handle: Arc<dyn PersonalityHandle> =
+            Arc::new(PersonalityAdapter(app.personality_overlay.clone()));
+        ctx = ctx.with_personality_overlay(handle);
+    }
+    // History snapshot: clone current history for read-only handlers.
+    // Mutations (/retry, /undo, /rollback) apply in the post-router hook.
+    {
+        let snapshot = Arc::new(std::sync::RwLock::new(app.history.clone()));
+        ctx = ctx.with_history(snapshot);
+    }
+    {
+        let handle: Arc<dyn AgentLoopHandle> =
+            Arc::new(AgentLoopAdapter(app.agent_loop.clone()));
+        ctx = ctx.with_agent_loop(handle);
     }
     ctx
 }

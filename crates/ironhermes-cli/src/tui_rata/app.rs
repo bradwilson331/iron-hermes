@@ -30,14 +30,18 @@ use crate::tui_rata::stream_events::StreamEvent;
 // Concrete paths — grep-verified iteration 2.
 use ironhermes_agent::agent_loop::AgentLoop;
 use ironhermes_agent::budget::BudgetHandle;
+use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::memory::MemoryManager;
+use ironhermes_agent::personality::PersonalityRegistry;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::AnyClient;
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::types::{ChatMessage, MessageContent, Role};
+use ironhermes_core::ProviderResolver;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
+use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
 
 // ── AppDeps ───────────────────────────────────────────────────────────────────
@@ -57,7 +61,6 @@ pub struct AppDeps {
     pub session_id: String,
     pub history_path: PathBuf,
     pub status_initial: StatusLineState,
-    pub yolo_enabled: bool,
     pub cancel_parent: CancellationToken,
     // Plan 22.4-07 additions: needed by spawn_turn to build per-turn AgentLoops
     pub client: AnyClient,
@@ -76,6 +79,31 @@ pub struct AppDeps {
     /// EnableMouseCapture call at run_chat_ratatui startup. The
     /// MouseCaptureGuard Drop impl unconditionally disables on REPL exit.
     pub mouse_capture_enabled: Arc<AtomicBool>,
+
+    // ── Phase 22.4.2 Plan 00: D-08 four subsystem handles ───────────────────
+    /// StateStore for `/sessions` `/resume` `/save` `/history` `/title`.
+    pub state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
+    /// ProviderResolver for `/model` `/provider` `/fast`.
+    pub resolver: ProviderResolver,
+    /// ContextEngine for `/compress` (Phase 18 PRMT-11).
+    pub context_compressor: Option<Arc<dyn ContextEngine>>,
+    /// PersonalityRegistry for `/personality` (Phase 15 PRMT-06/PRMT-07).
+    pub personality_overlay: Arc<PersonalityRegistry>,
+
+    // ── Phase 22.4.2 Plan 00: D-09 six session-toggle Arc fields ────────────
+    /// `/yolo` toggle — upgraded from `bool` to `Arc<AtomicBool>` (D-09).
+    /// (Replaces the plain `yolo_enabled: bool` field.)
+    pub yolo_enabled: Arc<AtomicBool>,
+    /// `/verbose` toggle (D-09).
+    pub verbose_enabled: Arc<AtomicBool>,
+    /// `/statusbar` toggle — initial value `true` (D-09).
+    pub statusbar_enabled: Arc<AtomicBool>,
+    /// `/debug` toggle (D-09).
+    pub debug_enabled: Arc<AtomicBool>,
+    /// `/fast` preset toggle (D-09).
+    pub fast_enabled: Arc<AtomicBool>,
+    /// `/skin <name>` setter (D-09).
+    pub skin: Arc<std::sync::RwLock<String>>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -113,8 +141,19 @@ pub struct App {
     pub cancel_parent: CancellationToken,
     pub cancel_child: Option<CancellationToken>,
 
-    // — feature flags ────────────────────────────────────────────────────────
-    pub yolo_enabled: bool,
+    // — feature flags (Phase 22.4.2 Plan 00: D-09 upgrades) ─────────────────
+    /// `/yolo` toggle — upgraded from `bool` to `Arc<AtomicBool>` (D-09).
+    pub yolo_enabled: Arc<AtomicBool>,
+    /// `/verbose` toggle (D-09).
+    pub verbose_enabled: Arc<AtomicBool>,
+    /// `/statusbar` toggle — initial `true` (D-09).
+    pub statusbar_enabled: Arc<AtomicBool>,
+    /// `/debug` toggle (D-09).
+    pub debug_enabled: Arc<AtomicBool>,
+    /// `/fast` preset toggle (D-09).
+    pub fast_enabled: Arc<AtomicBool>,
+    /// `/skin <name>` setter (D-09).
+    pub skin: Arc<std::sync::RwLock<String>>,
 
     // — D-18 parity handles (Arc-held) ───────────────────────────────────────
     pub agent_loop: Arc<AgentLoop>,
@@ -135,6 +174,16 @@ pub struct App {
     pub fallback_client: Option<AnyClient>,
     /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — see AppDeps.mouse_capture_enabled.
     pub mouse_capture_enabled: Arc<AtomicBool>,
+
+    // ── Phase 22.4.2 Plan 00: D-08 four subsystem handles ───────────────────
+    /// StateStore for `/sessions` `/resume` `/save` `/history` `/title`.
+    pub state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
+    /// ProviderResolver for `/model` `/provider` `/fast`.
+    pub resolver: ProviderResolver,
+    /// ContextEngine for `/compress` (Phase 18 PRMT-11).
+    pub context_compressor: Option<Arc<dyn ContextEngine>>,
+    /// PersonalityRegistry for `/personality` (Phase 15 PRMT-06/PRMT-07).
+    pub personality_overlay: Arc<PersonalityRegistry>,
 }
 
 impl App {
@@ -167,7 +216,13 @@ impl App {
             double_ctrl_c: DoubleCtrlCState::new(),
             cancel_parent: deps.cancel_parent,
             cancel_child: None,
+            // Phase 22.4.2 Plan 00: D-09 toggle Arcs (cloned from deps)
             yolo_enabled: deps.yolo_enabled,
+            verbose_enabled: deps.verbose_enabled,
+            statusbar_enabled: deps.statusbar_enabled,
+            debug_enabled: deps.debug_enabled,
+            fast_enabled: deps.fast_enabled,
+            skin: deps.skin,
             agent_loop: deps.agent_loop,
             hook_registry: deps.hook_registry,
             mcp_manager: deps.mcp_manager,
@@ -183,6 +238,11 @@ impl App {
             max_turns: deps.max_turns,
             fallback_client: deps.fallback_client,
             mouse_capture_enabled: deps.mouse_capture_enabled,
+            // Phase 22.4.2 Plan 00: D-08 subsystem handles
+            state_store: deps.state_store,
+            resolver: deps.resolver,
+            context_compressor: deps.context_compressor,
+            personality_overlay: deps.personality_overlay,
         }
     }
 
@@ -711,6 +771,7 @@ fn test_deps() -> AppDeps {
     use ironhermes_agent::{AnyClient, agent_loop::AgentLoop};
     use ironhermes_agent::budget::BudgetHandle;
     use ironhermes_core::commands::registry::build_registry;
+    use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_tools::ToolRegistry;
 
     let test_client = AnyClient::ChatCompletions(ironhermes_agent::client::LlmClient::new(
@@ -719,6 +780,14 @@ fn test_deps() -> AppDeps {
         "test-model",
     ));
     let test_registry = Arc::new(tokio::sync::RwLock::new(ToolRegistry::new()));
+    // ProviderResolver::build with default Config — uses built-in defaults, no env vars needed.
+    let test_resolver = ProviderResolver::build(&Config::default())
+        .expect("ProviderResolver::build with default Config must not fail in test context");
+    // PersonalityRegistry with no custom presets (built-ins always available).
+    let test_personality = Arc::new(PersonalityRegistry::load(
+        &std::collections::HashMap::new(),
+        &ironhermes_core::get_hermes_home(),
+    ));
 
     AppDeps {
         agent_loop: Arc::new(AgentLoop::for_tests()),
@@ -736,7 +805,6 @@ fn test_deps() -> AppDeps {
             std::process::id()
         )),
         status_initial: StatusLineState::default(),
-        yolo_enabled: false,
         cancel_parent: CancellationToken::new(),
         client: test_client,
         registry: test_registry,
@@ -746,6 +814,18 @@ fn test_deps() -> AppDeps {
         max_turns: 10,
         fallback_client: None,
         mouse_capture_enabled: Arc::new(AtomicBool::new(true)),
+        // Phase 22.4.2 Plan 00: D-08 subsystem handles (None/defaults for tests)
+        state_store: None,
+        resolver: test_resolver,
+        context_compressor: None,
+        personality_overlay: test_personality,
+        // Phase 22.4.2 Plan 00: D-09 toggle Arcs
+        yolo_enabled: Arc::new(AtomicBool::new(false)),
+        verbose_enabled: Arc::new(AtomicBool::new(false)),
+        statusbar_enabled: Arc::new(AtomicBool::new(true)),
+        debug_enabled: Arc::new(AtomicBool::new(false)),
+        fast_enabled: Arc::new(AtomicBool::new(false)),
+        skin: Arc::new(std::sync::RwLock::new("default".to_string())),
     }
 }
 
