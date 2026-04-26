@@ -1187,6 +1187,7 @@ mod tests {
             &None,              // memory_manager
             &None,              // hook_registry
             &config,
+            None,               // tg_client: no delivery in integration test
         ).await;
         assert!(result.is_ok(), "execute_cron_job failed: {:?}", result);
 
@@ -1674,6 +1675,7 @@ mod tests {
             &None, // no memory store
             &Some(hook_registry),
             &config,
+            None, // tg_client: no delivery in test
         )
         .await;
         // Give tokio::spawn listeners 50ms to drain

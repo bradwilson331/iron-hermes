@@ -1516,3 +1516,25 @@ fn invariant_22_4_2_1_02_delivery_call_site_present() {
         "INV-22.4.2.1-02: broken if-let-Err pattern must not exist"
     );
 }
+
+/// INV-22.4.2.1-03 (Phase 22.4.2.1 Plan 03 — D-03/D-10/D-11/D-13): worker drain present.
+///
+/// Guards against regression of the Ctrl+C graceful shutdown fix. Asserts:
+/// (a) worker_join_set is present in runner.rs (per-chat workers no longer detached)
+/// (b) ctrl_c() signal arm is still installed (D-02: do not remove working signal handler)
+///
+/// RED at Wave 0 (before Task 2 lands). GREEN after Task 2 inserts worker_join_set drain.
+#[test]
+fn invariant_22_4_2_1_03_worker_drain_present() {
+    let src = include_str!("../../../crates/ironhermes-gateway/src/runner.rs");
+    assert!(
+        src.contains("worker_join_set"),
+        "INV-22.4.2.1-03: worker_join_set must be present in runner.rs \
+         (per-chat workers must be tracked in JoinSet for graceful shutdown)"
+    );
+    assert!(
+        src.contains("ctrl_c()"),
+        "INV-22.4.2.1-03: ctrl_c() signal arm must be present in runner.rs \
+         (existing signal handler must not be removed per D-02)"
+    );
+}
