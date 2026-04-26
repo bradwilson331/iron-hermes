@@ -4,14 +4,14 @@ milestone: v2.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 22.4.2.1 context gathered
-last_updated: "2026-04-26T11:51:57.202Z"
-last_activity: 2026-04-26 -- Phase 22.4.2.1 planning complete
+last_updated: "2026-04-26T12:06:55.480Z"
+last_activity: 2026-04-26
 progress:
   total_phases: 18
   completed_phases: 16
   total_plans: 100
-  completed_plans: 97
-  percent: 97
+  completed_plans: 98
+  percent: 98
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22.4.1 — tui-rata-handler-re-port-route-dispatch-slash-through-comman
+**Current focus:** Phase 22.4.2.1 — cron-cmds-and-telegram-delivery-broken
 
 ## Current Position
 
-Phase: 22.4.2.1
-Plan: Not started
+Phase: 22.4.2.1 (cron-cmds-and-telegram-delivery-broken) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-04-26 -- Phase 22.4.2.1 planning complete
+Last activity: 2026-04-26
 
-Progress: [██████████] 100%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -130,6 +130,7 @@ Progress: [██████████] 100%
 | Phase 22.3 P9 | 3 | 1 tasks | 1 files |
 | Phase 22.3 P11 | 52 | 3 tasks | 3 files |
 | Phase 22.3 P12 | 11 | 1 tasks | 1 files |
+| Phase 22.4.2.1 P01 | 597 | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -295,6 +296,9 @@ Recent decisions affecting current work:
 - 22.3-12: INV-22.3-07/08/09 use raw string literals r"\x1b[1;" for source-text grep — include_str! loads source TEXT so escape literals render.rs compile-time produces are 7-char ASCII not ESC byte
 - 22.3-12: sibling test file invariants_22_3_streaming.rs (not appended to invariants_22_3.rs) preserves Plan 22.3-06 closed 6-test deliverable per preservation gate
 - 22.3-12: INV-22.3-08 scope-sanity asserts print!("{}", delta) is STILL present in main.rs (run_single at ~528) — catches future out-of-scope regression per CONTEXT D-15
+- [Phase ?]: CronJobReader trait defined in ironhermes-core to avoid circular dep with ironhermes-cron
+- [Phase ?]: CLI renderers in cron.rs delegate to shared ironhermes-cron::display formatters (D-06 shared renderer)
+- [Phase ?]: App.cron_store defaults to None per D-02 — gateway is primary cron host; runtime load deferred
 
 ### Roadmap Evolution
 
@@ -329,8 +333,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-26T11:12:51.988Z
+Last session: 2026-04-26T12:06:42.888Z
 Stopped at: Phase 22.4.2.1 context gathered
-Resume file: .planning/phases/22.4.2.1-cron-cmds-and-telegram-delivery-broken/22.4.2.1-CONTEXT.md
+Resume file: None
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
