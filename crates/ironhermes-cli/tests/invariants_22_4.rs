@@ -778,9 +778,6 @@ fn invariant_22_4_33_invoke_handler_arms() {
     );
 
     // (c) Real handler function bodies exist in core handlers for the 5 StateStore commands.
-    // These are in a separate file so we include_str! it for the grep check.
-    const CORE_HANDLERS: &str =
-        include_str!("../../ironhermes-core/src/commands/handlers.rs");
     for fn_name in &["cmd_sessions", "cmd_resume", "cmd_save", "cmd_history"] {
         assert!(
             CORE_HANDLERS.contains(fn_name),
@@ -797,6 +794,9 @@ fn invariant_22_4_33_invoke_handler_arms() {
          field (D-04/D-05). See Phase 22.4.2 Plan 01."
     );
 }
+
+const CORE_HANDLERS: &str =
+    include_str!("../../ironhermes-core/src/commands/handlers.rs");
 
 const CORE_CONTEXT: &str =
     include_str!("../../ironhermes-core/src/commands/context.rs");
@@ -889,5 +889,146 @@ fn invariant_22_4_36_app_field_membership() {
         "INV-22.4-36: app.rs must declare `yolo_enabled: Arc<AtomicBool>` \
          (D-09 upgrade from plain `bool`). The post-router toggle hook uses \
          fetch_xor on this AtomicBool."
+    );
+}
+
+// =============================================================================
+// Phase 22.4.2 Plan 01 — INV-22.4-37 through INV-22.4-41
+// Per-command static-grep INVs for the 5 StateStore commands (D-10).
+// Each asserts:
+//   (a) The stub marker is ABSENT from tui_rata/commands.rs (invoke_handler collapsed).
+//   (b) The real handler function exists in core/handlers.rs.
+// =============================================================================
+
+/// INV-22.4-37 (Phase 22.4.2 Plan 01 — D-03/D-06/D-10): `/sessions` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"sessions" => CommandResult::Output(` —
+///     the per-name arm was removed when invoke_handler collapsed to one-line delegation.
+/// (b) `fn cmd_sessions` must exist in core/handlers.rs with a real body reading ctx.state_store.
+#[test]
+fn invariant_22_4_37_sessions_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"sessions\" => CommandResult::Output("),
+        "INV-22.4-37 (a): tui_rata/commands.rs must NOT contain \
+         `\"sessions\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_sessions("),
+        "INV-22.4-37 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_sessions(` — real handler body added by Phase 22.4.2 Plan 01 (D-03)."
+    );
+    assert!(
+        CORE_HANDLERS.contains("\"sessions\" => cmd_sessions("),
+        "INV-22.4-37 (b): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"sessions\"` to `cmd_sessions(` — added by Phase 22.4.2 Plan 01."
+    );
+}
+
+/// INV-22.4-38 (Phase 22.4.2 Plan 01 — D-03/D-06/D-10): `/resume` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"resume" => CommandResult::Output(`.
+/// (b) `fn cmd_resume` must exist in core/handlers.rs.
+#[test]
+fn invariant_22_4_38_resume_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"resume\" => CommandResult::Output("),
+        "INV-22.4-38 (a): tui_rata/commands.rs must NOT contain \
+         `\"resume\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_resume("),
+        "INV-22.4-38 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_resume(` — real handler body added by Phase 22.4.2 Plan 01 (D-03)."
+    );
+    assert!(
+        CORE_HANDLERS.contains("\"resume\" => cmd_resume("),
+        "INV-22.4-38 (b): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"resume\"` to `cmd_resume(` — added by Phase 22.4.2 Plan 01."
+    );
+}
+
+/// INV-22.4-39 (Phase 22.4.2 Plan 01 — D-03/D-06/D-10): `/save` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"save" => CommandResult::Output(`.
+/// (b) `fn cmd_save` must exist in core/handlers.rs.
+#[test]
+fn invariant_22_4_39_save_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"save\" => CommandResult::Output("),
+        "INV-22.4-39 (a): tui_rata/commands.rs must NOT contain \
+         `\"save\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_save("),
+        "INV-22.4-39 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_save(` — real handler body added by Phase 22.4.2 Plan 01 (D-03)."
+    );
+    assert!(
+        CORE_HANDLERS.contains("\"save\" => cmd_save("),
+        "INV-22.4-39 (b): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"save\"` to `cmd_save(` — added by Phase 22.4.2 Plan 01."
+    );
+}
+
+/// INV-22.4-40 (Phase 22.4.2 Plan 01 — D-03/D-06/D-10): `/history` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"history" => CommandResult::Output(`.
+/// (b) `fn cmd_history` must exist in core/handlers.rs.
+#[test]
+fn invariant_22_4_40_history_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"history\" => CommandResult::Output("),
+        "INV-22.4-40 (a): tui_rata/commands.rs must NOT contain \
+         `\"history\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_history("),
+        "INV-22.4-40 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_history(` — real handler body added by Phase 22.4.2 Plan 01 (D-03)."
+    );
+    assert!(
+        CORE_HANDLERS.contains("\"history\" => cmd_history("),
+        "INV-22.4-40 (b): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"history\"` to `cmd_history(` — added by Phase 22.4.2 Plan 01."
+    );
+}
+
+/// INV-22.4-41 (Phase 22.4.2 Plan 01 — D-03/D-06/D-10): `/title` StateStore wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"title" => CommandResult::Output(`.
+/// (b) `fn cmd_title` must exist in core/handlers.rs and must read ctx.state_store.
+#[test]
+fn invariant_22_4_41_title_state_store_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"title\" => CommandResult::Output("),
+        "INV-22.4-41 (a): tui_rata/commands.rs must NOT contain \
+         `\"title\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_title("),
+        "INV-22.4-41 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_title(` — upgraded to read ctx.state_store in Phase 22.4.2 Plan 01."
+    );
+    // cmd_title must reference ctx.state_store (upgraded from stub in Plan 01).
+    assert!(
+        CORE_HANDLERS.contains("ctx.state_store"),
+        "INV-22.4-41 (b): ironhermes-core/src/commands/handlers.rs cmd_title must \
+         reference `ctx.state_store` to persist the title (D-04/D-05). \
+         See Phase 22.4.2 Plan 01."
     );
 }
