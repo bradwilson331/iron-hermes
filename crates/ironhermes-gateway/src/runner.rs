@@ -152,6 +152,14 @@ impl GatewayRunner {
         self.mcp_manager = Some(manager);
     }
 
+    /// Plan 03 (Phase 22.4.2.1): returns a clone of the runner's CancellationToken.
+    /// Used by gateway integration tests (tests/gateway_shutdown.rs) to fire
+    /// shutdown without going through the OS signal layer.
+    /// pub(crate) so only gateway-crate tests can reach it (T-22.4.2.1-03-05).
+    pub(crate) fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
     /// Build the GatewayMessageHandler with all wiring (memory, hooks, skills,
     /// active skills, AND Phase 18 Plan 06 gateway hygiene engine). Factored
     /// out of `start()` so it is unit-testable without a live adapter.
@@ -301,6 +309,13 @@ impl GatewayRunner {
 
         let mut join_set: JoinSet<()> = JoinSet::new();
 
+        // Plan 03 (Phase 22.4.2.1): track per-chat worker tasks so they can be
+        // drained on shutdown. Wrapped in Arc<TokioMutex<...>> so the dispatch
+        // closure (async move) and the post-select! drain both reach the same set.
+        // Drain happens AFTER self.cancel.cancel() and BEFORE drop(msg_tx) per D-11.
+        let worker_join_set: Arc<TokioMutex<JoinSet<()>>> =
+            Arc::new(TokioMutex::new(JoinSet::new()));
+
         // --- 7. Poll loop ---
         let poll_cancel = self.cancel.clone();
         let adapter_poll = adapter.clone();
@@ -372,6 +387,9 @@ impl GatewayRunner {
         let cancel_dispatch = self.cancel.clone();
         let mut msg_rx = msg_rx;
         let bot_username_str = bot_username.clone();
+
+        // Plan 03: clone Arc so dispatch_future (async move) can spawn into worker_join_set
+        let worker_join_set_dispatch = worker_join_set.clone();
 
         // We run dispatch inline (not in JoinSet) so we control msg_rx lifetime
         let dispatch_future = async move {
@@ -452,10 +470,10 @@ impl GatewayRunner {
                             let queue_task = user_queue_dispatch.clone();
                             let chat_id_task = msg.chat.id.to_string();
 
-                            // Spawn per-chat worker into a detached task
-                            // We don't add to join_set here (JoinSet is owned outside closure),
-                            // but per-chat workers drain when cancel fires because they select on it
-                            tokio::spawn(async move {
+                            // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
+                            // per-chat workers are tracked and drained on shutdown (D-10/D-11).
+                            // Previously a bare tokio::spawn (detached) — replaced with tracked spawn.
+                            worker_join_set_dispatch.lock().await.spawn(async move {
                                 while let Some(queued_msg) = chat_rx.recv().await {
                                     // Acquire semaphore permit (bounded concurrency per TG-06)
                                     let permit = match sem_task.acquire().await {
@@ -669,6 +687,39 @@ impl GatewayRunner {
 
         // Propagate cancellation to all subtasks
         self.cancel.cancel();
+
+        // Plan 03 (Phase 22.4.2.1): drain per-chat worker tasks with bounded 5s timeout (D-11).
+        // Workers observe cancel_task.is_cancelled() after each agent turn; the 5s timeout covers
+        // in-flight turns that haven't reached their cancellation check yet.
+        // ORDERING: AFTER self.cancel.cancel() and BEFORE drop(msg_tx) — preserves Phase 21.2
+        // Plan 11 ordering invariant (MCP shutdown_all FIRST, cancel SECOND, drain THIRD, drop FOURTH).
+        {
+            let abort_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut wjs = worker_join_set.lock().await;
+            loop {
+                match tokio::time::timeout_at(abort_deadline, wjs.join_next()).await {
+                    Ok(Some(_)) => {
+                        // A worker task finished — keep draining
+                    }
+                    Ok(None) => {
+                        // All workers finished cleanly
+                        info!("gateway: per-chat workers drained cleanly");
+                        break;
+                    }
+                    Err(_elapsed) => {
+                        // 5s timeout exceeded — abort remaining tasks
+                        warn!(
+                            "gateway: worker drain timed out after 5s; \
+                             aborting remaining per-chat worker tasks"
+                        );
+                        wjs.abort_all();
+                        break;
+                    }
+                }
+            }
+        }
+        // worker_join_set dropped here — any tasks not yet joined are aborted by JoinSet::drop.
 
         // Drop msg_tx to close the polling->dispatch channel
         drop(msg_tx);
