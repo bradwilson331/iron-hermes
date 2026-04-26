@@ -1556,3 +1556,22 @@ fn invariant_22_4_2_2_01_cmd_create_consults_origin_helper() {
         "INV-22.4.2.2-01: multi-chat eprintln hint must be present"
     );
 }
+
+/// INV-22.4.2.2-02 (Phase 22.4.2.2 Plan 02 — D-03/D-09): cronjob tool consults origin helper.
+///
+/// Sibling of INV-22.4.2.2-01 (Plan 01 / cmd_create). Asserts the LLM-tool path
+/// has parity with the CLI path: handle_create consults the helper and uses
+/// tracing::warn (not eprintln) for the multi-chat hint per D-03 logged-not-stdout
+/// discipline.
+#[test]
+fn invariant_22_4_2_2_02_cronjob_tool_consults_origin_helper() {
+    let src = include_str!("../../../crates/ironhermes-tools/src/cronjob_tool.rs");
+    assert!(
+        src.contains("telegram_default_origin") || src.contains("OriginDecision"),
+        "INV-22.4.2.2-02: handle_create must consult the TG default-origin helper"
+    );
+    assert!(
+        src.contains("tracing::warn") || src.contains("warn!"),
+        "INV-22.4.2.2-02: multi-chat hint must use tracing (not eprintln) inside LLM tool"
+    );
+}
