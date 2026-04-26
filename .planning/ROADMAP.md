@@ -105,11 +105,11 @@ Plans:
 **Goal:** Restore the v1.x ergonomic where `hermes cron create` (and the LLM `cronjob` tool) auto-route a new job back to the configured Telegram chat when the gateway has exactly one authorized chat. Plan 01 adds `OriginDecision` enum + `Config::telegram_default_origin()` helper to `ironhermes-core::config` and consults it from `cmd_create` (CLI path); Plan 02 consults the same helper from `cronjob_tool::handle_create` (LLM-tool path) using `tracing::warn` (not `eprintln`) for the multi-chat hint to avoid polluting LLM tool output. Existing jobs are NOT migrated (D-12). Helper bypassed when explicit `--deliver` flag / `deliver` arg is provided (D-04). Final INV ledger: 64 INVs in `invariants_22_4.rs` (62 + 1 per plan).
 **Requirements:** (none — D-01..D-12 from 22.4.2.2-CONTEXT.md serve as the requirements set)
 **Depends on:** Phase 22.4.2.1
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 22.4.2.2-01-PLAN.md — CLI default-routing: add `OriginDecision` enum + `Config::telegram_default_origin()` to `ironhermes-core::config`; flip `Create.deliver` to `Option<String>` and consult the helper from `cmd_create` via new `pub(crate) fn resolve_cron_deliver`; 5 behavioral tests in new `cron_default_deliver.rs` + 4 unit tests in `config.rs::mod tests` + INV-22.4.2.2-01 (function 63)
-- [ ] 22.4.2.2-02-PLAN.md — LLM tool default-routing: consult Plan 01's helper from `cronjob_tool::handle_create` (lazy `Config::load()` inside the handler) using `tracing::warn!` for the multi-chat hint; 5 behavioral tests in new `cronjob_tool_default_deliver.rs` mirroring Plan 01 + INV-22.4.2.2-02 (function 64); pure addition — `CronjobTool::new` signature, `register_cronjob_tool`, and main.rs / tui_rata callsites all unchanged
+- [x] 22.4.2.2-02-PLAN.md — LLM tool default-routing: consult Plan 01's helper from `cronjob_tool::handle_create` (lazy `Config::load()` inside the handler) using `tracing::warn!` for the multi-chat hint; 5 behavioral tests in new `cronjob_tool_default_deliver.rs` mirroring Plan 01 + INV-22.4.2.2-02 (function 64); pure addition — `CronjobTool::new` signature, `register_cronjob_tool`, and main.rs / tui_rata callsites all unchanged
 
 **Wave structure:**
 - Wave 1: 22.4.2.2-01 (helper + CLI consumer + 5 tests + INV-01 — autonomous)
