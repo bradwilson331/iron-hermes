@@ -1496,3 +1496,23 @@ fn invariant_22_4_2_1_01_no_cron_stub() {
     assert!(!src.contains("No cron management UI"), "INV-22.4.2.1-01: stub must be absent");
     assert!(src.contains("cmd_cron"), "INV-22.4.2.1-01: cmd_cron must be present");
 }
+
+/// INV-22.4.2.1-02 (Phase 22.4.2.1 Plan 02 — D-03/D-07/D-13): cron delivery call site present.
+///
+/// Guards against reintroduction of the broken `if let Err(e) = ironhermes_cron::complete_job_run`
+/// pattern that silently dropped `Ok(Some(DeliveryTarget))`. Asserts that:
+/// (a) send_message is called in runner.rs (delivery dispatch is present)
+/// (b) complete_job_run is still called (job run is still recorded)
+/// (c) the broken if-let-Err pattern is absent (regression guard)
+#[test]
+fn invariant_22_4_2_1_02_delivery_call_site_present() {
+    let src = include_str!("../../../crates/ironhermes-gateway/src/runner.rs");
+    assert!(
+        src.contains("send_message") && src.contains("complete_job_run"),
+        "INV-22.4.2.1-02: send_message must be called after complete_job_run in runner.rs"
+    );
+    assert!(
+        !src.contains("if let Err(e) = ironhermes_cron::complete_job_run"),
+        "INV-22.4.2.1-02: broken if-let-Err pattern must not exist"
+    );
+}

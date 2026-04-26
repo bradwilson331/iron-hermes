@@ -16,4 +16,4 @@ pub use session::GatewaySession;
 pub use stream_consumer::StreamConsumer;
 pub use runner::GatewayRunner;
 pub use user_queue::UserQueueManager;
-pub use telegram::{TelegramAdapter, TgMessage, TgUser, TgChat, TgUpdate, TgBotCommand, TgFile, TgPhotoSize, TgDocument};
+pub use telegram::{TelegramAdapter, TgMessage, TgUser, TgChat, TgUpdate, TgBotCommand, TgFile, TgPhotoSize, TgDocument, TgSendApi};

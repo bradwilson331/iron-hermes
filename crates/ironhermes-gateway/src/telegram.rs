@@ -5,6 +5,42 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use crate::adapter::PlatformAdapter;
 
+// ---------------------------------------------------------------------------
+// TgSendApi — testable seam for cron delivery dispatch (Phase 22.4.2.1 Plan 02)
+// ---------------------------------------------------------------------------
+
+/// Minimal send trait used by `execute_cron_job` so tests can inject a
+/// `FakeTgClient` without a live HTTP connection.
+///
+/// Defined in `ironhermes-gateway::telegram` to keep it alongside
+/// `TelegramAdapter` while allowing `Option<Arc<dyn TgSendApi>>` as a
+/// parameter type in `runner.rs`. Implemented by `TelegramAdapter` (production)
+/// and `FakeTgClient` (tests).
+#[async_trait]
+pub trait TgSendApi: Send + Sync {
+    async fn send_message(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait]
+impl TgSendApi for TelegramAdapter {
+    async fn send_message(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        // Delegate to PlatformAdapter::send_message; discard MessageResponse.
+        <Self as PlatformAdapter>::send_message(self, chat_id, content, thread_id)
+            .await
+            .map(|_| ())
+    }
+}
+
 // Re-export CancellationToken so polling modules in later plans can import it from here.
 pub use tokio_util::sync::CancellationToken;
 
