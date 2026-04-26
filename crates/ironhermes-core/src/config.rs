@@ -585,6 +585,20 @@ impl Default for BatchConfig {
     }
 }
 
+/// Return type for `Config::telegram_default_origin`.
+/// Defined in ironhermes-core (without embedding JobOrigin) to avoid a
+/// circular crate dep on ironhermes-cron. The CLI crate (which depends on
+/// both) constructs `ironhermes_cron::JobOrigin` from these strings.
+#[derive(Debug, Clone)]
+pub enum OriginDecision {
+    /// TG gateway is disabled, section is missing, or whitelist is empty.
+    None,
+    /// Exactly one authorized chat — auto-route to this origin.
+    Single { platform: String, chat_id: String },
+    /// Multiple authorized chats — caller must eprintln hint, fall back to "local".
+    Multi { whitelist: Vec<String> },
+}
+
 impl Config {
     /// Load config from the IronHermes home directory.
     pub fn load() -> anyhow::Result<Self> {
@@ -627,6 +641,29 @@ impl Config {
     /// Get the .env file path.
     pub fn env_path() -> PathBuf {
         get_hermes_home().join(".env")
+    }
+
+    /// Compute the default cron delivery origin from the TG gateway config.
+    /// Returns `OriginDecision::None` when TG section is missing, disabled, or has empty whitelist.
+    /// Returns `OriginDecision::Single` when whitelist has exactly one entry.
+    /// Returns `OriginDecision::Multi` when whitelist has >1 entries (caller emits hint).
+    pub fn telegram_default_origin(&self) -> OriginDecision {
+        let Some(tg) = self.gateway.platforms.get("telegram") else {
+            return OriginDecision::None;
+        };
+        if !tg.enabled {
+            return OriginDecision::None;
+        }
+        match tg.whitelist.len() {
+            0 => OriginDecision::None,
+            1 => OriginDecision::Single {
+                platform: "telegram".to_string(),
+                chat_id: tg.whitelist[0].to_string(),
+            },
+            _ => OriginDecision::Multi {
+                whitelist: tg.whitelist.iter().map(|id| id.to_string()).collect(),
+            },
+        }
     }
 }
 
@@ -1094,5 +1131,65 @@ mcp_servers:
         let mc: MemoryConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(mc.memory_enabled);
         assert!(mc.user_profile_enabled);
+    }
+
+    // =========================================================================
+    // Phase 22.4.2.2 Plan 01: telegram_default_origin tests (D-07/D-08)
+    // =========================================================================
+
+    #[test]
+    fn test_telegram_default_origin_disabled() {
+        let yaml = r#"
+gateway:
+  platforms:
+    telegram:
+      enabled: false
+      whitelist: [12345]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(config.telegram_default_origin(), OriginDecision::None));
+    }
+
+    #[test]
+    fn test_telegram_default_origin_single() {
+        let yaml = r#"
+gateway:
+  platforms:
+    telegram:
+      enabled: true
+      whitelist: [12345]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let dec = config.telegram_default_origin();
+        assert!(matches!(dec, OriginDecision::Single { .. }));
+        if let OriginDecision::Single { chat_id, platform } = dec {
+            assert_eq!(chat_id, "12345");
+            assert_eq!(platform, "telegram");
+        }
+    }
+
+    #[test]
+    fn test_telegram_default_origin_multi() {
+        let yaml = r#"
+gateway:
+  platforms:
+    telegram:
+      enabled: true
+      whitelist: [12345, 67890]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let dec = config.telegram_default_origin();
+        assert!(matches!(dec, OriginDecision::Multi { .. }));
+        if let OriginDecision::Multi { whitelist } = dec {
+            assert_eq!(whitelist.len(), 2);
+            assert!(whitelist.contains(&"12345".to_string()));
+            assert!(whitelist.contains(&"67890".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_telegram_default_origin_no_section() {
+        let config = Config::default();
+        assert!(matches!(config.telegram_default_origin(), OriginDecision::None));
     }
 }
