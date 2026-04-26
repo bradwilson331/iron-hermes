@@ -259,11 +259,29 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
             let ctx = build_command_context(app);
             match invoke_handler(def.name, &ctx, &app.command_router, &args_vec).await {
                 Ok(result) => {
-                    // D-10/D-11/D-12 post-router App-side hook for stateful /mouse.
-                    if def.name == "mouse" {
-                        handle_mouse_slash(app, args_str)
-                    } else {
-                        map_core_to_slash_outcome(result)
+                    // D-02 post-router App-side hook (Plan 03: FULL multi-name expansion).
+                    // Plan 03 is the SOLE writer of this hook in Wave 2 (Option B).
+                    match def.name {
+                        // Mouse: existing handler (crossterm + AtomicBool)
+                        "mouse" => handle_mouse_slash(app, args_str),
+                        // Toggles: yolo/verbose/statusbar/debug/skin (NOT fast — owned by subsystem_mutator)
+                        "yolo" | "verbose" | "statusbar" | "debug" | "skin" => {
+                            handle_toggle(app, def.name, args_str)
+                        }
+                        // App-handle inspectors: trust core output; no App-side mutation needed
+                        "memory" | "mcp" => {
+                            handle_app_inspector(app, def.name, &args_vec, &result).await
+                        }
+                        // Tier D session control: stub for Plan 04 to replace
+                        "stop" | "retry" | "undo" | "rollback" | "background" | "btw" | "queue" => {
+                            handle_session_control(app, def.name, &args_vec, &result).await
+                        }
+                        // Subsystem mutators: model/fast (AnyClient rebuild) + personality/compress
+                        "model" | "fast" | "personality" | "compress" => {
+                            handle_subsystem_mutator(app, def.name, &args_vec, &result).await
+                        }
+                        // Default: trust core dispatch result
+                        _ => map_core_to_slash_outcome(result),
                     }
                 }
                 Err(e) => SlashOutcome::Error(e.to_string()),
@@ -467,6 +485,184 @@ fn render_help_router(router: &CommandRouter, platform: &Platform) -> String {
         }
     }
     out
+}
+
+// ── Post-router helper functions (D-02, Plan 03 full expansion) ──────────────
+
+/// handle_toggle — flip Arc<AtomicBool> toggles (yolo/verbose/statusbar/debug) or
+/// write Arc<RwLock<String>> for skin. EXCLUDES "fast" (owned by handle_subsystem_mutator).
+///
+/// Plan 03 D-09: fetch_xor(true, Ordering::SeqCst) is the canonical toggle pattern for AtomicBool.
+/// T-22.4.2-03-07: skin uses `.write().unwrap_or_else(|p| p.into_inner())` for poison recovery.
+fn handle_toggle(app: &mut App, name: &str, arg: &str) -> SlashOutcome {
+    match name {
+        "yolo" => {
+            let new_val = !app.yolo_enabled.fetch_xor(true, Ordering::SeqCst);
+            SlashOutcome::Handled(format!("YOLO mode: {}", if new_val { "on" } else { "off" }))
+        }
+        "verbose" => {
+            let new_val = !app.verbose_enabled.fetch_xor(true, Ordering::SeqCst);
+            SlashOutcome::Handled(format!("Verbose mode: {}", if new_val { "on" } else { "off" }))
+        }
+        "statusbar" => {
+            let new_val = !app.statusbar_enabled.fetch_xor(true, Ordering::SeqCst);
+            SlashOutcome::Handled(format!("Status bar: {}", if new_val { "on" } else { "off" }))
+        }
+        "debug" => {
+            let new_val = !app.debug_enabled.fetch_xor(true, Ordering::SeqCst);
+            SlashOutcome::Handled(format!("Debug mode: {}", if new_val { "on" } else { "off" }))
+        }
+        "skin" => {
+            if arg.is_empty() {
+                let current = app.skin.read()
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|p| p.into_inner().clone());
+                SlashOutcome::Handled(format!(
+                    "Current skin: {current}. Usage: /skin <name>"
+                ))
+            } else {
+                // T-22.4.2-03-01: validate skin name to alphanumeric + dash + underscore
+                if !arg.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                    return SlashOutcome::Handled(format!(
+                        "Invalid skin name: {arg} (alphanumeric + - _ only)"
+                    ));
+                }
+                // T-22.4.2-03-07: poison recovery on RwLock
+                let mut w = app.skin.write().unwrap_or_else(|p| p.into_inner());
+                *w = arg.to_string();
+                SlashOutcome::Handled(format!("Skin set to: {arg}"))
+            }
+        }
+        other => SlashOutcome::Unknown {
+            input: format!("/{other}"),
+            hint: "handle_toggle dispatched to unknown name (planner bug)".to_string(),
+        },
+    }
+}
+
+/// handle_app_inspector — pass through to map_core_to_slash_outcome.
+///
+/// /memory and /mcp output comes from core handlers; no App-side mutation needed.
+/// Future: if scroll-to-bottom on /history or similar is desired, add here.
+async fn handle_app_inspector(
+    _app: &mut App,
+    _name: &str,
+    _args: &[&str],
+    core_result: &CommandResult,
+) -> SlashOutcome {
+    // Trust core handler output; no App-side mutation needed for /memory /mcp.
+    map_core_to_slash_outcome(core_result.clone())
+}
+
+/// handle_session_control — Plan 03 stub for Plan 04 to replace.
+///
+/// /rollback is scaffolded here per OQ-5 reconciliation: Plan 03 owns the
+/// multi-name match scaffold; Plan 04 fills the body. Per RESEARCH.md OQ-5,
+/// /rollback is session-history truncation only (no ContextEngine call).
+async fn handle_session_control(
+    _app: &mut App,
+    _name: &str,
+    _args: &[&str],
+    core_result: &CommandResult,
+) -> SlashOutcome {
+    // Plan 03 stub — Plan 04 replaces with real bodies for:
+    // /stop /retry /undo /rollback /background /btw /queue
+    map_core_to_slash_outcome(core_result.clone())
+}
+
+/// handle_subsystem_mutator — covers model/fast (AnyClient rebuild) + personality/compress.
+///
+/// Plan 03 owns the FULL helper under Option B (Plan 02 does NOT touch commands.rs).
+/// T-22.4.2-03-10: /model validates via resolver before rebuilding.
+async fn handle_subsystem_mutator(
+    app: &mut App,
+    name: &str,
+    args: &[&str],
+    core_result: &CommandResult,
+) -> SlashOutcome {
+    // Pass through if core handler returned an error.
+    if matches!(core_result, CommandResult::Error(_)) {
+        return map_core_to_slash_outcome(core_result.clone());
+    }
+    match name {
+        "model" => {
+            // No-args: list mode — pass through core Output.
+            let model = match args.first() {
+                Some(m) => *m,
+                None => return map_core_to_slash_outcome(core_result.clone()),
+            };
+            // T-22.4.2-03-10: validate model name via resolver before rebuilding.
+            let main_ep = app.resolver.resolve_for_main();
+            let provider = app.resolver.main_provider().to_string();
+            match ironhermes_agent::build_client(&app.resolver, &provider, model) {
+                Ok(new_client) => {
+                    app.client = new_client;
+                    SlashOutcome::Handled(format!("Switched to model {model}"))
+                }
+                Err(_) => {
+                    // Model not found in provider — return informational text.
+                    let _ = main_ep; // suppress unused warning
+                    SlashOutcome::Handled(format!("Model {model} not found in registry."))
+                }
+            }
+        }
+        "fast" => {
+            // Toggle fast_enabled AtomicBool AND rebuild AnyClient from fast role.
+            let new_state = !app.fast_enabled.fetch_xor(true, Ordering::SeqCst);
+            if new_state {
+                // ON: try to rebuild from fast role
+                match ironhermes_agent::build_role_client(&app.resolver, "fast") {
+                    Ok(Some(new_client)) => {
+                        let model = app.resolver.resolve_role("fast")
+                            .map(|ep| ep.default_model.clone())
+                            .unwrap_or_else(|| "fast".to_string());
+                        app.client = new_client;
+                        SlashOutcome::Handled(format!("Fast mode ON — model {model}"))
+                    }
+                    Ok(None) => SlashOutcome::Handled(
+                        "Fast mode toggle (no fast preset configured).".to_string()
+                    ),
+                    Err(e) => SlashOutcome::Handled(format!("Fast mode ON (rebuild failed: {e})")),
+                }
+            } else {
+                // OFF: restore main model client
+                match ironhermes_agent::build_main_client(&app.resolver) {
+                    Ok(new_client) => {
+                        let main_model = app.resolver.resolve_for_main().default_model.clone();
+                        app.client = new_client;
+                        SlashOutcome::Handled(format!("Fast mode OFF — restored to {main_model}"))
+                    }
+                    Err(e) => SlashOutcome::Handled(format!("Fast mode OFF (restore failed: {e})")),
+                }
+            }
+        }
+        "personality" => {
+            // Core returned Output(overlay_text) for a named preset; apply to next turn.
+            // For list mode or "not configured" case, pass through.
+            match core_result {
+                CommandResult::Output(text)
+                    if !text.starts_with("Available")
+                        && !text.starts_with("Personality registry")
+                        && !text.starts_with("No personalities") =>
+                {
+                    // Apply overlay as system-prompt injection for next turn.
+                    // App.next_turn_personality_overlay: Option<String> stores pending injection.
+                    app.next_turn_personality_overlay = Some(text.clone());
+                    SlashOutcome::Handled(format!(
+                        "Personality applied ({} chars). Active next turn.",
+                        text.len()
+                    ))
+                }
+                _ => map_core_to_slash_outcome(core_result.clone()),
+            }
+        }
+        "compress" => {
+            // Core returned informational text per Task 1 deferral note.
+            // Future: trigger actual compression hook here on demand.
+            map_core_to_slash_outcome(core_result.clone())
+        }
+        _ => map_core_to_slash_outcome(core_result.clone()),
+    }
 }
 
 /// Map a `ironhermes_core::commands::CommandResult` to a `SlashOutcome`.
