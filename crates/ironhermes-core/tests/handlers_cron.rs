@@ -118,11 +118,9 @@ fn router() -> CommandRouter {
 }
 
 // =============================================================================
-// Tests
+// Tests (GREEN after Task 2)
 // =============================================================================
 
-/// RED test (Task 1): base ctx (no cron_store) → Output "not configured".
-/// Turns GREEN in Task 2 when cmd_cron is wired into dispatch.
 #[test]
 fn cron_without_store_returns_not_configured() {
     let ctx = base_ctx();
@@ -139,42 +137,77 @@ fn cron_without_store_returns_not_configured() {
     }
 }
 
-/// Placeholder — wired in Task 2.
 #[test]
 fn cron_list_empty_store_says_no_scheduled_jobs() {
-    // Will be filled in with real dispatch call in Task 2.
-    // For now, just verify the fixture compiles.
-    let _ctx = make_test_ctx_with_cron_store(vec![]);
-    assert!(true, "fixture compiled successfully");
+    let ctx = make_test_ctx_with_cron_store(vec![]);
+    let cmd = find_cmd("cron");
+    let r = router();
+    let res = dispatch(&cmd, &[], &ctx, &r);
+    match res {
+        CommandResult::Output(s) => assert!(
+            s.contains("No scheduled jobs"),
+            "empty store should say 'No scheduled jobs'; got: {}",
+            s
+        ),
+        other => panic!("expected Output, got {:?}", other),
+    }
 }
 
-/// Placeholder — wired in Task 2.
 #[test]
 fn cron_list_one_job_contains_job_name() {
-    let _ctx = make_test_ctx_with_cron_store(vec![FakeCronJob {
+    let ctx = make_test_ctx_with_cron_store(vec![FakeCronJob {
         name: "foo".to_string(),
         id: "id-foo".to_string(),
     }]);
-    assert!(true, "fixture compiled successfully");
+    let cmd = find_cmd("cron");
+    let r = router();
+    let res = dispatch(&cmd, &[], &ctx, &r);
+    match res {
+        CommandResult::Output(s) => assert!(
+            s.contains("foo"),
+            "expected job name 'foo' in output; got: {}",
+            s
+        ),
+        other => panic!("expected Output, got {:?}", other),
+    }
 }
 
-/// Placeholder — wired in Task 2.
 #[test]
 fn cron_status_returns_output() {
-    let _ctx = make_test_ctx_with_cron_store(vec![]);
-    assert!(true, "fixture compiled successfully");
+    let ctx = make_test_ctx_with_cron_store(vec![]);
+    let cmd = find_cmd("cron");
+    let r = router();
+    let res = dispatch(&cmd, &["status"], &ctx, &r);
+    match res {
+        CommandResult::Output(_) => {}
+        other => panic!("expected Output for /cron status, got {:?}", other),
+    }
 }
 
-/// Placeholder — wired in Task 2.
 #[test]
 fn cron_get_missing_id_returns_error() {
-    let _ctx = make_test_ctx_with_cron_store(vec![]);
-    assert!(true, "fixture compiled successfully");
+    let ctx = make_test_ctx_with_cron_store(vec![]);
+    let cmd = find_cmd("cron");
+    let r = router();
+    let res = dispatch(&cmd, &["get", "no-such-id"], &ctx, &r);
+    match res {
+        CommandResult::Error(_) => {}
+        other => panic!("expected Error for /cron get <missing>, got {:?}", other),
+    }
 }
 
-/// Placeholder — wired in Task 2.
 #[test]
 fn cron_unknown_subcommand_returns_error_with_typo_suggestion() {
-    let _ctx = make_test_ctx_with_cron_store(vec![]);
-    assert!(true, "fixture compiled successfully");
+    let ctx = make_test_ctx_with_cron_store(vec![]);
+    let cmd = find_cmd("cron");
+    let r = router();
+    let res = dispatch(&cmd, &["lst"], &ctx, &r);
+    match res {
+        CommandResult::Error(s) => assert!(
+            s.contains("list"),
+            "expected typo suggestion 'list' for 'lst'; got: {}",
+            s
+        ),
+        other => panic!("expected Error with typo suggestion, got {:?}", other),
+    }
 }

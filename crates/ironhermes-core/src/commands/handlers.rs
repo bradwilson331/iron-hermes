@@ -66,6 +66,7 @@ pub fn dispatch(
         "help" => cmd_help(ctx, router),
         "commands" => cmd_commands(args, ctx, router),
         "skills" => cmd_skills(ctx),
+        "cron" => cmd_cron(args, ctx),
 
         // -------------------------------------------------------------------
         // MCP commands (Phase 21.2 Plan 04)
@@ -689,6 +690,79 @@ fn cmd_skills(ctx: &CommandContext) -> CommandResult {
     }
 }
 
+// Phase 22.4.2.1 Plan 01 — /cron slash command sub-dispatch.
+// Mirrors cmd_agents (handlers.rs:164-286) for sub-dispatch shape.
+// Mirrors cmd_skills (handlers.rs:685-690) for the None-guard shape.
+// All JobStore reads are sync (RESEARCH §3 / U10) — no async bridge needed.
+fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.cron_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output("/cron: cron store not configured.".to_string()),
+    };
+    match args.first().copied() {
+        None | Some("list") => CommandResult::Output(store.list_jobs_text()),
+        Some("status") => CommandResult::Output(store.status_text()),
+        Some("get") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/cron get <id>: missing id".to_string()),
+            };
+            match store.get_job_text(id) {
+                Some(text) => CommandResult::Output(text),
+                None => CommandResult::Error(format!("No cron job found: {}", id)),
+            }
+        }
+        Some("pause") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/cron pause <id>: missing id".to_string()),
+            };
+            match store.pause_job(id) {
+                Ok(s) => CommandResult::Output(s),
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some("resume") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/cron resume <id>: missing id".to_string()),
+            };
+            match store.resume_job(id) {
+                Ok(s) => CommandResult::Output(s),
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some("run") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/cron run <id>: missing id".to_string()),
+            };
+            match store.queue_run(id) {
+                Ok(s) => CommandResult::Output(s),
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some("remove") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/cron remove <id>: missing id".to_string()),
+            };
+            match store.remove_job(id) {
+                Ok(s) => CommandResult::Output(s),
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some(other) => {
+            let candidates: &[&str] =
+                &["list", "status", "get", "pause", "resume", "run", "remove"];
+            let suffix = suggest_typo(other, candidates)
+                .map(|s| format!(" {}", s))
+                .unwrap_or_default();
+            CommandResult::Error(format!("Unknown /cron subcommand: {}{}", other, suffix))
+        }
+    }
+}
+
 fn cmd_help(ctx: &CommandContext, router: &CommandRouter) -> CommandResult {
     let mut out = String::from("Available commands:\n");
     let groups = router.commands_by_category(&ctx.platform);
@@ -1099,7 +1173,7 @@ fn todo_stub(name: &str) -> CommandResult {
         "prompt" => "No custom system prompt injection",
         "tools" => "No tool enable/disable management",
         "toolsets" => "No toolset listing",
-        "cron" => "No cron management UI",
+
         "browser" => "No browser tools",
         "plugins" => "No plugin system",
         "paste" => "No clipboard integration",
