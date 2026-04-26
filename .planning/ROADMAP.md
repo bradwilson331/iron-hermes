@@ -95,10 +95,10 @@ Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-own
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 22.4
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 22.4.2 to break down)
+- [x] TBD (run /gsd-plan-phase 22.4.2 to break down) (completed 2026-04-26)
 
 ### Phase 22.4.1: tui_rata handler re-port — route dispatch_slash through CommandRouter and registry handlers (INSERTED)
 
