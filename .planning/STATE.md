@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: Inserted (urgent), not planned yet
-stopped_at: Phase 22.4.2 context gathered
-last_updated: "2026-04-26T10:39:27.189Z"
+stopped_at: Phase 22.4.2.1 context gathered
+last_updated: "2026-04-26T11:12:51.994Z"
 last_activity: 2026-04-26
 progress:
   total_phases: 18
@@ -329,8 +329,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: --stopped-at
-Stopped at: Phase 22.4.2 context gathered
-Resume file: --resume-file
+Last session: 2026-04-26T11:12:51.988Z
+Stopped at: Phase 22.4.2.1 context gathered
+Resume file: .planning/phases/22.4.2.1-cron-cmds-and-telegram-delivery-broken/22.4.2.1-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
