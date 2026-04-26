@@ -1032,3 +1032,112 @@ fn invariant_22_4_41_title_state_store_wired() {
          See Phase 22.4.2 Plan 01."
     );
 }
+
+// =============================================================================
+// Phase 22.4.2 Plan 02 — INV-22.4-42 through INV-22.4-44
+// Per-command static-grep INVs for the 3 ProviderResolver commands (D-10).
+// Each asserts:
+//   (a) The stub arm is ABSENT from tui_rata/commands.rs (invoke_handler collapsed in Plan 01).
+//   (b) The real handler function exists in core/handlers.rs.
+//   (c) The dispatch() routing arm exists in core/handlers.rs.
+// =============================================================================
+
+/// INV-22.4-42 (Phase 22.4.2 Plan 02 — D-03/D-06/D-10): `/model` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"model" => CommandResult::Output(` —
+///     the per-name arm was absent before invoke_handler collapse (it was a stub),
+///     and must remain absent after Plan 02 lands the real core handler.
+/// (b) `fn cmd_model` must exist in core/handlers.rs reading ctx.provider_resolver.
+/// (c) dispatch() must route `"model"` to `cmd_model(`.
+#[test]
+fn invariant_22_4_42_model_wired() {
+    // (a) stub arm absent from tui_rata (invoke_handler is a one-liner post Plan 01)
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"model\" => CommandResult::Output("),
+        "INV-22.4-42 (a): tui_rata/commands.rs must NOT contain \
+         `\"model\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_model("),
+        "INV-22.4-42 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_model(` — real handler body added by Phase 22.4.2 Plan 02 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"model\" => cmd_model("),
+        "INV-22.4-42 (c): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"model\"` to `cmd_model(` — added by Phase 22.4.2 Plan 02."
+    );
+    // (d) handler reads ctx.provider_resolver (D-05 guard pattern)
+    assert!(
+        CORE_HANDLERS.contains("ctx.provider_resolver"),
+        "INV-22.4-42 (d): ironhermes-core/src/commands/handlers.rs must reference \
+         `ctx.provider_resolver` — cmd_model reads this handle (D-04/D-05). \
+         See Phase 22.4.2 Plan 02."
+    );
+}
+
+/// INV-22.4-43 (Phase 22.4.2 Plan 02 — D-03/D-06/D-10): `/provider` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"provider" => CommandResult::Output(`.
+/// (b) `fn cmd_provider` must exist in core/handlers.rs reading ctx.provider_resolver.
+/// (c) dispatch() must route `"provider"` to `cmd_provider(`.
+#[test]
+fn invariant_22_4_43_provider_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"provider\" => CommandResult::Output("),
+        "INV-22.4-43 (a): tui_rata/commands.rs must NOT contain \
+         `\"provider\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_provider("),
+        "INV-22.4-43 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_provider(` — real handler body added by Phase 22.4.2 Plan 02 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"provider\" => cmd_provider("),
+        "INV-22.4-43 (c): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"provider\"` to `cmd_provider(` — added by Phase 22.4.2 Plan 02."
+    );
+}
+
+/// INV-22.4-44 (Phase 22.4.2 Plan 02 — D-03/D-06/D-10): `/fast` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain `"fast" => CommandResult::Output(`.
+/// (b) `fn cmd_fast` must exist in core/handlers.rs reading ctx.provider_resolver.
+/// (c) dispatch() must route `"fast"` to `cmd_fast(`.
+#[test]
+fn invariant_22_4_44_fast_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"fast\" => CommandResult::Output("),
+        "INV-22.4-44 (a): tui_rata/commands.rs must NOT contain \
+         `\"fast\" => CommandResult::Output(` — stub arm removed by \
+         Phase 22.4.2 Plan 01 invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_fast("),
+        "INV-22.4-44 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_fast(` — real handler body added by Phase 22.4.2 Plan 02 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"fast\" => cmd_fast("),
+        "INV-22.4-44 (c): ironhermes-core/src/commands/handlers.rs dispatch() must \
+         route `\"fast\"` to `cmd_fast(` — added by Phase 22.4.2 Plan 02."
+    );
+    // (d) cmd_fast reads ctx.provider_resolver for fast_role_model() (D-05 guard pattern)
+    assert!(
+        CORE_HANDLERS.contains("fast_role_model"),
+        "INV-22.4-44 (d): ironhermes-core/src/commands/handlers.rs cmd_fast must call \
+         `fast_role_model()` on the ProviderResolverHandle (D-04/D-05). \
+         See Phase 22.4.2 Plan 02."
+    );
+}
