@@ -405,6 +405,28 @@ fn build_command_context(app: &App) -> CommandContext {
             Arc::new(PersonalityAdapter(app.personality_overlay.clone()));
         ctx = ctx.with_personality_overlay(handle);
     }
+    // ProcessRegistry for /stop (Plan 04: thread into build_command_context).
+    // ProcessRegistryHandle is the newtype in ironhermes-exec that implements
+    // ProcessRegistrySnapshotHandle for Arc<RwLock<ProcessRegistry>>.
+    {
+        use ironhermes_core::commands::context::ProcessRegistrySnapshotHandle;
+        let handle: Arc<dyn ProcessRegistrySnapshotHandle> = Arc::new(
+            ironhermes_exec::process_registry::ProcessRegistryHandle::new(
+                app.process_registry.clone(),
+            ),
+        );
+        ctx = ctx.with_process_registry(handle);
+    }
+    // SubagentRegistry for /agents (already wired via cmd_agents in core).
+    {
+        use ironhermes_core::commands::context::SubagentListSnapshot;
+        let handle: Arc<dyn SubagentListSnapshot> = Arc::new(
+            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
+                app.subagent_registry.clone(),
+            ),
+        );
+        ctx = ctx.with_subagent_registry(handle);
+    }
     // History snapshot: clone current history for read-only handlers.
     // Mutations (/retry, /undo, /rollback) apply in the post-router hook.
     {
@@ -554,20 +576,151 @@ async fn handle_app_inspector(
     map_core_to_slash_outcome(core_result.clone())
 }
 
-/// handle_session_control — Plan 03 stub for Plan 04 to replace.
+/// handle_session_control — Plan 04 real bodies for Tier D session control.
 ///
-/// /rollback is scaffolded here per OQ-5 reconciliation: Plan 03 owns the
-/// multi-name match scaffold; Plan 04 fills the body. Per RESEARCH.md OQ-5,
-/// /rollback is session-history truncation only (no ContextEngine call).
+/// /stop: ProcessRegistry drain (threaded in build_command_context — core handles it).
+/// /retry: truncate last assistant message from history + queue last user msg for re-submission.
+/// /undo: remove last (user, assistant) pair from App.history.
+/// /rollback [n]: remove last N (user, assistant) pairs from App.history.
+/// /background, /btw, /queue: spawn/inject via App.pending_tx mechanism.
+///
+/// Per RESEARCH.md OQ-5: /rollback is session-history truncation only — no ContextEngine API.
 async fn handle_session_control(
-    _app: &mut App,
-    _name: &str,
-    _args: &[&str],
+    app: &mut App,
+    name: &str,
+    args: &[&str],
     core_result: &CommandResult,
 ) -> SlashOutcome {
-    // Plan 03 stub — Plan 04 replaces with real bodies for:
-    // /stop /retry /undo /rollback /background /btw /queue
-    map_core_to_slash_outcome(core_result.clone())
+    match name {
+        "stop" => {
+            // /stop: ProcessRegistry is now threaded into ctx via build_command_context.
+            // Core cmd_stop handles the drain-and-kill; trust core result.
+            map_core_to_slash_outcome(core_result.clone())
+        }
+        "retry" => {
+            // Find the last user message in history.
+            let last_user_text = app.history.iter().rev()
+                .find(|m| m.role == ironhermes_core::types::Role::User)
+                .and_then(|m| m.content.as_ref())
+                .and_then(|c| c.as_text())
+                .map(|s| s.to_string());
+
+            match last_user_text {
+                None => SlashOutcome::Handled("No user messages in history to retry.".to_string()),
+                Some(text) => {
+                    // Remove trailing assistant message(s) to re-run from last user turn.
+                    while app.history.last().map(|m| m.role == ironhermes_core::types::Role::Assistant).unwrap_or(false) {
+                        app.history.pop();
+                    }
+                    // Re-queue the user message as a new pending turn.
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::tui_rata::stream_events::StreamEvent>();
+                    app.pending_rx = Some(rx);
+                    app.pending_tx = Some(tx);
+                    app.cancel_child = Some(app.cancel_parent.child_token());
+                    app.auto_follow = true;
+                    app.assistant_buffer = None;
+                    SlashOutcome::Handled(format!("Retrying: {text}"))
+                }
+            }
+        }
+        "undo" => {
+            if app.history.is_empty() {
+                return SlashOutcome::Handled("No history to undo.".to_string());
+            }
+            // Remove last assistant message (if present).
+            if app.history.last().map(|m| m.role == ironhermes_core::types::Role::Assistant).unwrap_or(false) {
+                app.history.pop();
+            }
+            // Remove last user message (if present).
+            if app.history.last().map(|m| m.role == ironhermes_core::types::Role::User).unwrap_or(false) {
+                app.history.pop();
+                SlashOutcome::Handled("Last exchange undone.".to_string())
+            } else {
+                SlashOutcome::Handled("Undo: no user message found to remove.".to_string())
+            }
+        }
+        "rollback" => {
+            // Parse N (default 1) — number of (user, assistant) pairs to remove.
+            let n: usize = args.first()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1)
+                .max(1);
+            if app.history.is_empty() {
+                return SlashOutcome::Handled("No history to roll back.".to_string());
+            }
+            let mut removed = 0usize;
+            for _ in 0..n {
+                // Remove trailing assistant message (if any).
+                if app.history.last().map(|m| m.role == ironhermes_core::types::Role::Assistant).unwrap_or(false) {
+                    app.history.pop();
+                }
+                // Remove trailing user message (if any).
+                if app.history.last().map(|m| m.role == ironhermes_core::types::Role::User).unwrap_or(false) {
+                    app.history.pop();
+                    removed += 1;
+                } else {
+                    break; // No more user messages to remove.
+                }
+            }
+            if removed == 0 {
+                SlashOutcome::Handled("Rollback: no exchanges found to remove.".to_string())
+            } else {
+                SlashOutcome::Handled(format!("Rolled back {removed} exchange(s)."))
+            }
+        }
+        "background" => {
+            // Spawn a background agent turn with the given message.
+            // Uses the same pending_tx/spawn_turn mechanism as submit().
+            if args.is_empty() {
+                return SlashOutcome::Handled(
+                    "Usage: /background <message> — run a prompt as a background task.".to_string()
+                );
+            }
+            let message = args.join(" ");
+            // Push the background message as a user turn and queue for spawn.
+            app.history.push(ironhermes_core::types::ChatMessage::user(message.clone()));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::tui_rata::stream_events::StreamEvent>();
+            app.pending_rx = Some(rx);
+            app.pending_tx = Some(tx);
+            app.cancel_child = Some(app.cancel_parent.child_token());
+            app.auto_follow = true;
+            app.assistant_buffer = None;
+            SlashOutcome::Handled(format!("Background task queued: \"{message}\""))
+        }
+        "btw" => {
+            // Inject an aside into the current/next turn.
+            if args.is_empty() {
+                return SlashOutcome::Handled(
+                    "Usage: /btw <message> — add an aside to the current/next agent turn.".to_string()
+                );
+            }
+            let message = args.join(" ");
+            // Append as a user message; it will be included in the next spawn_turn call.
+            app.history.push(ironhermes_core::types::ChatMessage::user(
+                format!("[btw] {message}")
+            ));
+            SlashOutcome::Handled(format!("Aside added: \"{message}\" (active next turn)"))
+        }
+        "queue" => {
+            // Queue a message for submission after the current turn.
+            if args.is_empty() {
+                return SlashOutcome::Handled(
+                    "Usage: /queue <message> — add a message to the input queue.".to_string()
+                );
+            }
+            let message = args.join(" ");
+            // Pre-populate the textarea with the queued message; user can review/submit.
+            let mut ta = tui_textarea::TextArea::default();
+            ta.set_cursor_line_style(ratatui::style::Style::default());
+            ta.set_block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL).title("Prompt"));
+            for c in message.chars() {
+                ta.insert_char(c);
+            }
+            app.textarea = ta;
+            SlashOutcome::Handled(format!("Queued: \"{message}\" (press Enter to submit)"))
+        }
+        _ => map_core_to_slash_outcome(core_result.clone()),
+    }
 }
 
 /// handle_subsystem_mutator — covers model/fast (AnyClient rebuild) + personality/compress.

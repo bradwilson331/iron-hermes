@@ -22,6 +22,12 @@ pub fn dispatch(
         "new" => cmd_new(args, ctx),
         "clear" => cmd_clear(ctx),
         "stop" => cmd_stop(ctx),
+        "retry" => cmd_retry(args, ctx),
+        "undo" => cmd_undo(args, ctx),
+        "rollback" => cmd_rollback(args, ctx),
+        "background" | "bg" => cmd_background(args, ctx),
+        "btw" => cmd_btw(args, ctx),
+        "queue" => cmd_queue(args, ctx),
         "agents" => cmd_agents(args, ctx),
         "status" => cmd_status(ctx),
         "title" => cmd_title(args, ctx),
@@ -907,21 +913,187 @@ fn cmd_reload_mcp(ctx: &CommandContext) -> CommandResult {
 }
 
 // =============================================================================
+// Tier D session control handlers (Phase 22.4.2 Plan 04)
+// =============================================================================
+
+/// `/retry` — re-queue the last user message as a new turn.
+///
+/// Reads the history snapshot from `ctx.history` to find the most recent User
+/// message. Returns the message text for the post-router hook to re-submit.
+/// If no user message exists, returns an informational error.
+///
+/// Guard pattern (D-05): when `ctx.history` is None, returns informational text.
+/// Mutation (removing the last assistant response) happens in the tui_rata
+/// post-router hook `handle_session_control` which has `&mut App` access.
+fn cmd_retry(_args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let history_lock = match &ctx.history {
+        Some(h) => h.clone(),
+        None => return CommandResult::Output(
+            "History not available. Retry requires history threading.".to_string()
+        ),
+    };
+    let msgs = history_lock.read().unwrap_or_else(|e| e.into_inner());
+    // Find the last User message in history.
+    let last_user = msgs.iter().rev().find(|m| m.role == crate::types::Role::User);
+    match last_user {
+        Some(msg) => {
+            let content = msg.content.as_ref()
+                .and_then(|c| c.as_text())
+                .unwrap_or("")
+                .to_string();
+            if content.is_empty() {
+                CommandResult::Output("Last user message is empty — nothing to retry.".to_string())
+            } else {
+                // Post-router hook will truncate history and re-submit this content.
+                CommandResult::Output(format!("Retrying: {content}"))
+            }
+        }
+        None => CommandResult::Output(
+            "No user messages in history to retry.".to_string()
+        ),
+    }
+}
+
+/// `/undo` — remove the last (user, assistant) pair from history.
+///
+/// Reads the history snapshot from `ctx.history` to confirm there is something
+/// to undo. Returns informational text. The actual truncation happens in the
+/// tui_rata post-router hook `handle_session_control` which has `&mut App` access.
+///
+/// Guard pattern (D-05): when `ctx.history` is None, returns informational text.
+fn cmd_undo(_args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let history_lock = match &ctx.history {
+        Some(h) => h.clone(),
+        None => return CommandResult::Output(
+            "History not available. Undo requires history threading.".to_string()
+        ),
+    };
+    let msgs = history_lock.read().unwrap_or_else(|e| e.into_inner());
+    if msgs.is_empty() {
+        return CommandResult::Output("No history to undo.".to_string());
+    }
+    // Count how many messages will be removed (last user + last assistant pair).
+    let has_user = msgs.iter().rev().any(|m| m.role == crate::types::Role::User);
+    if !has_user {
+        return CommandResult::Output("No user messages in history to undo.".to_string());
+    }
+    CommandResult::Output(
+        "Last exchange undone. (Post-router hook will truncate history.)".to_string()
+    )
+}
+
+/// `/rollback [n]` — truncate session history by removing the last N exchanges.
+///
+/// With no args (or n=1): removes the last (user, assistant) pair.
+/// With n>1: removes the last N (user, assistant) pairs.
+/// Per RESEARCH.md OQ-5: this is session-history truncation only —
+/// ContextEngine has no public rollback API. The actual truncation happens
+/// in the tui_rata post-router hook.
+///
+/// Guard pattern (D-05): when `ctx.history` is None, returns informational text.
+fn cmd_rollback(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let history_lock = match &ctx.history {
+        Some(h) => h.clone(),
+        None => return CommandResult::Output(
+            "History not available. Rollback requires history threading.".to_string()
+        ),
+    };
+    let n: usize = args.first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let msgs = history_lock.read().unwrap_or_else(|e| e.into_inner());
+    if msgs.is_empty() {
+        return CommandResult::Output("No history to roll back.".to_string());
+    }
+    CommandResult::Output(format!(
+        "Rolling back {n} exchange(s). (Post-router hook will truncate history.)"
+    ))
+}
+
+/// `/background [message]` — run the given prompt as a background task.
+///
+/// Queues a message to be run asynchronously by a new AgentLoop instance.
+/// The actual spawn happens in the tui_rata post-router hook `handle_session_control`
+/// which has access to App's tokio handle and spawn_turn logic.
+///
+/// Guard pattern (D-05): when `ctx.agent_loop` is None, returns informational text.
+fn cmd_background(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    if ctx.agent_loop.is_none() {
+        return CommandResult::Output(
+            "Agent loop not configured. Background tasks require agent threading.".to_string()
+        );
+    }
+    if args.is_empty() {
+        return CommandResult::Output(
+            "Usage: /background <message> — run a prompt as a background task.".to_string()
+        );
+    }
+    let message = args.join(" ");
+    CommandResult::Output(format!(
+        "Background task queued: \"{message}\" (post-router hook will spawn agent turn)."
+    ))
+}
+
+/// `/btw [message]` — send an ephemeral aside to the current agent turn.
+///
+/// Appends the message as an additional user turn to be processed in the
+/// current or next agent execution. The actual injection happens in the
+/// tui_rata post-router hook.
+///
+/// Guard pattern (D-05): when `ctx.agent_loop` is None, returns informational text.
+fn cmd_btw(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    if ctx.agent_loop.is_none() {
+        return CommandResult::Output(
+            "Agent loop not configured. BTW requires agent threading.".to_string()
+        );
+    }
+    if args.is_empty() {
+        return CommandResult::Output(
+            "Usage: /btw <message> — add an aside to the current/next agent turn.".to_string()
+        );
+    }
+    let message = args.join(" ");
+    CommandResult::Output(format!(
+        "Aside queued: \"{message}\" (post-router hook will inject into next turn)."
+    ))
+}
+
+/// `/queue [message]` — add a message to the input queue.
+///
+/// Queues a message to be submitted after the current turn completes.
+/// The actual queuing happens in the tui_rata post-router hook.
+///
+/// Guard pattern (D-05): when `ctx.agent_loop` is None, returns informational text.
+fn cmd_queue(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    if ctx.agent_loop.is_none() {
+        return CommandResult::Output(
+            "Agent loop not configured. Queue requires agent threading.".to_string()
+        );
+    }
+    if args.is_empty() {
+        return CommandResult::Output(
+            "Usage: /queue <message> — add a message to the input queue.".to_string()
+        );
+    }
+    let message = args.join(" ");
+    CommandResult::Output(format!(
+        "Message queued: \"{message}\" (post-router hook will submit after current turn)."
+    ))
+}
+
+// =============================================================================
 // TODO stubs
 // =============================================================================
 
 fn todo_stub(name: &str) -> CommandResult {
     let reason = match name {
         "voice" => "No TTS infrastructure",
-        "background" | "bg" => "No background session manager",
-        "rollback" => "No checkpoint system",
         "snapshot" => "No checkpoint system",
         "insights" => "No analytics infrastructure",
         "usage" => "No token cost tracking",
         "update" => "Binary build \u{2014} use package manager",
         "sethome" | "set-home" => "No home channel concept",
-        "retry" => "No last-message replay",
-        "undo" => "No message history manipulation",
         "approve" => "No approval queue",
         "deny" => "No approval queue",
         "prompt" => "No custom system prompt injection",
@@ -932,8 +1104,6 @@ fn todo_stub(name: &str) -> CommandResult {
         "plugins" => "No plugin system",
         "paste" => "No clipboard integration",
         "platforms" | "gateway" => "No platform status display",
-        "btw" => "No ephemeral query mechanism",
-        "queue" => "No input queue",
         _ => "Not implemented",
     };
     CommandResult::Output(format!("/{} is not yet available. ({})", name, reason))
@@ -1223,15 +1393,15 @@ mod tests {
     fn dispatch_all_todo_stubs_return_not_yet_available() {
         let todo_commands = [
             "voice",
-            "background",
-            "rollback",
+            // "background" removed — now has real handler (Phase 22.4.2 Plan 04)
+            // "rollback" removed — now has real handler (Phase 22.4.2 Plan 04)
             "snapshot",
             "insights",
             "usage",
             "update",
             "sethome",
-            "retry",
-            "undo",
+            // "retry" removed — now has real handler (Phase 22.4.2 Plan 04)
+            // "undo" removed — now has real handler (Phase 22.4.2 Plan 04)
             // "resume" removed — now has real handler (Phase 22.4.2 Plan 01)
             "approve",
             "deny",
@@ -1246,8 +1416,8 @@ mod tests {
             "plugins",
             "paste",
             "platforms",
-            "btw",
-            "queue",
+            // "btw" removed — now has real handler (Phase 22.4.2 Plan 04)
+            // "queue" removed — now has real handler (Phase 22.4.2 Plan 04)
             // "fast" removed — now has real handler (Phase 22.4.2 Plan 02)
             // "debug" removed — now has real handler (Phase 22.4.2 Plan 03)
             // "model" removed — now has real handler (Phase 22.4.2 Plan 02)

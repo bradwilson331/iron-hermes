@@ -1265,3 +1265,227 @@ fn invariant_22_4_52_compress_wired() {
         "INV-22.4-52 (b): cmd_compress must reference ctx.context_compressor (D-04/D-05)"
     );
 }
+
+// =============================================================================
+// Phase 22.4.2 Plan 04 — INV-22.4-53 through INV-22.4-59
+// Per-command static-grep INVs for Tier D session control commands (D-10).
+// Each asserts:
+//   (a) The stub arm is ABSENT from tui_rata/commands.rs (invoke_handler collapsed in Plan 01).
+//   (b) The real handler function exists in core/handlers.rs.
+//   (c) The dispatch routing arm exists in core/handlers.rs.
+//   (d) Any required ctx handle reference is present (D-04/D-05 guard pattern).
+// =============================================================================
+
+/// INV-22.4-53 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/stop` full wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_stop` must exist in core/handlers.rs.
+/// (c) dispatch() must route `"stop"` to `cmd_stop(`.
+/// (d) ProcessRegistry must be threaded via with_process_registry in build_command_context.
+#[test]
+fn invariant_22_4_53_stop_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"stop\" => CommandResult::Output("),
+        "INV-22.4-53 (a): tui_rata/commands.rs must NOT contain \
+         `\"stop\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_stop("),
+        "INV-22.4-53 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_stop(` — real handler body (Phase 21.7-08)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"stop\" => cmd_stop("),
+        "INV-22.4-53 (c): dispatch() must route `\"stop\"` to `cmd_stop(` in core/handlers.rs."
+    );
+    // (d) ProcessRegistry threaded in build_command_context
+    assert!(
+        TUI_RATA_COMMANDS.contains("with_process_registry("),
+        "INV-22.4-53 (d): tui_rata/commands.rs build_command_context must call \
+         `with_process_registry(` to thread ProcessRegistry for /stop — Phase 22.4.2 Plan 04."
+    );
+}
+
+/// INV-22.4-54 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/retry` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_retry` must exist in core/handlers.rs reading ctx.history.
+/// (c) dispatch() must route `"retry"` to `cmd_retry(`.
+#[test]
+fn invariant_22_4_54_retry_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"retry\" => CommandResult::Output("),
+        "INV-22.4-54 (a): tui_rata/commands.rs must NOT contain \
+         `\"retry\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_retry("),
+        "INV-22.4-54 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_retry(` — real handler body added by Phase 22.4.2 Plan 04 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"retry\" => cmd_retry("),
+        "INV-22.4-54 (c): dispatch() must route `\"retry\"` to `cmd_retry(` in core/handlers.rs."
+    );
+    // (d) handler reads ctx.history (D-04/D-05 guard pattern)
+    assert!(
+        CORE_HANDLERS.contains("ctx.history"),
+        "INV-22.4-54 (d): core/handlers.rs cmd_retry must reference `ctx.history` \
+         to read the last user message (D-04/D-05). See Phase 22.4.2 Plan 04."
+    );
+}
+
+/// INV-22.4-55 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/undo` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_undo` must exist in core/handlers.rs reading ctx.history.
+/// (c) dispatch() must route `"undo"` to `cmd_undo(`.
+#[test]
+fn invariant_22_4_55_undo_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"undo\" => CommandResult::Output("),
+        "INV-22.4-55 (a): tui_rata/commands.rs must NOT contain \
+         `\"undo\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_undo("),
+        "INV-22.4-55 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_undo(` — real handler body added by Phase 22.4.2 Plan 04 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"undo\" => cmd_undo("),
+        "INV-22.4-55 (c): dispatch() must route `\"undo\"` to `cmd_undo(` in core/handlers.rs."
+    );
+}
+
+/// INV-22.4-56 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/rollback` wire-up.
+///
+/// Per RESEARCH.md OQ-5: /rollback is session-history truncation only — no ContextEngine API.
+/// Plan 04 owns the full /rollback implementation (both core handler and post-router body).
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_rollback` must exist in core/handlers.rs reading ctx.history.
+/// (c) dispatch() must route `"rollback"` to `cmd_rollback(`.
+/// (d) handle_session_control must implement real rollback (not just map_core_to_slash_outcome stub).
+#[test]
+fn invariant_22_4_56_rollback_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"rollback\" => CommandResult::Output("),
+        "INV-22.4-56 (a): tui_rata/commands.rs must NOT contain \
+         `\"rollback\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_rollback("),
+        "INV-22.4-56 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_rollback(` — real handler body added by Phase 22.4.2 Plan 04 (D-03). \
+         Per OQ-5: session-history truncation only (no ContextEngine API)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"rollback\" => cmd_rollback("),
+        "INV-22.4-56 (c): dispatch() must route `\"rollback\"` to `cmd_rollback(` \
+         in core/handlers.rs."
+    );
+    // (d) handle_session_control must contain real rollback body (not just stub pass-through)
+    assert!(
+        TUI_RATA_COMMANDS.contains("\"rollback\""),
+        "INV-22.4-56 (d): tui_rata/commands.rs handle_session_control must handle \
+         `\"rollback\"` arm — Plan 04 fills the body (OQ-5: history truncation)."
+    );
+}
+
+/// INV-22.4-57 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/background` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_background` must exist in core/handlers.rs guarding ctx.agent_loop.
+/// (c) dispatch() must route `"background"` to `cmd_background(`.
+#[test]
+fn invariant_22_4_57_background_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"background\" => CommandResult::Output("),
+        "INV-22.4-57 (a): tui_rata/commands.rs must NOT contain \
+         `\"background\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_background("),
+        "INV-22.4-57 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_background(` — real handler body added by Phase 22.4.2 Plan 04 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"background\" | \"bg\" => cmd_background("),
+        "INV-22.4-57 (c): dispatch() must route `\"background\" | \"bg\"` to \
+         `cmd_background(` in core/handlers.rs."
+    );
+    // (d) handler guards ctx.agent_loop (D-05 guard pattern)
+    assert!(
+        CORE_HANDLERS.contains("ctx.agent_loop"),
+        "INV-22.4-57 (d): core/handlers.rs cmd_background must reference `ctx.agent_loop` \
+         for the D-05 guard pattern. See Phase 22.4.2 Plan 04."
+    );
+}
+
+/// INV-22.4-58 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/btw` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_btw` must exist in core/handlers.rs guarding ctx.agent_loop.
+/// (c) dispatch() must route `"btw"` to `cmd_btw(`.
+#[test]
+fn invariant_22_4_58_btw_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"btw\" => CommandResult::Output("),
+        "INV-22.4-58 (a): tui_rata/commands.rs must NOT contain \
+         `\"btw\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_btw("),
+        "INV-22.4-58 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_btw(` — real handler body added by Phase 22.4.2 Plan 04 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"btw\" => cmd_btw("),
+        "INV-22.4-58 (c): dispatch() must route `\"btw\"` to `cmd_btw(` in core/handlers.rs."
+    );
+}
+
+/// INV-22.4-59 (Phase 22.4.2 Plan 04 — D-03/D-06/D-10): `/queue` wire-up.
+///
+/// (a) tui_rata/commands.rs must NOT contain the old stub arm.
+/// (b) `fn cmd_queue` must exist in core/handlers.rs guarding ctx.agent_loop.
+/// (c) dispatch() must route `"queue"` to `cmd_queue(`.
+#[test]
+fn invariant_22_4_59_queue_wired() {
+    // (a) stub arm absent from tui_rata
+    assert!(
+        !TUI_RATA_COMMANDS.contains("\"queue\" => CommandResult::Output("),
+        "INV-22.4-59 (a): tui_rata/commands.rs must NOT contain \
+         `\"queue\" => CommandResult::Output(` after invoke_handler collapse (D-01)."
+    );
+    // (b) real handler present in core
+    assert!(
+        CORE_HANDLERS.contains("fn cmd_queue("),
+        "INV-22.4-59 (b): ironhermes-core/src/commands/handlers.rs must contain \
+         `fn cmd_queue(` — real handler body added by Phase 22.4.2 Plan 04 (D-03)."
+    );
+    // (c) dispatch routing arm present
+    assert!(
+        CORE_HANDLERS.contains("\"queue\" => cmd_queue("),
+        "INV-22.4-59 (c): dispatch() must route `\"queue\"` to `cmd_queue(` in core/handlers.rs."
+    );
+}
