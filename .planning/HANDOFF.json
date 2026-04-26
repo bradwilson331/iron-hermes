@@ -1,41 +1,49 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-15T10:52:01.604Z",
-  "phase": "19.1",
-  "phase_name": "skills-hub",
-  "phase_dir": ".planning/phases/19.1-skills-hub",
+  "timestamp": "2026-04-26T13:46:12.426Z",
+  "phase": "22.4.2.2",
+  "phase_name": "cron-create-defaults-to-tg-origin-when-gateway-active",
+  "phase_dir": ".planning/phases/22.4.2.2-cron-create-defaults-to-tg-origin-when-gateway-active",
   "plan": null,
   "task": null,
-  "total_tasks": 12,
-  "status": "ready_to_execute",
-  "stage": "post-plan-check",
+  "total_tasks": null,
+  "status": "paused",
+  "stage": "plans-written-not-verified-not-committed",
   "completed_tasks": [
-    {"id": "discuss", "name": "CONTEXT.md (14 decisions D-01..D-14)", "status": "done", "commit": "6e0d853"},
-    {"id": "research", "name": "RESEARCH.md (Rust crates, adapter details, Validation Architecture)", "status": "done", "commit": "af89ce1"},
-    {"id": "validation", "name": "VALIDATION.md (Per-Task Verification Map, 12 task rows)", "status": "done", "commit": "6d476d6"},
-    {"id": "planning", "name": "5 PLAN.md files across 4 waves (12 tasks total)", "status": "done", "commit": "b18ca28"},
-    {"id": "research-fix", "name": "RESEARCH.md Open Questions marked RESOLVED (Dim-11 gate)", "status": "done", "commit": "c290c9c"}
+    {"id": "22.4.2.2-insert", "name": "Insert phase 22.4.2.2 into ROADMAP after 22.4.2.1 (sibling, not child)", "status": "done", "commit": "4bcdca9"},
+    {"id": "22.4.2.2-context", "name": "Capture CONTEXT.md (extended to 2 plans after user's 'dispatch_gateway in scope' constraint)", "status": "done", "commit": "see git log"},
+    {"id": "22.4.2.2-research", "name": "Research — confirmed JobOrigin shape, Vec<i64> whitelist, IRONHERMES_HOME test seam, circular-dep risk (Q-OQ1)", "status": "done", "commit": "see RESEARCH.md commit"},
+    {"id": "22.4.2.2-validation", "name": "Write VALIDATION.md (per-task automated commands for both plans)", "status": "done", "commit": "see VALIDATION.md commit"},
+    {"id": "22.4.2.2-patterns", "name": "Pattern map (analog files for cmd_create + cronjob_tool seams)", "status": "done", "commit": "see PATTERNS.md commit"},
+    {"id": "22.4.2.2-plan-01", "name": "Plan 22.4.2.2-01 written (CLI default-routing path)", "status": "done", "commit": "UNCOMMITTED on disk"},
+    {"id": "22.4.2.2-plan-02", "name": "Plan 22.4.2.2-02 written (LLM tool / dispatch_gateway path, depends_on Plan 01)", "status": "done", "commit": "UNCOMMITTED on disk"}
   ],
   "remaining_tasks": [
-    {"id": "wave-1", "name": "Plan 19.1-01: SkillSource::Trusted + HubConfig + ironhermes-hub crate scaffold (3 tasks)", "status": "not_started"},
-    {"id": "wave-2", "name": "Plan 19.1-02: GitHubSource / WellKnownSource / SkillsShSource adapters (3 tasks)", "status": "not_started"},
-    {"id": "wave-3a", "name": "Plan 19.1-03: Install pipeline + update/uninstall (2 tasks)", "status": "not_started"},
-    {"id": "wave-3b", "name": "Plan 19.1-04: resolve_source() trust recomputation in SkillRegistry (2 tasks)", "status": "not_started"},
-    {"id": "wave-4", "name": "Plan 19.1-05: hermes skills CLI tree + hub_search tool action (2 tasks)", "status": "not_started"}
+    {"id": "verify-plans", "name": "Run gsd-plan-checker on both plans (was about to spawn when user invoked /gsd-pause-work — verification_context already drafted in transcript)", "status": "not_started"},
+    {"id": "decision-coverage-gate", "name": "Run gsd-sdk query check.decision-coverage-plan — D-01..D-12 must all be covered (gate is strict: looks for 'D-NN:' inline citations; the decisions_addressed: blocks in plan frontmatter satisfy this)", "status": "not_started"},
+    {"id": "record-state", "name": "gsd-sdk query state.planned-phase --phase 22.4.2.2 --plans 2", "status": "not_started"},
+    {"id": "commit-plans", "name": "gsd-sdk query commit 'docs(22.4.2.2): create phase plan' — files: 22.4.2.2-01-PLAN.md, 22.4.2.2-02-PLAN.md, .planning/STATE.md, .planning/ROADMAP.md", "status": "not_started"},
+    {"id": "execute-plan-01", "name": "Spawn gsd-executor for Plan 22.4.2.2-01 (Wave 1, no deps). Sequential mode (Plans 01+02 share invariants_22_4.rs).", "status": "not_started"},
+    {"id": "execute-plan-02", "name": "Spawn gsd-executor for Plan 22.4.2.2-02 (Wave 2, depends_on Plan 01). Sequential — relies on Plan 01's OriginDecision enum existing in ironhermes-core::config.", "status": "not_started"},
+    {"id": "verify-phase", "name": "Spawn gsd-verifier for goal-backward verification (CLI default + LLM tool default both auto-route to TG when single-chat whitelist active)", "status": "not_started"}
   ],
-  "blockers": [
-    {"description": "Context window at 87% on paused session — fresh /clear strongly recommended before /gsd-execute-phase 19.1", "type": "technical", "workaround": "Resume in fresh session; re-read 19.1-CONTEXT.md + 19.1-RESEARCH.md + each PLAN.md as needed."}
+  "blockers": [],
+  "human_actions_pending": [
+    {"action": "After Phase 22.4.2.2 ships: edit existing 3 weather jobs in ~/.ironhermes/cron/jobs.json to deliver=telegram:7018949547 — they pre-date this phase and were created with deliver=local. Plans 01/02 fix the DEFAULT for new jobs only — existing jobs are NOT auto-migrated.", "context": "User confirmed during 22.4.2.1 UAT: dispatch fix works but live cron output isn't reaching TG because all 3 jobs have deliver=local. CONTEXT.md D-12 explicitly calls this out.", "blocking": false}
   ],
-  "human_actions_pending": [],
   "decisions": [
-    {"decision": "Skip publish flows (D-12 deferred to Phase 19.2 or 20)", "rationale": "Smallest viable Hub; publish needs PAT write-scope + repo bootstrap (~300-500 LOC)", "phase": "19.1"},
-    {"decision": "Read-only hub_search tool only (D-13)", "rationale": "Agent helps users discover skills; install mutations stay under user control via CLI", "phase": "19.1"},
-    {"decision": "New crate ironhermes-hub (not module in ironhermes-tools)", "rationale": "Isolates reqwest/tar/flate2 from core dep graph", "phase": "19.1"},
-    {"decision": "Wave 0 absorbed into Plan 01", "rationale": "SkillSource::Trusted variant + HubConfig + crate scaffold all needed before adapters; no separate Wave 0 plan", "phase": "19.1"},
-    {"decision": "wiremock 0.6 over mockito for HTTP mocking", "rationale": "Async-native, tokio-compatible; matches existing async stack", "phase": "19.1"},
-    {"decision": "Plans 01 (10 files) and 02 (11 files) at scope-sanity warning threshold accepted as-is", "rationale": "Plan 01 is pure scaffolding (small sibling modules); Plan 02 is structurally-parallel adapters. Split only if execution context overruns.", "phase": "19.1"}
+    {"decision": "Split into 2 plans (Plan 01 CLI, Plan 02 LLM tool) instead of folding into one", "rationale": "Plan 02 depends on Plan 01's helper enum + method; splitting keeps each plan independently reviewable and lets Plan 01 ship even if Plan 02 reveals an edge case", "phase": "22.4.2.2"},
+    {"decision": "OriginDecision enum lives in ironhermes-core::config with String chat_id (NOT JobOrigin)", "rationale": "Researcher Q-OQ1 confirmed ironhermes-core has zero dep on ironhermes-cron — embedding JobOrigin would create circular dep. CLI/tool consumers construct JobOrigin from the enum's String fields.", "phase": "22.4.2.2"},
+    {"decision": "Plan 02 reuses Plan 01's Config::telegram_default_origin() helper (NOT runtime Origin plumbing through CronjobTool::new)", "rationale": "Pragmatic — zero plumbing surgery, consistent behavior with CLI path. Per-message Origin precision lost for multi-chat whitelists, but user's setup is single-chat so not a concern today.", "phase": "22.4.2.2"},
+    {"decision": "Plan 02 uses tracing::warn! NOT eprintln! for multi-chat hint", "rationale": "Stderr from inside an LLM tool would pollute the JSON response the LLM reads back", "phase": "22.4.2.2"},
+    {"decision": "cmd_edit is unchanged (D-06)", "rationale": "Researcher Q5 confirmed cmd_edit already has Option<String> for deliver — current edit ergonomics already correct, no surgery needed", "phase": "22.4.2.2"},
+    {"decision": "INV ledger ends at 64 INVs (62 from Phase 22.4.2.1 + 1 from Plan 01 + 1 from Plan 02)", "rationale": "Each plan owns its own INV per Phase 22.4.2.1 D-13 pattern", "phase": "22.4.2.2"}
   ],
-  "uncommitted_files": [],
-  "next_action": "Run /clear, then /gsd-execute-phase 19.1 — Wave 1 starts with Plan 19.1-01 (SkillSource::Trusted variant unblocks everything downstream)",
-  "context_notes": "Phase 19.1 went discuss → research → plan → check (1 blocker: RESEARCH.md '## Open Questions' missing (RESOLVED) suffix — auto-fixed) cleanly. CONTEXT.md (D-01..D-14) is authoritative; downstream agents must NOT re-litigate. Reference impl lives at ~/code/hermes-agent/tools/skills_hub.py (2,691 LOC) — port faithfully per PROJECT.md constraint. SKILL-08 + SKILL-09 covered across all 5 plans. Threat models on every plan (security_enforcement enabled, ASVS L1)."
+  "uncommitted_files": [
+    ".planning/phases/22.4.2.2-cron-create-defaults-to-tg-origin-when-gateway-active/22.4.2.2-01-PLAN.md",
+    ".planning/phases/22.4.2.2-cron-create-defaults-to-tg-origin-when-gateway-active/22.4.2.2-02-PLAN.md",
+    ".planning/ROADMAP.md (planner finalized Phase 22.4.2.2 goal + plans listing)"
+  ],
+  "next_action": "Spawn gsd-plan-checker on the two PLAN.md files. Verification context: phase 22.4.2.2, two plans (01 wave 1 / 02 wave 2 depends_on 01), decision coverage D-01..D-12 distributed across decisions_addressed: blocks in frontmatter, anti-shallow rules, cross-plan consistency (OriginDecision in core::config with String chat_id, not JobOrigin), goal-backward (CLI + LLM tool both default to TG origin when single-chat whitelist), INV final count 64. After plan-checker passes: run decision-coverage SDK gate, record planning, commit plans + STATE + ROADMAP, then execute Plan 01 (gsd-executor sequential, no worktree — invariants_22_4.rs and other crates may overlap), then Plan 02, then verify.",
+  "context_notes": "Mid-flight in /gsd-plan-phase 22.4.2.2 --chain. Phase 22.4.2.1 (predecessor) FULLY SHIPPED this session — 10 atomic commits f796674..e7d5450, 62 INVs green, all 3 regressions resolved (cron slash UI, TG delivery dispatch, Ctrl+C graceful shutdown). User confirmed Ctrl+C works live; user spotted that weather jobs aren't reaching TG due to deliver=local default — that's the regression Phase 22.4.2.2 fixes. The 'dispatch_gateway in scope' user constraint added Plan 02 (LLM tool path) on top of original Plan 01 (CLI path). Both plans share Plan 01's OriginDecision helper to keep behavior consistent."
 }
