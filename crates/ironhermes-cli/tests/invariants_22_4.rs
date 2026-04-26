@@ -1538,3 +1538,21 @@ fn invariant_22_4_2_1_03_worker_drain_present() {
          (existing signal handler must not be removed per D-02)"
     );
 }
+
+/// INV-22.4.2.2-01 (Phase 22.4.2.2 Plan 01 — D-08/D-09): cmd_create consults origin helper.
+///
+/// Guards against silent regression of the TG default-routing fix. Asserts:
+/// (a) the helper call site is present in cron.rs (telegram_default_origin or OriginDecision)
+/// (b) the multi-chat eprintln hint text is present in cron.rs
+#[test]
+fn invariant_22_4_2_2_01_cmd_create_consults_origin_helper() {
+    let src = include_str!("../src/cron.rs");
+    assert!(
+        src.contains("telegram_default_origin") || src.contains("OriginDecision"),
+        "INV-22.4.2.2-01: cmd_create must consult the TG default-origin helper"
+    );
+    assert!(
+        src.contains("multiple authorized chats"),
+        "INV-22.4.2.2-01: multi-chat eprintln hint must be present"
+    );
+}

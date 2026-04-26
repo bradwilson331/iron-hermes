@@ -33,9 +33,12 @@ pub enum CronCommands {
         /// Agent prompt to execute
         #[arg(long)]
         prompt: String,
-        /// Delivery target (local, origin, platform:chat_id, webhook:url)
-        #[arg(long, default_value = "local")]
-        deliver: String,
+        /// Delivery target for job output. When omitted: defaults to "origin" routing
+        /// to the configured Telegram chat if the gateway has exactly one authorized
+        /// chat in config.yaml's whitelist; otherwise defaults to "local". Pass
+        /// "local", "origin", "telegram:<chat_id>", or "webhook:<url>" to override.
+        #[arg(long)]
+        deliver: Option<String>,
         /// Skills to attach (repeatable)
         #[arg(long = "skill")]
         skills: Vec<String>,
@@ -138,11 +141,48 @@ fn cmd_list(all: bool) -> Result<()> {
 // cmd_create
 // ---------------------------------------------------------------------------
 
+/// Resolve the (deliver, origin) pair for `hermes cron create`.
+/// - Some(flag) → respect explicitly per D-04, helper not consulted.
+/// - None + OriginDecision::Single → ("origin", Some(JobOrigin{...}))
+/// - None + OriginDecision::Multi → ("local", None) + caller eprintln hint
+/// - None + OriginDecision::None → ("local", None) silently per D-05
+pub(crate) fn resolve_cron_deliver(
+    deliver_flag: Option<String>,
+    config: &ironhermes_core::config::Config,
+) -> (String, Option<ironhermes_cron::JobOrigin>) {
+    use ironhermes_core::config::OriginDecision;
+    match deliver_flag {
+        Some(d) => (d, None),
+        None => match config.telegram_default_origin() {
+            OriginDecision::Single { platform, chat_id } => (
+                "origin".to_string(),
+                Some(ironhermes_cron::JobOrigin {
+                    platform,
+                    chat_id,
+                    chat_name: None,
+                    thread_id: None,
+                }),
+            ),
+            OriginDecision::Multi { whitelist } => {
+                eprintln!(
+                    "hermes cron create: Telegram gateway has multiple authorized chats — defaulting to deliver=local."
+                );
+                eprintln!(
+                    "                      Pass --deliver telegram:<chat_id> to route to a specific chat (whitelist: {:?}).",
+                    whitelist
+                );
+                ("local".to_string(), None)
+            }
+            OriginDecision::None => ("local".to_string(), None),
+        },
+    }
+}
+
 fn cmd_create(
     name: String,
     schedule: String,
     prompt: String,
-    deliver: String,
+    deliver: Option<String>,
     skills: Vec<String>,
 ) -> Result<()> {
     // Security scan on prompt
@@ -161,15 +201,18 @@ fn cmd_create(
         ScheduleParsed::Cron { display, .. } => display.clone(),
     };
 
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    let (deliver_str, origin_opt) = resolve_cron_deliver(deliver, &config);
+
     let mut store = open_store()?;
     let job = store.add_job(
         name,
         prompt,
         parsed,
         schedule_display.clone(),
-        deliver,
+        deliver_str,
         skills,
-        None,
+        origin_opt,
     )?;
 
     println!("{}: {} ({})", "Job created".bold().cyan(), job.name.bold(), job.id.dimmed());
