@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironhermes_core::ToolSchema;
-use ironhermes_cron::{scan_cron_prompt, JobStore, JobUpdate, ScheduleParsed};
+use ironhermes_cron::{scan_cron_prompt, JobOrigin, JobStore, JobUpdate, ScheduleParsed};
 use ironhermes_cron::parse_schedule;
 use serde_json::{json, Value};
 
@@ -116,11 +116,36 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
         ScheduleParsed::Cron { display, .. } => display.clone(),
     };
 
-    let deliver = args
+    let deliver_arg: Option<String> = args
         .get("deliver")
         .and_then(|v| v.as_str())
-        .unwrap_or("local")
-        .to_string();
+        .map(|s| s.to_string());
+
+    let (deliver, origin_opt): (String, Option<JobOrigin>) = match deliver_arg {
+        Some(d) => (d, None),
+        None => {
+            let config = ironhermes_core::config::Config::load().unwrap_or_default();
+            match config.telegram_default_origin() {
+                ironhermes_core::config::OriginDecision::Single { platform, chat_id } => (
+                    "origin".to_string(),
+                    Some(JobOrigin {
+                        platform,
+                        chat_id,
+                        chat_name: None,
+                        thread_id: None,
+                    }),
+                ),
+                ironhermes_core::config::OriginDecision::Multi { whitelist } => {
+                    tracing::warn!(
+                        "cronjob tool create: Telegram gateway has multiple authorized chats — defaulting to deliver=local. Pass deliver=telegram:<chat_id> to route (whitelist: {:?})",
+                        whitelist
+                    );
+                    ("local".to_string(), None)
+                }
+                ironhermes_core::config::OriginDecision::None => ("local".to_string(), None),
+            }
+        }
+    };
 
     let skills: Vec<String> = args
         .get("skills")
@@ -132,7 +157,7 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
         })
         .unwrap_or_default();
 
-    match store.add_job(name, prompt, schedule, schedule_display, deliver, skills, None) {
+    match store.add_job(name, prompt, schedule, schedule_display, deliver, skills, origin_opt) {
         Ok(job) => json!({"status": "created", "job": job_to_json(&job)}),
         Err(e) => json!({"status": "error", "message": format!("Failed to create job: {}", e)}),
     }
