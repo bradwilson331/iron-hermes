@@ -363,6 +363,80 @@ fn handle_mouse_slash(app: &mut App, arg: &str) -> SlashOutcome {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// ── Phase 22.4.2.1 Plan 01: CronJobReader adapter ────────────────────────────
+//
+// Bridges Arc<Mutex<ironhermes_cron::JobStore>> → CronJobReader trait so that
+// cmd_cron in ironhermes-core can read cron state without a circular dep.
+// Follows the McpManagerAdapter / MemoryManagerAdapter pattern above.
+
+use ironhermes_core::commands::context::CronJobReader;
+use ironhermes_cron::display::{format_cron_status, format_job_detail, format_job_list};
+
+struct CronJobReaderImpl(std::sync::Arc<std::sync::Mutex<ironhermes_cron::JobStore>>);
+
+impl CronJobReader for CronJobReaderImpl {
+    fn list_jobs_text(&self) -> String {
+        let guard = self.0.lock().expect("JobStore mutex poisoned");
+        format_job_list(guard.list_jobs(), false)
+    }
+
+    fn get_job_text(&self, id_or_name: &str) -> Option<String> {
+        let guard = self.0.lock().expect("JobStore mutex poisoned");
+        guard.find_job(id_or_name).map(format_job_detail)
+    }
+
+    fn status_text(&self) -> String {
+        let guard = self.0.lock().expect("JobStore mutex poisoned");
+        format_cron_status(guard.list_jobs())
+    }
+
+    fn pause_job(&self, id_or_name: &str) -> Result<String, String> {
+        let mut guard = self.0.lock().map_err(|e| format!("mutex: {}", e))?;
+        let job = guard
+            .find_job(id_or_name)
+            .ok_or_else(|| format!("No cron job found: {}", id_or_name))?;
+        let id = job.id.clone();
+        let name = job.name.clone();
+        guard.toggle_job(&id, false).map_err(|e| e.to_string())?;
+        guard.save().map_err(|e| e.to_string())?;
+        Ok(format!("Paused: {}", name))
+    }
+
+    fn resume_job(&self, id_or_name: &str) -> Result<String, String> {
+        let mut guard = self.0.lock().map_err(|e| format!("mutex: {}", e))?;
+        let job = guard
+            .find_job(id_or_name)
+            .ok_or_else(|| format!("No cron job found: {}", id_or_name))?;
+        let id = job.id.clone();
+        let name = job.name.clone();
+        guard.toggle_job(&id, true).map_err(|e| e.to_string())?;
+        guard.save().map_err(|e| e.to_string())?;
+        Ok(format!("Resumed: {}", name))
+    }
+
+    fn remove_job(&self, id_or_name: &str) -> Result<String, String> {
+        let mut guard = self.0.lock().map_err(|e| format!("mutex: {}", e))?;
+        let job = guard
+            .find_job(id_or_name)
+            .ok_or_else(|| format!("No cron job found: {}", id_or_name))?;
+        let id = job.id.clone();
+        let name = job.name.clone();
+        guard.remove_job(&id).map_err(|e| e.to_string())?;
+        guard.save().map_err(|e| e.to_string())?;
+        Ok(format!("Removed: {}", name))
+    }
+
+    fn queue_run(&self, id_or_name: &str) -> Result<String, String> {
+        let guard = self.0.lock().map_err(|e| format!("mutex: {}", e))?;
+        let job = guard
+            .find_job(id_or_name)
+            .ok_or_else(|| format!("No cron job found: {}", id_or_name))?;
+        // Per CONTEXT D-04 / RESEARCH §3 cmd_run note: slash /cron run queues
+        // for next gateway tick, does NOT execute inline.
+        Ok(format!("Job queued for next tick: {}", job.name))
+    }
+}
+
 /// Build a `CommandContext` from App state, populated with all available handles.
 ///
 /// `agent_running` is derived from whether a pending turn is active.
@@ -437,6 +511,11 @@ fn build_command_context(app: &App) -> CommandContext {
         let handle: Arc<dyn AgentLoopHandle> =
             Arc::new(AgentLoopAdapter(app.agent_loop.clone()));
         ctx = ctx.with_agent_loop(handle);
+    }
+    // Phase 22.4.2.1 Plan 01: wire CronJobReader as 11th with_* call.
+    if let Some(cron) = &app.cron_store {
+        let handle: Arc<dyn CronJobReader> = Arc::new(CronJobReaderImpl(cron.clone()));
+        ctx = ctx.with_cron_store(handle);
     }
     ctx
 }

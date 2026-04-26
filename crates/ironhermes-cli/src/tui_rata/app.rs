@@ -188,6 +188,12 @@ pub struct App {
     /// Set by tui_rata post-router hook `handle_subsystem_mutator` on `/personality <name>`.
     /// Consumed (and cleared) by spawn_turn bootstrap (Plan 03 scope: set only; consume deferred).
     pub next_turn_personality_overlay: Option<String>,
+
+    // ── Phase 22.4.2.1 Plan 01: CronJobReader wiring ────────────────────────
+    /// JobStore handle for `/cron` slash UI. None by default (deferred runtime
+    /// init per D-02 — gateway is the primary cron host; tui_rata field exists
+    /// so the wiring path is ready when a future plan loads the store).
+    pub cron_store: Option<std::sync::Arc<std::sync::Mutex<ironhermes_cron::JobStore>>>,
 }
 
 impl App {
@@ -249,6 +255,8 @@ impl App {
             personality_overlay: deps.personality_overlay,
             // Phase 22.4.2 Plan 03: pending personality overlay for next spawn_turn
             next_turn_personality_overlay: None,
+            // Phase 22.4.2.1 Plan 01: cron store — None by default (gateway is primary cron host)
+            cron_store: None,
         }
     }
 

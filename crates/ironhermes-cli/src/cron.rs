@@ -5,6 +5,7 @@ use ironhermes_cron::{
     parse_schedule, run_tick_check, scan_cron_prompt, CronJob, JobStore, JobUpdate,
     ScheduleParsed,
 };
+use ironhermes_cron::display::{format_cron_status, format_job_detail, format_job_list};
 use std::fmt::Write as FmtWrite;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -127,72 +128,9 @@ pub async fn handle_cron_command(cmd: CronCommands) -> Result<()> {
 fn cmd_list(all: bool) -> Result<()> {
     let store = open_store()?;
     let jobs = store.list_jobs();
-
-    let visible: Vec<_> = jobs
-        .iter()
-        .filter(|j| {
-            if all {
-                true
-            } else {
-                matches!(j.state, ironhermes_cron::JobState::Scheduled | ironhermes_cron::JobState::Paused)
-            }
-        })
-        .collect();
-
-    println!("{}", "Scheduled Jobs".bold().cyan());
-    println!("{}", "─".repeat(70));
-
-    if visible.is_empty() {
-        println!("  {}", "No scheduled jobs.".dimmed());
-        println!();
-        println!(
-            "  {}",
-            "Use `ironhermes cron create --name <name> --schedule <expr> --prompt <text>` to create one.".dimmed()
-        );
-        return Ok(());
-    }
-
-    println!(
-        "  {:<20} {:<20} {:<12} {}",
-        "NAME".bold(),
-        "SCHEDULE".bold(),
-        "STATUS".bold(),
-        "NEXT RUN".bold()
-    );
-
-    for job in &visible {
-        let status_str = match job.state {
-            ironhermes_cron::JobState::Scheduled => {
-                if job.enabled {
-                    "scheduled".green().to_string()
-                } else {
-                    "disabled".yellow().to_string()
-                }
-            }
-            ironhermes_cron::JobState::Paused => "paused".yellow().to_string(),
-            ironhermes_cron::JobState::Completed => "completed".dimmed().to_string(),
-        };
-
-        let next_run_str = job
-            .next_run_at
-            .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-            .unwrap_or_else(|| "---".to_string());
-
-        println!(
-            "  {:<20} {:<20} {:<20} {}",
-            job.name.yellow().to_string(),
-            job.schedule_display,
-            status_str,
-            next_run_str.dimmed()
-        );
-    }
-
-    println!("{}", "─".repeat(70));
-    println!(
-        "  {}",
-        format!("{} job(s) total", visible.len()).dimmed()
-    );
-
+    // D-06: delegate to shared pure-text formatter; CLI parity with slash /cron list.
+    let plain = format_job_list(jobs, all);
+    print!("{}", plain);
     Ok(())
 }
 
@@ -264,77 +202,11 @@ fn cmd_get(job_id: String) -> Result<()> {
     Ok(())
 }
 
-/// Pure rendering helper — produces the full detail view as a String so it
-/// can be unit-tested without capturing stdout. Mirrors sibling command
-/// colored-output primitives (cmd_status, cmd_list) for visual consistency.
+/// Pure rendering helper — produces the full detail view as a String.
+/// D-06: delegates to the shared ironhermes_cron::display formatter so
+/// CLI and slash /cron get share the same render logic.
 fn render_job_details(job: &CronJob) -> String {
-    let mut out = String::new();
-
-    // Header (matches cmd_status pattern)
-    let _ = writeln!(out, "{}", "Cron Job".bold().cyan());
-    let _ = writeln!(out, "{}", "─".repeat(50));
-
-    // Core identity
-    let _ = writeln!(out, "  {:<14} {}", "Name:".dimmed(), job.name.yellow());
-    let _ = writeln!(out, "  {:<14} {}", "ID:".dimmed(), job.id.dimmed());
-
-    // Schedule
-    let _ = writeln!(out, "  {:<14} {}", "Schedule:".dimmed(), job.schedule_display);
-
-    // Prompt (may be multi-line; render as-is, no truncation)
-    let _ = writeln!(out, "  {:<14} {}", "Prompt:".dimmed(), job.prompt);
-
-    // Delivery target
-    let _ = writeln!(out, "  {:<14} {}", "Deliver:".dimmed(), job.deliver);
-
-    // Skills (comma-joined, or "none" dimmed)
-    let skills_str = if job.skills.is_empty() {
-        "none".dimmed().to_string()
-    } else {
-        job.skills.join(", ")
-    };
-    let _ = writeln!(out, "  {:<14} {}", "Skills:".dimmed(), skills_str);
-
-    // State (color-coded matching cmd_list)
-    let state_str = match job.state {
-        ironhermes_cron::JobState::Scheduled => {
-            if job.enabled {
-                "scheduled".green().to_string()
-            } else {
-                "disabled".yellow().to_string()
-            }
-        }
-        ironhermes_cron::JobState::Paused => "paused".yellow().to_string(),
-        ironhermes_cron::JobState::Completed => "completed".dimmed().to_string(),
-    };
-    let _ = writeln!(out, "  {:<14} {}", "State:".dimmed(), state_str);
-    let _ = writeln!(out, "  {:<14} {}", "Enabled:".dimmed(), job.enabled);
-
-    // Timestamps — use "%Y-%m-%d %H:%M UTC" format; "never" for None (matches cmd_list)
-    let created_str = job.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
-    let _ = writeln!(out, "  {:<14} {}", "Created:".dimmed(), created_str);
-
-    let next_run_str = job
-        .next_run_at
-        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_else(|| "never".dimmed().to_string());
-    let _ = writeln!(out, "  {:<14} {}", "Next run:".dimmed(), next_run_str);
-
-    let last_run_str = job
-        .last_run_at
-        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_else(|| "never".dimmed().to_string());
-    let _ = writeln!(out, "  {:<14} {}", "Last run:".dimmed(), last_run_str);
-
-    // Optional status/error tail
-    if let Some(ref status) = job.last_status {
-        let _ = writeln!(out, "  {:<14} {}", "Last status:".dimmed(), status);
-    }
-    if let Some(ref err) = job.last_error {
-        let _ = writeln!(out, "  {:<14} {}", "Last error:".dimmed(), err.red());
-    }
-
-    out
+    format_job_detail(job)
 }
 
 // ---------------------------------------------------------------------------
@@ -513,71 +385,9 @@ fn cmd_remove(job_id: String, force: bool) -> Result<()> {
 fn cmd_status() -> Result<()> {
     let store = open_store()?;
     let jobs = store.list_jobs();
-
-    let total = jobs.len();
-    let enabled = jobs
-        .iter()
-        .filter(|j| j.enabled && matches!(j.state, ironhermes_cron::JobState::Scheduled))
-        .count();
-    let paused = jobs
-        .iter()
-        .filter(|j| matches!(j.state, ironhermes_cron::JobState::Paused))
-        .count();
-
-    // Find next due job
-    let now = chrono::Utc::now();
-    let next_due = jobs
-        .iter()
-        .filter(|j| j.enabled && j.next_run_at.is_some())
-        .filter_map(|j| j.next_run_at.map(|t| (j, t)))
-        .filter(|(_, t)| *t >= now)
-        .min_by_key(|(_, t)| *t);
-
-    // Check tick lock status
-    let cron_dir = ironhermes_core::get_hermes_home().join("cron");
-    let lock_path = cron_dir.join(".tick.lock");
-    let lock_status = if lock_path.exists() { "held" } else { "free" };
-
-    // Output dir
-    let output_dir = ironhermes_core::get_hermes_home().join("cron").join("output");
-
-    println!("{}", "Cron Status".bold().cyan());
-    println!("{}", "─".repeat(50));
-    println!(
-        "  {:<14} {} total, {} enabled, {} paused",
-        "Jobs:".dimmed(),
-        total,
-        enabled,
-        paused
-    );
-
-    if let Some((job, next_t)) = next_due {
-        let diff = next_t - now;
-        let mins = diff.num_minutes();
-        let duration_str = if mins < 60 {
-            format!("{}m", mins)
-        } else if mins < 1440 {
-            format!("{}h {}m", mins / 60, mins % 60)
-        } else {
-            format!("{}d {}h", mins / 1440, (mins % 1440) / 60)
-        };
-        println!(
-            "  {:<14} {} in {}",
-            "Next due:".dimmed(),
-            job.name.yellow(),
-            duration_str
-        );
-    } else {
-        println!("  {:<14} {}", "Next due:".dimmed(), "none".dimmed());
-    }
-
-    println!("  {:<14} {}", "Tick lock:".dimmed(), lock_status);
-    println!(
-        "  {:<14} {}",
-        "Output dir:".dimmed(),
-        output_dir.display().to_string().dimmed()
-    );
-
+    // D-06: delegate to shared pure-text formatter; CLI parity with slash /cron status.
+    let plain = format_cron_status(jobs);
+    print!("{}", plain);
     Ok(())
 }
 
