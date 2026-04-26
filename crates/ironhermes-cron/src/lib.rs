@@ -10,6 +10,7 @@ use tracing::debug;
 // ---------------------------------------------------------------------------
 
 pub mod delivery;
+pub mod display;
 pub mod job;
 pub mod parser;
 pub mod scanner;

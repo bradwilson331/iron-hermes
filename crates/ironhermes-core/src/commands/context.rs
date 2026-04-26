@@ -83,6 +83,24 @@ pub trait ProcessRegistrySnapshotHandle: Send + Sync {
 }
 
 // =============================================================================
+// CronJobReader trait — Phase 22.4.2.1 Plan 01 (circular-dep-safe trait)
+// =============================================================================
+
+/// Trait for reading cron job state from the slash command handler.
+/// Defined in ironhermes-core to avoid circular dep with ironhermes-cron
+/// (ironhermes-cron depends on ironhermes-core; adding JobStore here would
+/// be circular). Same topology as McpReloader (core/defined, gateway/impl).
+pub trait CronJobReader: Send + Sync {
+    fn list_jobs_text(&self) -> String;
+    fn get_job_text(&self, id_or_name: &str) -> Option<String>;
+    fn status_text(&self) -> String;
+    fn pause_job(&self, id_or_name: &str) -> Result<String, String>;
+    fn resume_job(&self, id_or_name: &str) -> Result<String, String>;
+    fn remove_job(&self, id_or_name: &str) -> Result<String, String>;
+    fn queue_run(&self, id_or_name: &str) -> Result<String, String>;
+}
+
+// =============================================================================
 // Phase 22.4.2 Plan 00 — D-04 handle traits
 // =============================================================================
 //
@@ -221,6 +239,10 @@ pub struct CommandContext {
     pub history: Option<Arc<std::sync::RwLock<Vec<ChatMessage>>>>,
     /// D-04: AgentLoop handle for Tier D session control spawn paths.
     pub agent_loop: Option<Arc<dyn AgentLoopHandle>>,
+
+    /// Phase 22.4.2.1 Plan 01: CronJobReader handle for `/cron` slash UI.
+    /// Option<Arc<dyn>> to avoid circular dep with ironhermes-cron.
+    pub cron_store: Option<Arc<dyn CronJobReader>>,
 }
 
 impl CommandContext {
@@ -250,6 +272,8 @@ impl CommandContext {
             personality_overlay: None,
             history: None,
             agent_loop: None,
+            // Phase 22.4.2.1 Plan 01: CronJobReader for /cron slash UI.
+            cron_store: None,
         }
     }
 
@@ -354,6 +378,12 @@ impl CommandContext {
     /// Builder: attach AgentLoop handle for Tier D session control (D-04).
     pub fn with_agent_loop(mut self, agent_loop: Arc<dyn AgentLoopHandle>) -> Self {
         self.agent_loop = Some(agent_loop);
+        self
+    }
+
+    /// Builder: attach a CronJobReader handle for `/cron` slash UI (Phase 22.4.2.1 Plan 01).
+    pub fn with_cron_store(mut self, store: Arc<dyn CronJobReader>) -> Self {
+        self.cron_store = Some(store);
         self
     }
 }

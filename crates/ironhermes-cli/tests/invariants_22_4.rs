@@ -1489,3 +1489,10 @@ fn invariant_22_4_59_queue_wired() {
         "INV-22.4-59 (c): dispatch() must route `\"queue\"` to `cmd_queue(` in core/handlers.rs."
     );
 }
+
+#[test]
+fn invariant_22_4_2_1_01_no_cron_stub() {
+    let src = include_str!("../../../crates/ironhermes-core/src/commands/handlers.rs");
+    assert!(!src.contains("No cron management UI"), "INV-22.4.2.1-01: stub must be absent");
+    assert!(src.contains("cmd_cron"), "INV-22.4.2.1-01: cmd_cron must be present");
+}
