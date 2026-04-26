@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: executing
+status: verifying
 stopped_at: Phase 22.4.2.1 context gathered
-last_updated: "2026-04-26T12:15:40.151Z"
+last_updated: "2026-04-26T12:24:14.775Z"
 last_activity: 2026-04-26
 progress:
   total_phases: 18
-  completed_phases: 16
+  completed_phases: 17
   total_plans: 100
-  completed_plans: 99
-  percent: 99
+  completed_plans: 100
+  percent: 100
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 22.4.2.1 (cron-cmds-and-telegram-delivery-broken) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-26
 
-Progress: [██████████] 99%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -132,6 +132,7 @@ Progress: [██████████] 99%
 | Phase 22.3 P12 | 11 | 1 tasks | 1 files |
 | Phase 22.4.2.1 P01 | 597 | 3 tasks | 9 files |
 | Phase 22.4.2.1 P02 | 5min | 2 tasks | 5 files |
+| Phase 22.4.2.1 P03 | 5 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -300,6 +301,8 @@ Recent decisions affecting current work:
 - [Phase ?]: CronJobReader trait defined in ironhermes-core to avoid circular dep with ironhermes-cron
 - [Phase ?]: CLI renderers in cron.rs delegate to shared ironhermes-cron::display formatters (D-06 shared renderer)
 - [Phase ?]: App.cron_store defaults to None per D-02 — gateway is primary cron host; runtime load deferred
+- [Phase ?]: Option 2 Arc<TokioMutex<JoinSet>> for worker_join_set — dispatch async move makes &mut borrow infeasible
+- [Phase ?]: Path B (synthetic JoinSet drain test) for gateway_drains_workers_within_timeout — full GatewayRunner requires live TG token per RESEARCH §6
 
 ### Roadmap Evolution
 
@@ -334,7 +337,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-26T12:15:36.806Z
+Last session: 2026-04-26T12:24:06.437Z
 Stopped at: Phase 22.4.2.1 context gathered
 Resume file: None
 
