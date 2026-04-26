@@ -25,6 +25,10 @@ pub fn dispatch(
         "agents" => cmd_agents(args, ctx),
         "status" => cmd_status(ctx),
         "title" => cmd_title(args, ctx),
+        "sessions" => cmd_sessions(args, ctx),
+        "resume" => cmd_resume(args, ctx),
+        "save" => cmd_save(args, ctx),
+        "history" => cmd_history(args, ctx),
         "compress" => cmd_compress(args, ctx),
         "start" => cmd_start(ctx),
 
@@ -365,13 +369,142 @@ fn cmd_status(ctx: &CommandContext) -> CommandResult {
     ))
 }
 
-fn cmd_title(args: &[&str], _ctx: &CommandContext) -> CommandResult {
+fn cmd_title(args: &[&str], ctx: &CommandContext) -> CommandResult {
     if args.is_empty() {
         return CommandResult::Error(
             "Usage: /title [name] — please provide a session title.".to_string(),
         );
     }
-    CommandResult::Output(format!("Session title set to: {}", args.join(" ")))
+    let title = args.join(" ");
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => {
+            // No StateStore wired — return informational confirmation only.
+            return CommandResult::Output(format!("Session title set to: {title}"));
+        }
+    };
+    match store.update_title(&ctx.session_id, &title) {
+        Ok(()) => CommandResult::Output(format!("Session title set to: {title}")),
+        Err(e) => CommandResult::Error(format!("Failed to update title: {e}")),
+    }
+}
+
+/// `/sessions` — list recent sessions from StateStore.
+///
+/// Guard pattern (D-05): when `ctx.state_store` is None, returns informational
+/// text rather than panicking (backwards-compat with gateway / classic-tui).
+fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output(
+            "Session storage not configured.".to_string()
+        ),
+    };
+    let limit: usize = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20)
+        .max(1);
+    CommandResult::Output(store.list_sessions_text(limit))
+}
+
+/// `/resume [name|id]` — restore a previous session by name or id.
+///
+/// With no args, shows the same listing as `/sessions` as a reminder.
+/// Guard pattern (D-05): when `ctx.state_store` is None, returns informational text.
+fn cmd_resume(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output(
+            "Session storage not configured.".to_string()
+        ),
+    };
+    let name_or_id = match args.first() {
+        Some(s) => *s,
+        None => {
+            // No arg — show session list as a reminder.
+            return CommandResult::Output(store.list_sessions_text(20));
+        }
+    };
+    match store.get_session_id(name_or_id) {
+        Some(session_id) => CommandResult::Output(
+            format!("Resuming session: {session_id}")
+        ),
+        None => CommandResult::Error(
+            format!("Session not found: {name_or_id}")
+        ),
+    }
+}
+
+/// `/save [session_id]` — export session as text.
+///
+/// With no args, exports the current session.
+/// Guard pattern (D-05): when `ctx.state_store` is None, returns informational text.
+fn cmd_save(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output(
+            "Session storage not configured.".to_string()
+        ),
+    };
+    let session_id = args.first().copied().unwrap_or(&ctx.session_id);
+    CommandResult::Output(store.export_session_text(session_id))
+}
+
+/// `/history [session_id]` — show conversation history.
+///
+/// With no args, shows current session history from the snapshot in `ctx.history`.
+/// With an explicit session_id, queries StateStore.
+/// Guard pattern (D-05): when both are None, returns informational text.
+fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    // If an explicit session_id is provided, use StateStore.
+    if let Some(session_id) = args.first() {
+        let store = match &ctx.state_store {
+            Some(s) => s.clone(),
+            None => return CommandResult::Output(
+                "Session storage not configured.".to_string()
+            ),
+        };
+        return CommandResult::Output(store.history_text(session_id));
+    }
+
+    // No arg — use the history snapshot from CommandContext.
+    if let Some(history_lock) = &ctx.history {
+        let msgs = history_lock.read().unwrap_or_else(|e| e.into_inner());
+        if msgs.is_empty() {
+            return CommandResult::Output("No messages in history.".to_string());
+        }
+        let lines: Vec<String> = msgs.iter()
+            .map(|m| {
+                let role = match m.role {
+                    crate::types::Role::User => "You",
+                    crate::types::Role::Assistant => "Hermes",
+                    crate::types::Role::Tool => "Tool",
+                    crate::types::Role::System => "System",
+                };
+                let content_str: String = m.content.as_ref()
+                    .and_then(|c| c.as_text())
+                    .map(|s: &str| s.to_string())
+                    .unwrap_or_default();
+                let preview = if content_str.len() > 120 {
+                    format!("{}…", &content_str[..120])
+                } else {
+                    content_str
+                };
+                format!("  [{role}] {preview}")
+            })
+            .collect();
+        return CommandResult::Output(
+            format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
+        );
+    }
+
+    // Fall back to StateStore current session.
+    if let Some(store) = &ctx.state_store {
+        return CommandResult::Output(store.history_text(&ctx.session_id));
+    }
+
+    CommandResult::Output("Session storage not configured.".to_string())
 }
 
 fn cmd_compress(_args: &[&str], _ctx: &CommandContext) -> CommandResult {
@@ -664,11 +797,8 @@ fn todo_stub(name: &str) -> CommandResult {
         "sethome" | "set-home" => "No home channel concept",
         "retry" => "No last-message replay",
         "undo" => "No message history manipulation",
-        "resume" => "No session listing UI",
         "approve" => "No approval queue",
         "deny" => "No approval queue",
-        "history" => "No history display",
-        "save" => "No conversation export",
         "prompt" => "No custom system prompt injection",
         "personality" => "Requires Phase 15",
         "tools" => "No tool enable/disable management",
@@ -982,11 +1112,11 @@ mod tests {
             "sethome",
             "retry",
             "undo",
-            "resume",
+            // "resume" removed — now has real handler (Phase 22.4.2 Plan 01)
             "approve",
             "deny",
-            "history",
-            "save",
+            // "history" removed — now has real handler (Phase 22.4.2 Plan 01)
+            // "save" removed — now has real handler (Phase 22.4.2 Plan 01)
             "prompt",
             "personality",
             "tools",
