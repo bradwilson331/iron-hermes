@@ -65,6 +65,7 @@ A working conversational AI agent with personality (context files) that operates
 - v2.0 Phase 21.5 complete 2026-04-21: Memory provider plugin (factory config loading, SQLite FTS5 memory_recall, Grafeo entity extraction, DuckDB ILIKE bridge, agent loop wiring for memory provider tools)
 - v2.0 Phase 21.6 complete 2026-04-22: Deployment setup files (.env.example, cli-config.yaml.example, Dockerfile with multi-stage Rust build, docker/entrypoint.sh, install.sh curl-pipe installer, setup-ironhermes.sh dev setup, ensure_home_dirs() first-run scaffolding)
 - v2.0 Phase 22.4.2.2 complete 2026-04-27: Cron create defaults to TG origin when gateway active — both `hermes cron create` (CLI) and the LLM `cronjob` tool auto-route to `deliver=origin` for the configured single-chat whitelist; multi-chat falls back to `local` with operator hint (stderr from CLI, `tracing::warn` from LLM tool); explicit `--deliver` flag/JSON arg preserved as full bypass; OriginDecision enum lives in `ironhermes-core` with plain-String fields to avoid a circular crate dep; INV ledger advanced 62 → 64
+- v2.0 Phase 22.4.2.3 complete 2026-04-27: Fix pre-existing INV-22.3-02 banner-bleed regression test on `develop` — relaxed `assert_eq!(count, 1)` to `assert!(count >= 1)` and tightened ordering via `match_indices` so every `print_banner();` call site is asserted strictly before `TuiHandle::new_with_extensions`; accepts the three legitimate Plan 22.4-11 ratatui-arm + run_chat sites without losing regression intent; structural-test-only edit, `main.rs` byte-identical; 6/6 invariants_22_3 tests green
 - 400+ workspace tests passing
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
 - Tech stack: Rust 2024 edition, tokio async, SQLite (rusqlite), OpenAI-compatible LLM API
@@ -130,4 +131,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-27 after Phase 22.4.2.2 (cron create defaults to TG origin when gateway active) complete*
+*Last updated: 2026-04-27 after Phase 22.4.2.3 (fix pre-existing INV-22.3-02 banner-bleed regression test) complete*
