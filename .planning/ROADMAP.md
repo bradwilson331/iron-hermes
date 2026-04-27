@@ -105,10 +105,10 @@ Plans:
 **Goal:** Update the static-grep regression test `invariant_22_3_02_banner_called_exactly_once_before_tui_init` in `crates/ironhermes-cli/tests/invariants_22_3.rs` so it accepts the legitimate Phase 22.4 ratatui-dispatch additions (Plan 22.4-11, commit `f1aeb73`) without losing regression intent. Replaces the stale `count == 1` equality with `count >= 1`, strengthens the ordering check from "first call site before TUI init" to "every call site strictly before `TuiHandle::new_with_extensions`", anchors on the qualified `TuiHandle::new_with_extensions` string, renames the test to `invariant_22_3_02_banner_called_at_least_once_strictly_before_tui_init`, and rewrites the doc-comment + assertion messages to cite Phase 22.4 CONTEXT D-03 as the rationale for accepting more than one site. Test-only change — `crates/ironhermes-cli/src/main.rs` is untouched. CONTEXT decisions D-01..D-06 in `22.4.2.3-CONTEXT.md` serve as the requirements set (no REQ-IDs).
 **Requirements:** (none — D-01..D-06 from 22.4.2.3-CONTEXT.md serve as the requirements set)
 **Depends on:** Phase 22.4.2
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 22.4.2.3-01-PLAN.md — Rewrite + rename `invariant_22_3_02_banner_called_exactly_once_before_tui_init` to relaxed-count (`>= 1`) + every-position-before-`TuiHandle::new_with_extensions` form per CONTEXT D-01..D-06; test-only edit, main.rs untouched.
+- [x] 22.4.2.3-01-PLAN.md — Rewrite + rename `invariant_22_3_02_banner_called_exactly_once_before_tui_init` to relaxed-count (`>= 1`) + every-position-before-`TuiHandle::new_with_extensions` form per CONTEXT D-01..D-06; test-only edit, main.rs untouched.
 
 ### Phase 22.4.2.2: Cron create defaults to TG origin when gateway active (INSERTED)
 
