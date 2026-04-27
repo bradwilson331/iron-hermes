@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: milestone_complete
+status: executing
 stopped_at: Phase 22.4.2.1 context gathered
-last_updated: "2026-04-26T22:24:24.520Z"
-last_activity: 2026-04-26 -- Phase 22.4.2.2 execution started
+last_updated: "2026-04-27T04:34:24.428Z"
+last_activity: 2026-04-27 -- Phase 22.4.2.3 planning complete
 progress:
-  total_phases: 19
+  total_phases: 20
   completed_phases: 18
-  total_plans: 102
-  completed_plans: 100
-  percent: 95
+  total_plans: 103
+  completed_plans: 102
+  percent: 99
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22.4.2.2 — cron-create-defaults-to-tg-origin-when-gateway-active
+**Current focus:** Phase 22.4.2.3 — fix the pre-existing INV-22.3-02 banner-bleed before milestone
 
 ## Current Position
 
-Phase: 22.4.2.2
+Phase: 22.4.2.3
 Plan: Not started
-Status: Milestone complete
-Last activity: 2026-04-27
+Status: Ready to execute
+Last activity: 2026-04-27 -- Phase 22.4.2.3 planning complete
 
 Progress: [██████████] 100%
 
@@ -322,6 +322,7 @@ Recent decisions affecting current work:
 - Phase 22.4.2 inserted after Phase 22.4: wire up slash commands — replace `Phase 22.4.x stub:` placeholders in `tui_rata` invoke_handler arms with real handlers delegating to owning subsystems (MemoryManager [Phase 20], SubagentRegistry, active_skills, session storage, McpManager); narrows generic `not yet wired` fallback (INSERTED)
 - Phase 22.4.2.1 inserted after Phase 22.4.2: Cron cmds and telegram delivery broken (URGENT)
 - Phase 22.4.2.2 inserted after Phase 22.4.2: Cron create defaults to TG origin when gateway active (whitelist len==1) (URGENT)
+- Phase 22.4.2.3 inserted after Phase 22.4.2: fix the pre-existing INV-22.3-02 banner-bleed before milestone (URGENT)
 
 ### Pending Todos
 
