@@ -24,6 +24,8 @@ This phase covers **CFG-01, CFG-02, CFG-03**. CFG-04 (profile isolation) is Phas
 - **D-01:** The setup wizard renders via **inline rustyline prompts** (sequential question-by-question). Reuses the rustyline 15 infrastructure landed in Phase 22.3 (history activation, `set_history_ignore_dups`, `set_max_history_size(1000)`). No ratatui form rendering for v2.1. Rationale: lightweight, scriptable (can be piped/automated), zero new deps, and works in pre-TTY contexts where the wizard auto-launches before any chat session.
 - **D-02:** The wizard uses **section-based subcommand routing**. `hermes setup` (no arg) runs the minimum-viable flow (provider + API key + model). `hermes setup model|memory|gateway|tools` configures one section. Mirrors hermes-agent's `hermes setup [section]` design exactly. Phase 25 (Toolset Management) and Phase 26 (Provider Polish) MAY plug additional questions into their respective sections later — Phase 23 establishes the dispatch surface.
 - **D-03:** Sections accepted in v2.1: **`model`**, **`memory`**, **`gateway`**, **`tools`** (4 sections). `agent` and `skills` sections are explicitly deferred to Phases 26 and 28 respectively, since those phases own the corresponding config schema additions. `hermes setup agent` should error cleanly with "section deferred to Phase 26" or be omitted from the help text entirely.
+  - **`memory` section is the Learning Loop opt-in surface.** This section's purpose is NOT just "pick a memory backend" — it is the user-facing entry point for enabling the self-improvement loop that makes IronHermes grow with the user. The wizard frames it accordingly (see D-14). Without this framing, IronHermes reproduces the canonical hermes-agent gotcha where self-learning is silently off and first-time users miss the entire differentiator.
+  - The `memory` section prompts cover: (1) Learning Loop opt-in (umbrella question — see D-14), (2) memory backend choice (file/sqlite/grafeo/duckdb), (3) HERMES_HOME path, (4) reservation slots for Phase 32 keys (`learning.periodic_nudge_interval_seconds`) and Phase 33 keys (`learning.skill_generation_enabled`, `learning.reflection_depth`, `learning.max_skills`, `learning.skill_eval`).
 - **D-04:** Each section's question flow shows **defaults inline** (e.g., `Model [openrouter/qwen-2.5-coder-32b]:`) and **validates per-answer** (provider exists in registry; API key non-empty; model resolves). On invalid answer: re-prompt with the validation error inline. No silent acceptance.
 
 ### First-Run Auto-Launch
@@ -50,6 +52,47 @@ This phase covers **CFG-01, CFG-02, CFG-03**. CFG-04 (profile isolation) is Phas
 ### Cross-Crate Type Pattern (carry-forward from Phase 22.4.2.2)
 
 - **D-12:** Any new types in `ironhermes-core::config` that cross crate boundaries use **plain Strings, not embedded downstream enums**. Example: a setup-wizard `WizardSection` enum, if introduced, lives in `ironhermes-core`; consumers (CLI subcommand dispatch, gateway setup hooks) construct their own enums at the call site. Avoids the circular-crate-dep problem documented in PROJECT.md Key Decisions (Phase 22.4.2.2 D-decision).
+
+### Learning Loop Opt-In (closes the canonical hermes-agent gotcha)
+
+The canonical hermes-agent has a well-known first-time-user trap: self-learning (persistent memory + autonomous skill generation) is **disabled by default** in `~/.hermes/config.toml`. Users who don't explicitly toggle `[memory] enabled = true` and `skill_generation = true` get a single-session agent and the "grows with you" promise never materializes. This trips up new users repeatedly. IronHermes v2.1 must NOT reproduce this gotcha.
+
+- **D-14: Learning Loop is opt-out, not opt-in. Defaults are ON.** The wizard's `memory` section prompt is framed as: `Enable IronHermes' Learning Loop (persistent memory + autonomous skill creation)? [Y/n]` with default **YES**. Selecting "Y" (or just hitting Enter) writes the following keys in one batch:
+  ```yaml
+  memory:
+    enabled: true              # MEM-* layer active
+    user_profile_enabled: true # USER.md layer active
+    provider: file             # safe default; user can swap later via hermes config set memory.provider
+  learning:
+    periodic_nudge_interval_seconds: 300   # 5 min default (LEARN-01, Phase 32 reservation)
+    skill_generation_enabled: true         # autonomous skill creation (LEARN-03/04, Phase 33 reservation)
+    reflection_depth: standard             # light | standard | deep (Phase 33 reservation)
+    skill_eval: true                       # validate before adding to library (Phase 33 reservation)
+    max_skills: 500                        # cap before pruning low-use skills (Phase 33 reservation)
+  ```
+  Selecting "n" still writes the keys explicitly with `false` / sentinel values — never absent. Reason: an absent key is ambiguous (default? legacy?); an explicit `false` is auditable and surfaces correctly in `hermes config show`. Plus future Phase 32/33 work can prompt for re-opt-in cleanly: `IronHermes' Learning Loop is currently disabled. Enable now? [Y/n]`.
+
+- **D-15: Phase 23 owns the Learning Loop *config keys*; Phase 32/33 own the *implementation* behind them.** Phase 23 reserves the `learning.*` namespace and writes the defaults — the keys exist and `hermes config set/get/show` works on them from day one. Phase 32 (LEARN-01/02) wires `learning.periodic_nudge_interval_seconds` into the actual nudge fire mechanism. Phase 33 (LEARN-03..05) wires `skill_generation_enabled`, `reflection_depth`, `skill_eval`, `max_skills` into the autonomous skill creator + skill_manage tool. Until Phase 32/33 land, the keys are inert (read but not consumed) — but the *first-run UX is already correct*. Avoids the trap of "wizard prompts for it, but it does nothing yet" or worse "wizard skips it, then Phase 33 needs a re-prompt event".
+
+- **D-16: Wizard messaging at first-run highlights the differentiator.** The umbrella prompt is preceded by a one-paragraph framing explanation (rendered before the question itself, not as an inline `?` help):
+  ```
+  IronHermes can curate its own memory and write its own skills as you use it —
+  this is the "Learning Loop" that makes the agent grow with you instead of
+  starting fresh every session. We strongly recommend enabling it now (you can
+  always disable later with `hermes config set memory.enabled false`).
+
+  Enable IronHermes' Learning Loop? [Y/n]
+  ```
+  The framing is not optional flavor text — it's load-bearing UX that closes the canonical gotcha. Plan must lock the verbatim wording (or near-equivalent) so a future refactor doesn't silently strip it.
+
+- **D-17: `hermes config show` highlights Learning Loop status at the top.** When `memory.enabled = true` AND `learning.skill_generation_enabled = true`, `config show` prepends a single-line marker: `🧠 Learning Loop: enabled (memory + skill generation)`. When either is `false`, prepend a warning banner: `⚠ Learning Loop: disabled — IronHermes is operating as a single-session agent. Run \`hermes setup memory\` to enable.` This makes the Learning Loop's state inspectable at a glance without parsing nested YAML.
+
+- **D-18: Cache-breaker tagging extends to Learning Loop keys.** The following `learning.*` keys are tagged `cache_breaking: true` per D-13's mechanism:
+  - `memory.enabled` (toggling adds/removes the memory layer from the 10-layer prompt)
+  - `memory.provider` (already in D-13)
+  - `learning.skill_generation_enabled` (toggling changes the skill index and the system-prompt skills slot)
+
+  The `learning.periodic_nudge_interval_seconds`, `reflection_depth`, `skill_eval`, and `max_skills` keys are NOT cache-breaking — they affect runtime behavior only.
 
 ### Cache-Breaker Field Inventory
 
@@ -137,7 +180,8 @@ This phase covers **CFG-01, CFG-02, CFG-03**. CFG-04 (profile isolation) is Phas
 <specifics>
 ## Specific Ideas
 
-- **Wizard `hermes setup` (no section) flow:** prompts in order — (1) Provider [OpenRouter]: , (2) API key: , (3) Default model [openrouter/qwen-2.5-coder-32b]: , (4) "Configure additional sections now? [y/N]" — if yes, dispatches to `hermes setup memory` etc. in turn; if no, exits to next user command (chat or whatever was originally requested).
+- **Wizard `hermes setup` (no section) flow:** prompts in order — (1) Provider [OpenRouter]: , (2) API key: , (3) Default model [openrouter/qwen-2.5-coder-32b]: , (4) **Learning Loop opt-in framing paragraph + `Enable IronHermes' Learning Loop? [Y/n]`** (D-14/D-16 — defaults to YES, writes the full `memory.*` + `learning.*` key block in one batch), (5) "Configure additional sections now? [y/N]" — if yes, dispatches to `hermes setup memory` etc. in turn; if no, exits to next user command (chat or whatever was originally requested). The Learning Loop prompt is the ONLY prompt in the minimum-viable flow that has a default-YES (everything else asks for explicit input).
+- **`hermes setup memory` deep-dive flow:** (1) Learning Loop opt-in (umbrella, D-14), (2) memory backend [file]: file/sqlite/grafeo/duckdb, (3) HERMES_HOME path [~/.ironhermes]: , (4) periodic nudge interval [300s]: (Phase 32 reservation — wizard accepts but stores inert until Phase 32 lands), (5) skill_generation [true]: (Phase 33 reservation — same), (6) reflection_depth [standard]: light/standard/deep (Phase 33 reservation), (7) max_skills [500]: (Phase 33 reservation), (8) skill_eval [true]: (Phase 33 reservation). When user runs `hermes setup memory` (no first-run umbrella context) the Learning Loop opt-in still appears — but in re-configuration framing: `Learning Loop is currently {enabled|disabled}. {Keep|Enable}? [Y/n]`.
 - **`hermes config show` redaction example:**
   ```yaml
   model:

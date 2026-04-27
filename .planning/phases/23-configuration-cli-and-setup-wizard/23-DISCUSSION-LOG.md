@@ -127,3 +127,24 @@
 - `hermes config show --json` — v2.2 polish
 - `hermes doctor --fix` integration — v2.2 Production Polish reservation; Phase 23's fix-mode is partial overlap but scoped narrower
 - Auto-trigger `config migrate` on skill install — explicitly rejected for v2.1 (D-11); reconsider in Phase 28
+
+---
+
+## Round 3 — Post-discussion amendment (Learning Loop opt-in)
+
+**Trigger:** User raised the canonical hermes-agent gotcha — self-learning is OFF by default in `~/.hermes/config.toml`, requiring users to explicitly enable `[memory] enabled = true` and `skill_generation = true` to get the differentiator. IronHermes v2.1's wizard as originally specified would reproduce this gotcha (memory section listed `memory_enabled` as a generic toggle, not as the Learning Loop opt-in surface).
+
+**Resolution:** Added decisions D-14 through D-18 to CONTEXT.md without re-running interactive AskUserQuestion (decision was unambiguous — "close the gotcha", not pick between alternatives):
+
+- D-14: Learning Loop is opt-OUT, not opt-in. Defaults are ON. Wizard prompts `Enable IronHermes' Learning Loop? [Y/n]` with default YES, writes `memory.enabled`, `memory.user_profile_enabled`, plus the full `learning.*` key block (`periodic_nudge_interval_seconds=300`, `skill_generation_enabled=true`, `reflection_depth=standard`, `skill_eval=true`, `max_skills=500`) in one batch. Selecting "n" still writes the keys explicitly with `false` / sentinel values — never absent — so `hermes config show` is auditable.
+- D-15: Phase 23 owns the Learning Loop **config keys** (writes defaults, supports `set/get/show`); Phase 32 owns the periodic-nudge **implementation**; Phase 33 owns the autonomous-skill-creation **implementation**. Keys are inert until consumed but the first-run UX is correct from day one.
+- D-16: Wizard messaging includes a load-bearing one-paragraph framing explanation immediately before the umbrella opt-in question. Plan must lock the verbatim wording so future refactors don't silently strip it.
+- D-17: `hermes config show` prepends a Learning Loop status banner (✓ enabled / ⚠ disabled). Makes the state inspectable at a glance without parsing nested YAML.
+- D-18: Cache-breaker tagging extends to `memory.enabled`, `memory.provider`, `learning.skill_generation_enabled`. Other `learning.*` keys (interval, depth, eval, max) are runtime-only and not cache-breaking.
+
+**Affected sections in CONTEXT.md:**
+- D-03 expanded — `memory` section is the Learning Loop opt-in surface, not just a backend picker
+- New "Learning Loop Opt-In" subsection added (D-14..D-18)
+- Specific Ideas — wizard `hermes setup` flow updated with the umbrella prompt as step 4; `hermes setup memory` deep-dive flow added with all Learning Loop reservation keys
+
+**Why no AskUserQuestion this round:** The gotcha and its fix are not a multi-option choice — they're a single corrective decision the user articulated directly. AskUserQuestion would be theater.
