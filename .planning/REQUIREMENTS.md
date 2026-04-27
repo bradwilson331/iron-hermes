@@ -124,12 +124,8 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 
 - [x] **CLI-01**: CLI registers execute_code, hooks, and guardrails (feature parity with gateway)
 - [x] **CLI-02**: CLI extension hooks: _get_extra_tui_widgets(), _register_extra_tui_keybindings(), _build_tui_layout_children(), process_command(), _build_tui_style_dict()
-- [ ] **CLI-03**: ACP adapter: JSON-RPC stdio server wrapping AgentLoop for VS Code / Zed / JetBrains integration
-- [ ] **CLI-04**: ACP SessionManager with create/get/remove/fork/list/cleanup operations
-- [ ] **CLI-05**: ACP event bridge converts AgentLoop callbacks (tool_progress, thinking, reasoning, step, stream_delta) into ACP session_update events via run_coroutine_threadsafe
-- [ ] **CLI-06**: ACP permission bridge maps dangerous command approval to ACP permission requests (allow_once/allow_always/reject)
-- [ ] **CLI-07**: ACP tool rendering maps Hermes tools to editor-facing content (file diffs, shell commands, text previews)
-- [ ] **CLI-08**: ACP sessions carry editor cwd bound to session ID for file/terminal tool context
+
+> **CLI-03..CLI-08 (ACP adapter) deferred to v2.1** as of 2026-04-27 milestone audit (`.planning/v2.0-MILESTONE-AUDIT.md`). Phase 22.2 was never broken down into plans; nothing else in v2.0 depends on ACP. See "Future Requirements → Deferred from v2.0" below for the full requirement text.
 
 ### Configuration
 
@@ -141,6 +137,17 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 ## Future Requirements
 
 Deferred to v2.1+. Tracked but not in current roadmap.
+
+### Deferred from v2.0
+
+ACP (Agent Client Protocol) adapter — moved out of v2.0 by milestone audit on 2026-04-27 (`.planning/v2.0-MILESTONE-AUDIT.md`). Phase 22.2 was never broken into plans and nothing else in v2.0 depends on ACP. Reassign to a new phase in v2.1 when the milestone is opened.
+
+- **CLI-03**: ACP adapter: JSON-RPC stdio server wrapping AgentLoop for VS Code / Zed / JetBrains integration
+- **CLI-04**: ACP SessionManager with create/get/remove/fork/list/cleanup operations
+- **CLI-05**: ACP event bridge converts AgentLoop callbacks (tool_progress, thinking, reasoning, step, stream_delta) into ACP session_update events via run_coroutine_threadsafe
+- **CLI-06**: ACP permission bridge maps dangerous command approval to ACP permission requests (allow_once/allow_always/reject)
+- **CLI-07**: ACP tool rendering maps Hermes tools to editor-facing content (file diffs, shell commands, text previews)
+- **CLI-08**: ACP sessions carry editor cwd bound to session ID for file/terminal tool context
 
 ### Additional Platforms
 
@@ -273,22 +280,23 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GW-11 | Phase 21 | Pending |
 | CLI-01 | Phase 22 | Complete |
 | CLI-02 | Phase 22.1 | Complete |
-| CLI-03 | Phase 22.2 | Pending |
-| CLI-04 | Phase 22.2 | Pending |
-| CLI-05 | Phase 22.2 | Pending |
-| CLI-06 | Phase 22.2 | Pending |
-| CLI-07 | Phase 22.2 | Pending |
-| CLI-08 | Phase 22.2 | Pending |
+| CLI-03 | Deferred to v2.1 | Deferred (was Phase 22.2) |
+| CLI-04 | Deferred to v2.1 | Deferred (was Phase 22.2) |
+| CLI-05 | Deferred to v2.1 | Deferred (was Phase 22.2) |
+| CLI-06 | Deferred to v2.1 | Deferred (was Phase 22.2) |
+| CLI-07 | Deferred to v2.1 | Deferred (was Phase 22.2) |
+| CLI-08 | Deferred to v2.1 | Deferred (was Phase 22.2) |
 | CFG-01 | Phase 23 | Pending |
 | CFG-02 | Phase 23 | Pending |
 | CFG-03 | Phase 23 | Pending |
 | CFG-04 | Phase 23 | Pending |
 
 **Coverage:**
-- v2.0 requirements: 99 total
-- Mapped to phases: 99
+- v2.0 requirements (active): 93 total (CLI-03..CLI-08 deferred to v2.1 on 2026-04-27)
+- Mapped to v2.0 phases: 93
+- Deferred to v2.1: 6 (CLI-03..CLI-08)
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-17 after Phase 22 planning (D-01 three-way split: 22/22.1/22.2)*
+*Last updated: 2026-04-27 — CLI-03..CLI-08 (ACP adapter / Phase 22.2) deferred to v2.1 per milestone audit*

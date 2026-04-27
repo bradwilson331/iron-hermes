@@ -204,15 +204,20 @@ Plans:
 
 **Phase directory:** `.planning/phases/22.1-tui-extension-hooks/`
 
-### Phase 22.2: ACP Adapter
+### Phase 22.2: ACP Adapter — DEFERRED to v2.1
 
-**Goal:** [To be planned]
-**Requirements:** CLI-03, CLI-04, CLI-05, CLI-06, CLI-07, CLI-08
+**Status:** Deferred (2026-04-27, per `.planning/v2.0-MILESTONE-AUDIT.md`)
+**Goal:** [To be planned in v2.1]
+**Requirements:** CLI-03, CLI-04, CLI-05, CLI-06, CLI-07, CLI-08 (now in REQUIREMENTS.md "Future Requirements → Deferred from v2.0")
 **Depends on:** Phase 22
-**Plans:** 0 plans (not yet broken down)
+**Plans:** 0 plans (deferred — not broken down)
+
+Phase 22.2 was never broken into plans during v2.0. The ACP adapter is a substantive new subsystem (JSON-RPC stdio server, SessionManager, event/permission/tool bridges, cwd-bound sessions) and nothing else in v2.0 depends on it. Per milestone audit, the four core v2.0 user flows (chat REPL, Telegram gateway, skills install, subagent delegation) all complete without ACP. Re-open as a fresh phase in v2.1 with `/gsd-discuss-phase` then `/gsd-plan-phase`.
+
+Artifacts preserved (do not delete): `.planning/phases/22.2-acp-adapter/22.2-CONTEXT.md` and `22.2-DISCUSSION-LOG.md`.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 22.2 to break down)
+- [ ] DEFERRED — moved to v2.1 (re-plan when v2.1 milestone opens)
 
 ---
 
