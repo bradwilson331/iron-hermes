@@ -49,13 +49,13 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [ ] **PRMT-07**: Built-in personality presets available (helpful, concise, technical, creative, teacher) plus custom presets from config
 - [ ] **PRMT-08**: Anthropic cache_control breakpoints placed using system_and_3 strategy (system prompt + last 3 non-system messages)
 - [ ] **PRMT-09**: Prompt caching automatically enabled for Anthropic Claude models with configurable TTL (5m/1h)
-- [ ] **PRMT-10**: Context pressure warnings emitted at 85% of compression threshold
-- [ ] **PRMT-11**: Dual-mode context compression: agent ContextCompressor at 50% threshold (configurable), gateway hygiene at 85% threshold
-- [ ] **PRMT-12**: ContextEngine trait enables pluggable compression strategies (default: local prune + structured summary)
-- [ ] **PRMT-13**: Compression preserves tool_call/tool_result pairs atomically — never splits a pair across summary boundary
-- [ ] **PRMT-14**: Compression protects first N messages (system + first exchange) and last N messages (configurable, default 20)
-- [ ] **PRMT-15**: Iterative re-compression updates previous summary rather than summarizing from scratch
-- [ ] **PRMT-16**: Memory is flushed to disk before compression to prevent data loss
+- [x] **PRMT-10**: Context pressure warnings emitted at 85% of compression threshold
+- [x] **PRMT-11**: Dual-mode context compression: agent ContextCompressor at 50% threshold (configurable), gateway hygiene at 85% threshold
+- [x] **PRMT-12**: ContextEngine trait enables pluggable compression strategies (default: local prune + structured summary)
+- [x] **PRMT-13**: Compression preserves tool_call/tool_result pairs atomically — never splits a pair across summary boundary
+- [x] **PRMT-14**: Compression protects first N messages (system + first exchange) and last N messages (configurable, default 20)
+- [x] **PRMT-15**: Iterative re-compression updates previous summary rather than summarizing from scratch
+- [x] **PRMT-16**: Memory is flushed to disk before compression to prevent data loss
 
 ### Context Files
 
@@ -103,8 +103,8 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [ ] **PROV-06**: Auxiliary model routing: vision, compression, session search, skills hub, MCP helper tasks can use separate provider/model from main conversational model
 - [x] **PROV-07**: Fallback model switching: on primary model failure (429/5xx/401), try configured fallback_providers in order with credential refresh
 - [ ] **PROV-08**: Named custom providers configurable in config.yaml for any OpenAI-compatible endpoint
-- [ ] **PROV-09**: Iteration budget with 2-tier pressure: caution at 70% (consolidate), warning at 90% (respond now), stop at 100%
-- [ ] **PROV-10**: Budget shared across parent and child agents — subagent consumes from parent's budget
+- [x] **PROV-09**: Iteration budget with 2-tier pressure: caution at 70% (consolidate), warning at 90% (respond now), stop at 100%
+- [x] **PROV-10**: Budget shared across parent and child agents — subagent consumes from parent's budget
 
 ### Gateway Architecture
 
@@ -112,13 +112,13 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 - [ ] **GW-02**: Session key format: agent:main:{platform}:{chat_type}:{chat_id} — constructed via build_session_key()
 - [ ] **GW-03**: Two-level message guard: base adapter queues messages and sets interrupt when agent is active; gateway runner intercepts control commands (/stop, /approve, /deny)
 - [ ] **GW-04**: Authorization: per-platform allowlists, DM pairing flow with codes, global allow-all flag, default deny
-- [ ] **GW-05**: Gateway slash command dispatch via resolve_command() with running-agent guard (blocks /model while agent active, bypasses /stop /approve /deny)
+- [x] **GW-05**: Gateway slash command dispatch via resolve_command() with running-agent guard (blocks /model while agent active, bypasses /stop /approve /deny)
 - [ ] **GW-06**: Gateway hook lifecycle events: gateway:startup, session:start/end/reset, agent:start/step/end, command:*
 - [ ] **GW-07**: Delivery routing: direct reply, home channel, explicit target (telegram:chat_id), cross-platform delivery
-- [ ] **GW-08**: Cron job deliveries NOT mirrored into gateway session history (prevents message alternation violations)
+- [x] **GW-08**: Cron job deliveries NOT mirrored into gateway session history (prevents message alternation violations)
 - [ ] **GW-09**: Token locks via acquire_scoped_lock()/release_scoped_lock() prevent two profiles using same bot token
 - [ ] **GW-10**: Background maintenance: cron ticking, session expiry, memory flush on session end/reset, cache refresh
-- [ ] **GW-11**: Memory provider integration: MemoryManager initialized per session, provider tools routed through handle_tool_call, on_session_end fires cleanup
+- [x] **GW-11**: Memory provider integration: MemoryManager initialized per session, provider tools routed through handle_tool_call, on_session_end fires cleanup
 
 ### CLI & ACP
 
@@ -224,13 +224,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PRMT-07 | Phase 15 | Pending |
 | PRMT-08 | Phase 16 | Pending |
 | PRMT-09 | Phase 16 | Pending |
-| PRMT-10 | Phase 18 | Pending |
-| PRMT-11 | Phase 18 | Pending |
-| PRMT-12 | Phase 18 | Pending |
-| PRMT-13 | Phase 18 | Pending |
-| PRMT-14 | Phase 18 | Pending |
-| PRMT-15 | Phase 18 | Pending |
-| PRMT-16 | Phase 18 | Pending |
+| PRMT-10 | Phase 18 | Complete |
+| PRMT-11 | Phase 18 | Complete |
+| PRMT-12 | Phase 18 | Complete |
+| PRMT-13 | Phase 18 | Complete |
+| PRMT-14 | Phase 18 | Complete |
+| PRMT-15 | Phase 18 | Complete |
+| PRMT-16 | Phase 18 | Complete |
 | CTX-01 | Phase 14 | Pending |
 | CTX-02 | Phase 14 | Pending |
 | CTX-03 | Phase 14 | Pending |
@@ -265,19 +265,19 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PROV-06 | Phase 12 | Pending |
 | PROV-07 | Phase 12 | Complete |
 | PROV-08 | Phase 12 | Pending |
-| PROV-09 | Phase 12 | Pending |
-| PROV-10 | Phase 12 | Pending |
+| PROV-09 | Phase 21.7 (was 12) | Complete |
+| PROV-10 | Phase 21.7 (was 12) | Complete |
 | GW-01 | Phase 21 | Pending |
 | GW-02 | Phase 21 | Pending |
 | GW-03 | Phase 21 | Pending |
 | GW-04 | Phase 21 | Pending |
-| GW-05 | Phase 21 | Pending |
+| GW-05 | Phase 21.1 (was 21) | Complete |
 | GW-06 | Phase 21 | Pending |
 | GW-07 | Phase 21 | Pending |
-| GW-08 | Phase 21 | Pending |
+| GW-08 | Phase 22.4.2.1/22.4.2.2 (was 21) | Complete |
 | GW-09 | Phase 21 | Pending |
 | GW-10 | Phase 21 | Pending |
-| GW-11 | Phase 21 | Pending |
+| GW-11 | Phase 21.4 (was 21) | Complete |
 | CLI-01 | Phase 22 | Complete |
 | CLI-02 | Phase 22.1 | Complete |
 | CLI-03 | Deferred to v2.1 | Deferred (was Phase 22.2) |
@@ -299,4 +299,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-27 — CLI-03..CLI-08 (ACP adapter / Phase 22.2) deferred to v2.1 per milestone audit*
+*Last updated: 2026-04-27 — bookkeeping sweep: PRMT-10..16, PROV-09/10, GW-05/08/11 flipped to Complete (12 items) + traceability re-pointed (PROV-09/10 → 21.7, GW-05 → 21.1, GW-08 → 22.4.2.1/22.4.2.2, GW-11 → 21.4); CLI-03..CLI-08 deferral retained.*
