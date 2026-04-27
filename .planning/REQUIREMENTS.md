@@ -3,9 +3,27 @@
 **Defined:** 2026-04-11
 **Core Value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
 
+## Current Milestone: v2.1 Carry-Overs
+
+**Active scope (29 reqs across 7 categories):**
+
+The v2.1 milestone is dedicated to closing v2.0 deferred-but-unfulfilled requirements. The reqs below remain `[ ]` in their original v2.0 categories — they are reassigned to v2.1 phases by the roadmapper. No new feature scope.
+
+| Category | Reqs in v2.1 |
+|----------|--------------|
+| ACP adapter | CLI-03, CLI-04, CLI-05, CLI-06, CLI-07, CLI-08 |
+| Prompt caching | PRMT-08, PRMT-09 |
+| Toolset management | TOOL-01, TOOL-02, TOOL-03, TOOL-04, TOOL-05 |
+| Provider polish | PROV-04, PROV-06, PROV-08 |
+| Skills trust tiers | SKILL-09 |
+| Gateway formal verification | GW-01, GW-02, GW-03, GW-04, GW-06, GW-07, GW-09, GW-10 |
+| Configuration / setup wizard | CFG-01, CFG-02, CFG-03, CFG-04 |
+
+(CLI-03..08 entries previously moved to "Future Requirements → Deferred from v2.0" on 2026-04-27 are restored as v2.1 active here. No body-checkbox movement needed — categories remain canonical home.)
+
 ## v2.0 Requirements
 
-Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
+Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audited 2026-04-27 and ready to close as `tech_debt` (77/93 active satisfied). Carry-overs above. Each maps to roadmap phases.
 
 ### Memory
 
@@ -124,8 +142,12 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 
 - [x] **CLI-01**: CLI registers execute_code, hooks, and guardrails (feature parity with gateway)
 - [x] **CLI-02**: CLI extension hooks: _get_extra_tui_widgets(), _register_extra_tui_keybindings(), _build_tui_layout_children(), process_command(), _build_tui_style_dict()
-
-> **CLI-03..CLI-08 (ACP adapter) deferred to v2.1** as of 2026-04-27 milestone audit (`.planning/v2.0-MILESTONE-AUDIT.md`). Phase 22.2 was never broken down into plans; nothing else in v2.0 depends on ACP. See "Future Requirements → Deferred from v2.0" below for the full requirement text.
+- [ ] **CLI-03**: ACP adapter: JSON-RPC stdio server wrapping AgentLoop for VS Code / Zed / JetBrains integration *(v2.1)*
+- [ ] **CLI-04**: ACP SessionManager with create/get/remove/fork/list/cleanup operations *(v2.1)*
+- [ ] **CLI-05**: ACP event bridge converts AgentLoop callbacks (tool_progress, thinking, reasoning, step, stream_delta) into ACP session_update events *(v2.1)*
+- [ ] **CLI-06**: ACP permission bridge maps dangerous command approval to ACP permission requests (allow_once/allow_always/reject) *(v2.1)*
+- [ ] **CLI-07**: ACP tool rendering maps Hermes tools to editor-facing content (file diffs, shell commands, text previews) *(v2.1)*
+- [ ] **CLI-08**: ACP sessions carry editor cwd bound to session ID for file/terminal tool context *(v2.1)*
 
 ### Configuration
 
@@ -136,18 +158,37 @@ Requirements for v2.0: Intelligence & Identity. Each maps to roadmap phases.
 
 ## Future Requirements
 
-Deferred to v2.1+. Tracked but not in current roadmap.
+Deferred to v2.2+. Tracked but not in current roadmap. CLI-03..CLI-08 (ACP adapter) were moved BACK to v2.1 active scope on 2026-04-27 — see "Current Milestone: v2.1 Carry-Overs" at the top of this file.
 
-### Deferred from v2.0
+### v2.2 Reservation: Production Polish
 
-ACP (Agent Client Protocol) adapter — moved out of v2.0 by milestone audit on 2026-04-27 (`.planning/v2.0-MILESTONE-AUDIT.md`). Phase 22.2 was never broken into plans and nothing else in v2.0 depends on ACP. Reassign to a new phase in v2.1 when the milestone is opened.
+Pre-reserved scope for v2.2 (the milestone after v2.1). Decided 2026-04-27 during v2.1 planning:
 
-- **CLI-03**: ACP adapter: JSON-RPC stdio server wrapping AgentLoop for VS Code / Zed / JetBrains integration
-- **CLI-04**: ACP SessionManager with create/get/remove/fork/list/cleanup operations
-- **CLI-05**: ACP event bridge converts AgentLoop callbacks (tool_progress, thinking, reasoning, step, stream_delta) into ACP session_update events via run_coroutine_threadsafe
-- **CLI-06**: ACP permission bridge maps dangerous command approval to ACP permission requests (allow_once/allow_always/reject)
-- **CLI-07**: ACP tool rendering maps Hermes tools to editor-facing content (file diffs, shell commands, text previews)
-- **CLI-08**: ACP sessions carry editor cwd bound to session ID for file/terminal tool context
+- **AUTH-01..N (TBD)**: Credential pools — multi-key rotation, exhaustion handling, `hermes auth add/list/remove/reset` CLI commands. Currently only Anthropic fallback exists.
+- **AUTH-?? (TBD)**: Multi-provider OAuth login — `hermes login --provider <name>` for Nous, OpenAI Codex, etc. Currently only Anthropic OAuth via `~/.claude/credentials.json`.
+- **UPDT-01 (TBD)**: `hermes update` self-update mechanism (live download/replace; test stubs exist in `crates/ironhermes-hub/tests/update_uninstall_test.rs` but no live logic).
+- **UPDT-02 (TBD)**: `hermes uninstall` CLI uninstaller (logic designed, not wired to CLI).
+- **ROUTE-01..N (TBD)**: Smart model routing — `smart_model_routing.cheap_model` config for intelligent cheap/expensive model selection based on task complexity.
+
+These will be assigned firm REQ-IDs at v2.2 milestone planning.
+
+### GAP-NEW (parity gaps from v2.1 planning, parked)
+
+Identified 2026-04-27 by IronHermes ↔ hermes-agent parity analysis. Each is observable in the canonical Python `hermes-agent` but absent from the IronHermes Rust port. Reserved for future milestones; assigned firm REQ-IDs when scheduled.
+
+- **VOICE-01..N**: Voice subsystem — STT (faster-whisper local + Groq + OpenAI fallback) + TTS (Edge default + ElevenLabs/OpenAI/Kokoro/Fish). Includes `/voice on|off|tts` slash command and `stt:`/`tts:` config sections. Currently `/voice` is a registered command stub returning "No TTS infrastructure" (see `crates/ironhermes-core/src/commands/handlers.rs` line 93-94).
+- **VIS-01..N**: Vision toolset — image analysis tool. No `vision` toolset in tools registry.
+- **IMG-01..N**: Image generation toolset. No `image_gen` toolset in tools registry.
+- **BROW-01..N**: Browser automation toolset (Browserbase, Camofox, local Chromium). `/browser` command registered but handler is stub.
+- **PROF-01..N**: Profile system — `hermes profile list/create/use/delete/show/alias/rename/export/import` with isolated HERMES_HOME per profile (CFG-04 in v2.1 covers config-level only; full profile lifecycle is a separate effort).
+- **PLUG-01..N**: Plugin system — `hermes plugins list/install/remove`. Distinct from skills. `/plugins` command registered but handler stub.
+- **PAIR-01..N**: Pairing / DM authorization — `hermes pairing list/approve/revoke` for multi-user gateway authorization. Different from `/approve`/`/deny` command-execution approval.
+- **INSI-01..N**: Insights / analytics — `hermes insights [--days N]` usage analytics. `/insights` command stub returns "No analytics infrastructure".
+- **MOA-01..N**: Mixture of Agents (MoA) toolset — orchestration of multiple model agents per turn.
+- **TIRI-01..N**: Tirith security integration — `security.tirith_enabled` config flag (no references in current codebase).
+- **HONC-01..N**: Honcho memory cloud-backend integration — `hermes honcho setup/status` CLI (current memory backends: file, SQLite, Grafeo, DuckDB only).
+- **COMP-01..N**: Shell completions — `hermes completion bash|zsh` generators.
+- **CLAR-01..N**: `clarify` toolset — agent-initiated clarification questions.
 
 ### Additional Platforms
 
@@ -280,23 +321,24 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GW-11 | Phase 21.4 (was 21) | Complete |
 | CLI-01 | Phase 22 | Complete |
 | CLI-02 | Phase 22.1 | Complete |
-| CLI-03 | Deferred to v2.1 | Deferred (was Phase 22.2) |
-| CLI-04 | Deferred to v2.1 | Deferred (was Phase 22.2) |
-| CLI-05 | Deferred to v2.1 | Deferred (was Phase 22.2) |
-| CLI-06 | Deferred to v2.1 | Deferred (was Phase 22.2) |
-| CLI-07 | Deferred to v2.1 | Deferred (was Phase 22.2) |
-| CLI-08 | Deferred to v2.1 | Deferred (was Phase 22.2) |
+| CLI-03 | Phase TBD (v2.1) | Pending |
+| CLI-04 | Phase TBD (v2.1) | Pending |
+| CLI-05 | Phase TBD (v2.1) | Pending |
+| CLI-06 | Phase TBD (v2.1) | Pending |
+| CLI-07 | Phase TBD (v2.1) | Pending |
+| CLI-08 | Phase TBD (v2.1) | Pending |
 | CFG-01 | Phase 23 | Pending |
 | CFG-02 | Phase 23 | Pending |
 | CFG-03 | Phase 23 | Pending |
 | CFG-04 | Phase 23 | Pending |
 
 **Coverage:**
-- v2.0 requirements (active): 93 total (CLI-03..CLI-08 deferred to v2.1 on 2026-04-27)
-- Mapped to v2.0 phases: 93
-- Deferred to v2.1: 6 (CLI-03..CLI-08)
-- Unmapped: 0
+- v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)
+- v2.1 active: 29 carry-over reqs (CLI-03..08 + PRMT-08/09 + TOOL-01..05 + PROV-04/06/08 + SKILL-09 + GW-01..04, GW-06, GW-07, GW-09, GW-10 + CFG-01..04)
+- Mapped to v2.1 phases: 0 (pending roadmap creation)
+- v2.2 reservation: ~5 categories (AUTH credential pools, OAuth multi-provider, UPDT self-update + uninstall, ROUTE smart routing) — REQ-IDs assigned at v2.2 planning
+- Future Requirements (parked GAP-NEW from v2.1 planning): VOICE-*, VIS-*, IMG-*, BROW-*, PROF-*, PLUG-*, PAIR-*, INSI-*, MOA-*, TIRI-*, HONC-*, COMP-*, CLAR-* (13 categories, REQ-IDs assigned when scheduled)
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-27 — bookkeeping sweep: PRMT-10..16, PROV-09/10, GW-05/08/11 flipped to Complete (12 items) + traceability re-pointed (PROV-09/10 → 21.7, GW-05 → 21.1, GW-08 → 22.4.2.1/22.4.2.2, GW-11 → 21.4); CLI-03..CLI-08 deferral retained.*
+*Last updated: 2026-04-27 — v2.1 milestone (Carry-Overs) opened; CLI-03..08 reactivated from v2.0 deferral; v2.2 reservation + 13 GAP-NEW parity gap categories added to Future Requirements.*

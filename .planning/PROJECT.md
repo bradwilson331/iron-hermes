@@ -96,20 +96,29 @@ A working conversational AI agent with personality (context files) that operates
 | Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit — v2 brings CLI parity |
 | Cross-crate transport types use plain Strings (no embedded downstream types) | `OriginDecision` in `ironhermes-core` carries `String` fields, not `ironhermes_cron::JobOrigin` — embedding would create a circular crate dep. Consumers (CLI + LLM tool) construct `JobOrigin` at the call site where both crates are in scope. Pattern applies to any future enum that returns "what platform/route to use" data from `ironhermes-core` to a downstream crate. | ✓ Good (Phase 22.4.2.2) |
 
-## Current Milestone: v2.0 Intelligence & Identity
+## Current Milestone: v2.1 Carry-Overs
 
-**Goal:** Give the agent persistent memory, session continuity, a customizable identity, context management, and a complete skill/tool framework — faithful to hermes-agent's architecture.
+**Goal:** Close out all v2.0 deferred-but-unfulfilled requirements (29 reqs across 7 categories). No new feature scope, no GAP-NEW items — tight, focused close to the v2.0 vision before opening v2.2 (Production Polish).
 
-**Target features:**
-- Persistent memory (MEMORY.md/USER.md) with memory providers (SQLite, Grafeo, DuckDB)
-- Session storage with SQLite + FTS5 search + session lineage
-- Context compression (dual system) + prompt caching (Anthropic breakpoints)
-- Full 10-layer prompt assembly with cached/ephemeral separation
-- Context files (.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules) with progressive discovery
-- SOUL.md personality system with /personality overlays
-- Skill framework (SKILL.md format, discovery, conditional activation, env vars, security, Hub)
-- Slash commands (SKILL-13), tool registry improvements, CLI feature parity
-- Configuration/setup wizard improvements
+**Target features (v2.0 carry-overs only):**
+- ACP adapter for IDE integration: JSON-RPC stdio server + SessionManager + event/permission/tool bridges + cwd-bound sessions (CLI-03..08, 6 reqs)
+- Anthropic prompt caching: cache_control breakpoints + system_and_3 strategy + cached/ephemeral separation (PRMT-08, PRMT-09, 2 reqs)
+- Toolset management: registry improvements, check_fn requirements, setup wizard hooks, runtime enable/disable (TOOL-01..05, 5 reqs)
+- Provider polish: API key per-base-URL scoping, auxiliary model routing, named custom providers (PROV-04, PROV-06, PROV-08, 3 reqs)
+- Skills trust tiers: replace hardcoded `Community` with builtin/official/trusted/community discrimination (SKILL-09, 1 req)
+- Gateway formal verification: back-fill formal verification of existing `ironhermes-gateway` crate (GW-01..04, GW-06, GW-07, GW-09, GW-10, 8 reqs)
+- Configuration / setup wizard: `hermes setup`, `config set/get/show`, `config migrate`, profile isolation (CFG-01..04, 4 reqs)
+
+**v2.0 outcome (closed 2026-04-27, status: tech_debt):**
+- 77/93 active requirements satisfied (~83%); 5/5 cross-phase integration; 4/4 user flows
+- Shipped: persistent memory subsystem, session storage + FTS5, context compression, 10-layer prompt assembly, context file loading, SOUL.md personality, skill framework + Hub + remote install, slash commands (49), CLI tool parity, ratatui-backed TUI, cron with TG origin routing, MCP client + slash integration, model registry + token estimation, multi-agent + autonomous + sandbox, deployment setup files
+- Audit: `.planning/v2.0-MILESTONE-AUDIT.md`
+
+**v2.2 reservation (Production Polish, ~3 months):**
+After v2.1, the next milestone targets daily-driver tool maturity: credential pools + multi-provider OAuth (NEW), self-update + uninstall (deferred from v2.0 informal scope), smart model routing (NEW), plus any v2.1 carry-overs that didn't ship.
+
+**Future Requirements parking lot:**
+14 GAP-NEW items identified during v2.1 planning (Voice STT/TTS, Vision, Image gen, Browser, Profiles, Plugins, Pairing, Insights, MoA, Tirith, Honcho, Shell completions, Clarify toolset, plus Smart routing pre-reservation) parked in REQUIREMENTS.md → Future Requirements. Re-evaluate at each milestone planning.
 
 **Architectural constraint:** All implementation must align to hermes-agent's architecture (see hermes-agent Architecture docs). Port faithfully, deviate only with documented rationale.
 
@@ -131,4 +140,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-27 after Phase 22.4.2.3 (fix pre-existing INV-22.3-02 banner-bleed regression test) complete*
+*Last updated: 2026-04-27 — v2.1 milestone (Carry-Overs) opened. v2.0 audited and ready to close as `tech_debt`; archive deferred until carry-overs land or user runs /gsd-complete-milestone v2.0.*

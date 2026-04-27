@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.0
-milestone_name: milestone
-status: milestone_complete
-stopped_at: Phase 22.4.2.1 context gathered
-last_updated: "2026-04-27T04:39:28.991Z"
-last_activity: 2026-04-27 -- Phase 22.4.2.3 execution started
+milestone: v2.1
+milestone_name: Carry-Overs
+status: planning
+last_updated: "2026-04-27T19:39:13.555Z"
+last_activity: 2026-04-27
 progress:
-  total_phases: 20
-  completed_phases: 19
-  total_plans: 103
-  completed_plans: 102
-  percent: 95
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,12 +24,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 22.4.2.3
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-04-27
-
-Progress: [██████████] 100%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-04-27 — Milestone v2.1 started
 
 ## Performance Metrics
 
