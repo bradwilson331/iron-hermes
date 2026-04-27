@@ -3,11 +3,11 @@
 **Defined:** 2026-04-11
 **Core Value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
 
-## Current Milestone: v2.1 Carry-Overs
+## Current Milestone: v2.1 Carry-Overs + Learning Loop
 
-**Active scope (29 reqs across 7 categories):**
+**Goal:** Close all v2.0 deferred requirements (29 carry-overs across 7 categories) **AND** land the Learning Loop foundation (5 new reqs in 2 phases) — the periodic nudge + autonomous skill creation that makes IronHermes self-improving rather than just feature-complete (per hermes-agent design philosophy).
 
-The v2.1 milestone is dedicated to closing v2.0 deferred-but-unfulfilled requirements. The reqs below remain `[ ]` in their original v2.0 categories — they are reassigned to v2.1 phases by the roadmapper. No new feature scope.
+**Active scope (34 reqs across 8 categories):**
 
 | Category | Reqs in v2.1 |
 |----------|--------------|
@@ -18,6 +18,19 @@ The v2.1 milestone is dedicated to closing v2.0 deferred-but-unfulfilled require
 | Skills trust tiers | SKILL-09 |
 | Gateway formal verification | GW-01, GW-02, GW-03, GW-04, GW-06, GW-07, GW-09, GW-10 |
 | Configuration / setup wizard | CFG-01, CFG-02, CFG-03, CFG-04 |
+| **Learning Loop (NEW for v2.1)** | **LEARN-01, LEARN-02, LEARN-03, LEARN-04, LEARN-05** |
+
+### v2.1 Architectural Principles (carried through every phase)
+
+These design principles, sourced from the canonical hermes-agent architecture, must be honored across all v2.1 phase implementations:
+
+1. **The Learning Loop is the unifying philosophy.** Skills + Memory + Session Search are outputs of one continuous process — every phase must consider how it participates.
+2. **Cache-awareness is load-bearing.** Three operations break the prompt cache: switching models mid-session, changing memory files mid-session, changing context files mid-session. Phase 27 enforces; Phases 23/25/26 surface warnings.
+3. **3,575 char total memory limit** — already aligned (MEM-01 2,200 + MEM-02 1,375 = 3,575). Phase 32 must respect this when nudging.
+4. **Patch-over-rewrite for skill self-improvement** — Phase 33's `skill_manage` defaults to patch action for token efficiency + correctness preservation.
+5. **Progressive disclosure for token economy** — names + summaries always, full content on demand. Applies to skills (Phase 28) and is a design constraint Phase 33 must preserve when creating new skills.
+6. **Sessions tied to ID, not platform.** Phase 29 verifies; Phases 30/31 implement for ACP.
+7. **Gateway as same-loop participant**, not bolt-on delivery. Phase 29 verifies that incoming messages can trigger skill creation (Phase 33), automation outputs route back through gateway.
 
 (CLI-03..08 entries previously moved to "Future Requirements → Deferred from v2.0" on 2026-04-27 are restored as v2.1 active here. No body-checkbox movement needed — categories remain canonical home.)
 
@@ -156,6 +169,16 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [ ] **CFG-03**: hermes config migrate scans skills for unconfigured settings and prompts user
 - [ ] **CFG-04**: Profile isolation: each profile gets own HERMES_HOME, config, memory, sessions, gateway PID
 
+### Learning Loop
+
+The Learning Loop is the unifying philosophy of v2.1 — Skills + Memory + Session Search are outputs of one continuous self-improvement process. These five reqs land the periodic-nudge + autonomous-skill-creation foundation that hermes-agent exposes as the differentiating feature.
+
+- [ ] **LEARN-01**: Periodic nudge mechanism — at configurable intervals (default 5 minutes) during a session, agent receives an internal system-level prompt asking it to scan recent activity and evaluate whether anything is worth persisting to MEMORY.md/USER.md. Fires without user input. Honors PRMT-06 (mid-session writes persist to disk but do not mutate the active prompt — the new entries take effect at next session start).
+- [ ] **LEARN-02**: Memory persistence judgment — during the nudge, agent decides per-item which memory layer information belongs in. Threshold: "important enough to be present in every future conversation" → prompt memory (MEMORY.md/USER.md, slots 5-6); "useful only when topic comes up" → session search (SQLite archive, retrieved on demand). Coordinates with the existing 3,575 char total memory cap (MEM-01 + MEM-02).
+- [ ] **LEARN-03**: Autonomous skill creation triggers — at task completion, agent evaluates whether the path is worth documenting using a heuristic: (a) 5+ tool calls, (b) recovery from error, (c) user correction, (d) non-obvious workflow that worked. Any trigger fires → write a SKILL.md.
+- [ ] **LEARN-04**: SKILL.md auto-creation format — written to `~/.hermes/skills/` (under a category subdirectory chosen by the agent) following the agentskills.io standard. Frontmatter: `name`, `description`, `version`, `platforms`, `metadata.hermes.{tags, category, fallback_for_toolsets, requires_toolsets}`. Default trust tier on creation: `Self-created` (a new tier added by Phase 28 SKILL-09 work — coordinates with that phase).
+- [ ] **LEARN-05**: `skill_manage` tool with 6 actions — `create`, `patch`, `edit`, `delete`, `write_file`, `remove_file`. Agent defaults to `patch` for updates (passes only `old_string` + `new_string`, mirroring the existing memory tool's substring matching pattern from MEM-03). Token-efficient incremental updates; full rewrites reserved for `edit` action only. Coordinates with Phase 25 toolset registry (registers `skill_manage` as a new toolset entry).
+
 ## Future Requirements
 
 Deferred to v2.2+. Tracked but not in current roadmap. CLI-03..CLI-08 (ACP adapter) were moved BACK to v2.1 active scope on 2026-04-27 — see "Current Milestone: v2.1 Carry-Overs" at the top of this file.
@@ -263,8 +286,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PRMT-05 | Phase 15 | Pending |
 | PRMT-06 | Phase 15 | Pending |
 | PRMT-07 | Phase 15 | Pending |
-| PRMT-08 | Phase 16 | Pending |
-| PRMT-09 | Phase 16 | Pending |
+| PRMT-08 | Phase 27 | Pending |
+| PRMT-09 | Phase 27 | Pending |
 | PRMT-10 | Phase 18 | Complete |
 | PRMT-11 | Phase 18 | Complete |
 | PRMT-12 | Phase 18 | Complete |
@@ -287,58 +310,65 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKILL-06 | Phase 19 | Complete |
 | SKILL-07 | Phase 19 | Complete |
 | SKILL-08 | Phase 19.1 | Complete |
-| SKILL-09 | Phase 19.1 | Pending |
+| SKILL-09 | Phase 28 | Pending |
 | SKILL-10 | Phase 19 | Complete |
 | SKILL-11 | Phase 19 | Complete |
 | SKILL-12 | Phase 20 | Complete |
 | SKILL-13 | Phase 20 | Complete |
 | SKILL-14 | Phase 20 | Complete |
-| TOOL-01 | Phase 20 | Pending |
-| TOOL-02 | Phase 20 | Pending |
-| TOOL-03 | Phase 20 | Pending |
-| TOOL-04 | Phase 20 | Pending |
-| TOOL-05 | Phase 20 | Pending |
+| TOOL-01 | Phase 25 | Pending |
+| TOOL-02 | Phase 25 | Pending |
+| TOOL-03 | Phase 25 | Pending |
+| TOOL-04 | Phase 25 | Pending |
+| TOOL-05 | Phase 25 | Pending |
 | PROV-01 | Phase 12 | Complete |
 | PROV-02 | Phase 12 | Complete |
 | PROV-03 | Phase 12 | Complete |
-| PROV-04 | Phase 12 | Pending |
+| PROV-04 | Phase 26 | Pending |
 | PROV-05 | Phase 12 | Complete |
-| PROV-06 | Phase 12 | Pending |
+| PROV-06 | Phase 26 | Pending |
 | PROV-07 | Phase 12 | Complete |
-| PROV-08 | Phase 12 | Pending |
+| PROV-08 | Phase 26 | Pending |
 | PROV-09 | Phase 21.7 (was 12) | Complete |
 | PROV-10 | Phase 21.7 (was 12) | Complete |
-| GW-01 | Phase 21 | Pending |
-| GW-02 | Phase 21 | Pending |
-| GW-03 | Phase 21 | Pending |
-| GW-04 | Phase 21 | Pending |
+| GW-01 | Phase 29 | Pending |
+| GW-02 | Phase 29 | Pending |
+| GW-03 | Phase 29 | Pending |
+| GW-04 | Phase 29 | Pending |
 | GW-05 | Phase 21.1 (was 21) | Complete |
-| GW-06 | Phase 21 | Pending |
-| GW-07 | Phase 21 | Pending |
+| GW-06 | Phase 29 | Pending |
+| GW-07 | Phase 29 | Pending |
 | GW-08 | Phase 22.4.2.1/22.4.2.2 (was 21) | Complete |
-| GW-09 | Phase 21 | Pending |
-| GW-10 | Phase 21 | Pending |
+| GW-09 | Phase 29 | Pending |
+| GW-10 | Phase 29 | Pending |
 | GW-11 | Phase 21.4 (was 21) | Complete |
 | CLI-01 | Phase 22 | Complete |
 | CLI-02 | Phase 22.1 | Complete |
-| CLI-03 | Phase TBD (v2.1) | Pending |
-| CLI-04 | Phase TBD (v2.1) | Pending |
-| CLI-05 | Phase TBD (v2.1) | Pending |
-| CLI-06 | Phase TBD (v2.1) | Pending |
-| CLI-07 | Phase TBD (v2.1) | Pending |
-| CLI-08 | Phase TBD (v2.1) | Pending |
+| CLI-03 | Phase 30 | Pending |
+| CLI-04 | Phase 30 | Pending |
+| CLI-05 | Phase 31 | Pending |
+| CLI-06 | Phase 31 | Pending |
+| CLI-07 | Phase 31 | Pending |
+| CLI-08 | Phase 30 | Pending |
 | CFG-01 | Phase 23 | Pending |
 | CFG-02 | Phase 23 | Pending |
 | CFG-03 | Phase 23 | Pending |
-| CFG-04 | Phase 23 | Pending |
+| CFG-04 | Phase 24 | Pending |
+| LEARN-01 | Phase 32 | Pending |
+| LEARN-02 | Phase 32 | Pending |
+| LEARN-03 | Phase 33 | Pending |
+| LEARN-04 | Phase 33 | Pending |
+| LEARN-05 | Phase 33 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)
-- v2.1 active: 29 carry-over reqs (CLI-03..08 + PRMT-08/09 + TOOL-01..05 + PROV-04/06/08 + SKILL-09 + GW-01..04, GW-06, GW-07, GW-09, GW-10 + CFG-01..04)
-- Mapped to v2.1 phases: 0 (pending roadmap creation)
+- v2.1 active: 34 reqs (29 carry-overs across 7 categories + 5 NEW Learning Loop reqs across 1 new category)
+  - Carry-overs: CLI-03..08 + PRMT-08/09 + TOOL-01..05 + PROV-04/06/08 + SKILL-09 + GW-01..04, GW-06, GW-07, GW-09, GW-10 + CFG-01..04
+  - Learning Loop: LEARN-01..05
+- Mapped to v2.1 phases: 34/34 (Phases 23-33)
 - v2.2 reservation: ~5 categories (AUTH credential pools, OAuth multi-provider, UPDT self-update + uninstall, ROUTE smart routing) — REQ-IDs assigned at v2.2 planning
 - Future Requirements (parked GAP-NEW from v2.1 planning): VOICE-*, VIS-*, IMG-*, BROW-*, PROF-*, PLUG-*, PAIR-*, INSI-*, MOA-*, TIRI-*, HONC-*, COMP-*, CLAR-* (13 categories, REQ-IDs assigned when scheduled)
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-27 — v2.1 milestone (Carry-Overs) opened; CLI-03..08 reactivated from v2.0 deferral; v2.2 reservation + 13 GAP-NEW parity gap categories added to Future Requirements.*
+*Last updated: 2026-04-27 — v2.1 expanded scope: + 5 Learning Loop reqs (LEARN-01..05) + 2 phases (32 + 33). Total: 34 reqs across 11 phases.*

@@ -424,3 +424,207 @@ Plans:
 - Wave 2: 21.1-02 (CLI + gateway integration — depends on 21.1-01, autonomous)
 
 **Phase directory:** `.planning/phases/21.1-slash-commands/`
+
+---
+
+## v2.1: Carry-Overs + Learning Loop
+
+> **Milestone goal:** Close all 29 v2.0 deferred requirements across 7 categories **AND** land the Learning Loop foundation (5 new reqs, 2 new phases). The Learning Loop — periodic memory nudge + autonomous skill creation — is the canonical hermes-agent differentiator that makes the agent self-improving rather than just feature-complete.
+> **Phases 23-31:** carry-over work (CFG, TOOL, PROV, PRMT, SKILL trust tiers, gateway formal verification, ACP adapter)
+> **Phases 32-33:** Learning Loop foundation (LEARN-01..05) — agent-curated memory + autonomous skill creation
+> **Total:** 11 phases, 34 reqs across 8 categories
+> Phase numbering continues from v2.0 last phase (22.4.2.3). New phases start at 23.
+
+**Architectural principles** (carried through every v2.1 phase, sourced from canonical hermes-agent design):
+1. The Learning Loop is the unifying philosophy — Skills + Memory + Session Search are outputs of one continuous process
+2. Cache-awareness is load-bearing — three cache breakers (model switch, memory file change, context file change) must be enforced (Phase 27) and surfaced in config UX (Phases 23/25/26)
+3. 3,575 char total memory limit (already aligned: MEM-01 + MEM-02 = 3,575)
+4. Patch-over-rewrite for skill self-improvement (Phase 33 default)
+5. Progressive disclosure for token economy (Phase 28 + 33)
+6. Sessions tied to ID, not platform (Phase 29 + 30/31)
+7. Gateway as same-loop participant, not bolt-on (Phase 29)
+
+### Phase 23: Configuration CLI and Setup Wizard
+
+**Goal:** Users can configure IronHermes interactively on first run and manage config values from the command line.
+**Depends on:** Phase 21 (config infrastructure), Phase 20 (memory setup wizard pattern)
+**Requirements:** CFG-01, CFG-02, CFG-03
+**Success Criteria** (what must be TRUE):
+  1. Running `hermes` for the first time launches an interactive setup wizard that asks for provider selection, API key, model, and writes a valid `config.yaml`
+  2. `hermes config set <key> <value>` updates a config.yaml key and `hermes config get <key>` reads it back
+  3. `hermes config show` prints the active config with redacted secrets
+  4. `hermes config migrate` scans installed skills for unconfigured settings and prompts the user to fill them in
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 23 to break down)
+
+**Phase directory:** `.planning/phases/23-configuration-cli-and-setup-wizard/`
+
+### Phase 24: Profile Isolation
+
+**Goal:** Each named profile gets its own isolated HERMES_HOME, config, memory stores, sessions database, and gateway PID file — operator can switch between profiles without cross-contamination.
+**Depends on:** Phase 23 (config CLI must exist before profiles can reference configs)
+**Requirements:** CFG-04
+**Success Criteria** (what must be TRUE):
+  1. `hermes --profile work chat` uses `~/.ironhermes/profiles/work/` as HERMES_HOME, separate from default
+  2. Memory stores and session history for `work` profile are completely isolated from `personal` profile
+  3. Gateway started under one profile does not interfere with gateway under another profile (separate PID files)
+  4. Profile directory is scaffolded automatically on first use with the same `ensure_home_dirs()` structure as default
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 24 to break down)
+
+**Phase directory:** `.planning/phases/24-profile-isolation/`
+
+### Phase 25: Toolset Management
+
+**Goal:** Tools are organized into named toolsets with runtime enable/disable, prerequisite check functions that silently exclude unavailable tools from the LLM schema, and a setup wizard hook that guides users through missing tool prerequisites.
+**Depends on:** Phase 23 (setup wizard integration requires CFG-01 wizard infrastructure), Phase 21.1 (slash command registry for toolset commands)
+**Requirements:** TOOL-01, TOOL-02, TOOL-03, TOOL-04, TOOL-05
+**Success Criteria** (what must be TRUE):
+  1. Each tool has an `is_available()` check; tools whose prerequisites (env vars, API keys) are absent are silently excluded from the schema sent to the LLM
+  2. Tools are grouped into named toolsets (e.g., `web`, `code`, `memory`) and operator can list/enable/disable a toolset at runtime
+  3. Adding a new tool requires only a registration call — no changes to dispatch logic
+  4. Agent-intercepted tools (memory, session_search, delegate_task) are handled before registry dispatch without being visible to the LLM as duplicates
+  5. `hermes setup` (or first-run wizard) detects tools with missing prerequisites and guides the user through configuring them
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 25 to break down)
+
+**Phase directory:** `.planning/phases/25-toolset-management/`
+
+### Phase 26: Provider Polish
+
+**Goal:** API keys are scoped to their provider's base URL, auxiliary tasks can route to a separate cheaper model, and operators can define named custom providers in config.yaml for any OpenAI-compatible endpoint.
+**Depends on:** Phase 21 (ProviderResolver infrastructure), Phase 23 (config CLI for setting provider values)
+**Requirements:** PROV-04, PROV-06, PROV-08
+**Success Criteria** (what must be TRUE):
+  1. Configuring two providers with different base URLs and different API keys sends the correct key to each endpoint — no key leaks to the wrong URL
+  2. Setting `auxiliary_model` in config.yaml routes compression, vision, and session-search tasks to that model instead of the main conversational model
+  3. A named custom provider (e.g., `my-local-llm`) defined in config.yaml is selectable as `--provider my-local-llm` and resolves its base URL, API key, and model correctly
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 26 to break down)
+
+**Phase directory:** `.planning/phases/26-provider-polish/`
+
+### Phase 27: Prompt Caching
+
+**Goal:** Anthropic Claude API calls automatically use `cache_control` breakpoints via the system_and_3 strategy, reducing cost and latency for repeated prefixes.
+**Depends on:** Phase 26 (PROV-04 key scoping ensures Anthropic requests use the correct key before caching is wired), Phase 15 (10-layer prompt assembly)
+**Requirements:** PRMT-08, PRMT-09
+**Success Criteria** (what must be TRUE):
+  1. When using an Anthropic Claude model, the system prompt and last 3 non-system messages carry `cache_control` breakpoints in the request payload
+  2. Prompt caching is automatically enabled for Anthropic models and silently skipped for non-Anthropic providers — no config change needed
+  3. The configurable TTL (5m or 1h) is respected in the `cache_control` type field
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27 to break down)
+
+**Phase directory:** `.planning/phases/27-prompt-caching/`
+
+### Phase 28: Skills Trust Tiers
+
+**Goal:** Installed skills carry a trust level (builtin / official / trusted / community) that drives security enforcement — community skills face stricter scanning gates than builtin skills.
+**Depends on:** Phase 21.8 (skills lock + install pipeline that this tier system annotates), Phase 25 (toolset management — trust tier enforcement reuses the is_available() check pattern)
+**Requirements:** SKILL-09
+**Success Criteria** (what must be TRUE):
+  1. Skills shipped inside the binary are classified as `builtin`; skills from the optional-skills/ directory as `official`; skills from known repo sources as `trusted`; all others as `community`
+  2. Community skills that fail the security scan are hard-rejected at load time; builtin/official/trusted skills that fail emit a warning but still load
+  3. `hermes skills list` shows each skill's trust tier alongside its name and status
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 28 to break down)
+
+**Phase directory:** `.planning/phases/28-skills-trust-tiers/`
+
+### Phase 29: Gateway Formal Verification
+
+**Goal:** The existing `ironhermes-gateway` crate has formal test coverage for all architectural contracts: session key construction, two-level message guard, authorization, hook lifecycle events, delivery routing, token locks, and background maintenance — back-filling verification that implementation matches spec.
+**Depends on:** Phase 21 (gateway architecture already implemented), Phase 21.1 (slash command dispatch verified separately)
+**Requirements:** GW-01, GW-02, GW-03, GW-04, GW-06, GW-07, GW-09, GW-10
+**Success Criteria** (what must be TRUE):
+  1. `build_session_key()` produces the documented `agent:main:{platform}:{chat_type}:{chat_id}` format and tests cover all platform/chat_type combinations
+  2. The two-level message guard is tested: base adapter queues messages when agent is active, and gateway runner bypasses /stop /approve /deny while blocking other commands
+  3. Authorization allowlist tests confirm that messages from non-whitelisted chats are denied and DM pairing codes gate access correctly
+  4. Hook lifecycle event tests confirm `gateway:startup`, `session:start/end`, `agent:start/step/end` fire at the correct points in the message processing pipeline
+  5. Token lock tests confirm `acquire_scoped_lock` / `release_scoped_lock` prevent two gateway instances from sharing the same bot token
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 29 to break down)
+
+**Phase directory:** `.planning/phases/29-gateway-formal-verification/`
+
+### Phase 30: ACP Adapter Core
+
+**Goal:** IronHermes exposes a JSON-RPC stdio server that VS Code, Zed, and JetBrains can connect to, with a SessionManager that creates, forks, and manages isolated agent sessions bound to the editor's working directory.
+**Depends on:** Phase 22 (CLI infrastructure, AgentLoop wiring), Phase 22.2 (ACP context and discussion artifacts), Phase 24 (profile isolation — ACP sessions benefit from per-session isolation)
+**Requirements:** CLI-03, CLI-04, CLI-08
+**Success Criteria** (what must be TRUE):
+  1. `hermes acp` starts a JSON-RPC stdio server; a client can send a `session.create` request and receive a session ID in response
+  2. Each ACP session is bound to the editor's cwd at creation time; file and terminal tool calls resolve relative to that cwd
+  3. `session.fork` creates a child session inheriting parent context; `session.list` enumerates active sessions; `session.remove` tears down a session cleanly
+  4. Sessions survive across multiple JSON-RPC calls within the same stdio connection and are cleaned up when the connection closes
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 30 to break down)
+
+**Phase directory:** `.planning/phases/30-acp-adapter-core/`
+
+### Phase 31: ACP Adapter Bridges
+
+**Goal:** The ACP server translates AgentLoop callbacks into editor-facing session_update events, maps dangerous-command approval requests to ACP permission flow, and renders Hermes tool outputs (file diffs, shell commands, text previews) in editor-native content formats.
+**Depends on:** Phase 30 (ACP server and SessionManager must exist before bridges can be wired)
+**Requirements:** CLI-05, CLI-06, CLI-07
+**Success Criteria** (what must be TRUE):
+  1. AgentLoop streaming events (tool_progress, thinking, step, stream_delta) appear as `session_update` JSON-RPC notifications in the editor within 100ms of the event firing
+  2. When a tool requires dangerous-command approval, the editor receives a permission request and `allow_once` / `allow_always` / `reject` responses are correctly honored by the agent
+  3. File-write tool calls produce a diff-format content block; shell-command tool calls produce a command-preview block; text-generation produces a plain text block — all in the ACP content schema
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 31 to break down)
+
+**Phase directory:** `.planning/phases/31-acp-adapter-bridges/`
+
+### Phase 32: Periodic Nudge & Memory Curation
+
+**Goal:** Land the agent-curated memory side of the Learning Loop. At configurable intervals during a session, the agent receives an internal system-level prompt asking it to review recent activity and decide what is worth persisting to MEMORY.md/USER.md vs leaving in the SQLite session archive. Honors PRMT-06 (mid-session writes don't mutate the active prompt — they take effect at next session start).
+**Depends on:** v2.0 memory framework (MEM-01..06 done); v2.0 PRMT-06 (frozen-at-session-start memory snapshot already shipped)
+**Requirements:** LEARN-01, LEARN-02
+**Success Criteria** (what must be TRUE):
+  1. A periodic nudge fires at the configured interval (default 5 min) during an active chat session, injecting a system-level prompt without user input
+  2. The agent can write to MEMORY.md/USER.md within the existing 3,575 char total cap during a nudge cycle; persisted entries appear in the next session's prompt without breaking the current session's prompt cache
+  3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
+  4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
+**Plans:** TBD (estimated 2 plans — nudge fire mechanism + memory persistence judgment prompt design)
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 32 to break down)
+
+**Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
+
+### Phase 33: Autonomous Skill Creation & Self-Improvement
+
+**Goal:** Land the agent-curated skill side of the Learning Loop. At task completion, the agent evaluates whether the path is worth documenting via heuristic (5+ tool calls / error recovery / user correction / non-obvious workflow) and autonomously writes a SKILL.md following the agentskills.io standard. The new `skill_manage` tool exposes 6 actions (create/patch/edit/delete/write_file/remove_file) with `patch` preferred for token-efficient updates.
+**Depends on:** Phase 25 (toolset registry — registers skill_manage as a new toolset entry); Phase 28 (SKILL-09 trust tiers — adds the `Self-created` tier that LEARN-04 assigns by default); v2.0 skill framework (Phase 19, done)
+**Requirements:** LEARN-03, LEARN-04, LEARN-05
+**Success Criteria** (what must be TRUE):
+  1. After a task that hit a trigger heuristic completes, the agent emits a tool_call to `skill_manage(action="create", ...)` that produces a valid SKILL.md under `~/.hermes/skills/<category>/<slug>/SKILL.md` with the `Self-created` trust tier set
+  2. Updates to existing skills are made via `skill_manage(action="patch", ...)` by default; the `patch` payload contains only the changed text, not the full skill content (token-efficient)
+  3. All 6 actions (create, patch, edit, delete, write_file, remove_file) are exposed via the `skill_manage` tool with the same JSON schema shape as the existing memory tool actions; runtime tests confirm each action's behavior
+  4. New self-created skills appear in the next session's skill index with the `Self-created` trust tier; agents can load them via the existing progressive-disclosure path (names+summaries → on-demand full content)
+**Plans:** TBD (estimated 3 plans — trigger heuristic detection, SKILL.md scaffold + agentskills.io frontmatter, skill_manage tool + 6 actions)
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 33 to break down)
+
+**Phase directory:** `.planning/phases/33-autonomous-skill-creation/`

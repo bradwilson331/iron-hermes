@@ -20,13 +20,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 22.4.2.3 — fix-the-pre-existing-inv-22-3-02-banner-bleed-before-milesto
+**Current focus:** Phase 23 — configuration-cli-and-setup-wizard (first v2.1 phase)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 23 (Configuration CLI and Setup Wizard)
 Plan: —
-Status: Defining requirements
+Status: Ready to plan
 Last activity: 2026-04-27 — Milestone v2.1 started
 
 ## Performance Metrics

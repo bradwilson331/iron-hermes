@@ -96,18 +96,36 @@ A working conversational AI agent with personality (context files) that operates
 | Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit — v2 brings CLI parity |
 | Cross-crate transport types use plain Strings (no embedded downstream types) | `OriginDecision` in `ironhermes-core` carries `String` fields, not `ironhermes_cron::JobOrigin` — embedding would create a circular crate dep. Consumers (CLI + LLM tool) construct `JobOrigin` at the call site where both crates are in scope. Pattern applies to any future enum that returns "what platform/route to use" data from `ironhermes-core` to a downstream crate. | ✓ Good (Phase 22.4.2.2) |
 
-## Current Milestone: v2.1 Carry-Overs
+## Current Milestone: v2.1 Carry-Overs + Learning Loop
 
-**Goal:** Close out all v2.0 deferred-but-unfulfilled requirements (29 reqs across 7 categories). No new feature scope, no GAP-NEW items — tight, focused close to the v2.0 vision before opening v2.2 (Production Polish).
+**Goal:** Close all v2.0 deferred requirements (29 carry-overs across 7 categories) **AND** land the Learning Loop foundation (5 new reqs in 2 phases). Together, these make IronHermes self-improving rather than just feature-complete — the Learning Loop is the canonical hermes-agent differentiator (per the architecture article that informed v2.1 planning).
 
-**Target features (v2.0 carry-overs only):**
+**Target features (34 reqs across 8 categories, 11 phases):**
+
+*Carry-overs (29 reqs / 9 phases):*
 - ACP adapter for IDE integration: JSON-RPC stdio server + SessionManager + event/permission/tool bridges + cwd-bound sessions (CLI-03..08, 6 reqs)
 - Anthropic prompt caching: cache_control breakpoints + system_and_3 strategy + cached/ephemeral separation (PRMT-08, PRMT-09, 2 reqs)
 - Toolset management: registry improvements, check_fn requirements, setup wizard hooks, runtime enable/disable (TOOL-01..05, 5 reqs)
 - Provider polish: API key per-base-URL scoping, auxiliary model routing, named custom providers (PROV-04, PROV-06, PROV-08, 3 reqs)
-- Skills trust tiers: replace hardcoded `Community` with builtin/official/trusted/community discrimination (SKILL-09, 1 req)
+- Skills trust tiers: replace hardcoded `Community` with builtin/official/trusted/community/self-created discrimination (SKILL-09, 1 req)
 - Gateway formal verification: back-fill formal verification of existing `ironhermes-gateway` crate (GW-01..04, GW-06, GW-07, GW-09, GW-10, 8 reqs)
 - Configuration / setup wizard: `hermes setup`, `config set/get/show`, `config migrate`, profile isolation (CFG-01..04, 4 reqs)
+
+*Learning Loop (5 NEW reqs / 2 phases):*
+- Periodic nudge mechanism + memory persistence judgment: at configurable intervals, agent decides per-item which memory layer (prompt vs session-search) information belongs in (LEARN-01, LEARN-02, 2 reqs)
+- Autonomous skill creation + skill_manage tool with patch-preferred semantics: agent detects task patterns worth documenting, writes/refines SKILL.md autonomously via 6-action skill_manage tool (LEARN-03, LEARN-04, LEARN-05, 3 reqs)
+
+### Architectural Principles (carried through every v2.1 phase)
+
+These principles, sourced from the canonical hermes-agent architecture, must be honored across all v2.1 phase implementations. They are not isolated to one phase — they constrain every phase's design.
+
+1. **The Learning Loop is the unifying philosophy** — Skills + Memory + Session Search are outputs of one continuous self-improvement process, not separate features. Phases 32-33 land the foundation; every other phase must consider how it participates.
+2. **Cache-awareness is load-bearing** — Three operations break the prompt cache: (a) switching models mid-session, (b) changing memory files mid-session, (c) changing context files mid-session. Phase 27 enforces; Phases 23/25/26 must surface warnings when their config could trigger it.
+3. **3,575 char total memory limit** — already aligned (MEM-01 2,200 + MEM-02 1,375). Phase 32's nudge mechanism must respect this when persisting.
+4. **Patch-over-rewrite for skill self-improvement** — Phase 33's `skill_manage` defaults to patch action for token efficiency + correctness preservation (mirrors the existing memory tool's substring-matching pattern).
+5. **Progressive disclosure for token economy** — names + summaries always; full content on demand. Applies to skills (Phase 28) and is a design constraint Phase 33 must preserve.
+6. **Sessions tied to ID, not platform** — cross-platform continuity. Phase 29 verifies; Phases 30/31 implement for ACP.
+7. **Gateway as same-loop participant**, not bolt-on delivery — incoming messages can trigger skill creation (Phase 33), automation outputs route back through gateway. Phase 29 verifies.
 
 **v2.0 outcome (closed 2026-04-27, status: tech_debt):**
 - 77/93 active requirements satisfied (~83%); 5/5 cross-phase integration; 4/4 user flows
@@ -140,4 +158,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-27 — v2.1 milestone (Carry-Overs) opened. v2.0 audited and ready to close as `tech_debt`; archive deferred until carry-overs land or user runs /gsd-complete-milestone v2.0.*
+*Last updated: 2026-04-27 — v2.1 milestone expanded to "Carry-Overs + Learning Loop" (34 reqs across 8 categories, 11 phases). 7 architectural principles from canonical hermes-agent threaded through every phase. v2.0 archive deferred.*
