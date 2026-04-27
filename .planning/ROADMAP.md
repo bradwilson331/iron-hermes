@@ -100,6 +100,16 @@ Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-own
 Plans:
 - [x] TBD (run /gsd-plan-phase 22.4.2 to break down) (completed 2026-04-26)
 
+### Phase 22.4.2.3: fix the pre-existing INV-22.3-02 banner-bleed before milestone (INSERTED)
+
+**Goal:** Update the static-grep regression test `invariant_22_3_02_banner_called_exactly_once_before_tui_init` in `crates/ironhermes-cli/tests/invariants_22_3.rs` so it accepts the legitimate Phase 22.4 ratatui-dispatch additions (Plan 22.4-11, commit `f1aeb73`) without losing regression intent. Replaces the stale `count == 1` equality with `count >= 1`, strengthens the ordering check from "first call site before TUI init" to "every call site strictly before `TuiHandle::new_with_extensions`", anchors on the qualified `TuiHandle::new_with_extensions` string, renames the test to `invariant_22_3_02_banner_called_at_least_once_strictly_before_tui_init`, and rewrites the doc-comment + assertion messages to cite Phase 22.4 CONTEXT D-03 as the rationale for accepting more than one site. Test-only change — `crates/ironhermes-cli/src/main.rs` is untouched. CONTEXT decisions D-01..D-06 in `22.4.2.3-CONTEXT.md` serve as the requirements set (no REQ-IDs).
+**Requirements:** (none — D-01..D-06 from 22.4.2.3-CONTEXT.md serve as the requirements set)
+**Depends on:** Phase 22.4.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 22.4.2.3 to break down)
+
 ### Phase 22.4.2.2: Cron create defaults to TG origin when gateway active (INSERTED)
 
 **Goal:** Restore the v1.x ergonomic where `hermes cron create` (and the LLM `cronjob` tool) auto-route a new job back to the configured Telegram chat when the gateway has exactly one authorized chat. Plan 01 adds `OriginDecision` enum + `Config::telegram_default_origin()` helper to `ironhermes-core::config` and consults it from `cmd_create` (CLI path); Plan 02 consults the same helper from `cronjob_tool::handle_create` (LLM-tool path) using `tracing::warn` (not `eprintln`) for the multi-chat hint to avoid polluting LLM tool output. Existing jobs are NOT migrated (D-12). Helper bypassed when explicit `--deliver` flag / `deliver` arg is provided (D-04). Final INV ledger: 64 INVs in `invariants_22_4.rs` (62 + 1 per plan).
