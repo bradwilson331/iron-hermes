@@ -64,6 +64,7 @@ A working conversational AI agent with personality (context files) that operates
 - v2.0 Phase 21.4 complete 2026-04-20: Persistent memory gap closure (memory_manager wired into AgentLoop/context engine across CLI+gateway, memory_enabled/user_profile_enabled config toggles, `hermes memory status/off` subcommands, on_session_end in clean exit paths, MEM-06 verified)
 - v2.0 Phase 21.5 complete 2026-04-21: Memory provider plugin (factory config loading, SQLite FTS5 memory_recall, Grafeo entity extraction, DuckDB ILIKE bridge, agent loop wiring for memory provider tools)
 - v2.0 Phase 21.6 complete 2026-04-22: Deployment setup files (.env.example, cli-config.yaml.example, Dockerfile with multi-stage Rust build, docker/entrypoint.sh, install.sh curl-pipe installer, setup-ironhermes.sh dev setup, ensure_home_dirs() first-run scaffolding)
+- v2.0 Phase 22.4.2.2 complete 2026-04-27: Cron create defaults to TG origin when gateway active — both `hermes cron create` (CLI) and the LLM `cronjob` tool auto-route to `deliver=origin` for the configured single-chat whitelist; multi-chat falls back to `local` with operator hint (stderr from CLI, `tracing::warn` from LLM tool); explicit `--deliver` flag/JSON arg preserved as full bypass; OriginDecision enum lives in `ironhermes-core` with plain-String fields to avoid a circular crate dep; INV ledger advanced 62 → 64
 - 400+ workspace tests passing
 - The "self-improving" aspect is the project's differentiator — the agent edits its own SOUL.md/AGENTS.md to refine its personality and capabilities over time
 - Tech stack: Rust 2024 edition, tokio async, SQLite (rusqlite), OpenAI-compatible LLM API
@@ -92,6 +93,7 @@ A working conversational AI agent with personality (context files) that operates
 | Pattern-based env exclusion for exec sandbox | Forward compatible with new env vars | ✓ Good |
 | delegate_task excluded from child toolsets | Structural recursion prevention | ✓ Good |
 | Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit — v2 brings CLI parity |
+| Cross-crate transport types use plain Strings (no embedded downstream types) | `OriginDecision` in `ironhermes-core` carries `String` fields, not `ironhermes_cron::JobOrigin` — embedding would create a circular crate dep. Consumers (CLI + LLM tool) construct `JobOrigin` at the call site where both crates are in scope. Pattern applies to any future enum that returns "what platform/route to use" data from `ironhermes-core` to a downstream crate. | ✓ Good (Phase 22.4.2.2) |
 
 ## Current Milestone: v2.0 Intelligence & Identity
 
@@ -128,4 +130,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-20 after Phase 21.3 (Model Metadata) complete*
+*Last updated: 2026-04-27 after Phase 22.4.2.2 (cron create defaults to TG origin when gateway active) complete*
