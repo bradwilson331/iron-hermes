@@ -212,3 +212,39 @@ Files created exist:
 Commits exist: 7d4a4fe, a5a44bb, 5da580a, 50403f1, 06dc15f, d5ba4fe ✓
 
 All 23 integration tests pass ✓
+
+## UAT Findings (2026-04-28)
+
+Manual UAT performed against the worktree binary using `IRONHERMES_HOME=/tmp/uat-23-...` and a real OpenRouter API key.
+
+| UAT | Scope | Result |
+|-----|-------|--------|
+| 1a | First-run wizard renders D-16 framing + minimum-viable flow completes | **PASS** |
+| 1b | `hermes chat` resumes after wizard (D-07 transparent resume) + streaming LLM call succeeds | **PASS** after fix |
+| 2 | `hermes config show` Learning Loop banner toggles on `memory.memory_enabled` flip + cache-break warning fires on `set` | **PASS** |
+| 3 | `hermes config show` redacts `model.api_key` (observed `sk-or-***`) | **PASS** |
+
+### UAT 1b root cause + fix
+
+Original wizard code hardcoded `model.default = "openrouter/qwen-2.5-coder-32b"`, which is not a valid OpenRouter model identifier (the `openrouter/` prefix isn't an OpenRouter author namespace). On the first chat turn the streaming LLM call returned 404 Not Found from `https://openrouter.ai/api/v1/chat/completions`.
+
+Iterated through three candidates before settling:
+1. `qwen/qwen-2.5-coder-32b-instruct` — listed in OpenRouter's catalog but returned 404 (account-level entitlement issue, not a wrong ID).
+2. `qwen/qwen3-coder:free` — succeeded structurally (auth + model resolution + request OK) but returned 429 (free-tier rate limit) — bad first-run UX for fresh accounts.
+3. **Final decision: no hardcoded default in the wizard.** The model field is now a required prompt with the hint `(e.g. openai/gpt-4o-mini)` so users land on a model that matches their account's entitlements rather than guessing a fragile default that ages quickly.
+
+### Implementation changes vs. original Plan 02 §Task 2
+
+- `run_minimum_viable_flow`: replaced `prompt_with_default(rl, "Default model", default_model)` + hardcoded `"openrouter/qwen-2.5-coder-32b"` with `prompt_required(rl, "Default model (e.g. openai/gpt-4o-mini)")` — wizard refuses to proceed without a user-supplied model ID.
+- `run_model_section`: branches on `config.model.default.is_empty()` — uses `prompt_required` for empty config (forces explicit choice), `prompt_with_default` for existing config (preserves edit ergonomics).
+- Test fixtures across `wizard_flow.rs`, `config_validate.rs`, `config_setter.rs`, `setup_wizard.rs` updated from the stale `qwen-2.5-coder-32b-instruct` literal to `openai/gpt-4o-mini` (representative valid OpenRouter ID; tests exercise `apply_*_answer` behavior with explicit inputs, not the wizard's hardcoded default).
+- `config_show_redaction.rs` test fixtures left unchanged — the literal in those YAML fixtures is arbitrary fixture content, not an assertion about the wizard.
+
+### Test coverage after fix
+
+- `wizard_flow`: 16 tests pass
+- `setup_wizard`: 16 tests pass
+- `config_validate`: 9 tests pass
+- `config_setter`: 8 tests pass
+
+Total: 49 tests green; no test count regression.
