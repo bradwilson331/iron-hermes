@@ -57,10 +57,7 @@ fn get_at(doc: &serde_yaml::Value, keys: &[&str]) -> Option<String> {
     let mut node = doc;
     for key in keys {
         let key_v = serde_yaml::Value::String((*key).to_string());
-        node = match node.as_mapping().and_then(|m| m.get(&key_v)) {
-            Some(v) => v,
-            None => return None,
-        };
+        node = node.as_mapping().and_then(|m| m.get(&key_v))?;
     }
     match node {
         serde_yaml::Value::String(s) => Some(s.clone()),
