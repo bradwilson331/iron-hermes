@@ -18,7 +18,7 @@ pub use config::{
     ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, HubConfig,
     MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
 };
-pub use config_schema::{ConfigField, MemoryAction};
+pub use config_schema::{ConfigField, MemoryAction, schema as config_schema};
 pub use constants::*;
 pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
 pub use error::{HermesError, Result};
