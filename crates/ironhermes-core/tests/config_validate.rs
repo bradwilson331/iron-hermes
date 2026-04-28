@@ -6,7 +6,7 @@ use ironhermes_core::config_validate::ConfigValidationError;
 fn valid_config() -> Config {
     let mut c = Config::default();
     c.model.api_key = Some("sk-test".into());
-    c.model.default = "openrouter/qwen-2.5-coder-32b".into();
+    c.model.default = "openai/gpt-4o-mini".into();
     c.model.provider = "openrouter".into();
     c
 }

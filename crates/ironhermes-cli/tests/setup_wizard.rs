@@ -30,7 +30,7 @@ fn minimum_viable_answers_seed_full_config() {
         &mut config,
         "openrouter",
         "sk-test",
-        "openrouter/qwen-2.5-coder-32b",
+        "openai/gpt-4o-mini",
         "y",
     );
     // Persist: typed Config first, then learning.* splice (mirrors run_minimum_viable_flow).
@@ -72,7 +72,7 @@ fn learning_loop_no_writes_explicit_false() {
         &mut config,
         "openrouter",
         "sk-test",
-        "openrouter/qwen-2.5-coder-32b",
+        "openai/gpt-4o-mini",
         "n",
     );
     config.save_to(&tmp.path().join("config.yaml")).unwrap();
@@ -198,11 +198,11 @@ fn config_set_cache_breaking_warns_then_persists() {
     Command::cargo_bin("ironhermes")
         .unwrap()
         .env("IRONHERMES_HOME", tmp.path())
-        .args(["config", "set", "model.default", "openrouter/qwen-2.5-coder-32b"])
+        .args(["config", "set", "model.default", "openai/gpt-4o-mini"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Persisted: model.default = openrouter/qwen-2.5-coder-32b",
+            "Persisted: model.default = openai/gpt-4o-mini",
         ))
         .stderr(predicate::str::contains("invalidates the prompt cache"));
 }

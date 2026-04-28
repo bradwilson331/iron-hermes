@@ -116,10 +116,10 @@ async fn run_minimum_viable_flow(
     let api_key = prompt_required(rl, &format!("API key for {}", provider))?;
     apply_api_key_answer(config, &api_key);
 
-    // 3. Default model
-    let default_model = "openrouter/qwen-2.5-coder-32b";
-    let model = prompt_with_default(rl, "Default model", default_model)?;
-    apply_model_answer(config, &model, default_model);
+    // 3. Default model — required, no hardcoded default. The wizard refuses to
+    // proceed with an empty model; users get a hint with a typical OpenRouter ID.
+    let model = prompt_required(rl, "Default model (e.g. openai/gpt-4o-mini)")?;
+    apply_model_answer(config, &model, "");
 
     // 4. Learning Loop opt-in (D-14, D-16) — verbatim framing first.
     println!("\n{}\n", LEARNING_LOOP_FRAMING);
@@ -160,8 +160,12 @@ async fn run_model_section(
     apply_provider_answer(config, &provider, "openrouter");
     let api_key = prompt_required(rl, &format!("API key for {}", provider))?;
     apply_api_key_answer(config, &api_key);
-    let model = prompt_with_default(rl, "Default model", &config.model.default)?;
-    apply_model_answer(config, &model, "openrouter/qwen-2.5-coder-32b");
+    let model = if config.model.default.is_empty() {
+        prompt_required(rl, "Default model (e.g. openai/gpt-4o-mini)")?
+    } else {
+        prompt_with_default(rl, "Default model", &config.model.default)?
+    };
+    apply_model_answer(config, &model, "");
     Ok(())
 }
 
