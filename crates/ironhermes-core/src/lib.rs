@@ -1,7 +1,10 @@
 pub mod commands;
 pub mod config;
 pub mod config_schema;
+pub mod config_setter;
+pub mod config_validate;
 pub mod constants;
+pub mod wizard;
 pub mod context_scanner;
 pub mod error;
 pub mod memory_provider;
