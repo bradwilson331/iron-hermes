@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: planning
+status: executing
 stopped_at: Phase 23 context gathered
-last_updated: "2026-04-27T20:40:24.455Z"
-last_activity: 2026-04-27 — Milestone v2.1 started
+last_updated: "2026-04-28T14:04:43.397Z"
+last_activity: 2026-04-28 -- Phase 23 execution started
 progress:
   total_phases: 21
   completed_phases: 9
-  total_plans: 50
+  total_plans: 52
   completed_plans: 50
-  percent: 100
+  percent: 96
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 23 — configuration-cli-and-setup-wizard (first v2.1 phase)
+**Current focus:** Phase 23 — configuration-cli-and-setup-wizard
 
 ## Current Position
 
-Phase: 23 (Configuration CLI and Setup Wizard)
-Plan: —
-Status: Ready to plan
-Last activity: 2026-04-27 — Milestone v2.1 started
+Phase: 23 (configuration-cli-and-setup-wizard) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 23
+Last activity: 2026-04-28 -- Phase 23 execution started
 
 ## Performance Metrics
 

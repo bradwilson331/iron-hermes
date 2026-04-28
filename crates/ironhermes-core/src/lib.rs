@@ -1,7 +1,10 @@
 pub mod commands;
 pub mod config;
 pub mod config_schema;
+pub mod config_setter;
+pub mod config_validate;
 pub mod constants;
+pub mod wizard;
 pub mod context_scanner;
 pub mod error;
 pub mod memory_provider;
@@ -18,7 +21,7 @@ pub use config::{
     ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, HubConfig,
     MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
 };
-pub use config_schema::{ConfigField, MemoryAction};
+pub use config_schema::{ConfigField, MemoryAction, schema as config_schema};
 pub use constants::*;
 pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
 pub use error::{HermesError, Result};
