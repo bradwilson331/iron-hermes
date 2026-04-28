@@ -26,12 +26,15 @@ use ironhermes_core::commands::registry::build_registry as build_command_registr
 use ironhermes_core::types::Platform;
 use std::time::Instant;
 
+mod config_cli;
 mod cron;
 mod batch;
 mod memory_cmd;
 mod memory_setup;
 mod models_cmd;
 mod mcp_config;
+mod preflight;
+mod setup;
 mod tui;
 use ironhermes_cli::skills_cmd;
 
@@ -144,6 +147,16 @@ enum Commands {
         #[command(subcommand)]
         action: mcp_config::McpAction,
     },
+    /// Interactive first-run setup wizard (Phase 23, D-01/D-02).
+    Setup {
+        /// Section to configure: model, memory, gateway, tools (default: minimum-viable flow)
+        section: Option<String>,
+    },
+    /// Manage configuration values (Phase 23, D-08/D-09/D-10/D-11).
+    Config {
+        #[command(subcommand)]
+        subcommand: config_cli::ConfigSubcommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -197,6 +210,16 @@ async fn main() -> Result<()> {
     ensure_home_dirs().context("Failed to initialize IronHermes home directory")?;
 
     let cli = Cli::parse();
+
+    // Phase 23 D-05: pre-flight check on interactive entry points.
+    // Skip when user is explicitly managing config (Setup/Config) or asking for help/version.
+    let skip_preflight = matches!(
+        &cli.command,
+        Some(Commands::Setup { .. }) | Some(Commands::Config { .. })
+    );
+    if !skip_preflight {
+        preflight::run_preflight_check(&cli).await?;
+    }
 
     // GAP-6a: interactive REPL entry points (`hermes chat`, bare `hermes`) get a
     // minimal log filter so the WARN flood from SkillRegistry / Cron / provider
@@ -300,6 +323,12 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Some(Commands::Setup { ref section }) => {
+            setup::run_setup(section.as_deref(), ironhermes_core::wizard::WizardMode::Explicit).await
+        }
+        Some(Commands::Config { subcommand }) => {
+            config_cli::handle_config_command(subcommand).await
+        }
         None => {
             if let Some(ref prompt) = cli.execute {
                 // Phase 21.7 Plan 08 (D-12): `-e` batch mode honors top-level

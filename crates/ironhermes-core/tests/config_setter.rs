@@ -6,9 +6,9 @@ use ironhermes_core::config_schema::schema;
 #[test]
 fn config_setter_creates_file_and_sets_model_default() {
     let tmp = tempfile::TempDir::new().unwrap();
-    config_set(tmp.path(), "model.default", "openrouter/qwen-2.5-coder-32b").unwrap();
+    config_set(tmp.path(), "model.default", "openai/gpt-4o-mini").unwrap();
     let got = config_get(tmp.path(), "model.default").unwrap();
-    assert_eq!(got.as_deref(), Some("openrouter/qwen-2.5-coder-32b"));
+    assert_eq!(got.as_deref(), Some("openai/gpt-4o-mini"));
 }
 
 #[test]

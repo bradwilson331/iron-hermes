@@ -13,8 +13,8 @@ use ironhermes_core::wizard::{
 #[test]
 fn apply_model_uses_default_on_empty_input() {
     let mut config = Config::default();
-    apply_model_answer(&mut config, "", "openrouter/qwen-2.5-coder-32b");
-    assert_eq!(config.model.default, "openrouter/qwen-2.5-coder-32b");
+    apply_model_answer(&mut config, "", "openai/gpt-4o-mini");
+    assert_eq!(config.model.default, "openai/gpt-4o-mini");
 }
 
 #[test]
@@ -68,8 +68,8 @@ fn apply_api_key_does_not_clear_existing_on_whitespace_input() {
 #[test]
 fn apply_model_uses_explicit_input_trimmed() {
     let mut config = Config::default();
-    apply_model_answer(&mut config, "  openrouter/qwen-2.5-coder-32b  ", "default-model");
-    assert_eq!(config.model.default, "openrouter/qwen-2.5-coder-32b");
+    apply_model_answer(&mut config, "  openai/gpt-4o-mini  ", "default-model");
+    assert_eq!(config.model.default, "openai/gpt-4o-mini");
 }
 
 // ─── Task 4: Learning Loop + memory helpers ────────────────────────────────────
