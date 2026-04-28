@@ -454,11 +454,11 @@ Plans:
   2. `hermes config set <key> <value>` updates a config.yaml key and `hermes config get <key>` reads it back
   3. `hermes config show` prints the active config with redacted secrets
   4. `hermes config migrate` scans installed skills for unconfigured settings and prompts the user to fill them in
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 23-01-PLAN.md — Schema extension + pure-function core (wizard, validate, dotted-path setter) + Wave 0 test scaffolding
-- [ ] 23-02-PLAN.md — CLI surfaces (`hermes setup` + `hermes config`) + rustyline I/O + first-run pre-flight middleware + manual UAT
+- [x] 23-02-PLAN.md — CLI surfaces (`hermes setup` + `hermes config`) + rustyline I/O + first-run pre-flight middleware + manual UAT
 
 **Phase directory:** `.planning/phases/23-configuration-cli-and-setup-wizard/`
 
