@@ -211,13 +211,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Phase 23 D-05: pre-flight check on interactive entry points.
-    // Skip when user is explicitly managing config (Setup/Config) or asking for help/version.
-    let skip_preflight = matches!(
-        &cli.command,
-        Some(Commands::Setup { .. }) | Some(Commands::Config { .. })
-    );
-    if !skip_preflight {
+    // Phase 23 D-05: pre-flight check fires ONLY on interactive entry points
+    // (`hermes chat` and bare `hermes` without -e). Non-interactive subcommands
+    // (skills/mcp/cron/memory/doctor/etc.) and explicit setup/config management
+    // never trigger the wizard — otherwise CLI tests and scripted runs would
+    // EOF on stdin when no config.yaml exists.
+    let run_preflight = matches!(cli.command, Some(Commands::Chat { .. }) | None)
+        && cli.execute.is_none();
+    if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
 
