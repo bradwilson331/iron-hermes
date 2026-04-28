@@ -23,7 +23,7 @@ fn make_wizard_editor() -> Result<rustyline::DefaultEditor> {
     use rustyline::config::Configurer;
     let mut rl = rustyline::DefaultEditor::new().context("initializing rustyline for wizard")?;
     rl.set_history_ignore_dups(true).ok();
-    // Do NOT call set_max_history_size, load_history, or save_history.
+    // Anti-Pattern #3: no history file persistence — only set_history_ignore_dups is allowed.
     Ok(rl)
 }
 
