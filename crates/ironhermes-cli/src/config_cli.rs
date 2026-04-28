@@ -5,6 +5,8 @@
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
+use colored::Colorize;
+use ironhermes_core::{config_schema, config_setter};
 use std::path::Path;
 
 #[derive(Subcommand)]
@@ -42,16 +44,34 @@ pub async fn handle_config_command(cmd: ConfigSubcommand) -> Result<()> {
     }
 }
 
-// Stubs — full impls in Tasks 4–6.
-async fn cmd_config_set(_home: &Path, _k: &str, _v: &str) -> Result<()> {
-    anyhow::bail!("config set not implemented (Task 4)")
+async fn cmd_config_set(hermes_home: &Path, key: &str, value: &str) -> Result<()> {
+    let schema = config_schema::schema();
+    if config_setter::is_cache_breaking(key, &schema) {
+        // D-10: warn-and-persist. Warning to stderr; persistence message to stdout.
+        eprintln!(
+            "{} Changing {} invalidates the prompt cache. Active sessions will pay full cache-miss cost on next turn.",
+            "⚠".yellow(),
+            key
+        );
+    }
+    let _old = config_setter::config_set(hermes_home, key, value)
+        .with_context(|| format!("failed to set {}", key))?;
+    println!("Persisted: {} = {}", key, value);
+    Ok(())
 }
-async fn cmd_config_get(_home: &Path, _k: &str) -> Result<()> {
-    anyhow::bail!("config get not implemented (Task 4)")
+
+async fn cmd_config_get(hermes_home: &Path, key: &str) -> Result<()> {
+    match config_setter::config_get(hermes_home, key)? {
+        Some(v) => println!("{}", v),
+        None => {} // missing key: silent + exit 0 (idiomatic for shell scripting)
+    }
+    Ok(())
 }
+
 async fn cmd_config_show(_home: &Path) -> Result<()> {
     anyhow::bail!("config show not implemented (Task 5)")
 }
+
 async fn cmd_config_migrate(_home: &Path) -> Result<()> {
     anyhow::bail!("config migrate not implemented (Task 6)")
 }

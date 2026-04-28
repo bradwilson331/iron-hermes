@@ -188,6 +188,74 @@ fn setup_unknown_section_errors_with_help_text() {
 }
 
 // ============================================================================
+// Task 4: config set/get with cache-break warnings
+// ============================================================================
+
+#[test]
+fn config_set_cache_breaking_warns_then_persists() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    Command::cargo_bin("ironhermes")
+        .unwrap()
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["config", "set", "model.default", "openrouter/qwen-2.5-coder-32b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Persisted: model.default = openrouter/qwen-2.5-coder-32b",
+        ))
+        .stderr(predicate::str::contains("invalidates the prompt cache"));
+}
+
+#[test]
+fn config_set_non_cache_breaking_no_warning() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    Command::cargo_bin("ironhermes")
+        .unwrap()
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["config", "set", "memory.user_profile_enabled", "false"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Persisted: memory.user_profile_enabled = false",
+        ))
+        .stderr(predicate::str::contains("invalidates the prompt cache").not());
+}
+
+#[test]
+fn config_get_roundtrip() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    Command::cargo_bin("ironhermes")
+        .unwrap()
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["config", "set", "model.default", "test-model"])
+        .assert()
+        .success();
+    Command::cargo_bin("ironhermes")
+        .unwrap()
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["config", "get", "model.default"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test-model"));
+}
+
+#[test]
+fn config_get_missing_key_silent() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    Command::cargo_bin("ironhermes")
+        .unwrap()
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["config", "get", "no.such.key"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+// ============================================================================
 // Task 7: Preflight middleware skip-list tests
 // ============================================================================
 
