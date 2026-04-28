@@ -655,7 +655,7 @@ fn cmd_fast(ctx: &CommandContext) -> CommandResult {
 
 fn cmd_config(_ctx: &CommandContext) -> CommandResult {
     CommandResult::Output(
-        "Configuration: (use hermes config show for full details)".to_string(),
+        "Use `hermes config show` to inspect, `hermes config set <key> <value>` to change, or `hermes config migrate` to discover skill gaps.".to_string(),
     )
 }
 
