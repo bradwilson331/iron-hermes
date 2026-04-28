@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
-stopped_at: Phase 23 context gathered
-last_updated: "2026-04-28T14:04:43.397Z"
+stopped_at: Phase 24 context gathered
+last_updated: "2026-04-28T23:29:59.086Z"
 last_activity: 2026-04-28 -- Phase 23 execution started
 progress:
   total_phases: 21
-  completed_phases: 9
+  completed_phases: 10
   total_plans: 52
-  completed_plans: 50
-  percent: 96
+  completed_plans: 52
+  percent: 100
 ---
 
 # Project State
@@ -339,8 +339,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T20:40:24.450Z
-Stopped at: Phase 23 context gathered
-Resume file: .planning/phases/23-configuration-cli-and-setup-wizard/23-CONTEXT.md
+Last session: 2026-04-28T23:29:59.081Z
+Stopped at: Phase 24 context gathered
+Resume file: .planning/phases/24-profile-isolation/24-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
