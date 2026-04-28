@@ -150,6 +150,101 @@ async fn cmd_config_show(hermes_home: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_config_migrate(_home: &Path) -> Result<()> {
-    anyhow::bail!("config migrate not implemented (Task 6)")
+async fn cmd_config_migrate(hermes_home: &Path) -> Result<()> {
+    use ironhermes_core::SkillRegistry;
+
+    // Load installed skills and collect their config/env declarations.
+    let skills_dir = hermes_home.join("skills");
+    if !skills_dir.exists() {
+        println!(
+            "No configuration gaps detected. (No skills directory at {})",
+            skills_dir.display()
+        );
+        return Ok(());
+    }
+
+    let registry = SkillRegistry::load_with_paths(&[skills_dir.clone()]);
+
+    let mut config_gaps: Vec<(String, String)> = Vec::new(); // (skill_name, dotted_key)
+    let mut env_gaps: Vec<(String, String)> = Vec::new(); // (skill_name, env_var)
+
+    // Walk each skill's hermes_metadata for config / required_environment_variables.
+    for skill in registry.list() {
+        if let Some(hm) = &skill.hermes_metadata {
+            for cfg_field in &hm.config {
+                if config_setter::config_get(hermes_home, &cfg_field.key)?.is_none() {
+                    config_gaps.push((skill.name.clone(), cfg_field.key.clone()));
+                }
+            }
+            for env_entry in &hm.required_environment_variables {
+                if !env_var_exists_in_dotenv(&hermes_home.join(".env"), &env_entry.name)? {
+                    env_gaps.push((skill.name.clone(), env_entry.name.clone()));
+                }
+            }
+        }
+    }
+
+    if config_gaps.is_empty() && env_gaps.is_empty() {
+        println!("No configuration gaps detected.");
+        return Ok(());
+    }
+
+    // Print gap table.
+    println!("Skill configuration gaps:");
+    println!();
+    if !config_gaps.is_empty() {
+        println!("  config.yaml gaps:");
+        for (skill, key) in &config_gaps {
+            println!("    [{}] missing: {}", skill, key);
+        }
+        println!();
+    }
+    if !env_gaps.is_empty() {
+        println!("  .env gaps:");
+        for (skill, var) in &env_gaps {
+            println!("    [{}] missing: {}", skill, var);
+        }
+        println!();
+    }
+
+    // Per-gap prompts with skip/skip-all.
+    let mut rl = rustyline::DefaultEditor::new()?;
+    let mut skip_all = false;
+    for (skill, key) in &config_gaps {
+        if skip_all {
+            break;
+        }
+        println!("[{}] Set {} now? [y / skip / skip all]", skill, key);
+        let answer = rl.readline("> ").unwrap_or_default();
+        match answer.trim() {
+            "skip all" => {
+                skip_all = true;
+            }
+            "skip" | "n" | "no" => continue,
+            _ => {
+                let value = rl.readline(&format!("Value for {}: ", key))?;
+                config_setter::config_set(hermes_home, key, value.trim())?;
+            }
+        }
+    }
+    // Env gaps left to manual (.env editing) — print path hint.
+    if !env_gaps.is_empty() {
+        println!(
+            "Edit env vars in {} (use `hermes config env-path`).",
+            hermes_home.join(".env").display()
+        );
+    }
+
+    Ok(())
+}
+
+fn env_var_exists_in_dotenv(env_path: &Path, var: &str) -> Result<bool> {
+    if !env_path.exists() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(env_path)?;
+    Ok(text.lines().any(|l| {
+        let trimmed = l.trim_start();
+        trimmed.starts_with(&format!("{}=", var))
+    }))
 }
