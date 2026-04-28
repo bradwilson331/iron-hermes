@@ -9,6 +9,7 @@
 //! API.
 
 pub mod memory_cmd;
+pub mod setup;
 pub mod skills_cmd;
 
 // Phase 21.7 Wave 0 (ISS-08) — re-exports for Wave 1 Plan 04 + Wave 3 Plans 08/09:
