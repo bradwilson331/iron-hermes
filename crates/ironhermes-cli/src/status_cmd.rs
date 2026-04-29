@@ -21,6 +21,142 @@ use serde::{Deserialize, Serialize};
 
 pub mod probe;
 
+// ---------------------------------------------------------------------------
+// Phase 24 D-14: Profile discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Phase 24 D-14: per-profile summary entry shown in `hermes status` Profile section.
+/// T-24-03: ONLY metadata fields permitted — no config values, no secrets.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ProfileSummary {
+    pub name: String,
+    /// True if this profile matches the current invocation's active profile.
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_pid: Option<u32>,
+    pub gateway_live: bool,
+    /// RFC3339 last-modified of the profile dir's config.yaml, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    /// Phase 23 Learning Loop status: "enabled", "disabled", or "unknown".
+    pub learning_loop: String,
+}
+
+/// Phase 24: returns the active profile slug for the current invocation,
+/// or "default" if IRONHERMES_HOME does not point under ~/.ironhermes/profiles/.
+///
+/// Reverse-checks the resolved IRONHERMES_HOME path. The bare-`hermes` root
+/// (`~/.ironhermes/`) returns the literal string "default" per D-15.
+pub fn current_profile() -> String {
+    let home = ironhermes_core::get_hermes_home();
+    let components: Vec<_> = home.components().collect();
+    for window in components.windows(2) {
+        if let std::path::Component::Normal(name) = window[0] {
+            if name == ironhermes_core::PROFILES_SUBDIR {
+                if let std::path::Component::Normal(slug) = window[1] {
+                    return slug.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    "default".to_string()
+}
+
+/// Phase 24 D-14: enumerate `<ironhermes_root>/profiles/*/` subdirs that contain
+/// a config.yaml file. Returns one ProfileSummary per matching subdir, sorted
+/// alphabetically by name. Marks `active = true` for the entry whose name
+/// matches `active_profile` (canonical: pass `&current_profile()`).
+///
+/// Returns an empty Vec if the profiles dir does not exist (the bare-hermes
+/// install case before any --profile has been used).
+pub fn enumerate_profiles(ironhermes_root: &std::path::Path, active_profile: &str) -> Vec<ProfileSummary> {
+    let profiles_dir = ironhermes_root.join(ironhermes_core::PROFILES_SUBDIR);
+    if !profiles_dir.exists() {
+        return Vec::new();
+    }
+    let read_dir = match std::fs::read_dir(&profiles_dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    let mut entries: Vec<ProfileSummary> = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let cfg_path = path.join("config.yaml");
+        if !cfg_path.exists() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let last_modified = std::fs::metadata(&cfg_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| {
+                use std::time::UNIX_EPOCH;
+                t.duration_since(UNIX_EPOCH).ok().map(|d| {
+                    chrono::DateTime::<chrono::Utc>::from(
+                        std::time::UNIX_EPOCH + d,
+                    )
+                    .to_rfc3339()
+                })
+            });
+        // Per-profile gateway.pid probe via Plan 02 helpers.
+        let (gateway_pid, gateway_live) = match ironhermes_gateway::pid::read_gateway_pid(&path) {
+            Ok(Some(rec)) => {
+                let live = matches!(
+                    ironhermes_gateway::pid::is_pid_alive(rec.pid),
+                    ironhermes_gateway::pid::PidLiveness::Live
+                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
+                );
+                (Some(rec.pid), live)
+            }
+            _ => (None, false),
+        };
+        // Phase 23 Learning Loop banner re-use: parse config.yaml and
+        // mirror the cmd_config_show logic. Best-effort — on parse error,
+        // emit "unknown".
+        let learning_loop = read_learning_loop_status(&cfg_path)
+            .unwrap_or_else(|| "unknown".to_string());
+        entries.push(ProfileSummary {
+            name: name.clone(),
+            active: name == active_profile,
+            gateway_pid,
+            gateway_live,
+            last_modified,
+            learning_loop,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// Best-effort: read config.yaml and return "enabled" / "disabled" matching
+/// Phase 23 D-17's Learning Loop banner logic. Returns None on read/parse
+/// failure (caller defaults to "unknown").
+fn read_learning_loop_status(cfg_path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(cfg_path).ok()?;
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&raw).ok()?;
+    let memory_enabled = parsed
+        .get("memory")
+        .and_then(|m| m.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let skill_gen = parsed
+        .get("skills")
+        .and_then(|s| s.get("generation_enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if memory_enabled && skill_gen {
+        Some("enabled".to_string())
+    } else {
+        Some("disabled".to_string())
+    }
+}
+
 #[derive(clap::Args, Debug, Clone)]
 pub struct StatusArgs {
     /// Include all optional subsections (per-MCP-server detail, full fallback chain, etc.)
@@ -47,6 +183,10 @@ pub struct StatusReport {
     pub processes: ProcessesStatus,
     pub mcp: McpStatus,
     pub yolo: YoloStatus,
+    /// Phase 24 D-14: additive. Skip-if-None keeps v1 JSON schema non-breaking.
+    /// Bare-hermes installs without any profiles/ dir get None → field absent in JSON.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub profiles: Option<Vec<ProfileSummary>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -213,6 +353,7 @@ impl StatusReport {
                 enabled: false,
                 source: "disabled".into(),
             },
+            profiles: None,
         }
     }
 
@@ -359,6 +500,7 @@ impl StatusReport {
                 enabled: yolo_enabled,
                 source: yolo_source.into(),
             },
+            profiles: None, // Phase 24 D-14: populated by run_status after collect()
         })
     }
 }
@@ -397,10 +539,46 @@ pub async fn run_status(args: StatusArgs) -> anyhow::Result<()> {
         StatusReport::collect(&config, &hermes_home, &args, &noop_probe).await?
     };
 
+    // Phase 24 D-14: enumerate profiles and populate the additive JSON field.
+    let active = current_profile();
+    // The canonical ironhermes root is always ~/.ironhermes — profiles always
+    // live under it per D-04 (locked by PROFILES_SUBDIR constant).
+    let ironhermes_root = dirs::home_dir()
+        .map(|h| h.join(".ironhermes"))
+        .unwrap_or_else(|| ironhermes_core::get_hermes_home());
+    let profile_entries = enumerate_profiles(&ironhermes_root, &active);
+    let profile_field = if profile_entries.is_empty() {
+        None
+    } else {
+        Some(profile_entries.clone())
+    };
+    let mut snap = snap;
+    snap.profiles = profile_field;
+
     if args.json {
         println!("{}", serde_json::to_string_pretty(&snap)?);
     } else {
         print_styled(&snap);
+        // Phase 24 D-14: render Profile section after the main status output.
+        if !profile_entries.is_empty() {
+            use colored::Colorize;
+            println!();
+            println!("{}", "Profiles".bold().cyan());
+            for p in &profile_entries {
+                let marker = if p.active { "*" } else { " " };
+                let pid_note = if p.gateway_live {
+                    format!(" gateway pid {} (live)", p.gateway_pid.unwrap_or(0))
+                } else if p.gateway_pid.is_some() {
+                    format!(" gateway pid {} (stale)", p.gateway_pid.unwrap_or(0))
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  {} {} [Learning Loop: {}]{}",
+                    marker, p.name, p.learning_loop, pid_note
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -650,4 +828,116 @@ fn telegram_authed(config: &ironhermes_core::Config) -> bool {
         .get("telegram")
         .map(|p| p.token.is_some() || p.api_key.is_some())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn enumerate_profiles_empty_when_no_profiles_dir() {
+        let dir = TempDir::new().unwrap();
+        let entries = enumerate_profiles(dir.path(), "default");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn enumerate_profiles_returns_alphabetical_entries() {
+        let dir = TempDir::new().unwrap();
+        let profiles = dir.path().join("profiles");
+        std::fs::create_dir_all(profiles.join("work")).unwrap();
+        std::fs::write(
+            profiles.join("work/config.yaml"),
+            "memory:\n  enabled: true\nskills:\n  generation_enabled: true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(profiles.join("personal")).unwrap();
+        std::fs::write(
+            profiles.join("personal/config.yaml"),
+            "memory:\n  enabled: true\nskills:\n  generation_enabled: false\n",
+        )
+        .unwrap();
+        let entries = enumerate_profiles(dir.path(), "work");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "personal");
+        assert_eq!(entries[1].name, "work");
+        assert!(entries[1].active);
+        assert!(!entries[0].active);
+        assert_eq!(entries[1].learning_loop, "enabled");
+        assert_eq!(entries[0].learning_loop, "disabled");
+    }
+
+    #[test]
+    fn enumerate_profiles_skips_subdirs_without_config_yaml() {
+        let dir = TempDir::new().unwrap();
+        let profiles = dir.path().join("profiles");
+        std::fs::create_dir_all(profiles.join("empty")).unwrap();
+        let entries = enumerate_profiles(dir.path(), "default");
+        assert!(entries.is_empty(), "subdir without config.yaml must be skipped");
+    }
+
+    #[test]
+    fn current_profile_returns_default_for_bare_home() {
+        let bare = std::path::PathBuf::from("/home/u/.ironhermes");
+        let mut last: Option<&std::ffi::OsStr> = None;
+        let comps: Vec<_> = bare.components().collect();
+        for w in comps.windows(2) {
+            if let std::path::Component::Normal(n) = w[0] {
+                if n == "profiles" {
+                    if let std::path::Component::Normal(slug) = w[1] {
+                        last = Some(slug);
+                    }
+                }
+            }
+        }
+        let result = last
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        assert_eq!(result, "default");
+    }
+
+    #[test]
+    fn current_profile_extracts_slug_from_profile_path() {
+        let p = std::path::PathBuf::from("/home/u/.ironhermes/profiles/work");
+        let mut last: Option<&std::ffi::OsStr> = None;
+        let comps: Vec<_> = p.components().collect();
+        for w in comps.windows(2) {
+            if let std::path::Component::Normal(n) = w[0] {
+                if n == "profiles" {
+                    if let std::path::Component::Normal(slug) = w[1] {
+                        last = Some(slug);
+                    }
+                }
+            }
+        }
+        let result = last
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        assert_eq!(result, "work");
+    }
+
+    #[test]
+    fn status_report_profiles_field_absent_when_none() {
+        let report = StatusReport::fixture();
+        assert!(report.profiles.is_none());
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            !json.contains("\"profiles\""),
+            "profiles field must be absent from JSON when None; got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn status_report_profiles_field_present_when_some_empty_vec() {
+        let mut report = StatusReport::fixture();
+        report.profiles = Some(vec![]);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            json.contains("\"profiles\""),
+            "profiles field must be present when Some([]); got: {}",
+            json
+        );
+    }
 }
