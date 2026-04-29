@@ -89,6 +89,13 @@ struct Cli {
     /// a live TTY.
     #[arg(long = "classic-tui")]
     classic_tui: bool,
+
+    /// Phase 24 (D-07): activate a named profile (isolated HERMES_HOME under
+    /// ~/.ironhermes/profiles/<name>/). Wins over any pre-set IRONHERMES_HOME
+    /// env var silently (D-02). Available on every subcommand including
+    /// `gateway run` (D-07). Validated per ironhermes_core::profile::validate_profile_name.
+    #[arg(long, global = true, value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -198,24 +205,50 @@ fn should_use_classic_tui(cli: &Cli) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file — must happen BEFORE Cli::parse() if any env var would
-    // influence parsing; it is already safe to run here because nothing in
-    // the clap derivation reads env.
+    // Phase 24 (Pitfall 1 canonical order):
+    // 1. Cli::parse()  — no env reads, pure argv
+    // 2. resolve_and_set_profile — sets IRONHERMES_HOME for profile pivot (D-01)
+    // 3. emit D-08 banner (stderr, stdout untouched)
+    // 4. dotenvy load  — reads .env from now-pivoted home
+    // 5. ensure_home_dirs — scaffolds now-pivoted home
+    // 6. preflight gate — UNCHANGED condition (Phase 23 lock)
+    // 7. dispatch
+    let cli = Cli::parse();
+
+    // Phase 24 D-01/D-02/D-04: resolve --profile flag and pivot IRONHERMES_HOME
+    // BEFORE any consumer (dotenvy, ensure_home_dirs, preflight, get_hermes_home callers).
+    let active_profile = resolve_and_set_profile(&cli)?;
+
+    // Phase 24 D-08: stderr banner when --profile is active. Stdout untouched
+    // so pipes like `hermes -e "prompt" | jq` stay clean.
+    if let Some(ref name) = active_profile {
+        eprintln!(
+            "[profile: {}] HERMES_HOME={}",
+            name,
+            ironhermes_core::display_hermes_home()
+        );
+    }
+
+    // Load .env file — runs AFTER resolve_and_set_profile so it reads .env
+    // from the profile-scoped home (Config::env_path() calls get_hermes_home()).
     let env_path = Config::env_path();
     if env_path.exists() {
         dotenvy::from_path(&env_path).ok();
     }
 
-    // D-21: Create ~/.ironhermes/ subdirectories on first run (belt-and-suspenders)
+    // D-21: Create ~/.ironhermes/ (or ~/.ironhermes/profiles/<name>/) subdirs
+    // on first run. After the Phase 24 pivot above, this scaffolds the
+    // profile-scoped path automatically.
     ensure_home_dirs().context("Failed to initialize IronHermes home directory")?;
-
-    let cli = Cli::parse();
 
     // Phase 23 D-05: pre-flight check fires ONLY on interactive entry points
     // (`hermes chat` and bare `hermes` without -e). Non-interactive subcommands
     // (skills/mcp/cron/memory/doctor/etc.) and explicit setup/config management
     // never trigger the wizard — otherwise CLI tests and scripted runs would
     // EOF on stdin when no config.yaml exists.
+    // PHASE 24 NOTE: Condition MUST remain unchanged. The Phase 23
+    // verification report (23-VERIFICATION.md) locks this condition; Phase
+    // 24's --profile resolution runs BEFORE this gate but does not widen it.
     let run_preflight = matches!(cli.command, Some(Commands::Chat { .. }) | None)
         && cli.execute.is_none();
     if run_preflight {
@@ -378,6 +411,38 @@ fn cmd_version() -> Result<()> {
     println!("The self-improving AI agent, rewritten in Rust");
     println!("Created by Nous Research");
     Ok(())
+}
+
+/// Phase 24 (D-01/D-02/D-04): validate `--profile <name>` and pivot
+/// `IRONHERMES_HOME` to `~/.ironhermes/profiles/<name>/`. Returns the
+/// validated slug when `--profile` is active, or `None` for bare `hermes`.
+///
+/// Must be called immediately after `Cli::parse()` and BEFORE
+/// `ensure_home_dirs()` and BEFORE the Phase 23 preflight gate fires.
+/// Per D-02, a pre-set `IRONHERMES_HOME` env var is silently overridden
+/// when `--profile` is supplied.
+fn resolve_and_set_profile(cli: &Cli) -> Result<Option<String>> {
+    let Some(ref name) = cli.profile else {
+        return Ok(None);
+    };
+    let validated = ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| anyhow::anyhow!("Invalid profile name '{}': {}", name, e))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let profile_path = home
+        .join(".ironhermes")
+        .join(ironhermes_core::PROFILES_SUBDIR)
+        .join(&validated);
+    // SAFETY: called once at process start, before any threads are spawned
+    // that read IRONHERMES_HOME. Mirrors the unsafe-set_var pattern
+    // established by Phase 21.6 (cron tests) and consumed by every Phase
+    // 22+ entry point. The `unsafe` is required by Rust 2024 edition for
+    // env-var mutation and is safe here because no consumer has yet read
+    // get_hermes_home() at this point in main().
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", &profile_path);
+    }
+    Ok(Some(validated))
 }
 
 /// Creates the standard ~/.ironhermes/ subdirectory tree on first run.
