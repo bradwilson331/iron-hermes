@@ -533,6 +533,50 @@ impl Default for ToolRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 25 D-13 / Open Question 2: greenfield todo_* schema constructors.
+// These are free functions (not Tool impls) because the in-session state
+// (Arc<Mutex<Vec<String>>>) is owned by AgentLoop, not a Tool struct.
+// Plan 3 wires real handlers via AgentLoop::with_intercepts(). Plan 2 ships
+// only the schema constructors — do NOT register them in ToolRegistry::new().
+// ---------------------------------------------------------------------------
+
+/// Phase 25 D-13 / Open Question 2 (Plan 2): minimal greenfield schema for the
+/// intercepted `todo_write` tool. `items` replaces the current todo list.
+/// In-session state lives in `Arc<Mutex<Vec<String>>>` owned by AgentLoop and
+/// passed to `with_intercepts()` (D-16, wired in Plan 3).
+pub fn todo_write_schema() -> ToolSchema {
+    ToolSchema::new(
+        "todo_write",
+        "Write (replace) the current todo list for this session. Replaces the entire list with the provided items.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "New todo list items. Replaces the entire current list."
+                }
+            },
+            "required": ["items"]
+        }),
+    )
+}
+
+/// Phase 25 D-13 / Open Question 2 (Plan 2): minimal greenfield schema for
+/// `todo_read`. Returns the current list. No required parameters.
+pub fn todo_read_schema() -> ToolSchema {
+    ToolSchema::new(
+        "todo_read",
+        "Read the current todo list for this session.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1261,6 +1305,85 @@ mod tests {
         let toolsets = registry.list_toolsets();
         assert_eq!(toolsets, vec!["code", "web"],
             "list_toolsets must return deduplicated, sorted toolset names; got: {toolsets:?}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 02 Task 3: todo_write_schema, todo_read_schema, D-26 Test 3
+    // ---------------------------------------------------------------------------
+
+    /// Test: todo_write_schema() returns a ToolSchema with name "todo_write" and
+    /// a required "items" field of type array of strings.
+    #[test]
+    fn todo_write_schema_minimal_shape() {
+        let schema = crate::registry::todo_write_schema();
+        assert_eq!(schema.function.name, "todo_write",
+            "todo_write_schema must have name 'todo_write'");
+        let params = serde_json::to_value(&schema.function.parameters).unwrap();
+        let props = &params["properties"];
+        assert!(props.get("items").is_some(),
+            "todo_write_schema must have 'items' in properties; got: {props}");
+        let items_type = props["items"]["type"].as_str().unwrap_or("");
+        assert_eq!(items_type, "array",
+            "todo_write_schema 'items' must be of type 'array'; got: {items_type}");
+        let item_item_type = props["items"]["items"]["type"].as_str().unwrap_or("");
+        assert_eq!(item_item_type, "string",
+            "todo_write_schema items.items.type must be 'string'; got: {item_item_type}");
+        let required = params["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("items")),
+            "todo_write_schema must have 'items' in required; got: {required:?}");
+    }
+
+    /// Test: todo_read_schema() returns a ToolSchema with name "todo_read"
+    /// and empty/no-arg parameters.
+    #[test]
+    fn todo_read_schema_minimal_shape() {
+        let schema = crate::registry::todo_read_schema();
+        assert_eq!(schema.function.name, "todo_read",
+            "todo_read_schema must have name 'todo_read'");
+        let params = serde_json::to_value(&schema.function.parameters).unwrap();
+        let props = params["properties"].as_object();
+        assert!(
+            props.map(|p| p.is_empty()).unwrap_or(true),
+            "todo_read_schema must have empty properties; got: {params}"
+        );
+        // No required fields (or empty required array)
+        let required = params.get("required").and_then(|r| r.as_array());
+        assert!(
+            required.map(|r| r.is_empty()).unwrap_or(true),
+            "todo_read_schema must have no required fields; got: {params}"
+        );
+    }
+
+    /// D-26 Test 3 (mandatory): intercepted_tool_no_schema_duplicate.
+    /// Boot registry with all 6 intercepted tool names; assert each appears
+    /// exactly once in get_definitions(None).
+    #[tokio::test]
+    async fn intercepted_tool_no_schema_duplicate() {
+        let mut registry = ToolRegistry::new();
+        let names = ["memory", "session_search", "delegate_task", "todo_write", "todo_read", "cronjob"];
+        for name in names {
+            registry.register_intercepted(
+                name,
+                ToolSchema::new(
+                    name,
+                    "stub intercepted tool for D-26 Test 3",
+                    serde_json::json!({ "type": "object", "properties": {} }),
+                ),
+                std::sync::Arc::new(|_args| {
+                    Box::pin(async move { Ok("stub".to_string()) })
+                }),
+            );
+        }
+        let schemas = registry.get_definitions(None);
+        let names_returned: Vec<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+        for name in names {
+            let count = names_returned.iter().filter(|n| n.as_str() == name).count();
+            assert_eq!(
+                count, 1,
+                "intercepted tool '{}' must appear exactly once in schema list, found {}; all: {:?}",
+                name, count, names_returned
+            );
+        }
     }
 
     #[tokio::test]
