@@ -51,10 +51,27 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
 }
 
+/// D-12 / D-14 (Phase 25): async handler for intercepted tools.
+/// Resolves Open Question 3 — async because execute_tool_call() is async; spawn_blocking
+/// for sync-StateStore stays inside the closure body (see session_search migration in Plan 3).
+///
+/// Security (T-25-04): library-internal use only — handler closures MUST be constructed
+/// by the workspace (ironhermes-agent::AgentLoop::with_intercepts), NOT deserialized from
+/// config or user input. The `with_intercepts(...)` builder in Plan 3 accepts only the five
+/// known-safe handles (memory_manager, state_store, subagent_runner, todo_state, cron_router).
+pub type InterceptHandler = std::sync::Arc<
+    dyn Fn(serde_json::Value) -> futures::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
+>;
+
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     guardrails: Vec<Box<dyn ironhermes_hooks::GuardrailHook>>,
     error_detail: ironhermes_hooks::ErrorDetailLevel,
+    /// D-14 (Phase 25): intercepted tools stored separately from regular tools.
+    /// get_definitions() returns schemas from BOTH maps; D-15 prevents name collisions.
+    intercepts: HashMap<String, (ToolSchema, InterceptHandler)>,
 }
 
 impl ToolRegistry {
@@ -63,18 +80,77 @@ impl ToolRegistry {
             tools: HashMap::new(),
             guardrails: Vec::new(),
             error_detail: ironhermes_hooks::ErrorDetailLevel::Full,
+            intercepts: HashMap::new(),
         }
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        let name = tool.name().to_string();
+        assert!(
+            !self.intercepts.contains_key(&name),
+            "register: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
+            name,
+        );
+        self.tools.insert(name, tool);
     }
 
     /// Register a tool dynamically (e.g., from MCP discovery). Per D-10.
     /// Functionally identical to register() -- the name distinction is semantic
     /// (dynamic = runtime MCP vs static = startup built-in).
+    /// D-15: Also guards against intercept name collisions for MCP-discovered tools.
     pub fn register_dynamic(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        let name = tool.name().to_string();
+        assert!(
+            !self.intercepts.contains_key(&name),
+            "register_dynamic: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
+            name,
+        );
+        self.tools.insert(name, tool);
+    }
+
+    /// Register an intercepted tool by name, schema, and async handler (D-12 / D-14, Phase 25).
+    ///
+    /// Intercepted tools are NOT in the regular `tools` HashMap; they live in a separate
+    /// `intercepts` map. `get_definitions()` returns schemas from BOTH maps so the LLM sees
+    /// the full surface, but `dispatch_intercepts()` handles them before `dispatch()` is called.
+    ///
+    /// D-15 reciprocal guard: panics if `name` is already registered as a regular tool —
+    /// schema duplication is structurally impossible.
+    ///
+    /// Security (T-25-04): library-internal use only — handler closures MUST be constructed
+    /// by the workspace (ironhermes-agent::AgentLoop::with_intercepts), NOT deserialized from
+    /// config or user input.
+    pub fn register_intercepted(
+        &mut self,
+        name: &str,
+        schema: ToolSchema,
+        handler: InterceptHandler,
+    ) {
+        assert!(
+            !self.tools.contains_key(name),
+            "register_intercepted: name '{}' already registered as a regular tool — schema duplication blocked at registry build (D-15)",
+            name,
+        );
+        self.intercepts.insert(name.to_string(), (schema, handler));
+    }
+
+    /// Dispatch a tool call to the intercepts map (D-12, Phase 25).
+    ///
+    /// Returns `Some(result)` when the tool is intercepted; `None` to fall through to
+    /// the normal `dispatch()` path. The agent_loop call site is responsible for:
+    /// ```rust,ignore
+    /// if let Some(r) = registry.dispatch_intercepts(name, args.clone()).await {
+    ///     return r;
+    /// }
+    /// registry.dispatch(name, args).await
+    /// ```
+    pub async fn dispatch_intercepts(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Option<anyhow::Result<String>> {
+        let (_schema, handler) = self.intercepts.get(name)?;
+        Some(handler(args).await)
     }
 
     /// Remove all tools whose name starts with `{server_name}__`.
@@ -104,7 +180,8 @@ impl ToolRegistry {
     }
 
     pub fn get_definitions(&self, enabled_tools: Option<&[String]>) -> Vec<ToolSchema> {
-        self.tools
+        let mut schemas: Vec<ToolSchema> = self
+            .tools
             .values()
             .filter(|t| t.is_available())
             .filter(|t| {
@@ -113,7 +190,20 @@ impl ToolRegistry {
                     .unwrap_or(true)
             })
             .map(|t| t.schema())
-            .collect()
+            .collect();
+        // Phase 25 D-14: union with intercept schemas. Same enabled_tools filter applies.
+        // Toolset-level filter (D-23) added in Plan 3 once toolset_config exists.
+        schemas.extend(
+            self.intercepts
+                .iter()
+                .filter(|(name, _)| {
+                    enabled_tools
+                        .map(|list| list.iter().any(|n| n == name.as_str()))
+                        .unwrap_or(true)
+                })
+                .map(|(_, (schema, _))| schema.clone()),
+        );
+        schemas
     }
 
     pub async fn dispatch(
@@ -879,6 +969,76 @@ mod tests {
             .await;
         assert!(result.is_ok(), "warn guardrail must not block: {result:?}");
         assert_eq!(result.unwrap(), "mock result");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 02 Task 1: InterceptHandler + register_intercepted + dispatch_intercepts tests
+    // ---------------------------------------------------------------------------
+
+    fn test_handler(response: &'static str) -> InterceptHandler {
+        std::sync::Arc::new(move |_args| {
+            Box::pin(async move { Ok(response.to_string()) })
+        })
+    }
+
+    fn test_intercept_schema(name: &str) -> ToolSchema {
+        ToolSchema::new(
+            name,
+            "test intercept tool",
+            serde_json::json!({ "type": "object", "properties": {} }),
+        )
+    }
+
+    /// Test: register_intercepted inserts schema; get_definitions(None) includes it exactly once.
+    #[test]
+    fn register_intercepted_inserts_schema_and_handler() {
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted(
+            "test_intercept",
+            test_intercept_schema("test_intercept"),
+            test_handler("hello"),
+        );
+        let schemas = registry.get_definitions(None);
+        let count = schemas.iter().filter(|s| s.function.name == "test_intercept").count();
+        assert_eq!(count, 1, "intercepted tool must appear exactly once in get_definitions(None)");
+    }
+
+    /// Test: register_intercepted panics when name already registered as a regular tool (D-15).
+    #[test]
+    #[should_panic(expected = "already registered as a regular tool")]
+    fn register_intercepted_panics_on_duplicate_with_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool { tool_name: "dup_name" }));
+        registry.register_intercepted("dup_name", test_intercept_schema("dup_name"), test_handler("x"));
+    }
+
+    /// Test: register() panics when name already registered as an intercepted tool (D-15 reciprocal).
+    #[test]
+    #[should_panic(expected = "already registered as an intercepted tool")]
+    fn register_tools_panics_on_duplicate_with_intercepts() {
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted("dup_name", test_intercept_schema("dup_name"), test_handler("x"));
+        registry.register(Box::new(MockTool { tool_name: "dup_name" }));
+    }
+
+    /// Test: dispatch_intercepts returns Some(Ok("hello")) for a known intercepted tool.
+    #[tokio::test]
+    async fn dispatch_intercepts_returns_some_for_known() {
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted("known", test_intercept_schema("known"), test_handler("hello"));
+        let result = registry.dispatch_intercepts("known", serde_json::json!({})).await;
+        assert!(result.is_some(), "dispatch_intercepts must return Some for a known intercepted name");
+        let inner = result.unwrap();
+        assert!(inner.is_ok(), "handler must return Ok");
+        assert_eq!(inner.unwrap(), "hello");
+    }
+
+    /// Test: dispatch_intercepts returns None for an unknown name (caller falls through to dispatch()).
+    #[tokio::test]
+    async fn dispatch_intercepts_returns_none_for_unknown() {
+        let registry = ToolRegistry::new();
+        let result = registry.dispatch_intercepts("unknown", serde_json::json!({})).await;
+        assert!(result.is_none(), "dispatch_intercepts must return None for an unregistered name");
     }
 
     #[tokio::test]
