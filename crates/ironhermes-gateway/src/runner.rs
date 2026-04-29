@@ -239,6 +239,22 @@ impl GatewayRunner {
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
     pub async fn start(&self) -> Result<()> {
+        // --- 0. Acquire PID lock (Phase 24 D-09/D-12) ---
+        // Refuses startup if another live gateway is already running under
+        // the same HERMES_HOME (profile-scoped after Phase 24's --profile
+        // pivot in main.rs). Stale PID files (crashed gateways) are
+        // auto-cleaned by acquire_pid_lock; the live-conflict path returns
+        // an error containing "Stop it first" which the CLI dispatch maps
+        // to exit code 2.
+        //
+        // The PidLockGuard is bound to a local variable held across the
+        // remainder of start(). Its Drop impl removes gateway.pid on both
+        // clean return and error propagation, so graceful shutdown and
+        // crash recovery converge on the same cleanup path.
+        let home = ironhermes_core::get_hermes_home();
+        let _pid_guard = crate::pid::acquire_pid_lock(&home)
+            .context("Gateway startup refused: PID lock conflict")?;
+
         // --- 1. Resolve Telegram token ---
         let tg_config = self
             .config
