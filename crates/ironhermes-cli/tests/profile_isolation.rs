@@ -69,3 +69,78 @@ fn profile_env_var_set_before_scaffold() {
         std::env::set_var("IRONHERMES_HOME", cleanup.path());
     }
 }
+
+/// 24-03-02 (D-08): when --profile is active, the stderr banner is emitted
+/// exactly once before any other output; stdout stays clean for pipes.
+/// Bare hermes (no --profile) prints NO banner.
+///
+/// Subprocess test — uses CARGO_BIN_EXE_ironhermes (binary name per
+/// crates/ironhermes-cli/Cargo.toml [[bin]] is `ironhermes`, not `hermes`).
+#[test]
+fn profile_banner_printed_to_stderr() {
+    let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Skipping profile_banner_printed_to_stderr: CARGO_BIN_EXE_ironhermes not set");
+            return;
+        }
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // With --profile testbanner: banner MUST appear on stderr, MUST NOT appear on stdout.
+    let out = std::process::Command::new(&bin)
+        .env("IRONHERMES_HOME", tmp.path())
+        // Disable interactive REPL preflight by hitting `doctor` (a non-Chat,
+        // non-bare entry point; Phase 23 preflight gate excludes it).
+        .args(["--profile", "testbanner", "doctor"])
+        .output()
+        .expect("failed to run ironhermes binary");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stderr.contains("[profile: testbanner]"),
+        "expected banner '[profile: testbanner]' on stderr, got stderr={:?}",
+        stderr
+    );
+    assert!(
+        !stdout.contains("[profile:"),
+        "stdout must NOT contain banner; got stdout={:?}",
+        stdout
+    );
+}
+
+/// 24-03-02 negative case: bare `ironhermes doctor` (no --profile) emits NO
+/// banner anywhere. Protects pipes like `hermes -e "..." | jq` from regression.
+#[test]
+fn no_banner_when_profile_absent() {
+    let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Skipping no_banner_when_profile_absent: CARGO_BIN_EXE_ironhermes not set");
+            return;
+        }
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    let out = std::process::Command::new(&bin)
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["doctor"])
+        .output()
+        .expect("failed to run ironhermes binary");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !stderr.contains("[profile:"),
+        "stderr must NOT contain banner when --profile is absent; got stderr={:?}",
+        stderr
+    );
+    assert!(
+        !stdout.contains("[profile:"),
+        "stdout must NOT contain banner; got stdout={:?}",
+        stdout
+    );
+}
