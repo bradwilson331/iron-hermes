@@ -12,4 +12,4 @@ pub mod web_read;
 pub mod web_search;
 
 pub use memory_manager_handle::MemoryManagerHandle;
-pub use registry::{Tool, ToolRegistry};
+pub use registry::{InterceptHandler, Prerequisite, Tool, ToolRegistry, todo_read_schema, todo_write_schema};

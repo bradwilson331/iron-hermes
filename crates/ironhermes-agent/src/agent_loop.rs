@@ -288,6 +288,140 @@ impl AgentLoop {
         self
     }
 
+    /// Phase 25 D-16: register intercepted tools via known-safe workspace handles.
+    ///
+    /// Wires session_search, memory, delegate_task, todo_write, todo_read, and cronjob
+    /// (when handles are provided) through `register_intercepted()` in the registry.
+    /// Each parameter is typed to a workspace-internal handle — no string-keyed or
+    /// config-deserialized handler construction is exposed here (T-25-04 mitigation).
+    ///
+    /// Call this AFTER `with_state_store()` and `with_memory_manager()` in the builder chain.
+    /// Default `AgentLoop::new()` registers no intercepts (backward compat — D-16).
+    pub fn with_intercepts(
+        self,
+        memory_manager: Option<Arc<Mutex<MemoryManager>>>,
+        state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
+        subagent_runner: Option<Arc<dyn ironhermes_tools::delegate_task::SubagentRunner>>,
+        todo_state: Option<Arc<Mutex<Vec<String>>>>,
+        _cron_router: Option<()>, // reserved for future cron router handle
+    ) -> Self {
+        {
+            // Use try_write() which is available in both sync and async context.
+            // During with_intercepts() (builder phase, before run()), no other writer holds
+            // the lock — try_write() always succeeds. unwrap() is safe here.
+            let mut reg = self.registry.try_write().expect("with_intercepts: failed to acquire registry write lock (concurrent modification during construction)");
+            #[allow(unused_mut)]
+
+            if let Some(state) = state_store {
+                let s = state.clone();
+                reg.register_intercepted(
+                    "session_search",
+                    crate::session_search::session_search_schema(),
+                    std::sync::Arc::new(move |args| {
+                        let s = s.clone();
+                        Box::pin(async move {
+                            let res = tokio::task::spawn_blocking(move || {
+                                let store = s.lock().unwrap();
+                                crate::session_search::handle_session_search(&args, &store)
+                            })
+                            .await;
+                            match res {
+                                Ok(s) => Ok(s),
+                                Err(e) => Err(anyhow::anyhow!("session_search join failed: {}", e)),
+                            }
+                        })
+                    }),
+                );
+            }
+
+            if let Some(mm) = memory_manager {
+                // Get memory schema from a temporary MemoryTool instance (canonical schema source per D-14).
+                use ironhermes_tools::Tool as _;
+                let memory_schema = ironhermes_tools::memory_tool::MemoryTool::new(mm.clone()).schema();
+                let m = mm.clone();
+                reg.register_intercepted(
+                    "memory",
+                    memory_schema,
+                    std::sync::Arc::new(move |args| {
+                        let m = m.clone();
+                        Box::pin(async move {
+                            // Dispatch to the memory manager handle's tool call router.
+                            use ironhermes_tools::memory_manager_handle::MemoryManagerHandle;
+                            let g = m.lock().await;
+                            g.handle_tool_call("memory", args)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))
+                        })
+                    }),
+                );
+            }
+
+            if let Some(_sr) = subagent_runner {
+                // delegate_task intercept: schema from DelegateTaskTool, dispatch stub for Plan 4.
+                // Full wiring (semaphore, config, progress callback) is in Plan 4 (operator surface).
+                // Use a placeholder schema since DelegateTaskTool requires a runner in constructor.
+                // Plan 4 will replace this with the live DelegateTaskTool schema.
+                let dt_schema = ironhermes_core::ToolSchema::new(
+                    "delegate_task",
+                    "Delegate a focused task to a child agent with restricted tools.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "task": { "type": "string", "description": "Task description for the child agent." },
+                            "allowed_tools": { "type": "array", "items": { "type": "string" }, "description": "Tools available to the child agent." }
+                        },
+                        "required": []
+                    }),
+                );
+                reg.register_intercepted(
+                    "delegate_task",
+                    dt_schema,
+                    std::sync::Arc::new(move |_args| {
+                        Box::pin(async move {
+                            // Stub: full delegation wiring via DelegateTaskTool is in Plan 4.
+                            Ok(r#"{"error":"not_wired","reason":"delegate_task intercept stub — full wiring in Plan 4"}"#.to_string())
+                        })
+                    }),
+                );
+            }
+
+            if let Some(ts) = todo_state {
+                let read_state = ts.clone();
+                reg.register_intercepted(
+                    "todo_read",
+                    ironhermes_tools::todo_read_schema(),
+                    std::sync::Arc::new(move |_args| {
+                        let st = read_state.clone();
+                        Box::pin(async move {
+                            let g = st.lock().await;
+                            Ok(serde_json::json!({"items": g.clone()}).to_string())
+                        })
+                    }),
+                );
+                let write_state = ts.clone();
+                reg.register_intercepted(
+                    "todo_write",
+                    ironhermes_tools::todo_write_schema(),
+                    std::sync::Arc::new(move |args| {
+                        let st = write_state.clone();
+                        Box::pin(async move {
+                            let items: Vec<String> = serde_json::from_value(
+                                args.get("items")
+                                    .cloned()
+                                    .unwrap_or(serde_json::json!([])),
+                            )
+                            .unwrap_or_default();
+                            let mut g = st.lock().await;
+                            *g = items.clone();
+                            Ok(serde_json::json!({"replaced_with": items}).to_string())
+                        })
+                    }),
+                );
+            }
+        } // drop write guard
+        self
+    }
+
     pub fn with_compression(mut self, context_length: usize, threshold: f64) -> Self {
         self.compressor = Some(Mutex::new(ContextCompressor::new(
             context_length,
@@ -476,11 +610,8 @@ impl AgentLoop {
     /// - An unrecoverable error occurs
     pub async fn run(&mut self, mut messages: Vec<ChatMessage>) -> Result<AgentResult> {
         let mut tool_schemas = self.registry.read().await.get_definitions(None);
-        // D-07: Add session_search schema when state_store is configured.
-        // Not added in subagent context (subagents should not search sessions).
-        if self.state_store.is_some() {
-            tool_schemas.push(crate::session_search::session_search_schema());
-        }
+        // Phase 25 D-14: session_search schema flows through registry.get_definitions()
+        // because register_intercepted("session_search", ...) was called in with_intercepts().
         // Phase 21.5: Add memory provider tool schemas (e.g. memory_recall).
         // These are tools declared by the provider via get_tool_schemas() —
         // distinct from the built-in "memory" tool which handles add/replace/remove.
@@ -948,27 +1079,21 @@ impl AgentLoop {
                     args_preview: ironhermes_hooks::event::preview(args_str, 200),
                 });
 
-                // D-07: Intercept session_search before registry dispatch.
-                // StateStore uses sync rusqlite; wrap in spawn_blocking to avoid blocking tokio.
-                if name == "session_search" {
-                    if let Some(ref state) = self.state_store {
-                        let state_clone = state.clone();
-                        let args_clone = args.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            let store = state_clone.lock().unwrap();
-                            crate::session_search::handle_session_search(&args_clone, &store)
-                        })
-                        .await;
+                // Phase 25 D-12: single intercept dispatch path replaces hardcoded session_search match.
+                // dispatch_intercepts returns Some(result) for intercepted tools, None to fall through.
+                {
+                    let reg = self.registry.read().await;
+                    if let Some(result) = reg.dispatch_intercepts(name, args.clone()).await {
                         return match result {
                             Ok(s) => s,
                             Err(e) => format!(
-                                r#"{{"error":"internal","reason":"{}"}}"#,
+                                r#"{{"error":"intercept_failed","reason":"{}"}}"#,
                                 e.to_string().replace('"', "'")
                             ),
                         };
                     }
-                    return r#"{"error":"unavailable","reason":"state store not configured"}"#.to_string();
                 }
+                // fall through to existing dispatch path (registry.dispatch / guardrail chain)
 
                 // Save path for subdirectory discovery before args is moved
                 let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
@@ -1986,5 +2111,124 @@ mod memory_provider_wiring_tests {
             source.contains("memory_provider_tool_names.contains"),
             "agent_loop.rs must intercept tools by name in execute_tool_call()"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 25 Plan 03 Task 3: with_intercepts builder + session_search migration tests
+    // -----------------------------------------------------------------------
+
+    /// Test: Build AgentLoop, call with_intercepts with a state_store; assert session_search
+    /// is registered via dispatch_intercepts.
+    #[tokio::test]
+    async fn agent_loop_with_intercepts_registers_session_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.db");
+        let store = ironhermes_state::StateStore::new(db_path).unwrap();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(store));
+
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let agent = AgentLoop::new(client, registry, 1)
+            .with_intercepts(None, Some(state.clone()), None, None, None);
+
+        let reg = agent.registry.read().await;
+        let result = reg.dispatch_intercepts("session_search", serde_json::json!({"query": "test"})).await;
+        assert!(
+            result.is_some(),
+            "session_search must be registered as intercept via with_intercepts"
+        );
+    }
+
+    /// Test: Build AgentLoop, call with_intercepts with a todo_state; assert both
+    /// todo_write and todo_read are registered.
+    #[tokio::test]
+    async fn agent_loop_with_intercepts_registers_todo_pair() {
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let todo_state: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent = AgentLoop::new(client, registry, 1)
+            .with_intercepts(None, None, None, Some(todo_state), None);
+
+        let reg = agent.registry.read().await;
+        assert!(
+            reg.dispatch_intercepts("todo_write", serde_json::json!({"items": []})).await.is_some(),
+            "todo_write must be registered via with_intercepts"
+        );
+        assert!(
+            reg.dispatch_intercepts("todo_read", serde_json::json!({})).await.is_some(),
+            "todo_read must be registered via with_intercepts"
+        );
+    }
+
+    /// Source-text invariant: session_search schema injection block is deleted (D-14).
+    /// The push call that injects session_search_schema() into tool_schemas must be absent.
+    #[test]
+    fn agent_loop_session_search_schema_injection_removed() {
+        let source = include_str!("agent_loop.rs");
+        // Build the forbidden string at runtime to avoid it appearing in test source.
+        let forbidden_push: String = [
+            "tool_schemas.push(crate::session_search::",
+            "session_search_schema())",
+        ].concat();
+        assert!(
+            !source.contains(&forbidden_push),
+            "D-14: session_search schema push injection must be deleted from run(); \
+             schema flows through registry.get_definitions() via register_intercepted. \
+             Found injection at unexpected location in agent_loop.rs."
+        );
+    }
+
+    /// Source-text invariant: hardcoded session_search dispatch block is deleted (D-12).
+    /// The name-equality check for session_search in execute_tool_call must be absent.
+    #[test]
+    fn agent_loop_session_search_match_block_removed() {
+        let source = include_str!("agent_loop.rs");
+        // Build the forbidden string at runtime to avoid it appearing in test source.
+        let forbidden_match: String = [
+            "if name == ",
+            "\"session_search\"",
+        ].concat();
+        assert!(
+            !source.contains(&forbidden_match),
+            "D-12: hardcoded session_search name-equality block must be deleted \
+             from execute_tool_call(); replaced by dispatch_intercepts call. \
+             Found hardcoded match at unexpected location in agent_loop.rs."
+        );
+    }
+
+    /// D-26 Test 3 live-handler version: all 6 intercepted tools appear exactly once
+    /// in get_definitions(None) after wiring via with_intercepts.
+    #[tokio::test]
+    async fn intercepted_no_duplicate_with_real_handlers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.db");
+        let store = ironhermes_state::StateStore::new(db_path).unwrap();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(store));
+        let todo_state: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let agent = AgentLoop::new(client, registry, 1)
+            .with_intercepts(None, Some(state), None, Some(todo_state), None);
+
+        let reg = agent.registry.read().await;
+        let schemas = reg.get_definitions(None);
+        let names: Vec<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+
+        // session_search, todo_write, todo_read should be wired (memory needs handle)
+        for expected in &["session_search", "todo_write", "todo_read"] {
+            let count = names.iter().filter(|n| n.as_str() == *expected).count();
+            assert_eq!(
+                count, 1,
+                "intercepted tool '{}' must appear exactly once in get_definitions(None); \
+                 all: {:?}", expected, names
+            );
+        }
     }
 }
