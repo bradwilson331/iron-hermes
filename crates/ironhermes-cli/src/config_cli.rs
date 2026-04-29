@@ -26,12 +26,12 @@ pub enum ConfigSubcommand {
     EnvPath,
 }
 
-pub async fn handle_config_command(cmd: ConfigSubcommand) -> Result<()> {
+pub async fn handle_config_command(cmd: ConfigSubcommand, profile_name: &str) -> Result<()> {
     let hermes_home = ironhermes_core::constants::get_hermes_home();
     match cmd {
         ConfigSubcommand::Set { key, value } => cmd_config_set(&hermes_home, &key, &value).await,
         ConfigSubcommand::Get { key } => cmd_config_get(&hermes_home, &key).await,
-        ConfigSubcommand::Show => cmd_config_show(&hermes_home).await,
+        ConfigSubcommand::Show => cmd_config_show(&hermes_home, profile_name).await,
         ConfigSubcommand::Migrate => cmd_config_migrate(&hermes_home).await,
         ConfigSubcommand::Path => {
             println!("{}", hermes_home.join("config.yaml").display());
@@ -110,7 +110,11 @@ fn redact_at(doc: &mut serde_yaml::Value, keys: &[&str]) {
     }
 }
 
-async fn cmd_config_show(hermes_home: &Path) -> Result<()> {
+async fn cmd_config_show(hermes_home: &Path, profile_name: &str) -> Result<()> {
+    // Phase 24 D-15: always-on Profile header, ABOVE Phase 23's Learning Loop banner.
+    println!("Profile: {}", profile_name);
+    println!();
+
     let cfg_path = hermes_home.join("config.yaml");
     if !cfg_path.exists() {
         println!("No config.yaml found at {}.", cfg_path.display());
@@ -123,7 +127,7 @@ async fn cmd_config_show(hermes_home: &Path) -> Result<()> {
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&text)
         .unwrap_or(serde_yaml::Value::Mapping(Default::default()));
 
-    // D-17: Learning Loop banner first.
+    // D-17: Learning Loop banner (Phase 23). Sits BELOW the Phase 24 Profile: line.
     let memory_enabled = config_setter::config_get(hermes_home, "memory.memory_enabled")
         .ok()
         .flatten()

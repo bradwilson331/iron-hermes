@@ -361,7 +361,11 @@ async fn main() -> Result<()> {
             setup::run_setup(section.as_deref(), ironhermes_core::wizard::WizardMode::Explicit).await
         }
         Some(Commands::Config { subcommand }) => {
-            config_cli::handle_config_command(subcommand).await
+            // Phase 24 D-15: thread the active profile name so cmd_config_show
+            // can prepend "Profile: <name>" always-on. Use cli.profile directly
+            // per RESEARCH §Pitfall 4 (no filesystem reverse-walk needed here).
+            let profile_name = cli.profile.as_deref().unwrap_or("default").to_string();
+            config_cli::handle_config_command(subcommand, &profile_name).await
         }
         None => {
             if let Some(ref prompt) = cli.execute {
@@ -473,6 +477,8 @@ fn ensure_home_dirs() -> Result<()> {
 
 fn cmd_doctor() -> Result<()> {
     println!("{}", "IronHermes Doctor".bold().cyan());
+    // Phase 24 D-16: show which profile this doctor run is inspecting.
+    println!("Profile: {}", ironhermes_cli::status_cmd::current_profile());
     println!("{}", "─".repeat(40));
 
     // Check home directory
@@ -500,6 +506,25 @@ fn cmd_doctor() -> Result<()> {
     // Check state database
     let db_path = home.join("state.db");
     print_check("State database", db_path.exists());
+
+    // Phase 24 D-16: gateway.pid liveness check (active profile only — no
+    // cross-profile sweep per the deferred-ideas list).
+    let pid_path = home.join("gateway.pid");
+    if pid_path.exists() {
+        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
+            .ok()
+            .flatten()
+            .map(|r| matches!(
+                ironhermes_gateway::pid::is_pid_alive(r.pid),
+                ironhermes_gateway::pid::PidLiveness::Live
+                    | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
+            ))
+            .unwrap_or(false);
+        print_check("Gateway PID (gateway.pid → live process)", pid_ok);
+    } else {
+        // Absent file = healthy (no gateway running). Use the "OK" branch.
+        print_check("Gateway PID (not running)", true);
+    }
 
     println!();
     println!(
