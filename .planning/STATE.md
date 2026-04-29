@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Completed Phase 24 Plan 03 (--profile flag, resolve_and_set_profile, D-08 banner)
-last_updated: "2026-04-29T14:11:53Z"
+last_updated: "2026-04-29T14:40:47.152Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 21
   completed_phases: 10
   total_plans: 59
-  completed_plans: 55
-  percent: 93
+  completed_plans: 56
+  percent: 95
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 24 (Profile Isolation) — EXECUTING
-Plan: 4 of 7
+Plan: 5 of 7
 Status: Ready to execute
 Last activity: 2026-04-29
 
@@ -135,6 +135,7 @@ Last activity: 2026-04-29
 | Phase 22.4.2.1 P03 | 5 | 2 tasks | 3 files |
 | Phase 24 P01 | 247 | 2 tasks | 3 files |
 | Phase 24 P03 | 264 | 3 tasks | 3 files |
+| Phase 24 P04 | 202 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -311,6 +312,10 @@ Recent decisions affecting current work:
 - [Phase 24]: Plan 03: dirs added as runtime dep (not dev-dep) since resolve_and_set_profile calls dirs::home_dir() at process startup
 - [Phase 24]: Plan 03: --profile uses global = true (D-07, works on all subcommands incl. gateway run); --yolo uses global = false to exclude gateway
 - [Phase 24]: Plan 03: Phase 23 preflight gate condition byte-for-byte unchanged per 23-VERIFICATION.md lock
+- [Phase 24]: Plan 04: Step 0 PID lock prepended to GatewayRunner::start() as first statement; existing steps 1..N renumbering skipped (minimal diff)
+- [Phase 24]: Plan 04: _pid_guard RAII binding kept across full start() body — Drop removes gateway.pid on clean return, error propagation, and future drop
+- [Phase 24]: Plan 04: gateway_pid.rs uses i32::MAX as u32 (not u32::MAX) for guaranteed-ESRCH stale PID — inherits Plan 02 fix (u32::MAX wraps to POSIX kill(-1,0) returning Live on macOS)
+- [Phase 24]: Plan 04: gateway_pid.rs passes &Path directly to acquire_pid_lock (no env_lock/set_var) per RESEARCH §Pitfall 6
 
 ### Roadmap Evolution
 
@@ -347,8 +352,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-29T14:07:29Z
-Stopped at: Completed Phase 24 Plan 03 (--profile flag, resolve_and_set_profile, D-08 banner)
+Last session: 2026-04-29T14:35:49Z
+Stopped at: Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)
 Resume file: None
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
