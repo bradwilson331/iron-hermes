@@ -751,6 +751,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         .context("failed to persist user message")?;
     let messages = vec![system_msg, user_msg];
 
+    // Phase 25 D-16: per-session todo state for todo_write / todo_read intercepts.
+    let todo_state_single = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+
     let mut agent = AgentLoop::new(client, registry, max_turns)
         .with_budget(budget)
         .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
@@ -761,7 +764,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         }))
         .with_tool_progress(Box::new(|name, args| {
             eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
-        }));
+        }))
+        // Phase 25 D-16: wire intercept handlers (todo_write/todo_read only in single mode;
+        // memory handled by register_memory_tool; state_store not wrapped in single mode).
+        .with_intercepts(None, None, None, Some(todo_state_single), None);
 
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
@@ -1941,7 +1947,15 @@ async fn run_agent_turn(
             // watch publish. The render task renders the scanner + label at bottom row
             // every 100ms — no more inline stderr spray.
             tui_tool.set_activity(ActivityState::ToolCall { name: name.to_string() });
-        }));
+        }))
+        // Phase 25 D-16: wire intercept handlers (todo_write/todo_read per-turn state).
+        .with_intercepts(
+            None, // memory handled by register_memory_tool (Plan 4 will migrate)
+            None, // state_store: session_search wiring in Plan 4
+            None, // subagent_runner: delegate_task wiring in Plan 4
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()))),
+            None, // cron_router: cronjob wiring in Plan 4
+        );
 
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
