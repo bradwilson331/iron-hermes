@@ -541,11 +541,21 @@ pub async fn run_status(args: StatusArgs) -> anyhow::Result<()> {
 
     // Phase 24 D-14: enumerate profiles and populate the additive JSON field.
     let active = current_profile();
-    // The canonical ironhermes root is always ~/.ironhermes — profiles always
-    // live under it per D-04 (locked by PROFILES_SUBDIR constant).
-    let ironhermes_root = dirs::home_dir()
-        .map(|h| h.join(".ironhermes"))
-        .unwrap_or_else(|| ironhermes_core::get_hermes_home());
+    // Determine the canonical ironhermes root from IRONHERMES_HOME:
+    // - Bare hermes: IRONHERMES_HOME = ~/.ironhermes → use it directly
+    // - Profile mode: IRONHERMES_HOME = ~/.ironhermes/profiles/<slug>
+    //   → the root is two levels up (strip profiles/<slug>)
+    // Using hermes_home respects IRONHERMES_HOME overrides (e.g. test tempdirs).
+    let ironhermes_root = if active == "default" {
+        hermes_home.clone()
+    } else {
+        // profiles/<slug> → parent() = profiles → parent() = root
+        hermes_home
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| hermes_home.clone())
+    };
     let profile_entries = enumerate_profiles(&ironhermes_root, &active);
     let profile_field = if profile_entries.is_empty() {
         None

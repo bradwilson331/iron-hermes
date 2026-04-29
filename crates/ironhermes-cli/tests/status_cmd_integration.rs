@@ -76,3 +76,54 @@ fn yolo_enabled_banner_surfaces_in_provider_block() {
         "yolo banner must mention approval bypass, got:\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 24 — Profile section integration test (24-05-01)
+// ---------------------------------------------------------------------------
+
+fn make_profile_dir(root: &std::path::Path, name: &str, learning_loop_on: bool) {
+    let dir = root.join("profiles").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = format!(
+        "memory:\n  enabled: true\nskills:\n  generation_enabled: {}\n",
+        learning_loop_on
+    );
+    std::fs::write(dir.join("config.yaml"), cfg).unwrap();
+}
+
+/// 24-05-01: `hermes status` Profile section enumerates `profiles/*/` subdirs
+/// that contain config.yaml. Both profile slugs must appear in the output.
+#[test]
+fn profile_section() {
+    let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Skipping profile_section: CARGO_BIN_EXE_ironhermes not set");
+            return;
+        }
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    make_profile_dir(tmp.path(), "work", true);
+    make_profile_dir(tmp.path(), "personal", false);
+    let out = std::process::Command::new(&bin)
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["status"])
+        .output()
+        .expect("ironhermes status");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.to_lowercase().contains("profiles"),
+        "expected 'Profiles' header in status stdout, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("work"),
+        "expected profile name 'work' in status stdout, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("personal"),
+        "expected profile name 'personal' in status stdout, got:\n{}",
+        stdout
+    );
+}
