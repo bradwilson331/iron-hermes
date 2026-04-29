@@ -490,10 +490,14 @@ Plans:
   3. Adding a new tool requires only a registration call — no changes to dispatch logic
   4. Agent-intercepted tools (memory, session_search, delegate_task) are handled before registry dispatch without being visible to the LLM as duplicates
   5. `hermes setup` (or first-run wizard) detects tools with missing prerequisites and guides the user through configuring them
-**Plans:** TBD
+**Plans:** 5 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 25 to break down)
+- [ ] 25-01-PLAN.md — Trait surface (Prerequisite + prerequisites()) + toolset() name fixes (terminal/file_tools/cronjob) + web prereqs declared
+- [ ] 25-02-PLAN.md — Registry expansion: intercepts map + register_intercepted/dispatch_intercepts/list_unavailable/list_toolsets + D-15 panic guards + todo schemas
+- [ ] 25-03-PLAN.md — Config (ToolsConfig + DEFAULT_TOOLSETS) + get_definitions toolset filter + agent_loop migration (with_intercepts builder, dispatch_intercepts call site, session_search injection removal)
+- [ ] 25-04-PLAN.md — `hermes toolset list/enable/disable/show` CLI + /toolset slash command (Universal, session-only mutation per D-06) + D-26 Test 1 + T-25-01/T-25-03 mitigations
+- [ ] 25-05-PLAN.md — `hermes toolset setup` + run_tools_section wizard hook + preflight prereq probe (D-17) + `hermes setup` D-19 final stage + T-25-02 secret masking
 
 **Phase directory:** `.planning/phases/25-toolset-management/`
 
