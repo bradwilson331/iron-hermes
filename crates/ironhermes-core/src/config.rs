@@ -4,6 +4,55 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // =============================================================================
+// ToolsConfig (TOOL-02, Phase 25)
+// =============================================================================
+
+/// Per-toolset enable/disable entry (D-22).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ToolsetEntry {
+    pub enabled: bool,
+}
+
+/// Operator-facing tools configuration (D-22, D-23).
+/// Lives under `tools:` in config.yaml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Per-toolset enable/disable map. Keys are toolset names (D-01).
+    pub toolsets: HashMap<String, ToolsetEntry>,
+    /// Tool names to skip in the setup-wizard prerequisite prompts (D-18).
+    pub skip_prompts: Vec<String>,
+    /// Per-tool override disable list within an enabled toolset (D-23 layer 4).
+    pub disabled: Vec<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        let mut toolsets = HashMap::new();
+        for name in ["memory", "session", "agent", "skills"] {
+            toolsets.insert(name.to_string(), ToolsetEntry { enabled: true });
+        }
+        for name in ["web", "code"] {
+            toolsets.insert(name.to_string(), ToolsetEntry { enabled: false });
+        }
+        Self {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        }
+    }
+}
+
+impl ToolsConfig {
+    /// D-23: enabled iff entry exists with enabled:true. Unknown names default to false
+    /// so MCP-server-as-toolset (e.g., "mcp__github") requires explicit opt-in.
+    pub fn is_toolset_enabled(&self, name: &str) -> bool {
+        self.toolsets.get(name).map(|e| e.enabled).unwrap_or(false)
+    }
+}
+
+// =============================================================================
 // Provider configuration types (PROV-01..PROV-08, Phase 12)
 // =============================================================================
 
@@ -95,6 +144,10 @@ pub struct Config {
     /// Pre-21.7 configs parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub autonomous: AutonomousConfig,
+    /// Phase 25 D-22: toolset enable/disable configuration.
+    /// Pre-Phase-25 configs load with D-20 defaults via `#[serde(default)]`.
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 // =============================================================================
@@ -1191,5 +1244,112 @@ gateway:
     fn test_telegram_default_origin_no_section() {
         let config = Config::default();
         assert!(matches!(config.telegram_default_origin(), OriginDecision::None));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 25 Plan 01 Task 1: ToolsConfig + DEFAULT_TOOLSETS tests
+    // -----------------------------------------------------------------------
+
+    /// Test: ToolsConfig::default() returns enabled for memory/session/agent/skills,
+    /// disabled for web/code (D-20).
+    #[test]
+    fn tools_config_default_has_correct_enabled_set() {
+        let cfg = ToolsConfig::default();
+        for name in &["memory", "session", "agent", "skills"] {
+            assert!(
+                cfg.is_toolset_enabled(name),
+                "ToolsConfig::default() must have '{}' enabled (D-20)", name
+            );
+        }
+        for name in &["web", "code"] {
+            assert!(
+                !cfg.is_toolset_enabled(name),
+                "ToolsConfig::default() must have '{}' disabled (D-20)", name
+            );
+        }
+    }
+
+    /// Test: Unknown toolset names default to disabled (D-23 — opt-in for unknowns).
+    #[test]
+    fn tools_config_unknown_toolset_defaults_to_disabled() {
+        let cfg = ToolsConfig::default();
+        assert!(
+            !cfg.is_toolset_enabled("mcp__github"),
+            "Unknown toolset 'mcp__github' must default to disabled (D-23)"
+        );
+    }
+
+    /// Test: serde roundtrip (YAML serialize then deserialize) preserves enabled state.
+    #[test]
+    fn tools_config_serde_roundtrip_preserves_enabled_state() {
+        let mut cfg = ToolsConfig::default();
+        cfg.toolsets.insert("web".to_string(), ToolsetEntry { enabled: true });
+        let yaml = serde_yaml::to_string(&cfg).expect("serialize must succeed");
+        let roundtripped: ToolsConfig = serde_yaml::from_str(&yaml).expect("deserialize must succeed");
+        assert!(
+            roundtripped.is_toolset_enabled("web"),
+            "After roundtrip, 'web' must still be enabled"
+        );
+        assert!(
+            roundtripped.is_toolset_enabled("memory"),
+            "After roundtrip, 'memory' must still be enabled"
+        );
+        assert!(
+            !roundtripped.is_toolset_enabled("code"),
+            "After roundtrip, 'code' must still be disabled"
+        );
+    }
+
+    /// Test (D-24): Parse a YAML lacking a `tools:` block; assert Config.tools == ToolsConfig::default().
+    #[test]
+    fn config_with_default_tools_field_loads_with_no_tools_block() {
+        let yaml = r#"
+model:
+  provider: anthropic
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parse must succeed without tools block");
+        let default_cfg = ToolsConfig::default();
+        // Verify D-20 defaults are present
+        for name in &["memory", "session", "agent", "skills"] {
+            assert_eq!(
+                config.tools.is_toolset_enabled(name),
+                default_cfg.is_toolset_enabled(name),
+                "Config loaded without tools block must have same '{}' state as ToolsConfig::default()", name
+            );
+        }
+        for name in &["web", "code"] {
+            assert_eq!(
+                config.tools.is_toolset_enabled(name),
+                default_cfg.is_toolset_enabled(name),
+                "Config loaded without tools block must have same '{}' state as ToolsConfig::default()", name
+            );
+        }
+    }
+
+    /// Test: DEFAULT_TOOLSETS constant matches D-20 (memory/session/agent/skills).
+    #[test]
+    fn default_toolsets_constant_matches_d20() {
+        use crate::constants::DEFAULT_TOOLSETS;
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"memory"),
+            "DEFAULT_TOOLSETS must contain 'memory'"
+        );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"session"),
+            "DEFAULT_TOOLSETS must contain 'session'"
+        );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"agent"),
+            "DEFAULT_TOOLSETS must contain 'agent'"
+        );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"skills"),
+            "DEFAULT_TOOLSETS must contain 'skills'"
+        );
+        assert_eq!(
+            DEFAULT_TOOLSETS.len(),
+            4,
+            "DEFAULT_TOOLSETS must contain exactly 4 entries (memory, session, agent, skills)"
+        );
     }
 }

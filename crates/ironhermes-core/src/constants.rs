@@ -29,6 +29,11 @@ pub const MEMORIES_DIR: &str = "memories";
 /// Profile isolation constants (D-04, Phase 24)
 pub const PROFILES_SUBDIR: &str = "profiles";
 
+/// D-20 (Phase 25): toolsets enabled on a fresh install.
+/// These four "internal" toolsets have no external prerequisites.
+/// web and code are disabled by default (require API keys / high blast radius).
+pub const DEFAULT_TOOLSETS: &[&str] = &["memory", "session", "agent", "skills"];
+
 /// Get the IronHermes home directory (default: ~/.ironhermes).
 pub fn get_hermes_home() -> PathBuf {
     match std::env::var("IRONHERMES_HOME") {
