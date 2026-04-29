@@ -108,7 +108,11 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("tools", "List or manage tools", ToolsAndSkills)
             .args_hint("[list|disable|enable]")
             .platform(CliOnly),
-        CommandDef::new("toolsets", "List available toolsets", ToolsAndSkills).platform(CliOnly),
+        // Phase 25 Plan 04 (D-06): replaces the /toolsets stub. Singular name (matches
+        // /personality vs /personalities), Universal platform (CLI REPL + gateway).
+        CommandDef::new("toolset", "Manage toolsets (list/enable/disable/show)", ToolsAndSkills)
+            .args_hint("[list|enable|disable|show] [name]")
+            .platform(Universal),
         CommandDef::new("skills", "List installed skills", ToolsAndSkills).platform(CliOnly),
         CommandDef::new("cron", "Manage cron jobs", ToolsAndSkills)
             .args_hint("[subcommand]")
@@ -157,3 +161,65 @@ pub fn build_registry() -> Vec<CommandDef> {
             .platform(CliOnly),
     ]
 }
+
+// =============================================================================
+// Tests — Phase 25 Plan 04 (slash command registration)
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{CommandRouter, ResolveResult};
+    use crate::types::Platform;
+
+    /// D-06: `/toolset` (singular) is registered; the old `/toolsets` stub is
+    /// REPLACED (no alias, no compat shim — Phase 22.3 typo system handles
+    /// the operator-typed plural variant).
+    #[test]
+    fn slash_toolset_registered_in_build_registry() {
+        let router = CommandRouter::new(build_registry());
+        let result = router.resolve("toolset", &Platform::Local);
+        assert!(
+            matches!(result, ResolveResult::Exact(c) if c.name == "toolset"),
+            "expected /toolset Exact match, got: {:?}",
+            result
+        );
+    }
+
+    /// D-06: `/toolsets` (plural) is NOT registered (the stub was replaced,
+    /// not aliased). The typo system will suggest `toolset` if the operator
+    /// types `toolsets`.
+    #[test]
+    fn slash_toolsets_plural_not_registered() {
+        let router = CommandRouter::new(build_registry());
+        let result = router.resolve("toolsets", &Platform::Local);
+        // Either NotFound or PrefixMatch to "toolset" via the prefix stage
+        // is acceptable — the key invariant is that an EXACT alias for
+        // "toolsets" no longer resolves.
+        match result {
+            ResolveResult::Exact(cmd) => {
+                assert_ne!(
+                    cmd.name, "toolsets",
+                    "no command named 'toolsets' should exist; got Exact match"
+                );
+            }
+            _ => {} // NotFound or PrefixMatch — both acceptable
+        }
+    }
+
+    /// D-06: `/toolset` is on Universal platform (CLI REPL + gateway, NOT
+    /// ApiServer/ACP). Test by resolving on Telegram.
+    #[test]
+    fn slash_toolset_platform_is_universal() {
+        let router = CommandRouter::new(build_registry());
+        // Universal includes Telegram (gateway). If the registration were
+        // CliOnly, this would return NotFound.
+        let result = router.resolve("toolset", &Platform::Telegram);
+        assert!(
+            matches!(result, ResolveResult::Exact(c) if c.name == "toolset"),
+            "expected /toolset on Telegram (Universal platform), got: {:?}",
+            result
+        );
+    }
+}
+

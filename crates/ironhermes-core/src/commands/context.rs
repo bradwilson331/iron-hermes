@@ -101,6 +101,37 @@ pub trait CronJobReader: Send + Sync {
 }
 
 // =============================================================================
+// ToolsetSessionHandle trait — Phase 25 Plan 04 (D-06)
+// =============================================================================
+
+/// Handle for `/toolset enable/disable/list/show` slash command session-only mutations.
+///
+/// Defined in ironhermes-core to avoid circular dep with ironhermes-tools
+/// (ironhermes-tools depends on ironhermes-core; adding ToolRegistry here would
+/// be circular). Same topology as CronJobReader and McpReloader.
+///
+/// **D-06 contract:** All mutation methods (`enable_toolset`, `disable_toolset`)
+/// modify ONLY the in-session live toolset config. They MUST NOT write to
+/// config.yaml. Persistent changes require the `hermes toolset` CLI subcommand.
+pub trait ToolsetSessionHandle: Send + Sync {
+    /// Enable a toolset for the current session only. Does NOT write config.yaml.
+    /// Returns Ok(()) or an error message string.
+    fn enable_toolset(&self, name: &str) -> Result<(), String>;
+
+    /// Disable a toolset for the current session only. Does NOT write config.yaml.
+    /// Returns Ok(()) or an error message string.
+    fn disable_toolset(&self, name: &str) -> Result<(), String>;
+
+    /// Render the toolset list as a string (read-only). Identical output to the
+    /// CLI `hermes toolset list` so both surfaces share a single source of truth.
+    fn render_list(&self) -> String;
+
+    /// Render the detail view for a single toolset. Returns Err with a message
+    /// when the toolset name is unknown or invalid.
+    fn render_show(&self, name: &str) -> Result<String, String>;
+}
+
+// =============================================================================
 // Phase 22.4.2 Plan 00 — D-04 handle traits
 // =============================================================================
 //
@@ -243,6 +274,12 @@ pub struct CommandContext {
     /// Phase 22.4.2.1 Plan 01: CronJobReader handle for `/cron` slash UI.
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-cron.
     pub cron_store: Option<Arc<dyn CronJobReader>>,
+
+    /// Phase 25 Plan 04 (D-06): ToolsetSessionHandle for `/toolset` session-only mutations.
+    /// Option<Arc<dyn>> to avoid circular dep with ironhermes-tools.
+    /// Slash command enable/disable mutate ONLY the session's live toolset config; they do
+    /// NOT write to config.yaml (D-06). The CLI subcommand writes to config.yaml instead.
+    pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
 }
 
 impl CommandContext {
@@ -274,6 +311,8 @@ impl CommandContext {
             agent_loop: None,
             // Phase 22.4.2.1 Plan 01: CronJobReader for /cron slash UI.
             cron_store: None,
+            // Phase 25 Plan 04 (D-06): ToolsetSessionHandle for /toolset slash UI.
+            toolset_session: None,
         }
     }
 
@@ -384,6 +423,12 @@ impl CommandContext {
     /// Builder: attach a CronJobReader handle for `/cron` slash UI (Phase 22.4.2.1 Plan 01).
     pub fn with_cron_store(mut self, store: Arc<dyn CronJobReader>) -> Self {
         self.cron_store = Some(store);
+        self
+    }
+
+    /// Builder: attach a ToolsetSessionHandle for `/toolset` session-only mutations (Phase 25 D-06).
+    pub fn with_toolset_session(mut self, handle: Arc<dyn ToolsetSessionHandle>) -> Self {
+        self.toolset_session = Some(handle);
         self
     }
 }

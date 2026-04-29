@@ -69,6 +69,11 @@ pub fn dispatch(
         "cron" => cmd_cron(args, ctx),
 
         // -------------------------------------------------------------------
+        // Toolset slash command (Phase 25 Plan 04 — D-06 session-only)
+        // -------------------------------------------------------------------
+        "toolset" => cmd_toolset(args, ctx),
+
+        // -------------------------------------------------------------------
         // MCP commands (Phase 21.2 Plan 04)
         // -------------------------------------------------------------------
         "reload-mcp" | "reload_mcp" | "reload" => cmd_reload_mcp(ctx),
@@ -763,6 +768,93 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
     }
 }
 
+// Phase 25 Plan 04 (D-06) — `/toolset` slash command sub-dispatch.
+//
+// Mirrors `cmd_cron` (handlers.rs above) for sub-dispatch shape.
+// Mirrors the None-guard pattern (D-05) — when `ctx.toolset_session` is None
+// (no live ToolRegistry attached), returns informational text rather than
+// panicking (gateway / classic-tui contexts that don't wire the handle).
+//
+// **D-06 contract**: enable/disable mutate ONLY the in-session config via the
+// ToolsetSessionHandle trait. They MUST NOT call `config_setter::config_set`.
+// Persistent changes require the `hermes toolset` CLI subcommand.
+fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let handle = match &ctx.toolset_session {
+        Some(h) => h.clone(),
+        None => {
+            return CommandResult::Output(
+                "/toolset: toolset session handle not configured.".to_string(),
+            )
+        }
+    };
+    match args.first().copied() {
+        None | Some("list") => CommandResult::Output(handle.render_list()),
+        Some("show") => {
+            let name = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/toolset show <name>: missing name".to_string(),
+                    )
+                }
+            };
+            match handle.render_show(name) {
+                Ok(text) => CommandResult::Output(text),
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some("enable") => {
+            let name = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/toolset enable <name>: missing name".to_string(),
+                    )
+                }
+            };
+            match handle.enable_toolset(name) {
+                Ok(()) => {
+                    // T-25-03: cache-break banner shape (session-only mutation
+                    // still breaks the LLM's prompt cache on the next call).
+                    eprintln!(
+                        "\u{26a0} [toolset: {}] enabled \u{2014} schema cache will rebuild on next LLM call",
+                        name
+                    );
+                    CommandResult::Output(format!("/toolset: enabled {} for this session.", name))
+                }
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some("disable") => {
+            let name = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/toolset disable <name>: missing name".to_string(),
+                    )
+                }
+            };
+            match handle.disable_toolset(name) {
+                Ok(()) => {
+                    eprintln!(
+                        "\u{26a0} [toolset: {}] disabled \u{2014} schema cache will rebuild on next LLM call",
+                        name
+                    );
+                    CommandResult::Output(format!("/toolset: disabled {} for this session.", name))
+                }
+                Err(e) => CommandResult::Error(e),
+            }
+        }
+        Some(other) => {
+            let candidates: &[&str] = &["list", "enable", "disable", "show"];
+            let suffix = suggest_typo(other, candidates)
+                .map(|s| format!(" {}", s))
+                .unwrap_or_default();
+            CommandResult::Error(format!("Unknown /toolset subcommand: {}{}", other, suffix))
+        }
+    }
+}
+
 fn cmd_help(ctx: &CommandContext, router: &CommandRouter) -> CommandResult {
     let mut out = String::from("Available commands:\n");
     let groups = router.commands_by_category(&ctx.platform);
@@ -1172,7 +1264,6 @@ fn todo_stub(name: &str) -> CommandResult {
         "deny" => "No approval queue",
         "prompt" => "No custom system prompt injection",
         "tools" => "No tool enable/disable management",
-        "toolsets" => "No toolset listing",
 
         "browser" => "No browser tools",
         "plugins" => "No plugin system",
@@ -1483,7 +1574,7 @@ mod tests {
             // "save" removed — now has real handler (Phase 22.4.2 Plan 01)
             "prompt",
             "tools",
-            "toolsets",
+            // "toolsets" removed — replaced by `/toolset` (Phase 25 Plan 04, D-06)
             "cron",
             // "reload-mcp" and "reload" removed — now have real handlers (Phase 21.2 Plan 04)
             "browser",
@@ -1653,6 +1744,144 @@ mod tests {
         match resolve_subagent_id("sub_abc", &entries) {
             Resolve::Exact(id) => assert_eq!(id, "sub_abc"),
             _ => panic!("exact match must beat prefix ambiguity"),
+        }
+    }
+
+    // =========================================================================
+    // Phase 25 Plan 04 — /toolset slash handler tests (D-06 session-only)
+    // =========================================================================
+
+    use crate::commands::context::ToolsetSessionHandle;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc as StdArc;
+
+    /// Fake handle that records what the slash handler did. Critically, this
+    /// fake does NOT touch the filesystem — it only records calls.
+    struct FakeToolsetSession {
+        enabled_calls: AtomicUsize,
+        disabled_calls: AtomicUsize,
+    }
+    impl FakeToolsetSession {
+        fn new() -> Self {
+            Self {
+                enabled_calls: AtomicUsize::new(0),
+                disabled_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl ToolsetSessionHandle for FakeToolsetSession {
+        fn enable_toolset(&self, _name: &str) -> Result<(), String> {
+            self.enabled_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn disable_toolset(&self, _name: &str) -> Result<(), String> {
+            self.disabled_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn render_list(&self) -> String {
+            "TOOLSET STATUS\nweb enabled\n".to_string()
+        }
+        fn render_show(&self, name: &str) -> Result<String, String> {
+            Ok(format!("Toolset: {}\nStatus: enabled\n", name))
+        }
+    }
+
+    /// D-06 contract test: `/toolset enable web` with a tempdir IRONHERMES_HOME
+    /// MUST NOT write to `<tempdir>/config.yaml`. The handler routes through
+    /// the in-process `ToolsetSessionHandle` trait — never `config_setter`.
+    #[test]
+    fn slash_toolset_handler_session_only_no_config_write() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.yaml");
+        // Pre-condition: file does not exist.
+        assert!(
+            !cfg_path.exists(),
+            "precondition: tempdir config.yaml must not exist"
+        );
+
+        let fake = StdArc::new(FakeToolsetSession::new());
+        let ctx = make_ctx(false).with_toolset_session(fake.clone());
+        let router = make_router();
+
+        let cmd = build_registry()
+            .into_iter()
+            .find(|c| c.name == "toolset")
+            .expect("toolset must be in registry");
+
+        let result = dispatch(&cmd, &["enable", "web"], &ctx, &router);
+
+        // Handler returned Output (not Error)
+        match &result {
+            CommandResult::Output(s) => assert!(
+                s.contains("enabled"),
+                "expected 'enabled' confirmation, got: {}",
+                s
+            ),
+            other => panic!("expected Output, got {:?}", other),
+        }
+
+        // D-06 invariant: NO config.yaml write happened. Even though the
+        // tempdir IRONHERMES_HOME is unrelated to dispatch (the slash handler
+        // does NOT consult IRONHERMES_HOME), assert the file is still absent.
+        assert!(
+            !cfg_path.exists(),
+            "D-06 violated: slash /toolset enable wrote config.yaml at {}",
+            cfg_path.display()
+        );
+
+        // The fake handle WAS called — proves the handler dispatched correctly.
+        assert_eq!(
+            fake.enabled_calls.load(Ordering::SeqCst),
+            1,
+            "expected enable_toolset to be called exactly once"
+        );
+        assert_eq!(
+            fake.disabled_calls.load(Ordering::SeqCst),
+            0,
+            "expected disable_toolset NOT to be called"
+        );
+    }
+
+    /// `/toolset list` with no handle attached — informational fallback.
+    #[test]
+    fn slash_toolset_no_handle_returns_informational() {
+        let ctx = make_ctx(false);
+        let router = make_router();
+        let cmd = build_registry()
+            .into_iter()
+            .find(|c| c.name == "toolset")
+            .expect("toolset must be in registry");
+
+        let result = dispatch(&cmd, &["list"], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("not configured"),
+                "expected 'not configured' fallback, got: {}",
+                s
+            ),
+            other => panic!("expected Output, got {:?}", other),
+        }
+    }
+
+    /// `/toolset list` with a handle attached — returns rendered list.
+    #[test]
+    fn slash_toolset_list_renders_via_handle() {
+        let fake = StdArc::new(FakeToolsetSession::new());
+        let ctx = make_ctx(false).with_toolset_session(fake.clone());
+        let router = make_router();
+        let cmd = build_registry()
+            .into_iter()
+            .find(|c| c.name == "toolset")
+            .expect("toolset must be in registry");
+
+        let result = dispatch(&cmd, &["list"], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("TOOLSET"),
+                "expected rendered table, got: {}",
+                s
+            ),
+            other => panic!("expected Output, got {:?}", other),
         }
     }
 }
