@@ -472,7 +472,7 @@ Plans:
   2. Memory stores and session history for `work` profile are completely isolated from `personal` profile
   3. Gateway started under one profile does not interfere with gateway under another profile (separate PID files)
   4. Profile directory is scaffolded automatically on first use with the same `ensure_home_dirs()` structure as default
-**Plans:** 5/7 plans executed
+**Plans:** 6/7 plans executed
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 24 to break down)
