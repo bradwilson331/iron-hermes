@@ -51,10 +51,27 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
 }
 
+/// D-12 / D-14 (Phase 25): async handler for intercepted tools.
+/// Resolves Open Question 3 — async because execute_tool_call() is async; spawn_blocking
+/// for sync-StateStore stays inside the closure body (see session_search migration in Plan 3).
+///
+/// Security (T-25-04): library-internal use only — handler closures MUST be constructed
+/// by the workspace (ironhermes-agent::AgentLoop::with_intercepts), NOT deserialized from
+/// config or user input. The `with_intercepts(...)` builder in Plan 3 accepts only the five
+/// known-safe handles (memory_manager, state_store, subagent_runner, todo_state, cron_router).
+pub type InterceptHandler = std::sync::Arc<
+    dyn Fn(serde_json::Value) -> futures::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
+>;
+
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     guardrails: Vec<Box<dyn ironhermes_hooks::GuardrailHook>>,
     error_detail: ironhermes_hooks::ErrorDetailLevel,
+    /// D-14 (Phase 25): intercepted tools stored separately from regular tools.
+    /// get_definitions() returns schemas from BOTH maps; D-15 prevents name collisions.
+    intercepts: HashMap<String, (ToolSchema, InterceptHandler)>,
 }
 
 impl ToolRegistry {
@@ -63,18 +80,113 @@ impl ToolRegistry {
             tools: HashMap::new(),
             guardrails: Vec::new(),
             error_detail: ironhermes_hooks::ErrorDetailLevel::Full,
+            intercepts: HashMap::new(),
         }
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        let name = tool.name().to_string();
+        assert!(
+            !self.intercepts.contains_key(&name),
+            "register: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
+            name,
+        );
+        self.tools.insert(name, tool);
     }
 
     /// Register a tool dynamically (e.g., from MCP discovery). Per D-10.
     /// Functionally identical to register() -- the name distinction is semantic
     /// (dynamic = runtime MCP vs static = startup built-in).
+    /// D-15: Also guards against intercept name collisions for MCP-discovered tools.
     pub fn register_dynamic(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        let name = tool.name().to_string();
+        assert!(
+            !self.intercepts.contains_key(&name),
+            "register_dynamic: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
+            name,
+        );
+        self.tools.insert(name, tool);
+    }
+
+    /// Register an intercepted tool by name, schema, and async handler (D-12 / D-14, Phase 25).
+    ///
+    /// Intercepted tools are NOT in the regular `tools` HashMap; they live in a separate
+    /// `intercepts` map. `get_definitions()` returns schemas from BOTH maps so the LLM sees
+    /// the full surface, but `dispatch_intercepts()` handles them before `dispatch()` is called.
+    ///
+    /// D-15 reciprocal guard: panics if `name` is already registered as a regular tool —
+    /// schema duplication is structurally impossible.
+    ///
+    /// Security (T-25-04): library-internal use only — handler closures MUST be constructed
+    /// by the workspace (ironhermes-agent::AgentLoop::with_intercepts), NOT deserialized from
+    /// config or user input.
+    pub fn register_intercepted(
+        &mut self,
+        name: &str,
+        schema: ToolSchema,
+        handler: InterceptHandler,
+    ) {
+        assert!(
+            !self.tools.contains_key(name),
+            "register_intercepted: name '{}' already registered as a regular tool — schema duplication blocked at registry build (D-15)",
+            name,
+        );
+        self.intercepts.insert(name.to_string(), (schema, handler));
+    }
+
+    /// Dispatch a tool call to the intercepts map (D-12, Phase 25).
+    ///
+    /// Returns `Some(result)` when the tool is intercepted; `None` to fall through to
+    /// the normal `dispatch()` path. The agent_loop call site is responsible for:
+    /// ```rust,ignore
+    /// if let Some(r) = registry.dispatch_intercepts(name, args.clone()).await {
+    ///     return r;
+    /// }
+    /// registry.dispatch(name, args).await
+    /// ```
+    pub async fn dispatch_intercepts(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Option<anyhow::Result<String>> {
+        let (_schema, handler) = self.intercepts.get(name)?;
+        Some(handler(args).await)
+    }
+
+    /// Returns (tool_name, [unsatisfied required prereqs]) for every Tool whose
+    /// required prereqs are missing. Used by Plan 5's preflight banner (D-17).
+    /// Only checks `kind == "env_var"` at the trait level; `kind == "config_field"`
+    /// is checked at config-load, not here (D-08 / D-09).
+    pub fn list_unavailable(&self) -> Vec<(String, Vec<Prerequisite>)> {
+        self.tools
+            .values()
+            .filter_map(|t| {
+                let missing: Vec<_> = t
+                    .prerequisites()
+                    .into_iter()
+                    .filter(|p| {
+                        p.required
+                            && match p.kind.as_str() {
+                                "env_var" => std::env::var(&p.name).is_err(),
+                                _ => false, // config_field handled at config-load layer
+                            }
+                    })
+                    .collect();
+                if missing.is_empty() { None } else { Some((t.name().to_string(), missing)) }
+            })
+            .collect()
+    }
+
+    /// Unique set of toolset() values across all currently-registered tools, sorted alphabetically.
+    /// Per D-03: membership is read at runtime from the trait, no separate table.
+    /// Only includes regular tools (from the `tools` map); intercepted tools have no Tool::toolset()
+    /// method. Plan 4's `hermes toolset list` presents intercepted-only names through a separate path.
+    pub fn list_toolsets(&self) -> Vec<String> {
+        let mut s: std::collections::HashSet<String> =
+            self.tools.values().map(|t| t.toolset().to_string()).collect();
+        let mut v: Vec<String> = s.drain().collect();
+        v.sort();
+        v
     }
 
     /// Remove all tools whose name starts with `{server_name}__`.
@@ -104,7 +216,8 @@ impl ToolRegistry {
     }
 
     pub fn get_definitions(&self, enabled_tools: Option<&[String]>) -> Vec<ToolSchema> {
-        self.tools
+        let mut schemas: Vec<ToolSchema> = self
+            .tools
             .values()
             .filter(|t| t.is_available())
             .filter(|t| {
@@ -113,7 +226,20 @@ impl ToolRegistry {
                     .unwrap_or(true)
             })
             .map(|t| t.schema())
-            .collect()
+            .collect();
+        // Phase 25 D-14: union with intercept schemas. Same enabled_tools filter applies.
+        // Toolset-level filter (D-23) added in Plan 3 once toolset_config exists.
+        schemas.extend(
+            self.intercepts
+                .iter()
+                .filter(|(name, _)| {
+                    enabled_tools
+                        .map(|list| list.iter().any(|n| n == name.as_str()))
+                        .unwrap_or(true)
+                })
+                .map(|(_, (schema, _))| schema.clone()),
+        );
+        schemas
     }
 
     pub async fn dispatch(
@@ -404,6 +530,50 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25 D-13 / Open Question 2: greenfield todo_* schema constructors.
+// These are free functions (not Tool impls) because the in-session state
+// (Arc<Mutex<Vec<String>>>) is owned by AgentLoop, not a Tool struct.
+// Plan 3 wires real handlers via AgentLoop::with_intercepts(). Plan 2 ships
+// only the schema constructors — do NOT register them in ToolRegistry::new().
+// ---------------------------------------------------------------------------
+
+/// Phase 25 D-13 / Open Question 2 (Plan 2): minimal greenfield schema for the
+/// intercepted `todo_write` tool. `items` replaces the current todo list.
+/// In-session state lives in `Arc<Mutex<Vec<String>>>` owned by AgentLoop and
+/// passed to `with_intercepts()` (D-16, wired in Plan 3).
+pub fn todo_write_schema() -> ToolSchema {
+    ToolSchema::new(
+        "todo_write",
+        "Write (replace) the current todo list for this session. Replaces the entire list with the provided items.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "New todo list items. Replaces the entire current list."
+                }
+            },
+            "required": ["items"]
+        }),
+    )
+}
+
+/// Phase 25 D-13 / Open Question 2 (Plan 2): minimal greenfield schema for
+/// `todo_read`. Returns the current list. No required parameters.
+pub fn todo_read_schema() -> ToolSchema {
+    ToolSchema::new(
+        "todo_read",
+        "Read the current todo list for this session.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +1049,341 @@ mod tests {
             .await;
         assert!(result.is_ok(), "warn guardrail must not block: {result:?}");
         assert_eq!(result.unwrap(), "mock result");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 02 Task 1: InterceptHandler + register_intercepted + dispatch_intercepts tests
+    // ---------------------------------------------------------------------------
+
+    fn test_handler(response: &'static str) -> InterceptHandler {
+        std::sync::Arc::new(move |_args| {
+            Box::pin(async move { Ok(response.to_string()) })
+        })
+    }
+
+    fn test_intercept_schema(name: &str) -> ToolSchema {
+        ToolSchema::new(
+            name,
+            "test intercept tool",
+            serde_json::json!({ "type": "object", "properties": {} }),
+        )
+    }
+
+    /// Test: register_intercepted inserts schema; get_definitions(None) includes it exactly once.
+    #[test]
+    fn register_intercepted_inserts_schema_and_handler() {
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted(
+            "test_intercept",
+            test_intercept_schema("test_intercept"),
+            test_handler("hello"),
+        );
+        let schemas = registry.get_definitions(None);
+        let count = schemas.iter().filter(|s| s.function.name == "test_intercept").count();
+        assert_eq!(count, 1, "intercepted tool must appear exactly once in get_definitions(None)");
+    }
+
+    /// Test: register_intercepted panics when name already registered as a regular tool (D-15).
+    #[test]
+    #[should_panic(expected = "already registered as a regular tool")]
+    fn register_intercepted_panics_on_duplicate_with_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool { tool_name: "dup_name" }));
+        registry.register_intercepted("dup_name", test_intercept_schema("dup_name"), test_handler("x"));
+    }
+
+    /// Test: register() panics when name already registered as an intercepted tool (D-15 reciprocal).
+    #[test]
+    #[should_panic(expected = "already registered as an intercepted tool")]
+    fn register_tools_panics_on_duplicate_with_intercepts() {
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted("dup_name", test_intercept_schema("dup_name"), test_handler("x"));
+        registry.register(Box::new(MockTool { tool_name: "dup_name" }));
+    }
+
+    /// Test: dispatch_intercepts returns Some(Ok("hello")) for a known intercepted tool.
+    #[tokio::test]
+    async fn dispatch_intercepts_returns_some_for_known() {
+        let mut registry = ToolRegistry::new();
+        registry.register_intercepted("known", test_intercept_schema("known"), test_handler("hello"));
+        let result = registry.dispatch_intercepts("known", serde_json::json!({})).await;
+        assert!(result.is_some(), "dispatch_intercepts must return Some for a known intercepted name");
+        let inner = result.unwrap();
+        assert!(inner.is_ok(), "handler must return Ok");
+        assert_eq!(inner.unwrap(), "hello");
+    }
+
+    /// Test: dispatch_intercepts returns None for an unknown name (caller falls through to dispatch()).
+    #[tokio::test]
+    async fn dispatch_intercepts_returns_none_for_unknown() {
+        let registry = ToolRegistry::new();
+        let result = registry.dispatch_intercepts("unknown", serde_json::json!({})).await;
+        assert!(result.is_none(), "dispatch_intercepts must return None for an unregistered name");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 02 Task 2: get_definitions intercept union + list_unavailable + list_toolsets
+    // ---------------------------------------------------------------------------
+
+    /// Test: get_definitions(None) includes schemas from both regular tools and intercepted tools.
+    #[test]
+    fn get_definitions_includes_intercept_schemas() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool { tool_name: "regular" }));
+        registry.register_intercepted("intercept_a", test_intercept_schema("intercept_a"), test_handler("a"));
+        registry.register_intercepted("intercept_b", test_intercept_schema("intercept_b"), test_handler("b"));
+        let schemas = registry.get_definitions(None);
+        let names: std::collections::HashSet<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+        assert_eq!(names.len(), 3, "must have 3 schemas: {names:?}");
+        assert!(names.contains("regular"), "missing 'regular'");
+        assert!(names.contains("intercept_a"), "missing 'intercept_a'");
+        assert!(names.contains("intercept_b"), "missing 'intercept_b'");
+    }
+
+    /// Test: enabled_tools filter applies to both regular tools and intercepted tools.
+    #[test]
+    fn get_definitions_with_enabled_tools_filter_includes_intercepts() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool { tool_name: "regular" }));
+        registry.register_intercepted("intercept_a", test_intercept_schema("intercept_a"), test_handler("a"));
+        registry.register_intercepted("intercept_b", test_intercept_schema("intercept_b"), test_handler("b"));
+        let enabled = vec!["regular".to_string(), "intercept_a".to_string()];
+        let schemas = registry.get_definitions(Some(&enabled));
+        let names: std::collections::HashSet<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+        assert_eq!(names.len(), 2, "must have 2 schemas after filter: {names:?}");
+        assert!(names.contains("regular"), "missing 'regular'");
+        assert!(names.contains("intercept_a"), "missing 'intercept_a'");
+        assert!(!names.contains("intercept_b"), "'intercept_b' must be filtered out");
+    }
+
+    /// Tool whose is_available() returns false — used to test filtering.
+    struct UnavailableTool;
+
+    #[async_trait]
+    impl Tool for UnavailableTool {
+        fn name(&self) -> &str { "unavailable" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "always unavailable" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("unavailable", "always unavailable",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        fn is_available(&self) -> bool { false }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("never called".to_string())
+        }
+    }
+
+    /// Test: unavailable regular tools are filtered out; intercepted tools (no is_available) always appear.
+    #[test]
+    fn get_definitions_filters_unavailable_regular_tools_only() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(UnavailableTool));
+        registry.register_intercepted("always_on", test_intercept_schema("always_on"), test_handler("ok"));
+        let schemas = registry.get_definitions(None);
+        let names: Vec<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+        assert!(!names.contains(&"unavailable".to_string()),
+            "unavailable regular tool must be filtered out; got: {names:?}");
+        assert!(names.contains(&"always_on".to_string()),
+            "intercepted tool must always appear in get_definitions; got: {names:?}");
+        assert_eq!(names.len(), 1, "only intercepted tool should appear; got: {names:?}");
+    }
+
+    /// Tool B with a required env_var prerequisite for list_unavailable testing.
+    struct MissingKeyTool;
+
+    #[async_trait]
+    impl Tool for MissingKeyTool {
+        fn name(&self) -> &str { "test_b" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tool requiring MISSING_KEY_25_02" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("test_b", "tool requiring MISSING_KEY_25_02",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn prerequisites(&self) -> Vec<Prerequisite> {
+            vec![Prerequisite {
+                kind: "env_var".to_string(),
+                name: "MISSING_KEY_25_02".to_string(),
+                description: "Test key for Phase 25 Plan 02 list_unavailable test.".to_string(),
+                required: true,
+            }]
+        }
+    }
+
+    /// Tool A with no prerequisites for list_unavailable testing.
+    struct AlwaysAvailTool;
+
+    #[async_trait]
+    impl Tool for AlwaysAvailTool {
+        fn name(&self) -> &str { "test_a" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "always available tool" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("test_a", "always available tool",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+    }
+
+    /// Test: list_unavailable() returns tools with missing required prerequisites.
+    #[test]
+    fn list_unavailable_returns_missing_required_prereqs() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test with env_lock held; Rust 2024 edition requires unsafe.
+        unsafe { std::env::remove_var("MISSING_KEY_25_02") };
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(AlwaysAvailTool));
+        registry.register(Box::new(MissingKeyTool));
+        let unavailable = registry.list_unavailable();
+        assert_eq!(unavailable.len(), 1,
+            "exactly one tool must be unavailable when MISSING_KEY_25_02 is unset; got: {unavailable:?}");
+        let (tool_name, missing) = &unavailable[0];
+        assert_eq!(tool_name.as_str(), "test_b",
+            "the unavailable tool must be 'test_b'; got: {tool_name}");
+        assert_eq!(missing.len(), 1,
+            "must have exactly one missing prereq; got: {missing:?}");
+
+        // With env set, returns empty Vec
+        unsafe { std::env::set_var("MISSING_KEY_25_02", "1") };
+        let unavailable_after = registry.list_unavailable();
+        unsafe { std::env::remove_var("MISSING_KEY_25_02") };
+        assert!(unavailable_after.is_empty(),
+            "list_unavailable must return empty when all prereqs satisfied; got: {unavailable_after:?}");
+    }
+
+    /// Tools with different toolsets for list_toolsets testing.
+    struct WebTool1;
+    struct CodeTool1;
+    struct WebTool2;
+
+    #[async_trait]
+    impl Tool for WebTool1 {
+        fn name(&self) -> &str { "web_tool_1" }
+        fn toolset(&self) -> &str { "web" }
+        fn description(&self) -> &str { "web tool 1" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("web_tool_1", "web tool 1", serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> { Ok("ok".to_string()) }
+    }
+
+    #[async_trait]
+    impl Tool for CodeTool1 {
+        fn name(&self) -> &str { "code_tool_1" }
+        fn toolset(&self) -> &str { "code" }
+        fn description(&self) -> &str { "code tool 1" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("code_tool_1", "code tool 1", serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> { Ok("ok".to_string()) }
+    }
+
+    #[async_trait]
+    impl Tool for WebTool2 {
+        fn name(&self) -> &str { "web_tool_2" }
+        fn toolset(&self) -> &str { "web" }
+        fn description(&self) -> &str { "web tool 2" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("web_tool_2", "web tool 2", serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> { Ok("ok".to_string()) }
+    }
+
+    /// Test: list_toolsets() returns unique, sorted toolset names from regular tools.
+    #[test]
+    fn list_toolsets_returns_unique_set() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(WebTool1));
+        registry.register(Box::new(CodeTool1));
+        registry.register(Box::new(WebTool2));
+        let toolsets = registry.list_toolsets();
+        assert_eq!(toolsets, vec!["code", "web"],
+            "list_toolsets must return deduplicated, sorted toolset names; got: {toolsets:?}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 02 Task 3: todo_write_schema, todo_read_schema, D-26 Test 3
+    // ---------------------------------------------------------------------------
+
+    /// Test: todo_write_schema() returns a ToolSchema with name "todo_write" and
+    /// a required "items" field of type array of strings.
+    #[test]
+    fn todo_write_schema_minimal_shape() {
+        let schema = crate::registry::todo_write_schema();
+        assert_eq!(schema.function.name, "todo_write",
+            "todo_write_schema must have name 'todo_write'");
+        let params = serde_json::to_value(&schema.function.parameters).unwrap();
+        let props = &params["properties"];
+        assert!(props.get("items").is_some(),
+            "todo_write_schema must have 'items' in properties; got: {props}");
+        let items_type = props["items"]["type"].as_str().unwrap_or("");
+        assert_eq!(items_type, "array",
+            "todo_write_schema 'items' must be of type 'array'; got: {items_type}");
+        let item_item_type = props["items"]["items"]["type"].as_str().unwrap_or("");
+        assert_eq!(item_item_type, "string",
+            "todo_write_schema items.items.type must be 'string'; got: {item_item_type}");
+        let required = params["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("items")),
+            "todo_write_schema must have 'items' in required; got: {required:?}");
+    }
+
+    /// Test: todo_read_schema() returns a ToolSchema with name "todo_read"
+    /// and empty/no-arg parameters.
+    #[test]
+    fn todo_read_schema_minimal_shape() {
+        let schema = crate::registry::todo_read_schema();
+        assert_eq!(schema.function.name, "todo_read",
+            "todo_read_schema must have name 'todo_read'");
+        let params = serde_json::to_value(&schema.function.parameters).unwrap();
+        let props = params["properties"].as_object();
+        assert!(
+            props.map(|p| p.is_empty()).unwrap_or(true),
+            "todo_read_schema must have empty properties; got: {params}"
+        );
+        // No required fields (or empty required array)
+        let required = params.get("required").and_then(|r| r.as_array());
+        assert!(
+            required.map(|r| r.is_empty()).unwrap_or(true),
+            "todo_read_schema must have no required fields; got: {params}"
+        );
+    }
+
+    /// D-26 Test 3 (mandatory): intercepted_tool_no_schema_duplicate.
+    /// Boot registry with all 6 intercepted tool names; assert each appears
+    /// exactly once in get_definitions(None).
+    #[tokio::test]
+    async fn intercepted_tool_no_schema_duplicate() {
+        let mut registry = ToolRegistry::new();
+        let names = ["memory", "session_search", "delegate_task", "todo_write", "todo_read", "cronjob"];
+        for name in names {
+            registry.register_intercepted(
+                name,
+                ToolSchema::new(
+                    name,
+                    "stub intercepted tool for D-26 Test 3",
+                    serde_json::json!({ "type": "object", "properties": {} }),
+                ),
+                std::sync::Arc::new(|_args| {
+                    Box::pin(async move { Ok("stub".to_string()) })
+                }),
+            );
+        }
+        let schemas = registry.get_definitions(None);
+        let names_returned: Vec<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+        for name in names {
+            let count = names_returned.iter().filter(|n| n.as_str() == name).count();
+            assert_eq!(
+                count, 1,
+                "intercepted tool '{}' must appear exactly once in schema list, found {}; all: {:?}",
+                name, count, names_returned
+            );
+        }
     }
 
     #[tokio::test]
