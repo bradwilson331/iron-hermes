@@ -642,6 +642,55 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Phase 25 Plan 01 Task 2: D-01 toolset name enumeration test
+    // ---------------------------------------------------------------------------
+
+    /// Verify that every built-in tool's toolset() return value matches the D-01
+    /// six-name enumeration: {web, code, memory, agent, skills, session}.
+    ///
+    /// For unit-struct tools (no constructor complexity), instantiate directly and
+    /// assert toolset(). For CronjobTool (requires Arc<Mutex<JobStore>>), use the
+    /// source-text invariant approach (include_str!) per Phase 22.3-12 pattern —
+    /// verifies the literal "agent" is in the toolset() impl block.
+    #[test]
+    fn toolset_names_match_d01_enumeration() {
+        use crate::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+        use crate::terminal::TerminalTool;
+
+        // Direct instantiation for tools with trivial constructors
+        assert_eq!(TerminalTool::new().toolset(), "code",
+            "TerminalTool must be in 'code' toolset per D-01");
+        assert_eq!(ReadFileTool.toolset(), "code",
+            "ReadFileTool must be in 'code' toolset per D-01");
+        assert_eq!(WriteFileTool.toolset(), "code",
+            "WriteFileTool must be in 'code' toolset per D-01");
+        assert_eq!(PatchFileTool.toolset(), "code",
+            "PatchFileTool must be in 'code' toolset per D-01");
+        assert_eq!(SearchFilesTool.toolset(), "code",
+            "SearchFilesTool must be in 'code' toolset per D-01");
+
+        // Source-text invariant for CronjobTool (requires Arc<Mutex<JobStore>> constructor).
+        // Verifies that the toolset() impl block returns "agent" per D-01 Open Question 1 resolution.
+        let cronjob_src = include_str!("cronjob_tool.rs");
+        // Find the toolset() impl block and verify "agent" literal is present
+        // (and "cronjob" is NOT present as a toolset return value)
+        let toolset_section: String = cronjob_src
+            .lines()
+            .skip_while(|l| !l.contains("fn toolset"))
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            toolset_section.contains("\"agent\""),
+            "CronjobTool::toolset() must return \"agent\" per D-01; found:\n{toolset_section}"
+        );
+        assert!(
+            !toolset_section.contains("\"cronjob\""),
+            "CronjobTool::toolset() must NOT return \"cronjob\" (fixed by Plan 1); found:\n{toolset_section}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // register_dynamic tests (D-10)
     // ---------------------------------------------------------------------------
 

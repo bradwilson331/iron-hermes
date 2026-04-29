@@ -341,7 +341,7 @@ impl Tool for CronjobTool {
     }
 
     fn toolset(&self) -> &str {
-        "cronjob"
+        "agent"
     }
 
     fn description(&self) -> &str {
