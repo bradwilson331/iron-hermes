@@ -167,7 +167,7 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [ ] **CFG-01**: Interactive setup wizard guides first-run configuration (provider selection, API keys, model choice, tool availability)
 - [ ] **CFG-02**: hermes config set/get/show for managing config.yaml values
 - [ ] **CFG-03**: hermes config migrate scans skills for unconfigured settings and prompts user
-- [ ] **CFG-04**: Profile isolation: each profile gets own HERMES_HOME, config, memory, sessions, gateway PID
+- [x] **CFG-04**: Profile isolation: each profile gets own HERMES_HOME, config, memory, sessions, gateway PID
 
 ### Learning Loop
 
@@ -353,7 +353,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CFG-01 | Phase 23 | Pending |
 | CFG-02 | Phase 23 | Pending |
 | CFG-03 | Phase 23 | Pending |
-| CFG-04 | Phase 24 | Pending |
+| CFG-04 | Phase 24 | Complete |
 | LEARN-01 | Phase 32 | Pending |
 | LEARN-02 | Phase 32 | Pending |
 | LEARN-03 | Phase 33 | Pending |
