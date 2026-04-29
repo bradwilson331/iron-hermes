@@ -570,27 +570,31 @@ Toolset {
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **`cronjob` toolset membership**
    - What we know: `cronjob_tool.rs` currently returns `toolset() = "cronjob"`. D-01 lists `cronjob` as a member of the `agent` toolset.
    - What's unclear: Is this a deliberate separation (cronjob is its own toolset) or should it be folded into `agent`?
    - Recommendation: Plan must explicitly update `cronjob_tool.rs` to return `"agent"` per D-01 mapping, OR planner creates a seventh `cronjob` toolset. Bring to user attention before Plan 1 executes.
+   - **RESOLVED:** Plan 1 updates `crates/ironhermes-tools/src/cronjob_tool.rs` `toolset()` to return `"agent"` per D-01.
 
 2. **`todo_write` / `todo_read` schema design**
    - What we know: These tools don't exist in the codebase yet. D-13 lists them as intercepted, D-09 requires `prerequisites()` on all tools.
    - What's unclear: Exact schema shape (fields, types) and in-session state structure for the todo list.
    - Recommendation: Plan 2 must include minimal schema definitions. Suggested: `todo_write(items: Vec<String>)` replaces the current list; `todo_read()` returns current list. Intercepted by an `Arc<Mutex<Vec<String>>>` in the AgentLoop state.
+   - **RESOLVED:** Plan 2 creates `todo_write({"items": [string]})` and `todo_read({})` greenfield. State lives in `Arc<tokio::sync::Mutex<Vec<String>>>` owned by AgentLoop, passed via `with_intercepts()`.
 
 3. **`InterceptHandler` async vs sync**
    - What we know: `dispatch_intercepts()` is called from `execute_tool_call()` which is `async fn`. Session_search currently uses `spawn_blocking` because StateStore is sync.
    - What's unclear: Should `InterceptHandler` be `async` (requiring `Box<dyn Future>`) or sync (requiring `spawn_blocking` inside handlers)?
    - Recommendation: Make `dispatch_intercepts` async; `InterceptHandler = Arc<dyn Fn(serde_json::Value) -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>`. The `spawn_blocking` for StateStore stays inside the closure. This avoids propagating the sync/async split into the trait surface.
+   - **RESOLVED:** `InterceptHandler = Arc<dyn Fn(serde_json::Value) -> futures::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>`. `spawn_blocking` for sync StateStore stays inside the closure.
 
 4. **`enabled_tools` parameter interpretation after toolset layer**
    - What we know: Existing call at `agent_loop.rs:478` passes `None` (all tools). D-23 says this parameter becomes the per-tool override layer. The toolset config is a separate layer read from the registry's stored `ToolsConfig`.
    - What's unclear: Should `get_definitions(None)` mean "no per-tool override filter" (apply all toolset+prereq filters) or "truly all tools"?
    - Recommendation: `None` = "apply all filters (toolset + prereq + per-tool disabled list)." Passing `Some(list)` narrows further. This is the only interpretation consistent with D-23.
+   - **RESOLVED:** `get_definitions(None)` means "no per-tool override list; apply all OTHER filters that the registry has configured (toolset filter if `toolset_config: Some(...)`, prereq filter via `is_available()`)". When `toolset_config: None` (pre-Phase-25 default state), no toolset filter is applied — preserves existing behavior per Pitfall 8 / Assumption A2. Document this in the rustdoc on `get_definitions` (Plan 03 Task 2 covers writing the rustdoc).
 
 ---
 
