@@ -5,6 +5,7 @@ use crate::types::Platform;
 pub mod context;
 pub mod handlers;
 pub mod registry;
+pub mod toolset_display;
 pub mod typo;
 
 // =============================================================================

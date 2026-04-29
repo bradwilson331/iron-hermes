@@ -27,6 +27,7 @@ use ironhermes_core::types::Platform;
 use std::time::Instant;
 
 mod config_cli;
+mod toolset_cmd;
 mod cron;
 mod batch;
 mod memory_cmd;
@@ -163,6 +164,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         subcommand: config_cli::ConfigSubcommand,
+    },
+    /// Manage toolsets — enable/disable, list, show (Phase 25, D-04).
+    Toolset {
+        #[command(subcommand)]
+        subcommand: toolset_cmd::ToolsetSubcommand,
     },
 }
 
@@ -381,6 +387,10 @@ async fn main() -> Result<()> {
             // per RESEARCH §Pitfall 4 (no filesystem reverse-walk needed here).
             let profile_name = cli.profile.as_deref().unwrap_or("default").to_string();
             config_cli::handle_config_command(subcommand, &profile_name).await
+        }
+        Some(Commands::Toolset { subcommand }) => {
+            let profile_name = cli.profile.as_deref().unwrap_or("default").to_string();
+            toolset_cmd::handle_toolset_command(subcommand, &profile_name).await
         }
         None => {
             if let Some(ref prompt) = cli.execute {

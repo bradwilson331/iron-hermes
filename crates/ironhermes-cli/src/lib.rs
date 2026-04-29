@@ -12,6 +12,11 @@ pub mod memory_cmd;
 pub mod setup;
 pub mod skills_cmd;
 
+// Phase 25 Plan 04: toolset subcommand — exported so integration tests and
+// the lib consumer can call validate_toolset_name / cmd_toolset_enable without
+// going through the binary subprocess for unit tests.
+pub mod toolset_cmd;
+
 // Phase 21.7 Wave 0 (ISS-08) — re-exports for Wave 1 Plan 04 + Wave 3 Plans 08/09:
 pub mod status_cmd; // Plan 04 Task 4-01 replaces body; placeholder only in Wave 0.
 pub mod tui; // Existing module (render_status_line etc.) — re-exported for Plan 07 tests.
