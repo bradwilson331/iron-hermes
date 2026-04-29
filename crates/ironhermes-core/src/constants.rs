@@ -26,6 +26,9 @@ pub const MEMORY_FILENAME: &str = "MEMORY.md";
 pub const USER_FILENAME: &str = "USER.md";
 pub const MEMORIES_DIR: &str = "memories";
 
+/// Profile isolation constants (D-04, Phase 24)
+pub const PROFILES_SUBDIR: &str = "profiles";
+
 /// Get the IronHermes home directory (default: ~/.ironhermes).
 pub fn get_hermes_home() -> PathBuf {
     match std::env::var("IRONHERMES_HOME") {

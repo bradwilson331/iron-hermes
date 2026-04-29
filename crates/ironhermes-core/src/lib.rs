@@ -11,6 +11,7 @@ pub mod memory_provider;
 pub mod memory_store;
 pub mod model_metadata;
 pub mod models_cache;
+pub mod profile;
 pub mod provider;
 pub mod skills;
 pub mod token_estimator;
