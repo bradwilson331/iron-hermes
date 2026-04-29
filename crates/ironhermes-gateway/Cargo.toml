@@ -29,6 +29,7 @@ chrono = { workspace = true }
 tokio-util = { workspace = true }
 pdf-extract = { workspace = true }
 base64 = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
+# tempfile promoted to [dependencies] — needed at runtime for write_gateway_pid atomic write (Phase 24 D-10)
