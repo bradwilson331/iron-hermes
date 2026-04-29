@@ -7,6 +7,20 @@ use ironhermes_cron::JobStore;
 
 use crate::memory_tool::SharedMemoryManager;
 
+/// D-09 / D-25 (Phase 25): per-tool prerequisite descriptor for setup-wizard discovery.
+/// Plain-String type per cross-crate convention (Phase 22.4.2.2 → 23 D-12 → 24 D-17 → 25 D-25).
+#[derive(Debug, Clone)]
+pub struct Prerequisite {
+    /// "env_var" | "config_field" (string union per D-25; downstream matches on kind at call site).
+    pub kind: String,
+    /// e.g. "FIRECRAWL_API_KEY" or "search.brave_api_key" (dotted-path config key).
+    pub name: String,
+    /// Human-readable description shown by the setup wizard (D-18).
+    pub description: String,
+    /// true = blocks is_available() when missing; false = optional / advisory only.
+    pub required: bool,
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -14,8 +28,24 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn schema(&self) -> ToolSchema;
 
+    /// Default: walk prerequisites(), return true iff every required env_var prereq is satisfied.
+    /// Tools may override for custom logic (e.g., "either KEY_A or KEY_B") but MUST also
+    /// implement prerequisites() for setup-wizard discovery (D-09).
     fn is_available(&self) -> bool {
-        true
+        self.prerequisites()
+            .iter()
+            .filter(|p| p.required)
+            .all(|p| match p.kind.as_str() {
+                "env_var" => std::env::var(&p.name).is_ok(),
+                "config_field" => true, // checked at config load site, not at trait level
+                _ => true,              // unknown kinds are non-blocking by design (D-25)
+            })
+    }
+
+    /// Per-tool prerequisite list for setup-wizard discovery (D-09 / Phase 25).
+    /// Default returns empty Vec (most tools have no external prerequisites).
+    fn prerequisites(&self) -> Vec<Prerequisite> {
+        vec![]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
@@ -386,6 +416,18 @@ mod tests {
     use async_trait::async_trait;
     use ironhermes_core::ToolSchema;
     use ironhermes_hooks::{BlocklistGuardrail, GuardrailDecision, GuardrailHook};
+    use std::sync::{Mutex, OnceLock};
+
+    // ---------------------------------------------------------------------------
+    // env_lock: serialise tests that mutate environment variables.
+    // Copied from crates/ironhermes-cli/tests/profile_isolation.rs pattern.
+    // Phase 21.6 D: Rust 2024 edition requires unsafe for env var mutation.
+    // ---------------------------------------------------------------------------
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     // ---------------------------------------------------------------------------
     // Mock tool for testing
@@ -439,6 +481,164 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(MockTool { tool_name }));
         registry
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test tools for prerequisite tests
+    // ---------------------------------------------------------------------------
+
+    /// Tool with no prerequisites() override — uses the default empty Vec.
+    struct NoPrereqTool;
+
+    #[async_trait]
+    impl Tool for NoPrereqTool {
+        fn name(&self) -> &str { "no_prereq" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tool with no prerequisites" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("no_prereq", "tool with no prerequisites",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        // prerequisites() intentionally NOT overridden — tests the default
+    }
+
+    /// Tool with one required env_var prerequisite.
+    struct RequiredEnvPrereqTool;
+
+    #[async_trait]
+    impl Tool for RequiredEnvPrereqTool {
+        fn name(&self) -> &str { "required_env_prereq" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tool with required env_var prerequisite" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("required_env_prereq", "tool with required env_var prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn prerequisites(&self) -> Vec<Prerequisite> {
+            vec![Prerequisite {
+                kind: "env_var".to_string(),
+                name: "TEST_PREREQ_25_01_PRESENT".to_string(),
+                description: "Test prerequisite env var for Phase 25 Plan 01 unit tests.".to_string(),
+                required: true,
+            }]
+        }
+    }
+
+    /// Tool with one optional (required:false) env_var prerequisite.
+    struct OptionalEnvPrereqTool;
+
+    #[async_trait]
+    impl Tool for OptionalEnvPrereqTool {
+        fn name(&self) -> &str { "optional_env_prereq" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tool with optional env_var prerequisite" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("optional_env_prereq", "tool with optional env_var prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn prerequisites(&self) -> Vec<Prerequisite> {
+            vec![Prerequisite {
+                kind: "env_var".to_string(),
+                name: "TEST_PREREQ_25_01_PRESENT".to_string(),
+                description: "Optional test prerequisite env var.".to_string(),
+                required: false,
+            }]
+        }
+    }
+
+    /// Tool with a config_field prerequisite (should never block is_available()).
+    struct ConfigFieldPrereqTool;
+
+    #[async_trait]
+    impl Tool for ConfigFieldPrereqTool {
+        fn name(&self) -> &str { "config_field_prereq" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tool with config_field prerequisite" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("config_field_prereq", "tool with config_field prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }))
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn prerequisites(&self) -> Vec<Prerequisite> {
+            vec![Prerequisite {
+                kind: "config_field".to_string(),
+                name: "search.brave_api_key".to_string(),
+                description: "Config field prerequisite — checked at config load, not trait level.".to_string(),
+                required: true,
+            }]
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 01: Prerequisite struct + default is_available() tests
+    // ---------------------------------------------------------------------------
+
+    /// Test 1: A struct implementing Tool with no prerequisites() override returns
+    /// empty Vec from prerequisites().
+    #[test]
+    fn prerequisite_default_impl_returns_empty() {
+        let tool = NoPrereqTool;
+        let prereqs = tool.prerequisites();
+        assert!(prereqs.is_empty(), "default prerequisites() must return empty Vec");
+    }
+
+    /// Test 2: A test Tool whose prerequisites() returns one required env_var prereq,
+    /// when the env var IS set, has is_available() == true.
+    #[test]
+    fn is_available_default_walks_prerequisites_required_env_var_present() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test with env_lock held; Rust 2024 edition requires unsafe.
+        unsafe { std::env::set_var("TEST_PREREQ_25_01_PRESENT", "1") };
+        let tool = RequiredEnvPrereqTool;
+        let available = tool.is_available();
+        unsafe { std::env::remove_var("TEST_PREREQ_25_01_PRESENT") };
+        assert!(available, "is_available() must be true when required env_var prereq is set");
+    }
+
+    /// Test 3: Same Tool when the env var is NOT set has is_available() == false.
+    #[test]
+    fn is_available_default_walks_prerequisites_required_env_var_absent() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test with env_lock held; Rust 2024 edition requires unsafe.
+        unsafe { std::env::remove_var("TEST_PREREQ_25_01_PRESENT") };
+        let tool = RequiredEnvPrereqTool;
+        let available = tool.is_available();
+        assert!(!available, "is_available() must be false when required env_var prereq is absent");
+    }
+
+    /// Test 4: A test Tool with required:false for an unset env var has is_available() == true
+    /// (optional prereqs do not block).
+    #[test]
+    fn is_available_default_walks_prerequisites_optional_env_var_absent() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test with env_lock held; Rust 2024 edition requires unsafe.
+        unsafe { std::env::remove_var("TEST_PREREQ_25_01_PRESENT") };
+        let tool = OptionalEnvPrereqTool;
+        let available = tool.is_available();
+        assert!(available, "is_available() must be true when only optional prereqs are absent");
+    }
+
+    /// Test 5: A prerequisite with kind "config_field" (or any non-"env_var" kind) does NOT
+    /// block is_available() — the default treats it as satisfied (config-level checks happen
+    /// elsewhere per D-09).
+    #[test]
+    fn is_available_default_treats_unknown_kind_as_satisfied() {
+        let tool = ConfigFieldPrereqTool;
+        // config_field prereqs are required:true but still non-blocking at trait level
+        let available = tool.is_available();
+        assert!(available,
+            "is_available() must be true for config_field prereqs (checked at config load, not here)");
     }
 
     // ---------------------------------------------------------------------------
