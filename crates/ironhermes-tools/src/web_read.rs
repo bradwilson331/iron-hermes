@@ -518,8 +518,13 @@ impl Tool for WebReadTool {
         )
     }
 
-    fn is_available(&self) -> bool {
-        true
+    fn prerequisites(&self) -> Vec<crate::registry::Prerequisite> {
+        vec![crate::registry::Prerequisite {
+            kind: "env_var".to_string(),
+            name: "FIRECRAWL_API_KEY".to_string(),
+            description: "Firecrawl API key — optional. Without it, web_read uses the plain-text fallback path.".to_string(),
+            required: false,
+        }]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {

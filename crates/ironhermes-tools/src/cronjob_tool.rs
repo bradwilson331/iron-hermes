@@ -341,7 +341,7 @@ impl Tool for CronjobTool {
     }
 
     fn toolset(&self) -> &str {
-        "cronjob"
+        "agent"
     }
 
     fn description(&self) -> &str {
@@ -748,6 +748,6 @@ mod tests {
         let store = JobStore::open(dir.path().join("cron")).unwrap();
         let tool = CronjobTool::new(Arc::new(Mutex::new(store)));
         assert_eq!(tool.name(), "cronjob");
-        assert_eq!(tool.toolset(), "cronjob");
+        assert_eq!(tool.toolset(), "agent"); // D-01: cronjob is a member of the 'agent' toolset (Phase 25 Plan 1)
     }
 }

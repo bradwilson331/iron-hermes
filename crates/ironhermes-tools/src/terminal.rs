@@ -67,7 +67,7 @@ impl Tool for TerminalTool {
     }
 
     fn toolset(&self) -> &str {
-        "system"
+        "code"
     }
 
     fn description(&self) -> &str {

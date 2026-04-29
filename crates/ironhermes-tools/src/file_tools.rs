@@ -47,7 +47,7 @@ impl Tool for ReadFileTool {
     }
 
     fn toolset(&self) -> &str {
-        "file"
+        "code"
     }
 
     fn description(&self) -> &str {
@@ -109,7 +109,7 @@ impl Tool for WriteFileTool {
     }
 
     fn toolset(&self) -> &str {
-        "file"
+        "code"
     }
 
     fn description(&self) -> &str {
@@ -198,7 +198,7 @@ impl Tool for PatchFileTool {
     }
 
     fn toolset(&self) -> &str {
-        "file"
+        "code"
     }
 
     fn description(&self) -> &str {
@@ -296,7 +296,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn toolset(&self) -> &str {
-        "file"
+        "code"
     }
 
     fn description(&self) -> &str {
