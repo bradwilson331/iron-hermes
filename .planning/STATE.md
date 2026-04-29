@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: verifying
-stopped_at: "Completed Phase 24 Plan 07 (D-19 profile_isolation_smoke + subagent_transcript_isolation + workspace smoke gate — phase 24 complete, ready for verification)"
-last_updated: "2026-04-29T20:39:52.111Z"
-last_activity: 2026-04-29
+status: executing
+stopped_at: "Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)"
+last_updated: "2026-04-29T22:13:32.491Z"
+last_activity: 2026-04-29 -- Phase 25 planning complete
 progress:
   total_phases: 21
   completed_phases: 11
-  total_plans: 59
+  total_plans: 64
   completed_plans: 59
-  percent: 100
+  percent: 92
 ---
 
 # Project State
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 24 (Profile Isolation) — EXECUTING
 Plan: 7 of 7
-Status: Phase complete — ready for verification
-Last activity: 2026-04-29
+Status: Ready to execute
+Last activity: 2026-04-29 -- Phase 25 planning complete
 
 ## Performance Metrics
 
