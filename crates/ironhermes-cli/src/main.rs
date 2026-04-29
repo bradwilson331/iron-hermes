@@ -249,6 +249,21 @@ async fn main() -> Result<()> {
     // PHASE 24 NOTE: Condition MUST remain unchanged. The Phase 23
     // verification report (23-VERIFICATION.md) locks this condition; Phase
     // 24's --profile resolution runs BEFORE this gate but does not widen it.
+    //
+    // Phase 24 D-06 first-use contract:
+    // The Phase 23 preflight gate condition is UNCHANGED. New-profile first-use
+    // auto-scaffolds and auto-launches the wizard via the implicit
+    // "config.yaml missing" trigger that Phase 23 already implements:
+    //
+    //   1. Plan 03 pivots IRONHERMES_HOME to the profile-scoped path
+    //   2. ensure_home_dirs() above scaffolds the 8-subdir tree at that path
+    //   3. config.yaml does not yet exist for a brand-new profile
+    //   4. preflight::run_preflight_check sees missing config.yaml and runs
+    //      the wizard; after wizard completes, control returns here and the
+    //      requested subcommand dispatches normally.
+    //
+    // Phase 24 must NOT widen the gate condition. PROF-01..N (full lifecycle)
+    // is deferred to v2.2 per REQUIREMENTS.md.
     let run_preflight = matches!(cli.command, Some(Commands::Chat { .. }) | None)
         && cli.execute.is_none();
     if run_preflight {
