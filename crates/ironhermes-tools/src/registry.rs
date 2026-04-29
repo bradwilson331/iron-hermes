@@ -691,6 +691,62 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Phase 25 Plan 01 Task 3: web tool prerequisites() and is_available() tests
+    // ---------------------------------------------------------------------------
+
+    /// Test: WebSearchTool::prerequisites() returns exactly one Prerequisite with
+    /// kind == "env_var", name == "FIRECRAWL_API_KEY", required == true.
+    #[test]
+    fn web_search_prerequisites_lists_firecrawl_required_true() {
+        let tool = crate::web_search::WebSearchTool;
+        let prereqs = tool.prerequisites();
+        assert_eq!(prereqs.len(), 1, "WebSearchTool must have exactly one prerequisite");
+        let p = &prereqs[0];
+        assert_eq!(p.kind, "env_var", "WebSearchTool prereq kind must be 'env_var'");
+        assert_eq!(p.name, "FIRECRAWL_API_KEY", "WebSearchTool prereq name must be FIRECRAWL_API_KEY");
+        assert!(p.required, "WebSearchTool FIRECRAWL_API_KEY prereq must be required:true");
+    }
+
+    /// Test: WebReadTool::prerequisites() returns one Prerequisite with
+    /// kind == "env_var", name == "FIRECRAWL_API_KEY", required == false.
+    #[test]
+    fn web_read_prerequisites_lists_firecrawl_required_false() {
+        let tool = crate::web_read::WebReadTool;
+        let prereqs = tool.prerequisites();
+        assert_eq!(prereqs.len(), 1, "WebReadTool must have exactly one prerequisite");
+        let p = &prereqs[0];
+        assert_eq!(p.kind, "env_var", "WebReadTool prereq kind must be 'env_var'");
+        assert_eq!(p.name, "FIRECRAWL_API_KEY", "WebReadTool prereq name must be FIRECRAWL_API_KEY");
+        assert!(!p.required, "WebReadTool FIRECRAWL_API_KEY prereq must be required:false (plain-text fallback)");
+    }
+
+    /// Test: With FIRECRAWL_API_KEY unset, WebSearchTool::is_available() == false
+    /// (kept manual override per D-09).
+    #[test]
+    fn web_search_is_available_remains_blocked_without_firecrawl() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test with env_lock held; Rust 2024 edition requires unsafe.
+        unsafe { std::env::remove_var("FIRECRAWL_API_KEY") };
+        let tool = crate::web_search::WebSearchTool;
+        let available = tool.is_available();
+        assert!(!available,
+            "WebSearchTool::is_available() must be false when FIRECRAWL_API_KEY is unset");
+    }
+
+    /// Test: With FIRECRAWL_API_KEY unset, WebReadTool::is_available() == true
+    /// (required:false does not block; web_read has plain-text fallback per D-09).
+    #[test]
+    fn web_read_is_available_stays_true_without_firecrawl() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test with env_lock held; Rust 2024 edition requires unsafe.
+        unsafe { std::env::remove_var("FIRECRAWL_API_KEY") };
+        let tool = crate::web_read::WebReadTool;
+        let available = tool.is_available();
+        assert!(available,
+            "WebReadTool::is_available() must be true when FIRECRAWL_API_KEY is unset (optional prereq)");
+    }
+
+    // ---------------------------------------------------------------------------
     // register_dynamic tests (D-10)
     // ---------------------------------------------------------------------------
 

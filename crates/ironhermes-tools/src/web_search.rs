@@ -68,6 +68,15 @@ impl Tool for WebSearchTool {
         std::env::var("FIRECRAWL_API_KEY").is_ok()
     }
 
+    fn prerequisites(&self) -> Vec<crate::registry::Prerequisite> {
+        vec![crate::registry::Prerequisite {
+            kind: "env_var".to_string(),
+            name: "FIRECRAWL_API_KEY".to_string(),
+            description: "Firecrawl API key — required for web_search to query the live web.".to_string(),
+            required: true,
+        }]
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         let query = args["query"]
             .as_str()
