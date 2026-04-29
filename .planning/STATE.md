@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
-stopped_at: Completed Phase 24 Plan 01 (validate_profile_name + PROFILES_SUBDIR)
-last_updated: "2026-04-29T13:45:18.045Z"
+stopped_at: Completed Phase 24 Plan 03 (--profile flag, resolve_and_set_profile, D-08 banner)
+last_updated: "2026-04-29T14:11:53Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 21
   completed_phases: 10
   total_plans: 59
-  completed_plans: 54
-  percent: 92
+  completed_plans: 55
+  percent: 93
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 24 (Profile Isolation) — EXECUTING
-Plan: 3 of 7
+Plan: 4 of 7
 Status: Ready to execute
 Last activity: 2026-04-29
 
@@ -134,6 +134,7 @@ Last activity: 2026-04-29
 | Phase 22.4.2.1 P02 | 5min | 2 tasks | 5 files |
 | Phase 22.4.2.1 P03 | 5 | 2 tasks | 3 files |
 | Phase 24 P01 | 247 | 2 tasks | 3 files |
+| Phase 24 P03 | 264 | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -306,6 +307,10 @@ Recent decisions affecting current work:
 - [Phase ?]: Path B (synthetic JoinSet drain test) for gateway_drains_workers_within_timeout — full GatewayRunner requires live TG token per RESEARCH §6
 - [Phase ?]: Phase 24 Plan 01: validate_profile_name returns Result<String, ProfileNameError> (D-17 plain-String cross-crate convention)
 - [Phase ?]: Phase 24 Plan 01: PROFILES_SUBDIR = 'profiles' constant in ironhermes-core::constants, re-exported via pub use constants::* (D-04)
+- [Phase 24]: Plan 03: dotenvy moved AFTER resolve_and_set_profile — Config::env_path() calls get_hermes_home(), so dotenvy must run after pivot or it loads from wrong home (Pitfall 1 fix)
+- [Phase 24]: Plan 03: dirs added as runtime dep (not dev-dep) since resolve_and_set_profile calls dirs::home_dir() at process startup
+- [Phase 24]: Plan 03: --profile uses global = true (D-07, works on all subcommands incl. gateway run); --yolo uses global = false to exclude gateway
+- [Phase 24]: Plan 03: Phase 23 preflight gate condition byte-for-byte unchanged per 23-VERIFICATION.md lock
 
 ### Roadmap Evolution
 
@@ -342,8 +347,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-29T13:45:18.039Z
-Stopped at: Completed Phase 24 Plan 01 (validate_profile_name + PROFILES_SUBDIR)
+Last session: 2026-04-29T14:07:29Z
+Stopped at: Completed Phase 24 Plan 03 (--profile flag, resolve_and_set_profile, D-08 banner)
 Resume file: None
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
