@@ -72,6 +72,10 @@ pub struct ToolRegistry {
     /// D-14 (Phase 25): intercepted tools stored separately from regular tools.
     /// get_definitions() returns schemas from BOTH maps; D-15 prevents name collisions.
     intercepts: HashMap<String, (ToolSchema, InterceptHandler)>,
+    /// D-22 (Phase 25): optional toolset configuration.
+    /// When Some, get_definitions() applies toolset-level filtering (D-23).
+    /// When None, no toolset filter is applied — preserves pre-Phase-25 behavior (A2/Pitfall 8).
+    toolset_config: Option<ironhermes_core::config::ToolsConfig>,
 }
 
 impl ToolRegistry {
@@ -81,7 +85,14 @@ impl ToolRegistry {
             guardrails: Vec::new(),
             error_detail: ironhermes_hooks::ErrorDetailLevel::Full,
             intercepts: HashMap::new(),
+            toolset_config: None,
         }
+    }
+
+    /// Set the toolset configuration for runtime filtering (D-22, Phase 25).
+    /// Pass `None` to disable toolset filtering (preserves pre-Phase-25 behavior, A2/Pitfall 8).
+    pub fn set_toolset_config(&mut self, cfg: Option<ironhermes_core::config::ToolsConfig>) {
+        self.toolset_config = cfg;
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
@@ -215,26 +226,65 @@ impl ToolRegistry {
         self.tools.get(name).map(|t| t.as_ref())
     }
 
+    /// Returns the LLM-visible schema list with all currently-configured filters applied.
+    ///
+    /// Filter resolution order (D-23):
+    /// 1. If `toolset_config` is `Some(_)` and a tool's toolset is disabled → exclude.
+    ///    If `toolset_config` is `None`, no toolset filter is applied (pre-Phase-25 behavior, A2/Pitfall 8).
+    /// 2. If `is_available()` returns `false` (missing required prerequisites) → exclude.
+    /// 3. If `enabled_tools` is `Some(list)` → narrow to that list.
+    /// 4. Schemas from both `tools` and `intercepts` maps are unioned.
     pub fn get_definitions(&self, enabled_tools: Option<&[String]>) -> Vec<ToolSchema> {
         let mut schemas: Vec<ToolSchema> = self
             .tools
             .values()
+            .filter(|t| {
+                // D-23 layer 1: toolset-level filter (only when toolset_config is set).
+                // When None, no toolset filter is applied (pre-Phase-25 behavior, A2/Pitfall 8).
+                self.toolset_config
+                    .as_ref()
+                    .map(|cfg| cfg.is_toolset_enabled(t.toolset()))
+                    .unwrap_or(true)
+            })
             .filter(|t| t.is_available())
             .filter(|t| {
+                // D-23 layer 3: enabled_tools list filter.
                 enabled_tools
                     .map(|list| list.iter().any(|name| name == t.name()))
                     .unwrap_or(true)
             })
+            .filter(|t| {
+                // D-23 layer 4: per-tool disabled list within an enabled toolset.
+                self.toolset_config
+                    .as_ref()
+                    .map(|cfg| !cfg.disabled.iter().any(|d| d == t.name()))
+                    .unwrap_or(true)
+            })
             .map(|t| t.schema())
             .collect();
-        // Phase 25 D-14: union with intercept schemas. Same enabled_tools filter applies.
-        // Toolset-level filter (D-23) added in Plan 3 once toolset_config exists.
+        // Phase 25 D-14: union with intercept schemas.
+        // Apply enabled_tools filter + intercepted_owner_toolset toolset filter + disabled list.
         schemas.extend(
             self.intercepts
                 .iter()
                 .filter(|(name, _)| {
+                    // D-23 layer 1 for intercepts: check owner toolset.
+                    self.toolset_config
+                        .as_ref()
+                        .map(|cfg| cfg.is_toolset_enabled(intercepted_owner_toolset(name)))
+                        .unwrap_or(true)
+                })
+                .filter(|(name, _)| {
+                    // D-23 layer 3: enabled_tools filter.
                     enabled_tools
                         .map(|list| list.iter().any(|n| n == name.as_str()))
+                        .unwrap_or(true)
+                })
+                .filter(|(name, _)| {
+                    // D-23 layer 4: per-tool disabled list.
+                    self.toolset_config
+                        .as_ref()
+                        .map(|cfg| !cfg.disabled.iter().any(|d| d.as_str() == name.as_str()))
                         .unwrap_or(true)
                 })
                 .map(|(_, (schema, _))| schema.clone()),
@@ -529,6 +579,23 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25 D-23: intercepted_owner_toolset helper
+// Maps intercepted tool names to their owning toolset for D-23 layer-1 filtering.
+// ---------------------------------------------------------------------------
+
+/// Maps an intercepted tool name to its owning toolset (D-13 / D-23 Plan 3).
+/// Used by `get_definitions()` to apply toolset-level filtering to intercepts.
+/// Default toolset is "agent" for any unknown intercepted name.
+fn intercepted_owner_toolset(name: &str) -> &'static str {
+    match name {
+        "memory" => "memory",
+        "session_search" => "session",
+        "delegate_task" | "todo_write" | "todo_read" | "cronjob" => "agent",
+        _ => "agent",
     }
 }
 
@@ -1384,6 +1451,164 @@ mod tests {
                 name, count, names_returned
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25 Plan 03 Task 2: toolset_config filter + D-15 collision guard tests
+    // ---------------------------------------------------------------------------
+
+    /// MockTool with a configurable toolset name for toolset-filter tests.
+    struct ToolsetMockTool {
+        tool_name: &'static str,
+        toolset_name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for ToolsetMockTool {
+        fn name(&self) -> &str { self.tool_name }
+        fn toolset(&self) -> &str { self.toolset_name }
+        fn description(&self) -> &str { "toolset mock tool" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                self.tool_name,
+                "toolset mock tool",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+    }
+
+    fn make_tools_config_with_web_disabled() -> ironhermes_core::config::ToolsConfig {
+        ironhermes_core::config::ToolsConfig::default() // web is disabled by default
+    }
+
+    fn make_tools_config_with_web_enabled() -> ironhermes_core::config::ToolsConfig {
+        let mut cfg = ironhermes_core::config::ToolsConfig::default();
+        cfg.toolsets.insert(
+            "web".to_string(),
+            ironhermes_core::config::ToolsetEntry { enabled: true },
+        );
+        cfg
+    }
+
+    /// Test: MockTool with toolset "web"; default ToolsConfig has web disabled;
+    /// get_definitions returns empty. Enable web; returns the schema.
+    #[test]
+    fn set_toolset_config_then_get_definitions_filters_by_toolset() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ToolsetMockTool { tool_name: "web_mock", toolset_name: "web" }));
+
+        // With web disabled (default)
+        registry.set_toolset_config(Some(make_tools_config_with_web_disabled()));
+        let defs = registry.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(
+            !names.iter().any(|n| n == "web_mock"),
+            "web_mock must be filtered out when web toolset is disabled; got: {:?}", names
+        );
+
+        // Enable web
+        registry.set_toolset_config(Some(make_tools_config_with_web_enabled()));
+        let defs = registry.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "web_mock"),
+            "web_mock must appear when web toolset is enabled; got: {:?}", names
+        );
+    }
+
+    /// Test (D-A2 / Pitfall 8): toolset_config = None → get_definitions returns schema
+    /// regardless of toolset name (preserves pre-Phase-25 behavior).
+    #[test]
+    fn get_definitions_no_config_preserves_existing_behavior() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ToolsetMockTool {
+            tool_name: "any_tool",
+            toolset_name: "some_weird_toolset",
+        }));
+        // No toolset_config set (None is the default)
+        let defs = registry.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "any_tool"),
+            "With no toolset_config, any_tool must appear regardless of toolset; got: {:?}", names
+        );
+    }
+
+    /// Test (D-23 layer 4): per-tool disabled list excludes a specific tool within an enabled toolset.
+    #[test]
+    fn get_definitions_per_tool_disabled_filter() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ToolsetMockTool {
+            tool_name: "regular",
+            toolset_name: "memory", // memory is enabled by default
+        }));
+        let mut cfg = ironhermes_core::config::ToolsConfig::default();
+        cfg.disabled.push("regular".to_string());
+        registry.set_toolset_config(Some(cfg));
+
+        let defs = registry.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(
+            !names.iter().any(|n| n == "regular"),
+            "Tool in disabled list must be excluded even when toolset is enabled; got: {:?}", names
+        );
+    }
+
+    /// Test (D-23 intercept toolset mapping): intercepts filtered by owner toolset.
+    #[test]
+    fn get_definitions_intercepted_owner_toolset_mapping() {
+        let mut registry = ToolRegistry::new();
+        // Register 3 intercepts: memory (memory toolset), session_search (session), delegate_task (agent)
+        for name in &["memory", "session_search", "delegate_task"] {
+            registry.register_intercepted(
+                name,
+                test_intercept_schema(name),
+                test_handler("ok"),
+            );
+        }
+
+        // Default config: memory+session+agent all enabled → all 3 present
+        let cfg = ironhermes_core::config::ToolsConfig::default();
+        registry.set_toolset_config(Some(cfg));
+        let defs = registry.get_definitions(None);
+        let names: std::collections::HashSet<String> = defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(names.contains("memory"), "memory intercept must be present when memory toolset enabled");
+        assert!(names.contains("session_search"), "session_search must be present when session toolset enabled");
+        assert!(names.contains("delegate_task"), "delegate_task must be present when agent toolset enabled");
+
+        // Disable agent toolset → delegate_task disappears, others remain
+        let mut cfg2 = ironhermes_core::config::ToolsConfig::default();
+        cfg2.toolsets.insert(
+            "agent".to_string(),
+            ironhermes_core::config::ToolsetEntry { enabled: false },
+        );
+        registry.set_toolset_config(Some(cfg2));
+        let defs2 = registry.get_definitions(None);
+        let names2: std::collections::HashSet<String> = defs2.iter().map(|s| s.function.name.clone()).collect();
+        assert!(!names2.contains("delegate_task"), "delegate_task must be absent when agent toolset disabled");
+        assert!(names2.contains("memory"), "memory must still be present");
+        assert!(names2.contains("session_search"), "session_search must still be present");
+    }
+
+    /// Test (D-15 collision guard): registering non-intercepted regular tool + intercepted names
+    /// does NOT panic when name sets are disjoint — the binary's actual setup contract.
+    #[test]
+    fn with_intercepts_does_not_collide_with_regular_registration() {
+        let mut registry = ToolRegistry::new();
+        // Register a non-intercepted regular tool (like web_search in the binary)
+        registry.register(Box::new(ToolsetMockTool { tool_name: "web_search", toolset_name: "web" }));
+        // Register intercepted names (different from the regular tool's name)
+        registry.register_intercepted("memory", test_intercept_schema("memory"), test_handler("m"));
+        registry.register_intercepted("delegate_task", test_intercept_schema("delegate_task"), test_handler("dt"));
+        registry.register_intercepted("cronjob", test_intercept_schema("cronjob"), test_handler("cj"));
+        // Reaching here means no D-15 panic fired — the test passes by completing
+        let defs = registry.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(names.contains(&"web_search".to_string()), "regular tool must appear");
+        assert!(names.contains(&"memory".to_string()), "memory intercept must appear");
     }
 
     #[tokio::test]
