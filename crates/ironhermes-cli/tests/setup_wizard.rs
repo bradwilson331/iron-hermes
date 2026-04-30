@@ -149,7 +149,10 @@ fn setup_tools_section_exits_ok() {
 }
 
 #[test]
-fn setup_agent_section_errors_with_deferred_message() {
+fn setup_agent_section_succeeds_with_phase26_implementation() {
+    // Phase 26 Plan 05: hermes setup agent is now implemented (D-19 auxiliary routing).
+    // Previously this section was deferred and bailed with "Phase 26".
+    // After Plan 05 it exits 0 (graceful skip on EOF in non-interactive context).
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
@@ -157,8 +160,8 @@ fn setup_agent_section_errors_with_deferred_message() {
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "agent"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Phase 26").or(predicate::str::contains("phase 26")));
+        .success()
+        .stdout(predicate::str::contains("auxiliary").or(predicate::str::contains("routing")));
 }
 
 #[test]
