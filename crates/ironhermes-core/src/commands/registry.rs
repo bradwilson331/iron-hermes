@@ -71,7 +71,26 @@ pub fn build_registry() -> Vec<CommandDef> {
         // CONFIGURATION
         // -----------------------------------------------------------------------
         CommandDef::new("config", "Show configuration", Configuration).platform(CliOnly),
-        CommandDef::new("provider", "Show current provider", Configuration).platform(Universal),
+        // Phase 26 D-14: provider management slash commands (list/show/test/enable/disable).
+        // One entry per subcommand so CommandRouter can resolve "/provider list" etc. via prefix.
+        CommandDef::new("provider", "Manage providers — list/show/test/enable/disable (Phase 26, D-14)", Configuration)
+            .args_hint("[list|show|test|enable|disable] [name]")
+            .platform(Universal),
+        CommandDef::new("provider list", "List all providers with status", Configuration)
+            .args_hint("[--json]")
+            .platform(Universal),
+        CommandDef::new("provider show", "Show detail for one provider", Configuration)
+            .args_hint("<name>")
+            .platform(Universal),
+        CommandDef::new("provider test", "Live-ping a provider API endpoint (D-15: never prints key value)", Configuration)
+            .args_hint("<name>")
+            .platform(Universal),
+        CommandDef::new("provider enable", "Enable a provider (persists to config.yaml, emits cache-break banner)", Configuration)
+            .args_hint("<name>")
+            .platform(Universal),
+        CommandDef::new("provider disable", "Disable a provider (persists to config.yaml, emits cache-break banner)", Configuration)
+            .args_hint("<name>")
+            .platform(Universal),
         CommandDef::new("prompt", "Set custom system prompt", Configuration)
             .args_hint("[text]")
             .platform(CliOnly),
