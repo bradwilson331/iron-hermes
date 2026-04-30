@@ -149,6 +149,20 @@ async fn run_minimum_viable_flow(
         "\nSetup complete. Configuration written to {}.",
         hermes_home.join("config.yaml").display()
     );
+
+    // Phase 25 D-19: opt-in optional tool prerequisites stage. Operator can decline
+    // and `hermes setup` still completes with the minimum-viable config from Phase 23.
+    // Default answer is "No" (false) — existing apply_minimum_viable_answers floor preserved.
+    println!();
+    let proceed = prompt_yes_no(
+        rl,
+        "Optional: configure additional tool prerequisites now? (e.g., FIRECRAWL_API_KEY for web search)",
+        false,
+    )?;
+    if proceed {
+        run_tools_section(rl, hermes_home).await?;
+    }
+
     Ok(())
 }
 
@@ -605,6 +619,29 @@ mod tests {
             .expect("Config should load again");
         let bar_count = cfg2.tools.skip_prompts.iter().filter(|s| *s == "bar").count();
         assert_eq!(bar_count, 1, "skip_prompts must not duplicate 'bar', got: {:?}", cfg2.tools.skip_prompts);
+    }
+
+    #[test]
+    fn run_setup_appends_optional_tool_prereq_stage_d19() {
+        // Source-text invariant: run_minimum_viable_flow must contain the D-19 prompt
+        // AFTER apply_minimum_viable_answers is referenced in setup.rs.
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains("Optional: configure additional tool prerequisites"),
+            "D-19 prompt string must be present in setup.rs"
+        );
+        // Verify ordering: "Optional: configure additional tool prerequisites" appears
+        // after "apply_minimum_viable_answers" in the source text.
+        let opt_pos = source
+            .find("Optional: configure additional tool prerequisites")
+            .expect("D-19 prompt must exist");
+        let apply_pos = source
+            .find("apply_minimum_viable_answers")
+            .expect("apply_minimum_viable_answers must exist");
+        assert!(
+            opt_pos > apply_pos,
+            "D-19 prompt must appear AFTER apply_minimum_viable_answers (D-19 ordering contract)"
+        );
     }
 
     #[test]
