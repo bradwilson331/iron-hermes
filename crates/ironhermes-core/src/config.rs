@@ -107,7 +107,7 @@ impl Default for ToolsConfig {
         for name in ["memory", "session", "agent", "skills"] {
             toolsets.insert(name.to_string(), ToolsetEntry { enabled: true });
         }
-        for name in ["web", "code"] {
+        for name in ["web", "code", "browser"] {  // browser added (D-04 high-blast-radius default)
             toolsets.insert(name.to_string(), ToolsetEntry { enabled: false });
         }
         Self {
@@ -283,6 +283,10 @@ pub struct Config {
     /// Pre-Phase-26 configs parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub auxiliary: AuxiliaryConfig,
+    /// Phase 25.1 D-18: browser automation configuration block.
+    /// Pre-25.1 configs parse cleanly via #[serde(default)].
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 // =============================================================================
@@ -493,6 +497,42 @@ impl Default for WebConfig {
             user_agent: "IronHermes/1.0 (+bot)".to_string(),
             max_content_chars: 50_000,
             timeout_secs: 30,
+        }
+    }
+}
+
+// =============================================================================
+// BrowserConfig (Phase 25.1 D-18)
+// =============================================================================
+
+/// Phase 25.1 D-18: browser automation configuration.
+/// All fields `#[serde(default)]` for backward compat — pre-25.1 YAML configs parse cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// D-02: run browser with a visible window (true) or headless (false, default).
+    pub headed: bool,
+    /// D-02: allow `--no-sandbox` flag (required on Docker/restricted envs). Default false.
+    pub no_sandbox: bool,
+    /// D-15: domain allowlist for browser_navigate. Empty = allow all hosts. Exact-match (no wildcards in v2.1).
+    pub allowed_domains: Vec<String>,
+    /// D-16: scheme allowlist for browser_navigate. Default ["http", "https"].
+    pub allowed_schemes: Vec<String>,
+    /// D-05: explicit chromium binary path. None = autodiscover via D-05 walk.
+    pub chromium_path: Option<String>,
+    /// D-02: per-operation timeout in seconds. Default 30.
+    pub timeout_seconds: u64,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            headed: false,
+            no_sandbox: false,
+            allowed_domains: vec![],
+            allowed_schemes: vec!["http".to_string(), "https".to_string()],
+            chromium_path: None,
+            timeout_seconds: 30,
         }
     }
 }
@@ -886,6 +926,61 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Phase 25.1 Plan 02: BrowserConfig + ToolsConfig browser entry tests (D-18, D-04)
+    // =========================================================================
+
+    #[test]
+    fn browser_config_default_matches_d18() {
+        let bc = BrowserConfig::default();
+        assert!(!bc.headed);
+        assert!(!bc.no_sandbox);
+        assert!(bc.allowed_domains.is_empty());
+        assert_eq!(bc.allowed_schemes, vec!["http".to_string(), "https".to_string()]);
+        assert_eq!(bc.chromium_path, None);
+        assert_eq!(bc.timeout_seconds, 30);
+    }
+
+    #[test]
+    fn config_includes_browser_block_with_defaults() {
+        let c = Config::default();
+        assert_eq!(c.browser.timeout_seconds, 30);
+        assert!(c.browser.allowed_domains.is_empty());
+    }
+
+    #[test]
+    fn config_yaml_without_browser_section_parses_with_defaults() {
+        // Phase 25.1 D-18 backward compat
+        let yaml = r#"
+web:
+  backend: "firecrawl"
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.browser.timeout_seconds, 30);
+        assert!(!c.browser.headed);
+    }
+
+    #[test]
+    fn config_yaml_partial_browser_section_uses_defaults_for_rest() {
+        let yaml = r#"
+browser:
+  headed: true
+  timeout_seconds: 60
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(c.browser.headed);
+        assert_eq!(c.browser.timeout_seconds, 60);
+        assert!(!c.browser.no_sandbox);                    // default
+        assert_eq!(c.browser.allowed_schemes, vec!["http".to_string(), "https".to_string()]); // default
+    }
+
+    #[test]
+    fn tools_config_default_disables_browser_toolset() {
+        let tc = ToolsConfig::default();
+        let entry = tc.toolsets.get("browser").expect("browser toolset entry must exist by default");
+        assert!(!entry.enabled, "Phase 25.1 D-04: browser toolset MUST be disabled by default (high-blast-radius)");
+    }
 
     #[test]
     fn test_skills_config_default() {
