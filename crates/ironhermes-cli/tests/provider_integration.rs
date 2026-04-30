@@ -441,6 +441,220 @@ fn cache_break_banner_on_persistent_enable_disable() {
 }
 
 // =============================================================================
+// D-20 Test 2: auxiliary_routes_to_separate_model (PROV-06)
+// =============================================================================
+
+/// PROV-06 end-to-end (D-20 Test 2): with auxiliary = { provider: openai, model: gpt-4o-mini }
+/// and main = anthropic, a compression task hits the openai endpoint (aux_server) with
+/// model gpt-4o-mini — NOT the anthropic endpoint (main_server).
+///
+/// Architecture:
+/// - aux_server  = wiremock server standing in for openai (OpenAI ChatCompletions mode)
+/// - main_server = wiremock server standing in for anthropic (should receive 0 requests)
+/// - LlmClient posts to {base_url}/chat/completions, so wiremock path = /v1/chat/completions
+#[tokio::test(flavor = "multi_thread")]
+async fn auxiliary_routes_to_separate_model() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+    let aux_server = MockServer::start().await;
+    let main_server = MockServer::start().await;
+
+    // Auxiliary endpoint (openai/ChatCompletions): returns a valid OpenAI-compatible response.
+    // Path must be /v1/chat/completions because LlmClient appends /chat/completions to
+    // the configured base_url (which is aux_server.uri() + "/v1").
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1700000000u64,
+                "model": "gpt-4o-mini",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "compressed summary"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15
+                }
+            })),
+        )
+        .mount(&aux_server)
+        .await;
+
+    // Main endpoint (anthropic): must NOT be hit by the compression task.
+    // Any request to main_server is a test failure indicator.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(
+            "main_server should NOT receive compression requests — PROV-06 violated",
+        ))
+        .mount(&main_server)
+        .await;
+
+    let _aux_key = EnvGuard::set("OPENAI_API_KEY", "sk-aux-test");
+    let _main_key = EnvGuard::set("ANTHROPIC_API_KEY", "sk-main-test");
+
+    // Build config: main = anthropic, auxiliary = openai/gpt-4o-mini.
+    let mut config = ironhermes_core::Config::default();
+    config.model.provider = "anthropic".to_string();
+    config.model.default = "claude-sonnet-4".to_string();
+
+    config.providers.insert(
+        "anthropic".to_string(),
+        ironhermes_core::ProviderConfig {
+            // main_server.uri() is http://127.0.0.1:PORT — append /v1 for base_url
+            base_url: Some(format!("{}/v1", main_server.uri())),
+            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+            api_mode: Some(ironhermes_core::config::ApiMode::AnthropicMessages),
+            ..Default::default()
+        },
+    );
+    config.providers.insert(
+        "openai".to_string(),
+        ironhermes_core::ProviderConfig {
+            base_url: Some(format!("{}/v1", aux_server.uri())),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            api_mode: Some(ironhermes_core::config::ApiMode::ChatCompletions),
+            ..Default::default()
+        },
+    );
+    config.auxiliary = ironhermes_core::config::AuxiliaryConfig {
+        provider: "openai".to_string(),
+        model: "gpt-4o-mini".to_string(),
+    };
+
+    let resolver = ironhermes_core::ProviderResolver::build(&config)
+        .expect("resolver build must succeed");
+
+    // build_role_client("compression") resolves via D-05 cascade level 2 (auxiliary).
+    let client = ironhermes_agent::build_role_client(&resolver, "compression")
+        .expect("build_role_client must not error")
+        .expect("compression role must resolve via auxiliary cascade (D-05 level 2)");
+
+    // Verify the client is targeting the auxiliary endpoint (openai).
+    // The client's model() must be "gpt-4o-mini" (the auxiliary model, not "claude-sonnet-4").
+    assert_eq!(
+        client.model(),
+        "gpt-4o-mini",
+        "PROV-06: compression client must use auxiliary model gpt-4o-mini, not claude-sonnet-4"
+    );
+
+    // Drive a real HTTP request via chat_completion — this sends POST to {base_url}/chat/completions.
+    let messages = vec![ironhermes_core::ChatMessage {
+        role: ironhermes_core::types::Role::User,
+        content: Some(ironhermes_core::types::MessageContent::text(
+            "Summarize: test compression payload",
+        )),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    }];
+    let resp = client
+        .chat_completion(&messages, None, None, Some(10), None, None)
+        .await
+        .expect("chat_completion to aux_server must succeed");
+
+    // The response model must be gpt-4o-mini (echoed back from wiremock stub).
+    assert_eq!(
+        resp.model, "gpt-4o-mini",
+        "PROV-06: response model must be gpt-4o-mini from aux endpoint"
+    );
+
+    // Assert: aux_server received the request (compression hit auxiliary endpoint).
+    let aux_reqs = aux_server.received_requests().await.unwrap_or_default();
+    assert!(
+        !aux_reqs.is_empty(),
+        "PROV-06 VIOLATED: auxiliary endpoint (openai/aux_server) received 0 requests"
+    );
+
+    // Assert: the request body contains "model":"gpt-4o-mini".
+    let body: serde_json::Value =
+        serde_json::from_slice(&aux_reqs[0].body).expect("aux request body must be valid JSON");
+    assert_eq!(
+        body["model"].as_str(),
+        Some("gpt-4o-mini"),
+        "PROV-06: compression request body must contain model=gpt-4o-mini; got: {}",
+        body
+    );
+
+    // Assert: main_server was NOT hit by the compression task (zero requests).
+    let main_reqs = main_server.received_requests().await.unwrap_or_default();
+    assert!(
+        main_reqs.is_empty(),
+        "PROV-06 VIOLATED: main (anthropic) endpoint received {} request(s) from compression task — \
+         compression must route to aux only",
+        main_reqs.len()
+    );
+}
+
+// =============================================================================
+// Pitfall 3 end-to-end: auxiliary_provider_unknown_name_fails_at_load
+// =============================================================================
+
+/// Plan 02 Pitfall 3: auxiliary.provider referencing an unknown name must fail
+/// fast at ProviderResolver::build() with a clear error message.
+/// This subprocess test verifies the error reaches the user at launch.
+#[test]
+fn auxiliary_provider_unknown_name_fails_at_load() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let bin = match ironhermes_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("Skip auxiliary_provider_unknown_name_fails_at_load: CARGO_BIN_EXE_ironhermes not set");
+            return;
+        }
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // Write config with auxiliary.provider pointing to a nonexistent provider name.
+    write_config_yaml(
+        tmp.path(),
+        r#"model:
+  provider: openai
+  default: gpt-4o
+providers:
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+auxiliary:
+  provider: nonexistent
+  model: some-model
+"#,
+    );
+
+    // Run hermes status — any command that triggers ProviderResolver::build().
+    // hermes provider list also works and is more direct.
+    let out = std::process::Command::new(&bin)
+        .env("IRONHERMES_HOME", tmp.path())
+        .env("OPENAI_API_KEY", "sk-test")
+        .args(["provider", "list"])
+        .output()
+        .expect("run ironhermes provider list");
+
+    // Must fail (non-zero exit) because ProviderResolver::build() rejects unknown aux provider.
+    assert!(
+        !out.status.success(),
+        "Pitfall 3: hermes provider list must fail when auxiliary.provider is unknown; \
+         exit code was 0;\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nonexistent") || stderr.contains("auxiliary"),
+        "Pitfall 3: error must mention the unknown provider name or 'auxiliary';\nstderr:\n{}",
+        stderr
+    );
+}
+
+// =============================================================================
 // T-26-03: provider_enable_rejects_slug_injection
 // =============================================================================
 
