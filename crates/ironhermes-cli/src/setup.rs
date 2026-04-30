@@ -267,6 +267,7 @@ async fn run_gateway_section(
 /// Phase 26 D-19: `hermes setup agent` — configure auxiliary model routing.
 /// Presents the same prompt as the inline auxiliary stage in run_minimum_viable_flow
 /// but as a stand-alone section for re-configuration.
+/// EOF (Ctrl-D) or interrupt is treated as a graceful skip — no error.
 async fn run_agent_section(
     config: &mut Config,
     rl: &mut rustyline::DefaultEditor,
@@ -280,13 +281,27 @@ async fn run_agent_section(
     };
     println!("Current: {}\n", current);
 
-    let aux_provider = prompt_with_default(
+    // Treat EOF/interrupt as graceful skip (non-interactive invocation is valid).
+    let aux_provider = match prompt_with_default(
         rl,
         "Auxiliary provider (Enter to skip / keep current)",
         "",
-    )?;
+    ) {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("EOF") || e.to_string().contains("interrupted") => {
+            println!("No change to auxiliary routing.");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     if !aux_provider.trim().is_empty() {
-        let aux_model = prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
+        let aux_model = match prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini") {
+            Ok(v) => v,
+            Err(e) if e.to_string().contains("EOF") || e.to_string().contains("interrupted") => {
+                "gpt-4o-mini".to_string()
+            }
+            Err(e) => return Err(e),
+        };
         apply_auxiliary_answer(config, &aux_provider, &aux_model);
         println!("Auxiliary routing set to {}/{}.", config.auxiliary.provider, config.auxiliary.model);
     } else {
