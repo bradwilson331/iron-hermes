@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: verifying
+status: executing
 stopped_at: "Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)"
-last_updated: "2026-04-30T18:53:46.692Z"
-last_activity: 2026-04-30 -- Phase 26 execution complete
+last_updated: "2026-04-30T22:38:44.750Z"
+last_activity: 2026-04-30 -- Phase 25.1 planning complete
 progress:
   total_phases: 22
   completed_phases: 13
-  total_plans: 69
+  total_plans: 80
   completed_plans: 69
-  percent: 100
+  percent: 86
 ---
 
 # Project State
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 26 (Provider Polish) — COMPLETE
 Plan: 5 of 5
-Status: Phase 26 complete (verifier closed all 3 ROADMAP success criteria; SC-2 vision/session-search greenfield-deferred per user; SC-3 standalone --provider fixed via afa421a)
-Last activity: 2026-04-30 -- Phase 26 execution complete
+Status: Ready to execute
+Last activity: 2026-04-30 -- Phase 25.1 planning complete
 
 ## Performance Metrics
 
