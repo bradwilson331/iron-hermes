@@ -232,6 +232,29 @@ async fn ensure_session<'a>(
 }
 
 // =============================================================================
+// NoOpVisionHandle — public stub for registry wiring and tests
+// =============================================================================
+
+/// A no-op `VisionClientHandle` implementation used by `register_browser_tools`
+/// when no real agent-side vision client is wired (e.g. in unit tests or when
+/// the browser toolset is registered without plan-09 AgentLoop wiring).
+///
+/// The real implementation (`AnyClientVisionHandle`) lives in `ironhermes-agent`
+/// and is injected via `register_browser_tools_with_vision` (plan 09).
+pub struct NoOpVisionHandle;
+
+#[async_trait]
+impl VisionClientHandle for NoOpVisionHandle {
+    async fn vision_call(
+        &self,
+        _prompt: String,
+        _image_data_url: String,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("browser_vision: no vision client wired — call register_browser_tools_with_vision instead of register_browser_tools")
+    }
+}
+
+// =============================================================================
 // Unit tests
 // =============================================================================
 
