@@ -4,6 +4,45 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // =============================================================================
+// api_key_env validator (D-04, Phase 26)
+// =============================================================================
+
+/// Validate that an api_key_env value looks like a valid env var identifier.
+///
+/// Valid: `[A-Z][A-Z0-9_]*` — uppercase letter start, uppercase/digit/underscore only.
+/// Rejects: empty strings, lowercase names, names with spaces, shell-injection patterns.
+///
+/// # Errors
+/// Returns an error if the value does not match `[A-Z][A-Z0-9_]*`.
+pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
+    // Hand-rolled check to avoid regex overhead at the call site — and to
+    // match the project's policy of not instantiating Regex in hot paths.
+    // The regex crate is still available for tests.
+    if value.is_empty() {
+        anyhow::bail!(
+            "api_key_env '' is not a valid env var name — must match [A-Z][A-Z0-9_]*"
+        );
+    }
+    let mut chars = value.chars();
+    let first = chars.next().unwrap(); // non-empty, safe
+    if !first.is_ascii_uppercase() {
+        anyhow::bail!(
+            "api_key_env '{}' is not a valid env var name — must match [A-Z][A-Z0-9_]*",
+            value
+        );
+    }
+    for ch in chars {
+        if !ch.is_ascii_uppercase() && !ch.is_ascii_digit() && ch != '_' {
+            anyhow::bail!(
+                "api_key_env '{}' is not a valid env var name — must match [A-Z][A-Z0-9_]*",
+                value
+            );
+        }
+    }
+    Ok(())
+}
+
+// =============================================================================
 // ToolsConfig (TOOL-02, Phase 25)
 // =============================================================================
 
@@ -66,14 +105,31 @@ pub enum ApiMode {
 }
 
 /// Per-provider override configuration (used in the `providers:` map).
+///
+/// Phase 26 additions (D-01, D-04, D-14):
+/// - `api_key_env`: reference to env var holding the API key (replaces `api_key` literal).
+///   Must match `[A-Z][A-Z0-9_]*` (validated at resolver build time).
+/// - `disabled`: when `true`, the provider is excluded from resolver entry creation (D-14).
+///
+/// `api_key` is kept for one release cycle as a deprecated fallback (D-01 / Phase 26 Pitfall 5).
+/// Existing configs with `api_key:` literal parse cleanly; a deprecation banner is emitted at
+/// resolver build time (handled in `provider.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
     pub base_url: Option<String>,
+    /// DEPRECATED (D-01, Phase 26): use `api_key_env` instead.
+    /// Kept for one release cycle; resolver emits a one-shot stderr banner when non-None.
     pub api_key: Option<String>,
+    /// Env var name whose value holds the API key for this provider (D-01, D-04).
+    /// Must match `[A-Z][A-Z0-9_]*`. Validated at `ProviderResolver::build()` time.
+    pub api_key_env: Option<String>,
     pub api_mode: Option<ApiMode>,
     pub default_model: Option<String>,
     pub fallback_providers: Vec<String>,
+    /// When `true`, this provider is excluded from the resolver (D-14, Phase 26).
+    /// `hermes provider disable <name>` writes this flag; `enable` clears it.
+    pub disabled: Option<bool>,
 }
 
 impl Default for ProviderConfig {
@@ -81,9 +137,11 @@ impl Default for ProviderConfig {
         Self {
             base_url: None,
             api_key: None,
+            api_key_env: None,
             api_mode: None,
             default_model: None,
             fallback_providers: vec![],
+            disabled: None,
         }
     }
 }
@@ -105,6 +163,43 @@ pub struct ModelRoleConfig {
     pub provider: String,
     /// Model to use; None = use the provider's default_model.
     pub model: Option<String>,
+}
+
+/// Auxiliary model routing configuration (PROV-06, D-05, Phase 26).
+///
+/// Defines a default cheaper model for the five helper task categories:
+/// `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`.
+///
+/// Resolution cascade for `resolve_role("vision")`:
+/// 1. `model.roles["vision"]` — per-task override (if set)
+/// 2. `auxiliary` — this block (if set)
+/// 3. `None` — caller falls through to main provider
+///
+/// `auxiliary` is optional (D-06): absent means all helper tasks use the main provider.
+/// All fields are plain `String` per Phase 22.4.2.2 / Phase 26 D-18 cross-crate convention.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuxiliaryConfig {
+    /// Provider name (must be a key in `providers:`). Empty string = unset.
+    pub provider: String,
+    /// Model identifier served by this provider. Empty string = use provider default.
+    pub model: String,
+}
+
+impl Default for AuxiliaryConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+impl AuxiliaryConfig {
+    /// Returns `true` if the auxiliary block is meaningfully configured (non-empty provider).
+    pub fn is_set(&self) -> bool {
+        !self.provider.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -148,6 +243,11 @@ pub struct Config {
     /// Pre-Phase-25 configs load with D-20 defaults via `#[serde(default)]`.
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Phase 26 D-05/D-06: auxiliary model routing configuration.
+    /// Optional — absent means all helper tasks use the main provider.
+    /// Pre-Phase-26 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub auxiliary: AuxiliaryConfig,
 }
 
 // =============================================================================
@@ -660,10 +760,38 @@ impl Config {
     }
 
     /// Load config from a specific path, falling back to defaults.
+    ///
+    /// Phase 26 D-02: if `custom_providers:` entries exist and have no matching
+    /// key in `providers:`, they are migrated into `providers:` at parse time
+    /// with a one-line stderr warning per migrated entry.
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
             let content = std::fs::read_to_string(path)?;
-            let config: Config = serde_yaml::from_str(&content)?;
+            let mut config: Config = serde_yaml::from_str(&content)?;
+            // D-02: migrate custom_providers entries that are missing from providers HashMap.
+            // If providers.foo already exists, the custom_providers.foo entry is silently
+            // dropped (providers: takes precedence — no ambiguity).
+            for custom in &config.custom_providers {
+                if !config.providers.contains_key(&custom.name) {
+                    eprintln!(
+                        "[provider:{}] migrated from deprecated custom_providers list — \
+                        move to providers.{} in config.yaml to silence this warning",
+                        custom.name, custom.name
+                    );
+                    config.providers.insert(
+                        custom.name.clone(),
+                        ProviderConfig {
+                            base_url: Some(custom.base_url.clone()),
+                            api_key: custom.api_key.clone(),
+                            api_key_env: None,
+                            api_mode: custom.api_mode.clone(),
+                            default_model: custom.default_model.clone(),
+                            fallback_providers: vec![],
+                            disabled: None,
+                        },
+                    );
+                }
+            }
             Ok(config)
         } else {
             Ok(Config::default())
@@ -1351,5 +1479,236 @@ model:
             4,
             "DEFAULT_TOOLSETS must contain exactly 4 entries (memory, session, agent, skills)"
         );
+    }
+
+    // =========================================================================
+    // Phase 26 Plan 01: config schema additions (D-01, D-04, D-05, D-06, D-18)
+    // =========================================================================
+
+    /// D-04: validate_api_key_env rejects invalid names.
+    #[test]
+    fn api_key_env_validation_rejects_invalid() {
+        // Empty string
+        assert!(
+            validate_api_key_env("").is_err(),
+            "empty string must be rejected"
+        );
+        // Lowercase
+        assert!(
+            validate_api_key_env("lower_case").is_err(),
+            "lowercase name must be rejected"
+        );
+        // Mixed case
+        assert!(
+            validate_api_key_env("Mixed_Case").is_err(),
+            "mixed-case name must be rejected"
+        );
+        // Has space
+        assert!(
+            validate_api_key_env("HAS SPACE").is_err(),
+            "name with space must be rejected"
+        );
+        // Starts with digit
+        assert!(
+            validate_api_key_env("1_STARTS_WITH_DIGIT").is_err(),
+            "name starting with digit must be rejected"
+        );
+        // Starts with underscore
+        assert!(
+            validate_api_key_env("_STARTS_WITH_UNDERSCORE").is_err(),
+            "name starting with underscore must be rejected"
+        );
+        // Shell injection attempt
+        assert!(
+            validate_api_key_env("$(rm -rf ~)").is_err(),
+            "shell injection pattern must be rejected"
+        );
+    }
+
+    /// D-04: validate_api_key_env accepts valid env var names.
+    #[test]
+    fn api_key_env_validation_accepts_valid() {
+        assert!(
+            validate_api_key_env("OPENAI_API_KEY").is_ok(),
+            "OPENAI_API_KEY must be accepted"
+        );
+        assert!(
+            validate_api_key_env("MY_KEY_123").is_ok(),
+            "MY_KEY_123 must be accepted"
+        );
+        assert!(
+            validate_api_key_env("A").is_ok(),
+            "single uppercase letter must be accepted"
+        );
+        assert!(
+            validate_api_key_env("ANTHROPIC_API_KEY").is_ok(),
+            "ANTHROPIC_API_KEY must be accepted"
+        );
+        assert!(
+            validate_api_key_env("MY_LLM_KEY").is_ok(),
+            "MY_LLM_KEY must be accepted"
+        );
+    }
+
+    /// D-01: ProviderConfig parses with new api_key_env field.
+    #[test]
+    fn provider_config_parses_api_key_env() {
+        let yaml = r#"
+providers:
+  openai:
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o
+  my-local-llm:
+    base_url: http://localhost:8080/v1
+    api_key_env: MY_LLM_KEY
+    default_model: llama3.1
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        let openai = &config.providers["openai"];
+        assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(openai.default_model.as_deref(), Some("gpt-4o"));
+
+        let local = &config.providers["my-local-llm"];
+        assert_eq!(local.api_key_env.as_deref(), Some("MY_LLM_KEY"));
+        assert_eq!(local.base_url.as_deref(), Some("http://localhost:8080/v1"));
+    }
+
+    /// D-14: ProviderConfig parses with `disabled` field.
+    #[test]
+    fn provider_config_parses_disabled_field() {
+        let yaml = r#"
+providers:
+  openrouter:
+    disabled: true
+  anthropic:
+    disabled: false
+  openai: {}
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.providers["openrouter"].disabled, Some(true));
+        assert_eq!(config.providers["anthropic"].disabled, Some(false));
+        assert_eq!(config.providers["openai"].disabled, None);
+    }
+
+    /// Backward compat: existing configs WITHOUT api_key_env/disabled parse cleanly (D-18).
+    #[test]
+    fn provider_config_backward_compat_without_new_fields() {
+        let yaml = r#"
+providers:
+  openrouter:
+    api_mode: chat_completions
+    fallback_providers: ["anthropic"]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse without new fields");
+        let or = &config.providers["openrouter"];
+        assert!(or.api_key_env.is_none(), "api_key_env must default to None");
+        assert!(or.disabled.is_none(), "disabled must default to None");
+    }
+
+    /// D-06: auxiliary config defaults to unset (is_set() == false).
+    #[test]
+    fn auxiliary_config_default_is_unset() {
+        let config = Config::default();
+        assert!(
+            !config.auxiliary.is_set(),
+            "auxiliary must be unset by default (D-06)"
+        );
+        assert!(config.auxiliary.provider.is_empty());
+        assert!(config.auxiliary.model.is_empty());
+    }
+
+    /// D-05: auxiliary config parses from YAML.
+    #[test]
+    fn auxiliary_config_parses_from_yaml() {
+        let yaml = r#"
+auxiliary:
+  provider: openai
+  model: gpt-4o-mini
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert!(config.auxiliary.is_set());
+        assert_eq!(config.auxiliary.provider, "openai");
+        assert_eq!(config.auxiliary.model, "gpt-4o-mini");
+    }
+
+    /// Backward compat: configs WITHOUT auxiliary block parse cleanly (D-06, serde default).
+    #[test]
+    fn config_without_auxiliary_block_parses_cleanly() {
+        let yaml = r#"
+model:
+  default: "test-model"
+  provider: "openrouter"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse without auxiliary block");
+        assert!(!config.auxiliary.is_set(), "auxiliary must be unset when block absent");
+    }
+
+    /// D-05: AuxiliaryConfig round-trip serialization.
+    #[test]
+    fn auxiliary_config_serde_roundtrip() {
+        let yaml = r#"
+auxiliary:
+  provider: anthropic
+  model: claude-haiku-4-5
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parse");
+        let ser = serde_yaml::to_string(&config).expect("serialize");
+        let re: Config = serde_yaml::from_str(&ser).expect("re-parse");
+        assert_eq!(re.auxiliary.provider, "anthropic");
+        assert_eq!(re.auxiliary.model, "claude-haiku-4-5");
+    }
+
+    /// D-02: custom_providers migration — entries NOT in providers get migrated with warning.
+    /// This test verifies the structural effect (migration happens); stderr output is not
+    /// captured in unit tests (that requires subprocess isolation per RESEARCH.md A4).
+    #[test]
+    fn custom_providers_migration_copies_missing_entries_to_providers() {
+        // Write a temp config YAML with only custom_providers (no providers key)
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        let yaml = r#"
+custom_providers:
+  - name: "my-local-llm"
+    base_url: "http://localhost:8080/v1"
+    default_model: "llama3.1"
+"#;
+        std::fs::write(&config_path, yaml).expect("write");
+
+        let config = Config::load_from(&config_path).expect("load");
+        assert!(
+            config.providers.contains_key("my-local-llm"),
+            "migrated entry must appear in providers HashMap"
+        );
+        let entry = &config.providers["my-local-llm"];
+        assert_eq!(entry.base_url.as_deref(), Some("http://localhost:8080/v1"));
+        assert_eq!(entry.default_model.as_deref(), Some("llama3.1"));
+    }
+
+    /// D-02: when providers.foo already exists, custom_providers.foo is silently dropped.
+    #[test]
+    fn custom_providers_migration_does_not_overwrite_existing_providers_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        let yaml = r#"
+providers:
+  my-local-llm:
+    base_url: "http://localhost:9090/v1"
+    default_model: "mistral"
+custom_providers:
+  - name: "my-local-llm"
+    base_url: "http://localhost:8080/v1"
+    default_model: "llama3.1"
+"#;
+        std::fs::write(&config_path, yaml).expect("write");
+
+        let config = Config::load_from(&config_path).expect("load");
+        // providers.my-local-llm must retain the providers: entry, not the custom_providers one
+        let entry = &config.providers["my-local-llm"];
+        assert_eq!(
+            entry.base_url.as_deref(),
+            Some("http://localhost:9090/v1"),
+            "providers: entry must win over custom_providers: when both define the same name"
+        );
+        assert_eq!(entry.default_model.as_deref(), Some("mistral"));
     }
 }
