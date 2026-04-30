@@ -61,6 +61,7 @@ regex = { workspace = true }
 # provider HEAD probes and rusqlite for FTS5 `PRAGMA integrity_check`.
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

@@ -24,7 +24,10 @@ pub enum ToolsetSubcommand {
     Disable { name: String },
     /// Show detail for one toolset (members + schemas + prerequisites)
     Show { name: String },
-    // Setup is in Plan 5
+    /// Walk every unsatisfied required tool prerequisite, prompting for env var or
+    /// config field values. Persistent: writes env vars to .env (0600 mode), config
+    /// fields via dotted-path setter. Phase 25 D-18 / TOOL-05.
+    Setup,
 }
 
 pub async fn handle_toolset_command(
@@ -37,7 +40,14 @@ pub async fn handle_toolset_command(
         ToolsetSubcommand::Enable { name } => cmd_toolset_enable(&hermes_home, &name).await,
         ToolsetSubcommand::Disable { name } => cmd_toolset_disable(&hermes_home, &name).await,
         ToolsetSubcommand::Show { name } => cmd_toolset_show(&hermes_home, &name).await,
+        ToolsetSubcommand::Setup => cmd_toolset_setup(&hermes_home).await,
     }
+}
+
+/// Phase 25 D-18: walk every unsatisfied required prerequisite via rustyline wizard.
+async fn cmd_toolset_setup(hermes_home: &Path) -> Result<()> {
+    let mut rl = crate::setup::make_wizard_editor()?;
+    crate::setup::run_tools_section(&mut rl, hermes_home).await
 }
 
 /// T-25-01 mitigation: slug-validate a toolset name using the Phase 24 D-03 pattern.
