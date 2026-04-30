@@ -1,4 +1,16 @@
 pub mod approval;
+pub mod browser_back;       // Phase 25.1 — implemented by plan 04
+pub mod browser_click;      // Phase 25.1 — implemented by plan 06
+pub mod browser_close;      // Phase 25.1 — implemented by plan 04
+pub mod browser_console;    // Phase 25.1 — implemented by plan 07
+pub mod browser_get_images; // Phase 25.1 — implemented by plan 05
+pub mod browser_navigate;   // Phase 25.1 — implemented by plan 04
+pub mod browser_press;      // Phase 25.1 — implemented by plan 03
+pub mod browser_scroll;     // Phase 25.1 — implemented by plan 03
+pub mod browser_session;    // Phase 25.1 — implemented by plan 02
+pub mod browser_snapshot;   // Phase 25.1 — implemented by plan 05
+pub mod browser_type;       // Phase 25.1 — implemented by plan 06
+pub mod browser_vision;     // Phase 25.1 — implemented by plan 08
 pub mod cronjob_tool;
 pub mod delegate_task;
 pub mod execute_code;
