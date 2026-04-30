@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
-stopped_at: "Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)"
-last_updated: "2026-04-29T22:13:32.491Z"
-last_activity: 2026-04-29 -- Phase 25 planning complete
+stopped_at: "Completed Phase 25 (Toolset Management — 5 plans, 22 feature/test commits + 4 worktree merges + 1 session_search regression fix; verifier closed all 5 ROADMAP success criteria)"
+last_updated: "2026-04-29T23:55:00.000Z"
+last_activity: 2026-04-29 -- Phase 25 execution complete
 progress:
   total_phases: 21
-  completed_phases: 11
-  total_plans: 64
-  completed_plans: 59
-  percent: 92
+  completed_phases: 12
+  total_plans: 69
+  completed_plans: 64
+  percent: 93
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 24 — Profile Isolation
+**Current focus:** Phase 25 — Toolset Management (complete)
 
 ## Current Position
 
-Phase: 24 (Profile Isolation) — EXECUTING
-Plan: 7 of 7
-Status: Ready to execute
-Last activity: 2026-04-29 -- Phase 25 planning complete
+Phase: 25 (Toolset Management) — COMPLETE
+Plan: 5 of 5
+Status: Phase 25 complete (verifier closed all 5 ROADMAP success criteria)
+Last activity: 2026-04-29 -- Phase 25 execution complete
 
 ## Performance Metrics
 
