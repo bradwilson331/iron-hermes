@@ -596,6 +596,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let session_id = uuid::Uuid::new_v4().to_string();
     state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
         .context("failed to create CLI session")?;
+    // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
+    // the session_search intercept handler (D-07 / session_search regression fix).
+    let state_store = std::sync::Arc::new(std::sync::Mutex::new(state_store));
     // Plan 21.7-05 (PROV-09/PROV-10/D-15): construct BudgetHandle seeded from
     // config.agent.max_iterations so the shared counter starts FULL and
     // drains per-turn (Caution70 at 70% used, Warning90 at 90%, Stop100 at
@@ -757,7 +760,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let system_msg = prompt_builder.build_system_message();
 
     let user_msg = ChatMessage::user(prompt);
-    state_store.add_message(&session_id, &user_msg)
+    state_store.lock().unwrap().add_message(&session_id, &user_msg)
         .context("failed to persist user message")?;
     let messages = vec![system_msg, user_msg];
 
@@ -776,8 +779,8 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
         }))
         // Phase 25 D-16: wire intercept handlers (todo_write/todo_read only in single mode;
-        // memory handled by register_memory_tool; state_store not wrapped in single mode).
-        .with_intercepts(None, None, None, Some(todo_state_single), None);
+        // memory handled by register_memory_tool; state_store wired for session_search).
+        .with_intercepts(None, Some(state_store.clone()), None, Some(todo_state_single), None);
 
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
@@ -849,10 +852,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
         if msg.role == ironhermes_core::Role::Assistant {
-            let _ = state_store.add_message(&session_id, msg);
+            let _ = state_store.lock().unwrap().add_message(&session_id, msg);
         }
     }
-    state_store.end_session(&session_id, "completed")
+    state_store.lock().unwrap().end_session(&session_id, "completed")
         .context("failed to end CLI session")?;
 
     // Ensure newline after streaming
@@ -952,6 +955,9 @@ async fn run_chat(
     let session_id = uuid::Uuid::new_v4().to_string();
     state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
         .context("failed to create CLI session")?;
+    // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
+    // the session_search intercept handler (D-07 / session_search regression fix).
+    let state_store = std::sync::Arc::new(std::sync::Mutex::new(state_store));
     // Plan 21.7-05 (PROV-09/PROV-10/D-15): BudgetHandle seeded from
     // config.agent.max_iterations. Parent + subagents share the counter
     // via BudgetHandle::clone; the per-turn run_agent_turn() inherits
@@ -1252,7 +1258,7 @@ async fn run_chat(
     // Handle initial message if provided
     if let Some(msg) = initial_message {
         let user_msg = ChatMessage::user(&msg);
-        let _ = state_store.add_message(&session_id, &user_msg);
+        let _ = state_store.lock().unwrap().add_message(&session_id, &user_msg);
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
         let response = run_agent_turn(
@@ -1271,12 +1277,13 @@ async fn run_chat(
             hook_registry.clone(),   // Phase 22: D-05
             context_length, // Phase 21.3
             memory_manager.clone(), // GAP-1: wire queue_prefetch
+            state_store.clone(), // Phase 25: session_search intercept
         )
         .await?;
         // Persist assistant response
         if let Some(ref text) = response {
             let assistant_msg = ChatMessage::assistant(text);
-            let _ = state_store.add_message(&session_id, &assistant_msg);
+            let _ = state_store.lock().unwrap().add_message(&session_id, &assistant_msg);
             println!();
             // Phase 22.3 GAP-22.3-01 closure (Plan 22.3-11):
             // Route the post-turn assistant label through the same scroll-region
@@ -1491,7 +1498,7 @@ async fn run_chat(
 
                 repl_input.add_history(&input);
                 let user_msg = ChatMessage::user(&input);
-                let _ = state_store.add_message(&session_id, &user_msg);
+                let _ = state_store.lock().unwrap().add_message(&session_id, &user_msg);
                 messages.push(user_msg);
 
                 // D-13: fresh user input resets the 1.5s debounce window.
@@ -1518,6 +1525,7 @@ async fn run_chat(
                     hook_registry.clone(),   // Phase 22: D-05
                     context_length, // Phase 21.3
                     memory_manager.clone(), // GAP-1: wire queue_prefetch
+                    state_store.clone(), // Phase 25: session_search intercept
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -1564,7 +1572,7 @@ async fn run_chat(
                                     chat_cancel_token.cancel();
                                     println!("{}", "Goodbye!".dimmed());
                                     tui.cleanup_on_exit();
-                                    let _ = state_store.end_session(&session_id, "interrupted");
+                                    let _ = state_store.lock().unwrap().end_session(&session_id, "interrupted");
                                     // Break to outer loop cleanup so on_session_end fires.
                                     exit_cleanly = true;
                                     break 'turn None;
@@ -1636,7 +1644,7 @@ async fn run_chat(
                                             chat_cancel_token.cancel();
                                             println!("{}", "Goodbye!".dimmed());
                                             tui.cleanup_on_exit();
-                                            let _ = state_store
+                                            let _ = state_store.lock().unwrap()
                                                 .end_session(&session_id, "interrupted");
                                             exit_cleanly = true;
                                             break 'turn None;
@@ -1660,7 +1668,7 @@ async fn run_chat(
                                     chat_cancel_token.cancel();
                                     println!("{}", "Goodbye!".dimmed());
                                     tui.cleanup_on_exit();
-                                    let _ = state_store
+                                    let _ = state_store.lock().unwrap()
                                         .end_session(&session_id, "eof");
                                     exit_cleanly = true;
                                     break 'turn None;
@@ -1811,7 +1819,7 @@ async fn run_chat(
                 // Persist assistant response
                 if let Some(ref text) = response {
                     let assistant_msg = ChatMessage::assistant(text);
-                    let _ = state_store.add_message(&session_id, &assistant_msg);
+                    let _ = state_store.lock().unwrap().add_message(&session_id, &assistant_msg);
                     // If we were streaming, just add a newline
                     println!();
                 }
@@ -1828,7 +1836,7 @@ async fn run_chat(
                     CtrlCDecision::ExitCleanly => {
                         println!("{}", "Goodbye!".dimmed());
                         tui.cleanup_on_exit();
-                        let _ = state_store.end_session(&session_id, "interrupted");
+                        let _ = state_store.lock().unwrap().end_session(&session_id, "interrupted");
                         // Break to outer loop cleanup so on_session_end fires.
                         break;
                     }
@@ -1893,7 +1901,7 @@ async fn run_chat(
         }
     }
 
-    state_store.end_session(&session_id, "completed")
+    state_store.lock().unwrap().end_session(&session_id, "completed")
         .context("failed to end CLI session")?;
 
     Ok(())
@@ -1917,6 +1925,7 @@ async fn run_agent_turn(
     hook_registry: Arc<ironhermes_hooks::HookRegistry>,   // Phase 22: D-05
     context_length: usize,  // Phase 21.3: resolved from model metadata
     memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>,  // GAP-1: wire queue_prefetch
+    state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>,  // Phase 25: session_search intercept
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -1961,7 +1970,7 @@ async fn run_agent_turn(
         // Phase 25 D-16: wire intercept handlers (todo_write/todo_read per-turn state).
         .with_intercepts(
             None, // memory handled by register_memory_tool (Plan 4 will migrate)
-            None, // state_store: session_search wiring in Plan 4
+            Some(state_store.clone()), // Phase 25 fix: session_search intercept wired
             None, // subagent_runner: delegate_task wiring in Plan 4
             Some(std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()))),
             None, // cron_router: cronjob wiring in Plan 4
