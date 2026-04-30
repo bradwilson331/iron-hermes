@@ -27,6 +27,7 @@ use ironhermes_core::types::Platform;
 use std::time::Instant;
 
 mod config_cli;
+mod provider_cmd;
 mod toolset_cmd;
 mod cron;
 mod batch;
@@ -169,6 +170,11 @@ enum Commands {
     Toolset {
         #[command(subcommand)]
         subcommand: toolset_cmd::ToolsetSubcommand,
+    },
+    /// Manage providers — list/show/test/enable/disable (Phase 26, D-14).
+    Provider {
+        #[command(subcommand)]
+        subcommand: provider_cmd::ProviderSubcommand,
     },
 }
 
@@ -391,6 +397,10 @@ async fn main() -> Result<()> {
         Some(Commands::Toolset { subcommand }) => {
             let profile_name = cli.profile.as_deref().unwrap_or("default").to_string();
             toolset_cmd::handle_toolset_command(subcommand, &profile_name).await
+        }
+        Some(Commands::Provider { subcommand }) => {
+            let profile_name = cli.profile.as_deref().unwrap_or("default").to_string();
+            provider_cmd::handle_provider_command(subcommand, &profile_name).await
         }
         None => {
             if let Some(ref prompt) = cli.execute {
