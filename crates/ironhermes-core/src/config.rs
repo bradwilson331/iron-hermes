@@ -43,6 +43,41 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
 }
 
 // =============================================================================
+// Reserved role names (D-05, Phase 26)
+// =============================================================================
+
+/// The five reserved auxiliary role names (D-05, PROV-06, Phase 26).
+///
+/// Used by `model.roles:` map keys and `auxiliary` per-task overrides.
+/// Unknown role names must be rejected at config load (Phase 26 anti-pattern
+/// "Swallowing unknown roles" — RESEARCH.md §Anti-Patterns).
+pub const RESERVED_ROLE_NAMES: &[&str] = &[
+    "vision",
+    "compression",
+    "session_search",
+    "skills_hub",
+    "mcp_helper",
+];
+
+/// Validate that a role name is one of the five reserved Phase 26 helper-task roles.
+///
+/// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper` (D-05).
+///
+/// # Errors
+/// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
+pub fn validate_role_name(name: &str) -> anyhow::Result<()> {
+    if RESERVED_ROLE_NAMES.iter().any(|r| *r == name) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "role '{}' is not a recognised auxiliary role — must be one of: {}",
+            name,
+            RESERVED_ROLE_NAMES.join(", ")
+        )
+    }
+}
+
+// =============================================================================
 // ToolsConfig (TOOL-02, Phase 25)
 // =============================================================================
 
@@ -1710,5 +1745,87 @@ custom_providers:
             "providers: entry must win over custom_providers: when both define the same name"
         );
         assert_eq!(entry.default_model.as_deref(), Some("mistral"));
+    }
+
+    // =========================================================================
+    // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
+    // =========================================================================
+
+    /// D-05: RESERVED_ROLE_NAMES must hold exactly the five Phase 26 roles.
+    #[test]
+    fn reserved_role_names_contains_all_five_d05_roles() {
+        assert_eq!(
+            RESERVED_ROLE_NAMES.len(),
+            5,
+            "Phase 26 D-05 specifies exactly 5 reserved roles"
+        );
+        for required in &[
+            "vision",
+            "compression",
+            "session_search",
+            "skills_hub",
+            "mcp_helper",
+        ] {
+            assert!(
+                RESERVED_ROLE_NAMES.contains(required),
+                "RESERVED_ROLE_NAMES must contain '{}'",
+                required
+            );
+        }
+    }
+
+    /// D-05: validate_role_name accepts every reserved role.
+    #[test]
+    fn validate_role_name_accepts_all_reserved_roles() {
+        for role in RESERVED_ROLE_NAMES {
+            assert!(
+                validate_role_name(role).is_ok(),
+                "reserved role '{}' must validate",
+                role
+            );
+        }
+    }
+
+    /// D-05: validate_role_name rejects unknown role names (anti-pattern: swallowing).
+    #[test]
+    fn validate_role_name_rejects_unknown_names() {
+        assert!(validate_role_name("").is_err(), "empty role name must be rejected");
+        assert!(
+            validate_role_name("voice").is_err(),
+            "unknown role 'voice' must be rejected"
+        );
+        assert!(
+            validate_role_name("Vision").is_err(),
+            "case mismatch 'Vision' must be rejected (canonical is lowercase)"
+        );
+        assert!(
+            validate_role_name("session-search").is_err(),
+            "hyphen instead of underscore must be rejected"
+        );
+        assert!(
+            validate_role_name("typo-name").is_err(),
+            "arbitrary unknown name must be rejected"
+        );
+    }
+
+    /// D-05: validate_role_name error message lists the allowed roles for operator UX.
+    #[test]
+    fn validate_role_name_error_message_lists_allowed_roles() {
+        let err = validate_role_name("voice").unwrap_err().to_string();
+        assert!(
+            err.contains("vision"),
+            "error must enumerate allowed roles: {}",
+            err
+        );
+        assert!(
+            err.contains("compression"),
+            "error must enumerate allowed roles: {}",
+            err
+        );
+        assert!(
+            err.contains("mcp_helper"),
+            "error must enumerate allowed roles: {}",
+            err
+        );
     }
 }
