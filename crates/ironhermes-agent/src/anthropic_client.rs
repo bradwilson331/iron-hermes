@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use ironhermes_core::{
-    ChatMessage, ChatResponse, ChatChoice, FunctionCall, MessageContent, Role,
-    ToolCall, ToolSchema, Usage,
+    ChatMessage, ChatResponse, ChatChoice, ContentPart, FunctionCall, ImageUrl,
+    MessageContent, Role, ToolCall, ToolSchema, Usage,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,9 @@ enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        source: ImageSource,                 // Phase 25.1 OQ-2: multimodal user input
+    },
     ToolUse {
         id: String,
         name: String,
@@ -85,6 +88,20 @@ enum ContentBlock {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ImageSource {
+    /// Base64-encoded inline image. browser_vision sends this for full-page screenshots.
+    Base64 {
+        media_type: String,    // "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        data: String,          // base64 payload (no "data:..." prefix)
+    },
+    /// URL-source (Anthropic supports this in newer API versions).
+    Url {
+        url: String,
     },
 }
 
@@ -260,15 +277,22 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
         match msg.role {
             Role::System => continue,
             Role::User => {
-                let text = msg
-                    .content
-                    .as_ref()
-                    .and_then(|c| c.as_text())
-                    .unwrap_or("")
-                    .to_string();
+                let blocks: Vec<ContentBlock> = match msg.content.as_ref() {
+                    Some(MessageContent::Text(t)) => vec![ContentBlock::Text { text: t.clone() }],
+                    Some(MessageContent::Parts(parts)) => parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text { text } => Some(ContentBlock::Text { text: text.clone() }),
+                            ContentPart::ImageUrl { image_url } => {
+                                convert_image_url_to_block(&image_url.url)
+                            }
+                        })
+                        .collect(),
+                    None => vec![ContentBlock::Text { text: String::new() }],
+                };
                 raw_messages.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: AnthropicContent::Blocks(vec![ContentBlock::Text { text }]),
+                    content: AnthropicContent::Blocks(blocks),
                 });
             }
             Role::Assistant => {
@@ -335,6 +359,43 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
     let merged = merge_consecutive_same_role(raw_messages);
 
     (system, merged)
+}
+
+/// Phase 25.1 OQ-2: convert an OpenAI-style ImageUrl.url into an Anthropic Image ContentBlock.
+///
+/// Accepts:
+///   - `data:image/png;base64,<payload>` → `Image { source: Base64 { media_type, data } }`
+///   - `data:image/jpeg;base64,<payload>` → ditto
+///   - `data:image/gif;base64,<payload>` → ditto
+///   - `data:image/webp;base64,<payload>` → ditto
+///   - `https://...` or `http://...` → `Image { source: Url { url } }`
+///
+/// Anything else (malformed/unrecognized) returns None and emits a tracing::warn so the
+/// LLM call still proceeds with the rest of the parts intact (graceful degradation).
+fn convert_image_url_to_block(url: &str) -> Option<ContentBlock> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        // Expect "<media>;base64,<data>"
+        let (media_with_b64, data) = rest.split_once(',')?;
+        let media_type = media_with_b64.strip_suffix(";base64")?.to_string();
+        if !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&media_type.as_str()) {
+            tracing::warn!(media = %media_type, "Phase 25.1: unsupported image media-type; skipping image block");
+            return None;
+        }
+        return Some(ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type,
+                data: data.to_string(),
+            },
+        });
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Some(ContentBlock::Image {
+            source: ImageSource::Url { url: url.to_string() },
+        });
+    }
+    tracing::warn!(url_prefix = %&url.chars().take(32).collect::<String>(),
+        "Phase 25.1: unrecognized ImageUrl scheme; skipping image block");
+    None
 }
 
 /// Merge consecutive messages with the same role by combining their content blocks.
@@ -1060,5 +1121,62 @@ mod tests {
             }
             _ => panic!("Expected blocks"),
         }
+    }
+
+    #[test]
+    fn adapt_messages_user_with_image_data_url_produces_image_block() {
+        use ironhermes_core::types::*;
+        let user = ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text { text: "describe".to_string() },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                        detail: None,
+                    },
+                },
+            ])),
+            tool_calls: None, tool_call_id: None, name: None,
+        };
+        let (_sys, msgs) = adapt_messages(&[user]);
+        assert_eq!(msgs.len(), 1);
+        let json = serde_json::to_string(&msgs[0]).unwrap();
+        assert!(json.contains(r#""type":"image""#), "expected image block, got: {json}");
+        assert!(json.contains(r#""media_type":"image/png""#), "expected media_type, got: {json}");
+        assert!(json.contains(r#""data":"iVBORw0KGgo=""#), "expected base64 data, got: {json}");
+        assert!(json.contains(r#""text":"describe""#), "expected text block alongside image, got: {json}");
+    }
+
+    #[test]
+    fn adapt_messages_user_text_only_unchanged() {
+        use ironhermes_core::types::*;
+        let user = ChatMessage::user("hello");
+        let (_sys, msgs) = adapt_messages(&[user]);
+        let json = serde_json::to_string(&msgs[0]).unwrap();
+        assert!(json.contains(r#""text":"hello""#), "regression: text-only user message must round-trip");
+        assert!(!json.contains("image"), "regression: text-only must not synthesize image block");
+    }
+
+    #[test]
+    fn adapt_messages_user_with_malformed_data_url_skips_image() {
+        use ironhermes_core::types::*;
+        let user = ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text { text: "ok".to_string() },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "not-a-real-url".to_string(),
+                        detail: None,
+                    },
+                },
+            ])),
+            tool_calls: None, tool_call_id: None, name: None,
+        };
+        let (_sys, msgs) = adapt_messages(&[user]);
+        let json = serde_json::to_string(&msgs[0]).unwrap();
+        assert!(json.contains(r#""text":"ok""#));
+        assert!(!json.contains("image"), "malformed url MUST skip image block, not crash");
     }
 }

@@ -20,6 +20,8 @@ futures = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }                          # Phase 25.1 D-01 / browser_vision
+chromiumoxide = { version = "0.9", features = [] }     # Phase 25.1 D-01
 tokio = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
