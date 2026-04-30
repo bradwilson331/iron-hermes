@@ -2275,10 +2275,19 @@ fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
     let config = Config::load().unwrap_or_default();
     let resolver = ProviderResolver::build(&config)?;
 
-    // If user specified a model override, build client with that model
+    // Provider/model resolution (Phase 26 SC-3 fix):
+    // - --model + --provider → explicit provider+model
+    // - --model only → main provider + that model
+    // - --provider only → that provider + its default_model (Phase 26 SC-3)
+    // - neither → main provider's default endpoint
     let client = if let Some(ref model) = cli.model {
         let provider = cli.provider.as_deref().unwrap_or(resolver.main_provider());
         build_provider_client(&resolver, provider, model)?
+    } else if let Some(ref provider) = cli.provider {
+        let endpoint = resolver
+            .resolve(provider)
+            .ok_or_else(|| anyhow::anyhow!("Unknown provider: {}", provider))?;
+        AnyClient::from_endpoint(endpoint)?
     } else {
         build_main_client(&resolver)?
     };
