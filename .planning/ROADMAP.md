@@ -501,6 +501,16 @@ Plans:
 
 **Phase directory:** `.planning/phases/25-toolset-management/`
 
+### Phase 25.1: built-in browser tools: 11 tools for browser automation (browser_back, browser_click, browser_close, browser_console, browser_get_images, browser_navigate, browser_press, browser_scroll, browser_snapshot, browser_type, browser_vision) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 25
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 25.1 to break down)
+
 ### Phase 26: Provider Polish
 
 **Goal:** API keys are scoped to their provider's base URL, auxiliary tasks can route to a separate cheaper model, and operators can define named custom providers in config.yaml for any OpenAI-compatible endpoint.

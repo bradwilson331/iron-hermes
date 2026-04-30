@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: executing
-stopped_at: "Completed Phase 26 (Provider Polish — 5 plans, 21 commits + 1 SC-3 fix; verifier closed all 3 ROADMAP success criteria after user accepted SC-2 greenfield deferral and approved SC-3 standalone --provider fix)"
-last_updated: "2026-04-30T16:30:00.000Z"
+status: verifying
+stopped_at: "Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)"
+last_updated: "2026-04-30T18:53:46.692Z"
 last_activity: 2026-04-30 -- Phase 26 execution complete
 progress:
-  total_phases: 21
+  total_phases: 22
   completed_phases: 13
-  total_plans: 74
+  total_plans: 69
   completed_plans: 69
-  percent: 93
+  percent: 100
 ---
 
 # Project State
@@ -338,6 +338,7 @@ Recent decisions affecting current work:
 - Phase 22.4.2.1 inserted after Phase 22.4.2: Cron cmds and telegram delivery broken (URGENT)
 - Phase 22.4.2.2 inserted after Phase 22.4.2: Cron create defaults to TG origin when gateway active (whitelist len==1) (URGENT)
 - Phase 22.4.2.3 inserted after Phase 22.4.2: fix the pre-existing INV-22.3-02 banner-bleed before milestone (URGENT)
+- Phase 25.1 inserted after Phase 25: built-in browser tools — 11 tools for browser automation (URGENT)
 
 ### Pending Todos
 
