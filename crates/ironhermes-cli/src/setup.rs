@@ -10,8 +10,9 @@ use anyhow::{anyhow, Context, Result};
 use ironhermes_core::config::Config;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::wizard::{
-    apply_api_key_answer, apply_learning_loop_answer, apply_memory_provider_answer,
-    apply_model_answer, apply_provider_answer, WizardMode, LEARNING_LOOP_FRAMING,
+    apply_api_key_answer, apply_auxiliary_answer, apply_learning_loop_answer,
+    apply_memory_provider_answer, apply_model_answer, apply_provider_answer, WizardMode,
+    LEARNING_LOOP_FRAMING,
 };
 use std::path::Path;
 
@@ -81,7 +82,7 @@ pub async fn run_setup(section: Option<&str>, mode: WizardMode) -> Result<()> {
         Some("memory") => run_memory_section(&mut config, &hermes_home, &mut rl).await?,
         Some("gateway") => run_gateway_section(&mut config, &mut rl).await?,
         Some("tools") => run_tools_section(&mut rl, &hermes_home).await?,
-        Some("agent") => anyhow::bail!("section deferred to Phase 26"),
+        Some("agent") => run_agent_section(&mut config, &mut rl).await?,
         Some("skills") => anyhow::bail!("section deferred to Phase 28"),
         Some(other) => anyhow::bail!(
             "unknown setup section: {} (valid: model, memory, gateway, tools)",
@@ -149,6 +150,19 @@ async fn run_minimum_viable_flow(
         "\nSetup complete. Configuration written to {}.",
         hermes_home.join("config.yaml").display()
     );
+
+    // Phase 26 D-19 (PROV-06): optional auxiliary routing stage.
+    // Empty input = skip (D-06 default-None preserved). Default is "No" (D-19 contract).
+    println!();
+    let aux_provider = prompt_with_default(
+        rl,
+        "Auxiliary provider (cheaper helper-task model — Enter to skip)",
+        "",
+    )?;
+    if !aux_provider.trim().is_empty() {
+        let aux_model = prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
+        apply_auxiliary_answer(config, &aux_provider, &aux_model);
+    }
 
     // Phase 25 D-19: opt-in optional tool prerequisites stage. Operator can decline
     // and `hermes setup` still completes with the minimum-viable config from Phase 23.
@@ -247,6 +261,37 @@ async fn run_gateway_section(
 ) -> Result<()> {
     // Phase 23: dispatch surface only. Phase 25/26 plug in real questions.
     println!("Gateway setup will gain Telegram/Discord prompts in Phase 25 (TOOL-05).");
+    Ok(())
+}
+
+/// Phase 26 D-19: `hermes setup agent` — configure auxiliary model routing.
+/// Presents the same prompt as the inline auxiliary stage in run_minimum_viable_flow
+/// but as a stand-alone section for re-configuration.
+async fn run_agent_section(
+    config: &mut Config,
+    rl: &mut rustyline::DefaultEditor,
+) -> Result<()> {
+    println!("\nConfigure auxiliary model routing (PROV-06).\n");
+    println!("Auxiliary routing sends helper tasks (compression, vision, etc.) to a cheaper model.");
+    let current = if config.auxiliary.is_set() {
+        format!("{}/{}", config.auxiliary.provider, config.auxiliary.model)
+    } else {
+        "not configured".to_string()
+    };
+    println!("Current: {}\n", current);
+
+    let aux_provider = prompt_with_default(
+        rl,
+        "Auxiliary provider (Enter to skip / keep current)",
+        "",
+    )?;
+    if !aux_provider.trim().is_empty() {
+        let aux_model = prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
+        apply_auxiliary_answer(config, &aux_provider, &aux_model);
+        println!("Auxiliary routing set to {}/{}.", config.auxiliary.provider, config.auxiliary.model);
+    } else {
+        println!("No change to auxiliary routing.");
+    }
     Ok(())
 }
 
@@ -641,6 +686,48 @@ mod tests {
         assert!(
             opt_pos > apply_pos,
             "D-19 prompt must appear AFTER apply_minimum_viable_answers (D-19 ordering contract)"
+        );
+    }
+
+    /// Test 5 (Phase 26 D-19): setup auxiliary stage skips when input is empty.
+    /// Uses apply_auxiliary_answer pure-function seam (no rustyline I/O needed).
+    #[test]
+    fn setup_auxiliary_stage_skipped_when_input_empty() {
+        let mut config = ironhermes_core::config::Config::default();
+        // Simulate operator pressing Enter (empty string) at the aux provider prompt.
+        apply_auxiliary_answer(&mut config, "", "gpt-4o-mini");
+        assert!(
+            !config.auxiliary.is_set(),
+            "auxiliary MUST remain unset when operator presses Enter (D-06 default-None preserved)"
+        );
+    }
+
+    /// Test 6 (Phase 26 D-19): setup auxiliary stage persists when operator enters provider + model.
+    /// Uses apply_auxiliary_answer pure-function seam.
+    #[test]
+    fn setup_auxiliary_stage_persists_when_user_enters_provider_and_model() {
+        let mut config = ironhermes_core::config::Config::default();
+        // Simulate operator entering "openai" then "gpt-4o-mini".
+        apply_auxiliary_answer(&mut config, "openai", "gpt-4o-mini");
+        assert!(
+            config.auxiliary.is_set(),
+            "auxiliary must be set after non-empty provider input"
+        );
+        assert_eq!(config.auxiliary.provider, "openai");
+        assert_eq!(config.auxiliary.model, "gpt-4o-mini");
+    }
+
+    /// Source-text invariant: run_minimum_viable_flow must contain the D-26-19 auxiliary prompt.
+    #[test]
+    fn setup_rs_has_auxiliary_provider_prompt() {
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains("Auxiliary provider"),
+            "Phase 26 D-19: 'Auxiliary provider' prompt must be present in setup.rs"
+        );
+        assert!(
+            source.contains("apply_auxiliary_answer"),
+            "Phase 26 D-19: apply_auxiliary_answer must be called in setup.rs"
         );
     }
 

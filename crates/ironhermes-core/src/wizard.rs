@@ -132,3 +132,65 @@ pub fn apply_gateway_section_answer(_config: &mut Config, _enable_telegram: &str
 pub fn apply_tools_section_answer(_config: &mut Config, _selection: &str) -> anyhow::Result<()> {
     Ok(())
 }
+
+/// Phase 26 D-05/D-19: write Config.auxiliary from wizard input.
+/// Pure mutation — no I/O. Skip semantics match D-06 default-None: if `provider`
+/// is empty/whitespace, leave config.auxiliary unchanged (operator opted out).
+/// Mirrors apply_provider_answer pattern (lines 37-44).
+pub fn apply_auxiliary_answer(config: &mut Config, provider: &str, model: &str) {
+    use crate::config::AuxiliaryConfig;
+    let p = provider.trim();
+    let m = model.trim();
+    if p.is_empty() {
+        // D-06: auxiliary is optional; empty input means "don't enable".
+        return;
+    }
+    config.auxiliary = AuxiliaryConfig {
+        provider: p.to_string(),
+        model: m.to_string(),
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn apply_auxiliary_answer_writes_when_provider_nonempty() {
+        let mut config = Config::default();
+        apply_auxiliary_answer(&mut config, "openai", "gpt-4o-mini");
+        assert!(config.auxiliary.is_set(), "auxiliary must be set after non-empty provider");
+        assert_eq!(config.auxiliary.provider, "openai");
+        assert_eq!(config.auxiliary.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn apply_auxiliary_answer_skips_when_provider_empty() {
+        let mut config = Config::default();
+        // D-06: empty provider = skip, auxiliary stays unset.
+        apply_auxiliary_answer(&mut config, "", "gpt-4o-mini");
+        assert!(!config.auxiliary.is_set(), "auxiliary MUST remain unset when provider is empty (D-06)");
+    }
+
+    #[test]
+    fn apply_auxiliary_answer_trims_whitespace() {
+        let mut config = Config::default();
+        apply_auxiliary_answer(&mut config, "  openai  ", "  gpt-4o-mini  ");
+        assert_eq!(config.auxiliary.provider, "openai", "provider must be trimmed");
+        assert_eq!(config.auxiliary.model, "gpt-4o-mini", "model must be trimmed");
+    }
+
+    #[test]
+    fn apply_auxiliary_answer_overwrites_existing() {
+        use crate::config::AuxiliaryConfig;
+        let mut config = Config::default();
+        config.auxiliary = AuxiliaryConfig {
+            provider: "old-provider".to_string(),
+            model: "old-model".to_string(),
+        };
+        apply_auxiliary_answer(&mut config, "openai", "gpt-4o-mini");
+        assert_eq!(config.auxiliary.provider, "openai", "must overwrite existing provider");
+        assert_eq!(config.auxiliary.model, "gpt-4o-mini", "must overwrite existing model");
+    }
+}
