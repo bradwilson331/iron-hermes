@@ -33,8 +33,10 @@ impl Tool for BrowserCloseTool {
     fn name(&self) -> &str { "browser_close" }
     fn toolset(&self) -> &str { "browser" }
     fn description(&self) -> &str {
-        "Close the browser session and free chromium resources. \
-         The next browser_* call will lazy-respawn a new session."
+        "Close the browser. Shuts down the chromium browser session and \
+         frees its resources. Use this when the user asks to close, quit, exit, \
+         or shut down the browser. The next browser_navigate or other browser_* \
+         call will automatically respawn a fresh session."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -92,6 +94,20 @@ mod tests {
         let t = BrowserCloseTool::new(dummy_session());
         assert_eq!(t.name(), "browser_close");
         assert_eq!(t.toolset(), "browser");
+    }
+
+    /// Phase 25.1 GAP-5 regression: description must contain 'close' and 'browser'
+    /// so the LLM's tool-selection heuristic can map "close the browser" to this tool.
+    /// If this test fails, the description was accidentally reverted to jargon-only language.
+    #[test]
+    fn description_uses_explicit_close_verb_for_llm_mapping() {
+        let t = BrowserCloseTool::new(dummy_session());
+        let desc = t.description().to_lowercase();
+        // Phase 25.1 GAP-5: model must be able to map "close the browser" → this tool.
+        // The description MUST contain both 'close' and 'browser' as substrings so the
+        // LLM's tool-selection heuristic finds it for plain-language requests.
+        assert!(desc.contains("close"), "description MUST contain 'close': {:?}", t.description());
+        assert!(desc.contains("browser"), "description MUST contain 'browser': {:?}", t.description());
     }
 
     #[tokio::test]
