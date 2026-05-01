@@ -506,7 +506,7 @@ Plans:
 **Goal:** Eleven built-in browser-automation tools (browser_back/click/close/console/get_images/navigate/press/scroll/snapshot/type/vision) backed by chromiumoxide 0.9, sharing one AgentLoop-scoped browser session, with browser_vision routing through the Phase 26 auxiliary vision role (PROV-06 first consumer). Toolset disabled by default; chromium binary required.
 **Requirements**: D-01 through D-22 (CONTEXT-locked decisions; no REQUIREMENTS.md tags pre-mapped — Phase 25.1 closes the BROW gap from Future Requirements parking lot)
 **Depends on:** Phase 25 (toolset management infrastructure), Phase 26 (resolve_role vision cascade)
-**Plans:** 18/18 plans complete
+**Plans:** 19/19 plans complete
 
 Plans:
 - [x] 25.1-01-PLAN.md — Wave 0 foundations: chromiumoxide 0.9 + base64 deps; 12 module stubs in lib.rs; AnthropicClient ImageUrl→Image ContentBlock conversion (closes OQ-2)

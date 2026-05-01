@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: "Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)"
-last_updated: "2026-04-30T22:40:07.207Z"
-last_activity: 2026-04-30 -- Phase 25.1 execution started
+last_updated: "2026-05-01T20:22:55.889Z"
+last_activity: 2026-05-01 -- Phase 25.1 execution started
 progress:
   total_phases: 22
   completed_phases: 13
-  total_plans: 80
-  completed_plans: 69
-  percent: 86
+  total_plans: 88
+  completed_plans: 87
+  percent: 99
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 25.1 — Built-in Browser Tools
+**Current focus:** Phase 25.1 — built-in-browser-tools-11-tools-for-browser-automation-brows
 
 ## Current Position
 
-Phase: 25.1 (Built-in Browser Tools) — EXECUTING
-Plan: 1 of 11
+Phase: 25.1 (built-in-browser-tools-11-tools-for-browser-automation-brows) — EXECUTING
+Plan: 1 of 19
 Status: Executing Phase 25.1
-Last activity: 2026-04-30 -- Phase 25.1 execution started
+Last activity: 2026-05-01 -- Phase 25.1 execution started
 
 ## Performance Metrics
 
