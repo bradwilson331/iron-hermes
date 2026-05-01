@@ -674,7 +674,12 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
-    registry.register_browser_tools_with_vision(browser_session.clone(), std::sync::Arc::new(resolver.clone()), vision_handle);
+    registry.register_browser_tools_with_vision(
+        browser_session.clone(),
+        std::sync::Arc::new(resolver.clone()),
+        vision_handle,
+        std::sync::Arc::new(config.clone()),
+    );
 
     // Phase 22: skills tool (per D-02/D-03)
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -1170,7 +1175,12 @@ async fn run_chat(
     let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
-    registry.register_browser_tools_with_vision(browser_session.clone(), std::sync::Arc::new(resolver.clone()), vision_handle);
+    registry.register_browser_tools_with_vision(
+        browser_session.clone(),
+        std::sync::Arc::new(resolver.clone()),
+        vision_handle,
+        std::sync::Arc::new(config.clone()),
+    );
 
     // Phase 22: skills tool with shared active_skills Arc (per D-02, D-08)
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2126,7 +2136,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
-    registry.register_browser_tools_with_vision(browser_session.clone(), std::sync::Arc::new(resolver.clone()), vision_handle);
+    registry.register_browser_tools_with_vision(
+        browser_session.clone(),
+        std::sync::Arc::new(resolver.clone()),
+        vision_handle,
+        std::sync::Arc::new(config.clone()),
+    );
 
     // Discover skills and register the skills tool
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2770,6 +2785,47 @@ mod mcp_wiring_tests {
             set_count >= 1,
             "Phase 25.1 D-17: set_browser_session MUST be called on runner in run_gateway; got {} calls",
             set_count
+        );
+    }
+
+    /// INV-25.1-14: Phase 25.1 GAP-3 + GAP-4 closure.
+    /// register_browser_tools_with_vision MUST receive Arc::new(config.clone()) at all 3 entry
+    /// points so the runtime Config (with operator's browser.allowed_domains and autonomous.yolo)
+    /// reaches BrowserNavigateTool (T-25.1-01 SSRF) and BrowserConsoleTool (T-25.1-02 arbitrary JS).
+    ///
+    /// Guard against silent removal of the Arc::new(config.clone()) arg at any call site.
+    #[test]
+    fn inv_25_1_browser_config_threaded_through_all_entry_points() {
+        let source = include_str!("main.rs");
+        // Filter out lines that are pure comments (//) to avoid the self-invalidating grep-gate trap.
+        let non_comment_source: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let reg_count = non_comment_source
+            .matches("register_browser_tools_with_vision(")
+            .count();
+        assert!(
+            reg_count >= 3,
+            "Phase 25.1 D-04: register_browser_tools_with_vision MUST be called in run_single, \
+             run_chat, and run_gateway; got {} non-comment calls",
+            reg_count
+        );
+
+        let config_arg_count = non_comment_source
+            .matches("Arc::new(config.clone())")
+            .count();
+        // We expect at least 3 (one per call site). Other code in main.rs may also use this idiom,
+        // so use >= 3 not == 3.
+        assert!(
+            config_arg_count >= 3,
+            "Phase 25.1 GAP-3+4: each register_browser_tools_with_vision call MUST receive \
+             Arc::new(config.clone()) so runtime Config reaches BrowserNavigateTool (T-25.1-01 SSRF) \
+             and BrowserConsoleTool (T-25.1-02 arbitrary JS); got {} occurrences of \
+             Arc::new(config.clone())",
+            config_arg_count
         );
     }
 }

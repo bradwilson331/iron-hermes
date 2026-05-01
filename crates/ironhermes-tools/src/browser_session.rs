@@ -156,15 +156,19 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
     if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").is_ok() {
         return None;
     }
-    // 1. BROWSER_PATH env var
-    if let Ok(p) = std::env::var("BROWSER_PATH") {
+    // 1. BROWSER_PATH env var (D-05 step 1: authoritative when set).
+    //    Empty string treated as unset (POSIX convention: BROWSER_PATH= == not exported).
+    //    When set to a non-empty value: return Some(path) if valid file, else return None.
+    //    Do NOT fall through to subsequent sources — the operator's intent is explicit.
+    if let Some(p) = std::env::var("BROWSER_PATH").ok().filter(|s| !s.is_empty()) {
         let path = PathBuf::from(&p);
-        if path.is_file() { return Some(path); }
+        return if path.is_file() { Some(path) } else { None };
     }
-    // 2. CHROMIUM_PATH env var
-    if let Ok(p) = std::env::var("CHROMIUM_PATH") {
+    // 2. CHROMIUM_PATH env var (D-05 step 2: authoritative when set).
+    //    Same authoritative semantics as BROWSER_PATH above.
+    if let Some(p) = std::env::var("CHROMIUM_PATH").ok().filter(|s| !s.is_empty()) {
         let path = PathBuf::from(&p);
-        if path.is_file() { return Some(path); }
+        return if path.is_file() { Some(path) } else { None };
     }
     // 3. config.browser.chromium_path
     if let Some(p) = config_path {
@@ -236,21 +240,75 @@ mod tests {
             std::env::remove_var("CHROMIUM_PATH");
             std::env::set_var("PATH", "/dev/null/empty-path");
         }
-        // Note: this test relies on no chromium being installed at platform paths.
-        // On dev machines with Chrome installed at /Applications/..., the test will
-        // still find it — that's expected and acceptable. The contract here is "BROWSER_PATH
-        // pointing to absent file is NOT used as a positive match" — the function falls through
-        // to PATH/platform paths.
+        // D-05 step 1 authority: when BROWSER_PATH is SET (even to an invalid path),
+        // find_chromium_binary MUST return None rather than falling through to platform
+        // paths. This holds deterministically even on dev machines with system Chrome.
         let result = find_chromium_binary(None);
-        // We can't assert None universally (dev machines may have Chrome). We assert the
-        // returned path is NOT the absent BROWSER_PATH.
-        if let Some(p) = result {
-            assert_ne!(p, PathBuf::from("/dev/null/definitely-absent-chromium"),
-                "absent BROWSER_PATH must NOT be returned");
-        }
+        assert!(result.is_none(),
+            "BROWSER_PATH set to absent file MUST return None (D-05 step 1 authoritative), got {:?}", result);
         unsafe {
             std::env::remove_var("BROWSER_PATH");
             std::env::remove_var("PATH");
+        }
+    }
+
+    #[test]
+    fn find_chromium_binary_returns_none_when_browser_path_set_to_absent_file_strict() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 Rust 2024 pattern).
+        unsafe {
+            std::env::set_var("BROWSER_PATH", "/dev/null/definitely-absent-chromium");
+            std::env::remove_var("CHROMIUM_PATH");
+            std::env::set_var("PATH", "/dev/null/empty-path");
+        }
+        // GAP-2 regression test: BROWSER_PATH authoritative when set (D-05 step 1).
+        // Must return None even on dev machines with system Chrome installed.
+        let result = find_chromium_binary(None);
+        assert!(result.is_none(),
+            "BROWSER_PATH set but invalid → must return None (not fall through to system Chrome), got {:?}", result);
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[test]
+    fn find_chromium_binary_returns_none_when_chromium_path_set_to_absent_file_strict() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 Rust 2024 pattern).
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+            std::env::set_var("CHROMIUM_PATH", "/dev/null/definitely-absent-chromium");
+            std::env::set_var("PATH", "/dev/null/empty-path");
+        }
+        // GAP-2 regression test: CHROMIUM_PATH authoritative when set (D-05 step 2).
+        // BROWSER_PATH is unset so falls through to CHROMIUM_PATH, which is set but invalid.
+        // Must return None even on dev machines with system Chrome installed.
+        let result = find_chromium_binary(None);
+        assert!(result.is_none(),
+            "CHROMIUM_PATH set but invalid → must return None (not fall through to system Chrome), got {:?}", result);
+        unsafe {
+            std::env::remove_var("CHROMIUM_PATH");
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[test]
+    fn find_chromium_binary_falls_through_when_browser_path_unset() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 Rust 2024 pattern).
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+            std::env::remove_var("CHROMIUM_PATH");
+        }
+        // When both env vars are UNSET, the function falls through to step 3 (config_path).
+        // Using /bin/sh as a stand-in for a real chromium binary — tests path resolution,
+        // not whether the binary IS chromium.
+        #[cfg(unix)]
+        {
+            let result = find_chromium_binary(Some("/bin/sh"));
+            assert_eq!(result, Some(PathBuf::from("/bin/sh")),
+                "When env vars unset, config_path (/bin/sh) must be returned (fall-through preserved)");
         }
     }
 

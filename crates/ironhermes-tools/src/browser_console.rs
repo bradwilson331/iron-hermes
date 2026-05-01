@@ -61,11 +61,15 @@ const DRAIN_CONSOLE_BUFFER_JS: &str = r#"
 
 pub struct BrowserConsoleTool {
     session: Arc<Mutex<Option<BrowserSession>>>,
+    config: Arc<ironhermes_core::config::Config>,
 }
 
 impl BrowserConsoleTool {
-    pub fn new(session: Arc<Mutex<Option<BrowserSession>>>) -> Self {
-        Self { session }
+    pub fn new(
+        session: Arc<Mutex<Option<BrowserSession>>>,
+        config: Arc<ironhermes_core::config::Config>,
+    ) -> Self {
+        Self { session, config }
     }
 }
 
@@ -132,7 +136,7 @@ impl BrowserConsoleTool {
     async fn execute_log_mode(&self) -> anyhow::Result<String> {
         debug!("browser_console mode=log");
         let mut guard = self.session.lock().await;
-        let sess = ensure_session(&mut guard).await?;
+        let sess = ensure_session(&mut guard, &self.config.browser).await?;
 
         // Inject the override (idempotent) — first log call after navigate ensures buffering is on.
         let _ = sess.page.evaluate(INJECT_CONSOLE_OVERRIDE_JS).await;
@@ -163,9 +167,7 @@ impl BrowserConsoleTool {
             .to_string();
 
         // D-13: yolo+approval gate (mirrors terminal.rs).
-        let yolo = ironhermes_core::config::Config::load()
-            .map(|c| c.autonomous.yolo)
-            .unwrap_or(false);
+        let yolo = self.config.autonomous.yolo;
         if should_prompt_for_approval(yolo) {
             return Ok(json!({
                 "approval_needed": true,
@@ -179,7 +181,7 @@ impl BrowserConsoleTool {
         debug!(expr_len = expression.len(), "browser_console mode=eval (yolo on, gate bypassed)");
 
         let mut guard = self.session.lock().await;
-        let sess = ensure_session(&mut guard).await?;
+        let sess = ensure_session(&mut guard, &self.config.browser).await?;
 
         let result = sess.page.evaluate(expression.as_str()).await;
         let (value, warning) = match result {
@@ -207,10 +209,10 @@ impl BrowserConsoleTool {
 
 async fn ensure_session<'a>(
     guard: &'a mut tokio::sync::MutexGuard<'_, Option<BrowserSession>>,
+    browser_cfg: &ironhermes_core::config::BrowserConfig,
 ) -> anyhow::Result<&'a mut BrowserSession> {
     if guard.is_none() {
-        let cfg = ironhermes_core::config::Config::load().unwrap_or_default().browser;
-        let new = BrowserSession::spawn(&cfg).await?;
+        let new = BrowserSession::spawn(browser_cfg).await?;
         **guard = Some(new);
     }
     Ok(guard.as_mut().expect("just inserted"))
@@ -219,21 +221,28 @@ async fn ensure_session<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironhermes_core::config::{AutonomousConfig, Config};
 
     fn dummy_session() -> Arc<Mutex<Option<BrowserSession>>> {
         Arc::new(Mutex::new(None))
     }
 
+    fn dummy_console_tool(yolo: bool) -> BrowserConsoleTool {
+        let mut config = Config::default();
+        config.autonomous = AutonomousConfig { yolo };
+        BrowserConsoleTool::new(dummy_session(), Arc::new(config))
+    }
+
     #[test]
     fn name_and_toolset_match_d04() {
-        let t = BrowserConsoleTool::new(dummy_session());
+        let t = dummy_console_tool(false);
         assert_eq!(t.name(), "browser_console");
         assert_eq!(t.toolset(), "browser");
     }
 
     #[test]
     fn schema_default_mode_is_log() {
-        let t = BrowserConsoleTool::new(dummy_session());
+        let t = dummy_console_tool(false);
         let s = t.schema();
         let mode_default = s.function.parameters
             .get("properties")
@@ -245,7 +254,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_eval_without_expression_errors() {
-        let t = BrowserConsoleTool::new(dummy_session());
+        // With yolo=true so the gate doesn't fire before the missing-expression check
+        let t = dummy_console_tool(true);
         let result = t.execute(json!({"mode": "eval"})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Missing required parameter: expression"));
@@ -253,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_unknown_mode_errors() {
-        let t = BrowserConsoleTool::new(dummy_session());
+        let t = dummy_console_tool(false);
         let result = t.execute(json!({"mode": "destroy"})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid mode"));
@@ -292,5 +302,46 @@ mod tests {
     fn drain_js_clears_buffer() {
         // Static invariant: drain MUST reset the buffer or repeated calls re-emit stale entries.
         assert!(DRAIN_CONSOLE_BUFFER_JS.contains("window.__ironhermes_console__ = []"));
+    }
+
+    /// GAP-4 / T-25.1-02: when yolo=false (injected), eval returns approval_needed envelope.
+    /// No chromium needed — the gate fires before page.evaluate.
+    #[tokio::test]
+    async fn execute_eval_returns_approval_envelope_when_yolo_is_false() {
+        let t = dummy_console_tool(false);
+        let result = t.execute(json!({"mode": "eval", "expression": "document.title"})).await.unwrap();
+        assert!(result.contains("\"approval_needed\":true"),
+            "expected approval_needed envelope when yolo=false, got: {result}");
+        assert!(result.contains("\"tool\":\"browser_console\""),
+            "envelope must identify the tool: {result}");
+        assert!(result.contains("\"mode\":\"eval\""),
+            "envelope must include mode: {result}");
+        assert!(result.contains("\"expression\":\"document.title\""),
+            "envelope must include expression: {result}");
+    }
+
+    /// GAP-4 / T-25.1-02: when yolo=true (injected), the approval gate is bypassed.
+    /// Because no chromium is available in unit tests, ensure_session() will fail with
+    /// a binary-not-found / spawn error — that's the expected path, NOT the approval envelope.
+    /// This proves yolo=true from the injected Config bypasses the gate.
+    #[tokio::test]
+    async fn execute_eval_uses_injected_yolo_not_disk() {
+        let t = dummy_console_tool(true);
+        let result = t.execute(json!({"mode": "eval", "expression": "document.title"})).await;
+        // Either the result is Ok (chromium happened to be present) or Err (no chromium).
+        // Either way, it must NOT be the approval_needed envelope.
+        match result {
+            Ok(s) => {
+                assert!(!s.contains("\"approval_needed\""),
+                    "yolo=true must NOT produce approval_needed envelope: {s}");
+            }
+            Err(e) => {
+                // Chromium not found or spawn failed — this is the expected unit-test path.
+                // The important invariant is that we got here at all (gate was bypassed).
+                let err_str = e.to_string();
+                assert!(!err_str.contains("approval_needed"),
+                    "yolo=true must NOT produce approval_needed error: {err_str}");
+            }
+        }
     }
 }

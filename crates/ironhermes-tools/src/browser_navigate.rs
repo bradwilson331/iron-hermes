@@ -17,11 +17,15 @@ use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserNavigateTool {
     session: Arc<Mutex<Option<BrowserSession>>>,
+    config: Arc<ironhermes_core::config::Config>,
 }
 
 impl BrowserNavigateTool {
-    pub fn new(session: Arc<Mutex<Option<BrowserSession>>>) -> Self {
-        Self { session }
+    pub fn new(
+        session: Arc<Mutex<Option<BrowserSession>>>,
+        config: Arc<ironhermes_core::config::Config>,
+    ) -> Self {
+        Self { session, config }
     }
 }
 
@@ -76,9 +80,7 @@ impl Tool for BrowserNavigateTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?
             .to_string();
 
-        let cfg = ironhermes_core::config::Config::load()
-            .unwrap_or_default()
-            .browser;
+        let cfg = &self.config.browser;
 
         // D-16: scheme allowlist. Default ["http","https"]. Reject everything else (file:, data:, javascript:).
         let scheme = url
@@ -93,7 +95,7 @@ impl Tool for BrowserNavigateTool {
                 "error": "scheme_blocked",
                 "url": url,
                 "scheme": scheme,
-                "allowed": cfg.allowed_schemes,
+                "allowed": cfg.allowed_schemes.clone(),
                 "hint": "Add the scheme to browser.allowed_schemes to permit"
             }).to_string());
         }
@@ -108,7 +110,7 @@ impl Tool for BrowserNavigateTool {
         debug!(%url, "browser_navigate");
 
         let mut guard = self.session.lock().await;
-        let sess = ensure_session(&mut guard).await?;
+        let sess = ensure_session(&mut guard, &self.config.browser).await?;
 
         // T-25.1-08: clear console buffer on every navigate (avoids cross-page PII leak).
         sess.console_buffer.clear();
@@ -148,10 +150,10 @@ impl Tool for BrowserNavigateTool {
 
 async fn ensure_session<'a>(
     guard: &'a mut tokio::sync::MutexGuard<'_, Option<BrowserSession>>,
+    browser_cfg: &ironhermes_core::config::BrowserConfig,
 ) -> anyhow::Result<&'a mut BrowserSession> {
     if guard.is_none() {
-        let cfg = ironhermes_core::config::Config::load().unwrap_or_default().browser;
-        let new = BrowserSession::spawn(&cfg).await?;
+        let new = BrowserSession::spawn(browser_cfg).await?;
         **guard = Some(new);
     }
     Ok(guard.as_mut().expect("just inserted"))
@@ -160,21 +162,31 @@ async fn ensure_session<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironhermes_core::config::{BrowserConfig, Config};
 
     fn dummy_session() -> Arc<Mutex<Option<BrowserSession>>> {
         Arc::new(Mutex::new(None))
     }
 
+    fn dummy_navigate_tool(allowed_domains: Vec<String>) -> BrowserNavigateTool {
+        let mut config = Config::default();
+        config.browser = BrowserConfig {
+            allowed_domains,
+            ..BrowserConfig::default()
+        };
+        BrowserNavigateTool::new(dummy_session(), Arc::new(config))
+    }
+
     #[test]
     fn name_and_toolset_match_d04() {
-        let t = BrowserNavigateTool::new(dummy_session());
+        let t = dummy_navigate_tool(vec![]);
         assert_eq!(t.name(), "browser_navigate");
         assert_eq!(t.toolset(), "browser");
     }
 
     #[tokio::test]
     async fn execute_rejects_missing_url() {
-        let t = BrowserNavigateTool::new(dummy_session());
+        let t = dummy_navigate_tool(vec![]);
         let result = t.execute(json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Missing required parameter: url"));
@@ -183,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn execute_rejects_disallowed_scheme() {
         // Default config has allowed_schemes = ["http", "https"]
-        let t = BrowserNavigateTool::new(dummy_session());
+        let t = dummy_navigate_tool(vec![]);
         let result = t.execute(json!({"url": "javascript:alert(1)"})).await.unwrap();
         assert!(result.contains("\"error\":\"scheme_blocked\""));
         assert!(result.contains("javascript"));
@@ -191,8 +203,34 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_file_scheme_by_default() {
-        let t = BrowserNavigateTool::new(dummy_session());
+        let t = dummy_navigate_tool(vec![]);
         let result = t.execute(json!({"url": "file:///etc/passwd"})).await.unwrap();
         assert!(result.contains("\"error\":\"scheme_blocked\""));
+    }
+
+    /// GAP-3 / T-25.1-01: allowlist enforcement uses the injected Config, not BrowserConfig::default().
+    /// Proves that when allowed_domains=["example.com"], navigation to wikipedia.org is blocked.
+    #[tokio::test]
+    async fn execute_blocks_navigate_when_host_not_in_allowlist() {
+        let t = dummy_navigate_tool(vec!["example.com".to_string()]);
+        let result = t.execute(json!({"url": "https://wikipedia.org"})).await.unwrap();
+        assert!(result.contains("\"error\":\"domain_blocked\""), "expected domain_blocked, got: {result}");
+        assert!(result.contains("wikipedia.org"), "host must appear in envelope: {result}");
+        assert!(result.contains("example.com"), "allowed list must appear in envelope: {result}");
+    }
+
+    /// GAP-3 / T-25.1-01: uses a DISTINCT_TEST_HOSTNAME that no real config file would ever contain.
+    /// If the tool were calling Config::load() from disk, the rejection envelope would contain
+    /// whatever the test machine's config file has (typically empty list = no rejection at all).
+    /// The presence of DISTINCT_TEST_HOSTNAME.example proves the injected Config is the source.
+    #[tokio::test]
+    async fn execute_uses_injected_config_not_disk() {
+        let t = dummy_navigate_tool(vec!["DISTINCT_TEST_HOSTNAME.example".to_string()]);
+        let result = t.execute(json!({"url": "https://wikipedia.org"})).await.unwrap();
+        // Must be rejected (domain_blocked) — not a scheme_blocked or success
+        assert!(result.contains("\"error\":\"domain_blocked\""), "expected domain_blocked, got: {result}");
+        // The injected distinct hostname must appear in the allowed list in the envelope
+        assert!(result.contains("DISTINCT_TEST_HOSTNAME.example"),
+            "injected allowed_domains must appear in rejection envelope — proves disk Config::load() is NOT used: {result}");
     }
 }
