@@ -653,7 +653,7 @@ impl GatewayMessageHandler {
             }
             Err(e) => {
                 // D-18: Append error indicator to whatever was already streamed
-                error!("Agent error: {}", e);
+                error!("Agent error: {:#}", e);
                 let error_suffix = "\n\n-- Something went wrong, please try again";
                 let _ = adapter
                     .send_message(&event.chat_id, error_suffix, None)

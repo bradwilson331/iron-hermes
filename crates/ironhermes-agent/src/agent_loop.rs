@@ -790,7 +790,7 @@ impl AgentLoop {
                         // Retry transient errors with backoff
                         if should_retry && retry_count < MAX_RETRIES {
                             retry_count += 1;
-                            warn!(retry = retry_count, "LLM call failed, retrying: {err}");
+                            warn!(retry = retry_count, "LLM call failed, retrying: {err:#}");
                             tokio::time::sleep(tokio::time::Duration::from_millis(500 * retry_count as u64)).await;
                             continue;
                         }
