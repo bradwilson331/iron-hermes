@@ -42,3 +42,4 @@ tempfile = "3"
 # out by the default `{crate}=trace` env filter.
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
+wiremock = "0.6"

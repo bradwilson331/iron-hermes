@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use ironhermes_core::{ApiMode, ChatMessage, ChatResponse, ProviderResolver, ResolvedEndpoint, ToolSchema};
+use ironhermes_core::types::{ContentPart, ImageUrl, MessageContent, Role};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::anthropic_client::AnthropicClient;
@@ -149,6 +152,88 @@ pub fn build_role_client(resolver: &ProviderResolver, role: &str) -> Result<Opti
     match resolver.resolve_role(role) {
         Some(endpoint) => Ok(Some(AnyClient::from_endpoint(&endpoint)?)),
         None => Ok(None),
+    }
+}
+
+// =============================================================================
+// AnyClientVisionHandle — VisionClientHandle impl for production use (OQ-5 closure)
+// =============================================================================
+
+/// Production implementation of `VisionClientHandle` for `browser_vision`.
+///
+/// Wraps an `Arc<ProviderResolver>` and uses `build_role_client("vision")` to
+/// follow the Phase 26 D-07 cascade:
+///   1. `model.roles["vision"]` per-task override
+///   2. `auxiliary` block fallback
+///   3. Fall through to main provider (if supports_vision)
+///
+/// Constructed in `ironhermes-cli/src/main.rs` and passed to
+/// `register_browser_tools_with_vision` so that `BrowserVisionTool` routes
+/// multimodal calls through the correct endpoint.
+pub struct AnyClientVisionHandle {
+    resolver: Arc<ProviderResolver>,
+}
+
+impl AnyClientVisionHandle {
+    pub fn new(resolver: Arc<ProviderResolver>) -> Self {
+        Self { resolver }
+    }
+}
+
+#[async_trait]
+impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHandle {
+    async fn vision_call(
+        &self,
+        prompt: String,
+        image_data_url: String,
+    ) -> anyhow::Result<String> {
+        // D-07 cascade: vision role → auxiliary → main provider.
+        let client = match build_role_client(&self.resolver, "vision")? {
+            Some(c) => c,
+            None => build_main_client(&self.resolver)?,
+        };
+
+        // Build a multimodal message: text prompt + image data URL (D-08 PNG base64).
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text { text: prompt },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: image_data_url,
+                        detail: Some("auto".to_string()),
+                    },
+                },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let response = client
+            .chat_completion(&messages, None, None, Some(1024), None, None)
+            .await?;
+
+        // Extract text content from choices[0].message.content
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .and_then(|mc| match mc {
+                ironhermes_core::types::MessageContent::Text(s) => Some(s),
+                ironhermes_core::types::MessageContent::Parts(parts) => {
+                    parts.into_iter().find_map(|p| {
+                        if let ironhermes_core::types::ContentPart::Text { text } = p {
+                            Some(text)
+                        } else {
+                            None
+                        }
+                    })
+                }
+            })
+            .unwrap_or_else(|| "(no vision response)".to_string());
+        Ok(text)
     }
 }
 

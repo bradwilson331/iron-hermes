@@ -356,6 +356,27 @@ impl ToolRegistry {
         tool.execute(args).await
     }
 
+    /// Invoke a tool by name, bypassing `is_available()`.
+    ///
+    /// This is used by integration tests that guard chromium availability themselves
+    /// (D-22) and need to call tools that report `is_available() = false` because
+    /// the resolver has no vision config (tests 1 and 2), or to call browser_vision
+    /// with a wired resolver in test 3.
+    ///
+    /// Unlike `execute_tool`, this does NOT check `is_available()` — callers are
+    /// responsible for ensuring the tool can run (e.g. D-22 chromium_available guard).
+    pub async fn handle_tool_call(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
+        tool.execute(args).await
+    }
+
     /// Return the configured error detail level for guardrail block messages.
     /// Used by agent_loop.rs to format block errors with the same detail level
     /// as dispatch_with_hook (preserves LLM-visible error format, T-07.4-06).
@@ -488,6 +509,42 @@ impl ToolRegistry {
         // is not available (e.g. in unit tests). The real impl is wired in AgentLoop
         // via plan 09's AnyClientVisionHandle.
         let vision_client = std::sync::Arc::new(crate::browser_vision::NoOpVisionHandle);
+
+        self.register(Box::new(BrowserBackTool::new(session.clone())));
+        self.register(Box::new(BrowserClickTool::new(session.clone())));
+        self.register(Box::new(BrowserCloseTool::new(session.clone())));
+        self.register(Box::new(BrowserConsoleTool::new(session.clone())));
+        self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
+        self.register(Box::new(BrowserNavigateTool::new(session.clone())));
+        self.register(Box::new(BrowserPressTool::new(session.clone())));
+        self.register(Box::new(BrowserScrollTool::new(session.clone())));
+        self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
+        self.register(Box::new(BrowserTypeTool::new(session.clone())));
+        self.register(Box::new(BrowserVisionTool::new(session.clone(), resolver, vision_client)));
+    }
+
+    /// Phase 25.1 D-07 / OQ-5: register all 11 browser_* tools with a real VisionClientHandle.
+    ///
+    /// Variant of `register_browser_tools` used by production CLI entry points after
+    /// `AnyClientVisionHandle` is available (plan 11 wiring). The real handle routes
+    /// `browser_vision` calls through the Phase 26 D-07 cascade rather than the NoOp stub.
+    pub fn register_browser_tools_with_vision(
+        &mut self,
+        session: std::sync::Arc<tokio::sync::Mutex<Option<crate::browser_session::BrowserSession>>>,
+        resolver: std::sync::Arc<ironhermes_core::provider::ProviderResolver>,
+        vision_client: std::sync::Arc<dyn crate::browser_vision::VisionClientHandle>,
+    ) {
+        use crate::browser_back::BrowserBackTool;
+        use crate::browser_click::BrowserClickTool;
+        use crate::browser_close::BrowserCloseTool;
+        use crate::browser_console::BrowserConsoleTool;
+        use crate::browser_get_images::BrowserGetImagesTool;
+        use crate::browser_navigate::BrowserNavigateTool;
+        use crate::browser_press::BrowserPressTool;
+        use crate::browser_scroll::BrowserScrollTool;
+        use crate::browser_snapshot::BrowserSnapshotTool;
+        use crate::browser_type::BrowserTypeTool;
+        use crate::browser_vision::BrowserVisionTool;
 
         self.register(Box::new(BrowserBackTool::new(session.clone())));
         self.register(Box::new(BrowserClickTool::new(session.clone())));
