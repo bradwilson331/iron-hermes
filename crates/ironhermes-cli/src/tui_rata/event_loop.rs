@@ -110,7 +110,7 @@ async fn run_with_deps(
 ///
 /// Concrete identifiers — grep-verified iteration 2. All 14 D-18 items below.
 async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDeps> {
-    use ironhermes_agent::{build_main_client, build_client as build_provider_client, AgentSubagentRunner};
+    use ironhermes_agent::{build_main_client, build_client as build_provider_client, AgentSubagentRunner, AnyClientVisionHandle};
     use ironhermes_agent::budget::BudgetHandle;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_core::commands::{CommandRouter, registry::build_registry as build_command_registry};
@@ -265,6 +265,20 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         process_registry.clone(),
     );
 
+    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
+    // Wired identically across run_chat / run_single / run_gateway / run_chat_ratatui (Phase 22 D-04 invariant).
+    // Phase 25.1 GAP-8 closure (plan 25.1-19): mirror of run_chat (main.rs:1173-1184) into the rata REPL bootstrap.
+    // Without this block, `ironhermes chat` (which dispatches to run_chat_ratatui) omits all 11 browser_* tools.
+    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
+    registry.register_browser_tools_with_vision(
+        browser_session.clone(),
+        std::sync::Arc::new(resolver.clone()),
+        vision_handle,
+        std::sync::Arc::new(config.clone()),
+    );
+
     // D-18 item 9: BlocklistGuardrail (before Arc wrap — D-05)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
     if !hooks_config.blocked_tools.is_empty() {
@@ -319,7 +333,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     .with_budget(budget.clone())
     .with_cancellation_token(cancel_parent.clone())
     .with_hook_registry(hook_registry.clone())
-    .with_compression(context_length, config.agent.context_compression);
+    .with_compression(context_length, config.agent.context_compression)
+    .with_browser_session(browser_session.clone()); // Phase 25.1 D-17 / GAP-8
     let agent_loop = Arc::new(agent_loop_inst);
 
     // D-18 item 14: StatusLineState initial seed
@@ -372,6 +387,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         config_compression: config.agent.context_compression,
         max_turns: cli.max_turns.unwrap_or(config.agent.max_turns),
         fallback_client,
+        browser_session: browser_session.clone(),
         mouse_capture_enabled,
         // Phase 22.4.2 Plan 00: D-08 subsystem handles
         state_store,
@@ -528,6 +544,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let max_turns = app.max_turns;
     let memory_manager = app.memory_manager.clone();
     let fallback_client = app.fallback_client.clone();
+    let browser_session = app.browser_session.clone(); // Phase 25.1 GAP-8 (plan 25.1-19)
     let cancel_token = cancel.clone();
     let messages_snapshot = app.history.clone();
     let session_id = app.session_id.clone();
@@ -582,6 +599,12 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         .with_tool_progress(tool_progress_cb)
         .with_tool_result(tool_result_cb);
 
+        // Phase 25.1 D-17 / GAP-8 (plan 25.1-19): per-turn AgentLoop holds the same
+        // browser_session Arc as the App-level AgentLoop, so D-03's "one browser per
+        // AgentLoop" invariant holds across turns (lazy-spawn on first browser_*
+        // call, reuse on subsequent calls, browser_close re-spawns next time).
+        agent = agent.with_browser_session(browser_session);
+
         if let Some(mm) = memory_manager {
             agent = agent.with_memory_manager(mm);
         }
@@ -604,4 +627,91 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         };
         let _ = tx.send(terminal_event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    /// INV-25.1-19: Phase 25.1 GAP-8 closure.
+    /// The rata chat REPL bootstrap MUST register browser tools and wire the
+    /// shared Arc into BOTH the App-level AgentLoop AND the per-turn AgentLoop
+    /// in spawn_turn. Without these wirings, `ironhermes chat` omits all 11
+    /// browser_* tools (the GAP-8 root cause).
+    #[test]
+    fn inv_25_1_gap8_browser_tools_wired_in_rata_chat() {
+        let source = include_str!("event_loop.rs");
+        // Filter comments to dodge the self-invalidating-grep-gate trap.
+        let non_comment: String = source.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let reg_count = non_comment.matches("register_browser_tools_with_vision(").count();
+        assert!(reg_count >= 1,
+            "Phase 25.1 GAP-8 (plan 25.1-19): rata bootstrap MUST call \
+             register_browser_tools_with_vision in build_app_deps; got {} non-comment calls",
+            reg_count);
+
+        // Plan-14 Arc<Config> threading: the call MUST receive Arc::new(config.clone()) as its 4th arg.
+        let cfg_count = non_comment.matches("Arc::new(config.clone())").count();
+        assert!(cfg_count >= 1,
+            "Phase 25.1 GAP-8 + plan 25.1-14: register_browser_tools_with_vision in the \
+             rata bootstrap MUST receive Arc::new(config.clone()) so allowlist (D-15) and \
+             yolo gating (D-13) reach the chat REPL's browser tools; got {} occurrences",
+            cfg_count);
+
+        // Both AgentLoop builders MUST chain .with_browser_session(...) — one in build_app_deps,
+        // one in spawn_turn. So we expect at least 2 occurrences.
+        let with_count = non_comment.matches(".with_browser_session(").count();
+        assert!(with_count >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): BOTH the App-level AgentLoop (build_app_deps) \
+             AND the per-turn AgentLoop (spawn_turn) MUST chain .with_browser_session(); \
+             got {} occurrences", with_count);
+    }
+
+    /// Phase 25.1 GAP-8 behavioral test: verify that calling register_browser_tools_with_vision
+    /// with the same 4-arg call shape used in build_app_deps produces a registry containing
+    /// all 11 browser_* tools. This is the 2nd layer of the regression net:
+    /// registry.rs locks the registration function (plan 09);
+    /// this test locks the rata-side call site (this plan).
+    #[test]
+    fn rata_bootstrap_registry_contains_all_11_browser_tools() {
+        use ironhermes_agent::AnyClientVisionHandle;
+        use ironhermes_core::{Config, provider::ProviderResolver};
+        use ironhermes_tools::ToolRegistry;
+        use std::sync::Arc;
+
+        let mut registry = ToolRegistry::new();
+        let config = Config::default();
+        let resolver = ProviderResolver::build(&config)
+            .expect("ProviderResolver::build with default Config must not fail in test context");
+
+        let browser_session = Arc::new(tokio::sync::Mutex::new(None));
+        let vision_handle = Arc::new(AnyClientVisionHandle::new(Arc::new(resolver.clone())));
+
+        registry.register_browser_tools_with_vision(
+            browser_session,
+            Arc::new(resolver),
+            vision_handle,
+            Arc::new(config),
+        );
+
+        let names: std::collections::HashSet<String> = registry.list_tools()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for expected in &[
+            "browser_back", "browser_click", "browser_close", "browser_console",
+            "browser_get_images", "browser_navigate", "browser_press", "browser_scroll",
+            "browser_snapshot", "browser_type", "browser_vision",
+        ] {
+            assert!(names.contains(*expected),
+                "Phase 25.1 GAP-8 (plan 25.1-19): rata bootstrap call shape MUST register \
+                 {} (got: {:?})", expected, names);
+        }
+
+        let browser_count = names.iter().filter(|n| n.starts_with("browser_")).count();
+        assert_eq!(browser_count, 11,
+            "Phase 25.1 D-04: exactly 11 browser_* tools must be registered");
+    }
 }
