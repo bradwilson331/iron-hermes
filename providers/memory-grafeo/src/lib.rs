@@ -312,6 +312,7 @@ impl MemoryProvider for GrafeoMemoryProvider {
             ),
             secret: false,
             required: false,
+            cache_breaking: false,
             default: Some(json!("$HERMES_HOME/grafeo")),
             choices: None,
             env_var: None,

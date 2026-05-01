@@ -195,6 +195,7 @@ impl MemoryProvider for SqliteMemoryProvider {
             ),
             secret: false,
             required: false,
+            cache_breaking: false,
             default: Some(json!("$HERMES_HOME/memory.db")),
             choices: None,
             env_var: None,
