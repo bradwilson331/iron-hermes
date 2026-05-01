@@ -86,6 +86,12 @@ pub struct GatewayMessageHandler {
     /// main.rs so lifecycle events update state. Per-request on_session_end
     /// sleeps 200ms to drain pending fire-and-forget transcript writes.
     subagent_registry: Option<Arc<RwLock<SubagentRegistry>>>,
+    /// Phase 25.1 D-03/D-17: shared browser session Arc threaded from the runner.
+    /// All 11 browser_* tools share this Arc (registered via register_browser_tools
+    /// in main.rs run_gateway). Per-request AgentLoop calls with_browser_session
+    /// so the AgentLoop holds a reference — ensuring drop semantics clean up the
+    /// browser process when the last Arc clone drops (T-25.1-04).
+    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
 }
 
 impl GatewayMessageHandler {
@@ -117,6 +123,7 @@ impl GatewayMessageHandler {
             budget_handle: None,
             process_registry: None,
             subagent_registry: None,
+            browser_session: None,
         }
     }
 
@@ -138,6 +145,18 @@ impl GatewayMessageHandler {
     /// fire-and-forget transcript writes (sleep 200ms).
     pub fn set_subagent_registry(&mut self, reg: Arc<RwLock<SubagentRegistry>>) {
         self.subagent_registry = Some(reg);
+    }
+
+    /// Phase 25.1 D-17: install the shared browser session Arc so each per-request
+    /// AgentLoop can call `.with_browser_session(...)`. Mirrors set_memory_manager shape.
+    /// The Arc is pre-constructed in run_gateway (main.rs) and cloned into every
+    /// per-request AgentLoop so AgentLoop drop semantics clean up the browser process
+    /// when the last Arc clone drops (T-25.1-04 resource exhaustion mitigation).
+    pub fn set_browser_session(
+        &mut self,
+        session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+    ) {
+        self.browser_session = Some(session);
     }
 
     /// Phase 18 Plan 06: install the per-turn hygiene engine. Wired by composition
@@ -563,6 +582,12 @@ impl GatewayMessageHandler {
         // each natural-end gateway turn. Guard with if-let per T-21.4-04.
         if let Some(ref mgr) = self.memory_manager {
             agent = agent.with_memory_manager(mgr.clone());
+        }
+
+        // Phase 25.1 D-17: wire browser session Arc so AgentLoop holds a reference.
+        // This ensures browser process cleanup when the AgentLoop drops (T-25.1-04).
+        if let Some(ref sess) = self.browser_session {
+            agent = agent.with_browser_session(sess.clone());
         }
 
         // Phase 18 Plan 09: wire agent-side context compression (honors

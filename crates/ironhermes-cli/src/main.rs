@@ -669,6 +669,12 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
 
+    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
+    // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
+    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    registry.register_browser_tools(browser_session.clone(), std::sync::Arc::new(resolver.clone()));
+
     // Phase 22: skills tool (per D-02/D-03)
     let cwd = std::env::current_dir().unwrap_or_default();
     let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
@@ -790,7 +796,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         }))
         // Phase 25 D-16: wire intercept handlers (todo_write/todo_read only in single mode;
         // memory handled by register_memory_tool; state_store wired for session_search).
-        .with_intercepts(None, Some(state_store.clone()), None, Some(todo_state_single), None);
+        .with_intercepts(None, Some(state_store.clone()), None, Some(todo_state_single), None)
+        // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
+        .with_browser_session(browser_session.clone());
 
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
@@ -1156,6 +1164,12 @@ async fn run_chat(
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
 
+    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
+    // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
+    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    registry.register_browser_tools(browser_session.clone(), std::sync::Arc::new(resolver.clone()));
+
     // Phase 22: skills tool with shared active_skills Arc (per D-02, D-08)
     let cwd = std::env::current_dir().unwrap_or_default();
     let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
@@ -1288,6 +1302,7 @@ async fn run_chat(
             context_length, // Phase 21.3
             memory_manager.clone(), // GAP-1: wire queue_prefetch
             state_store.clone(), // Phase 25: session_search intercept
+            Some(browser_session.clone()), // Phase 25.1 D-17
         )
         .await?;
         // Persist assistant response
@@ -1536,6 +1551,7 @@ async fn run_chat(
                     context_length, // Phase 21.3
                     memory_manager.clone(), // GAP-1: wire queue_prefetch
                     state_store.clone(), // Phase 25: session_search intercept
+                    Some(browser_session.clone()), // Phase 25.1 D-17
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -1936,6 +1952,7 @@ async fn run_agent_turn(
     context_length: usize,  // Phase 21.3: resolved from model metadata
     memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>,  // GAP-1: wire queue_prefetch
     state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>,  // Phase 25: session_search intercept
+    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,  // Phase 25.1 D-17
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -1985,6 +2002,11 @@ async fn run_agent_turn(
             Some(std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()))),
             None, // cron_router: cronjob wiring in Plan 4
         );
+
+    // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
+    if let Some(sess) = browser_session {
+        agent = agent.with_browser_session(sess);
+    }
 
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
@@ -2096,6 +2118,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let cron_dir = ironhermes_core::get_hermes_home().join("cron");
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
+
+    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
+    // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
+    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    registry.register_browser_tools(browser_session.clone(), std::sync::Arc::new(resolver.clone()));
 
     // Discover skills and register the skills tool
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2259,6 +2287,9 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     runner.set_skill_registry(skill_registry);
     runner.set_hook_registry(hook_registry);
     runner.set_active_skills(active_skills);
+    // Phase 25.1 D-17: wire shared browser session Arc into the runner so per-request
+    // AgentLoops receive with_browser_session (T-25.1-04 drop semantics).
+    runner.set_browser_session(browser_session.clone());
     // GAP-8 (Phase 21.2 Plan 11): wire MCP manager into runner's shutdown
     // path so Ctrl+C actually returns when stdio MCP servers are connected.
     // build_mcp_manager returns Option<Arc<McpManager>>; pass the Arc clone
@@ -2704,5 +2735,35 @@ mod mcp_wiring_tests {
         let src = include_str!("main.rs");
         assert!(src.contains("Commands::Mcp"), "Commands enum must have Mcp variant");
         assert!(src.contains("handle_mcp_command"), "main must dispatch to handle_mcp_command");
+    }
+
+    /// INV-25.1: browser session wired in all 3 entry points (Phase 25.1 D-04 mirror-pattern invariant).
+    ///
+    /// - register_browser_tools must appear in run_chat, run_single, AND run_gateway (≥3)
+    /// - with_browser_session must be called on the AgentLoop builder in run_single and run_chat (≥2)
+    /// - set_browser_session must be called to wire the runner in run_gateway (≥1)
+    #[test]
+    fn inv_25_1_browser_session_wired_in_all_entry_points() {
+        let source = include_str!("main.rs");
+        let reg_count = source.matches("register_browser_tools(").count();
+        assert!(
+            reg_count >= 3,
+            "Phase 25.1 D-04: register_browser_tools MUST be called in run_chat, run_single, AND run_gateway \
+             (Phase 22 D-04 mirror-pattern invariant); got {} calls",
+            reg_count
+        );
+        let with_count = source.matches(".with_browser_session(").count();
+        assert!(
+            with_count >= 2,
+            "Phase 25.1 D-17: with_browser_session MUST be on AgentLoop builder chain in run_single and run_chat; \
+             got {} calls (run_gateway uses runner.set_browser_session instead)",
+            with_count
+        );
+        let set_count = source.matches("set_browser_session(").count();
+        assert!(
+            set_count >= 1,
+            "Phase 25.1 D-17: set_browser_session MUST be called on runner in run_gateway; got {} calls",
+            set_count
+        );
     }
 }
