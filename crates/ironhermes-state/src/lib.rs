@@ -452,12 +452,20 @@ impl StateStore {
             .map_err(Into::into)
     }
 
-    /// Retrieve all messages for a session ordered by timestamp ascending.
+    /// Retrieve all messages for a session ordered by per-session insert order.
+    ///
+    /// Phase 25.1 GAP-7: orders by `id ASC` (not `timestamp ASC`). Same-tick
+    /// `add_message` calls share a millisecond-resolution `timestamp` and
+    /// previously tied non-deterministically — scrambling assistant↔tool
+    /// pairing on session restore and producing OpenAI 400s. `id` is the
+    /// strictly-monotonic AUTOINCREMENT primary key (lib.rs:71); within a
+    /// `WHERE session_id = ?1` filter, id-order equals per-session insert
+    /// order.
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name, \
              timestamp, token_count, finish_reason \
-             FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC",
+             FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], message_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)

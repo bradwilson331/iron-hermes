@@ -40,3 +40,5 @@ tempfile = "3"
 # Phase 21.7 Wave 0 — BudgetHandle + transcript + pressure tests
 tracing-test = { workspace = true }
 insta = { workspace = true }
+# Phase 25.1 GAP-7 — pre-send invariant integration tests
+wiremock = { workspace = true }

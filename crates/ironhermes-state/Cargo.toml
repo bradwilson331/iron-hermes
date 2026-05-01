@@ -20,3 +20,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 serde_json = { workspace = true }
+# Phase 25.1 GAP-7 — round-trip regression tests open a sibling rusqlite
+# connection to force a timestamp inversion; ironhermes-core is already a
+# regular dep so validate_tool_call_pairing is reachable in integration tests.
+rusqlite = { workspace = true }

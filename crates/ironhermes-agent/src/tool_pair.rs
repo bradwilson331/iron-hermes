@@ -162,34 +162,23 @@ pub fn compute_effective_protect_first_n(
     effective
 }
 
-/// Post-compression invariant (D-16): every assistant tool_call id must have a
-/// subsequent matching tool message, and every tool message must refer to a
-/// preceding assistant tool_call.
+/// Phase 18 D-16 + Phase 25.1 GAP-7: pairing-invariant check, kept here for
+/// backward compatibility with existing call sites in context_engine /
+/// summarizing_engine. The actual walk lives in
+/// [`ironhermes_core::validate_tool_call_pairing`] (strict semantics) — this
+/// is now a thin wrapper that maps the diagnostic string to
+/// [`ContextError::OrphanedToolPair`]. Single source of truth for pairing
+/// logic across both crates.
+///
+/// Note: the wrapper now uses STRICT semantics (the GAP-7 fix). It will catch
+/// orphan-after-interjecting-assistant cases the prior flat-set
+/// implementation missed; existing callers all bubble `Err` via `?` and the
+/// stricter semantics are the correct ones for OpenAI's API contract.
 pub fn check_orphan_invariant(messages: &[ChatMessage]) -> Result<(), ContextError> {
-    use std::collections::HashSet;
-    let mut unmatched_calls: HashSet<String> = HashSet::new();
-    for msg in messages {
-        match msg.role {
-            Role::Assistant => {
-                if let Some(ref calls) = msg.tool_calls {
-                    for c in calls {
-                        unmatched_calls.insert(c.id.clone());
-                    }
-                }
-            }
-            Role::Tool => match msg.tool_call_id.as_ref() {
-                Some(id) if unmatched_calls.contains(id) => {
-                    unmatched_calls.remove(id);
-                }
-                _ => return Err(ContextError::OrphanedToolPair),
-            },
-            _ => {}
-        }
-    }
-    if !unmatched_calls.is_empty() {
-        return Err(ContextError::OrphanedToolPair);
-    }
-    Ok(())
+    ironhermes_core::validate_tool_call_pairing(messages).map_err(|diag| {
+        tracing::warn!(diag = %diag, "tool-pair invariant violated");
+        ContextError::OrphanedToolPair
+    })
 }
 
 #[cfg(test)]
