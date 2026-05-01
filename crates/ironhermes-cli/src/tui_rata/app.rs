@@ -73,6 +73,12 @@ pub struct AppDeps {
     /// PROV-07 parity with classic main.rs:631-637. spawn_turn clones this and
     /// chains `.with_fallback(fb)` on the per-turn AgentLoop when present.
     pub fallback_client: Option<AnyClient>,
+    /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
+    /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
+    /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
+    /// AgentLoop builder AND the per-turn AgentLoop in `spawn_turn`. Without
+    /// this field the rata REPL omits all 11 browser_* tools (GAP-8 root cause).
+    pub browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
     /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — shared mouse-capture state.
     /// `/mouse on|off` slash command flips this AtomicBool AND executes the
     /// corresponding crossterm command. Initial value `true` matches the
@@ -172,6 +178,12 @@ pub struct App {
     pub max_turns: usize,
     /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — see AppDeps.fallback_client.
     pub fallback_client: Option<AnyClient>,
+    /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
+    /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
+    /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
+    /// AgentLoop builder AND the per-turn AgentLoop in `spawn_turn`. Without
+    /// this field the rata REPL omits all 11 browser_* tools (GAP-8 root cause).
+    pub browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
     /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — see AppDeps.mouse_capture_enabled.
     pub mouse_capture_enabled: Arc<AtomicBool>,
 
@@ -247,6 +259,7 @@ impl App {
             config_compression: deps.config_compression,
             max_turns: deps.max_turns,
             fallback_client: deps.fallback_client,
+            browser_session: deps.browser_session,
             mouse_capture_enabled: deps.mouse_capture_enabled,
             // Phase 22.4.2 Plan 00: D-08 subsystem handles
             state_store: deps.state_store,
@@ -827,6 +840,7 @@ fn test_deps() -> AppDeps {
         config_compression: 0.8,
         max_turns: 10,
         fallback_client: None,
+        browser_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         mouse_capture_enabled: Arc::new(AtomicBool::new(true)),
         // Phase 22.4.2 Plan 00: D-08 subsystem handles (None/defaults for tests)
         state_store: None,
@@ -844,6 +858,29 @@ fn test_deps() -> AppDeps {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod inv_tests {
+    /// INV-25.1-19: Phase 25.1 GAP-8 closure.
+    /// Both AppDeps and App MUST carry the browser_session field with the
+    /// exact verified type from the interfaces block, and App::new MUST
+    /// forward it from deps.
+    #[test]
+    fn inv_25_1_gap8_app_carries_browser_session_field() {
+        let source = include_str!("app.rs");
+        let non_comment: String = source.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The field MUST appear in BOTH AppDeps and App (2 struct definitions).
+        let count = non_comment.matches("browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>").count();
+        assert!(count >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST carry the browser_session field; got {} occurrences in non-comment source", count);
+        // App::new MUST forward the field from deps.
+        assert!(non_comment.contains("browser_session: deps.browser_session"),
+            "Phase 25.1 GAP-8 (plan 25.1-19): App::new MUST forward browser_session from deps");
+    }
+}
 
 #[cfg(all(test, feature = "test-support"))]
 mod scroll_tests {
