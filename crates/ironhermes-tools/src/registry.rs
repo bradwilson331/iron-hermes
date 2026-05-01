@@ -462,6 +462,46 @@ impl ToolRegistry {
         self.register(Box::new(CronjobTool::new(store)));
     }
 
+    /// Phase 25.1 D-04: register all 11 browser_* tools sharing one Arc<Mutex<Option<BrowserSession>>>.
+    ///
+    /// Mirrors register_memory_tool / register_cronjob_tool wiring shape.
+    /// Caller pre-constructs the Arc so AgentLoop can hold the same instance via with_browser_session.
+    /// browser_vision additionally takes the resolver Arc for D-06 vision capability checks.
+    pub fn register_browser_tools(
+        &mut self,
+        session: std::sync::Arc<tokio::sync::Mutex<Option<crate::browser_session::BrowserSession>>>,
+        resolver: std::sync::Arc<ironhermes_core::provider::ProviderResolver>,
+    ) {
+        use crate::browser_back::BrowserBackTool;
+        use crate::browser_click::BrowserClickTool;
+        use crate::browser_close::BrowserCloseTool;
+        use crate::browser_console::BrowserConsoleTool;
+        use crate::browser_get_images::BrowserGetImagesTool;
+        use crate::browser_navigate::BrowserNavigateTool;
+        use crate::browser_press::BrowserPressTool;
+        use crate::browser_scroll::BrowserScrollTool;
+        use crate::browser_snapshot::BrowserSnapshotTool;
+        use crate::browser_type::BrowserTypeTool;
+        use crate::browser_vision::BrowserVisionTool;
+
+        // VisionClientHandle stub: a no-op handle used when the real agent-side impl
+        // is not available (e.g. in unit tests). The real impl is wired in AgentLoop
+        // via plan 09's AnyClientVisionHandle.
+        let vision_client = std::sync::Arc::new(crate::browser_vision::NoOpVisionHandle);
+
+        self.register(Box::new(BrowserBackTool::new(session.clone())));
+        self.register(Box::new(BrowserClickTool::new(session.clone())));
+        self.register(Box::new(BrowserCloseTool::new(session.clone())));
+        self.register(Box::new(BrowserConsoleTool::new(session.clone())));
+        self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
+        self.register(Box::new(BrowserNavigateTool::new(session.clone())));
+        self.register(Box::new(BrowserPressTool::new(session.clone())));
+        self.register(Box::new(BrowserScrollTool::new(session.clone())));
+        self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
+        self.register(Box::new(BrowserTypeTool::new(session.clone())));
+        self.register(Box::new(BrowserVisionTool::new(session.clone(), resolver, vision_client)));
+    }
+
     /// Register the skills tool with a shared SkillRegistry and active_skills tracker.
     /// Called separately from register_defaults() because it requires a SkillRegistry instance.
     ///
@@ -1631,6 +1671,53 @@ mod tests {
         assert!(
             !err_msg.contains("secret_tool"),
             "tool name must not appear in minimal error: {err_msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 25.1 D-04: register_browser_tools registers exactly 11 browser_* tools
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn register_browser_tools_registers_all_11() {
+        use ironhermes_core::{config::Config, provider::ProviderResolver};
+        let mut registry = ToolRegistry::new();
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let config = Config::default();
+        let resolver = std::sync::Arc::new(
+            ProviderResolver::build(&config).expect("default config builds resolver"),
+        );
+        registry.register_browser_tools(session, resolver);
+
+        let names: std::collections::HashSet<String> = registry
+            .list_tools()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        for expected in &[
+            "browser_back",
+            "browser_click",
+            "browser_close",
+            "browser_console",
+            "browser_get_images",
+            "browser_navigate",
+            "browser_press",
+            "browser_scroll",
+            "browser_snapshot",
+            "browser_type",
+            "browser_vision",
+        ] {
+            assert!(
+                names.contains(*expected),
+                "Phase 25.1 D-04: tool {} MUST be registered (got: {:?})",
+                expected,
+                names
+            );
+        }
+        let browser_count = names.iter().filter(|n| n.starts_with("browser_")).count();
+        assert_eq!(
+            browser_count, 11,
+            "exactly 11 browser_* tools must be registered"
         );
     }
 }

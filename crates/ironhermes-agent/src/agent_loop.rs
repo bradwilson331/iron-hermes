@@ -164,6 +164,14 @@ pub struct AgentLoop {
     /// Populated in `run()` from `memory_manager.get_tool_schemas()`.
     /// Used in `execute_tool_call()` to intercept and route to MemoryManager.
     memory_provider_tool_names: std::collections::HashSet<String>,
+    /// Phase 25.1 D-03: shared browser session for all 11 browser_* tools.
+    /// None until BrowserSession::spawn() is called from first browser_* tool use.
+    /// Arc is cloned into each browser_* tool constructor at registry build time
+    /// so AgentLoop and tools share the same instance.
+    /// On AgentLoop drop, the Arc reference count decrements; when the last tool
+    /// clone also drops (all tools dropped with the registry), the Mutex drops,
+    /// and BrowserSession::drop kills the handler task (T-25.1-04 drop semantics).
+    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
 }
 
 impl AgentLoop {
@@ -194,6 +202,7 @@ impl AgentLoop {
             compression_count: 0,
             memory_manager: None,
             memory_provider_tool_names: std::collections::HashSet::new(),
+            browser_session: None,
         }
     }
 
@@ -208,6 +217,21 @@ impl AgentLoop {
     /// handle has been wired before `agent.run(...)`.
     pub fn has_memory_manager(&self) -> bool {
         self.memory_manager.is_some()
+    }
+
+    /// Phase 25.1 D-17: wire the shared browser session Arc so it can be passed to
+    /// browser_* tools during registry build. Mirrors with_memory_manager() shape.
+    ///
+    /// The Arc is cloned into each browser_* tool constructor at registry build time
+    /// (via register_browser_tools) so AgentLoop and tools share the same instance.
+    /// AgentLoop drop drops this Arc; when the last tool clone also drops, the
+    /// BrowserSession::drop kills the handler task (T-25.1-04 resource cleanup).
+    pub fn with_browser_session(
+        mut self,
+        session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+    ) -> Self {
+        self.browser_session = Some(session);
+        self
     }
 
     /// Phase 18 Plan 06: inject a pre-chat context engine.
@@ -2230,5 +2254,46 @@ mod memory_provider_wiring_tests {
                  all: {:?}", expected, names
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 25.1 D-03/D-17: browser_session field + with_browser_session builder
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn agent_loop_with_browser_session_sets_field() {
+        use ironhermes_tools::browser_session::BrowserSession;
+        let arc = std::sync::Arc::new(tokio::sync::Mutex::new(None::<BrowserSession>));
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new(
+                "http://localhost".to_string(),
+                "".to_string(),
+                "mock-model",
+            ),
+        );
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let agent = AgentLoop::new(client, registry, 1)
+            .with_browser_session(arc.clone());
+        assert!(
+            agent.browser_session.is_some(),
+            "Phase 25.1 D-17: with_browser_session MUST populate the field"
+        );
+    }
+
+    #[test]
+    fn agent_loop_browser_session_wiring_invariants() {
+        let source = include_str!("agent_loop.rs");
+        assert!(
+            source.contains("browser_session: Option<"),
+            "AgentLoop MUST have browser_session field"
+        );
+        assert!(
+            source.contains("pub fn with_browser_session"),
+            "AgentLoop MUST expose with_browser_session builder"
+        );
+        assert!(
+            source.contains("browser_session: None"),
+            "AgentLoop::new MUST initialize browser_session to None"
+        );
     }
 }

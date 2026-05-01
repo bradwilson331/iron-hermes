@@ -59,6 +59,10 @@ pub struct GatewayRunner {
     /// Cloned into `build_gateway_handler` so per-request handlers see
     /// live subagent state + can drain transcripts on session end.
     subagent_registry: Option<Arc<RwLock<SubagentRegistry>>>,
+    /// Phase 25.1 D-03/D-17: shared browser session Arc for all browser_* tools.
+    /// Cloned into `build_gateway_handler` so per-request AgentLoops receive
+    /// `with_browser_session(...)` and hold a reference (T-25.1-04 drop semantics).
+    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
     cancel: CancellationToken,
 }
 
@@ -84,6 +88,7 @@ impl GatewayRunner {
             budget_handle: None, // Plan 21.7-05: wired by run_gateway before start()
             process_registry: None, // Plan 21.7-06: wired by run_gateway before start()
             subagent_registry: None, // Plan 21.7-07: wired by run_gateway before start()
+            browser_session: None, // Phase 25.1: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -152,6 +157,16 @@ impl GatewayRunner {
         self.mcp_manager = Some(manager);
     }
 
+    /// Phase 25.1 D-17: install the shared browser session Arc.
+    /// Mirrored to `build_gateway_handler` so every per-request AgentLoop
+    /// receives `with_browser_session(...)`. Caller is `run_gateway` in main.rs.
+    pub fn set_browser_session(
+        &mut self,
+        session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+    ) {
+        self.browser_session = Some(session);
+    }
+
     /// Plan 03 (Phase 22.4.2.1): returns a clone of the runner's CancellationToken.
     /// Used by gateway integration tests (tests/gateway_shutdown.rs) to fire
     /// shutdown without going through the OS signal layer.
@@ -197,6 +212,12 @@ impl GatewayRunner {
         // writes and the delegate_task runner shares state across requests.
         if let Some(ref reg) = self.subagent_registry {
             handler.set_subagent_registry(reg.clone());
+        }
+
+        // Phase 25.1 D-17: thread the shared browser session Arc so every
+        // per-request AgentLoop calls with_browser_session (T-25.1-04 drop semantics).
+        if let Some(ref sess) = self.browser_session {
+            handler.set_browser_session(sess.clone());
         }
 
         // Phase 21.3: initialize global token estimator from model's encoding
