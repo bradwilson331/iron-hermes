@@ -141,22 +141,52 @@ async fn cmd_toolset_show(hermes_home: &Path, name: &str) -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register_defaults();
 
-    let members_map = toolset_members_map();
-    let member_names = members_map.get(validated.as_str()).copied().unwrap_or(&[]);
+    let (row, members) = build_toolset_show_view(&cfg, &registry, &validated);
 
-    let enabled = cfg.is_toolset_enabled(&validated);
+    let rendered = ironhermes_core::commands::toolset_display::render_toolset_show(&row, &members);
+    print!("{}", rendered);
+    Ok(())
+}
+
+/// Phase 25.1 GAP-6 closure: pure logic for `toolset show` extracted so the
+/// chromium-availability contract can be unit-tested without spawning a
+/// subprocess or capturing stdout. Both `cmd_toolset_show` (the CLI entry
+/// point) and the `browser_show_reports_*` regression tests call this.
+///
+/// Returns `(ToolsetRow, members)` where `members` is the per-tool tuple
+/// `(name, is_available, prereq_label)` consumed by `render_toolset_show`.
+pub fn build_toolset_show_view(
+    cfg: &ToolsConfig,
+    registry: &ToolRegistry,
+    validated: &str,
+) -> (
+    ironhermes_core::commands::toolset_display::ToolsetRow,
+    Vec<(String, bool, String)>,
+) {
+    let members_map = toolset_members_map();
+    let member_names = members_map.get(validated).copied().unwrap_or(&[]);
+
+    let enabled = cfg.is_toolset_enabled(validated);
     let unavailable = registry.list_unavailable();
     let unavailable_names: std::collections::HashSet<&str> = unavailable
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
 
+    // GAP-6: special-case the browser toolset because register_defaults() does
+    // not register browser_* tools (they require Arc<Config> from plan 14 and
+    // are registered separately via register_browser_tools_with_vision).
+    // See `browser_chromium_unavailable()` for the rationale + single-source-of-truth.
+    let chromium_missing = validated == "browser" && browser_chromium_unavailable();
+
     let members: Vec<(String, bool, String)> = member_names
         .iter()
         .map(|&tool_name| {
-            let avail = !unavailable_names.contains(tool_name);
+            let avail = !chromium_missing && !unavailable_names.contains(tool_name);
             let prereq_str = if avail {
                 String::new()
+            } else if chromium_missing {
+                "chromium".to_string()
             } else {
                 unavailable
                     .iter()
@@ -176,16 +206,16 @@ async fn cmd_toolset_show(hermes_home: &Path, name: &str) -> Result<()> {
         .collect();
 
     let row = ironhermes_core::commands::toolset_display::ToolsetRow {
-        name: validated.clone(),
+        name: validated.to_string(),
         enabled,
         member_count: member_names.len(),
+        // available_count derives from per-member `avail`, which already
+        // respects `chromium_missing` — no second branch needed here.
         available_count: members.iter().filter(|(_, avail, _)| *avail).count(),
         member_summary: String::new(), // not used for show
     };
 
-    let rendered = ironhermes_core::commands::toolset_display::render_toolset_show(&row, &members);
-    print!("{}", rendered);
-    Ok(())
+    (row, members)
 }
 
 // ---------------------------------------------------------------------------
@@ -269,10 +299,20 @@ pub fn build_toolset_rows(
         .map(|ts_name| {
             let member_names = members_map.get(ts_name).copied().unwrap_or(&[]);
             let enabled = cfg.is_toolset_enabled(ts_name);
-            let available_count = member_names
-                .iter()
-                .filter(|&&n| !unavailable_names.contains(n))
-                .count();
+
+            // GAP-6: special-case the browser toolset because register_defaults()
+            // does not register browser_* tools — see `browser_chromium_unavailable()`
+            // for the rationale + single-source-of-truth contract with `cmd_toolset_show`.
+            let chromium_missing = ts_name == "browser" && browser_chromium_unavailable();
+
+            let available_count = if chromium_missing {
+                0
+            } else {
+                member_names
+                    .iter()
+                    .filter(|&&n| !unavailable_names.contains(n))
+                    .count()
+            };
 
             // Build summary string: "web_search ✓, web_read ✗ FIRECRAWL_API_KEY"
             let member_summary = if member_names.is_empty() {
@@ -281,8 +321,14 @@ pub fn build_toolset_rows(
                 member_names
                     .iter()
                     .map(|&n| {
-                        if unavailable_names.contains(n) {
-                            let prereq_str = unavailable
+                        let unavailable_now = chromium_missing || unavailable_names.contains(n);
+                        if !unavailable_now {
+                            return format!("{} \u{2713}", n);
+                        }
+                        let prereq_str = if chromium_missing {
+                            "chromium".to_string()
+                        } else {
+                            unavailable
                                 .iter()
                                 .find(|(nm, _)| nm == n)
                                 .map(|(_, prereqs)| {
@@ -293,14 +339,12 @@ pub fn build_toolset_rows(
                                         .collect::<Vec<_>>()
                                         .join(", ")
                                 })
-                                .unwrap_or_default();
-                            if prereq_str.is_empty() {
-                                format!("{} \u{2717}", n)
-                            } else {
-                                format!("{} \u{2717} {}", n, prereq_str)
-                            }
+                                .unwrap_or_default()
+                        };
+                        if prereq_str.is_empty() {
+                            format!("{} \u{2717}", n)
                         } else {
-                            format!("{} \u{2713}", n)
+                            format!("{} \u{2717} {}", n, prereq_str)
                         }
                     })
                     .collect::<Vec<_>>()
@@ -319,12 +363,50 @@ pub fn build_toolset_rows(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 25.1 GAP-6 closure helper
+// ---------------------------------------------------------------------------
+
+/// Phase 25.1 GAP-6: registry-level prereq machinery does not know about browser
+/// tools because `register_defaults()` does not register them (browser_* tools
+/// require `Arc<Config>` from plan 14 and are registered separately via
+/// `register_browser_tools_with_vision`). Both `toolset list` and `toolset show`
+/// build their `ToolRegistry` via `register_defaults()`, so without an explicit
+/// chromium-availability check the browser row would always render as `11/11 ✓`
+/// even when `BROWSER_PATH` points at a non-existent file.
+///
+/// To keep the two subcommands consistent (D-05 chromium discovery surfaces in
+/// BOTH `toolset list` AND `toolset show` — never just one), this helper
+/// centralises the chromium-availability check used by `build_toolset_rows`
+/// and `build_toolset_show_view`. A future drift between list and show is
+/// impossible without deleting the helper.
+///
+/// Returns `true` when chromium is NOT discoverable per `find_chromium_binary`
+/// (i.e. `BROWSER_PATH` / `CHROMIUM_PATH` set to a non-existent file, or no
+/// system chromium found on `PATH` and platform paths).
+fn browser_chromium_unavailable() -> bool {
+    ironhermes_tools::browser_session::find_chromium_binary(None).is_none()
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironhermes_core::ToolsetEntry;
+    use std::sync::OnceLock;
+
+    /// Process-wide ENV_LOCK — mirrors the pattern used in
+    /// `tests/toolset_integration.rs` lines 18-21. Required because `cargo test`
+    /// runs tests in the same process on multiple threads by default; any test
+    /// that mutates `BROWSER_PATH` / `CHROMIUM_PATH` must hold this lock to avoid
+    /// cross-test bleed (also collides with `find_chromium_binary` env reads in
+    /// other crates' tests when the same binary is invoked).
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
 
     #[test]
     fn validate_toolset_name_rejects_path_traversal() {
@@ -423,5 +505,178 @@ mod tests {
             "GAP-1: cmd_toolset_enable must accept 'browser', got error: {:?}",
             result.err()
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 25.1 GAP-6 regression — list AND show must agree on chromium
+    // availability. The `find_chromium_binary` discovery uses `path.is_file()`
+    // ONLY (no magic-byte check, no executable-bit check), so the green-arm
+    // test below using `current_exe()` remains safe even if a future tightening
+    // adds a magic-byte check (the test binary itself is a real ELF/Mach-O).
+    // ---------------------------------------------------------------------
+
+    /// GAP-6 LIST path: when BROWSER_PATH points at a non-existent path, the
+    /// browser row must show 0/11 with every member marked `✗ chromium`.
+    #[test]
+    fn browser_row_reports_zero_when_chromium_unavailable() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+        // SAFETY: env mutation is process-wide; serialised by env_lock.
+        unsafe {
+            std::env::remove_var("CHROMIUM_PATH");
+            std::env::set_var("BROWSER_PATH", "/dev/null/nonexistent-chromium-for-test");
+        }
+
+        let mut cfg = ToolsConfig::default();
+        cfg.toolsets.insert(
+            "browser".to_string(),
+            ToolsetEntry { enabled: true },
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+
+        let members_map = toolset_members_map();
+        let rows = build_toolset_rows(&cfg, &registry, &members_map);
+
+        let row = rows
+            .iter()
+            .find(|r| r.name == "browser")
+            .expect("browser row must exist");
+
+        assert_eq!(
+            row.available_count, 0,
+            "GAP-6 LIST: browser available_count must be 0 when chromium missing, got {} (summary: {})",
+            row.available_count, row.member_summary,
+        );
+        assert_eq!(
+            row.member_count, 11,
+            "browser member_count must be 11 (the 11 browser_* tools)"
+        );
+        assert!(
+            row.member_summary.contains("chromium"),
+            "GAP-6 LIST: member_summary must surface 'chromium' prereq label, got: {}",
+            row.member_summary,
+        );
+        assert!(
+            row.member_summary.contains("browser_navigate"),
+            "browser_navigate must still appear in member_summary, got: {}",
+            row.member_summary,
+        );
+
+        // Tear down so we do not leak BROWSER_PATH into other tests.
+        unsafe { std::env::remove_var("BROWSER_PATH"); }
+    }
+
+    /// GAP-6 SHOW path: when BROWSER_PATH points at a non-existent path, the
+    /// show view must report 0/11 with EVERY member marked unavailable + prereq=chromium.
+    /// This is the regression guard against list/show divergence flagged by the planner.
+    #[test]
+    fn browser_show_reports_zero_when_chromium_unavailable() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+        unsafe {
+            std::env::remove_var("CHROMIUM_PATH");
+            std::env::set_var("BROWSER_PATH", "/dev/null/nonexistent-chromium-for-test");
+        }
+
+        let mut cfg = ToolsConfig::default();
+        cfg.toolsets.insert(
+            "browser".to_string(),
+            ToolsetEntry { enabled: true },
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+
+        let (row, members) = build_toolset_show_view(&cfg, &registry, "browser");
+
+        assert_eq!(
+            row.available_count, 0,
+            "GAP-6 SHOW: ToolsetRow.available_count must be 0 when chromium missing, got {}",
+            row.available_count,
+        );
+        assert_eq!(
+            row.member_count, 11,
+            "browser member_count must be 11"
+        );
+        assert_eq!(
+            members.len(),
+            11,
+            "build_toolset_show_view must return 11 member tuples for browser, got {}",
+            members.len(),
+        );
+        for (name, avail, prereq) in &members {
+            assert!(
+                !*avail,
+                "GAP-6 SHOW: member {} must be unavailable when chromium missing",
+                name,
+            );
+            assert!(
+                prereq.contains("chromium"),
+                "GAP-6 SHOW: member {} prereq must contain 'chromium', got: {:?}",
+                name,
+                prereq,
+            );
+        }
+
+        unsafe { std::env::remove_var("BROWSER_PATH"); }
+    }
+
+    /// GAP-6 GREEN arm: when chromium IS discoverable (CHROMIUM_PATH points at a
+    /// real file), the browser row must report 11/11 with every member marked
+    /// `✓` and no `chromium` prereq label — i.e. the pre-fix behaviour preserved.
+    /// We use `std::env::current_exe()` because `find_chromium_binary` uses
+    /// `path.is_file()` only (no magic-byte / no executable-bit check), which the
+    /// test binary always satisfies. If a future tightening ever adds a magic-byte
+    /// check, the test still passes (the test binary is a real Mach-O/ELF).
+    #[test]
+    fn browser_row_reports_full_when_chromium_available() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+        let real_path = std::env::current_exe()
+            .expect("test binary must have a current_exe path")
+            .to_string_lossy()
+            .into_owned();
+
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+            std::env::set_var("CHROMIUM_PATH", &real_path);
+        }
+
+        let mut cfg = ToolsConfig::default();
+        cfg.toolsets.insert(
+            "browser".to_string(),
+            ToolsetEntry { enabled: true },
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+
+        let members_map = toolset_members_map();
+        let rows = build_toolset_rows(&cfg, &registry, &members_map);
+
+        let row = rows
+            .iter()
+            .find(|r| r.name == "browser")
+            .expect("browser row must exist");
+
+        assert_eq!(
+            row.available_count, 11,
+            "GAP-6 GREEN: chromium IS available — available_count must be 11, got {} (summary: {})",
+            row.available_count, row.member_summary,
+        );
+        assert!(
+            row.member_summary.contains("\u{2713}"),
+            "GAP-6 GREEN: member_summary must contain the check-mark, got: {}",
+            row.member_summary,
+        );
+        assert!(
+            !row.member_summary.contains("chromium"),
+            "GAP-6 GREEN: member_summary must NOT contain 'chromium' prereq when chromium is available, got: {}",
+            row.member_summary,
+        );
+
+        unsafe { std::env::remove_var("CHROMIUM_PATH"); }
     }
 }
