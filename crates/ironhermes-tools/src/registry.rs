@@ -492,6 +492,7 @@ impl ToolRegistry {
         &mut self,
         session: std::sync::Arc<tokio::sync::Mutex<Option<crate::browser_session::BrowserSession>>>,
         resolver: std::sync::Arc<ironhermes_core::provider::ProviderResolver>,
+        config: std::sync::Arc<ironhermes_core::config::Config>,
     ) {
         use crate::browser_back::BrowserBackTool;
         use crate::browser_click::BrowserClickTool;
@@ -513,9 +514,9 @@ impl ToolRegistry {
         self.register(Box::new(BrowserBackTool::new(session.clone())));
         self.register(Box::new(BrowserClickTool::new(session.clone())));
         self.register(Box::new(BrowserCloseTool::new(session.clone())));
-        self.register(Box::new(BrowserConsoleTool::new(session.clone())));
+        self.register(Box::new(BrowserConsoleTool::new(session.clone(), config.clone())));
         self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
-        self.register(Box::new(BrowserNavigateTool::new(session.clone())));
+        self.register(Box::new(BrowserNavigateTool::new(session.clone(), config.clone())));
         self.register(Box::new(BrowserPressTool::new(session.clone())));
         self.register(Box::new(BrowserScrollTool::new(session.clone())));
         self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
@@ -533,6 +534,7 @@ impl ToolRegistry {
         session: std::sync::Arc<tokio::sync::Mutex<Option<crate::browser_session::BrowserSession>>>,
         resolver: std::sync::Arc<ironhermes_core::provider::ProviderResolver>,
         vision_client: std::sync::Arc<dyn crate::browser_vision::VisionClientHandle>,
+        config: std::sync::Arc<ironhermes_core::config::Config>,
     ) {
         use crate::browser_back::BrowserBackTool;
         use crate::browser_click::BrowserClickTool;
@@ -549,9 +551,9 @@ impl ToolRegistry {
         self.register(Box::new(BrowserBackTool::new(session.clone())));
         self.register(Box::new(BrowserClickTool::new(session.clone())));
         self.register(Box::new(BrowserCloseTool::new(session.clone())));
-        self.register(Box::new(BrowserConsoleTool::new(session.clone())));
+        self.register(Box::new(BrowserConsoleTool::new(session.clone(), config.clone())));
         self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
-        self.register(Box::new(BrowserNavigateTool::new(session.clone())));
+        self.register(Box::new(BrowserNavigateTool::new(session.clone(), config.clone())));
         self.register(Box::new(BrowserPressTool::new(session.clone())));
         self.register(Box::new(BrowserScrollTool::new(session.clone())));
         self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
@@ -1744,7 +1746,7 @@ mod tests {
         let resolver = std::sync::Arc::new(
             ProviderResolver::build(&config).expect("default config builds resolver"),
         );
-        registry.register_browser_tools(session, resolver);
+        registry.register_browser_tools(session, resolver, std::sync::Arc::new(config));
 
         let names: std::collections::HashSet<String> = registry
             .list_tools()
