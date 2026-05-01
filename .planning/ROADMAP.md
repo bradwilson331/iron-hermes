@@ -506,20 +506,20 @@ Plans:
 **Goal:** Eleven built-in browser-automation tools (browser_back/click/close/console/get_images/navigate/press/scroll/snapshot/type/vision) backed by chromiumoxide 0.9, sharing one AgentLoop-scoped browser session, with browser_vision routing through the Phase 26 auxiliary vision role (PROV-06 first consumer). Toolset disabled by default; chromium binary required.
 **Requirements**: D-01 through D-22 (CONTEXT-locked decisions; no REQUIREMENTS.md tags pre-mapped — Phase 25.1 closes the BROW gap from Future Requirements parking lot)
 **Depends on:** Phase 25 (toolset management infrastructure), Phase 26 (resolve_role vision cascade)
-**Plans:** 11 plans
+**Plans:** 17/17 plans complete
 
 Plans:
-- [ ] 25.1-01-PLAN.md — Wave 0 foundations: chromiumoxide 0.9 + base64 deps; 12 module stubs in lib.rs; AnthropicClient ImageUrl→Image ContentBlock conversion (closes OQ-2)
-- [ ] 25.1-02-PLAN.md — BrowserSession struct + lazy spawn + find_chromium_binary (D-05 walk); BrowserConfig in core (D-18); browser entry in default ToolsConfig (D-04 disabled)
-- [ ] 25.1-03-PLAN.md — Simple navigation/keyboard tools: browser_back, browser_press, browser_scroll
-- [ ] 25.1-04-PLAN.md — browser_navigate (D-15 host allowlist + D-16 scheme allowlist + console_buffer/ref_table clear) + browser_close (explicit teardown, T-25.1-04)
-- [ ] 25.1-05-PLAN.md — browser_snapshot (DOM walker + data-ironhermes-ref injection — OQ-1 fix) + browser_get_images
-- [ ] 25.1-06-PLAN.md — browser_click + browser_type (consume snapshot refs; element_stale envelope on miss/error per D-11)
-- [ ] 25.1-07-PLAN.md — browser_console (mode:log read-only + mode:eval yolo-gated per D-13; JS console override injection per OQ-3)
-- [ ] 25.1-08-PLAN.md — browser_vision (full-page screenshot + base64 + ContentPart::ImageUrl + build_role_client('vision') cascade with main fallback — closes Phase 26 SC-2)
-- [ ] 25.1-09-PLAN.md — Wiring: register_browser_tools in registry; with_browser_session builder on AgentLoop; main.rs run_chat/run_single/run_gateway dual wire (Phase 22 D-04 invariant)
-- [ ] 25.1-10-PLAN.md — D-21 schema-exclusion test: browser_tools_excluded_when_chromium_missing + IRONHERMES_BROWSER_TEST_DISABLE escape hatch
-- [ ] 25.1-11-PLAN.md — D-20 three integration tests: navigate→snapshot ref format, stale-ref envelope, vision-routes-to-aux-server (D-22 skip-not-fail on missing chromium)
+- [x] 25.1-01-PLAN.md — Wave 0 foundations: chromiumoxide 0.9 + base64 deps; 12 module stubs in lib.rs; AnthropicClient ImageUrl→Image ContentBlock conversion (closes OQ-2)
+- [x] 25.1-02-PLAN.md — BrowserSession struct + lazy spawn + find_chromium_binary (D-05 walk); BrowserConfig in core (D-18); browser entry in default ToolsConfig (D-04 disabled)
+- [x] 25.1-03-PLAN.md — Simple navigation/keyboard tools: browser_back, browser_press, browser_scroll
+- [x] 25.1-04-PLAN.md — browser_navigate (D-15 host allowlist + D-16 scheme allowlist + console_buffer/ref_table clear) + browser_close (explicit teardown, T-25.1-04)
+- [x] 25.1-05-PLAN.md — browser_snapshot (DOM walker + data-ironhermes-ref injection — OQ-1 fix) + browser_get_images
+- [x] 25.1-06-PLAN.md — browser_click + browser_type (consume snapshot refs; element_stale envelope on miss/error per D-11)
+- [x] 25.1-07-PLAN.md — browser_console (mode:log read-only + mode:eval yolo-gated per D-13; JS console override injection per OQ-3)
+- [x] 25.1-08-PLAN.md — browser_vision (full-page screenshot + base64 + ContentPart::ImageUrl + build_role_client('vision') cascade with main fallback — closes Phase 26 SC-2)
+- [x] 25.1-09-PLAN.md — Wiring: register_browser_tools in registry; with_browser_session builder on AgentLoop; main.rs run_chat/run_single/run_gateway dual wire (Phase 22 D-04 invariant)
+- [x] 25.1-10-PLAN.md — D-21 schema-exclusion test: browser_tools_excluded_when_chromium_missing + IRONHERMES_BROWSER_TEST_DISABLE escape hatch
+- [x] 25.1-11-PLAN.md — D-20 three integration tests: navigate→snapshot ref format, stale-ref envelope, vision-routes-to-aux-server (D-22 skip-not-fail on missing chromium)
 
 **Phase directory:** `.planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/`
 
