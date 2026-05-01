@@ -100,6 +100,7 @@ use super::filters::*;
 fn mock_agent_result(messages: Vec<ChatMessage>, final_response: Option<String>) -> AgentResult {
     AgentResult {
         messages,
+        appended: Vec::new(),
         turns_used: 1,
         finished_naturally: true,
         final_response,

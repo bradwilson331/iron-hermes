@@ -638,15 +638,19 @@ impl GatewayMessageHandler {
                     registry.fire(hook_event);
                 }
 
-                // 11. Update session with agent's response messages (write-through to SQLite)
-                let new_messages: Vec<ChatMessage> = result
-                    .messages
-                    .into_iter()
-                    .filter(|m| m.role == Role::Assistant)
-                    .collect();
-                if !new_messages.is_empty() {
+                // 11. Update session with agent's response messages (write-through to SQLite).
+                //
+                // Phase 25.1 GAP-7 follow-up: persist `result.appended` directly. The
+                // previous `filter(|m| m.role == Role::Assistant)` over `result.messages`
+                // dropped every Role::Tool message, so the next turn's history failed
+                // OpenAI's strict assistant↔tool pairing invariant — the streaming endpoint
+                // returned 400, validate_tool_call_pairing now catches it as an orphan
+                // pre-send, and the agent gave up after retries. `appended` is the
+                // round-trip output (assistant turns + matching tool results, in order),
+                // and excludes one-shot pressure-tier system advisories. Compression-safe.
+                if !result.appended.is_empty() {
                     let mut store = self.session_store.write().await;
-                    for msg in new_messages {
+                    for msg in result.appended {
                         store.add_message_to_session(&key, msg);
                     }
                 }

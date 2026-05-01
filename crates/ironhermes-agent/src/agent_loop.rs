@@ -36,6 +36,17 @@ pub enum StopReason {
 pub struct AgentResult {
     /// Full conversation history including tool calls.
     pub messages: Vec<ChatMessage>,
+    /// Phase 25.1 GAP-7 follow-up: messages appended by THIS run only — the
+    /// assistant turns + matching tool results, in insertion order. Excludes
+    /// the input slice and the loop's own transient pressure-tier system
+    /// advisories (which are one-shot signals, not durable history).
+    ///
+    /// Persistence callers (gateway handler, REPL) MUST use this field instead
+    /// of filtering `messages` by role: a role-based filter drops `Role::Tool`
+    /// messages, breaking OpenAI's strict assistant↔tool pairing on the next
+    /// turn. Compression-aware too — if `pre_chat_compress` shrinks the input
+    /// vec mid-run, `appended` still contains exactly the round-trip output.
+    pub appended: Vec<ChatMessage>,
     /// Number of LLM turns used.
     pub turns_used: usize,
     /// Whether the agent finished naturally (not by hitting max iterations).
@@ -64,6 +75,7 @@ impl AgentResult {
     pub fn budget_exhausted(messages: Vec<ChatMessage>, turns_used: usize) -> Self {
         Self {
             messages,
+            appended: Vec::new(),
             turns_used,
             finished_naturally: false,
             final_response: None,
@@ -656,6 +668,13 @@ impl AgentLoop {
         let mut turns_used = 0;
         let mut total_usage = AggregatedUsage::default();
         let mut final_response = None;
+        // Phase 25.1 GAP-7 follow-up: track messages appended by THIS run so the
+        // gateway/REPL persistence path can include matching tool results without
+        // a Role-based filter (which would drop Role::Tool and re-persist prior
+        // assistants on subsequent turns). Excludes transient pressure-tier
+        // system advisories (lines 738/576) — those are one-shot signals, not
+        // durable history.
+        let mut appended: Vec<ChatMessage> = Vec::new();
 
         info!(max_iterations = self.max_iterations, "Starting agent loop");
 
@@ -670,6 +689,7 @@ impl AgentLoop {
                     info!(turns = turns_used, "Agent loop cancelled by parent");
                     return Ok(AgentResult {
                         messages,
+                        appended,
                         turns_used,
                         finished_naturally: false,
                         final_response: Some("Cancelled by parent".to_string()),
@@ -698,6 +718,7 @@ impl AgentLoop {
                     );
                     return Ok(AgentResult {
                         messages,
+                        appended,
                         turns_used,
                         finished_naturally: false,
                         final_response: None,
@@ -756,6 +777,7 @@ impl AgentLoop {
                             info!(turns = turns_used, "Agent loop cancelled during LLM call");
                             return Ok(AgentResult {
                                 messages,
+                                appended,
                                 turns_used,
                                 finished_naturally: false,
                                 final_response: Some("Cancelled by parent".to_string()),
@@ -819,6 +841,7 @@ impl AgentLoop {
             }
 
             messages.push(assistant_message.clone());
+            appended.push(assistant_message.clone());
 
             if !has_tool_calls {
                 debug!(turn = turns_used, "Agent completed naturally (no tool calls)");
@@ -854,10 +877,9 @@ impl AgentLoop {
 
             for tool_call in tool_calls {
                 let result = self.execute_tool_call(tool_call).await;
-                messages.push(ChatMessage::tool_result(
-                    &tool_call.id,
-                    result,
-                ));
+                let tool_msg = ChatMessage::tool_result(&tool_call.id, result);
+                messages.push(tool_msg.clone());
+                appended.push(tool_msg);
             }
         }
 
@@ -873,6 +895,7 @@ impl AgentLoop {
         };
         Ok(AgentResult {
             messages,
+            appended,
             turns_used,
             finished_naturally,
             final_response,
