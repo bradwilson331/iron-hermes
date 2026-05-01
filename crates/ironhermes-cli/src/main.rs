@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
+use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, AnyClientVisionHandle, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::JobStore;
@@ -673,7 +673,8 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
     let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    registry.register_browser_tools(browser_session.clone(), std::sync::Arc::new(resolver.clone()));
+    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
+    registry.register_browser_tools_with_vision(browser_session.clone(), std::sync::Arc::new(resolver.clone()), vision_handle);
 
     // Phase 22: skills tool (per D-02/D-03)
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -1168,7 +1169,8 @@ async fn run_chat(
     // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
     let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    registry.register_browser_tools(browser_session.clone(), std::sync::Arc::new(resolver.clone()));
+    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
+    registry.register_browser_tools_with_vision(browser_session.clone(), std::sync::Arc::new(resolver.clone()), vision_handle);
 
     // Phase 22: skills tool with shared active_skills Arc (per D-02, D-08)
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2123,7 +2125,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
     let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    registry.register_browser_tools(browser_session.clone(), std::sync::Arc::new(resolver.clone()));
+    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
+    registry.register_browser_tools_with_vision(browser_session.clone(), std::sync::Arc::new(resolver.clone()), vision_handle);
 
     // Discover skills and register the skills tool
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2745,11 +2748,14 @@ mod mcp_wiring_tests {
     #[test]
     fn inv_25_1_browser_session_wired_in_all_entry_points() {
         let source = include_str!("main.rs");
-        let reg_count = source.matches("register_browser_tools(").count();
+        // Count either register_browser_tools( or register_browser_tools_with_vision(
+        // (plan 11 migrated to _with_vision variant; both satisfy the D-04 wiring invariant).
+        let reg_count = source.matches("register_browser_tools(").count()
+            + source.matches("register_browser_tools_with_vision(").count();
         assert!(
             reg_count >= 3,
-            "Phase 25.1 D-04: register_browser_tools MUST be called in run_chat, run_single, AND run_gateway \
-             (Phase 22 D-04 mirror-pattern invariant); got {} calls",
+            "Phase 25.1 D-04: register_browser_tools or register_browser_tools_with_vision MUST be called \
+             in run_chat, run_single, AND run_gateway (Phase 22 D-04 mirror-pattern invariant); got {} calls",
             reg_count
         );
         let with_count = source.matches(".with_browser_session(").count();
