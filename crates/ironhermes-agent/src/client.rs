@@ -60,6 +60,16 @@ impl LlmClient {
         temperature: Option<f64>,
         extra: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<ChatResponse> {
+        // Phase 25.1 GAP-7: pre-send invariant guard. Convert opaque provider
+        // 400 ("tool_call_ids did not have response messages") into a
+        // deterministic, locally-named, non-retriable error before the wire.
+        if let Err(diag) = ironhermes_core::validate_tool_call_pairing(messages) {
+            warn!(
+                diag = %diag,
+                "tool-call pairing invariant violated before non-streaming send"
+            );
+            anyhow::bail!("tool-call pairing invariant violated: {}", diag);
+        }
         let request = ChatRequest {
             model: model.unwrap_or(&self.default_model).to_string(),
             messages: messages.to_vec(),
@@ -114,6 +124,17 @@ impl LlmClient {
         temperature: Option<f64>,
         extra: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        // Phase 25.1 GAP-7: pre-send invariant guard. Catches orphan tool-call
+        // sequences (caused by same-tick timestamp ties in session restore)
+        // BEFORE the streaming POST. Returns a non-retriable error so the
+        // agent_loop retry path treats it as terminal — no 400 cascade.
+        if let Err(diag) = ironhermes_core::validate_tool_call_pairing(messages) {
+            warn!(
+                diag = %diag,
+                "tool-call pairing invariant violated before streaming send"
+            );
+            anyhow::bail!("tool-call pairing invariant violated: {}", diag);
+        }
         let request = ChatRequest {
             model: model.unwrap_or(&self.default_model).to_string(),
             messages: messages.to_vec(),

@@ -370,3 +370,217 @@ impl ChatMessage {
         self.content.as_ref().and_then(|c| c.as_text())
     }
 }
+
+// =============================================================================
+// Phase 25.1 GAP-7: tool-call pairing invariant
+// =============================================================================
+
+/// Phase 25.1 GAP-7: validate the OpenAI strict tool-pair invariant before
+/// any LLM request goes on the wire.
+///
+/// SEMANTICS (strict, NOT flat-set-difference):
+///   Walk messages in order. Maintain `pending_ids: HashSet<String>` of
+///   tool_call ids the most-recent assistant block emitted. Then:
+///   - On a NEW assistant message:
+///       * If `pending_ids` is non-empty → Err (previous assistant's tool
+///         calls were never answered; OpenAI rejects this even if a
+///         matching tool message appears LATER in the array).
+///       * Otherwise, replace `pending_ids` with the ids from this
+///         message's tool_calls (or empty if no tool_calls).
+///   - On a TOOL message:
+///       * If `tool_call_id` is missing → Err.
+///       * If `tool_call_id` not in `pending_ids` → Err (orphan tool, e.g.
+///         the id belonged to a prior assistant whose pending set was
+///         already cleared by an interjecting assistant).
+///       * Otherwise remove the id from `pending_ids`.
+///   - On a USER or SYSTEM message:
+///       * If `pending_ids` is non-empty → Err (a non-tool message
+///         interjected before all tool results arrived).
+///   - At END of the array:
+///       * If `pending_ids` is non-empty → Err.
+///
+/// Returns Err with a human-readable diagnostic naming the offending id and
+/// (where applicable) the message-array index. The WARN log at the call
+/// site surfaces this diagnostic so debugging is one-line.
+///
+/// Why strict and not flat-set: a flat `HashSet<String>` across the whole
+/// array would falsely accept `[asst[c1], asst[no-calls], tool(c1)]` even
+/// though OpenAI's invariant is "answered BEFORE the next assistant", and
+/// the provider rejects this sequence. The flat semantics is what the prior
+/// `tool_pair::check_orphan_invariant` used; we fix it here and re-route
+/// that wrapper to delegate so there is a SINGLE source of truth for
+/// pairing logic across both crates.
+pub fn validate_tool_call_pairing(messages: &[ChatMessage]) -> Result<(), String> {
+    use std::collections::HashSet;
+    let mut pending: HashSet<String> = HashSet::new();
+    for (idx, msg) in messages.iter().enumerate() {
+        match msg.role {
+            Role::Assistant => {
+                if !pending.is_empty() {
+                    let example = pending.iter().next().cloned().unwrap_or_default();
+                    return Err(format!(
+                        "orphan tool_call_id '{example}' (and {} other(s)) at messages[{idx}]: a new assistant message arrived before tool messages answered the prior assistant block",
+                        pending.len().saturating_sub(1)
+                    ));
+                }
+                pending.clear();
+                if let Some(ref calls) = msg.tool_calls {
+                    for c in calls {
+                        pending.insert(c.id.clone());
+                    }
+                }
+            }
+            Role::Tool => {
+                let id = msg.tool_call_id.as_ref().ok_or_else(|| {
+                    format!("tool message at messages[{idx}] has no tool_call_id")
+                })?;
+                if !pending.remove(id) {
+                    return Err(format!(
+                        "orphan tool_call_id '{id}' at messages[{idx}]: tool message has no preceding (still-pending) assistant.tool_calls entry"
+                    ));
+                }
+            }
+            Role::User | Role::System => {
+                if !pending.is_empty() {
+                    let example = pending.iter().next().cloned().unwrap_or_default();
+                    return Err(format!(
+                        "orphan tool_call_id '{example}' (and {} other(s)) at messages[{idx}]: a {:?} message arrived while tool calls were still pending",
+                        pending.len().saturating_sub(1),
+                        msg.role
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(id) = pending.iter().next() {
+        return Err(format!(
+            "orphan tool_call_id '{id}': assistant.tool_calls entry has no following tool message before end-of-history"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tool_pair_invariant_tests {
+    use super::*;
+
+    fn tc(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "fn".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_passes_clean_history() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant("hi"),
+            ChatMessage::user("u2"),
+            ChatMessage::assistant_tool_calls(vec![tc("c1")]),
+            ChatMessage::tool_result("c1", "r"),
+            ChatMessage::assistant("done"),
+        ];
+        assert!(validate_tool_call_pairing(&msgs).is_ok());
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_fails_missing_tool_result_names_orphan() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("call_3PlsiYtJbAmwCtvtxjcIhI3G")]),
+            ChatMessage::user("next"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(
+            err.contains("call_3PlsiYtJbAmwCtvtxjcIhI3G"),
+            "diagnostic must name the orphan id; got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_fails_tool_without_assistant() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::tool_result("dangling", "r"),
+            ChatMessage::assistant("done"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(
+            err.contains("dangling"),
+            "diagnostic must name the dangling id; got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_handles_parallel_tool_calls() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("a"), tc("b")]),
+            ChatMessage::tool_result("a", "r1"),
+            ChatMessage::tool_result("b", "r2"),
+            ChatMessage::assistant("done"),
+        ];
+        assert!(validate_tool_call_pairing(&msgs).is_ok());
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_partial_parallel_orphans() {
+        // b is orphaned — closed by next assistant, NOT end-of-array
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("a"), tc("b")]),
+            ChatMessage::tool_result("a", "r1"),
+            ChatMessage::assistant("done"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(err.contains("b"), "diagnostic must reference 'b'; got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_strict_rejects_late_tool_after_new_assistant() {
+        // STRICT VS FLAT divergence test. Flat-set Ok; strict MUST Err.
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("c1")]),
+            ChatMessage::assistant("interjection"),
+            ChatMessage::tool_result("c1", "late"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(err.contains("c1"), "diagnostic must reference 'c1'; got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_strict_rejects_user_arriving_with_pending() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("c1")]),
+            ChatMessage::user("ignoring the pending tool"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(err.contains("c1"), "diagnostic must reference 'c1'; got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_call_pairing_unknown_tool_call_id() {
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("u"),
+            ChatMessage::assistant_tool_calls(vec![tc("c1")]),
+            ChatMessage::tool_result("c2", "r"),
+        ];
+        let err = validate_tool_call_pairing(&msgs).expect_err("must err");
+        assert!(err.contains("c2"), "diagnostic must reference 'c2'; got: {err}");
+    }
+}
