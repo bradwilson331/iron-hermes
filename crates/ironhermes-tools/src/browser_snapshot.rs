@@ -200,7 +200,7 @@ impl Tool for BrowserSnapshotTool {
             .map_err(|e| anyhow::anyhow!("snapshot walker failed: {e}"))?;
 
         let entries: Vec<serde_json::Value> = result
-            .into_value()
+            .into_value::<serde_json::Value>()
             .unwrap_or_else(|_| serde_json::Value::Array(vec![]))
             .as_array()
             .cloned()
