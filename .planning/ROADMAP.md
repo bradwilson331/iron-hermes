@@ -506,7 +506,7 @@ Plans:
 **Goal:** Eleven built-in browser-automation tools (browser_back/click/close/console/get_images/navigate/press/scroll/snapshot/type/vision) backed by chromiumoxide 0.9, sharing one AgentLoop-scoped browser session, with browser_vision routing through the Phase 26 auxiliary vision role (PROV-06 first consumer). Toolset disabled by default; chromium binary required.
 **Requirements**: D-01 through D-22 (CONTEXT-locked decisions; no REQUIREMENTS.md tags pre-mapped — Phase 25.1 closes the BROW gap from Future Requirements parking lot)
 **Depends on:** Phase 25 (toolset management infrastructure), Phase 26 (resolve_role vision cascade)
-**Plans:** 17/17 plans complete
+**Plans:** 18/18 plans complete
 
 Plans:
 - [x] 25.1-01-PLAN.md — Wave 0 foundations: chromiumoxide 0.9 + base64 deps; 12 module stubs in lib.rs; AnthropicClient ImageUrl→Image ContentBlock conversion (closes OQ-2)
@@ -520,6 +520,7 @@ Plans:
 - [x] 25.1-09-PLAN.md — Wiring: register_browser_tools in registry; with_browser_session builder on AgentLoop; main.rs run_chat/run_single/run_gateway dual wire (Phase 22 D-04 invariant)
 - [x] 25.1-10-PLAN.md — D-21 schema-exclusion test: browser_tools_excluded_when_chromium_missing + IRONHERMES_BROWSER_TEST_DISABLE escape hatch
 - [x] 25.1-11-PLAN.md — D-20 three integration tests: navigate→snapshot ref format, stale-ref envelope, vision-routes-to-aux-server (D-22 skip-not-fail on missing chromium)
+- [x] 25.1-18-PLAN.md — GAP-7 follow-up (gap_closure): persist tool messages from gateway runs — adds AgentResult.appended + replaces gateway handler role-filter; live 4-turn UAT passed
 
 **Phase directory:** `.planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/`
 
