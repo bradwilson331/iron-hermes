@@ -149,6 +149,13 @@ fn extract_host(url: &str) -> Option<String> {
 /// `config_path` is the operator-set `browser.chromium_path` from config.yaml (highest precedence
 /// after the env vars per D-05 ordering: env vars > config > PATH > platform paths).
 pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
+    // Phase 25.1 D-21: test-only escape hatch — forces None even if chromium is installed.
+    // Set IRONHERMES_BROWSER_TEST_DISABLE=1 to deterministically reproduce the "no chromium"
+    // condition in browser_prereq.rs tests on dev machines with system Chrome installed.
+    // This var MUST NOT be set in production environments.
+    if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").is_ok() {
+        return None;
+    }
     // 1. BROWSER_PATH env var
     if let Ok(p) = std::env::var("BROWSER_PATH") {
         let path = PathBuf::from(&p);
