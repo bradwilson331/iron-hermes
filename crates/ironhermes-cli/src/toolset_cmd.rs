@@ -11,8 +11,8 @@ use ironhermes_core::{config_setter, profile, ToolsConfig, DEFAULT_TOOLSETS};
 use ironhermes_tools::ToolRegistry;
 use std::path::Path;
 
-/// D-01: The six concrete toolsets shipped in v2.1.
-const KNOWN_TOOLSETS: &[&str] = &["web", "code", "memory", "agent", "skills", "session"];
+/// D-01/D-04: The seven concrete toolsets shipped in v2.1 (browser added in Phase 25.1).
+const KNOWN_TOOLSETS: &[&str] = &["web", "code", "memory", "agent", "skills", "session", "browser"];
 
 #[derive(Subcommand)]
 pub enum ToolsetSubcommand {
@@ -225,6 +225,22 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
     m.insert("agent", &["delegate_task", "cronjob"]);
     m.insert("skills", &["skills"]);
     m.insert("session", &["session_search"]);
+    m.insert(
+        "browser",
+        &[
+            "browser_back",
+            "browser_click",
+            "browser_close",
+            "browser_console",
+            "browser_get_images",
+            "browser_navigate",
+            "browser_press",
+            "browser_scroll",
+            "browser_snapshot",
+            "browser_type",
+            "browser_vision",
+        ],
+    );
     m
 }
 
@@ -375,6 +391,37 @@ mod tests {
             msg.contains("unknown toolset") || msg.contains("invalid"),
             "error should mention 'unknown toolset' or 'invalid', got: {}",
             msg
+        );
+    }
+
+    /// GAP-1 regression: `browser` must appear in KNOWN_TOOLSETS so that
+    /// `hermes toolset enable browser` does not return "unknown toolset 'browser'".
+    #[test]
+    fn browser_in_known_set() {
+        assert!(
+            KNOWN_TOOLSETS.contains(&"browser"),
+            "GAP-1: 'browser' must be in KNOWN_TOOLSETS (got: {:?})",
+            KNOWN_TOOLSETS
+        );
+        assert_eq!(
+            KNOWN_TOOLSETS.len(),
+            7,
+            "KNOWN_TOOLSETS must have exactly 7 entries after Phase 25.1 extension"
+        );
+    }
+
+    /// GAP-1 regression: `hermes toolset enable browser` must succeed (not error with
+    /// "unknown toolset 'browser'"). Verifies the full enable path accepts the browser name.
+    #[test]
+    fn cmd_toolset_enable_accepts_browser() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(cmd_toolset_enable(tmp.path(), "browser"));
+        assert!(
+            result.is_ok(),
+            "GAP-1: cmd_toolset_enable must accept 'browser', got error: {:?}",
+            result.err()
         );
     }
 }
