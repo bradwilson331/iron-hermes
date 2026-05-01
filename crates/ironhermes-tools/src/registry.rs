@@ -1779,4 +1779,102 @@ mod tests {
             "exactly 11 browser_* tools must be registered"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 25.1 GAP-5: diagnostic tests — browser_close vs browser_navigate
+    // in get_definitions() output (the LLM-visible schema list).
+    // Run with: cargo test -p ironhermes-tools --lib diagnose_gap_5 -- --nocapture
+    // -----------------------------------------------------------------------
+
+    /// Phase 25.1 GAP-5 diagnostic: prove browser_close appears in get_definitions
+    /// alongside browser_navigate, and dump both schemas for inspection.
+    /// Run with `cargo test -p ironhermes-tools diagnose_gap_5 -- --nocapture` to see schemas.
+    #[test]
+    fn diagnose_gap_5_browser_close_appears_in_get_definitions() {
+        use ironhermes_core::{config::Config, provider::ProviderResolver};
+        let mut registry = ToolRegistry::new();
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let config = Config::default();
+        let resolver = std::sync::Arc::new(
+            ProviderResolver::build(&config).expect("default config builds resolver"),
+        );
+        // Pass Arc<Config> — plan 14 signature (3 args).
+        registry.register_browser_tools(session, resolver, std::sync::Arc::new(config));
+
+        // No toolset_config set → get_definitions returns all tools where is_available()
+        // passes. This is the same filter path as the LLM schema production in AgentLoop
+        // when toolset_config is set with browser enabled (just the toolset layer is
+        // bypassed here; we verify structural presence).
+        let schemas = registry.get_definitions(None);
+
+        let close = schemas.iter().find(|s| s.function.name == "browser_close");
+        let navigate = schemas.iter().find(|s| s.function.name == "browser_navigate");
+
+        // Hypothesis 3 floor: if browser_close is missing here, the registry filter
+        // (is_available / toolset / disabled) is excluding it. This MUST not be the case
+        // because both share identical impls.
+        assert!(close.is_some(), "GAP-5 hypothesis 3: browser_close MUST appear in get_definitions");
+        assert!(navigate.is_some(), "browser_navigate MUST appear in get_definitions");
+
+        let close = close.unwrap();
+        let navigate = navigate.unwrap();
+
+        // Diagnostic dump — captured to SUMMARY.md for the fix task to reference.
+        println!("\n=== GAP-5 DIAGNOSTIC: browser_close schema ===");
+        println!("{}", serde_json::to_string_pretty(&close).unwrap());
+        println!("\n=== GAP-5 DIAGNOSTIC: browser_navigate schema (control) ===");
+        println!("{}", serde_json::to_string_pretty(&navigate).unwrap());
+        println!("\n=== GAP-5 DIAGNOSTIC: description comparison ===");
+        println!("close:    {}", close.function.description);
+        println!("navigate: {}", navigate.function.description);
+
+        // Structural sanity (hypothesis 2 — schema malformation):
+        assert!(
+            close.function.description.len() >= 10,
+            "browser_close description too short: {:?}", close.function.description
+        );
+        let params = &close.function.parameters;
+        assert_eq!(params["type"], "object", "browser_close.schema parameters MUST be type:object");
+        assert!(params["properties"].is_object(), "browser_close.schema MUST have properties:{{}}");
+        assert!(params["required"].is_array(), "browser_close.schema MUST have required:[]");
+    }
+
+    /// Phase 25.1 GAP-5 diagnostic: prove browser_close and browser_navigate share
+    /// identical filter signals (toolset, is_available, prerequisites count).
+    /// If this test passes, hypothesis 3 (path divergence) is FALSE.
+    #[test]
+    fn diagnose_gap_5_browser_close_and_navigate_have_isomorphic_filters() {
+        use ironhermes_core::{config::Config, provider::ProviderResolver};
+        let mut registry = ToolRegistry::new();
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let config = Config::default();
+        let resolver = std::sync::Arc::new(
+            ProviderResolver::build(&config).expect("default config builds resolver"),
+        );
+        registry.register_browser_tools(session, resolver, std::sync::Arc::new(config));
+
+        // Access tools map directly (we are in the same module as the private field).
+        let close = registry.tools.get("browser_close").expect("browser_close registered");
+        let navigate = registry.tools.get("browser_navigate").expect("browser_navigate registered");
+
+        assert_eq!(
+            close.toolset(), navigate.toolset(),
+            "GAP-5 hypothesis 3: toolset() MUST match. close={:?} navigate={:?}",
+            close.toolset(), navigate.toolset()
+        );
+        assert_eq!(
+            close.is_available(), navigate.is_available(),
+            "GAP-5 hypothesis 3: is_available() MUST match for both tools"
+        );
+        assert_eq!(
+            close.prerequisites().len(), navigate.prerequisites().len(),
+            "GAP-5 hypothesis 3: prerequisites() length MUST match"
+        );
+
+        println!("\n=== GAP-5 DIAGNOSTIC: filter signals ===");
+        println!("close    toolset={:?}  is_available={}  prerequisites.len={}",
+            close.toolset(), close.is_available(), close.prerequisites().len());
+        println!("navigate toolset={:?}  is_available={}  prerequisites.len={}",
+            navigate.toolset(), navigate.is_available(), navigate.prerequisites().len());
+    }
 }
