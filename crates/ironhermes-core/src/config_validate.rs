@@ -20,12 +20,31 @@ impl Config {
     pub fn validate(&self) -> Vec<ConfigValidationError> {
         let mut errors = Vec::new();
 
-        // model.api_key — required, non-empty.
-        let api_key_empty = self.model.api_key.as_deref().unwrap_or("").is_empty();
-        if api_key_empty {
+        // API key required — accept EITHER legacy model.api_key OR
+        // providers.<main-provider>.api_key_env (Phase 26 canonical schema).
+        // model.api_key is kept one release as a deprecated fallback; either
+        // presence satisfies the validator. Structural check only — actual
+        // env-var resolution happens at ProviderResolver::build() time.
+        let legacy_api_key_set = self
+            .model
+            .api_key
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let new_api_key_env_set = self
+            .providers
+            .get(&self.model.provider)
+            .and_then(|p| p.api_key_env.as_deref())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        if !legacy_api_key_set && !new_api_key_env_set {
             errors.push(ConfigValidationError {
                 path: "model.api_key".into(),
-                reason: "API key is required to call the LLM provider".into(),
+                reason: format!(
+                    "API key required — set providers.{}.api_key_env (preferred) or model.api_key (deprecated)",
+                    self.model.provider
+                ),
                 suggested_fix: Some("hermes setup model".into()),
             });
         }

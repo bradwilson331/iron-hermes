@@ -101,3 +101,66 @@ fn validate_default_config_has_errors() {
     assert!(!errors.is_empty(), "Config::default() should have at least one validation error (missing api_key)");
     assert!(errors.iter().any(|e| e.path == "model.api_key"), "should flag missing api_key");
 }
+
+#[test]
+fn validate_accepts_providers_api_key_env_without_legacy_api_key() {
+    // Phase 26 schema: providers.<main>.api_key_env satisfies the api_key requirement
+    // even when the deprecated model.api_key field is absent. This is the recommended
+    // migration path and must not trigger the preflight fix-mode wizard.
+    use ironhermes_core::config::ProviderConfig;
+    let mut config = valid_config();
+    config.model.api_key = None; // remove the legacy path
+    config.providers.insert(
+        "openrouter".into(),
+        ProviderConfig {
+            api_key_env: Some("OPENROUTER_API_KEY".into()),
+            ..Default::default()
+        },
+    );
+    let errors = config.validate();
+    assert!(
+        !errors.iter().any(|e| e.path == "model.api_key"),
+        "providers.openrouter.api_key_env should satisfy api_key requirement, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn validate_rejects_when_neither_legacy_nor_new_api_key_set() {
+    // If both schemas are absent, validate must still error so preflight can fire the wizard.
+    let mut config = valid_config();
+    config.model.api_key = None;
+    config.providers.clear();
+    let errors = config.validate();
+    let api_key_err = errors
+        .iter()
+        .find(|e| e.path == "model.api_key")
+        .expect("missing api_key (both schemas absent) must produce an error");
+    assert!(
+        api_key_err.reason.contains("api_key_env"),
+        "error reason must mention the new providers.<main>.api_key_env path; got: {}",
+        api_key_err.reason
+    );
+}
+
+#[test]
+fn validate_ignores_api_key_env_for_wrong_provider() {
+    // api_key_env on a different provider than model.provider must NOT satisfy validate.
+    use ironhermes_core::config::ProviderConfig;
+    let mut config = valid_config();
+    config.model.api_key = None;
+    config.model.provider = "openrouter".into();
+    config.providers.insert(
+        "anthropic".into(), // wrong provider
+        ProviderConfig {
+            api_key_env: Some("ANTHROPIC_API_KEY".into()),
+            ..Default::default()
+        },
+    );
+    let errors = config.validate();
+    assert!(
+        errors.iter().any(|e| e.path == "model.api_key"),
+        "api_key_env on a non-main provider must NOT satisfy the validator; got: {:?}",
+        errors
+    );
+}
