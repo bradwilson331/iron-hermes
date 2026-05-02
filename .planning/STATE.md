@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T05:15:02.940Z"
+last_updated: "2026-05-02T05:22:28.412Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 96
-  percent: 93
+  completed_plans: 97
+  percent: 94
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 8 of 15
+Plan: 9 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -146,6 +146,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P05 | 7 | 1 tasks | 2 files |
 | Phase 25.2 P06 | 8 | 2 tasks | 2 files |
 | Phase 25.2 P07 | 10 | 2 tasks | 2 files |
+| Phase 25.2 P08 | 3 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -352,6 +353,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25.2 Plan 07]: fetch_with_tavily derives title via derive_title_from_url() URL-path-last-segment fallback (Tavily returns no title field); strips .pdf and .html suffixes — covered by 4 unit tests
 - [Phase ?]: [Phase 25.2 Plan 07]: EXA_ENDPOINT_OVERRIDE + TAVILY_ENDPOINT_OVERRIDE via private resolve_endpoint() helpers — byte-exact parity with firecrawl.rs:118-120 (Plan 06 SkillsShBlobSource pattern) for Plan 14 wiremock testing
 - [Phase ?]: [Phase 25.2 Plan 07]: #[allow(dead_code)] on ExaStatus.status + TavilyFailedResult.url (Rule 2 critical-correctness) — preserves API schema parity without regressing 9-warning baseline; mirrors Plan 06 FirecrawlMetadata.status_code rationale
+- [Phase 25.2]: Plan 08: LocalFetchOutcome { result, content_type, raw_bytes } enables Plan 13 dispatcher to mid-fetch reroute to PDF (D-03) without a second GET — bytes already on hand from body read
+- [Phase 25.2]: Plan 08: Local backend pre-fetch + post-redirect SSRF re-validation (D-18) lifted byte-for-byte from web_read.rs:142-150; Content-Type primary-token parse tolerates 'application/pdf; charset=binary' variants without a mime crate dep (Plan 25.2-05 reroute_for_pdf precedent)
 
 ### Roadmap Evolution
 
@@ -390,7 +393,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T05:14:30.849Z
+Last session: 2026-05-02T05:20:49.037Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
