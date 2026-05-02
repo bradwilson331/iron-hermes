@@ -19,8 +19,8 @@ pub mod ssrf;
 pub mod types;
 
 pub use config::{
-    ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, HubConfig,
-    MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
+    ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtractConfig, ExtraTap,
+    HubConfig, MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
     ToolsetEntry, ToolsConfig,
 };
 pub use config_schema::{ConfigField, MemoryAction, schema as config_schema};
