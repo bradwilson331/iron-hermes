@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T09:06:56.914Z"
+last_updated: "2026-05-02T09:54:54.313Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
-  completed_phases: 14
+  completed_phases: 15
   total_plans: 103
-  completed_plans: 102
-  percent: 99
+  completed_plans: 103
+  percent: 100
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 14 of 15
+Plan: 15 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -151,6 +151,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P10 | 22 | 1 tasks | 1 files |
 | Phase 25.2 P12 | 8 | 2 tasks tasks | 5 files files |
 | Phase 25.2 P13 | 108 | 3 tasks | 5 files |
+| Phase 25.2 P14 | 25 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -367,6 +368,7 @@ Recent decisions affecting current work:
 - [Phase 25.2]: Plan 12: Inline backend chain in fetch_web_with_chain (Firecrawl→Exa→Tavily→Local) instead of select_backend() — gives per-fallthrough warn telemetry the enum-based selector cannot express
 - [Phase 25.2]: Plan 12: tokio::spawn per URL (not futures::join_all) preserves Pitfall 6 ordering by tagging tasks with idx and sorting before serializing; per-URL panics map into ExtractionResult.error
 - [Phase 25.2]: Plan 12 [Rule 1 fix]: Replaced .entered() with async-block + .instrument(span) in tiers.rs/chunked.rs — Plan 11's EnteredSpan was held across await and broke tokio::spawn Send bound
+- [Phase 25.2]: Plan 14: AnyClientSummarizationHandle is verbatim port of AnyClientVisionHandle (any_client.rs:158-238); register_web_extract_tool wired in run_chat/run_single/run_gateway with parity guard test; smoke test uses ToolSchema 2-level shape (d.function.name, not d.name)
 
 ### Roadmap Evolution
 
@@ -405,7 +407,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T09:05:19.637Z
+Last session: 2026-05-02T09:53:15.795Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 

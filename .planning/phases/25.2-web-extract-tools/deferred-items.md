@@ -114,3 +114,38 @@ Plan 13's own surface verified clean:
 
 **Resolution path:** same as prior Plan 25.2 entries above — track for cleanup
 after Plan 25.2 closes; do not block on it.
+
+## Pre-existing workspace clippy warnings (Plan 25.2-14)
+
+Re-confirmed the same family of pre-existing `ironhermes-core` clippy errors when
+running the plan-mandated `cargo clippy -p ironhermes-agent -- -D warnings` and
+`cargo clippy -p ironhermes-cli -- -D warnings` gates after wiring `register_web_extract_tool`
+in all three CLI entry points (D-13 / D-20 production binary closure).
+
+- `cargo clippy -p ironhermes-agent -- -D warnings` failed compiling the `ironhermes-core`
+  dependency due to ~10 errors (manual_is_multiple_of, derivable_impls, collapsible_if,
+  manual_div_ceil, field_reassign_with_default, needless_range_loop, iter_contains).
+- `cargo clippy -p ironhermes-cli -- -D warnings` failed for the same reason — same
+  transitive `ironhermes-core` errors block compilation under `-D warnings`.
+- `cargo clippy -p ironhermes-agent --lib --no-deps -- -D warnings` produced 40 errors
+  in unrelated agent files (anthropic_client.rs, agent_loop.rs, etc.) — ZERO matches in
+  `crates/ironhermes-agent/src/any_client.rs` or `crates/ironhermes-agent/src/lib.rs`
+  (Plan 14's only modified files in the agent crate).
+- `cargo clippy -p ironhermes-cli --no-deps -- -D warnings` produced 25 errors in
+  unrelated CLI files (atomic.rs, render.rs, tui modules) — ZERO matches in
+  `crates/ironhermes-cli/src/main.rs` (Plan 14's only modified CLI file).
+
+Plan 14's own surface verified clean:
+- `cargo build -p ironhermes-cli` → 0 errors, 26 pre-existing warnings, finished in 3m 37s.
+- `cargo test -p ironhermes-agent --lib any_client::tests` → 12/12 pass (10 existing +
+  `test_any_client_summarization_handle_constructible` + `web_extract_tool_appears_in_definitions_after_wireup`).
+- `cargo test -p ironhermes-cli --bin ironhermes register_web_extract_tool_wired_in_all_three_sites`
+  → 1/1 pass (≥3 register_web_extract_tool call sites + ≥3 AnyClientSummarizationHandle::new
+  call sites in non-comment source).
+- `grep -c "register_web_extract_tool(" crates/ironhermes-cli/src/main.rs` → 4 (3 call
+  sites + 1 in guard test source).
+- `grep -c "AnyClientSummarizationHandle::new" crates/ironhermes-cli/src/main.rs` → 5
+  (3 call sites + 1 in guard test source + 1 in guard assertion message string).
+
+**Resolution path:** same as prior Plan 25.2 entries above — track for cleanup
+after Plan 25.2 closes; do not block on it.

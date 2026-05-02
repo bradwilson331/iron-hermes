@@ -506,7 +506,7 @@ Plans:
 **Goal:** A single `web_extract` tool that unifies multi-URL HTML/PDF/YouTube extraction behind one dispatcher, normalizes everything to Markdown, runs a tiered LLM summarization pipeline (5K direct / 5K-500K single-pass / 500K-2M chunked synthesis / >2M refuse) with aux-LLM routing via Phase 26 `resolve_role("summarization")` cascade, and ships in the existing `web` toolset. Extends `web_read` patterns; adds Exa + Tavily provider backends and PDF support; YouTube dispatched via the Phase 19 `youtube-content` skill.
 **Requirements**: D-01 through D-28 (CONTEXT-locked decisions; no REQUIREMENTS.md tags pre-mapped — Phase 25.2 closes a `web_read` follow-on gap from the v2.1 carry-over set)
 **Depends on:** Phase 25 (toolset management infrastructure), Phase 26 (resolve_role summarization cascade)
-**Plans:** 14/15 plans executed
+**Plans:** 15/15 plans complete
 
 Plans:
 - [x] 25.2-00-PLAN.md — Wave 0 file scaffolding + pdf-extract dep + module wiring
@@ -523,7 +523,7 @@ Plans:
 - [x] 25.2-11-PLAN.md — D-11..D-17 tiered summarization + chunked synthesis
 - [x] 25.2-12-PLAN.md — D-01..D-21 / D-27 WebExtractTool impl + registry registration
 - [x] 25.2-13-PLAN.md — D-26 / D-27 / D-28 integration tests + ROADMAP update + VALIDATION.md flip
-- [ ] 25.2-14-PLAN.md — D-13 / D-20 agent-side wireup (AnyClientSummarizationHandle + CLI register_web_extract_tool)
+- [x] 25.2-14-PLAN.md — D-13 / D-20 agent-side wireup (AnyClientSummarizationHandle + CLI register_web_extract_tool)
 
 ### Phase 25.1: built-in browser tools: 11 tools for browser automation (browser_back, browser_click, browser_close, browser_console, browser_get_images, browser_navigate, browser_press, browser_scroll, browser_snapshot, browser_type, browser_vision) (INSERTED)
 
