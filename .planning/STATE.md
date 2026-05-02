@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
-stopped_at: "Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)"
-last_updated: "2026-05-01T20:22:55.889Z"
+stopped_at: Phase 25.2 context gathered
+last_updated: "2026-05-02T01:49:50.285Z"
 last_activity: 2026-05-01 -- Phase 25.1 execution started
 progress:
-  total_phases: 22
-  completed_phases: 13
+  total_phases: 23
+  completed_phases: 14
   total_plans: 88
-  completed_plans: 87
-  percent: 99
+  completed_plans: 88
+  percent: 100
 ---
 
 # Project State
@@ -339,6 +339,7 @@ Recent decisions affecting current work:
 - Phase 22.4.2.2 inserted after Phase 22.4.2: Cron create defaults to TG origin when gateway active (whitelist len==1) (URGENT)
 - Phase 22.4.2.3 inserted after Phase 22.4.2: fix the pre-existing INV-22.3-02 banner-bleed before milestone (URGENT)
 - Phase 25.1 inserted after Phase 25: built-in browser tools — 11 tools for browser automation (URGENT)
+- Phase 25.2 inserted after Phase 25: web extract tools (URGENT)
 
 ### Pending Todos
 
@@ -356,8 +357,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-29T20:39:52.103Z
-Stopped at: Completed Phase 24 Plan 04 (Step 0 PID lock in runner.rs::start() + D-19 gateway_pid integration tests)
-Resume file: None
+Last session: 2026-05-02T01:49:50.279Z
+Stopped at: Phase 25.2 context gathered
+Resume file: .planning/phases/25.2-web-extract-tools/25.2-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
