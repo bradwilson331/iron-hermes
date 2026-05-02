@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T06:33:51.093Z"
+last_updated: "2026-05-02T06:49:35.841Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 100
-  percent: 97
+  completed_plans: 101
+  percent: 98
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 12 of 15
+Plan: 13 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -149,6 +149,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P08 | 3 | 1 tasks | 1 files |
 | Phase 25.2 P09 | 17 min | 1 tasks | 1 files |
 | Phase 25.2 P10 | 22 | 1 tasks | 1 files |
+| Phase 25.2 P12 | 8 | 2 tasks tasks | 5 files files |
 
 ## Accumulated Context
 
@@ -362,6 +363,9 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25.2 Plan 09]: Bytes-cap check duplicated in extract_pdf_bytes (in addition to fetch_pdf_bytes) — defends against Plan 08's mid-fetch reroute path where bytes arrive from outside this module; belt-and-braces
 - [Phase ?]: [Phase 25.2 Plan 09]: Three-arm Result destructure on timeout/spawn_blocking/extract chain produces distinct error envelopes (pdf_too_large / pdf_text_extraction_timeout / pdf_text_extraction_failed / pdf extract task panicked) — actionable telemetry
 - [Phase 25.2]: Plan 10: D-10 YouTube dispatch via tokio::process::Command shell-out to youtube-content skill helper script (HYPHENATED, verified vs SKILL.md frontmatter). Phase 19 skills runtime has no programmatic execute API — on-disk helper IS the canonical extension point. URL passed as separate arg(url): no shell, no format-string, T-25.2-shell-injection mitigated by construction. 5/5 unit tests pass; integration coverage deferred to Plan 14.
+- [Phase 25.2]: Plan 12: Inline backend chain in fetch_web_with_chain (Firecrawl→Exa→Tavily→Local) instead of select_backend() — gives per-fallthrough warn telemetry the enum-based selector cannot express
+- [Phase 25.2]: Plan 12: tokio::spawn per URL (not futures::join_all) preserves Pitfall 6 ordering by tagging tasks with idx and sorting before serializing; per-URL panics map into ExtractionResult.error
+- [Phase 25.2]: Plan 12 [Rule 1 fix]: Replaced .entered() with async-block + .instrument(span) in tiers.rs/chunked.rs — Plan 11's EnteredSpan was held across await and broke tokio::spawn Send bound
 
 ### Roadmap Evolution
 
@@ -400,7 +404,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T06:33:51.087Z
+Last session: 2026-05-02T06:48:02.492Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
