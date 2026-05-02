@@ -84,3 +84,33 @@ Errors (file:line — lint):
   of `"youtube_content"` in the file is the negative assertion at line 122.
 
 **Resolution path:** same as Plan 25.2-01 entry above.
+
+## Pre-existing workspace test failures (Plan 25.2-13)
+
+Re-confirmed pre-existing failures while running `cargo test --workspace --no-fail-fast`
+after Plan 13:
+
+- `ironhermes-core --lib`: `commands::handlers::tests::dispatch_all_todo_stubs_return_not_yet_available`
+  fails because the test still expects the cron handler to return a stub message,
+  but commit `96b19c1 feat(22.4.2.1-01)` replaced the stub with real cron sub-dispatch
+  that returns "cron store not configured" when no store is configured. Pre-existing
+  drift between handler and its assertion.
+- `ironhermes-cli --test setup_wizard`: failure category not investigated; package
+  has no overlap with Plan 13's surface (web_extract / web_local).
+- `ironhermes-hub --lib`: failure category not investigated; package has no overlap
+  with Plan 13's surface.
+
+Filter check: `git log --oneline crates/ironhermes-core/src/commands/handlers.rs`
+shows the file was last touched by commit `c394c44 feat(25-04)` — long before
+Plan 25.2-13. Filter check: `cargo test -p ironhermes-tools --lib` returns
+286/286 passing — Plan 13's `web_local.rs` SSRF override does not break any
+test in the tools crate.
+
+Plan 13's own surface verified clean:
+- `cargo test -p ironhermes-tools --test web_extract_integration` → 9/9 pass
+- `cargo test -p ironhermes-tools --lib` → 286/286 pass
+- `cargo clippy -p ironhermes-tools --tests --no-deps` → zero new warnings on
+  `web_local.rs` or `web_extract_integration.rs`
+
+**Resolution path:** same as prior Plan 25.2 entries above — track for cleanup
+after Plan 25.2 closes; do not block on it.
