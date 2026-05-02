@@ -29,7 +29,7 @@ pub use context_scanner::{scan_context_content, truncate_content, CONTEXT_FILE_M
 pub use error::{HermesError, Result};
 pub use memory_provider::{MemoryEntries, MemoryProvider};
 pub use memory_store::{MemoryStore, MemoryTarget};
-pub use provider::{ProviderResolver, ResolvedEndpoint};
+pub use provider::{ProviderResolver, ResolvedEndpoint, SummarizationClientHandle};
 pub use skills::{
     CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,
     SkillSource,
