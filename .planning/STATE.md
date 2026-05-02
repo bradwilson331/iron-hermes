@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T05:01:24.543Z"
+last_updated: "2026-05-02T05:15:02.940Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 95
-  percent: 92
+  completed_plans: 96
+  percent: 93
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 7 of 15
+Plan: 8 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -145,6 +145,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P04 | 6 | 1 tasks | 2 files |
 | Phase 25.2 P05 | 7 | 1 tasks | 2 files |
 | Phase 25.2 P06 | 8 | 2 tasks | 2 files |
+| Phase 25.2 P07 | 10 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -347,6 +348,10 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25.2 Plan 06]: FIRECRAWL_ENDPOINT_OVERRIDE env var (Phase 21.8 Plan 02 SkillsShBlobSource pattern) — single env var, plain-String, Plan 14 wiremock testable
 - [Phase ?]: [Phase 25.2 Plan 06]: D-07 Option B (inline Markdown header) locked across all backends — matches web_read.rs:159 precedent
 - [Phase ?]: [Phase 25.2 Plan 06]: SSRF pre-validation runs as line 1 of fetch_with_firecrawl body (T-25.2-03 mitigation enforced structurally)
+- [Phase ?]: [Phase 25.2 Plan 07]: fetch_with_exa uses .header("x-api-key", &api_key) (NOT bearer_auth) per Exa API docs verified 2026-05-01 — auth-divergence point vs firecrawl/tavily
+- [Phase ?]: [Phase 25.2 Plan 07]: fetch_with_tavily derives title via derive_title_from_url() URL-path-last-segment fallback (Tavily returns no title field); strips .pdf and .html suffixes — covered by 4 unit tests
+- [Phase ?]: [Phase 25.2 Plan 07]: EXA_ENDPOINT_OVERRIDE + TAVILY_ENDPOINT_OVERRIDE via private resolve_endpoint() helpers — byte-exact parity with firecrawl.rs:118-120 (Plan 06 SkillsShBlobSource pattern) for Plan 14 wiremock testing
+- [Phase ?]: [Phase 25.2 Plan 07]: #[allow(dead_code)] on ExaStatus.status + TavilyFailedResult.url (Rule 2 critical-correctness) — preserves API schema parity without regressing 9-warning baseline; mirrors Plan 06 FirecrawlMetadata.status_code rationale
 
 ### Roadmap Evolution
 
@@ -385,7 +390,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T05:01:24.537Z
+Last session: 2026-05-02T05:14:30.849Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
