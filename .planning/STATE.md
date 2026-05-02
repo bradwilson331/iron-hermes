@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T03:45:33.234Z"
+last_updated: "2026-05-02T04:12:40.863Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 89
-  percent: 86
+  completed_plans: 91
+  percent: 88
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 2 of 15
+Plan: 3 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -140,6 +140,7 @@ Last activity: 2026-05-02
 | Phase 24 P06 | 10 | 2 tasks | 2 files |
 | Phase 24 P07 | 849 | 2 tasks | 1 files |
 | Phase 25.2 P00 | 5 | 4 tasks | 17 files |
+| Phase 25.2 P02 | 10 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -323,6 +324,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 25.2 Plan 00: Used pdf-extract = { workspace = true } (workspace pin 0.10) — overrode CONTEXT D-24 reference to 0.7 per RESEARCH.md verified versions
 - [Phase ?]: Phase 25.2 Plan 00: Deferred pub use web_extract::WebExtractTool; re-export to plan 25.2-13 — Wave 0 stub has no struct yet
 - [Phase ?]: Phase 25.2 Plan 00: Used pub(crate) on env_lock/EnvGuard in tests/web_extract_integration.rs so plan 25.2-14 sibling test modules can reference them
+- [Phase ?]: Phase 25.2 Plan 02: ExtractConfig inserted between BrowserConfig and GatewayConfig (D-23 file-layout); 'summarization' added as 6th RESERVED_ROLE_NAME (Phase 25.2 D-13)
+- [Phase ?]: Phase 25.2 Plan 02: validate_role_name body unchanged — iterates RESERVED_ROLE_NAMES so summarization auto-accepts; validate_role_name_accepts_all_reserved_roles auto-covers new role
+- [Phase ?]: Phase 25.2 Plan 02: AuxiliaryConfig cascade doc + RESERVED_ROLE_NAMES doc + validate_role_name doc all updated to 'six roles' for cross-site coherence (Rule 2 critical-correctness add)
 
 ### Roadmap Evolution
 
@@ -361,7 +365,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T03:45:24.860Z
+Last session: 2026-05-02T04:12:10.019Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
