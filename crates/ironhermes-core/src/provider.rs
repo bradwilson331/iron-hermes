@@ -453,6 +453,47 @@ impl ProviderResolver {
 }
 
 // =============================================================================
+// SummarizationClientHandle — dependency-inversion trait (Phase 25.2 D-13)
+// =============================================================================
+
+/// Phase 25.2 D-13: dependency-inversion handle for the summarization aux-LLM call path.
+///
+/// Mirrors Phase 25.1's `VisionClientHandle` (crates/ironhermes-tools/src/browser_vision.rs:51).
+///
+/// # Why this trait lives in `ironhermes-core`
+///
+/// `WebExtractTool` (in `ironhermes-tools`) needs to invoke an LLM via the Phase 26
+/// `resolve_role("summarization")` cascade implemented in `ironhermes-agent`. A direct
+/// `tools → agent` import would create a circular dependency (agent already depends on tools).
+/// By defining the contract in `core` — which both `tools` and `agent` already depend on —
+/// the consumer (`WebExtractTool`) holds an `Arc<dyn SummarizationClientHandle>` and the
+/// implementation lives in `ironhermes-agent`, wired in at tool-registration time.
+///
+/// # Cascade contract (implementer's responsibility)
+///
+/// The implementation MUST call [`ProviderResolver::resolve_role`] with `"summarization"` first;
+/// on `None`, it MUST fall back to [`ProviderResolver::resolve_for_main`]. The `WebExtractTool`
+/// consumer never sees `None` — it always receives a usable response or an `Err`.
+///
+/// # Parameters
+/// * `system_prompt` — system message for the summarization role.
+/// * `user_prompt` — the content (or chunk) to summarize, prefixed with any per-call context.
+/// * `max_tokens` — output token cap (caller chooses based on tier: tier 2 ≈ 20_000, tier 3 chunk ≈ 5_000, tier 3 synthesis ≈ 20_000).
+///
+/// # Returns
+/// Assistant text content on success; `Err` on any failure (transport, model, parsing).
+/// Errors propagate up to `WebExtractTool::execute` and become per-URL `ExtractionResult.error` entries.
+#[async_trait::async_trait]
+pub trait SummarizationClientHandle: Send + Sync {
+    async fn summarize_call(
+        &self,
+        system_prompt: String,
+        user_prompt: String,
+        max_tokens: u32,
+    ) -> anyhow::Result<String>;
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1028,5 +1069,16 @@ mod tests {
         let ep = resolver.resolve_role("session_search").expect("should fall through to auxiliary");
         assert_eq!(ep.base_url, "https://api.openai.com/v1");
         assert_eq!(ep.default_model, "gpt-4o-mini");
+    }
+
+    // =========================================================================
+    // Phase 25.2 Plan 03 (D-13): SummarizationClientHandle dyn-compatibility lock
+    // =========================================================================
+
+    #[test]
+    fn summarization_client_handle_is_dyn_compatible() {
+        // Compile-only: ensures the trait can be made into a trait object.
+        // Without Send + Sync, Arc<dyn SummarizationClientHandle> would not be valid.
+        fn _accepts(_: std::sync::Arc<dyn super::SummarizationClientHandle>) {}
     }
 }

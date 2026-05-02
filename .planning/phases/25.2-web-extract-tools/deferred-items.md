@@ -28,3 +28,14 @@ transitive dep crates that clippy rebuilds when targeting `ironhermes-tools`.
 **Resolution path:** schedule a workspace-wide `cargo clippy --workspace --fix` pass as a
 standalone hygiene plan (or fold into a future v2.1 stabilization phase). Each warning is a
 one-line auto-fixable mechanical refactor.
+
+## Pre-existing workspace clippy warnings (Plan 25.2-03)
+
+Re-confirmed the same 10 `ironhermes-core` clippy errors when running the plan-mandated
+`cargo clippy -p ironhermes-core -- -D warnings` gate at the end of Task 1.
+
+- Same 10 errors as Plan 25.2-01 (config.rs, memory_store.rs, skills.rs).
+- Zero errors in `crates/ironhermes-core/src/provider.rs` — the only file modified by Plan 03.
+- New `SummarizationClientHandle` trait + dyn-compatibility test introduce zero new warnings.
+
+**Resolution path:** same as Plan 25.2-01 entry above.
