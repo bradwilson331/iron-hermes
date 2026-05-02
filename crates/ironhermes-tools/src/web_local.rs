@@ -26,7 +26,22 @@ pub const CONTENT_SELECTORS: &[&str] = &["article", "main", "[role=main]", "body
 // --- SSRF validation (D-16) ---
 
 /// Wrap `is_safe_url` in spawn_blocking for async callers.
+///
+/// **Test-only escape hatch:** when the env var
+/// `IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK` is set (any value), this function
+/// returns `Ok(())` for URLs whose host is `127.0.0.1` / `::1` / `localhost`
+/// without consulting `is_safe_url`. This lets wiremock-backed integration
+/// tests reach loopback servers (which `is_safe_url` correctly blocks in
+/// production) without disabling SSRF protection for any non-loopback host.
+/// The bypass mirrors the `IRONHERMES_BROWSER_TEST_DISABLE` pattern from
+/// Phase 25.1 (Plan 25.1-10) — the `_TEST_` infix makes the test-only intent
+/// crystal-clear and the env var is never read in production code paths.
 pub async fn validate_url_async(url: &str) -> anyhow::Result<()> {
+    if std::env::var("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK").is_ok()
+        && is_loopback_host(url)
+    {
+        return Ok(());
+    }
     let url_owned = url.to_string();
     let safe = tokio::task::spawn_blocking(move || is_safe_url(&url_owned))
         .await
@@ -37,6 +52,18 @@ pub async fn validate_url_async(url: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Test-only helper: `true` when `url`'s host is loopback (`127.0.0.1`, `::1`,
+/// or `localhost`). Only consulted when the `IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK`
+/// env var is set; production code never reaches this branch.
+fn is_loopback_host(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            return host == "127.0.0.1" || host == "::1" || host == "localhost";
+        }
+    }
+    false
 }
 
 // --- Smart truncation (D-13, D-14, D-15) ---
