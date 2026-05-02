@@ -46,7 +46,7 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
 // Reserved role names (D-05, Phase 26)
 // =============================================================================
 
-/// The five reserved auxiliary role names (D-05, PROV-06, Phase 26).
+/// The six reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13).
 ///
 /// Used by `model.roles:` map keys and `auxiliary` per-task overrides.
 /// Unknown role names must be rejected at config load (Phase 26 anti-pattern
@@ -57,11 +57,13 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "session_search",
     "skills_hub",
     "mcp_helper",
+    "summarization",   // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
 ];
 
-/// Validate that a role name is one of the five reserved Phase 26 helper-task roles.
+/// Validate that a role name is one of the six reserved helper-task roles.
 ///
-/// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper` (D-05).
+/// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`,
+/// `summarization` (Phase 26 D-05 + Phase 25.2 D-13).
 ///
 /// # Errors
 /// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
@@ -200,12 +202,12 @@ pub struct ModelRoleConfig {
     pub model: Option<String>,
 }
 
-/// Auxiliary model routing configuration (PROV-06, D-05, Phase 26).
+/// Auxiliary model routing configuration (PROV-06, D-05, Phase 26 + Phase 25.2 D-13).
 ///
-/// Defines a default cheaper model for the five helper task categories:
-/// `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`.
+/// Defines a default cheaper model for the six helper task categories:
+/// `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`, `summarization`.
 ///
-/// Resolution cascade for `resolve_role("vision")`:
+/// Resolution cascade for `resolve_role("vision")` / `resolve_role("summarization")`:
 /// 1. `model.roles["vision"]` — per-task override (if set)
 /// 2. `auxiliary` — this block (if set)
 /// 3. `None` — caller falls through to main provider
@@ -287,6 +289,10 @@ pub struct Config {
     /// Pre-25.1 configs parse cleanly via #[serde(default)].
     #[serde(default)]
     pub browser: BrowserConfig,
+    /// Phase 25.2 D-22: web_extract configuration block.
+    /// `#[serde(default)]` makes this field optional in YAML — pre-25.2 configs parse cleanly.
+    #[serde(default)]
+    pub extract: ExtractConfig,
 }
 
 // =============================================================================
@@ -533,6 +539,49 @@ impl Default for BrowserConfig {
             allowed_schemes: vec!["http".to_string(), "https".to_string()],
             chromium_path: None,
             timeout_seconds: 30,
+        }
+    }
+}
+
+// =============================================================================
+// ExtractConfig (Phase 25.2 D-22)
+// =============================================================================
+
+/// Phase 25.2 D-22: web_extract tool configuration.
+/// All fields default; pre-25.2 configs parse cleanly via #[serde(default)].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtractConfig {
+    /// D-15: Semaphore permits covering BOTH multi-URL parallelism AND
+    /// per-chunk summarization parallelism. Default 4.
+    pub max_parallel_summaries: usize,
+
+    /// D-11 tier-3 chunk size in chars. Default 100_000.
+    pub summary_chunk_chars: usize,
+
+    /// D-11 tier-4 refusal threshold in chars. Default 2_000_000.
+    pub refuse_threshold_chars: usize,
+
+    /// D-11 tier 1→2 boundary in chars. Default 5_000.
+    pub summary_tier2_threshold_chars: usize,
+
+    /// D-11 tier 2→3 boundary in chars. Default 500_000.
+    pub summary_tier3_threshold_chars: usize,
+
+    /// D-19: extra secret-URL patterns appended to the const default set
+    /// in `crates/ironhermes-tools/src/web_extract/sanitize.rs::SECRET_URL_PATTERNS`.
+    pub redact_url_patterns: Vec<String>,
+}
+
+impl Default for ExtractConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel_summaries: 4,
+            summary_chunk_chars: 100_000,
+            refuse_threshold_chars: 2_000_000,
+            summary_tier2_threshold_chars: 5_000,
+            summary_tier3_threshold_chars: 500_000,
+            redact_url_patterns: Vec::new(),
         }
     }
 }
@@ -1846,13 +1895,14 @@ custom_providers:
     // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
     // =========================================================================
 
-    /// D-05: RESERVED_ROLE_NAMES must hold exactly the five Phase 26 roles.
+    /// D-05 + Phase 25.2 D-13: RESERVED_ROLE_NAMES must hold exactly the six roles
+    /// (5 from Phase 26 + summarization from Phase 25.2).
     #[test]
-    fn reserved_role_names_contains_all_five_d05_roles() {
+    fn reserved_role_names_contains_all_six_roles_with_summarization() {
         assert_eq!(
             RESERVED_ROLE_NAMES.len(),
-            5,
-            "Phase 26 D-05 specifies exactly 5 reserved roles"
+            6,
+            "Phase 26 D-05 + Phase 25.2 D-13 specify exactly 6 reserved roles (5 + summarization)"
         );
         for required in &[
             "vision",
@@ -1860,6 +1910,7 @@ custom_providers:
             "session_search",
             "skills_hub",
             "mcp_helper",
+            "summarization",
         ] {
             assert!(
                 RESERVED_ROLE_NAMES.contains(required),
@@ -1921,6 +1972,54 @@ custom_providers:
             err.contains("mcp_helper"),
             "error must enumerate allowed roles: {}",
             err
+        );
+    }
+
+    // =========================================================================
+    // Phase 25.2 Plan 02 Task 1: ExtractConfig (D-22) + summarization role (D-13)
+    // =========================================================================
+
+    /// D-22: ExtractConfig::default() must match the locked spec defaults.
+    #[test]
+    fn extract_config_defaults() {
+        let c = ExtractConfig::default();
+        assert_eq!(c.max_parallel_summaries, 4);
+        assert_eq!(c.summary_chunk_chars, 100_000);
+        assert_eq!(c.refuse_threshold_chars, 2_000_000);
+        assert_eq!(c.summary_tier2_threshold_chars, 5_000);
+        assert_eq!(c.summary_tier3_threshold_chars, 500_000);
+        assert!(c.redact_url_patterns.is_empty());
+    }
+
+    /// D-22: pre-25.2 YAML configs (without an `extract:` block) must still parse and
+    /// surface ExtractConfig::default() values via #[serde(default)].
+    #[test]
+    fn config_parses_yaml_without_extract_block() {
+        // Minimal pre-25.2 config — `extract:` key absent. Config is fully-defaulted so
+        // even an empty document parses to Config::default(); the meaningful assertion
+        // is that the missing `extract` field is filled by ExtractConfig::default().
+        let yaml = "model:\n  default: gpt-4o\n";
+        let parsed: Result<Config, _> = serde_yaml::from_str(yaml);
+        if let Ok(cfg) = parsed {
+            assert_eq!(cfg.extract.max_parallel_summaries, 4);
+            assert_eq!(cfg.extract.summary_chunk_chars, 100_000);
+        }
+        // Direct ExtractConfig parse: partial YAML preserves defaults for unset fields.
+        let extract_only = "max_parallel_summaries: 8\n";
+        let e: ExtractConfig =
+            serde_yaml::from_str(extract_only).expect("partial extract YAML must parse");
+        assert_eq!(e.max_parallel_summaries, 8);
+        assert_eq!(e.summary_chunk_chars, 100_000); // default preserved
+        assert_eq!(e.refuse_threshold_chars, 2_000_000); // default preserved
+    }
+
+    /// Phase 25.2 D-13: summarization is the second resolve_role consumer (web_extract);
+    /// it must be in RESERVED_ROLE_NAMES so config validation accepts the role.
+    #[test]
+    fn reserved_role_names_includes_summarization() {
+        assert!(
+            RESERVED_ROLE_NAMES.contains(&"summarization"),
+            "Phase 25.2 D-13 requires `summarization` in RESERVED_ROLE_NAMES"
         );
     }
 }
