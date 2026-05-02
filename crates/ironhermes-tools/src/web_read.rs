@@ -1,30 +1,13 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironhermes_core::{config::Config, ssrf::is_safe_url, ToolSchema};
-use scraper::{Html, Selector};
+use ironhermes_core::{config::Config, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{debug, warn};
 
 use crate::registry::Tool;
-
-// --- Boilerplate and content selectors (D-01, D-08) ---
-
-const BOILERPLATE_SELECTORS: &[&str] = &[
-    "nav",
-    "header",
-    "footer",
-    "aside",
-    "[role=navigation]",
-    "[role=banner]",
-    "[role=contentinfo]",
-    "script",
-    "style",
-    "noscript",
-];
-
-const CONTENT_SELECTORS: &[&str] = &["article", "main", "[role=main]", "body"];
+use crate::web_local::{extract_content_local, truncate_content, validate_url_async};
 
 // --- Firecrawl response types (D-01) ---
 
@@ -51,118 +34,6 @@ struct FirecrawlMetadata {
     title: Option<String>,
     #[serde(rename = "statusCode", default)]
     status_code: Option<u16>,
-}
-
-// --- SSRF validation (D-16) ---
-
-/// Wrap `is_safe_url` in spawn_blocking for async callers.
-async fn validate_url_async(url: &str) -> anyhow::Result<()> {
-    let url_owned = url.to_string();
-    let safe = tokio::task::spawn_blocking(move || is_safe_url(&url_owned))
-        .await
-        .map_err(|e| anyhow::anyhow!("SSRF check task panicked: {}", e))?;
-    if !safe {
-        return Err(anyhow::anyhow!(
-            "URL blocked by security policy (private IP)"
-        ));
-    }
-    Ok(())
-}
-
-// --- Smart truncation (D-13, D-14, D-15) ---
-
-/// Truncate content at a smart boundary (paragraph > sentence > word > hard cut).
-/// Appends a truncation notice with char counts (not byte counts).
-fn truncate_content(content: &str, max_chars: usize) -> String {
-    let total_chars = content.chars().count();
-    if total_chars <= max_chars {
-        return content.to_string();
-    }
-
-    // Find the byte offset at the max_chars'th character (UTF-8 safe — avoids mid-codepoint split).
-    let cut_byte = content
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(content.len());
-
-    let slice = &content[..cut_byte];
-
-    // Search backward for the best break point.
-    let break_byte = if let Some(pos) = slice.rfind("\n\n") {
-        pos
-    } else if let Some(pos) = slice.rfind(". ") {
-        pos + 2 // include the period and space
-    } else if let Some(pos) = slice.rfind(' ') {
-        pos
-    } else {
-        cut_byte
-    };
-
-    let trimmed = &content[..break_byte];
-    let displayed_chars = trimmed.chars().count();
-
-    format!(
-        "{}\n\n[Content truncated at {} of {} characters]",
-        trimmed, displayed_chars, total_chars
-    )
-}
-
-// --- Local HTML extraction (D-01, D-05, D-06, D-08) ---
-
-/// Extract and convert HTML content to markdown using scraper + htmd.
-fn extract_content_local(html: &str, url: &str) -> anyhow::Result<String> {
-    let document = Html::parse_document(html);
-
-    // Extract title.
-    let title = {
-        let title_sel = Selector::parse("title").unwrap();
-        document
-            .select(&title_sel)
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
-            .unwrap_or_default()
-    };
-
-    // Find main content area by iterating selectors in priority order.
-    let mut content_html = String::new();
-    for &sel_str in CONTENT_SELECTORS {
-        if let Ok(sel) = Selector::parse(sel_str)
-            && let Some(el) = document.select(&sel).next()
-        {
-            content_html = el.html();
-            break;
-        }
-    }
-
-    if content_html.is_empty() {
-        content_html = document.root_element().html();
-    }
-
-    // Strip boilerplate: re-parse the content fragment and replace boilerplate
-    // element outer HTML with empty strings in the content HTML string.
-    let content_doc = Html::parse_fragment(&content_html);
-    for &boilerplate in BOILERPLATE_SELECTORS {
-        if let Ok(sel) = Selector::parse(boilerplate) {
-            for el in content_doc.select(&sel) {
-                let outer = el.html();
-                content_html = content_html.replacen(&outer, "", 1);
-            }
-        }
-    }
-
-    // Convert cleaned HTML to markdown.
-    let markdown = htmd::convert(&content_html)
-        .map_err(|e| anyhow::anyhow!("htmd conversion failed: {}", e))?;
-
-    // Assemble output with header (D-06).
-    let header = if title.is_empty() {
-        format!("Source: {}\n\n", url)
-    } else {
-        format!("# {}\nSource: {}\n\n", title, url)
-    };
-
-    Ok(format!("{}{}", header, markdown))
 }
 
 // --- Firecrawl fetch (D-02) ---
