@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use ironhermes_core::config::{ExtractConfig, WebConfig};
 use ironhermes_core::SummarizationClientHandle;
 use tokio::sync::Semaphore;
-use tracing::{debug, info_span};
+use tracing::{debug, info_span, Instrument};
 
 use crate::web_local::truncate_content;
 use super::chunked;
@@ -47,36 +47,41 @@ pub async fn route_tiers(
     sem: &Arc<Semaphore>,
 ) -> Result<String> {
     let n = content.chars().count();
-    let _span = info_span!("web_extract.summary.tier", chars = n).entered();
-    debug!("tier router: content={} chars, use_llm={}", n, use_llm_processing);
+    let tier_span = info_span!("web_extract.summary.tier", chars = n);
+    async move {
+        debug!("tier router: content={} chars, use_llm={}", n, use_llm_processing);
 
-    // Tier 4: refuse, regardless of use_llm_processing (D-11 + D-12)
-    if n > extract_cfg.refuse_threshold_chars {
-        return Err(anyhow!("content_too_large"));
+        // Tier 4: refuse, regardless of use_llm_processing (D-11 + D-12)
+        if n > extract_cfg.refuse_threshold_chars {
+            return Err(anyhow!("content_too_large"));
+        }
+
+        // Tier 1: raw (always, no LLM)
+        if n < extract_cfg.summary_tier2_threshold_chars {
+            return Ok(content.to_string());
+        }
+
+        // D-12: use_llm_processing=false short-circuits tiers 2/3 — fall back to truncation
+        if !use_llm_processing {
+            return Ok(truncate_content(content, web_cfg.max_content_chars));
+        }
+
+        // Tier 2: single-pass summary (5K-500K)
+        if n <= extract_cfg.summary_tier3_threshold_chars {
+            let _permit = sem.acquire().await
+                .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
+            let aux_span = info_span!("web_extract.summary.aux_call", tier = 2, max_tokens = TIER2_MAX_TOKENS);
+            return client
+                .summarize_call(SUMMARY_SYSTEM.to_string(), content.to_string(), TIER2_MAX_TOKENS)
+                .instrument(aux_span)
+                .await;
+        }
+
+        // Tier 3: chunked + synthesis (500K-2M) — delegate to chunked module
+        chunked::summarize_chunked(content, extract_cfg, client, sem).await
     }
-
-    // Tier 1: raw (always, no LLM)
-    if n < extract_cfg.summary_tier2_threshold_chars {
-        return Ok(content.to_string());
-    }
-
-    // D-12: use_llm_processing=false short-circuits tiers 2/3 — fall back to truncation
-    if !use_llm_processing {
-        return Ok(truncate_content(content, web_cfg.max_content_chars));
-    }
-
-    // Tier 2: single-pass summary (5K-500K)
-    if n <= extract_cfg.summary_tier3_threshold_chars {
-        let _permit = sem.acquire().await
-            .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
-        let _aux_span = info_span!("web_extract.summary.aux_call", tier = 2, max_tokens = TIER2_MAX_TOKENS).entered();
-        return client
-            .summarize_call(SUMMARY_SYSTEM.to_string(), content.to_string(), TIER2_MAX_TOKENS)
-            .await;
-    }
-
-    // Tier 3: chunked + synthesis (500K-2M) — delegate to chunked module
-    chunked::summarize_chunked(content, extract_cfg, client, sem).await
+    .instrument(tier_span)
+    .await
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use ironhermes_core::config::ExtractConfig;
 use ironhermes_core::SummarizationClientHandle;
 use tokio::sync::Semaphore;
-use tracing::{debug, info_span};
+use tracing::{debug, info_span, Instrument};
 
 use super::tiers::{
     SUMMARY_SYSTEM, SYNTHESIS_SYSTEM,
@@ -30,42 +30,47 @@ pub async fn summarize_chunked(
 ) -> Result<String> {
     let chunks = split_into_chunks(content, extract_cfg.summary_chunk_chars);
     let total = chunks.len();
-    let _span = info_span!("web_extract.summary.chunked", chunks = total).entered();
-    debug!("chunked: splitting {} chars into {} chunks of ~{} chars", content.chars().count(), total, extract_cfg.summary_chunk_chars);
+    let chunked_span = info_span!("web_extract.summary.chunked", chunks = total);
+    async move {
+        debug!("chunked: splitting {} chars into {} chunks of ~{} chars", content.chars().count(), total, extract_cfg.summary_chunk_chars);
 
-    // Spawn one task per chunk; each acquires sem permit (D-15)
-    let mut handles = Vec::with_capacity(total);
-    for (i, chunk) in chunks.iter().enumerate() {
-        let sem_c = sem.clone();
-        let client_c = client.clone();
-        let chunk_str = chunk.clone();
-        let idx = i;
-        let n = total;
-        handles.push(tokio::spawn(async move {
-            let _permit = sem_c.acquire_owned().await
-                .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
-            let prompt = format!("Summarize chunk {}/{} of a document:", idx + 1, n);
-            client_c.summarize_call(prompt, chunk_str, TIER3_CHUNK_MAX_TOKENS).await
-        }));
+        // Spawn one task per chunk; each acquires sem permit (D-15)
+        let mut handles = Vec::with_capacity(total);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let sem_c = sem.clone();
+            let client_c = client.clone();
+            let chunk_str = chunk.clone();
+            let idx = i;
+            let n = total;
+            handles.push(tokio::spawn(async move {
+                let _permit = sem_c.acquire_owned().await
+                    .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
+                let prompt = format!("Summarize chunk {}/{} of a document:", idx + 1, n);
+                client_c.summarize_call(prompt, chunk_str, TIER3_CHUNK_MAX_TOKENS).await
+            }));
+        }
+
+        // Collect chunk summaries IN ORDER (not race-order)
+        let mut summaries: Vec<String> = Vec::with_capacity(total);
+        for (i, h) in handles.into_iter().enumerate() {
+            let s = h.await
+                .map_err(|e| anyhow!("chunk {} task panicked: {}", i + 1, e))??;
+            summaries.push(format!("---\n[Chunk {}/{}]\n{}", i + 1, total, s));
+        }
+
+        // D-16 synthesis pass — single LLM call over all chunk summaries
+        let _permit = sem.acquire().await
+            .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
+        let syn_span = info_span!("web_extract.summary.synthesis", chunk_count = total);
+        let joined = summaries.join("\n\n");
+        let _ = SUMMARY_SYSTEM;  // explicit unused — synthesis uses its own system prompt
+        client
+            .summarize_call(SYNTHESIS_SYSTEM.to_string(), joined, TIER3_SYNTHESIS_MAX_TOKENS)
+            .instrument(syn_span)
+            .await
     }
-
-    // Collect chunk summaries IN ORDER (not race-order)
-    let mut summaries: Vec<String> = Vec::with_capacity(total);
-    for (i, h) in handles.into_iter().enumerate() {
-        let s = h.await
-            .map_err(|e| anyhow!("chunk {} task panicked: {}", i + 1, e))??;
-        summaries.push(format!("---\n[Chunk {}/{}]\n{}", i + 1, total, s));
-    }
-
-    // D-16 synthesis pass — single LLM call over all chunk summaries
-    let _permit = sem.acquire().await
-        .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
-    let _syn_span = info_span!("web_extract.summary.synthesis", chunk_count = total).entered();
-    let joined = summaries.join("\n\n");
-    let _ = SUMMARY_SYSTEM;  // explicit unused — synthesis uses its own system prompt
-    client
-        .summarize_call(SYNTHESIS_SYSTEM.to_string(), joined, TIER3_SYNTHESIS_MAX_TOKENS)
-        .await
+    .instrument(chunked_span)
+    .await
 }
 
 /// Split content into chunks of approximately `chunk_chars` characters.
