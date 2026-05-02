@@ -31,6 +31,7 @@ regex = { workspace = true }
 chrono = { workspace = true }
 scraper = { workspace = true }
 htmd = { workspace = true }
+pdf-extract = { workspace = true }                     # Phase 25.2 D-09 PDF local fallback (workspace pins 0.10)
 tokio-util = { workspace = true }
 tempfile = "3"
 
