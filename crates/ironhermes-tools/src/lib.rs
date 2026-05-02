@@ -27,3 +27,4 @@ pub mod web_search;
 
 pub use memory_manager_handle::MemoryManagerHandle;
 pub use registry::{InterceptHandler, Prerequisite, Tool, ToolRegistry, todo_read_schema, todo_write_schema};
+pub use web_extract::WebExtractTool;

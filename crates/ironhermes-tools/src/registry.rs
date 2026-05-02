@@ -561,6 +561,23 @@ impl ToolRegistry {
         self.register(Box::new(BrowserVisionTool::new(session.clone(), resolver, vision_client)));
     }
 
+    /// Phase 25.2 D-13: register `web_extract` tool with injected summarization client handle
+    /// and skill registry. Called from agent crate's AgentLoop init AFTER `register_defaults()`,
+    /// because WebExtractTool needs both handles wired before it can dispatch summarization
+    /// or YouTube skill calls. Separate from register_defaults() because the constructor takes
+    /// runtime-built handles that the registry crate cannot construct itself.
+    pub fn register_web_extract_tool(
+        &mut self,
+        summarization_client: std::sync::Arc<dyn ironhermes_core::SummarizationClientHandle>,
+        skill_registry: std::sync::Arc<ironhermes_core::SkillRegistry>,
+    ) {
+        use crate::web_extract::WebExtractTool;
+        self.register(Box::new(WebExtractTool::new(
+            summarization_client,
+            skill_registry,
+        )));
+    }
+
     /// Register the skills tool with a shared SkillRegistry and active_skills tracker.
     /// Called separately from register_defaults() because it requires a SkillRegistry instance.
     ///
@@ -763,6 +780,18 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Phase 25.2 Plan 12 Task 2: lock the public signature of register_web_extract_tool
+    /// against drift. Plan 14 wires this method against AnyClientSummarizationHandle from
+    /// the agent crate; if the signature shape ever changes, this test fails at compile time.
+    #[test]
+    fn register_web_extract_tool_signature_locked() {
+        let _: fn(
+            &mut ToolRegistry,
+            std::sync::Arc<dyn ironhermes_core::SummarizationClientHandle>,
+            std::sync::Arc<ironhermes_core::SkillRegistry>,
+        ) = ToolRegistry::register_web_extract_tool;
     }
 
     // ---------------------------------------------------------------------------
