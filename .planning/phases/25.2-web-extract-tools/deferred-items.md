@@ -54,3 +54,33 @@ Re-confirmed the same 10 `ironhermes-core` clippy errors when running the plan-m
 - All 11 unit tests in `web_extract::sanitize::tests` pass.
 
 **Resolution path:** same as Plan 25.2-01 entry above.
+
+## Pre-existing workspace clippy warnings (Plan 25.2-10)
+
+Re-confirmed the same 10 `ironhermes-core` clippy errors when running the plan-mandated
+`cargo clippy -p ironhermes-tools -- -D warnings` gate after implementing
+`crates/ironhermes-tools/src/web_extract/youtube.rs` (D-10 YouTube dispatch via skill helper
+shell-out).
+
+Errors (file:line — lint):
+- `ironhermes-core/src/commands/handlers.rs:359` — `clippy::collapsible_if`
+- `ironhermes-core/src/commands/handlers.rs:901` — `clippy::manual_div_ceil`
+- `ironhermes-core/src/commands/handlers.rs:974,975` — `clippy::field_reassign_with_default`
+- `ironhermes-core/src/commands/typo.rs:55,56` — `clippy::needless_range_loop`
+- `ironhermes-core/src/config.rs:71` — `clippy::iter_contains` (`contains()` instead of `iter().any()`)
+- `ironhermes-core/src/config.rs:172,226` — `clippy::derivable_impls`
+- `ironhermes-core/src/memory_store.rs:429` — `clippy::manual_is_multiple_of`
+- `ironhermes-core/src/skills.rs:125` — `clippy::derivable_impls`
+
+- Filtering full clippy output for `(youtube|web_extract)` returns ZERO matches — the new
+  YouTube dispatch code itself is clippy-clean.
+- 5/5 youtube unit tests pass (`youtube_skill_name_is_hyphenated`,
+  `helper_script_relpath_correct`, `first_h1_pulls_title`, `first_h1_returns_empty_when_no_heading`,
+  `first_h1_skips_subheadings`).
+- The plan's own acceptance grep `! grep -q '"youtube_content"' ...` is internally
+  inconsistent with its prescribed `assert_ne!(YOUTUBE_SKILL_NAME, "youtube_content")` test
+  body (the test deliberately includes the underscored literal as a guard). Substantive intent
+  — production const HYPHENATED, dispatch path HYPHENATED — is satisfied: the only occurrence
+  of `"youtube_content"` in the file is the negative assertion at line 122.
+
+**Resolution path:** same as Plan 25.2-01 entry above.

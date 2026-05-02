@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T05:44:58.111Z"
+last_updated: "2026-05-02T06:12:55.407Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 98
-  percent: 95
+  completed_plans: 99
+  percent: 96
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 10 of 15
+Plan: 11 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -148,6 +148,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P07 | 10 | 2 tasks | 2 files |
 | Phase 25.2 P08 | 3 | 1 tasks | 1 files |
 | Phase 25.2 P09 | 17 min | 1 tasks | 1 files |
+| Phase 25.2 P10 | 22 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -360,6 +361,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 25.2 Plan 09]: PDF_MAX_BYTES=50MB and PDF_EXTRACT_TIMEOUT_SECS=30 hard-coded as module consts (not Config fields) — RESEARCH.md threat T5 + Assumption A3 give fixed bounds; config-tunable would invite operators to disable DoS mitigation
 - [Phase ?]: [Phase 25.2 Plan 09]: Bytes-cap check duplicated in extract_pdf_bytes (in addition to fetch_pdf_bytes) — defends against Plan 08's mid-fetch reroute path where bytes arrive from outside this module; belt-and-braces
 - [Phase ?]: [Phase 25.2 Plan 09]: Three-arm Result destructure on timeout/spawn_blocking/extract chain produces distinct error envelopes (pdf_too_large / pdf_text_extraction_timeout / pdf_text_extraction_failed / pdf extract task panicked) — actionable telemetry
+- [Phase 25.2]: Plan 10: D-10 YouTube dispatch via tokio::process::Command shell-out to youtube-content skill helper script (HYPHENATED, verified vs SKILL.md frontmatter). Phase 19 skills runtime has no programmatic execute API — on-disk helper IS the canonical extension point. URL passed as separate arg(url): no shell, no format-string, T-25.2-shell-injection mitigated by construction. 5/5 unit tests pass; integration coverage deferred to Plan 14.
 
 ### Roadmap Evolution
 
@@ -398,7 +400,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T05:43:38.433Z
+Last session: 2026-05-02T06:10:33.410Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
