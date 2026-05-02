@@ -501,6 +501,16 @@ Plans:
 
 **Phase directory:** `.planning/phases/25-toolset-management/`
 
+### Phase 25.2: web extract tools (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 25
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 25.2 to break down)
+
 ### Phase 25.1: built-in browser tools: 11 tools for browser automation (browser_back, browser_click, browser_close, browser_console, browser_get_images, browser_navigate, browser_press, browser_scroll, browser_snapshot, browser_type, browser_vision) (INSERTED)
 
 **Goal:** Eleven built-in browser-automation tools (browser_back/click/close/console/get_images/navigate/press/scroll/snapshot/type/vision) backed by chromiumoxide 0.9, sharing one AgentLoop-scoped browser session, with browser_vision routing through the Phase 26 auxiliary vision role (PROV-06 first consumer). Toolset disabled by default; chromium binary required.
