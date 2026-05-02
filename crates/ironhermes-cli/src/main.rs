@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, AnyClientVisionHandle, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
+use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, AnyClientSummarizationHandle, AnyClientVisionHandle, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::JobStore;
@@ -694,6 +694,14 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         std::collections::HashMap::new(),
     );
 
+    // Phase 25.2 D-13 / D-20: register web_extract tool with summarization handle.
+    // Uses the SAME Arc<ProviderResolver> pattern as the vision handle (Phase 26 cascade — second consumer).
+    // Uses the SAME Arc<SkillRegistry> as register_skills_tool (D-10 youtube-content dispatch reuses it).
+    let summarization_handle = std::sync::Arc::new(
+        AnyClientSummarizationHandle::new(std::sync::Arc::new(resolver.clone())),
+    );
+    registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
+
     // Phase 22: RPC dispatch registry — safe subset per D-04 (no terminal, no execute_code)
     let mut rpc_registry = ToolRegistry::new();
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
@@ -1194,6 +1202,14 @@ async fn run_chat(
         credential_dir,
         std::collections::HashMap::new(),
     );
+
+    // Phase 25.2 D-13 / D-20: register web_extract tool with summarization handle.
+    // Uses the SAME Arc<ProviderResolver> pattern as the vision handle (Phase 26 cascade — second consumer).
+    // Uses the SAME Arc<SkillRegistry> as register_skills_tool (D-10 youtube-content dispatch reuses it).
+    let summarization_handle = std::sync::Arc::new(
+        AnyClientSummarizationHandle::new(std::sync::Arc::new(resolver.clone())),
+    );
+    registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
 
     // Phase 22: RPC dispatch registry — safe subset per D-04 (no terminal, no execute_code)
     let mut rpc_registry = ToolRegistry::new();
@@ -2156,6 +2172,14 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         std::collections::HashMap::new(),
     );
 
+    // Phase 25.2 D-13 / D-20: register web_extract tool with summarization handle.
+    // Uses the SAME Arc<ProviderResolver> pattern as the vision handle (Phase 26 cascade — second consumer).
+    // Uses the SAME Arc<SkillRegistry> as register_skills_tool (D-10 youtube-content dispatch reuses it).
+    let summarization_handle = std::sync::Arc::new(
+        AnyClientSummarizationHandle::new(std::sync::Arc::new(resolver.clone())),
+    );
+    registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
+
     // Build RPC dispatch registry — only D-07 safe tools for sandbox (no terminal, no execute_code)
     let mut rpc_registry = ToolRegistry::new();
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
@@ -2826,6 +2850,36 @@ mod mcp_wiring_tests {
              and BrowserConsoleTool (T-25.1-02 arbitrary JS); got {} occurrences of \
              Arc::new(config.clone())",
             config_arg_count
+        );
+    }
+
+    /// Phase 25.2 D-20 invariant: register_web_extract_tool must appear in run_chat,
+    /// run_single, AND run_gateway — same parity rule as register_browser_tools_with_vision.
+    /// Mirrors the existing browser-tools parity guard above (T-25.2-wire-skip mitigation).
+    #[test]
+    fn register_web_extract_tool_wired_in_all_three_sites() {
+        let source = include_str!("main.rs");
+        // Filter out lines that are pure comments (//) to avoid the self-invalidating grep-gate trap.
+        let non_comment_source: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let count = non_comment_source.matches("register_web_extract_tool(").count();
+        assert!(
+            count >= 3,
+            "Phase 25.2 D-20: register_web_extract_tool MUST be called in run_chat, \
+             run_single, AND run_gateway (Phase 22 D-04 mirror-pattern invariant); got {} non-comment calls",
+            count
+        );
+
+        let handle_count = non_comment_source.matches("AnyClientSummarizationHandle::new").count();
+        assert!(
+            handle_count >= 3,
+            "Phase 25.2 D-13: AnyClientSummarizationHandle::new MUST be constructed once per CLI \
+             entry point so the Phase 26 D-07 cascade reaches WebExtractTool; got {} occurrences",
+            handle_count
         );
     }
 }
