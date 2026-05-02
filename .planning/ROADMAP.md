@@ -503,13 +503,27 @@ Plans:
 
 ### Phase 25.2: web extract tools (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 25
-**Plans:** 13/15 plans executed
+**Goal:** A single `web_extract` tool that unifies multi-URL HTML/PDF/YouTube extraction behind one dispatcher, normalizes everything to Markdown, runs a tiered LLM summarization pipeline (5K direct / 5K-500K single-pass / 500K-2M chunked synthesis / >2M refuse) with aux-LLM routing via Phase 26 `resolve_role("summarization")` cascade, and ships in the existing `web` toolset. Extends `web_read` patterns; adds Exa + Tavily provider backends and PDF support; YouTube dispatched via the Phase 19 `youtube-content` skill.
+**Requirements**: D-01 through D-28 (CONTEXT-locked decisions; no REQUIREMENTS.md tags pre-mapped — Phase 25.2 closes a `web_read` follow-on gap from the v2.1 carry-over set)
+**Depends on:** Phase 25 (toolset management infrastructure), Phase 26 (resolve_role summarization cascade)
+**Plans:** 15 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 25.2 to break down)
+- [ ] 25.2-00-PLAN.md — Wave 0 file scaffolding + pdf-extract dep + module wiring
+- [ ] 25.2-01-PLAN.md — D-04 web_local refactor (extract shared helpers from web_read.rs)
+- [ ] 25.2-02-PLAN.md — D-22 ExtractConfig struct + RESERVED_ROLE_NAMES update
+- [ ] 25.2-03-PLAN.md — D-13 SummarizationClientHandle trait
+- [ ] 25.2-04-PLAN.md — D-08 / D-19 sanitize module (base64 strip + secret URL detection)
+- [ ] 25.2-05-PLAN.md — D-03 dispatch classifier + backend selector
+- [ ] 25.2-06-PLAN.md — D-04 / D-06 / D-07 ExtractionResult struct + Firecrawl backend
+- [ ] 25.2-07-PLAN.md — D-04 / D-06 Exa + Tavily backends
+- [ ] 25.2-08-PLAN.md — D-04 / D-18 local backend with mid-fetch PDF reroute
+- [ ] 25.2-09-PLAN.md — D-09 PDF handler with safety guards
+- [ ] 25.2-10-PLAN.md — D-10 YouTube dispatch via skill helper script
+- [ ] 25.2-11-PLAN.md — D-11..D-17 tiered summarization + chunked synthesis
+- [ ] 25.2-12-PLAN.md — D-01..D-21 / D-27 WebExtractTool impl + registry registration
+- [ ] 25.2-13-PLAN.md — D-26 / D-27 / D-28 integration tests + ROADMAP update + VALIDATION.md flip
+- [ ] 25.2-14-PLAN.md — D-13 / D-20 agent-side wireup (AnyClientSummarizationHandle + CLI register_web_extract_tool)
 
 ### Phase 25.1: built-in browser tools: 11 tools for browser automation (browser_back, browser_click, browser_close, browser_console, browser_get_images, browser_navigate, browser_press, browser_scroll, browser_snapshot, browser_type, browser_vision) (INSERTED)
 
