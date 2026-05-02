@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T04:21:07.816Z"
+last_updated: "2026-05-02T04:34:33.668Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 92
-  percent: 89
+  completed_plans: 93
+  percent: 90
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 4 of 15
+Plan: 5 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -142,6 +142,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P00 | 5 | 4 tasks | 17 files |
 | Phase 25.2 P02 | 10 | 2 tasks | 2 files |
 | Phase 25.2 P03 | 4 | 2 tasks | 3 files |
+| Phase 25.2 P04 | 6 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -331,6 +332,10 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 25.2 Plan 03: SummarizationClientHandle trait lives in ironhermes-core (not ironhermes-tools) — sibling crates need to reference the contract from both directions; tools holds Arc<dyn ...>, agent impls; same cycle-break logic as Phase 20 MemoryManagerHandle
 - [Phase ?]: Phase 25.2 Plan 03: Used fully-qualified #[async_trait::async_trait] form rather than adding 'use async_trait::async_trait;' import to provider.rs — keeps import block byte-stable; async-trait already a workspace dep on ironhermes-core
 - [Phase ?]: Phase 25.2 Plan 03: Compile-only dyn-compatibility test (Arc<dyn SummarizationClientHandle>) locks Send + Sync bounds against future regressions
+- [Phase 25.2]: Plan 04: Used std::sync::OnceLock for one-time Regex compile (not LazyLock) — std-only, MSRV-compatible
+- [Phase 25.2]: Plan 04: Hand-rolled percent_decode_lossy (15 lines, lifted from Phase 21.8 Plan 02) — preserves D-25 zero-new-deps mandate
+- [Phase 25.2]: Plan 04: contains_secret builds combined haystack 'lower_orig + lower_decoded' so single .contains() pass covers raw + percent-encoded URL forms
+- [Phase 25.2]: Plan 04: secret_url_patterns_const_contains_required_entries asserts EXACTLY 9 patterns to lock count against silent additions
 
 ### Roadmap Evolution
 
@@ -369,7 +374,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T04:20:28.953Z
+Last session: 2026-05-02T04:31:53.139Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
