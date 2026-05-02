@@ -238,6 +238,91 @@ impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHan
 }
 
 // =============================================================================
+// AnyClientSummarizationHandle — SummarizationClientHandle impl (Phase 25.2 D-13)
+// =============================================================================
+
+/// Production implementation of `SummarizationClientHandle` for `web_extract`
+/// (Phase 25.2 D-13 — second consumer of `resolve_role` after Phase 25.1's vision).
+///
+/// Wraps an `Arc<ProviderResolver>` and uses `build_role_client("summarization")` to
+/// follow the Phase 26 D-07 cascade:
+///   1. `model.roles["summarization"]` per-task override
+///   2. `auxiliary` block fallback (`auxiliary.summary` → general aux)
+///   3. Fall through to main provider (always succeeds — no None reaches WebExtractTool)
+///
+/// Constructed in `ironhermes-cli/src/main.rs` (run_chat / run_single / run_gateway)
+/// and passed to `register_web_extract_tool` so that `WebExtractTool` routes
+/// summarization calls through the correct endpoint per the operator's config.yaml.
+pub struct AnyClientSummarizationHandle {
+    resolver: Arc<ProviderResolver>,
+}
+
+impl AnyClientSummarizationHandle {
+    pub fn new(resolver: Arc<ProviderResolver>) -> Self {
+        Self { resolver }
+    }
+}
+
+#[async_trait]
+impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle {
+    async fn summarize_call(
+        &self,
+        system_prompt: String,
+        user_prompt: String,
+        max_tokens: u32,
+    ) -> anyhow::Result<String> {
+        // Phase 26 D-07 cascade: summarization role → auxiliary → main provider.
+        let client = match build_role_client(&self.resolver, "summarization")? {
+            Some(c) => c,
+            None => build_main_client(&self.resolver)?,
+        };
+
+        // Text-only message vector (simpler than vision multimodal payload).
+        let messages = vec![
+            ChatMessage {
+                role: Role::System,
+                content: Some(MessageContent::Text(system_prompt)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: Some(MessageContent::Text(user_prompt)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let response = client
+            .chat_completion(&messages, None, None, Some(max_tokens as usize), None, None)
+            .await?;
+
+        // Extract text content from choices[0].message.content (same shape as vision handle).
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .and_then(|mc| match mc {
+                ironhermes_core::types::MessageContent::Text(s) => Some(s),
+                ironhermes_core::types::MessageContent::Parts(parts) => {
+                    parts.into_iter().find_map(|p| {
+                        if let ironhermes_core::types::ContentPart::Text { text } = p {
+                            Some(text)
+                        } else {
+                            None
+                        }
+                    })
+                }
+            })
+            .unwrap_or_else(|| "(no summarization response)".to_string());
+        Ok(text)
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -357,5 +442,16 @@ mod tests {
         let am_debug = format!("{:?}", am);
         assert!(cc_debug.contains("ChatCompletions"));
         assert!(am_debug.contains("AnthropicMessages"));
+    }
+
+    /// Phase 25.2 D-13: dyn-compatibility test — AnyClientSummarizationHandle
+    /// can be coerced into Arc<dyn SummarizationClientHandle>, which is the form
+    /// register_web_extract_tool consumes.
+    #[test]
+    fn test_any_client_summarization_handle_constructible() {
+        let config = Config::default();
+        let resolver = ironhermes_core::ProviderResolver::build(&config).unwrap();
+        let handle = AnyClientSummarizationHandle::new(Arc::new(resolver));
+        let _: Arc<dyn ironhermes_core::SummarizationClientHandle> = Arc::new(handle);
     }
 }
