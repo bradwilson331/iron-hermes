@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T03:24:01.714Z"
-last_activity: 2026-05-02 -- Phase 25.2 planning complete
+last_updated: "2026-05-02T03:45:33.234Z"
+last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 88
-  percent: 85
+  completed_plans: 89
+  percent: 86
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 25.1 — built-in-browser-tools-11-tools-for-browser-automation-brows
+**Current focus:** Phase 25.2 — web-extract-tools
 
 ## Current Position
 
-Phase: 25.1 (built-in-browser-tools-11-tools-for-browser-automation-brows) — EXECUTING
-Plan: 1 of 19
+Phase: 25.2 (web-extract-tools) — EXECUTING
+Plan: 2 of 15
 Status: Ready to execute
-Last activity: 2026-05-02 -- Phase 25.2 planning complete
+Last activity: 2026-05-02
 
 ## Performance Metrics
 
@@ -139,6 +139,7 @@ Last activity: 2026-05-02 -- Phase 25.2 planning complete
 | Phase 24 P05 | 12 | 3 tasks | 6 files |
 | Phase 24 P06 | 10 | 2 tasks | 2 files |
 | Phase 24 P07 | 849 | 2 tasks | 1 files |
+| Phase 25.2 P00 | 5 | 4 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -319,6 +320,9 @@ Recent decisions affecting current work:
 - [Phase 24]: Plan 04: _pid_guard RAII binding kept across full start() body — Drop removes gateway.pid on clean return, error propagation, and future drop
 - [Phase 24]: Plan 04: gateway_pid.rs uses i32::MAX as u32 (not u32::MAX) for guaranteed-ESRCH stale PID — inherits Plan 02 fix (u32::MAX wraps to POSIX kill(-1,0) returning Live on macOS)
 - [Phase 24]: Plan 04: gateway_pid.rs passes &Path directly to acquire_pid_lock (no env_lock/set_var) per RESEARCH §Pitfall 6
+- [Phase ?]: Phase 25.2 Plan 00: Used pdf-extract = { workspace = true } (workspace pin 0.10) — overrode CONTEXT D-24 reference to 0.7 per RESEARCH.md verified versions
+- [Phase ?]: Phase 25.2 Plan 00: Deferred pub use web_extract::WebExtractTool; re-export to plan 25.2-13 — Wave 0 stub has no struct yet
+- [Phase ?]: Phase 25.2 Plan 00: Used pub(crate) on env_lock/EnvGuard in tests/web_extract_integration.rs so plan 25.2-14 sibling test modules can reference them
 
 ### Roadmap Evolution
 
@@ -357,8 +361,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T01:49:50.279Z
+Last session: 2026-05-02T03:45:24.860Z
 Stopped at: Phase 25.2 context gathered
-Resume file: .planning/phases/25.2-web-extract-tools/25.2-CONTEXT.md
+Resume file: None
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
