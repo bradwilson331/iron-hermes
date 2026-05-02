@@ -454,4 +454,44 @@ mod tests {
         let handle = AnyClientSummarizationHandle::new(Arc::new(resolver));
         let _: Arc<dyn ironhermes_core::SummarizationClientHandle> = Arc::new(handle);
     }
+
+    /// Phase 25.2 D-20 + D-27: end-to-end smoke test that the production wireup path
+    /// (AnyClientSummarizationHandle + register_web_extract_tool) produces a registry
+    /// where `web_extract` appears in get_definitions() output.
+    ///
+    /// This validates the full Task 1 + Task 2 wiring at unit-test time without needing
+    /// a live AgentLoop — exactly what the production binary does in run_chat /
+    /// run_single / run_gateway after Plan 14 ships.
+    #[tokio::test]
+    async fn web_extract_tool_appears_in_definitions_after_wireup() {
+        use ironhermes_core::SkillRegistry;
+        use ironhermes_tools::ToolRegistry;
+
+        // 1. Build resolver from default config.
+        let config = Config::default();
+        let resolver = ironhermes_core::ProviderResolver::build(&config).unwrap();
+
+        // 2. Construct the cascade-aware summarization handle and coerce to dyn trait.
+        let handle: Arc<dyn ironhermes_core::SummarizationClientHandle> =
+            Arc::new(AnyClientSummarizationHandle::new(Arc::new(resolver)));
+
+        // 3. Construct an empty SkillRegistry from a tempdir (mirrors the production load).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_registry = Arc::new(SkillRegistry::load(tmp.path()));
+
+        // 4. Wire the production registration path that Plan 14 Task 2 added to the CLI.
+        let mut registry = ToolRegistry::new();
+        registry.register_web_extract_tool(handle, skill_registry);
+
+        // 5. Assert web_extract appears in get_definitions() — proves the tool is
+        //    discoverable by AgentLoop (which calls get_definitions to build tool schemas).
+        let defs = registry.get_definitions(None);
+        // ironhermes_core::ToolSchema is OpenAI-compatible: { type, function: { name, ... } }
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "web_extract"),
+            "D-20 + D-27: web_extract must appear in get_definitions() after register_web_extract_tool. Got: {:?}",
+            names
+        );
+    }
 }
