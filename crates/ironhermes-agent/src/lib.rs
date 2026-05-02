@@ -25,7 +25,7 @@ pub use agent_loop::{AgentLoop, AgentResult, AggregatedUsage};
 pub use memory::{MemoryManager, SharedProvider};
 pub use client::LlmClient;
 pub use anthropic_client::AnthropicClient;
-pub use any_client::{AnyClient, AnyClientVisionHandle, build_client, build_main_client, build_role_client};
+pub use any_client::{AnyClient, AnyClientSummarizationHandle, AnyClientVisionHandle, build_client, build_main_client, build_role_client};
 pub use prompt_builder::{PromptBuilder, PromptSlot};
 pub use personality::PersonalityRegistry;
 pub use context_compressor::ContextCompressor;
