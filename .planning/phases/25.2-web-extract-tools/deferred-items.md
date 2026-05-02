@@ -39,3 +39,18 @@ Re-confirmed the same 10 `ironhermes-core` clippy errors when running the plan-m
 - New `SummarizationClientHandle` trait + dyn-compatibility test introduce zero new warnings.
 
 **Resolution path:** same as Plan 25.2-01 entry above.
+
+## Pre-existing workspace clippy warnings (Plan 25.2-04)
+
+Re-confirmed the same 10 `ironhermes-core` clippy errors when running the plan-mandated
+`cargo clippy -p ironhermes-tools -- -D warnings` gate after writing
+`crates/ironhermes-tools/src/web_extract/sanitize.rs`.
+
+- Stashing the new sanitize.rs content and re-running clippy on `ironhermes-core` produced
+  the same 11 error lines (10 errors + "could not compile") — proving the lints pre-existed
+  this plan and were not introduced by the D-08 + D-19 sanitizer.
+- Filtering clippy output for `(sanitize|web_extract)` returns ZERO matches — the new code
+  itself is clippy-clean.
+- All 11 unit tests in `web_extract::sanitize::tests` pass.
+
+**Resolution path:** same as Plan 25.2-01 entry above.
