@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: Carry-Overs
 status: executing
 stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T04:49:53.176Z"
+last_updated: "2026-05-02T05:01:24.543Z"
 last_activity: 2026-05-02
 progress:
   total_phases: 23
   completed_phases: 14
   total_plans: 103
-  completed_plans: 94
-  percent: 91
+  completed_plans: 95
+  percent: 92
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 6 of 15
+Plan: 7 of 15
 Status: Ready to execute
 Last activity: 2026-05-02
 
@@ -144,6 +144,7 @@ Last activity: 2026-05-02
 | Phase 25.2 P03 | 4 | 2 tasks | 3 files |
 | Phase 25.2 P04 | 6 | 1 tasks | 2 files |
 | Phase 25.2 P05 | 7 | 1 tasks | 2 files |
+| Phase 25.2 P06 | 8 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -341,6 +342,11 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 25.2 Plan 05: select_backend() reads env vars at call time per web_read.rs:550 pattern; FIRECRAWL > EXA > TAVILY > Local; no caching to allow Plan 14 env_lock-coordinated tests
 - [Phase ?]: Phase 25.2 Plan 05: Rule 3 auto-fix added url = { workspace = true } to ironhermes-tools Cargo.toml — workspace already pinned url = 2 at root for ironhermes-core::ssrf; tools crate just lacked the consumer line
 - [Phase ?]: Phase 25.2 Plan 05: reroute_for_pdf() splits on ';' first to isolate primary content type; tolerates 'application/pdf; charset=binary' parameter variants without an extra mime crate dep
+- [Phase ?]: [Phase 25.2 Plan 06]: ExtractionResult struct exported from web_extract crate root with plain-String error envelope (D-02 / Phase 22.4.2.2 D-18 cross-crate convention)
+- [Phase ?]: [Phase 25.2 Plan 06]: fetch_with_firecrawl mirrors web_read.rs:171-248 verbatim except return type (Result<ExtractionResult>) — Err on backend failure so Plan 13 dispatcher falls through chain
+- [Phase ?]: [Phase 25.2 Plan 06]: FIRECRAWL_ENDPOINT_OVERRIDE env var (Phase 21.8 Plan 02 SkillsShBlobSource pattern) — single env var, plain-String, Plan 14 wiremock testable
+- [Phase ?]: [Phase 25.2 Plan 06]: D-07 Option B (inline Markdown header) locked across all backends — matches web_read.rs:159 precedent
+- [Phase ?]: [Phase 25.2 Plan 06]: SSRF pre-validation runs as line 1 of fetch_with_firecrawl body (T-25.2-03 mitigation enforced structurally)
 
 ### Roadmap Evolution
 
@@ -379,7 +385,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T04:49:32.903Z
+Last session: 2026-05-02T05:01:24.537Z
 Stopped at: Phase 25.2 context gathered
 Resume file: None
 
