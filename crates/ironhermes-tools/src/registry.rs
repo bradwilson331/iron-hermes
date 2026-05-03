@@ -1007,6 +1007,52 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Phase 25.3 Plan 05 (D-T-1 / Discretion D-2 — Option B):
+    // Tool::redact_args default method tests.
+    // ---------------------------------------------------------------------------
+
+    /// Phase 25.3 D-T-1: a Tool that does NOT override redact_args inherits the
+    /// default impl which returns the input verbatim (raw.clone()).
+    ///
+    /// The cast to `Box<dyn Tool>` confirms the method is object-safe — required
+    /// because Plan 9's AgentLoop callback calls `tool.redact_args(...)` through
+    /// the trait object stored in `ToolRegistry`.
+    #[test]
+    fn tool_redact_args_default_returns_input_verbatim() {
+        struct DefaultMock;
+        #[async_trait]
+        impl Tool for DefaultMock {
+            fn name(&self) -> &str { "default_mock" }
+            fn toolset(&self) -> &str { "test" }
+            fn description(&self) -> &str { "test mock for redact_args default" }
+            fn schema(&self) -> ToolSchema {
+                ToolSchema::new(
+                    "default_mock",
+                    "test mock for redact_args default",
+                    serde_json::json!({ "type": "object", "properties": {} }),
+                )
+            }
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            // redact_args intentionally NOT overridden — exercises the default.
+        }
+
+        // Object-safety check: the default method must be callable on a trait object.
+        let tool: Box<dyn Tool> = Box::new(DefaultMock);
+        let raw = serde_json::json!({
+            "url": "https://example.com/?api_key=sk-secret",
+            "n": 42,
+            "nested": {"key": "value"}
+        });
+        let redacted = tool.redact_args(&raw);
+        assert_eq!(
+            redacted, raw,
+            "default redact_args must return input verbatim (no mutation)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // Phase 25 Plan 01 Task 2: D-01 toolset name enumeration test
     // ---------------------------------------------------------------------------
 
