@@ -11,6 +11,76 @@
 //! atomicity for writes <= PIPE_BUF (4 KiB) which a typical TrajectoryEntry
 //! comfortably fits within.
 
+use crate::format::TrajectoryEntry;
+use anyhow::{Context as _, Result};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// Append-only writer for `trajectories.jsonl`.
+///
+/// Construct ONE per session at session start; drop at session end.
+/// Plan 9 wires it into AgentLoop; Plan 8 threads it through CommandContext +
+/// GatewayRunner.
+pub struct TrajectoryWriter {
+    file: File,
+    path: PathBuf,
+}
+
+impl TrajectoryWriter {
+    /// Open (or create) a trajectory file for the given session.
+    ///
+    /// Creates parent directories if needed (analog: `StateStore::new` pattern).
+    /// Opens with `O_APPEND | O_CREAT` so re-opening preserves existing entries
+    /// and writes are atomic at line granularity (POSIX guarantee for writes <= PIPE_BUF).
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create trajectory directory {}", parent.display()))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open trajectory file {}", path.display()))?;
+        Ok(Self { file, path })
+    }
+
+    /// Append one entry as a single JSONL line + fsync.
+    ///
+    /// Crash-safe: `sync_data()` flushes kernel buffers to storage so a process
+    /// kill BETWEEN lines cannot corrupt prior entries (RESEARCH.md §5 / Pitfall 3).
+    /// The trailing newline is added here — `serde_json::to_string` does NOT add one
+    /// (locked by Plan 1's `trajectory_entry_jsonl_format_matches_golden` test).
+    pub fn append(&mut self, entry: &TrajectoryEntry) -> Result<()> {
+        let mut line =
+            serde_json::to_string(entry).with_context(|| "serialize trajectory entry")?;
+        line.push('\n');
+        self.file.write_all(line.as_bytes())
+            .with_context(|| format!("write trajectory line to {}", self.path.display()))?;
+        self.file.sync_data()
+            .with_context(|| format!("fsync trajectory file {}", self.path.display()))?;
+        Ok(())
+    }
+
+    /// Path of the open trajectory file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Drop impl: final fsync on session end (Pitfall 3 guard).
+///
+/// `.ok()` swallows any error — Drop must not panic. The previous `append()`
+/// already fsync'd successfully, so a Drop fsync failure is informational.
+impl Drop for TrajectoryWriter {
+    fn drop(&mut self) {
+        // Best-effort flush; ignore errors per Drop-must-not-panic contract.
+        let _ = self.file.sync_data();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::format::{ImpactLevel, TrajectoryEntry};

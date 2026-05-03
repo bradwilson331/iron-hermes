@@ -15,3 +15,4 @@ pub mod format;
 pub mod writer;
 
 pub use format::{ImpactLevel, TrajectoryEntry};
+pub use writer::TrajectoryWriter;
