@@ -32,6 +32,7 @@ pub fn dispatch(
         "status" => cmd_status(ctx),
         "title" => cmd_title(args, ctx),
         "sessions" => cmd_sessions(args, ctx),
+        "export-session" => cmd_export_session(args, ctx),
         "resume" => cmd_resume(args, ctx),
         "save" => cmd_save(args, ctx),
         "history" => cmd_history(args, ctx),
@@ -466,6 +467,37 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
         None => store.list_sessions_text(limit),
     };
     CommandResult::Output(text)
+}
+
+/// `/export-session [session_id]` — export a session to the 4-file layout (Phase 25.3 D-F-1).
+///
+/// With no args, exports the current session (`ctx.session_id`).
+/// With one arg, exports the named session.
+///
+/// Output directory: `<hermes_home>/sessions/<session_id>/` (operator-overridable
+/// from the CLI subcommand `hermes session export <id> --output <dir>`; the
+/// slash command always uses the default location for safety).
+///
+/// Guard pattern (D-05): returns informational text when `ctx.state_store` is None.
+fn cmd_export_session(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => {
+            return CommandResult::Output(
+                "Session storage not configured.".to_string(),
+            )
+        }
+    };
+    let session_id = args
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ctx.session_id.clone());
+    let result = store.export_to_directory_text(&session_id);
+    if result.starts_with("error:") {
+        CommandResult::Error(result)
+    } else {
+        CommandResult::Output(result)
+    }
 }
 
 /// `/resume [name|id]` — restore a previous session by name or id.
@@ -2126,5 +2158,162 @@ mod tests {
 
         let last = store.last_filtered.lock().unwrap().clone();
         assert_eq!(last, Some((5, Some("/explicit/path".to_string()))));
+    }
+
+    // =========================================================================
+    // Phase 25.3 Plan 11 — /export-session slash command tests (D-F-1)
+    // =========================================================================
+
+    /// FakeStateStore extension: record the session_id passed to
+    /// `export_to_directory_text` and return a canned success / error string.
+    struct FakeExportStore {
+        last_export: StdMutex<Option<String>>,
+        return_error: bool,
+    }
+    impl FakeExportStore {
+        fn ok() -> Self {
+            Self {
+                last_export: StdMutex::new(None),
+                return_error: false,
+            }
+        }
+        fn err() -> Self {
+            Self {
+                last_export: StdMutex::new(None),
+                return_error: true,
+            }
+        }
+    }
+    impl StateStoreHandle for FakeExportStore {
+        fn list_sessions_text(&self, _limit: usize) -> String {
+            String::new()
+        }
+        fn list_sessions_text_filtered(
+            &self,
+            _limit: usize,
+            _workspace_root: Option<&str>,
+        ) -> String {
+            String::new()
+        }
+        fn history_text(&self, _session_id: &str) -> String {
+            String::new()
+        }
+        fn export_session_text(&self, _session_id: &str) -> String {
+            String::new()
+        }
+        fn export_to_directory_text(&self, session_id: &str) -> String {
+            *self.last_export.lock().unwrap() = Some(session_id.to_string());
+            if self.return_error {
+                "error: export failed: simulated failure".to_string()
+            } else {
+                format!("Session {session_id} exported to /tmp/sessions/{session_id}")
+            }
+        }
+        fn update_title(&self, _session_id: &str, _title: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn get_session_id(&self, _name_or_id: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn cmd_export_session_with_no_state_store_returns_helpful_message() {
+        let ctx = make_ctx(false); // no state_store
+        let router = make_router();
+        // /export-session is registered in registry.rs; resolve via dispatch.
+        // Call the handler directly via the dispatch table by constructing a
+        // CommandDef on the fly — simplest path that exercises the function.
+        let cmd = CommandDef::new(
+            "export-session",
+            "Export a session to flat JSON files",
+            crate::commands::CommandCategory::Session,
+        );
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("Session storage not configured"),
+                "expected guard message; got: {s}"
+            ),
+            other => panic!("expected Output, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cmd_export_session_no_args_uses_ctx_session_id() {
+        let store = StdArc::new(FakeExportStore::ok());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = CommandDef::new(
+            "export-session",
+            "Export a session",
+            crate::commands::CommandCategory::Session,
+        );
+
+        let result = dispatch(&cmd, &[], &ctx, &router);
+
+        // Should call export_to_directory_text with ctx.session_id ("test-session-id").
+        let last = store.last_export.lock().unwrap().clone();
+        assert_eq!(last, Some("test-session-id".to_string()));
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("test-session-id"),
+                "expected success message naming session; got: {s}"
+            ),
+            other => panic!("expected Output, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cmd_export_session_with_explicit_id_uses_that_id() {
+        let store = StdArc::new(FakeExportStore::ok());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = CommandDef::new(
+            "export-session",
+            "Export a session",
+            crate::commands::CommandCategory::Session,
+        );
+
+        let _ = dispatch(&cmd, &["explicit-id"], &ctx, &router);
+
+        let last = store.last_export.lock().unwrap().clone();
+        assert_eq!(last, Some("explicit-id".to_string()));
+    }
+
+    #[test]
+    fn cmd_export_session_error_response_routes_to_error_variant() {
+        let store = StdArc::new(FakeExportStore::err());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = CommandDef::new(
+            "export-session",
+            "Export a session",
+            crate::commands::CommandCategory::Session,
+        );
+
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match result {
+            CommandResult::Error(s) => assert!(
+                s.starts_with("error:"),
+                "expected error: prefix passed through; got: {s}"
+            ),
+            other => panic!("expected Error variant for failed export, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn slash_export_session_registered_in_build_registry() {
+        use crate::commands::ResolveResult;
+        let router = CommandRouter::new(build_registry());
+        let result = router.resolve("export-session", &crate::types::Platform::Local);
+        assert!(
+            matches!(result, ResolveResult::Exact(c) if c.name == "export-session"),
+            "expected /export-session Exact match, got: {:?}",
+            result
+        );
     }
 }

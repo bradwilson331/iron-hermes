@@ -66,6 +66,17 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("start", "Start with an LLM greeting", Session).platform(GatewayOnly),
         CommandDef::new("sessions", "List recent sessions", Session)
             .platform(Universal),
+        // Phase 25.3 Plan 11 (D-F-1): export the current (or named) session to
+        // the canonical 4-file flat-file directory layout. Universal platform
+        // (CLI REPL + ratatui REPL + Telegram). Optional positional arg is the
+        // session id; with no arg, exports `ctx.session_id` (the current session).
+        CommandDef::new(
+            "export-session",
+            "Export a session to flat JSON files (4-file layout)",
+            Session,
+        )
+        .args_hint("[session_id]")
+        .platform(Universal),
 
         // -----------------------------------------------------------------------
         // CONFIGURATION

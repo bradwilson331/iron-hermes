@@ -197,6 +197,18 @@ pub trait StateStoreHandle: Send + Sync {
     fn history_text(&self, session_id: &str) -> String;
     /// Export session as formatted text.
     fn export_session_text(&self, session_id: &str) -> String;
+    /// Phase 25.3 D-F-1: export a session to the 4-file directory layout.
+    /// Returns a status message — `"Session <id> exported to <path>"` on
+    /// success or `"error: <reason>"` on failure (guard pattern, no panics).
+    ///
+    /// Default impl returns the not-configured guard string; production
+    /// adapters in ironhermes-cli override with the real
+    /// `SessionDirectoryExport::write` call. Default kept here so the trait
+    /// stays consumable from existing test fakes that haven't opted into
+    /// flat-file export semantics.
+    fn export_to_directory_text(&self, _session_id: &str) -> String {
+        "error: directory export not supported by this StateStoreHandle impl".to_string()
+    }
     /// Update session title. Returns Ok(()) or an error message.
     fn update_title(&self, session_id: &str, title: &str) -> Result<(), String>;
     /// Get a session by name or id. Returns `Some(session_id)` when found.
