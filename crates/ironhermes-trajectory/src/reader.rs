@@ -6,6 +6,59 @@
 //! Per CONTEXT.md D-T-2: trajectories.jsonl is auxiliary, never read at session-load.
 //! This reader is for OFFLINE consumption (export, curator, RL pipelines).
 
+use crate::format::TrajectoryEntry;
+use anyhow::{Context as _, Result};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+/// Read-only handle for an existing `trajectories.jsonl` file.
+///
+/// Construct via `TrajectoryReader::open(path)`; consume via `read_all()`.
+/// Missing files are treated as empty (Curator iterates this defensively).
+pub struct TrajectoryReader {
+    path: PathBuf,
+}
+
+impl TrajectoryReader {
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Path of the trajectory file (may not exist yet).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Read all entries from the JSONL file.
+    ///
+    /// Returns Ok(empty Vec) if the file does not exist (so Curator iteration
+    /// is a no-op for sessions that produced no trajectories).
+    /// Returns Err if a line fails to parse as TrajectoryEntry — loud failure
+    /// surfaces format drift early.
+    /// Skips blank / whitespace-only lines (defensive).
+    pub fn read_all(&self) -> Result<Vec<TrajectoryEntry>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = std::fs::File::open(&self.path)
+            .with_context(|| format!("open trajectory file {}", self.path.display()))?;
+        let reader = BufReader::new(file);
+        let mut entries = Vec::new();
+        for (idx, line) in reader.lines().enumerate() {
+            let line = line
+                .with_context(|| format!("read line {} of {}", idx, self.path.display()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry: TrajectoryEntry = serde_json::from_str(&line).with_context(|| {
+                format!("parse trajectory line {} of {}", idx, self.path.display())
+            })?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::format::{ImpactLevel, TrajectoryEntry};

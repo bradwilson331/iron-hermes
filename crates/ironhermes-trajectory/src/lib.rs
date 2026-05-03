@@ -17,3 +17,4 @@ pub mod reader;
 
 pub use format::{ImpactLevel, TrajectoryEntry};
 pub use writer::TrajectoryWriter;
+pub use reader::TrajectoryReader;
