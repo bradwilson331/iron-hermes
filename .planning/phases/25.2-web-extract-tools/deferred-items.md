@@ -149,3 +149,42 @@ Plan 14's own surface verified clean:
 
 **Resolution path:** same as prior Plan 25.2 entries above — track for cleanup
 after Plan 25.2 closes; do not block on it.
+
+## Phase 26 follow-up bug discovered + fixed during verification (2026-05-02)
+
+**Symptom:** Running `ironhermes`, `ironhermes chat`, or `ironhermes gateway` after
+migrating to the Phase 26 `providers.<main>.api_key_env` schema (i.e. removing the
+deprecated `model.api_key`) launched the FixMode wizard on every invocation:
+
+```
+$ ironhermes
+Welcome to IronHermes. Let's get you configured.
+Provider [openrouter]:
+```
+
+**Root cause:** `crates/ironhermes-core/src/config_validate.rs:24` only checked
+`self.model.api_key` for non-empty. The Phase 26 schema migration was incomplete —
+the validator was never updated to recognize the canonical
+`providers.<model.provider>.api_key_env` path. Configs that correctly migrated
+tripped `Config::validate()` on every preflight pass and got bounced into the wizard.
+
+**Fix:** committed as `9f530b1` —
+`fix(config-validate): teach validator about Phase 26 providers.<main>.api_key_env schema`.
+
+The validator now accepts EITHER:
+- legacy `model.api_key` (deprecated, still warns at provider build time), OR
+- `providers.<model.provider>.api_key_env` (Phase 26 canonical).
+
+Structural check only — actual env-var resolution stays at `ProviderResolver::build()`.
+
+**Tests:** 3 new in `crates/ironhermes-core/tests/config_validate.rs`:
+- `validate_accepts_providers_api_key_env_without_legacy_api_key` — happy path
+- `validate_rejects_when_neither_legacy_nor_new_api_key_set` — both-absent must still error
+- `validate_ignores_api_key_env_for_wrong_provider` — wrong-provider negative case
+
+All 12 `config_validate` tests pass (9 pre-existing + 3 new).
+
+**Why not deferred:** out-of-scope per the executor `<scope_boundary>` rule (this is a
+Phase 26 bug, not a Phase 25.2 bug), but cheap and self-contained — fixing it
+unblocked the user's gateway invocation in the same session, so it shipped now
+rather than as a separate Phase 26 follow-up plan. Logged here for traceability.
