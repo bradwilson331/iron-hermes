@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: executed
-stopped_at: Phase 25.2 complete — gap-closure wave 5 (plans 15 + 16)
-last_updated: "2026-05-03T00:00:00.000Z"
+status: Phase 25.3 inserted (URGENT) — session-workspace parity. Awaiting /gsd-plan-phase 25.3.
+stopped_at: Phase 25.3 context gathered
+last_updated: "2026-05-03T09:35:22.555Z"
 last_activity: 2026-05-03
 progress:
-  total_phases: 23
+  total_phases: 24
   completed_phases: 15
-  total_plans: 103
-  completed_plans: 103
+  total_plans: 105
+  completed_plans: 105
   percent: 100
 ---
 
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 25.2 (web-extract-tools) — COMPLETE
-Plan: 17 of 17
-Status: Phase 25.2 complete — UAT Issues 2 + 9 closed via gap-closure plans 15 + 16
+Phase: 25.3 (session-workspace parity) — NOT PLANNED
+Plan: 0 of 0
+Status: Phase 25.3 inserted (URGENT) — session-workspace parity. Awaiting /gsd-plan-phase 25.3.
 Last activity: 2026-05-03
 
 ## Performance Metrics
@@ -390,6 +390,7 @@ Recent decisions affecting current work:
 - Phase 22.4.2.3 inserted after Phase 22.4.2: fix the pre-existing INV-22.3-02 banner-bleed before milestone (URGENT)
 - Phase 25.1 inserted after Phase 25: built-in browser tools — 11 tools for browser automation (URGENT)
 - Phase 25.2 inserted after Phase 25: web extract tools (URGENT)
+- Phase 25.3 inserted after Phase 25: session-workspace parity (URGENT)
 
 ### Pending Todos
 
@@ -407,8 +408,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-02T09:53:15.795Z
-Stopped at: Phase 25.2 context gathered
-Resume file: None
+Last session: 2026-05-03T09:35:22.549Z
+Stopped at: Phase 25.3 context gathered
+Resume file: .planning/phases/25.3-session-workspace-parity/25.3-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
