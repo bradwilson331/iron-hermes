@@ -183,6 +183,16 @@ pub trait MemoryManagerHandle: Send + Sync {
 pub trait StateStoreHandle: Send + Sync {
     /// List recent sessions (up to `limit`). Returns formatted text.
     fn list_sessions_text(&self, limit: usize) -> String;
+    /// Phase 25.3 D-W-2: list recent sessions filtered by workspace_root.
+    ///
+    /// `workspace_root` of `None` returns the same listing as `list_sessions_text`
+    /// (no filter — backward compat). `Some(path)` filters to sessions whose
+    /// `workspace_root` column equals `path` exactly.
+    fn list_sessions_text_filtered(
+        &self,
+        limit: usize,
+        workspace_root: Option<&str>,
+    ) -> String;
     /// Get history for `session_id` as formatted text.
     fn history_text(&self, session_id: &str) -> String;
     /// Export session as formatted text.

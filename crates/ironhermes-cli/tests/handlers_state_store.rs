@@ -34,15 +34,30 @@ struct TestStateStoreAdapter(Arc<Mutex<StateStore>>);
 
 impl StateStoreHandle for TestStateStoreAdapter {
     fn list_sessions_text(&self, limit: usize) -> String {
+        self.list_sessions_text_filtered(limit, None)
+    }
+
+    fn list_sessions_text_filtered(
+        &self,
+        limit: usize,
+        workspace_root: Option<&str>,
+    ) -> String {
         let guard = match self.0.lock() {
             Ok(g) => g,
             Err(_) => return "StateStore lock poisoned.".to_string(),
         };
-        match guard.list_sessions(None, limit) {
-            Ok(sessions) if sessions.is_empty() => "No sessions found.".to_string(),
+        match guard.list_sessions_filtered(None, limit, workspace_root) {
+            Ok(sessions) if sessions.is_empty() => match workspace_root {
+                Some(ws) => format!("No sessions found for workspace: {ws}"),
+                None => "No sessions found.".to_string(),
+            },
             Ok(sessions) => {
                 let lines: Vec<String> = sessions.iter().map(|s| format!("  {}", s.id)).collect();
-                format!("Recent sessions:\n{}", lines.join("\n"))
+                let header = match workspace_root {
+                    Some(ws) => format!("Recent sessions (workspace={ws}):"),
+                    None => "Recent sessions:".to_string(),
+                };
+                format!("{header}\n{}", lines.join("\n"))
             }
             Err(e) => format!("Error listing sessions: {e}"),
         }
