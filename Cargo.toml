@@ -2,6 +2,7 @@
 members = [
     "crates/ironhermes-core",
     "crates/ironhermes-state",
+    "crates/ironhermes-trajectory",
     "crates/ironhermes-tools",
     "crates/ironhermes-agent",
     "crates/ironhermes-cli",
