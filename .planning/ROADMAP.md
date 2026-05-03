@@ -501,6 +501,19 @@ Plans:
 
 **Phase directory:** `.planning/phases/25-toolset-management/`
 
+### Phase 25.5: iron_hermes_ui (INSERTED)
+
+**Goal:** Wire the existing Dioxus 0.7.1 UI crate (13 shell components, all mock data) to the live IronHermes backend via Fullstack Dioxus — server functions for commands/config/sessions, WebSocket for streaming chat. Every mock data source replaced with real backend calls. Separate binary (dx build), additive surface alongside TUI and Telegram, separate session namespace. Imports ironhermes-core + ironhermes-agent + ironhermes-state + ironhermes-tools directly behind server feature gate.
+**Depends on:** Phase 25
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 25.5 to break down)
+
+**Phase directory:** `.planning/phases/25.5-iron-hermes-ui/`
+
+---
+
 ### Phase 25.4: curator + learning loop (INSERTED)
 
 **Goal:** Session-to-skill Curator subsystem — heuristic gate (`tool_calls >= 3` + impactful tool + `duration >= 30s`) plus LLM educational-value scoring (>=7 promotes) via the Phase 26 cascade `"curator"` role; emits Phase 19 SKILL.md files into `<workspace>/skills/<slug>/` (or global fallback); fires automatically on `/new`, `/clear`, and gateway idle-timeout sweep, plus on-demand via `/curate` slash and `hermes curate` CLI. CURATOR_PROMPT must be authored from scratch — no Python upstream precedent (the Python `agent/curator.py` is a skill-consolidator, not a session-to-skill creator). Depends on Phase 25.3 trajectory crate (input data), Workspace newtype (skill output destination), and RESERVED_ROLE_NAMES["curator"] from 25.3 Plan 0.
