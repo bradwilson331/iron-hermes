@@ -132,6 +132,29 @@ pub trait ToolsetSessionHandle: Send + Sync {
 }
 
 // =============================================================================
+// TrajectoryWriterHandle trait — Phase 25.3 Plan 06 (D-T-3)
+// =============================================================================
+
+/// Phase 25.3 D-T-3 cycle-break: trait-object handle for per-tool-call trajectory
+/// logging. Defined here (in ironhermes-core) so `CommandContext` can hold a
+/// trajectory writer without ironhermes-core taking a path dep on
+/// ironhermes-trajectory (which would break the strict leaf-crate convention).
+///
+/// The canonical impl is `ironhermes_trajectory::TrajectoryWriterHandleImpl`,
+/// a thin `Arc<Mutex<TrajectoryWriter>>` wrapper. Callers pass a
+/// pre-serialized JSON line (one trajectory entry, no trailing newline) — the
+/// impl handles locking, write, and fsync.
+///
+/// Mirrors `ToolsetSessionHandle` (Phase 25 Plan 04 D-06),
+/// `MemoryManagerHandle` (Phase 20), and `SummarizationClientHandle` (Phase 25.2).
+pub trait TrajectoryWriterHandle: Send + Sync {
+    /// Append a pre-serialized JSONL line. Implementations are responsible for
+    /// locking, write, and fsync. Returns `Err` only on unrecoverable IO errors;
+    /// callers MUST log + continue (best-effort ledger — never aborts an agent turn).
+    fn append_json_line(&self, line: &str) -> anyhow::Result<()>;
+}
+
+// =============================================================================
 // Phase 22.4.2 Plan 00 — D-04 handle traits
 // =============================================================================
 //
@@ -280,6 +303,21 @@ pub struct CommandContext {
     /// Slash command enable/disable mutate ONLY the session's live toolset config; they do
     /// NOT write to config.yaml (D-06). The CLI subcommand writes to config.yaml instead.
     pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+
+    /// Phase 25.3 D-W-2: per-cwd Workspace resolved at session start (frozen-snapshot
+    /// pattern, mirrors Phase 17/18). Consumed by `/sessions --workspace` filter (cmd_sessions),
+    /// `/export-session` slash (cmd_export_session), and the trajectory directory scoping
+    /// in CommandContext.trajectory_writer. PromptBuilder Identity-slot Workspace line
+    /// is wired separately at session-start (Plan 7 — does NOT go through CommandContext).
+    pub workspace: Option<Arc<crate::workspace::Workspace>>,
+
+    /// Phase 25.3 D-T-3: trait-object handle for per-tool-call JSONL ledger.
+    /// Trait-object form (NOT Arc<Mutex<TrajectoryWriter>>) preserves the strict
+    /// leaf-crate status of ironhermes-core. The impl lives in ironhermes-trajectory
+    /// (`TrajectoryWriterHandleImpl`); the dep direction is `trajectory -> core`.
+    /// Mirrors the ToolsetSessionHandle / MemoryManagerHandle / SummarizationClientHandle
+    /// cycle-break pattern.
+    pub trajectory_writer: Option<Arc<dyn TrajectoryWriterHandle>>,
 }
 
 impl CommandContext {
@@ -313,6 +351,10 @@ impl CommandContext {
             cron_store: None,
             // Phase 25 Plan 04 (D-06): ToolsetSessionHandle for /toolset slash UI.
             toolset_session: None,
+            // Phase 25.3 D-W-2: Workspace newtype for /sessions filter + Curator output destination.
+            workspace: None,
+            // Phase 25.3 D-T-3: TrajectoryWriter for per-tool-call JSONL ledger.
+            trajectory_writer: None,
         }
     }
 
@@ -429,6 +471,31 @@ impl CommandContext {
     /// Builder: attach a ToolsetSessionHandle for `/toolset` session-only mutations (Phase 25 D-06).
     pub fn with_toolset_session(mut self, handle: Arc<dyn ToolsetSessionHandle>) -> Self {
         self.toolset_session = Some(handle);
+        self
+    }
+
+    /// Builder: attach a Workspace for session-scoped project resolution (Phase 25.3 D-W-2).
+    ///
+    /// Resolved ONCE at session start by `ironhermes_core::workspace::resolve_from_cwd`
+    /// (Plan 8 wires this at all 4 CommandContext-construction sites). Frozen-snapshot
+    /// — never mutated mid-session (Pitfall 2 cache stability).
+    pub fn with_workspace(mut self, workspace: Arc<crate::workspace::Workspace>) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
+    /// Builder: attach a trajectory writer handle for per-tool-call JSONL logging
+    /// (Phase 25.3 D-T-3). Accepts any `TrajectoryWriterHandle` impl; the canonical
+    /// implementation is `ironhermes_trajectory::TrajectoryWriterHandleImpl`.
+    ///
+    /// Plan 9 wires the AgentLoop callback that serializes a `TrajectoryEntry` and
+    /// calls `handle.append_json_line(&line)`. Plan 8 attaches this at all 4
+    /// CommandContext-construction sites.
+    pub fn with_trajectory_writer(
+        mut self,
+        handle: Arc<dyn TrajectoryWriterHandle>,
+    ) -> Self {
+        self.trajectory_writer = Some(handle);
         self
     }
 }
@@ -549,5 +616,88 @@ mod plan_21_7_07_tests {
         let p = c.process_registry.as_ref().unwrap();
         assert_eq!(p.tracked(), 1);
         assert_eq!(p.snapshot_json()["running"], 1);
+    }
+}
+
+#[cfg(test)]
+mod plan_25_3_tests {
+    use super::*;
+    use crate::workspace::Workspace;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+
+    fn make_ctx() -> CommandContext {
+        CommandContext::new(
+            Platform::Local,
+            "sess-25.3".to_string(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn sample_workspace() -> Workspace {
+        Workspace {
+            root: PathBuf::from("/tmp/fake-root"),
+            soul_path: None,
+            agents_chain: vec![],
+            memory_dir: PathBuf::from("/tmp/fake-root/.ironhermes/memory"),
+            skills_dir: PathBuf::from("/tmp/fake-root/skills"),
+            tools_config: None,
+        }
+    }
+
+    #[test]
+    fn new_context_has_no_workspace_or_trajectory() {
+        let ctx = make_ctx();
+        assert!(ctx.workspace.is_none(), "workspace defaults to None");
+        assert!(
+            ctx.trajectory_writer.is_none(),
+            "trajectory_writer defaults to None"
+        );
+    }
+
+    #[test]
+    fn with_workspace_attaches_handle() {
+        let ws = Arc::new(sample_workspace());
+        let ctx = make_ctx().with_workspace(ws.clone());
+        assert!(ctx.workspace.is_some());
+        assert_eq!(
+            ctx.workspace.as_ref().unwrap().root,
+            PathBuf::from("/tmp/fake-root")
+        );
+        // Frozen-snapshot semantics: the Arc inside ctx points to the same instance.
+        assert!(Arc::ptr_eq(ctx.workspace.as_ref().unwrap(), &ws));
+    }
+
+    // A minimal in-test impl of TrajectoryWriterHandle to avoid taking a
+    // dev-dep on ironhermes-trajectory from ironhermes-core (preserves leaf-crate
+    // status even in tests). The real impl lives in ironhermes-trajectory.
+    struct NoopHandle;
+    impl TrajectoryWriterHandle for NoopHandle {
+        fn append_json_line(&self, _line: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn with_trajectory_writer_attaches_handle() {
+        let handle: Arc<dyn TrajectoryWriterHandle> = Arc::new(NoopHandle);
+        let ctx = make_ctx().with_trajectory_writer(handle.clone());
+        assert!(ctx.trajectory_writer.is_some());
+        // Identity check: the Arc inside ctx points to the same trait object.
+        assert!(Arc::ptr_eq(ctx.trajectory_writer.as_ref().unwrap(), &handle));
+    }
+
+    #[test]
+    fn builders_chain_with_existing_methods() {
+        let handle: Arc<dyn TrajectoryWriterHandle> = Arc::new(NoopHandle);
+        let ws = Arc::new(sample_workspace());
+        let ctx = make_ctx()
+            .with_workspace(ws)
+            .with_trajectory_writer(handle);
+        assert!(ctx.workspace.is_some());
+        assert!(ctx.trajectory_writer.is_some());
+        // Pre-existing field defaults preserved
+        assert!(ctx.toolset_session.is_none());
+        assert!(ctx.state_store.is_none());
     }
 }

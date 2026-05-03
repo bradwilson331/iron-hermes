@@ -64,6 +64,23 @@ impl TrajectoryWriter {
         Ok(())
     }
 
+    /// Append a pre-serialized JSON line + fsync.
+    ///
+    /// Phase 25.3 Plan 6: the `TrajectoryWriterHandle` trait-object impl
+    /// (`TrajectoryWriterHandleImpl` in `crate::handle`) uses this to write a
+    /// pre-serialized `TrajectoryEntry` without re-serializing through `append`.
+    /// Caller passes the JSON line WITHOUT a trailing newline — this method
+    /// appends `\n` and calls `sync_data()` (same crash-safety contract as `append`).
+    pub fn append_raw_line(&mut self, line: &str) -> Result<()> {
+        self.file.write_all(line.as_bytes())
+            .with_context(|| format!("write trajectory raw line to {}", self.path.display()))?;
+        self.file.write_all(b"\n")
+            .with_context(|| format!("write trajectory newline to {}", self.path.display()))?;
+        self.file.sync_data()
+            .with_context(|| format!("fsync trajectory file {}", self.path.display()))?;
+        Ok(())
+    }
+
     /// Path of the open trajectory file.
     pub fn path(&self) -> &Path {
         &self.path
