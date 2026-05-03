@@ -12,5 +12,6 @@
 //! Plan 9: AgentLoop callback wires writer.append() after each tool result.
 
 pub mod format;
+pub mod writer;
 
 pub use format::{ImpactLevel, TrajectoryEntry};
