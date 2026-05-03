@@ -501,6 +501,26 @@ Plans:
 
 **Phase directory:** `.planning/phases/25-toolset-management/`
 
+### Phase 25.4: curator + learning loop (INSERTED)
+
+**Goal:** Session-to-skill Curator subsystem — heuristic gate (`tool_calls >= 3` + impactful tool + `duration >= 30s`) plus LLM educational-value scoring (>=7 promotes) via the Phase 26 cascade `"curator"` role; emits Phase 19 SKILL.md files into `<workspace>/skills/<slug>/` (or global fallback); fires automatically on `/new`, `/clear`, and gateway idle-timeout sweep, plus on-demand via `/curate` slash and `hermes curate` CLI. CURATOR_PROMPT must be authored from scratch — no Python upstream precedent (the Python `agent/curator.py` is a skill-consolidator, not a session-to-skill creator). Depends on Phase 25.3 trajectory crate (input data), Workspace newtype (skill output destination), and RESERVED_ROLE_NAMES["curator"] from 25.3 Plan 0.
+**Requirements**: D-C-1 through D-C-4 (CONTEXT-locked decisions; carved out of original Phase 25.3 scope on 2026-05-03 after CONTEXT scope-concern flag + RESEARCH agreed on a 2-phase split). LEARN-* requirements may be reassigned during /gsd-discuss-phase 25.4.
+**Depends on:** Phase 25.3 (trajectory crate + Workspace newtype + RESERVED_ROLE_NAMES["curator"] from Plan 0)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-discuss-phase 25.4 then /gsd-plan-phase 25.4 to break down)
+
+### Phase 25.3: session-workspace parity (INSERTED)
+
+**Goal:** Land three foundational subsystems from the hermes-agent parity work, plus the Phase 26 cascade prerequisite for Phase 25.4's Curator: (1) new `ironhermes-trajectory` crate — append-only JSONL ledger writing per-tool-call records to `<workspace-or-home>/.ironhermes/sessions/<id>/trajectories.jsonl` from all four dispatch surfaces (CLI run_single, classic-TUI run_chat, ratatui run_chat_ratatui, Telegram gateway); (2) hybrid flat-file session export — SQLite stays canonical, on-demand `hermes session export <id>` + `/export-session` slash produce the four-file folder layout (`messages.json` + `metadata.json` + `context.json` + `trajectories.jsonl`); (3) `Workspace` newtype with cwd walk-up resolution, frozen-snapshot semantics, `[Workspace: <root>]` system prompt slot, `/sessions --workspace` filter, schema migration v8 adding `workspace_root TEXT NULL` to the sessions table; (4) Plan 0 mechanical addition of `"curator"` to `RESERVED_ROLE_NAMES` (6 -> 7) so Phase 25.4 can `resolve_role("curator")` without forward references. Curator subsystem itself is carved out into Phase 25.4.
+**Requirements**: D-T-1 through D-T-4, D-F-1, D-F-2, D-W-1, D-W-2 (CONTEXT-locked decisions; D-C-1..4 moved to Phase 25.4 after the 2026-05-03 scope split). No REQUIREMENTS.md tags pre-mapped — these CONTEXT decisions are the requirement set.
+**Depends on:** Phase 25 (toolset management infrastructure precedent), Phase 25.2 (CommandContext parity-guard pattern + AnyClient*Handle template + redact_secrets_in_url precedent)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 25.3 to break down)
+
 ### Phase 25.2: web extract tools (INSERTED)
 
 **Goal:** A single `web_extract` tool that unifies multi-URL HTML/PDF/YouTube extraction behind one dispatcher, normalizes everything to Markdown, runs a tiered LLM summarization pipeline (5K direct / 5K-500K single-pass / 500K-2M chunked synthesis / >2M refuse) with aux-LLM routing via Phase 26 `resolve_role("summarization")` cascade, and ships in the existing `web` toolset. Extends `web_read` patterns; adds Exa + Tavily provider backends and PDF support; YouTube dispatched via the Phase 19 `youtube-content` skill.
