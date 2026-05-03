@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
 
+// Phase 25.3 D-F-1: 4-file directory export (messages/metadata/context/trajectories).
+pub mod session_export;
+pub use session_export::SessionDirectoryExport;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
