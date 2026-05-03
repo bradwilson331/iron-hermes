@@ -106,12 +106,13 @@ pub struct GatewayMessageHandler {
     /// `.with_workspace` so /sessions --workspace + trajectory scoping see the
     /// resolved root.
     workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
-    /// Phase 25.3 D-T-3: TrajectoryWriter clone — propagated from
-    /// `GatewayRunner.trajectory_writer`. Per-message slash dispatch attaches
-    /// via `.with_trajectory_writer` so the per-message CommandContext sees the
-    /// shared writer; AgentLoop wireup (Plan 9) consumes it for per-tool-call
-    /// JSONL appends.
-    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    // Phase 25.3-15 CR-02 close-out: the per-handler `trajectory_writer` field
+    // was REMOVED. The previous implementation held a single process-wide
+    // handle keyed by `gateway-<random-uuid>` that was unreachable from
+    // `hermes session export <session_id>`. Per-session writers are now owned
+    // (and lazily opened) by `SessionStore`, keyed by the canonical SQLite
+    // session UUID. `run_agent` reaches them via
+    // `self.session_store.write().await.get_or_create_trajectory_writer(...)`.
 }
 
 impl GatewayMessageHandler {
@@ -146,7 +147,8 @@ impl GatewayMessageHandler {
             browser_session: None,
             toolset_session: None,
             workspace: None,        // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
-            trajectory_writer: None, // Phase 25.3 D-T-3: wired by GatewayRunner::build_gateway_handler
+            // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
+            // writers live in SessionStore, looked up by canonical session UUID.
         }
     }
 
@@ -166,15 +168,11 @@ impl GatewayMessageHandler {
         self.workspace = Some(workspace);
     }
 
-    /// Phase 25.3 D-T-3: install the TrajectoryWriter handle clone. Caller is
-    /// `GatewayRunner::build_gateway_handler`. Per-message dispatch attaches
-    /// via `.with_trajectory_writer` on the CommandContext.
-    pub fn set_trajectory_writer(
-        &mut self,
-        handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
-    ) {
-        self.trajectory_writer = Some(handle);
-    }
+    // Phase 25.3-15 CR-02 close-out: `set_trajectory_writer` removed. The
+    // gateway no longer holds a single process-wide writer; per-session
+    // writers are owned by `SessionStore` (lazily opened, cached by session
+    // UUID). Configuration goes through `GatewayRunner::set_trajectory_root`
+    // -> `SessionStore::set_trajectory_root`.
 
     /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install a shared BudgetHandle.
     /// Clones are threaded into each per-request `AgentLoop` so parent + any
@@ -320,12 +318,14 @@ impl GatewayMessageHandler {
         } else {
             ctx
         };
-        // Phase 25.3 D-T-3: attach TrajectoryWriter for slash-dispatch context.
-        let ctx = if let Some(tw) = &self.trajectory_writer {
-            ctx.with_trajectory_writer(tw.clone())
-        } else {
-            ctx
-        };
+        // Phase 25.3-15 CR-02 close-out: slash-dispatch CommandContext no longer
+        // attaches a trajectory writer. The previous implementation attached a
+        // process-wide handle that was unreachable from `hermes session export`.
+        // Per-tool trajectory writes happen inside `run_agent` via the
+        // SessionStore-cached, per-session writer keyed by the canonical
+        // SQLite session UUID. Slash commands themselves do not currently
+        // record trajectory entries; if Phase 25.4 needs that, it can pull
+        // the per-session handle out of `SessionStore` here.
 
         let parts: Vec<&str> = command_input.split_whitespace().collect();
         let args: Vec<&str> = if parts.len() > 1 { parts[1..].to_vec() } else { vec![] };
@@ -667,15 +667,42 @@ impl GatewayMessageHandler {
             agent = agent.with_browser_session(sess.clone());
         }
 
-        // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
-        // tool call in this per-message AgentLoop lands a TrajectoryEntry on disk.
-        if let Some(ref tw) = self.trajectory_writer {
-            agent = agent.with_trajectory_writer(tw.clone());
+        // Phase 25.3-15 CR-02 close-out: open (or reuse) a per-session
+        // trajectory writer keyed by the canonical SQLite session UUID. The
+        // writer is cached in `SessionStore` so subsequent messages on the
+        // same chat reuse one file handle (no leak across long-running
+        // gateway sessions). Replaces the process-wide handle that was
+        // previously attached at GatewayMessageHandler construction.
+        //
+        // `gateway_session.session_id` is the SAME UUID that
+        // `state.create_session(...)` received in `SessionStore::get_or_create`,
+        // so `hermes session export <id>` and `SessionDirectoryExport::write`
+        // can find the trajectory file at the canonical path
+        // `<trajectory_root>/<session_id>/trajectories.jsonl`.
+        let canonical_session_id = {
+            let store = self.session_store.read().await;
+            store
+                .get(&key)
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default()
+        };
+        if !canonical_session_id.is_empty() {
+            let traj_handle = {
+                let mut store = self.session_store.write().await;
+                store.get_or_create_trajectory_writer(&canonical_session_id)
+            };
+            if let Some(tw) = traj_handle {
+                agent = agent.with_trajectory_writer(tw);
+            }
         }
 
         // Phase 18 Plan 09: wire agent-side context compression (honors
         // config.agent.context_engine + config.agent.compression_threshold).
         // GAP-2/GAP-3: pass memory_manager so on_pre_compress fires on compression.
+        // Phase 25.3-15 CR-02: AgentLoop telemetry retains the per-message
+        // session_id_str (`gw:<chat_id>:<sender_id>`) — this identifier feeds
+        // hooks / on_session_end and is intentionally distinct from the
+        // canonical SQLite session UUID used for trajectory file paths.
         let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
         let context_length = self.resolver.resolve_for_main().context_length();
         agent = ironhermes_agent::attach_context_engine(

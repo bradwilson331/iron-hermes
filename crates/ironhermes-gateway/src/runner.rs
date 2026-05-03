@@ -75,10 +75,14 @@ pub struct GatewayRunner {
     /// clones it into the per-message handler so /sessions --workspace and trajectory
     /// scoping see the resolved root.
     workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
-    /// Phase 25.3 D-T-3: TrajectoryWriter shared across the gateway's per-message
-    /// handlers. Plan 9 wires the AgentLoop callback that calls writer.append() after
-    /// each tool result. `build_gateway_handler` clones it into the handler.
-    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    /// Phase 25.3-15 CR-02 close-out: trajectory directory ROOT for per-session
+    /// lazy-open. Replaces the old `trajectory_writer` field which held a single
+    /// process-wide handle keyed by `gateway-<random-uuid>` and was unreachable
+    /// from `hermes session export <session_id>`. Per-session writers are owned
+    /// by `SessionStore` (cached, lazy-opened on first tool call), keyed by the
+    /// canonical SQLite session UUID. `set_trajectory_root` propagates this
+    /// path into the inner `SessionStore` via `try_write`.
+    trajectory_root: Option<std::path::PathBuf>,
     cancel: CancellationToken,
 }
 
@@ -107,7 +111,7 @@ impl GatewayRunner {
             browser_session: None, // Phase 25.1: wired by run_gateway before start()
             toolset_session: None, // Phase 25.2 Plan 15 follow-up: wired by run_gateway before start()
             workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
-            trajectory_writer: None, // Phase 25.3 D-T-3: wired by run_gateway before start()
+            trajectory_root: None, // Phase 25.3-15 CR-02: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -154,15 +158,30 @@ impl GatewayRunner {
         }
     }
 
-    /// Phase 25.3 D-T-3: install the TrajectoryWriter for the gateway surface.
-    /// Caller is `run_gateway` in ironhermes-cli (created alongside StateStore open).
-    /// `build_gateway_handler` clones it into the handler so per-message AgentLoops
-    /// can append trajectory entries via the trait-object handle.
-    pub fn set_trajectory_writer(
-        &mut self,
-        handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
-    ) {
-        self.trajectory_writer = Some(handle);
+    /// Phase 25.3-15 CR-02 close-out: install the trajectory directory ROOT so
+    /// the inner `SessionStore` can lazily open per-session writers keyed by
+    /// the canonical SQLite session UUID. Replaces the old
+    /// `set_trajectory_writer` (which fed a process-wide writer that was
+    /// unreachable from `hermes session export <session_id>`).
+    ///
+    /// Caller is `run_gateway` in ironhermes-cli (created alongside the
+    /// workspace + StateStore open). The path is propagated into the inner
+    /// `SessionStore` via `try_write` — the `SessionStore` is exclusively held
+    /// by `GatewayRunner` during the setup phase before `start()` is called,
+    /// so `try_write` cannot legitimately fail. We log and continue rather
+    /// than panic on the impossible-failure path so a future refactor that
+    /// moves the call onto a contended path surfaces the misuse loudly without
+    /// crashing the gateway. Mirrors the `set_workspace` propagation pattern
+    /// added in Plan 25.3-14.
+    pub fn set_trajectory_root(&mut self, root: std::path::PathBuf) {
+        self.trajectory_root = Some(root.clone());
+        match self.session_store.try_write() {
+            Ok(mut s) => s.set_trajectory_root(root),
+            Err(_) => tracing::warn!(
+                "Phase 25.3-15: SessionStore was held during set_trajectory_root; \
+                 per-session trajectories may not be wired"
+            ),
+        }
     }
 
     /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install the shared BudgetHandle
@@ -304,11 +323,12 @@ impl GatewayRunner {
         if let Some(ref ws) = self.workspace {
             handler.set_workspace(ws.clone());
         }
-        // Phase 25.3 D-T-3: thread the shared TrajectoryWriter handle into the
-        // gateway handler so per-message dispatch + AgentLoop see the same writer.
-        if let Some(ref tw) = self.trajectory_writer {
-            handler.set_trajectory_writer(tw.clone());
-        }
+        // Phase 25.3-15 CR-02 close-out: trajectory writers are no longer
+        // process-wide; per-session writers are owned (and lazily opened) by
+        // `SessionStore` keyed by the canonical SQLite session UUID. The
+        // handler reaches them via `self.session_store.write().await
+        // .get_or_create_trajectory_writer(&canonical_session_id)` inside
+        // `run_agent`, so no clone is plumbed through here.
 
         // Phase 21.3: initialize global token estimator from model's encoding
         let main_ep = self.resolver.resolve_for_main();
