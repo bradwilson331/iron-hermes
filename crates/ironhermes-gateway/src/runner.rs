@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use ironhermes_core::commands::context::ToolsetSessionHandle;
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::engine_factory::build_context_engine;
@@ -63,6 +64,13 @@ pub struct GatewayRunner {
     /// Cloned into `build_gateway_handler` so per-request AgentLoops receive
     /// `with_browser_session(...)` and hold a reference (T-25.1-04 drop semantics).
     browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1 close-out for
+    /// Telegram): production `ToolsetSessionHandle` for the gateway's
+    /// `/toolset` slash dispatch. `build_gateway_handler` clones it into
+    /// the handler so per-request CommandContext can delegate to
+    /// `RegistryToolsetSession::render_list` etc. instead of returning the
+    /// "toolset session handle not configured" fallback.
+    toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
     cancel: CancellationToken,
 }
 
@@ -89,8 +97,19 @@ impl GatewayRunner {
             process_registry: None, // Plan 21.7-06: wired by run_gateway before start()
             subagent_registry: None, // Plan 21.7-07: wired by run_gateway before start()
             browser_session: None, // Phase 25.1: wired by run_gateway before start()
+            toolset_session: None, // Phase 25.2 Plan 15 follow-up: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1 close-out for
+    /// Telegram): install the production `ToolsetSessionHandle` so the
+    /// gateway's `/toolset` slash command works. Mirrors
+    /// `set_memory_manager` / `set_subagent_registry`. Caller is
+    /// `run_gateway` in ironhermes-cli, which threads the same Arc here that
+    /// the REPL and single-shot binary already use.
+    pub fn set_toolset_session(&mut self, handle: Arc<dyn ToolsetSessionHandle>) {
+        self.toolset_session = Some(handle);
     }
 
     /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install the shared BudgetHandle
@@ -218,6 +237,13 @@ impl GatewayRunner {
         // per-request AgentLoop calls with_browser_session (T-25.1-04 drop semantics).
         if let Some(ref sess) = self.browser_session {
             handler.set_browser_session(sess.clone());
+        }
+
+        // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): thread the
+        // production toolset session handle into the gateway handler so the
+        // `/toolset` slash command works in Telegram.
+        if let Some(ref handle) = self.toolset_session {
+            handler.set_toolset_session(handle.clone());
         }
 
         // Phase 21.3: initialize global token estimator from model's encoding

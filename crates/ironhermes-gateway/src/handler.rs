@@ -10,7 +10,7 @@ use ironhermes_core::commands::{
     CommandResult as CoreCommandResult, CommandRouter, ResolveResult,
     registry::build_registry,
 };
-use ironhermes_core::commands::context::CommandContext;
+use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::budget::BudgetHandle;
@@ -92,6 +92,15 @@ pub struct GatewayMessageHandler {
     /// so the AgentLoop holds a reference — ensuring drop semantics clean up the
     /// browser process when the last Arc clone drops (T-25.1-04).
     browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): production
+    /// `ToolsetSessionHandle` for the gateway's `/toolset` slash dispatch.
+    /// Plan 15 wired this in main.rs run_gateway but never threaded the Arc
+    /// through to GatewayMessageHandler — without this field, the gateway's
+    /// CommandContext at handler.rs:254 has `toolset_session: None` and
+    /// cmd_toolset (handlers.rs:782) returns the documented fallback string
+    /// in Telegram (UAT Test 2 reproduced this twice — REPL via tui_rata
+    /// and Telegram via this gateway path).
+    toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
 }
 
 impl GatewayMessageHandler {
@@ -124,7 +133,18 @@ impl GatewayMessageHandler {
             process_registry: None,
             subagent_registry: None,
             browser_session: None,
+            toolset_session: None,
         }
+    }
+
+    /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1 close-out for
+    /// Telegram): install the production `ToolsetSessionHandle` so the
+    /// gateway's `/toolset list/show/enable/disable` slash commands work.
+    /// Mirrors `set_memory_manager` / `set_subagent_registry` lifecycle —
+    /// caller in main.rs run_gateway threads in the same Arc that the
+    /// REPL and single-shot binary already use.
+    pub fn set_toolset_session(&mut self, handle: Arc<dyn ToolsetSessionHandle>) {
+        self.toolset_session = Some(handle);
     }
 
     /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install a shared BudgetHandle.
@@ -256,6 +276,15 @@ impl GatewayMessageHandler {
             session_key.to_string_key(),
             agent_running,
         );
+        // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
+        // production toolset session handle so /toolset list/show/enable/disable
+        // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
+        // circuits on None with the documented fallback string.
+        let ctx = if let Some(handle) = &self.toolset_session {
+            ctx.with_toolset_session(handle.clone())
+        } else {
+            ctx
+        };
 
         let parts: Vec<&str> = command_input.split_whitespace().collect();
         let args: Vec<&str> = if parts.len() > 1 { parts[1..].to_vec() } else { vec![] };

@@ -2380,6 +2380,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // Phase 25.1 D-17: wire shared browser session Arc into the runner so per-request
     // AgentLoops receive with_browser_session (T-25.1-04 drop semantics).
     runner.set_browser_session(browser_session.clone());
+    // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): thread the same
+    // ToolsetSessionHandle into the runner so the gateway's per-request
+    // CommandContext gets `.with_toolset_session(handle)` and `/toolset`
+    // works in Telegram. Without this, the runner→handler→ctx wiring
+    // chain stops at the runner and ctx.toolset_session stays None.
+    runner.set_toolset_session(toolset_session.clone());
     // GAP-8 (Phase 21.2 Plan 11): wire MCP manager into runner's shutdown
     // path so Ctrl+C actually returns when stdio MCP servers are connected.
     // build_mcp_manager returns Option<Arc<McpManager>>; pass the Arc clone
