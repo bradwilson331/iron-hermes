@@ -1,0 +1,31 @@
+/* Phase 3 design-gap fix: animate the 10-cell scanner via pure CSS.
+   Resolves SHELL-09 + CONTEXT D-08 simultaneously. The prototype's
+   shell.jsx Scanner (lines 5-27) uses React setInterval; pure-CSS
+   port is pixel-equivalent and GPU-friendly.
+   Period and width come from --scanner-period / --scanner-width in
+   design-tokens.css (already loaded earlier in the cascade). */
+
+@keyframes wh-scanner-tick {
+   0%    { color: var(--fg-dim); }
+   11.1% { color: color-mix(in oklab, var(--accent-primary) 50%, var(--fg-dim)); }
+   22.2% { color: var(--accent-primary); }
+   33.3% { color: var(--accent-primary-hi); }
+   44.4% { color: var(--accent-primary); }
+   55.5% { color: color-mix(in oklab, var(--accent-primary) 50%, var(--fg-dim)); }
+   66.6% { color: var(--fg-dim); }
+   100%  { color: var(--fg-dim); }
+}
+
+.wh-scanner.is-active span {
+   animation: wh-scanner-tick var(--scanner-period, 1800ms) linear infinite;
+}
+.wh-scanner.is-active span:nth-child(1)  { animation-delay: 0ms; }
+.wh-scanner.is-active span:nth-child(2)  { animation-delay: -100ms; }
+.wh-scanner.is-active span:nth-child(3)  { animation-delay: -200ms; }
+.wh-scanner.is-active span:nth-child(4)  { animation-delay: -300ms; }
+.wh-scanner.is-active span:nth-child(5)  { animation-delay: -400ms; }
+.wh-scanner.is-active span:nth-child(6)  { animation-delay: -500ms; }
+.wh-scanner.is-active span:nth-child(7)  { animation-delay: -600ms; }
+.wh-scanner.is-active span:nth-child(8)  { animation-delay: -700ms; }
+.wh-scanner.is-active span:nth-child(9)  { animation-delay: -800ms; }
+.wh-scanner.is-active span:nth-child(10) { animation-delay: -900ms; }

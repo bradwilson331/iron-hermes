@@ -15,6 +15,24 @@ members = [
     "providers/memory-sqlite",
     "providers/memory-grafeo",
     "providers/memory-duckdb",
+    "crates/iron_hermes_ui",
+]
+default-members = [
+    "crates/ironhermes-core",
+    "crates/ironhermes-state",
+    "crates/ironhermes-trajectory",
+    "crates/ironhermes-tools",
+    "crates/ironhermes-agent",
+    "crates/ironhermes-cli",
+    "crates/ironhermes-gateway",
+    "crates/ironhermes-cron",
+    "crates/ironhermes-hooks",
+    "crates/ironhermes-exec",
+    "crates/ironhermes-hub",
+    "crates/ironhermes-mcp",
+    "providers/memory-sqlite",
+    "providers/memory-grafeo",
+    "providers/memory-duckdb",
 ]
 resolver = "2"
 

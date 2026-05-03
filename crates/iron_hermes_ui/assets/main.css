@@ -1,0 +1,12 @@
+/* IronHermes — base shell styles (Phase 2)
+ *
+ * Most base rules live in design-tokens.css (the verbatim port of
+ * colors_and_type.css). This file holds only what design-tokens.css
+ * does NOT define and what is too project-specific to push upstream.
+ */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}

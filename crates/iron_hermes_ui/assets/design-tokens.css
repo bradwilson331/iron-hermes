@@ -1,0 +1,245 @@
+/* Source: warp2ironhermes/project/ironhermes/colors_and_type.css
+ * Copied: 2026-05-03 (Phase 2)
+ * DO NOT EDIT — re-sync from source if upstream changes.
+ */
+/* IronHermes Design System — colors & type
+ *
+ * Everything here is derived from the `colored` crate usage in the IronHermes
+ * CLI/TUI (see crates/ironhermes-cli/src/tui/*). The product does not have
+ * hex-coded brand colors — it uses the 16 ANSI named colors. These vars are
+ * one canonical dark-terminal mapping for use in HTML mocks, slides, and docs.
+ */
+
+/* --- Webfont: Ioskeley Mono (Berkeley Mono look-alike, Iosevka-based) ---
+ * Full family: 10 weights (100–900) × Regular/Italic × 3 widths (Cond/SemiCond/Normal).
+ */
+
+/* Normal width */
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 100; font-display: swap; src: url("fonts/IoskeleyMono-Thin.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 200; font-display: swap; src: url("fonts/IoskeleyMono-ExtraLight.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 300; font-display: swap; src: url("fonts/IoskeleyMono-Light.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 350; font-display: swap; src: url("fonts/IoskeleyMono-SemiLight.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/IoskeleyMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/IoskeleyMono-Medium.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/IoskeleyMono-SemiBold.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/IoskeleyMono-Bold.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 800; font-display: swap; src: url("fonts/IoskeleyMono-ExtraBold.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: normal; font-weight: 900; font-display: swap; src: url("fonts/IoskeleyMono-Black.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: italic; font-weight: 400; font-display: swap; src: url("fonts/IoskeleyMono-Italic.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono"; font-style: italic; font-weight: 700; font-display: swap; src: url("fonts/IoskeleyMono-BoldItalic.woff2") format("woff2"); }
+
+/* SemiCondensed */
+@font-face { font-family: "Ioskeley Mono SemiCondensed"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/IoskeleyMono-SemiCondensed.woff2") format("woff2"); }
+
+/* Condensed — used for dense TUI/table labels */
+@font-face { font-family: "Ioskeley Mono Condensed"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/IoskeleyMono-Condensed.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono Condensed"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/IoskeleyMono-CondensedMedium.woff2") format("woff2"); }
+@font-face { font-family: "Ioskeley Mono Condensed"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/IoskeleyMono-CondensedBold.woff2") format("woff2"); }
+
+:root {
+  /* === ANSI palette (dark terminal default) === */
+  --ansi-black:           #0d1117;
+  --ansi-red:             #f85149;
+  --ansi-green:           #3fb950;
+  --ansi-yellow:          #d29922;
+  --ansi-blue:            #58a6ff;
+  --ansi-magenta:         #c678dd;
+  --ansi-cyan:            #4ec9b0;
+  --ansi-white:           #c9d1d9;
+
+  --ansi-bright-black:    #484f58;   /* = dimmed fg */
+  --ansi-bright-red:      #ff7b72;
+  --ansi-bright-green:    #56d364;
+  --ansi-bright-yellow:   #e3b341;
+  --ansi-bright-blue:     #79c0ff;
+  --ansi-bright-magenta:  #d7a0ea;
+  --ansi-bright-cyan:     #6fd8c2;
+  --ansi-bright-white:    #f0f6fc;
+
+  /* === Surfaces === */
+  --bg:                   var(--ansi-black);        /* main terminal bg */
+  --bg-elevated:          #161b22;                  /* HTML panel bg, not used in real TUI */
+  --border-subtle:        #30363d;
+
+  /* === Text === */
+  --fg:                   var(--ansi-white);
+  --fg-strong:            var(--ansi-bright-white);
+  --fg-dim:               #6e7681;                  /* the canonical `dimmed` */
+  --fg-disabled:          #484f58;
+
+  /* === Semantic accents (from actual codebase usage) === */
+  --brand:                #f0883e;                  /* IronHermes wordmark, section titles */
+  --brand-hi:             #ffa657;                  /* hover / highlight state of brand */
+  --accent-primary:       var(--ansi-cyan);         /* banner, Hermes:, scanner lit, mode pill */
+  --accent-primary-hi:    var(--ansi-bright-cyan);  /* scanner lit cell █ */
+  --accent-secondary:     var(--ansi-magenta);      /* model pill (pill index 1) */
+  --success:              var(--ansi-green);        /* configured, [OK], You:, provider pill */
+  --warn:                 var(--ansi-yellow);       /* [MISSING], tool name, tokens pill */
+  --danger:               var(--ansi-red);          /* not set, ^C×3 emergency, fatal errors */
+
+  /* === Pill rotation (canonical, from pills.rs) === */
+  --pill-0:               var(--accent-primary);
+  --pill-1:               var(--accent-secondary);
+  --pill-2:               var(--success);
+  --pill-3:               var(--warn);
+  --pill-4:               var(--fg-dim);
+
+  /* === Type === */
+  --font-mono: "Ioskeley Mono", "Berkeley Mono", ui-monospace, "SF Mono", "Menlo", "Consolas",
+               "Liberation Mono", monospace;
+  --font-body: var(--font-mono);   /* everything is mono */
+
+  --type-h1:      1.5rem;          /* 24px — section banner */
+  --type-h2:      1.125rem;        /* 18px — sub-section */
+  --type-body:    0.875rem;        /* 14px — default */
+  --type-small:   0.75rem;         /* 12px — dimmed hints */
+  --type-mono:    0.875rem;        /* same as body */
+
+  --leading-tight:  1.2;
+  --leading-snug:   1.3;
+  --leading-normal: 1.5;
+  --leading-loose:  1.8;
+
+  --weight-regular: 400;
+  --weight-bold:    700;
+
+  /* === Spacing (monospace cell scale; 1 cell ≈ 8px vertically) === */
+  --space-0:   0;
+  --space-1:   4px;    /* half-cell */
+  --space-2:   8px;    /* 1 cell */
+  --space-3:   16px;   /* 2 cells — default panel padding */
+  --space-4:   24px;   /* 3 cells — section gap */
+  --space-5:   32px;
+  --space-6:   48px;
+
+  --rule-width: 40ch;  /* section horizontal rule = 40 chars */
+
+  /* === Radius — always zero === */
+  --radius-0: 0px;
+
+  /* === Animation — only the scanner exists === */
+  --scanner-fps:    10;            /* 100ms/frame */
+  --scanner-period: 1800ms;        /* 18 ticks round-trip */
+  --scanner-width:  10;            /* cells */
+
+  /* === Z layering === */
+  --z-transcript: 0;
+  --z-scanner:    10;
+  --z-status:     20;
+}
+
+/* === Base === */
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--type-body);
+  line-height: var(--leading-normal);
+  font-variant-ligatures: none;    /* terminal: no programming ligatures */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* === Semantic elements === */
+h1, .h1 {
+  font-size: var(--type-h1);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-bold);
+  color: var(--accent-primary);
+  margin: 0 0 var(--space-2) 0;
+}
+
+h2, .h2 {
+  font-size: var(--type-h2);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-bold);
+  color: var(--fg-strong);
+  margin: var(--space-4) 0 var(--space-2) 0;
+}
+
+p, .body {
+  font-size: var(--type-body);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+  margin: 0 0 var(--space-3) 0;
+  text-wrap: pretty;
+}
+
+small, .small, .dim {
+  font-size: var(--type-small);
+  color: var(--fg-dim);
+}
+
+code, pre, .mono {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono);
+}
+
+pre {
+  background: transparent;
+  color: var(--fg);
+  padding: 0;
+  margin: 0;
+  white-space: pre;
+  tab-size: 4;
+}
+
+hr, .rule {
+  border: none;
+  border-top: none;
+  color: var(--fg-dim);
+  display: block;
+}
+hr::before, .rule::before {
+  content: "────────────────────────────────────────";   /* 40 × ─ */
+  color: var(--fg-dim);
+  display: inline-block;
+}
+
+/* === Utility classes mirroring `colored` crate calls === */
+.c-cyan       { color: var(--ansi-cyan); }
+.c-bright-cyan{ color: var(--ansi-bright-cyan); }
+.c-magenta    { color: var(--ansi-magenta); }
+.c-green      { color: var(--ansi-green); }
+.c-yellow     { color: var(--ansi-yellow); }
+.c-red        { color: var(--ansi-red); }
+.c-white      { color: var(--ansi-white); }
+.c-dimmed     { color: var(--fg-dim); }
+
+.bold   { font-weight: var(--weight-bold); }
+.italic { font-style: italic; }
+.dimmed { color: var(--fg-dim); }
+
+/* === Status-bar pill (positional rotation, from pills.rs) === */
+.pill       { font-weight: var(--weight-regular); }
+.pill-0     { color: var(--pill-0); }
+.pill-1     { color: var(--pill-1); }
+.pill-2     { color: var(--pill-2); }
+.pill-3     { color: var(--pill-3); }
+.pill-4, .hint { color: var(--pill-4); }
+
+.dot-sep::before {
+  content: " · ";
+  color: var(--fg-dim);
+}
+
+/* === Bracket status glyphs === */
+.ok      { color: var(--success); font-weight: var(--weight-bold); }
+.missing { color: var(--warn);    font-weight: var(--weight-bold); }
+.bad     { color: var(--danger);  font-weight: var(--weight-bold); }
+
+/* === Layout === */
+.terminal {
+  background: var(--bg);
+  color: var(--fg);
+  padding: var(--space-3);
+  border-radius: var(--radius-0);
+  min-height: 100%;
+}
+
+.panel {
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-0);
+  padding: var(--space-3);
+}

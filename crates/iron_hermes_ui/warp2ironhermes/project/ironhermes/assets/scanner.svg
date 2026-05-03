@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 28" width="220" height="28">
+  <rect width="220" height="28" fill="#0d1117"></rect>
+  <g font-family="Ioskeley Mono, JetBrains Mono, monospace" font-size="20" font-weight="700">
+    <text x="8" y="22" fill="#6e7681">░</text>
+    <text x="28" y="22" fill="#6e7681">░</text>
+    <text x="48" y="22" fill="#6e7681">░</text>
+    <text x="68" y="22" fill="#39c5cf" opacity="0.6">▒</text>
+    <text x="88" y="22" fill="#39c5cf">▓</text>
+    <text x="108" y="22" fill="#56d4dd">█</text>
+    <text x="128" y="22" fill="#39c5cf">▓</text>
+    <text x="148" y="22" fill="#39c5cf" opacity="0.6">▒</text>
+    <text x="168" y="22" fill="#6e7681">░</text>
+    <text x="188" y="22" fill="#6e7681">░</text>
+  </g>
+</svg>
