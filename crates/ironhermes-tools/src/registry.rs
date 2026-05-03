@@ -48,6 +48,25 @@ pub trait Tool: Send + Sync {
         vec![]
     }
 
+    /// Phase 25.3 D-T-1 / Discretion D-2: redact sensitive values from raw tool args
+    /// before they are recorded in the trajectory ledger.
+    ///
+    /// Default: return args unchanged (most tools have no secrets in their args).
+    /// Tools that handle credentials override this — e.g., `WebExtractTool` calls
+    /// `crate::web_extract::sanitize::redact_secrets_in_url()` (Phase 25.2 Plan 16)
+    /// on URL-typed args.
+    ///
+    /// The TrajectoryWriter (Phase 25.3 D-T-2) calls `tool.redact_args(&raw_args)`
+    /// before serializing the entry — see Plan 9 AgentLoop callback wireup.
+    ///
+    /// Contract: the returned Value is what lands in `TrajectoryEntry.args`. It MUST
+    /// preserve the structural shape (object/array/scalar) so downstream consumers
+    /// (Phase 25.4 Curator, RL pipelines) can count fields. Only string LEAVES that
+    /// contain secrets should be replaced with redacted placeholders.
+    fn redact_args(&self, raw: &serde_json::Value) -> serde_json::Value {
+        raw.clone()
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
 }
 
