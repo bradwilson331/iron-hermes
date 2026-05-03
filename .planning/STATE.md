@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: ready_to_plan
-stopped_at: Phase 25.3 context gathered
-last_updated: "2026-05-03T13:58:43.872Z"
-last_activity: 2026-05-03 -- Phase 25.3 execution started
+status: planning
+stopped_at: Phase 25.5 context gathered
+last_updated: "2026-05-03T22:45:21.241Z"
+last_activity: 2026-05-03
 progress:
-  total_phases: 25
+  total_phases: 26
   completed_phases: 16
-  total_plans: 117
-  completed_plans: 105
-  percent: 64
+  total_plans: 123
+  completed_plans: 123
+  percent: 100
 ---
 
 # Project State
@@ -392,6 +392,7 @@ Recent decisions affecting current work:
 - Phase 25.1 inserted after Phase 25: built-in browser tools — 11 tools for browser automation (URGENT)
 - Phase 25.2 inserted after Phase 25: web extract tools (URGENT)
 - Phase 25.3 inserted after Phase 25: session-workspace parity (URGENT)
+- Phase 25.5 inserted after Phase 25: iron_hermes_ui (URGENT)
 
 ### Pending Todos
 
@@ -409,8 +410,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-03T09:35:22.549Z
-Stopped at: Phase 25.3 context gathered
-Resume file: .planning/phases/25.3-session-workspace-parity/25.3-CONTEXT.md
+Last session: 2026-05-03T22:45:21.228Z
+Stopped at: Phase 25.5 context gathered
+Resume file: .planning/phases/25.5-iron-hermes-ui/25.5-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
