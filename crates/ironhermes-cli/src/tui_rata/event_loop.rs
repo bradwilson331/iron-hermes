@@ -304,6 +304,40 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
             config.tools.clone(),
         ));
 
+    // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
+    // (frozen-snapshot pattern — Workspace never changes mid-session).
+    let workspace = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ironhermes_core::workspace::resolve_from_cwd(&cwd))
+        .map(Arc::new);
+
+    // Phase 25.3 D-T-2 / D-T-3: open TrajectoryWriter at workspace-scoped or global
+    // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
+    // Workspace is resolved, else ~/.ironhermes/sessions/<id>/trajectories.jsonl.
+    // Uses the same session_id as the StateStore canonical UUID (resolved at L143).
+    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+        let traj_dir = match &workspace {
+            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&session_id),
+            None => hermes_home.join("sessions").join(&session_id),
+        };
+        let traj_path = traj_dir.join("trajectories.jsonl");
+        match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
+            Ok(w) => {
+                // Plan 6 cycle-break: wrap the writer in TrajectoryWriterHandleImpl
+                // so the handle satisfies Arc<dyn TrajectoryWriterHandle>.
+                let arc_writer = Arc::new(std::sync::Mutex::new(w));
+                let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %traj_path.display(),
+                    "Phase 25.3: failed to open trajectory writer; per-tool-call ledger disabled for this session");
+                None
+            }
+        }
+    };
+
     // D-18 item 3: McpManager (Option<Arc<McpManager>>)
     let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
 
@@ -417,6 +451,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         skin,
         // Phase 25.2 Plan 15 follow-up: the wireup the original plan missed
         toolset_session: Some(toolset_session),
+        // Phase 25.3 D-W-2 / D-T-3: resolved Workspace + TrajectoryWriter handle
+        workspace,
+        trajectory_writer,
     })
 }
 

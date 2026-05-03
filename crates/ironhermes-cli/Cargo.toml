@@ -32,6 +32,10 @@ ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-hub = { path = "../ironhermes-hub" }
 ironhermes-mcp = { path = "../ironhermes-mcp" }
+# Phase 25.3 D-T-3: cli opens TrajectoryWriter at session start in run_chat,
+# run_single, run_gateway, AND tui_rata::build_app_deps; the resulting handle
+# is wrapped in TrajectoryWriterHandleImpl and threaded into CommandContext.
+ironhermes-trajectory = { path = "../ironhermes-trajectory" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
