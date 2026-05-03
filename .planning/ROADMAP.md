@@ -516,7 +516,7 @@ Plans:
 **Goal:** Land three foundational subsystems from the hermes-agent parity work, plus the Phase 26 cascade prerequisite for Phase 25.4's Curator: (1) new `ironhermes-trajectory` crate — append-only JSONL ledger writing per-tool-call records to `<workspace-or-home>/.ironhermes/sessions/<id>/trajectories.jsonl` from all four dispatch surfaces (CLI run_single, classic-TUI run_chat, ratatui run_chat_ratatui, Telegram gateway); (2) hybrid flat-file session export — SQLite stays canonical, on-demand `hermes session export <id>` + `/export-session` slash produce the four-file folder layout (`messages.json` + `metadata.json` + `context.json` + `trajectories.jsonl`); (3) `Workspace` newtype with cwd walk-up resolution, frozen-snapshot semantics, `[Workspace: <root>]` system prompt slot, `/sessions --workspace` filter, schema migration v8 adding `workspace_root TEXT NULL` to the sessions table; (4) Plan 0 mechanical addition of `"curator"` to `RESERVED_ROLE_NAMES` (6 -> 7) so Phase 25.4 can `resolve_role("curator")` without forward references. Curator subsystem itself is carved out into Phase 25.4.
 **Requirements**: D-T-1 through D-T-4, D-F-1, D-F-2, D-W-1, D-W-2 (CONTEXT-locked decisions; D-C-1..4 moved to Phase 25.4 after the 2026-05-03 scope split). No REQUIREMENTS.md tags pre-mapped — these CONTEXT decisions are the requirement set.
 **Depends on:** Phase 25 (toolset management infrastructure precedent), Phase 25.2 (CommandContext parity-guard pattern + AnyClient*Handle template + redact_secrets_in_url precedent)
-**Plans:** 15/18 plans executed
+**Plans:** 16/18 plans executed
 
 Plans:
 - [x] 25.3-00-PLAN.md — D-P0-1 RESERVED_ROLE_NAMES["curator"] (6→7) + D-W-1 schema migration v8 (workspace_root TEXT NULL) + 26-CONTEXT.md doc-update
@@ -534,7 +534,7 @@ Plans:
 - [x] 25.3-12-PLAN.md — gap-closure RED parity-guards INV-25.3-07..11 (locks contract for plans 25.3-13..16 before code lands)
 - [x] 25.3-13-PLAN.md — REPL build_app_deps state.create_session + PromptBuilder.with_workspace_root (closes CR-01 + CR-04)
 - [x] 25.3-14-PLAN.md — Gateway SessionStore.workspace_root threading + regression test (closes VERIFIER BLOCKER must-have #28 + WR-02)
-- [ ] 25.3-15-PLAN.md — Gateway trajectory canonical session UUID + per-session writer cache in SessionStore (closes CR-02)
+- [x] 25.3-15-PLAN.md — Gateway trajectory canonical session UUID + per-session writer cache in SessionStore (closes CR-02)
 - [ ] 25.3-16-PLAN.md — Workspace.canonical_root_string single-source-of-truth encoding + INV-25.3-12 (closes CR-03 + WR-01 + IN-03)
 - [ ] 25.3-17-PLAN.md — Re-verify + update VERIFICATION.md to 28/28 + VALIDATION.md inventory + gap-closure SUMMARY
 
