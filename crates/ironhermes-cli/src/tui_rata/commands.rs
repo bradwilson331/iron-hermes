@@ -526,6 +526,14 @@ fn build_command_context(app: &App) -> CommandContext {
     if let Some(handle) = &app.toolset_session {
         ctx = ctx.with_toolset_session(handle.clone());
     }
+    // Phase 25.3 D-W-2: attach Workspace for /sessions --workspace + trajectory scoping.
+    if let Some(ws) = &app.workspace {
+        ctx = ctx.with_workspace(ws.clone());
+    }
+    // Phase 25.3 D-T-3: attach TrajectoryWriter for slash-dispatch context.
+    if let Some(tw) = &app.trajectory_writer {
+        ctx = ctx.with_trajectory_writer(tw.clone());
+    }
     ctx
 }
 

@@ -121,6 +121,17 @@ pub struct AppDeps {
     /// to the "toolset session handle not configured" guard at
     /// `crates/ironhermes-core/src/commands/handlers.rs:782`.
     pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+
+    /// Phase 25.3 D-W-2: resolved Workspace for session-scoped project resolution.
+    /// `build_app_deps` calls `ironhermes_core::workspace::resolve_from_cwd(&cwd)`
+    /// at session start (frozen-snapshot). `build_command_context` attaches via
+    /// `.with_workspace(...)` so the slash-dispatch CommandContext sees the root.
+    pub workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
+    /// Phase 25.3 D-T-3: TrajectoryWriter handle for per-tool-call JSONL ledger.
+    /// `build_app_deps` opens the writer at workspace-scoped or global path and
+    /// wraps it in `TrajectoryWriterHandleImpl`. `build_command_context` attaches
+    /// via `.with_trajectory_writer(...)`.
+    pub trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -220,6 +231,11 @@ pub struct App {
 
     /// Phase 25.2 Plan 15 follow-up — see `AppDeps.toolset_session` doc.
     pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+
+    /// Phase 25.3 D-W-2: resolved Workspace — see `AppDeps.workspace` doc.
+    pub workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
+    /// Phase 25.3 D-T-3: TrajectoryWriter handle — see `AppDeps.trajectory_writer` doc.
+    pub trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 }
 
 impl App {
@@ -286,6 +302,9 @@ impl App {
             cron_store: None,
             // Phase 25.2 Plan 15 follow-up: toolset session handle for /toolset slash UI
             toolset_session: deps.toolset_session,
+            // Phase 25.3 D-W-2 / D-T-3: Workspace + TrajectoryWriter for slash dispatch
+            workspace: deps.workspace,
+            trajectory_writer: deps.trajectory_writer,
         }
     }
 
@@ -872,6 +891,9 @@ fn test_deps() -> AppDeps {
         skin: Arc::new(std::sync::RwLock::new("default".to_string())),
         // Phase 25.2 Plan 15 follow-up: tests don't exercise the toolset slash UI
         toolset_session: None,
+        // Phase 25.3 D-W-2 / D-T-3: tests don't exercise the workspace or trajectory writer
+        workspace: None,
+        trajectory_writer: None,
     }
 }
 
