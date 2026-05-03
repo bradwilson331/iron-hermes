@@ -22,7 +22,7 @@ fn test_state_store_persistence() {
     {
         let mut store = StateStore::new(&path).unwrap();
         store
-            .create_session("s1", "cli", None, None, None)
+            .create_session("s1", "cli", None, None, None, None)
             .unwrap();
         store
             .add_message("s1", &ChatMessage::user("hello world"))
@@ -48,10 +48,10 @@ fn test_session_lineage() {
 
     // Parent must exist (FK enforced).
     store
-        .create_session("parent_id", "cli", None, None, None)
+        .create_session("parent_id", "cli", None, None, None, None)
         .unwrap();
     store
-        .create_session("child", "cli", None, None, Some("parent_id"))
+        .create_session("child", "cli", None, None, Some("parent_id"), None)
         .unwrap();
 
     let child = store.get_session("child").unwrap().unwrap();
@@ -71,7 +71,7 @@ fn test_session_title_lookup() {
     let (mut store, _f) = temp_store();
 
     store
-        .create_session("s1", "cli", None, None, None)
+        .create_session("s1", "cli", None, None, None, None)
         .unwrap();
     store.update_session_title("s1", "My Chat").unwrap();
 
@@ -84,7 +84,7 @@ fn test_session_title_lookup() {
 
     // Duplicate title on another session should fail (unique partial index).
     store
-        .create_session("s2", "cli", None, None, None)
+        .create_session("s2", "cli", None, None, None, None)
         .unwrap();
     let dup = store.update_session_title("s2", "My Chat");
     assert!(
@@ -117,7 +117,7 @@ fn test_search_snippet() {
     let (mut store, _f) = temp_store();
 
     store
-        .create_session("s1", "cli", None, None, None)
+        .create_session("s1", "cli", None, None, None, None)
         .unwrap();
     store
         .add_message(
@@ -150,7 +150,7 @@ fn test_search_context_window() {
     let (mut store, _f) = temp_store();
 
     store
-        .create_session("s1", "cli", None, None, None)
+        .create_session("s1", "cli", None, None, None, None)
         .unwrap();
 
     // Add 3 messages with small sleeps to ensure distinct timestamps.
@@ -196,10 +196,10 @@ fn test_search_filter() {
     let (mut store, _f) = temp_store();
 
     store
-        .create_session("cli1", "cli", None, None, None)
+        .create_session("cli1", "cli", None, None, None, None)
         .unwrap();
     store
-        .create_session("tg1", "telegram", None, None, None)
+        .create_session("tg1", "telegram", None, None, None, None)
         .unwrap();
 
     store
@@ -252,7 +252,7 @@ fn test_export_session() {
     let (mut store, _f) = temp_store();
 
     store
-        .create_session("s1", "cli", None, None, None)
+        .create_session("s1", "cli", None, None, None, None)
         .unwrap();
     store
         .add_message("s1", &ChatMessage::user("msg1"))
@@ -283,10 +283,10 @@ fn test_export_sessions_bulk() {
     let (mut store, _f) = temp_store();
 
     store
-        .create_session("c1", "cli", None, None, None)
+        .create_session("c1", "cli", None, None, None, None)
         .unwrap();
     store
-        .create_session("t1", "telegram", None, None, None)
+        .create_session("t1", "telegram", None, None, None, None)
         .unwrap();
     store
         .add_message("c1", &ChatMessage::user("cli msg"))
@@ -315,10 +315,10 @@ fn test_prune_sessions() {
 
     // Create two sessions.
     store
-        .create_session("ended1", "cli", None, None, None)
+        .create_session("ended1", "cli", None, None, None, None)
         .unwrap();
     store
-        .create_session("active1", "cli", None, None, None)
+        .create_session("active1", "cli", None, None, None, None)
         .unwrap();
 
     // Add messages to both.

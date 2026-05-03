@@ -39,7 +39,7 @@ pub type Result<T, E = StateError> = std::result::Result<T, E>;
 // Schema version
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode=WAL;
@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     input_tokens        INTEGER DEFAULT 0,
     output_tokens       INTEGER DEFAULT 0,
     title               TEXT,
+    workspace_root      TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -129,6 +130,10 @@ pub struct Session {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub title: Option<String>,
+    /// Phase 25.3 D-W-1: per-cwd workspace root resolved at session start.
+    /// NULL for sessions created before Phase 25.3 or for sessions without a workspace marker.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 /// A single message row retrieved from storage.
@@ -342,6 +347,19 @@ impl StateStore {
             self.conn
                 .execute("UPDATE schema_version SET version = 7", [])?;
         }
+        if current < 8 {
+            // v8 (Phase 25.3 D-W-1): add workspace_root TEXT NULL to sessions.
+            // SQLite ALTER TABLE ADD COLUMN with no DEFAULT is valid — existing rows
+            // get NULL automatically. The `let _ =` here tolerates "duplicate column"
+            // ONLY if a previous partial migration ran the ALTER but didn't bump
+            // schema_version; the `if current < 8` version gate is the primary guard
+            // (RESEARCH.md Pitfall 5).
+            let _ = self
+                .conn
+                .execute("ALTER TABLE sessions ADD COLUMN workspace_root TEXT", []);
+            self.conn
+                .execute("UPDATE schema_version SET version = 8", [])?;
+        }
         Ok(())
     }
 
@@ -350,6 +368,9 @@ impl StateStore {
     // -----------------------------------------------------------------------
 
     /// Create a new session record.
+    ///
+    /// Phase 25.3 D-W-1: `workspace_root` is the resolved per-cwd workspace path or None
+    /// for global/no-workspace sessions. Frozen at session start; never mutated mid-session.
     pub fn create_session(
         &mut self,
         id: &str,
@@ -357,15 +378,16 @@ impl StateStore {
         model: Option<&str>,
         system_prompt: Option<&str>,
         parent_session_id: Option<&str>,
+        workspace_root: Option<&str>,
     ) -> Result<()> {
         let now = unix_now();
         self.conn.execute(
             "INSERT OR IGNORE INTO sessions \
-             (id, source, model, system_prompt, parent_session_id, started_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, source, model, system_prompt, parent_session_id, now],
+             (id, source, model, system_prompt, parent_session_id, started_at, workspace_root) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, source, model, system_prompt, parent_session_id, now, workspace_root],
         )?;
-        debug!("created session {id} source={source} parent={parent_session_id:?}");
+        debug!("created session {id} source={source} parent={parent_session_id:?} workspace_root={workspace_root:?}");
         Ok(())
     }
 
@@ -443,7 +465,7 @@ impl StateStore {
             .query_row(
                 "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
                  started_at, ended_at, end_reason, message_count, tool_call_count, \
-                 input_tokens, output_tokens, title \
+                 input_tokens, output_tokens, title, workspace_root \
                  FROM sessions WHERE id = ?1",
                 params![id],
                 session_from_row,
@@ -481,7 +503,7 @@ impl StateStore {
             let mut stmt = self.conn.prepare(
                 "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
                  started_at, ended_at, end_reason, message_count, tool_call_count, \
-                 input_tokens, output_tokens, title \
+                 input_tokens, output_tokens, title, workspace_root \
                  FROM sessions WHERE source = ?1 ORDER BY started_at DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(params![src, limit as i64], session_from_row)?;
@@ -490,7 +512,7 @@ impl StateStore {
             let mut stmt = self.conn.prepare(
                 "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
                  started_at, ended_at, end_reason, message_count, tool_call_count, \
-                 input_tokens, output_tokens, title \
+                 input_tokens, output_tokens, title, workspace_root \
                  FROM sessions ORDER BY started_at DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![limit as i64], session_from_row)?;
@@ -667,7 +689,7 @@ impl StateStore {
             .query_row(
                 "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
                  started_at, ended_at, end_reason, message_count, tool_call_count, \
-                 input_tokens, output_tokens, title \
+                 input_tokens, output_tokens, title, workspace_root \
                  FROM sessions WHERE title = ?1",
                 params![title],
                 session_from_row,
@@ -840,6 +862,10 @@ fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         input_tokens: r.get(11)?,
         output_tokens: r.get(12)?,
         title: r.get(13)?,
+        // Phase 25.3 D-W-1: workspace_root may be absent if the SELECT statement
+        // uses a fixed column list. Tolerate either presence or absence so callers
+        // that issue narrower SELECTs (no workspace_root in projection) keep working.
+        workspace_root: r.get(14).ok(),
     })
 }
 
@@ -856,4 +882,94 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         token_count: r.get(8)?,
         finish_reason: r.get(9)?,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 0 Task 2: Schema migration v8 — workspace_root column (D-W-1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod schema_migration_v8_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    #[test]
+    fn schema_version_constant_is_8() {
+        assert_eq!(SCHEMA_VERSION, 8, "Phase 25.3 D-W-1: SCHEMA_VERSION must be bumped to 8");
+    }
+
+    #[test]
+    fn fresh_install_has_workspace_root_column() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let _store = StateStore::new(&path).expect("open fresh store");
+        let conn = Connection::open(&path).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
+        let cols: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            cols.iter().any(|(n, t)| n == "workspace_root" && t.eq_ignore_ascii_case("TEXT")),
+            "v8 fresh install must include workspace_root TEXT in sessions; got cols={:?}",
+            cols
+        );
+    }
+
+    #[test]
+    fn v7_db_upgrades_to_v8_preserving_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Manually create a v7 DB shape (no workspace_root)
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL); \
+                 INSERT INTO schema_version (version) VALUES (7); \
+                 CREATE TABLE sessions ( \
+                   id TEXT PRIMARY KEY, source TEXT NOT NULL, user_id TEXT, model TEXT, \
+                   system_prompt TEXT, parent_session_id TEXT, started_at REAL NOT NULL, \
+                   ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0, \
+                   tool_call_count INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, \
+                   output_tokens INTEGER DEFAULT 0, title TEXT \
+                 ); \
+                 INSERT INTO sessions (id, source, started_at) VALUES ('legacy-1', 'cli', 1.0);"
+            ).unwrap();
+        }
+        // Open with the new code — should ALTER + bump to 8
+        let _store = StateStore::new(&path).expect("upgrade open");
+        let conn = Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8, "schema_version must be 8 after upgrade");
+        let wr: Option<String> = conn
+            .query_row("SELECT workspace_root FROM sessions WHERE id = 'legacy-1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(wr.is_none(), "pre-v8 row must have NULL workspace_root after upgrade");
+    }
+
+    #[test]
+    fn create_session_with_workspace_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("s1", "cli", None, None, None, Some("/repo/foo"))
+            .unwrap();
+        store
+            .create_session("s2", "cli", None, None, None, None)
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let r1: Option<String> = conn
+            .query_row("SELECT workspace_root FROM sessions WHERE id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        let r2: Option<String> = conn
+            .query_row("SELECT workspace_root FROM sessions WHERE id = 's2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(r1.as_deref(), Some("/repo/foo"));
+        assert!(r2.is_none());
+    }
 }

@@ -46,7 +46,7 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
 // Reserved role names (D-05, Phase 26)
 // =============================================================================
 
-/// The six reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13).
+/// The seven reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
 ///
 /// Used by `model.roles:` map keys and `auxiliary` per-task overrides.
 /// Unknown role names must be rejected at config load (Phase 26 anti-pattern
@@ -58,12 +58,13 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "skills_hub",
     "mcp_helper",
     "summarization",   // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
+    "curator",         // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
 ];
 
-/// Validate that a role name is one of the six reserved helper-task roles.
+/// Validate that a role name is one of the seven reserved helper-task roles.
 ///
 /// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`,
-/// `summarization` (Phase 26 D-05 + Phase 25.2 D-13).
+/// `summarization`, `curator` (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
 ///
 /// # Errors
 /// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
@@ -1895,14 +1896,14 @@ custom_providers:
     // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
     // =========================================================================
 
-    /// D-05 + Phase 25.2 D-13: RESERVED_ROLE_NAMES must hold exactly the six roles
-    /// (5 from Phase 26 + summarization from Phase 25.2).
+    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1: RESERVED_ROLE_NAMES must hold exactly
+    /// the seven roles (5 from Phase 26 + summarization from Phase 25.2 + curator from Phase 25.3).
     #[test]
-    fn reserved_role_names_contains_all_six_roles_with_summarization() {
+    fn reserved_role_names_contains_all_seven_roles_with_curator() {
         assert_eq!(
             RESERVED_ROLE_NAMES.len(),
-            6,
-            "Phase 26 D-05 + Phase 25.2 D-13 specify exactly 6 reserved roles (5 + summarization)"
+            7,
+            "Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 specify exactly 7 reserved roles"
         );
         for required in &[
             "vision",
@@ -1911,6 +1912,7 @@ custom_providers:
             "skills_hub",
             "mcp_helper",
             "summarization",
+            "curator",
         ] {
             assert!(
                 RESERVED_ROLE_NAMES.contains(required),

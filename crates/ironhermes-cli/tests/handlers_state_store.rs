@@ -175,7 +175,7 @@ fn cmd_sessions_with_sessions_lists_them() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("sess-abc", "cli", None, None, None).unwrap();
+        g.create_session("sess-abc", "cli", None, None, None, None).unwrap();
     }
     let result = dispatch("sessions", &[], &ctx);
     match result {
@@ -192,8 +192,8 @@ fn cmd_sessions_accepts_limit_arg() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("s-one", "cli", None, None, None).unwrap();
-        g.create_session("s-two", "cli", None, None, None).unwrap();
+        g.create_session("s-one", "cli", None, None, None, None).unwrap();
+        g.create_session("s-two", "cli", None, None, None, None).unwrap();
     }
     // Limit 1 — should list only 1 session.
     let result = dispatch("sessions", &["1"], &ctx);
@@ -247,7 +247,7 @@ fn cmd_resume_known_session_returns_resuming_message() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("my-session", "cli", None, None, None).unwrap();
+        g.create_session("my-session", "cli", None, None, None, None).unwrap();
     }
     let result = dispatch("resume", &["my-session"], &ctx);
     match result {
@@ -296,7 +296,7 @@ fn cmd_save_with_session_exports_it() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store(session_id);
     {
         let mut g = store.lock().unwrap();
-        g.create_session(session_id, "cli", None, None, None).unwrap();
+        g.create_session(session_id, "cli", None, None, None, None).unwrap();
     }
     let result = dispatch("save", &[], &ctx);
     match result {
@@ -370,7 +370,7 @@ fn cmd_history_with_session_id_arg_queries_store() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("hist-sess", "cli", None, None, None).unwrap();
+        g.create_session("hist-sess", "cli", None, None, None, None).unwrap();
     }
     let result = dispatch("history", &["hist-sess"], &ctx);
     match result {
@@ -418,7 +418,7 @@ fn cmd_title_with_state_store_persists_title() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store(session_id);
     {
         let mut g = store.lock().unwrap();
-        g.create_session(session_id, "cli", None, None, None).unwrap();
+        g.create_session(session_id, "cli", None, None, None, None).unwrap();
     }
     let result = dispatch("title", &["My", "Session", "Title"], &ctx);
     match result {
