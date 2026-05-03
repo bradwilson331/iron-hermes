@@ -574,3 +574,86 @@ mod plan_21_7_07_tests {
         assert_eq!(p.snapshot_json()["running"], 1);
     }
 }
+
+#[cfg(test)]
+mod plan_25_3_tests {
+    use super::*;
+    use crate::workspace::Workspace;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+
+    fn make_ctx() -> CommandContext {
+        CommandContext::new(
+            Platform::Local,
+            "sess-25.3".to_string(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn sample_workspace() -> Workspace {
+        Workspace {
+            root: PathBuf::from("/tmp/fake-root"),
+            soul_path: None,
+            agents_chain: vec![],
+            memory_dir: PathBuf::from("/tmp/fake-root/.ironhermes/memory"),
+            skills_dir: PathBuf::from("/tmp/fake-root/skills"),
+            tools_config: None,
+        }
+    }
+
+    #[test]
+    fn new_context_has_no_workspace_or_trajectory() {
+        let ctx = make_ctx();
+        assert!(ctx.workspace.is_none(), "workspace defaults to None");
+        assert!(
+            ctx.trajectory_writer.is_none(),
+            "trajectory_writer defaults to None"
+        );
+    }
+
+    #[test]
+    fn with_workspace_attaches_handle() {
+        let ws = Arc::new(sample_workspace());
+        let ctx = make_ctx().with_workspace(ws.clone());
+        assert!(ctx.workspace.is_some());
+        assert_eq!(
+            ctx.workspace.as_ref().unwrap().root,
+            PathBuf::from("/tmp/fake-root")
+        );
+        // Frozen-snapshot semantics: the Arc inside ctx points to the same instance.
+        assert!(Arc::ptr_eq(ctx.workspace.as_ref().unwrap(), &ws));
+    }
+
+    // A minimal in-test impl of TrajectoryWriterHandle to avoid taking a
+    // dev-dep on ironhermes-trajectory from ironhermes-core (preserves leaf-crate
+    // status even in tests). The real impl lives in ironhermes-trajectory.
+    struct NoopHandle;
+    impl TrajectoryWriterHandle for NoopHandle {
+        fn append_json_line(&self, _line: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn with_trajectory_writer_attaches_handle() {
+        let handle: Arc<dyn TrajectoryWriterHandle> = Arc::new(NoopHandle);
+        let ctx = make_ctx().with_trajectory_writer(handle.clone());
+        assert!(ctx.trajectory_writer.is_some());
+        // Identity check: the Arc inside ctx points to the same trait object.
+        assert!(Arc::ptr_eq(ctx.trajectory_writer.as_ref().unwrap(), &handle));
+    }
+
+    #[test]
+    fn builders_chain_with_existing_methods() {
+        let handle: Arc<dyn TrajectoryWriterHandle> = Arc::new(NoopHandle);
+        let ws = Arc::new(sample_workspace());
+        let ctx = make_ctx()
+            .with_workspace(ws)
+            .with_trajectory_writer(handle);
+        assert!(ctx.workspace.is_some());
+        assert!(ctx.trajectory_writer.is_some());
+        // Pre-existing field defaults preserved
+        assert!(ctx.toolset_session.is_none());
+        assert!(ctx.state_store.is_none());
+    }
+}
