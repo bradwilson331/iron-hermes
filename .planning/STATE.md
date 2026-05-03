@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: executing
-stopped_at: Phase 25.2 context gathered
-last_updated: "2026-05-02T09:54:54.313Z"
-last_activity: 2026-05-02
+status: executed
+stopped_at: Phase 25.2 complete — gap-closure wave 5 (plans 15 + 16)
+last_updated: "2026-05-03T00:00:00.000Z"
+last_activity: 2026-05-03
 progress:
   total_phases: 23
   completed_phases: 15
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 25.2 (web-extract-tools) — EXECUTING
-Plan: 15 of 15
-Status: Ready to execute
-Last activity: 2026-05-02
+Phase: 25.2 (web-extract-tools) — COMPLETE
+Plan: 17 of 17
+Status: Phase 25.2 complete — UAT Issues 2 + 9 closed via gap-closure plans 15 + 16
+Last activity: 2026-05-03
 
 ## Performance Metrics
 
