@@ -85,7 +85,7 @@ fn state_store_round_trip_preserves_tool_pair_order_id_ordering() {
         let (_dir, mut store) = open_store_in_tempdir();
         let session_id = format!("sess-rt-{iteration}");
         store
-            .create_session(&session_id, "test", None, None, None)
+            .create_session(&session_id, "test", None, None, None, None)
             .expect("create_session");
 
         // Build the production-shape browser conversation: two sequential
@@ -156,7 +156,7 @@ fn state_store_round_trip_preserves_parallel_tool_calls() {
         let (_dir, mut store) = open_store_in_tempdir();
         let session_id = format!("sess-par-{iteration}");
         store
-            .create_session(&session_id, "test", None, None, None)
+            .create_session(&session_id, "test", None, None, None, None)
             .expect("create_session");
 
         let messages = vec![
@@ -198,7 +198,7 @@ fn state_store_get_messages_orders_by_id_not_timestamp() {
     let mut store = StateStore::new(&path).expect("StateStore::new");
     let session_id = "sess-inversion";
     store
-        .create_session(session_id, "test", None, None, None)
+        .create_session(session_id, "test", None, None, None, None)
         .expect("create_session");
 
     // Add three messages back-to-back. Capture insert order via the order

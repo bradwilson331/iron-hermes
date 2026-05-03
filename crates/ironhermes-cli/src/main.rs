@@ -604,7 +604,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
-    state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
+    state_store.create_session(&session_id, "cli", Some(client.model()), None, None, None)
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
     // the session_search intercept handler (D-07 / session_search regression fix).
@@ -1009,7 +1009,7 @@ async fn run_chat(
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
-    state_store.create_session(&session_id, "cli", Some(client.model()), None, None)
+    state_store.create_session(&session_id, "cli", Some(client.model()), None, None, None)
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
     // the session_search intercept handler (D-07 / session_search regression fix).

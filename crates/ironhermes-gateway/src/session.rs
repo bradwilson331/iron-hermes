@@ -110,6 +110,7 @@ impl SessionStore {
                     Some(model),
                     None, // system_prompt set later
                     None, // no parent
+                    None, // workspace_root: Plan 0 placeholder — Plan 8 wires resolved workspace
                 ) {
                     warn!("Failed to persist session to SQLite: {e}");
                 }
