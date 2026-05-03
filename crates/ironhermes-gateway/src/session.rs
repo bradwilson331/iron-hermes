@@ -93,6 +93,19 @@ pub struct SessionStore {
     /// gateway-originated sessions. Set via SessionStore::set_workspace from
     /// GatewayRunner::set_workspace.
     workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
+    /// Phase 25.3-15 CR-02 close-out: per-session trajectory directory root.
+    /// Per-session writers nest under
+    /// `<trajectory_root>/<canonical_session_id>/trajectories.jsonl`. Replaces
+    /// the old process-wide `gateway-<uuid>` writer that was unreachable from
+    /// `hermes session export` and decoupled trajectory paths from per-message
+    /// canonical session UUIDs.
+    trajectory_root: Option<std::path::PathBuf>,
+    /// Phase 25.3-15 CR-02 close-out: cached per-session TrajectoryWriter
+    /// handles, keyed by the canonical SQLite session UUID. Lazily opened on
+    /// first tool call; reused across messages on the same chat to avoid
+    /// reopening the file per call (and the resulting file-handle leak).
+    trajectory_writers:
+        HashMap<String, Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 }
 
 impl SessionStore {
@@ -101,6 +114,8 @@ impl SessionStore {
             state,
             sessions: HashMap::new(),
             workspace: None,
+            trajectory_root: None,
+            trajectory_writers: HashMap::new(),
         }
     }
 
@@ -109,6 +124,55 @@ impl SessionStore {
     /// — GatewayRunner calls this on the inner SessionStore so both sides agree.
     pub fn set_workspace(&mut self, workspace: Arc<ironhermes_core::workspace::Workspace>) {
         self.workspace = Some(workspace);
+    }
+
+    /// Phase 25.3-15 CR-02: install the trajectory directory ROOT under which
+    /// per-session subdirs are nested. Set by `GatewayRunner::set_trajectory_root`
+    /// during gateway startup. After this is set, `get_or_create_trajectory_writer`
+    /// will lazily open per-session writers at
+    /// `<trajectory_root>/<session_id>/trajectories.jsonl`.
+    pub fn set_trajectory_root(&mut self, root: std::path::PathBuf) {
+        self.trajectory_root = Some(root);
+    }
+
+    /// Phase 25.3-15 CR-02: get or lazily-open a per-session TrajectoryWriter
+    /// handle keyed by the canonical SQLite session UUID. Returns None if no
+    /// trajectory_root was installed (gateway launched without trajectory dir
+    /// configured) or if the open failed (logged + None — best-effort).
+    ///
+    /// The returned handle is cached in `trajectory_writers` so subsequent
+    /// messages on the same chat reuse the same writer (avoids reopening
+    /// the file and a file-handle leak across long-running gateway sessions).
+    pub fn get_or_create_trajectory_writer(
+        &mut self,
+        session_id: &str,
+    ) -> Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> {
+        if let Some(existing) = self.trajectory_writers.get(session_id) {
+            return Some(existing.clone());
+        }
+        let root = self.trajectory_root.as_ref()?;
+        let traj_path = root.join(session_id).join("trajectories.jsonl");
+        match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
+            Ok(w) => {
+                let arc_writer = Arc::new(Mutex::new(w));
+                let handle: Arc<
+                    dyn ironhermes_core::commands::context::TrajectoryWriterHandle,
+                > = Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                    arc_writer,
+                ));
+                self.trajectory_writers
+                    .insert(session_id.to_string(), handle.clone());
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %traj_path.display(),
+                    "Phase 25.3-15: failed to open per-session trajectory writer for {session_id}"
+                );
+                None
+            }
+        }
     }
 
     /// Get or create a session for the given key. On creation, writes through to SQLite.

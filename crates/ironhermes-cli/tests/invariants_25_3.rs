@@ -163,11 +163,19 @@ fn trajectory_writer_wired_in_gateway_runner_setter() {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    // Phase 25.3-15 CR-02 close-out widened the contract: the runner exposes
+    // EITHER `set_trajectory_writer` (legacy process-wide handle) OR
+    // `set_trajectory_root` (canonical per-session lazy-open via SessionStore).
+    // The latter is the correct shape post-CR-02; the former is grandfathered
+    // for compatibility with the original Plan 8 wireup.
     assert!(
-        no_comments.contains("set_trajectory_writer("),
-        "INV-25.3-06: gateway/runner.rs must define `pub fn set_trajectory_writer(...)` setter \
-         so run_gateway can install the TrajectoryWriter before runner.start(). \
-         Mirrors set_toolset_session at line 111. build_gateway_handler clones it into the handler."
+        no_comments.contains("set_trajectory_writer(")
+            || no_comments.contains("set_trajectory_root("),
+        "INV-25.3-06: gateway/runner.rs must expose `set_trajectory_writer(...)` OR \
+         `set_trajectory_root(...)` so run_gateway can configure trajectory destination \
+         before runner.start(). Phase 25.3-15 CR-02 close-out switched the canonical \
+         form to set_trajectory_root (per-session lazy-open keyed by canonical SQLite \
+         session UUID); the original setter shape is grandfathered for compatibility."
     );
 }
 
@@ -354,7 +362,13 @@ fn invariant_25_3_09_gateway_session_store_passes_workspace_root() {
 }
 
 #[test]
-#[ignore = "Phase 25.3 Plan 16 (CR-02) un-ignores after canonical SQLite session UUID drives gateway trajectory path"]
+// Phase 25.3-15 CR-02 close-out: un-ignored after main.rs stopped opening a
+// process-wide TrajectoryWriter keyed by `gateway-<random-uuid>`. The gateway
+// now hands `SessionStore` a trajectory ROOT (`set_trajectory_root`), and
+// `SessionStore::get_or_create_trajectory_writer` lazily opens per-session
+// writers at `<root>/<canonical_session_id>/trajectories.jsonl` — the same
+// canonical UUID `state.create_session` received, so `hermes session export`
+// can find the file.
 fn invariant_25_3_10_gateway_trajectory_uses_canonical_session_uuid() {
     // CR-02: gateway trajectory file path must be derived from the canonical
     // SQLite session UUID, NOT a process-wide `gateway-<uuid>` token.

@@ -2300,33 +2300,20 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         .and_then(|cwd| ironhermes_core::workspace::resolve_from_cwd(&cwd))
         .map(Arc::new);
 
-    // Phase 25.3 D-T-2 / D-T-3: open a single TrajectoryWriter for the gateway
-    // process. Path is keyed by a fresh `gateway-<uuid>` token so multiple
-    // long-lived gateway processes don't collide on the same JSONL file. Per-
-    // request session_ids inside GatewayMessageHandler still address the
-    // canonical StateStore session row; trajectory scoping at gateway level
-    // keeps Phase 25.4 Curator's input source bounded per-process.
-    let gateway_trajectory_id = format!("gateway-{}", uuid::Uuid::new_v4());
-    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
-        let traj_dir = match &workspace {
-            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&gateway_trajectory_id),
-            None => ironhermes_core::get_hermes_home()
-                .join("sessions").join(&gateway_trajectory_id),
-        };
-        let traj_path = traj_dir.join("trajectories.jsonl");
-        match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
-            Ok(w) => {
-                let arc_writer = Arc::new(std::sync::Mutex::new(w));
-                let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
-                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
-                Some(handle)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, path = %traj_path.display(),
-                    "Phase 25.3: failed to open gateway trajectory writer; per-tool-call ledger disabled for this gateway lifetime");
-                None
-            }
-        }
+    // Phase 25.3-15 CR-02 close-out: do NOT open a process-wide TrajectoryWriter
+    // here. The previous implementation opened ONE writer at
+    // `<workspace>/.ironhermes/sessions/gateway-<random-uuid>/trajectories.jsonl`,
+    // decoupling trajectory paths from per-message canonical session UUIDs and
+    // making the data unreachable from `hermes session export <session_id>`.
+    //
+    // The new design (CR-02 Option A): SessionStore caches per-session
+    // TrajectoryWriters keyed by the canonical SQLite session UUID. Lazy open
+    // on first tool call; one file handle per session reused across messages.
+    // We hand SessionStore the trajectory ROOT here so it knows where to nest
+    // per-session subdirs.
+    let trajectory_root: std::path::PathBuf = match &workspace {
+        Some(ws) => ws.root.join(".ironhermes").join("sessions"),
+        None => ironhermes_core::get_hermes_home().join("sessions"),
     };
 
     // Plan 20-02 / GAP-4: build the MemoryManager once — returns None when
@@ -2573,10 +2560,11 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     if let Some(ws) = workspace.clone() {
         runner.set_workspace(ws);
     }
-    // Phase 25.3 D-T-3: thread the gateway-scoped TrajectoryWriter into GatewayRunner.
-    if let Some(tw) = trajectory_writer.clone() {
-        runner.set_trajectory_writer(tw);
-    }
+    // Phase 25.3-15 CR-02 close-out: hand SessionStore the trajectory root
+    // for per-session lazy-open. Replaces the old `runner.set_trajectory_writer(handle)`
+    // call which fed a process-wide writer keyed by `gateway-<uuid>` and was
+    // unreachable from `hermes session export <session_id>`.
+    runner.set_trajectory_root(trajectory_root);
     // GAP-8 (Phase 21.2 Plan 11): wire MCP manager into runner's shutdown
     // path so Ctrl+C actually returns when stdio MCP servers are connected.
     // build_mcp_manager returns Option<Arc<McpManager>>; pass the Arc clone
