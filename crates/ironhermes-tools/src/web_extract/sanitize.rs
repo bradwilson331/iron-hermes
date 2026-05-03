@@ -179,4 +179,111 @@ mod tests {
         }
         assert_eq!(SECRET_URL_PATTERNS.len(), 9, "exactly 9 patterns expected");
     }
+
+    // ── Plan 25.2-16: redact_secrets_in_url tests (UAT Issue 9 R2 fix) ─────────
+
+    #[test]
+    fn redact_simple_token_query_param() {
+        let out = redact_secrets_in_url("https://example.com/?token=sk-fake-abc123", &[]);
+        assert_eq!(
+            out, "https://example.com/?token=***",
+            "simple token redaction must preserve URL structure: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_handles_multiple_secrets_in_one_url() {
+        let out = redact_secrets_in_url(
+            "https://example.com/?token=abc&api_key=def&safe=ok",
+            &[],
+        );
+        assert_eq!(
+            out, "https://example.com/?token=***&api_key=***&safe=ok",
+            "multi-secret redaction must only touch matched values: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_case_insensitive_key_match() {
+        let out = redact_secrets_in_url("https://example.com/?TOKEN=ABC", &[]);
+        assert_eq!(
+            out, "https://example.com/?TOKEN=***",
+            "case-insensitive key match must preserve key case in output: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_handles_percent_encoded_param_name() {
+        // ?token%3Dabc — the `=` is percent-encoded. Must still redact the `abc` value.
+        let out = redact_secrets_in_url("https://example.com/?token%3Dabc", &[]);
+        assert!(
+            !out.contains("abc"),
+            "redacted URL must NOT contain literal secret value 'abc': {}",
+            out
+        );
+        assert!(
+            out.to_lowercase().contains("token"),
+            "redacted URL must still contain the parameter name 'token': {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_respects_extra_patterns() {
+        let extras = vec!["x_custom_secret=".to_string()];
+        let out = redact_secrets_in_url("https://example.com/?x_custom_secret=foo", &extras);
+        assert!(
+            out.contains("x_custom_secret=***"),
+            "operator extras must trigger redaction: {}",
+            out
+        );
+        assert!(
+            !out.contains("foo"),
+            "operator-matched secret value must be removed: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_returns_input_unchanged_on_clean_url() {
+        let clean1 = "https://example.com/article?id=1234";
+        assert_eq!(
+            redact_secrets_in_url(clean1, &[]),
+            clean1,
+            "clean URL with id= must be bytewise-equal"
+        );
+
+        let clean2 = "https://arxiv.org/abs/2401.12345.pdf";
+        assert_eq!(
+            redact_secrets_in_url(clean2, &[]),
+            clean2,
+            "clean arxiv URL must be bytewise-equal"
+        );
+    }
+
+    #[test]
+    fn redact_bearer_value_in_query_string() {
+        // `Bearer ` (with space) is a value-bearing pattern after percent-decode.
+        // Acceptable to emit either `Bearer%20***` or `Bearer ***` — gate is just that
+        // the literal `sk-abc` value MUST NOT remain.
+        let out = redact_secrets_in_url("https://example.com/?h=Bearer%20sk-abc", &[]);
+        assert!(
+            !out.contains("sk-abc"),
+            "redacted URL must NOT contain bearer value 'sk-abc': {}",
+            out
+        );
+    }
+
+    #[test]
+    fn secret_url_patterns_const_count_unchanged() {
+        // Plan 16 must NOT modify the const list — only add a new function.
+        assert_eq!(
+            SECRET_URL_PATTERNS.len(),
+            9,
+            "Plan 16 forbids modifying SECRET_URL_PATTERNS — count must stay at 9"
+        );
+    }
 }
