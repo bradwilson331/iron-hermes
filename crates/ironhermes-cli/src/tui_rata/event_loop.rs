@@ -290,6 +290,20 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
 
     let registry = Arc::new(RwLock::new(registry));
 
+    // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): construct the
+    // production `ToolsetSessionHandle` for the ratatui REPL's slash dispatch
+    // (`/toolset list/show/enable/disable`). Plan 15 wired this in
+    // run_chat / run_single / run_gateway but missed run_chat_ratatui — the
+    // default `hermes chat` entry since Phase 22.4. Without this, the REPL
+    // returns "/toolset: toolset session handle not configured" because
+    // `build_command_context` in tui_rata/commands.rs never attaches the
+    // handle to CommandContext.
+    let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
+        Arc::new(ironhermes_tools::RegistryToolsetSession::new(
+            registry.clone(),
+            config.tools.clone(),
+        ));
+
     // D-18 item 3: McpManager (Option<Arc<McpManager>>)
     let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
 
@@ -401,6 +415,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         debug_enabled,
         fast_enabled,
         skin,
+        // Phase 25.2 Plan 15 follow-up: the wireup the original plan missed
+        toolset_session: Some(toolset_session),
     })
 }
 

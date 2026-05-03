@@ -517,6 +517,15 @@ fn build_command_context(app: &App) -> CommandContext {
         let handle: Arc<dyn CronJobReader> = Arc::new(CronJobReaderImpl(cron.clone()));
         ctx = ctx.with_cron_store(handle);
     }
+    // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
+    // production `ToolsetSessionHandle` so /toolset list/show/enable/disable
+    // works in the ratatui REPL. Without this attach, cmd_toolset short-
+    // circuits on `None` at handlers.rs:782 with the documented fallback
+    // string. Plan 15 wired this for run_chat/run_single/run_gateway but
+    // missed run_chat_ratatui (the default `hermes chat` since Phase 22.4).
+    if let Some(handle) = &app.toolset_session {
+        ctx = ctx.with_toolset_session(handle.clone());
+    }
     ctx
 }
 

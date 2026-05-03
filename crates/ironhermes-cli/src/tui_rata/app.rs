@@ -35,6 +35,7 @@ use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::personality::PersonalityRegistry;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::AnyClient;
+use ironhermes_core::commands::context::ToolsetSessionHandle;
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::types::{ChatMessage, MessageContent, Role};
 use ironhermes_core::ProviderResolver;
@@ -110,6 +111,16 @@ pub struct AppDeps {
     pub fast_enabled: Arc<AtomicBool>,
     /// `/skin <name>` setter (D-09).
     pub skin: Arc<std::sync::RwLock<String>>,
+
+    /// Phase 25.2 Plan 15 follow-up — production `ToolsetSessionHandle` for the
+    /// ratatui REPL's slash dispatch (`/toolset list/show/enable/disable`).
+    /// Plan 15 wired the handle in `run_chat`/`run_single`/`run_gateway` but
+    /// missed `tui_rata::run_chat_ratatui`, which is the default `hermes chat`
+    /// entry since Phase 22.4. Without this field, `build_command_context`
+    /// returns a `CommandContext` whose `toolset_session: None` falls through
+    /// to the "toolset session handle not configured" guard at
+    /// `crates/ironhermes-core/src/commands/handlers.rs:782`.
+    pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -206,6 +217,9 @@ pub struct App {
     /// init per D-02 — gateway is the primary cron host; tui_rata field exists
     /// so the wiring path is ready when a future plan loads the store).
     pub cron_store: Option<std::sync::Arc<std::sync::Mutex<ironhermes_cron::JobStore>>>,
+
+    /// Phase 25.2 Plan 15 follow-up — see `AppDeps.toolset_session` doc.
+    pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
 }
 
 impl App {
@@ -270,6 +284,8 @@ impl App {
             next_turn_personality_overlay: None,
             // Phase 22.4.2.1 Plan 01: cron store — None by default (gateway is primary cron host)
             cron_store: None,
+            // Phase 25.2 Plan 15 follow-up: toolset session handle for /toolset slash UI
+            toolset_session: deps.toolset_session,
         }
     }
 
@@ -854,6 +870,8 @@ fn test_deps() -> AppDeps {
         debug_enabled: Arc::new(AtomicBool::new(false)),
         fast_enabled: Arc::new(AtomicBool::new(false)),
         skin: Arc::new(std::sync::RwLock::new("default".to_string())),
+        // Phase 25.2 Plan 15 follow-up: tests don't exercise the toolset slash UI
+        toolset_session: None,
     }
 }
 
