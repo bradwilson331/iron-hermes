@@ -400,10 +400,69 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     };
 
     // Phase 22.4.2 Plan 00: D-08 four subsystem handles
-    // StateStore: open the default session DB (session-scoped).
-    let state_store = ironhermes_state::StateStore::open_default()
-        .ok()
-        .map(|s| Arc::new(std::sync::Mutex::new(s)));
+    // Phase 25.3-13 CR-01 close-out: persist a sessions row at REPL session start.
+    // Without this, /sessions, /resume, /history, /export-session, and the
+    // workspace_root filter all fail on the default chat surface.
+    let state_store = match ironhermes_state::StateStore::open_default() {
+        Ok(mut s) => {
+            // Phase 25.3 D-W-1: persist resolved workspace_root onto the row.
+            // workspace was resolved at line 309 (see above in this function).
+            let ws_root_str = workspace.as_ref().and_then(|ws| ws.root.to_str());
+            if let Err(e) = s.create_session(
+                &session_id,
+                "cli-repl",
+                Some(client.model()),
+                None,
+                None,
+                ws_root_str,
+            ) {
+                // Best-effort: log and continue with None state_store. /sessions,
+                // /resume, etc. will report "session storage not configured".
+                tracing::warn!(
+                    error = %e,
+                    "Phase 25.3-13: failed to persist REPL session row to state.db; \
+                     /sessions and /resume will not see this session"
+                );
+                None
+            } else {
+                Some(Arc::new(std::sync::Mutex::new(s)))
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Phase 25.3-13: failed to open state.db for REPL; session persistence disabled"
+            );
+            None
+        }
+    };
+
+    // Phase 25.3-13 CR-04 close-out: construct a PromptBuilder so the durable
+    // [Workspace: <root>] Identity-slot line is injected into the REPL's system
+    // message — same pattern as run_chat in main.rs:846-864. The system message
+    // is seeded into app.history at App::from_deps so the per-turn AgentLoop's
+    // messages_snapshot (event_loop.rs:608) carries it to every turn.
+    //
+    // Mirrors run_chat field-for-field except for `source = "cli-repl"`.
+    let system_message: Option<ironhermes_core::types::ChatMessage> = {
+        let mut prompt_builder = ironhermes_agent::prompt_builder::PromptBuilder::new(
+            client.model(),
+            "cli-repl",
+        );
+        // Identity-slot workspace line — frozen at session start; never mutated mid-session
+        // (D-W-1 frozen-snapshot pattern). Cache-stable in the durable slot 1.
+        if let Some(ref ws) = workspace {
+            prompt_builder = prompt_builder.with_workspace_root(&ws.root);
+        }
+        prompt_builder.set_skill_registry(skill_registry.clone());
+        if let Some(ref mgr) = memory_manager {
+            prompt_builder.set_memory_manager(mgr.clone());
+        }
+        prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+        prompt_builder.load_memory().await;
+        prompt_builder.load_skills();
+        Some(prompt_builder.build_system_message())
+    };
 
     // PersonalityRegistry: load built-ins + any custom presets from hermes_home.
     let personality_overlay = Arc::new(
@@ -459,6 +518,10 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         // Phase 25.3 D-W-2 / D-T-3: resolved Workspace + TrajectoryWriter handle
         workspace,
         trajectory_writer,
+        // Phase 25.3-13 CR-04: pre-built system message containing the durable
+        // [Workspace: <root>] Identity-slot line. Seeded into App.history at
+        // App::new so the per-turn AgentLoop sees it via messages_snapshot.
+        system_message,
     })
 }
 
