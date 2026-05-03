@@ -318,7 +318,10 @@ fn invariant_25_3_08_with_workspace_root_called_in_all_chat_entry_points() {
 }
 
 #[test]
-#[ignore = "Phase 25.3 Plan 14 (WR-02 + verifier blocker) un-ignores after threading workspace into SessionStore"]
+// Phase 25.3 Plan 14: un-ignored after threading workspace into SessionStore.
+// SessionStore now has an Option<Arc<Workspace>> field + set_workspace setter,
+// and GatewayRunner::set_workspace propagates the resolved workspace down so
+// state.create_session(..., workspace_root) is no longer hardcoded None.
 fn invariant_25_3_09_gateway_session_store_passes_workspace_root() {
     // VERIFIER BLOCKER + WR-02 + CR-03 (gateway half): SessionStore::get_or_create
     // must NOT pass a literal `None` to state.create_session for the workspace_root
@@ -380,7 +383,10 @@ fn invariant_25_3_10_gateway_trajectory_uses_canonical_session_uuid() {
 }
 
 #[test]
-#[ignore = "Phase 25.3 Plan 14 un-ignores after SessionStore::get_or_create signature widens to accept workspace_root"]
+// Phase 25.3 Plan 14: un-ignored after SessionStore wires workspace_root through
+// to state.create_session via the SessionStore.workspace field + set_workspace
+// setter. The signature widening was implemented as the field+setter variant
+// (option (b) in the test docstring below) rather than a parameter widening.
 fn invariant_25_3_11_session_store_get_or_create_accepts_workspace_root() {
     // VERIFIER BLOCKER signature change: SessionStore::get_or_create must take
     // a workspace_root parameter (Option<&str> or similar) so per-message dispatch
