@@ -185,7 +185,10 @@ impl SessionStore {
             // root into state.create_session so Telegram session rows carry the
             // workspace metadata (D-W-1). Without this, /sessions --workspace and
             // Phase 25.4 Curator are starved on the primary user-facing surface.
-            let workspace_root = self.workspace.as_ref().and_then(|ws| ws.root.to_str());
+            // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with
+            // prompt + filter sites. The local `workspace_root` token is retained
+            // (non-comment) to satisfy INV-25.3-11.
+            let workspace_root = self.workspace.as_ref().map(|ws| ws.canonical_root_string());
             if let Ok(mut state) = self.state.lock() {
                 if let Err(e) = state.create_session(
                     &session.session_id,
@@ -193,7 +196,7 @@ impl SessionStore {
                     Some(model),
                     None, // system_prompt set later
                     None, // no parent
-                    workspace_root,
+                    workspace_root.as_deref(),
                 ) {
                     warn!("Failed to persist session to SQLite: {e}");
                 }

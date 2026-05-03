@@ -426,3 +426,37 @@ fn invariant_25_3_11_session_store_get_or_create_accepts_workspace_root() {
          get_or_create can pass it to state.create_session."
     );
 }
+
+#[test]
+fn invariant_25_3_12_canonical_root_string_used_at_all_workspace_root_sites() {
+    // CR-03 close-out: every site that reads ws.root for SQLite persistence or
+    // SQL filter MUST go through Workspace::canonical_root_string.
+    // Trajectory-path code is exempt (filesystem path, not SQL value).
+    let main = strip_line_comments(MAIN_RS);
+    let event_loop = strip_line_comments(TUI_EVENT_LOOP);
+    let gw_session = strip_line_comments(GW_SESSION);
+    let handlers: &str = include_str!("../../ironhermes-core/src/commands/handlers.rs");
+    let handlers_no_comments = strip_line_comments(handlers);
+
+    assert!(
+        main.matches("canonical_root_string").count() >= 2,
+        "INV-25.3-12a: main.rs run_chat + run_single must call canonical_root_string \
+         before create_session (CR-03). Found {} occurrences.",
+        main.matches("canonical_root_string").count()
+    );
+    assert!(
+        event_loop.contains("canonical_root_string"),
+        "INV-25.3-12b: tui_rata/event_loop.rs build_app_deps must call \
+         canonical_root_string before create_session (CR-03)."
+    );
+    assert!(
+        gw_session.contains("canonical_root_string"),
+        "INV-25.3-12c: gateway/session.rs SessionStore::get_or_create must call \
+         canonical_root_string before create_session (CR-03)."
+    );
+    assert!(
+        handlers_no_comments.contains("canonical_root_string"),
+        "INV-25.3-12d: commands/handlers.rs cmd_sessions --workspace filter must \
+         use canonical_root_string (matches what persistence stored — CR-03)."
+    );
+}

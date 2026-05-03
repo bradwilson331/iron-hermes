@@ -70,6 +70,23 @@ impl Workspace {
             tools_config,
         }
     }
+
+    /// Phase 25.3-16 CR-03 close-out: single source of truth for the encoding
+    /// of `self.root` used at every persistence and filter site (sessions table
+    /// `workspace_root` column, /sessions --workspace filter, and the
+    /// [Workspace: <root>] system prompt line).
+    ///
+    /// Uses `to_string_lossy().into_owned()` — lossy U+FFFD substitution for
+    /// non-UTF-8 bytes. This matches what `Path::display()` produces, so the
+    /// PromptBuilder's existing `format!("{}", root.display())` line agrees by
+    /// construction.
+    ///
+    /// Centralizing the encoding here is the contract INV-25.3-12 enforces — every
+    /// site touching workspace_root for SQLite persistence or filter MUST go
+    /// through this helper.
+    pub fn canonical_root_string(&self) -> String {
+        self.root.to_string_lossy().into_owned()
+    }
 }
 
 /// Walk up from `cwd` looking for `.ironhermes/` or `.hermes/` directory.
@@ -256,5 +273,44 @@ mod tests {
         // The critical property is termination, not the value — None or Some are both acceptable here.
         let _ = resolve_from_cwd(&p);
         // If we reached this line, we did not infinite-loop. PASS.
+    }
+
+    #[test]
+    fn canonical_root_string_returns_path_for_ascii() {
+        let ws = Workspace {
+            root: std::path::PathBuf::from("/proj/myapp"),
+            soul_path: None,
+            agents_chain: vec![],
+            memory_dir: std::path::PathBuf::from("/proj/myapp/.ironhermes/memory"),
+            skills_dir: std::path::PathBuf::from("/proj/myapp/skills"),
+            tools_config: None,
+        };
+        assert_eq!(ws.canonical_root_string(), "/proj/myapp");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_root_string_lossy_subs_non_utf8_unix() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // Non-UTF-8 bytes — the regression target for CR-03.
+        let bytes = vec![b'/', b't', b'm', b'p', b'/', 0xFFu8, 0xFEu8, 0xFDu8];
+        let os = OsString::from_vec(bytes);
+        let root = std::path::PathBuf::from(os);
+        let ws = Workspace {
+            root: root.clone(),
+            soul_path: None,
+            agents_chain: vec![],
+            memory_dir: root.join(".ironhermes/memory"),
+            skills_dir: root.join("skills"),
+            tools_config: None,
+        };
+        let canonical = ws.canonical_root_string();
+        // canonical_root_string MUST agree with Path::display() so the SQL filter
+        // string and the SQLite column never diverge for non-UTF-8 paths.
+        assert_eq!(canonical, format!("{}", ws.root.display()));
+        assert!(!canonical.is_empty(), "must NOT return empty for non-UTF-8 paths");
+        assert!(!canonical.contains('\0'));
     }
 }
