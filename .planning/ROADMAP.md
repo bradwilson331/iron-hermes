@@ -505,10 +505,19 @@ Plans:
 
 **Goal:** Wire the existing Dioxus 0.7.1 UI crate (13 shell components, all mock data) to the live IronHermes backend via Fullstack Dioxus — server functions for commands/config/sessions, WebSocket for streaming chat. Every mock data source replaced with real backend calls. Separate binary (dx build), additive surface alongside TUI and Telegram, separate session namespace. Imports ironhermes-core + ironhermes-agent + ironhermes-state + ironhermes-tools directly behind server feature gate.
 **Depends on:** Phase 25
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 25.5 to break down)
+- [ ] 25.5-01-PLAN.md — Git integration + Cargo.toml fullstack wiring: remove nested .git (D-05), add Dioxus fullstack + backend crate deps behind server feature (D-06), exclude UI from default cargo build via default-members (D-07), dual main.rs (server + client)
+- [ ] 25.5-02-PLAN.md — Platform::Web + server API layer + WebSocket endpoint: add Platform::Web to core types (D-03/D-04), create server/ module with #[server] functions (list_slash_commands, list_sessions, get_config_summary, list_tools, create_session) and WebSocket chat endpoint (D-01)
+- [ ] 25.5-03-PLAN.md — Wire static-data components: command palette (49 real slash commands from CommandRouter), status bar (real model/provider/tokens from Config), title bar (real sessions from StateStore). Replace demo_palette_items/demo_tabs with server function calls (D-02 static half)
+- [ ] 25.5-04-PLAN.md — Wire interactive components: block stream + input box + agent panel via WebSocket. Real AgentLoop dispatch in ws_chat handler, streaming deltas to block stream, tool calls to agent panel. Replace demo_block_entries/demo_messages/run_shell/run_agent_steps (D-02 live half, D-01 completion)
+- [ ] 25.5-05-PLAN.md — Integration verification + mock retirement: gate mocks/ behind cfg(test|demo), verify all 13 components wired to real data, human smoke test (dx serve → chat loop end-to-end)
+
+**Wave structure:**
+- Wave 1 parallel: 25.5-01 (git + cargo wiring — autonomous) + 25.5-02 (Platform::Web + server API — autonomous). Zero file overlap.
+- Wave 2 parallel: 25.5-03 (static components — depends on 01+02, autonomous) + 25.5-04 (interactive components — depends on 01+02, autonomous). Shared file: warp_hermes.rs — executor must sequentialise edits to this file.
+- Wave 3: 25.5-05 (mock retirement + human verification — depends on 03+04, NOT autonomous: checkpoint:human-verify)
 
 **Phase directory:** `.planning/phases/25.5-iron-hermes-ui/`
 
