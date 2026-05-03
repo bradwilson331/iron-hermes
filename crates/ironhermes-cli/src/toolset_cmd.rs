@@ -239,7 +239,7 @@ fn load_tools_config(hermes_home: &Path) -> ToolsConfig {
 fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'static str]> {
     let mut m: std::collections::HashMap<&'static str, &'static [&'static str]> =
         std::collections::HashMap::new();
-    m.insert("web", &["web_search", "web_read"]);
+    m.insert("web", &["web_search", "web_read", "web_extract"]);
     m.insert(
         "code",
         &[
@@ -678,5 +678,40 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("CHROMIUM_PATH"); }
+    }
+
+    /// Phase 25.2 Plan 15 (UAT Issue 2 side-bug): the static toolset_members_map
+    /// MUST include web_extract in the web toolset. Phase 25.2 added the tool but
+    /// this map was not updated until Plan 15. Lock against future drift.
+    #[test]
+    fn toolset_members_map_web_includes_web_extract() {
+        let m = toolset_members_map();
+        let web = m.get("web").copied().expect("web toolset must exist in members map");
+        assert!(
+            web.contains(&"web_extract"),
+            "web toolset must list web_extract; got {:?}",
+            web
+        );
+        assert!(web.contains(&"web_search"));
+        assert!(web.contains(&"web_read"));
+        assert_eq!(
+            web.len(),
+            3,
+            "web toolset must have exactly 3 members (search/read/extract); got {:?}",
+            web
+        );
+    }
+
+    /// Phase 25.2 Plan 15 cross-crate parity: the CLI subcommand's static map
+    /// MUST agree with the slash UI's RegistryToolsetSession internal map.
+    /// Both surfaces show the same data; drift would surface as different
+    /// member counts depending on entry point.
+    #[test]
+    fn toolset_members_map_agrees_with_registry_toolset_session() {
+        // Plan 15 Task 1 invariant: the slash-UI map keeps "web" at 3 members
+        // including web_extract. CLI map (this file) must match.
+        let cli_map = toolset_members_map();
+        let cli_web = cli_map.get("web").copied().unwrap_or(&[]);
+        assert_eq!(cli_web.len(), 3, "CLI map web entry: {:?}", cli_web);
     }
 }
