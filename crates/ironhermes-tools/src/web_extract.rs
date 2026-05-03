@@ -418,6 +418,86 @@ mod tests {
         assert_eq!(r.url, "https://example.com");
     }
 
+    // ---------------------------------------------------------------------------
+    // Phase 25.3 Plan 05 (D-T-1 / Discretion D-2):
+    // WebExtractTool::redact_args override tests via the redact_url_args free
+    // function (testable seam — the trait impl delegates to this fn so tests
+    // do NOT need to construct a full WebExtractTool with SummarizationClientHandle
+    // + SkillRegistry deps; redact_args reads no fields of self).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn web_extract_redact_args_redacts_url_secrets() {
+        let raw = serde_json::json!({
+            "urls": ["https://example.com/?api_key=sk-or-v1-fakekeyabc123"],
+            "use_llm_processing": false
+        });
+        let redacted = redact_url_args(&raw);
+        let urls = redacted
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .expect("urls array preserved");
+        assert_eq!(urls.len(), 1);
+        let s = urls[0].as_str().expect("url is a string");
+        assert!(
+            !s.contains("sk-or-v1-fakekeyabc123"),
+            "secret token must be redacted; got: {s}"
+        );
+        // Other fields preserved verbatim
+        assert_eq!(
+            redacted.get("use_llm_processing").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn web_extract_redact_args_preserves_safe_urls() {
+        let raw = serde_json::json!({
+            "urls": ["https://example.com/path?query=visible"]
+        });
+        let redacted = redact_url_args(&raw);
+        let urls = redacted
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .expect("urls array preserved");
+        assert_eq!(
+            urls[0].as_str(),
+            Some("https://example.com/path?query=visible"),
+            "safe URL must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn web_extract_redact_args_passes_non_url_args_through() {
+        let raw = serde_json::json!({"use_llm_processing": true, "format": "markdown"});
+        let redacted = redact_url_args(&raw);
+        assert_eq!(
+            redacted, raw,
+            "args without a urls field must pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn web_extract_redact_args_preserves_array_shape_with_multiple_urls() {
+        // Plan 9 / RL pipelines need to count the urls field — the array shape
+        // and length MUST be preserved across redaction.
+        let raw = serde_json::json!({
+            "urls": [
+                "https://safe.example.com/a",
+                "https://example.com/?api_key=sk-secret-token-xyz",
+                "https://safe.example.com/b"
+            ]
+        });
+        let redacted = redact_url_args(&raw);
+        let urls = redacted
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .expect("urls array preserved");
+        assert_eq!(urls.len(), 3, "array length preserved across redaction");
+        assert!(!serde_json::to_string(&redacted).unwrap().contains("sk-secret-token-xyz"),
+            "no leaf in the redacted JSON may contain the cleartext secret");
+    }
+
     /// Plan 25.2-16 (UAT Issue 9): integration-style assertion that the
     /// process_one_url secret-rejection branch puts the REDACTED URL into the
     /// ExtractionResult.url echo, never the raw cleartext token.
