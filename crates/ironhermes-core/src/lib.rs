@@ -17,6 +17,7 @@ pub mod skills;
 pub mod token_estimator;
 pub mod ssrf;
 pub mod types;
+pub mod workspace;
 
 pub use config::{
     ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtractConfig, ExtraTap,
@@ -50,3 +51,10 @@ pub use token_estimator::{
 };
 pub use ssrf::is_safe_url;
 pub use types::*;
+
+// Phase 25.3 D-W-1 — Workspace newtype + cwd walk-up resolution helper.
+// Re-export name is `resolve_workspace_from_cwd` (aliased) to avoid collision with
+// any existing or future `resolve_from_cwd` in other modules. Plan 8 wireup uses
+// either `ironhermes_core::resolve_workspace_from_cwd` or the path-qualified
+// `ironhermes_core::workspace::resolve_from_cwd` — both work.
+pub use workspace::{Workspace, resolve_from_cwd as resolve_workspace_from_cwd};
