@@ -49,7 +49,6 @@ const GW_RUNNER: &str = include_str!("../../ironhermes-gateway/src/runner.rs");
 // ============================================================================
 
 #[test]
-#[ignore = "Wave 0 RED — Plan 8 must REMOVE this #[ignore] after wiring .with_workspace( in main.rs::build_cmd_ctx AND tui_rata/commands.rs::build_command_context"]
 fn workspace_wired_in_all_commandcontext_construction_sites() {
     // Strip line comments first (per planner antipattern: bare grep can match
     // a doc comment and produce a self-invalidating gate).
@@ -79,7 +78,6 @@ fn workspace_wired_in_all_commandcontext_construction_sites() {
 }
 
 #[test]
-#[ignore = "Wave 0 RED — Plan 8 must REMOVE this #[ignore] after wiring .with_workspace( in gateway/handler.rs::handle_slash_command"]
 fn workspace_wired_in_gateway_handler() {
     let no_comments: String = GW_HANDLER
         .lines()
@@ -95,7 +93,6 @@ fn workspace_wired_in_gateway_handler() {
 }
 
 #[test]
-#[ignore = "Wave 0 RED — Plan 8 must REMOVE this #[ignore] after adding set_workspace setter to GatewayRunner"]
 fn workspace_wired_in_gateway_runner_setter() {
     let no_comments: String = GW_RUNNER
         .lines()
@@ -115,7 +112,6 @@ fn workspace_wired_in_gateway_runner_setter() {
 // ============================================================================
 
 #[test]
-#[ignore = "Wave 0 RED — Plan 8 must REMOVE this #[ignore] after wiring .with_trajectory_writer( in main.rs::build_cmd_ctx AND tui_rata/commands.rs::build_command_context"]
 fn trajectory_writer_wired_in_all_commandcontext_construction_sites() {
     let main_no_comments: String = MAIN_RS
         .lines()
@@ -142,7 +138,6 @@ fn trajectory_writer_wired_in_all_commandcontext_construction_sites() {
 }
 
 #[test]
-#[ignore = "Wave 0 RED — Plan 8 must REMOVE this #[ignore] after wiring .with_trajectory_writer( in gateway/handler.rs::handle_slash_command"]
 fn trajectory_writer_wired_in_gateway_handler() {
     let no_comments: String = GW_HANDLER
         .lines()
@@ -158,7 +153,6 @@ fn trajectory_writer_wired_in_gateway_handler() {
 }
 
 #[test]
-#[ignore = "Wave 0 RED — Plan 8 must REMOVE this #[ignore] after adding set_trajectory_writer setter to GatewayRunner"]
 fn trajectory_writer_wired_in_gateway_runner_setter() {
     let no_comments: String = GW_RUNNER
         .lines()

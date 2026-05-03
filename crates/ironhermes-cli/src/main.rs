@@ -600,15 +600,57 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     );
     let context_length = main_ep.context_length();
 
+    // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
+    // (frozen-snapshot pattern — Workspace never changes mid-session).
+    let workspace = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ironhermes_core::workspace::resolve_from_cwd(&cwd))
+        .map(Arc::new);
+
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
-    state_store.create_session(&session_id, "cli", Some(client.model()), None, None, None)
+    state_store.create_session(
+        &session_id, "cli", Some(client.model()), None, None,
+        // Phase 25.3 D-W-1: persist the resolved workspace_root onto the sessions row.
+        workspace.as_ref().and_then(|ws| ws.root.to_str()),
+    )
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
     // the session_search intercept handler (D-07 / session_search regression fix).
     let state_store = std::sync::Arc::new(std::sync::Mutex::new(state_store));
+
+    // Phase 25.3 D-T-2 / D-T-3: open TrajectoryWriter at workspace-scoped or global
+    // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
+    // workspace is resolved, else ~/.ironhermes/sessions/<id>/trajectories.jsonl.
+    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+        let traj_dir = match &workspace {
+            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&session_id),
+            None => ironhermes_core::get_hermes_home()
+                .join("sessions").join(&session_id),
+        };
+        let traj_path = traj_dir.join("trajectories.jsonl");
+        match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
+            Ok(w) => {
+                let arc_writer = Arc::new(std::sync::Mutex::new(w));
+                let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %traj_path.display(),
+                    "Phase 25.3: failed to open trajectory writer; per-tool-call ledger disabled for this session");
+                None
+            }
+        }
+    };
+    // run_single doesn't dispatch slash commands so trajectory_writer is currently
+    // unused on its CommandContext — but we keep the variable in scope so Plan 9
+    // (AgentLoop callback wireup) can simply attach `agent.with_trajectory_writer(...)`
+    // here without re-resolving the path.
+    let _ = &trajectory_writer;
+
     // Plan 21.7-05 (PROV-09/PROV-10/D-15): construct BudgetHandle seeded from
     // config.agent.max_iterations so the shared counter starts FULL and
     // drains per-turn (Caution70 at 70% used, Warning90 at 90%, Stop100 at
@@ -789,6 +831,12 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
         .load_context(&cwd);
+    // Phase 25.3 D-W-2: inject the resolved workspace root into the prompt so
+    // PromptSlot::Identity (or whichever slot the builder uses for the workspace
+    // hint) renders `[Workspace: <root>]` cache-stably across the session.
+    if let Some(ref ws) = workspace {
+        prompt_builder = prompt_builder.with_workspace_root(&ws.root);
+    }
     prompt_builder.set_skill_registry(skill_registry.clone());
     // Plan 20-03 Fix 2 / GAP-4: inject manager (when Some) so the frozen-snapshot
     // memory block renders into the system prompt. Skip when memory is disabled.
@@ -935,6 +983,11 @@ fn build_cmd_ctx(
     // optional ToolsetSessionHandle threaded through to attach to CommandContext
     // via .with_toolset_session(handle). Phase 25 Plan 04 deferred this wireup.
     toolset_session: Option<Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle>>,
+    // Phase 25.3 D-W-2 / D-T-3: APPEND-ONLY widening — resolved Workspace +
+    // TrajectoryWriter handle. The two new fields land on every CommandContext
+    // built by run_chat / run_single / run_gateway via this single helper.
+    workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
+    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 ) -> CommandContext {
     let base = CommandContext::new(
         Platform::Local,
@@ -962,10 +1015,23 @@ fn build_cmd_ctx(
         .with_max_subagents(max_subagents);
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): conditionally attach the
     // live ToolsetSessionHandle so /toolset list/show/enable/disable work in
-    // REPL + Telegram. EVERY existing .with_* call above is preserved verbatim —
-    // this `if let` is the ONLY net-new code in build_cmd_ctx's body.
-    if let Some(handle) = toolset_session {
+    // REPL + Telegram. EVERY existing .with_* call above is preserved verbatim.
+    let ctx = if let Some(handle) = toolset_session {
         ctx.with_toolset_session(handle)
+    } else {
+        ctx
+    };
+    // Phase 25.3 D-W-2: attach the resolved Workspace so /sessions --workspace
+    // and Plan 11 /export-session see the frozen-snapshot project root.
+    let ctx = if let Some(ws) = workspace {
+        ctx.with_workspace(ws)
+    } else {
+        ctx
+    };
+    // Phase 25.3 D-T-3: attach the per-session TrajectoryWriter handle so
+    // slash dispatch sees the same writer that AgentLoop (Plan 9) consumes.
+    if let Some(handle) = trajectory_writer {
+        ctx.with_trajectory_writer(handle)
     } else {
         ctx
     }
@@ -1005,15 +1071,53 @@ async fn run_chat(
     );
     let context_length = main_ep.context_length();
 
+    // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
+    // (frozen-snapshot pattern — Workspace never changes mid-session).
+    let workspace = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ironhermes_core::workspace::resolve_from_cwd(&cwd))
+        .map(Arc::new);
+
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
-    state_store.create_session(&session_id, "cli", Some(client.model()), None, None, None)
+    state_store.create_session(
+        &session_id, "cli", Some(client.model()), None, None,
+        // Phase 25.3 D-W-1: persist resolved workspace_root onto sessions row.
+        workspace.as_ref().and_then(|ws| ws.root.to_str()),
+    )
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
     // the session_search intercept handler (D-07 / session_search regression fix).
     let state_store = std::sync::Arc::new(std::sync::Mutex::new(state_store));
+
+    // Phase 25.3 D-T-2 / D-T-3: open TrajectoryWriter at workspace-scoped or global
+    // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
+    // workspace is resolved, else ~/.ironhermes/sessions/<id>/trajectories.jsonl.
+    // Same path scheme used by run_single + tui_rata::build_app_deps + run_gateway.
+    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+        let traj_dir = match &workspace {
+            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&session_id),
+            None => ironhermes_core::get_hermes_home()
+                .join("sessions").join(&session_id),
+        };
+        let traj_path = traj_dir.join("trajectories.jsonl");
+        match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
+            Ok(w) => {
+                let arc_writer = Arc::new(std::sync::Mutex::new(w));
+                let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %traj_path.display(),
+                    "Phase 25.3: failed to open trajectory writer; per-tool-call ledger disabled for this session");
+                None
+            }
+        }
+    };
+
     // Plan 21.7-05 (PROV-09/PROV-10/D-15): BudgetHandle seeded from
     // config.agent.max_iterations. Parent + subagents share the counter
     // via BudgetHandle::clone; the per-turn run_agent_turn() inherits
@@ -1321,6 +1425,11 @@ async fn run_chat(
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
         .load_context(&cwd);
+    // Phase 25.3 D-W-2: inject the resolved workspace root so PromptBuilder
+    // renders `[Workspace: <root>]` cache-stably across the session.
+    if let Some(ref ws) = workspace {
+        prompt_builder = prompt_builder.with_workspace_root(&ws.root);
+    }
     prompt_builder.set_skill_registry(skill_registry);
     // Plan 20-03 Fix 2 / GAP-4: inject manager (when Some) before load_memory.
     if let Some(ref mgr) = memory_manager {
@@ -1492,7 +1601,8 @@ async fn run_chat(
                     // prompt-time branch (here) and the mid-turn slash
                     // dispatch arm call the same code path, guaranteeing
                     // identical registry handle identity across dispatch
-                    // sites (INV-21.7-08 / D-03 / D-04).
+                    // sites (INV-21.7-08 / D-03 / D-04). Phase 25.3 Plan 8
+                    // appends workspace + trajectory_writer for D-W-2 / D-T-3.
                     let cmd_ctx = build_cmd_ctx(
                         &session_id,
                         agent_running.clone(),
@@ -1503,6 +1613,8 @@ async fn run_chat(
                         subagent_semaphore.clone(),
                         config.subagent.max_subagents,
                         Some(toolset_session.clone()),
+                        workspace.clone(),
+                        trajectory_writer.clone(),
                     );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -1791,6 +1903,8 @@ async fn run_chat(
                                 if !parts.is_empty() {
                                     let cmd = parts[0];
                                     let args = &parts[1..];
+                                    // Phase 25.3 Plan 8: workspace + trajectory_writer threaded
+                                    // through the mid-turn slash dispatch site (D-W-2 / D-T-3).
                                     let cmd_ctx = build_cmd_ctx(
                                         &session_id,
                                         agent_running.clone(),
@@ -1801,6 +1915,8 @@ async fn run_chat(
                                         subagent_semaphore.clone(),
                                         config.subagent.max_subagents,
                                         Some(toolset_session.clone()),
+                                        workspace.clone(),
+                                        trajectory_writer.clone(),
                                     );
                                     match dispatch_command(
                                         tui.extensions(),
@@ -2147,6 +2263,42 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         ironhermes_cli::resolve_yolo(false, config.autonomous.yolo);
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
+    // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at gateway startup
+    // (frozen-snapshot pattern — Workspace never changes across the gateway lifetime).
+    let workspace = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ironhermes_core::workspace::resolve_from_cwd(&cwd))
+        .map(Arc::new);
+
+    // Phase 25.3 D-T-2 / D-T-3: open a single TrajectoryWriter for the gateway
+    // process. Path is keyed by a fresh `gateway-<uuid>` token so multiple
+    // long-lived gateway processes don't collide on the same JSONL file. Per-
+    // request session_ids inside GatewayMessageHandler still address the
+    // canonical StateStore session row; trajectory scoping at gateway level
+    // keeps Phase 25.4 Curator's input source bounded per-process.
+    let gateway_trajectory_id = format!("gateway-{}", uuid::Uuid::new_v4());
+    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+        let traj_dir = match &workspace {
+            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&gateway_trajectory_id),
+            None => ironhermes_core::get_hermes_home()
+                .join("sessions").join(&gateway_trajectory_id),
+        };
+        let traj_path = traj_dir.join("trajectories.jsonl");
+        match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
+            Ok(w) => {
+                let arc_writer = Arc::new(std::sync::Mutex::new(w));
+                let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %traj_path.display(),
+                    "Phase 25.3: failed to open gateway trajectory writer; per-tool-call ledger disabled for this gateway lifetime");
+                None
+            }
+        }
+    };
+
     // Plan 20-02 / GAP-4: build the MemoryManager once — returns None when
     // config.memory.memory_enabled=false (T-21.4-02). All consumers guard
     // with if-let so None propagates cleanly.
@@ -2386,6 +2538,15 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // works in Telegram. Without this, the runner→handler→ctx wiring
     // chain stops at the runner and ctx.toolset_session stays None.
     runner.set_toolset_session(toolset_session.clone());
+    // Phase 25.3 D-W-2: thread the resolved Workspace into GatewayRunner so
+    // build_gateway_handler clones it into every per-message handler.
+    if let Some(ws) = workspace.clone() {
+        runner.set_workspace(ws);
+    }
+    // Phase 25.3 D-T-3: thread the gateway-scoped TrajectoryWriter into GatewayRunner.
+    if let Some(tw) = trajectory_writer.clone() {
+        runner.set_trajectory_writer(tw);
+    }
     // GAP-8 (Phase 21.2 Plan 11): wire MCP manager into runner's shutdown
     // path so Ctrl+C actually returns when stdio MCP servers are connected.
     // build_mcp_manager returns Option<Arc<McpManager>>; pass the Arc clone

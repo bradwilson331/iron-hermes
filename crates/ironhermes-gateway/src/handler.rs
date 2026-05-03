@@ -535,6 +535,13 @@ impl GatewayMessageHandler {
         let mut prompt_builder = PromptBuilder::new(&model, "telegram")
             .with_provider(&self.config.model.provider)
             .load_context(&cwd);
+        // Phase 25.3 D-W-2: inject the resolved workspace root so the Telegram
+        // surface renders `[Workspace: <root>]` in the Identity slot, matching
+        // run_chat / run_single. Frozen-snapshot — same Workspace instance for
+        // every per-message handler clone (set by GatewayRunner::set_workspace).
+        if let Some(ref ws) = self.workspace {
+            prompt_builder = prompt_builder.with_workspace_root(&ws.root);
+        }
         if let Some(ref mgr) = self.memory_manager {
             prompt_builder.set_memory_manager(mgr.clone());
         }
