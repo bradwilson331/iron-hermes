@@ -1805,6 +1805,141 @@ mod hooks_ordering_tests {
             "agent_loop.rs must not call fire_hook for ResponseSent (D-01, audit warning #4)"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 25.3 D-T-1 / D-T-3: trajectory append tests (Plan 9 Task 2)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal AgentLoop with the given trajectory writer attached
+    /// AND `OkMockTool` registered, for trajectory append tests.
+    fn build_agent_with_trajectory(
+        trajectory: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) -> AgentLoop {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        build_agent(tool_registry, hook_registry).with_trajectory_writer(trajectory)
+    }
+
+    fn build_agent_with_trajectory_and_failmock(
+        trajectory: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) -> AgentLoop {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(FailMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        build_agent(tool_registry, hook_registry).with_trajectory_writer(trajectory)
+    }
+
+    /// Phase 25.3 D-T-1 / D-T-3: a successful tool call appends exactly one
+    /// JSONL entry to the trajectory file with name="mock", result populated,
+    /// error None, and impact_level matching the classifier's verdict for the
+    /// unknown tool name "mock" (default Write).
+    #[tokio::test]
+    async fn execute_tool_call_appends_trajectory_entry_on_success() {
+        use ironhermes_trajectory::{
+            ImpactLevel, TrajectoryReader, TrajectoryWriter, TrajectoryWriterHandleImpl,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trajectories.jsonl");
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(
+            TrajectoryWriter::open(&path).expect("open writer"),
+        ));
+        let handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+            std::sync::Arc::new(TrajectoryWriterHandleImpl::new(writer.clone()));
+
+        let agent = build_agent_with_trajectory(handle);
+        let _ = agent.execute_tool_call(&tool_call("mock")).await;
+
+        // Drop any owned writer references and force the Mutex<Writer> to flush
+        // by reading the file (TrajectoryWriter calls sync_data per append).
+        let reader = TrajectoryReader::open(&path);
+        let entries = reader.read_all().expect("read trajectory file");
+        assert_eq!(
+            entries.len(),
+            1,
+            "execute_tool_call must append exactly one trajectory entry; got {}",
+            entries.len()
+        );
+        assert_eq!(entries[0].name, "mock", "trajectory entry name must match tool name");
+        assert!(
+            entries[0].result.is_some(),
+            "success entry must have result populated"
+        );
+        assert!(
+            entries[0].error.is_none(),
+            "success entry must have error None"
+        );
+        // "mock" is an unknown tool name to classify_impact_level → Write (5) default.
+        assert_eq!(
+            entries[0].impact_level,
+            ImpactLevel::Write,
+            "unknown tool name 'mock' must default to ImpactLevel::Write"
+        );
+        assert_eq!(
+            entries[0].turn_index, 0,
+            "default turn_index from a fresh AgentLoop must be 0"
+        );
+        assert_eq!(
+            entries[0].tool_call_id, "call-1",
+            "tool_call_id must reflect the LLM-supplied ToolCall.id"
+        );
+    }
+
+    /// Phase 25.3 D-T-1 / D-T-3: a failing tool call appends one entry with
+    /// `error` populated and `result` None.
+    #[tokio::test]
+    async fn execute_tool_call_appends_trajectory_entry_on_failure() {
+        use ironhermes_trajectory::{
+            TrajectoryReader, TrajectoryWriter, TrajectoryWriterHandleImpl,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trajectories.jsonl");
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(
+            TrajectoryWriter::open(&path).expect("open writer"),
+        ));
+        let handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+            std::sync::Arc::new(TrajectoryWriterHandleImpl::new(writer.clone()));
+
+        let agent = build_agent_with_trajectory_and_failmock(handle);
+        let _ = agent.execute_tool_call(&tool_call("failmock")).await;
+
+        let reader = TrajectoryReader::open(&path);
+        let entries = reader.read_all().expect("read trajectory file");
+        assert_eq!(
+            entries.len(),
+            1,
+            "execute_tool_call must append exactly one trajectory entry on failure"
+        );
+        assert_eq!(entries[0].name, "failmock");
+        assert!(
+            entries[0].result.is_none(),
+            "failure entry must have result None"
+        );
+        assert!(
+            entries[0].error.is_some(),
+            "failure entry must have error populated"
+        );
+    }
+
+    /// Phase 25.3 D-T-3: when no trajectory writer is attached, execute_tool_call
+    /// works without panicking and produces no entries (Option<...> field is None).
+    #[tokio::test]
+    async fn execute_tool_call_without_trajectory_writer_is_a_noop_for_ledger() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+        // Sanity: no trajectory writer attached.
+        assert!(
+            agent.trajectory_writer.is_none(),
+            "default AgentLoop must have trajectory_writer None"
+        );
+        // Should not panic, should return the tool result text.
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert_eq!(result, "mock result", "tool result must pass through unchanged");
+    }
 }
 
 // ---------------------------------------------------------------------------
