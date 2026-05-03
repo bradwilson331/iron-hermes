@@ -3,6 +3,11 @@ use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
+// Phase 25.3 D-T-1 / D-T-3: trajectory ledger types.
+// `TrajectoryEntry` + `ImpactLevel` come from `ironhermes-trajectory` (Plan 1 wire format).
+// `TrajectoryWriterHandle` lives in `ironhermes-core` per Plan 6's cycle-break;
+// AgentLoop holds the trait-object form.
+use ironhermes_trajectory::{ImpactLevel, TrajectoryEntry};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -184,6 +189,16 @@ pub struct AgentLoop {
     /// clone also drops (all tools dropped with the registry), the Mutex drops,
     /// and BrowserSession::drop kills the handler task (T-25.1-04 drop semantics).
     browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    /// Phase 25.3 D-T-3: per-session trajectory writer handle (trait-object form
+    /// from Plan 6 cycle-break — `TrajectoryWriterHandle` lives in `ironhermes-core`,
+    /// `TrajectoryWriterHandleImpl` lives in `ironhermes-trajectory`). None means
+    /// trajectory logging is disabled for this session. Plan 8 wires the Some-case
+    /// from each `run_*` function (CLI/REPL/gateway). Append site is in execute_tool_call.
+    pub trajectory_writer: Option<std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    /// Phase 25.3 D-T-1: 0-indexed turn counter — incremented per agent turn (one
+    /// complete user-assistant exchange). Recorded in TrajectoryEntry.turn_index
+    /// so Phase 25.4 Curator can correlate tool calls within a turn.
+    turn_index: std::sync::atomic::AtomicUsize,
 }
 
 impl AgentLoop {
@@ -215,6 +230,9 @@ impl AgentLoop {
             memory_manager: None,
             memory_provider_tool_names: std::collections::HashSet::new(),
             browser_session: None,
+            // Phase 25.3 D-T-3 / D-T-1: trajectory ledger fields default to disabled / 0.
+            trajectory_writer: None,
+            turn_index: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -243,6 +261,19 @@ impl AgentLoop {
         session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
     ) -> Self {
         self.browser_session = Some(session);
+        self
+    }
+
+    /// Phase 25.3 D-T-3: attach a `TrajectoryWriterHandle` (trait-object from Plan 6)
+    /// so per-tool-call entries are recorded to
+    /// `<workspace-or-home>/.ironhermes/sessions/<id>/trajectories.jsonl`.
+    /// Append failures are logged via `tracing::warn!` but do NOT abort the agent
+    /// turn (best-effort ledger).
+    pub fn with_trajectory_writer(
+        mut self,
+        handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) -> Self {
+        self.trajectory_writer = Some(handle);
         self
     }
 
@@ -1240,6 +1271,63 @@ impl AgentLoop {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 9 (D-T-1): tool-name -> ImpactLevel classifier.
+// ---------------------------------------------------------------------------
+
+/// Phase 25.3 D-T-1: classify a tool name into an `ImpactLevel` for the trajectory ledger.
+///
+/// Used by `AgentLoop`'s trajectory append site to populate
+/// `TrajectoryEntry.impact_level`. Phase 25.4 Curator's heuristic gate (D-C-2)
+/// sums these weights to decide curation eligibility.
+///
+/// Classification rules:
+/// - **Read (0)**: pure read operations (read_file, search_files, web_search,
+///   web_read, web_extract, session_search, status checks).
+/// - **Write (5)**: persistent state changes that don't run untrusted code or
+///   invoke external systems (write_file, patch, patch_file, MEMORY.md writes).
+/// - **SystemChange (10)**: code execution, shell, MCP, anything that can have
+///   side effects beyond the local filesystem (terminal, execute_code, mcp_*,
+///   browser_* navigation/actions).
+///
+/// Conservative defaults:
+/// - Unknown tools default to **Write (5)**: not a no-op, not a code-execution risk.
+/// - MCP tools (any name starting with `mcp_` or `mcp__`) default to
+///   **SystemChange (10)**: operator-defined, treat as untrusted code path.
+pub(crate) fn classify_impact_level(tool_name: &str) -> ImpactLevel {
+    // Read-only tools (heuristic by name + known catalog).
+    const READ_TOOLS: &[&str] = &[
+        "read_file", "search_files", "web_search", "web_read", "web_extract",
+        "session_search", "status", "list_files", "browser_snapshot",
+        "browser_get_images", "browser_console", "memory_search",
+    ];
+    // Write-but-local tools.
+    const WRITE_TOOLS: &[&str] = &[
+        "write_file", "patch", "patch_file", "create_file", "delete_file",
+        "memory_write", "skill_install", "skill_remove",
+    ];
+    // System-changing tools.
+    const SYSTEM_CHANGE_TOOLS: &[&str] = &[
+        "terminal", "execute_code", "delegate_task", "browser_click",
+        "browser_navigate", "browser_type", "browser_press", "browser_scroll",
+        "browser_back", "browser_close",
+    ];
+
+    if READ_TOOLS.contains(&tool_name) {
+        ImpactLevel::Read
+    } else if WRITE_TOOLS.contains(&tool_name) {
+        ImpactLevel::Write
+    } else if SYSTEM_CHANGE_TOOLS.contains(&tool_name)
+        || tool_name.starts_with("mcp_")
+        || tool_name.starts_with("mcp__")
+    {
+        ImpactLevel::SystemChange
+    } else {
+        // Conservative default for unknown tools — Curator heuristic D-C-2 weights this as 5.
+        ImpactLevel::Write
     }
 }
 
