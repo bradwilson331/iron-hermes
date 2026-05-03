@@ -873,6 +873,12 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
         .with_browser_session(browser_session.clone());
 
+    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
+    // tool call lands a TrajectoryEntry in the per-session JSONL.
+    if let Some(ref handle) = trajectory_writer {
+        agent = agent.with_trajectory_writer(handle.clone());
+    }
+
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
     if let Some(fb_name) = main_endpoint.fallback_providers.first() {
@@ -1476,6 +1482,7 @@ async fn run_chat(
             memory_manager.clone(), // GAP-1: wire queue_prefetch
             state_store.clone(), // Phase 25: session_search intercept
             Some(browser_session.clone()), // Phase 25.1 D-17
+            trajectory_writer.clone(), // Phase 25.3 D-T-3
         )
         .await?;
         // Persist assistant response
@@ -1729,6 +1736,7 @@ async fn run_chat(
                     memory_manager.clone(), // GAP-1: wire queue_prefetch
                     state_store.clone(), // Phase 25: session_search intercept
                     Some(browser_session.clone()), // Phase 25.1 D-17
+                    trajectory_writer.clone(), // Phase 25.3 D-T-3
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -2135,6 +2143,7 @@ async fn run_agent_turn(
     memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>,  // GAP-1: wire queue_prefetch
     state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>,  // Phase 25: session_search intercept
     browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,  // Phase 25.1 D-17
+    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,  // Phase 25.3 D-T-3
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -2188,6 +2197,12 @@ async fn run_agent_turn(
     // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
     if let Some(sess) = browser_session {
         agent = agent.with_browser_session(sess);
+    }
+
+    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
+    // tool call in this per-turn AgentLoop lands a TrajectoryEntry on disk.
+    if let Some(handle) = trajectory_writer {
+        agent = agent.with_trajectory_writer(handle);
     }
 
     // Wire fallback from resolver
