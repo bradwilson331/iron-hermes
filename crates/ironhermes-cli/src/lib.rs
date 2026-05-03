@@ -17,6 +17,12 @@ pub mod skills_cmd;
 // going through the binary subprocess for unit tests.
 pub mod toolset_cmd;
 
+// Phase 25.3 Plan 11: session subcommand — `hermes session export <id>` and
+// `hermes session export-all [--since YYYY-MM-DD]` (D-F-1 / D-F-2). Exposed
+// from lib.rs so unit tests can exercise resolve_output_dir + the chrono
+// `--since` parser without spawning the binary.
+pub mod session_cmd;
+
 // Phase 21.7 Wave 0 (ISS-08) — re-exports for Wave 1 Plan 04 + Wave 3 Plans 08/09:
 pub mod status_cmd; // Plan 04 Task 4-01 replaces body; placeholder only in Wave 0.
 pub mod tui; // Existing module (render_status_line etc.) — re-exported for Plan 07 tests.
