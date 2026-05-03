@@ -71,6 +71,14 @@ pub struct GatewayRunner {
     /// `RegistryToolsetSession::render_list` etc. instead of returning the
     /// "toolset session handle not configured" fallback.
     toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+    /// Phase 25.3 D-W-2: per-cwd Workspace resolved at startup. `build_gateway_handler`
+    /// clones it into the per-message handler so /sessions --workspace and trajectory
+    /// scoping see the resolved root.
+    workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
+    /// Phase 25.3 D-T-3: TrajectoryWriter shared across the gateway's per-message
+    /// handlers. Plan 9 wires the AgentLoop callback that calls writer.append() after
+    /// each tool result. `build_gateway_handler` clones it into the handler.
+    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
     cancel: CancellationToken,
 }
 
@@ -98,6 +106,8 @@ impl GatewayRunner {
             subagent_registry: None, // Plan 21.7-07: wired by run_gateway before start()
             browser_session: None, // Phase 25.1: wired by run_gateway before start()
             toolset_session: None, // Phase 25.2 Plan 15 follow-up: wired by run_gateway before start()
+            workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
+            trajectory_writer: None, // Phase 25.3 D-T-3: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -110,6 +120,25 @@ impl GatewayRunner {
     /// the REPL and single-shot binary already use.
     pub fn set_toolset_session(&mut self, handle: Arc<dyn ToolsetSessionHandle>) {
         self.toolset_session = Some(handle);
+    }
+
+    /// Phase 25.3 D-W-2: install the resolved Workspace for the gateway surface.
+    /// Caller is `run_gateway` in ironhermes-cli (resolved via resolve_from_cwd at startup).
+    /// `build_gateway_handler` clones it into the handler so the per-message
+    /// CommandContext sees the resolved root for /sessions --workspace + trajectory scoping.
+    pub fn set_workspace(&mut self, workspace: Arc<ironhermes_core::workspace::Workspace>) {
+        self.workspace = Some(workspace);
+    }
+
+    /// Phase 25.3 D-T-3: install the TrajectoryWriter for the gateway surface.
+    /// Caller is `run_gateway` in ironhermes-cli (created alongside StateStore open).
+    /// `build_gateway_handler` clones it into the handler so per-message AgentLoops
+    /// can append trajectory entries via the trait-object handle.
+    pub fn set_trajectory_writer(
+        &mut self,
+        handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) {
+        self.trajectory_writer = Some(handle);
     }
 
     /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install the shared BudgetHandle
@@ -244,6 +273,17 @@ impl GatewayRunner {
         // `/toolset` slash command works in Telegram.
         if let Some(ref handle) = self.toolset_session {
             handler.set_toolset_session(handle.clone());
+        }
+
+        // Phase 25.3 D-W-2: thread the resolved Workspace into the gateway handler
+        // so the per-message CommandContext sees it (slash dispatch + trajectory scoping).
+        if let Some(ref ws) = self.workspace {
+            handler.set_workspace(ws.clone());
+        }
+        // Phase 25.3 D-T-3: thread the shared TrajectoryWriter handle into the
+        // gateway handler so per-message dispatch + AgentLoop see the same writer.
+        if let Some(ref tw) = self.trajectory_writer {
+            handler.set_trajectory_writer(tw.clone());
         }
 
         // Phase 21.3: initialize global token estimator from model's encoding

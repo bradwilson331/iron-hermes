@@ -101,6 +101,17 @@ pub struct GatewayMessageHandler {
     /// in Telegram (UAT Test 2 reproduced this twice — REPL via tui_rata
     /// and Telegram via this gateway path).
     toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+    /// Phase 25.3 D-W-2: Workspace clone — propagated by `build_gateway_handler`
+    /// from `GatewayRunner.workspace`. Per-message slash dispatch attaches via
+    /// `.with_workspace` so /sessions --workspace + trajectory scoping see the
+    /// resolved root.
+    workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
+    /// Phase 25.3 D-T-3: TrajectoryWriter clone — propagated from
+    /// `GatewayRunner.trajectory_writer`. Per-message slash dispatch attaches
+    /// via `.with_trajectory_writer` so the per-message CommandContext sees the
+    /// shared writer; AgentLoop wireup (Plan 9) consumes it for per-tool-call
+    /// JSONL appends.
+    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 }
 
 impl GatewayMessageHandler {
@@ -134,6 +145,8 @@ impl GatewayMessageHandler {
             subagent_registry: None,
             browser_session: None,
             toolset_session: None,
+            workspace: None,        // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
+            trajectory_writer: None, // Phase 25.3 D-T-3: wired by GatewayRunner::build_gateway_handler
         }
     }
 
@@ -145,6 +158,22 @@ impl GatewayMessageHandler {
     /// REPL and single-shot binary already use.
     pub fn set_toolset_session(&mut self, handle: Arc<dyn ToolsetSessionHandle>) {
         self.toolset_session = Some(handle);
+    }
+
+    /// Phase 25.3 D-W-2: install the resolved Workspace clone for the gateway
+    /// handler. Caller is `GatewayRunner::build_gateway_handler`.
+    pub fn set_workspace(&mut self, workspace: Arc<ironhermes_core::workspace::Workspace>) {
+        self.workspace = Some(workspace);
+    }
+
+    /// Phase 25.3 D-T-3: install the TrajectoryWriter handle clone. Caller is
+    /// `GatewayRunner::build_gateway_handler`. Per-message dispatch attaches
+    /// via `.with_trajectory_writer` on the CommandContext.
+    pub fn set_trajectory_writer(
+        &mut self,
+        handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) {
+        self.trajectory_writer = Some(handle);
     }
 
     /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install a shared BudgetHandle.
@@ -282,6 +311,18 @@ impl GatewayMessageHandler {
         // circuits on None with the documented fallback string.
         let ctx = if let Some(handle) = &self.toolset_session {
             ctx.with_toolset_session(handle.clone())
+        } else {
+            ctx
+        };
+        // Phase 25.3 D-W-2: attach Workspace for /sessions --workspace + trajectory scoping.
+        let ctx = if let Some(ws) = &self.workspace {
+            ctx.with_workspace(ws.clone())
+        } else {
+            ctx
+        };
+        // Phase 25.3 D-T-3: attach TrajectoryWriter for slash-dispatch context.
+        let ctx = if let Some(tw) = &self.trajectory_writer {
+            ctx.with_trajectory_writer(tw.clone())
         } else {
             ctx
         };
