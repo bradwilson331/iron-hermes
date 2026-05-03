@@ -11,7 +11,7 @@ Provider polish — three closely-related correctness/UX fixes on top of the exi
 
 - **PROV-04: Per-provider key scoping.** Eliminate the generic `OPENAI_API_KEY` fallback for unknown providers (the leak path at `crates/ironhermes-core/src/provider.rs:212`). Each provider — built-in or custom — gets its own explicit `api_key_env: VAR_NAME` reference; no implicit cross-provider fallback. Legacy `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` env vars stay as a deprecated-but-still-accepted fallback for the matching built-in provider only, with a one-line stderr deprecation banner on load.
 
-- **PROV-06: Auxiliary model routing.** Add an `auxiliary: { provider, model }` config block that routes the five helper task categories (vision, compression, session_search, skills_hub, mcp_helper) to a separate cheaper model. Per-task overrides supported. Wire the existing `ProviderResolver::resolve_role(role)` through `crates/ironhermes-agent/src/engine_factory.rs` and `crates/ironhermes-agent/src/summarizing_engine.rs` so the auxiliary endpoint is actually used (today the field is referenced but the route doesn't complete).
+- **PROV-06: Auxiliary model routing.** Add an `auxiliary: { provider, model }` config block that routes the seven helper task categories (vision, compression, session_search, skills_hub, mcp_helper, summarization, curator) to a separate cheaper model. Per-task overrides supported. Wire the existing `ProviderResolver::resolve_role(role)` through `crates/ironhermes-agent/src/engine_factory.rs` and `crates/ironhermes-agent/src/summarizing_engine.rs` so the auxiliary endpoint is actually used (today the field is referenced but the route doesn't complete). (Phase 26 originally shipped with 5 roles; Phase 25.2 D-13 added `summarization`, Phase 25.3 D-P0-1 added `curator`.)
 
 - **PROV-08: Named custom providers in config.yaml.** Already partially implemented via `config.custom_providers: Vec<CustomProvider>`. Phase 26 unifies the surface: one `providers:` HashMap covers built-ins and custom alike, deprecates the parallel `custom_providers:` Vec (redirected with stderr migration warning), and `--provider <name>` selects any name from this single block.
 
@@ -75,7 +75,7 @@ Phase 26 covers **PROV-04, PROV-06, PROV-08** only.
   2. Else if `auxiliary: { provider, model }` is set → use it
   3. Else → use main (`config.model.provider` / `config.model.default`)
 
-  All five role names are reserved keys: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`. Unknown role names rejected at config load.
+  All seven role names are reserved keys: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`, `summarization`, `curator` (D-05, Phase 25.2 D-13, Phase 25.3 D-P0-1). Unknown role names rejected at config load.
 
 - **D-06: `auxiliary` is OPTIONAL.** Default config has no `auxiliary:` block — all helper tasks use main. Adding `auxiliary:` is opt-in. Per-task overrides require the role-specific block.
 
@@ -136,6 +136,8 @@ Phase 26 covers **PROV-04, PROV-06, PROV-08** only.
 ### Folded Todos
 
 - *(none — no pending todos in `.planning/todos/` match Phase 26 scope; will be re-checked at plan-phase)*
+
+> **Phase 25.3 update (2026-05-03):** RESERVED_ROLE_NAMES was extended from 6 -> 7 with `"curator"` (Phase 25.3 Plan 0, D-P0-1) so Phase 25.4 Curator can `resolve_role("curator")` without forward references. The cascade contract documented above is unchanged — `curator` is just another auxiliary role following the same precedence rules.
 
 </decisions>
 
@@ -271,7 +273,7 @@ Phase 26 covers **PROV-04, PROV-06, PROV-08** only.
 - **`hermes provider create / delete / rename / clone / import / export`** — full lifecycle. Skipped per the "active scope only" pattern from Phase 24 D-16 / Phase 25 D-04. Operators edit config.yaml directly for create/delete; rename is just edit-the-key.
 - **Encrypted at-rest storage of api_key values** — D-01 explicitly forbids inline `api_key:` literal; values live in env vars (process memory) only. OS-keyring integration is a future phase.
 - **`hermes doctor --providers`** — cross-provider availability check (would walk all providers and run `provider test` on each). Skipped per Phase 24 D-16. Operator uses `hermes provider list` (which shows ✓/✗ for keys) + `hermes provider test <name>` for individual live checks.
-- **Per-toolset model override (e.g., `tools.web.toolset_model: gpt-4o-mini`)** — interesting (cheap searches with main-model orchestration), but auxiliary routing already covers the helper-task case. Re-open if PROV-06's five role categories prove insufficient.
+- **Per-toolset model override (e.g., `tools.web.toolset_model: gpt-4o-mini`)** — interesting (cheap searches with main-model orchestration), but auxiliary routing already covers the helper-task case. Re-open if PROV-06's seven role categories prove insufficient (D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
 
 ### Reviewed Todos (not folded)
 
