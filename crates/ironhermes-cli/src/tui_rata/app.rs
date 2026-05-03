@@ -132,6 +132,13 @@ pub struct AppDeps {
     /// wraps it in `TrajectoryWriterHandleImpl`. `build_command_context` attaches
     /// via `.with_trajectory_writer(...)`.
     pub trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+
+    /// Phase 25.3-13 CR-04: pre-built system message containing the durable
+    /// [Workspace: <root>] Identity-slot line. Seeded into App.history at
+    /// App::new so the per-turn AgentLoop sees it via messages_snapshot.
+    /// Without this seed, the LLM sees no system prompt and [Workspace: <root>]
+    /// is invisible on the default `hermes chat` surface.
+    pub system_message: Option<ChatMessage>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -251,8 +258,19 @@ impl App {
         // offsets to account for the top + left borders.
         textarea.set_block(Block::default().borders(Borders::ALL).title("Prompt"));
 
+        // Phase 25.3-13 CR-04: seed the system message into history so the per-turn
+        // AgentLoop sees it via messages_snapshot. Without this seed, the LLM sees
+        // no system prompt and [Workspace: <root>] is invisible. Subsequent /clear
+        // and /reset handlers may clear this; the documented run_chat behavior is
+        // that the system message is part of the FIRST session only — post-clear
+        // turns use whatever history exists post-clear.
+        let mut history: Vec<ChatMessage> = Vec::new();
+        if let Some(sys) = deps.system_message {
+            history.push(sys);
+        }
+
         Self {
-            history: Vec::new(),
+            history,
             textarea,
             transcript_scroll: 0,
             auto_follow: true,
@@ -894,6 +912,8 @@ fn test_deps() -> AppDeps {
         // Phase 25.3 D-W-2 / D-T-3: tests don't exercise the workspace or trajectory writer
         workspace: None,
         trajectory_writer: None,
+        // Phase 25.3-13 CR-04: tests don't exercise the seeded system message
+        system_message: None,
     }
 }
 

@@ -258,7 +258,6 @@ fn strip_line_comments(src: &str) -> String {
 }
 
 #[test]
-#[ignore = "Phase 25.3 Plan 13 (CR-01) un-ignores after wiring REPL state.create_session"]
 fn invariant_25_3_07_repl_calls_create_session() {
     // CR-01: ratatui REPL build_app_deps must persist a sessions row via
     // state.create_session so /sessions, /resume, /history, /export-session,
@@ -280,7 +279,6 @@ fn invariant_25_3_07_repl_calls_create_session() {
 }
 
 #[test]
-#[ignore = "Phase 25.3 Plan 15 (CR-04) un-ignores after wiring REPL with_workspace_root"]
 fn invariant_25_3_08_with_workspace_root_called_in_all_chat_entry_points() {
     // CR-04: the durable Identity-slot [Workspace: <root>] line must be
     // injected on EVERY chat entry surface — not just main.rs run_chat
