@@ -889,6 +889,60 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 25.3 Plan 10 Task 2: list_sessions_filtered tests (D-W-2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod list_sessions_filtered_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn list_sessions_filtered_by_workspace() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("a", "cli", None, None, None, Some("/repo/x"))
+            .unwrap();
+        store
+            .create_session("b", "cli", None, None, None, Some("/repo/y"))
+            .unwrap();
+        store
+            .create_session("c", "cli", None, None, None, None)
+            .unwrap();
+
+        let all = store.list_sessions(None, 100).unwrap();
+        assert_eq!(all.len(), 3, "no filter -> all sessions");
+
+        let only_x = store
+            .list_sessions_filtered(None, 100, Some("/repo/x"))
+            .unwrap();
+        assert_eq!(only_x.len(), 1);
+        assert_eq!(only_x[0].id, "a");
+
+        // empty-string filter does NOT match NULL workspace_root
+        let only_global = store
+            .list_sessions_filtered(None, 100, Some(""))
+            .unwrap();
+        assert_eq!(only_global.len(), 0);
+
+        // None filter behaves identically to list_sessions(None, ...)
+        let unfiltered = store
+            .list_sessions_filtered(None, 100, None)
+            .unwrap();
+        assert_eq!(unfiltered.len(), 3);
+
+        // source filter still works alongside workspace filter
+        let cli_x = store
+            .list_sessions_filtered(Some("cli"), 100, Some("/repo/x"))
+            .unwrap();
+        assert_eq!(cli_x.len(), 1);
+        assert_eq!(cli_x[0].id, "a");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 25.3 Plan 0 Task 2: Schema migration v8 — workspace_root column (D-W-1)
 // ---------------------------------------------------------------------------
 
