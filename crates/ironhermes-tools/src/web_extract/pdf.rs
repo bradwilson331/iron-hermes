@@ -47,9 +47,16 @@ pub async fn extract_pdf(url: &str) -> Result<ExtractionResult> {
                 );
             }
             Err(e) => {
+                // Plan 25.2-16 (UAT Issue 9): redact secret-bearing URL fields before
+                // they hit tracing log sinks. cfg.extract.redact_url_patterns is not in
+                // scope here (extract_pdf takes only `url: &str`); the const
+                // SECRET_URL_PATTERNS list still fires via &[]. Threading operator
+                // extras through pdf.rs is a future ≤5-LOC refactor (out of Plan 16 scope).
+                let url_for_log =
+                    crate::web_extract::sanitize::redact_secrets_in_url(url, &[]);
                 warn!(
                     "Firecrawl failed for PDF {}: {}; falling back to pdf-extract",
-                    url, e
+                    url_for_log, e
                 );
             }
         }

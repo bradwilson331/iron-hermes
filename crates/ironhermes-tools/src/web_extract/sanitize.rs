@@ -74,6 +74,77 @@ pub fn contains_secret(url: &str, extra_patterns: &[String]) -> bool {
             .any(|p| haystack.contains(&p.to_lowercase()))
 }
 
+/// Plan 25.2-16 (D-19): transform sibling of [`contains_secret`] — preserves URL structure
+/// while replacing each secret-valued query parameter's value with `***`. Single source of
+/// truth: same `SECRET_URL_PATTERNS` const + same `extras` list as the predicate.
+///
+/// Behavior contract (locked by 8 unit tests in this module):
+/// - Clean URLs are returned bytewise-equal (fast-path via [`contains_secret`] gate).
+/// - Secret-keyed values are replaced with `***`; the parameter NAME and surrounding URL
+///   structure (host, path, other params) are preserved.
+/// - Match is case-insensitive; the original case of the parameter name is preserved
+///   in the output.
+/// - The decoded URL form is what's emitted on dirty URLs — percent-encoding fidelity
+///   of the redacted span is traded for redaction completeness. Cleartext secrets must
+///   never leak; preserving `%20` in the output is cosmetic by comparison.
+pub fn redact_secrets_in_url(url: &str, extras: &[String]) -> String {
+    // Fast-path: clean URLs are returned untouched (bytewise-equal).
+    if !contains_secret(url, extras) {
+        return url.to_string();
+    }
+
+    // Decode once. We emit the decoded form because percent-encoded keys (e.g.
+    // `?token%3Dabc`) can only be detected after decode — and we must not let
+    // an undetected percent-encoded form silently round-trip the cleartext value
+    // back to the caller.
+    let decoded = percent_decode_lossy(url);
+    let decoded_lower = decoded.to_lowercase();
+    let bytes = decoded.as_bytes();
+
+    // Build the combined pattern list once (lowercase), so we can scan in a single pass.
+    // SECRET_URL_PATTERNS is already lowercase by construction.
+    let mut all_patterns: Vec<String> = SECRET_URL_PATTERNS.iter().map(|p| (*p).to_string()).collect();
+    for extra in extras {
+        all_patterns.push(extra.to_lowercase());
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Try to match any pattern beginning at byte position `i`.
+        let remaining_lower = &decoded_lower[i..];
+        let matched = all_patterns
+            .iter()
+            .find(|p| remaining_lower.starts_with(p.as_str()));
+
+        if let Some(p) = matched {
+            // Copy through the matched pattern (preserving original case of the key).
+            let plen = p.len();
+            out.extend_from_slice(&bytes[i..i + plen]);
+            i += plen;
+            // Now we're at the start of the value. Scan to next delimiter.
+            // Delimiters that end a query value: `&`, `#`. End-of-string also stops.
+            let value_start = i;
+            while i < bytes.len() && bytes[i] != b'&' && bytes[i] != b'#' {
+                i += 1;
+            }
+            // Only emit `***` if there was actually a value to redact (avoid empty `auth=`
+            // becoming `auth=***` which would be a false positive for `?auth=` with no value).
+            if i > value_start {
+                out.extend_from_slice(b"***");
+            }
+            // Loop continues; delimiter byte (or EOS) handled by outer copy below.
+            continue;
+        }
+
+        // No pattern at this position; copy one byte and advance.
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Minimal `%xx` percent-decoder. Ignores invalid escapes (passes them through verbatim).
 /// This is intentionally simpler than the `percent-encoding` / `urlencoding` crate APIs —
 /// we only need it for substring matching, not roundtrip-correct URL parsing.
@@ -178,5 +249,112 @@ mod tests {
                 "SECRET_URL_PATTERNS missing required entry: {}", required);
         }
         assert_eq!(SECRET_URL_PATTERNS.len(), 9, "exactly 9 patterns expected");
+    }
+
+    // ── Plan 25.2-16: redact_secrets_in_url tests (UAT Issue 9 R2 fix) ─────────
+
+    #[test]
+    fn redact_simple_token_query_param() {
+        let out = redact_secrets_in_url("https://example.com/?token=sk-fake-abc123", &[]);
+        assert_eq!(
+            out, "https://example.com/?token=***",
+            "simple token redaction must preserve URL structure: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_handles_multiple_secrets_in_one_url() {
+        let out = redact_secrets_in_url(
+            "https://example.com/?token=abc&api_key=def&safe=ok",
+            &[],
+        );
+        assert_eq!(
+            out, "https://example.com/?token=***&api_key=***&safe=ok",
+            "multi-secret redaction must only touch matched values: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_case_insensitive_key_match() {
+        let out = redact_secrets_in_url("https://example.com/?TOKEN=ABC", &[]);
+        assert_eq!(
+            out, "https://example.com/?TOKEN=***",
+            "case-insensitive key match must preserve key case in output: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_handles_percent_encoded_param_name() {
+        // ?token%3Dabc — the `=` is percent-encoded. Must still redact the `abc` value.
+        let out = redact_secrets_in_url("https://example.com/?token%3Dabc", &[]);
+        assert!(
+            !out.contains("abc"),
+            "redacted URL must NOT contain literal secret value 'abc': {}",
+            out
+        );
+        assert!(
+            out.to_lowercase().contains("token"),
+            "redacted URL must still contain the parameter name 'token': {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_respects_extra_patterns() {
+        let extras = vec!["x_custom_secret=".to_string()];
+        let out = redact_secrets_in_url("https://example.com/?x_custom_secret=foo", &extras);
+        assert!(
+            out.contains("x_custom_secret=***"),
+            "operator extras must trigger redaction: {}",
+            out
+        );
+        assert!(
+            !out.contains("foo"),
+            "operator-matched secret value must be removed: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn redact_returns_input_unchanged_on_clean_url() {
+        let clean1 = "https://example.com/article?id=1234";
+        assert_eq!(
+            redact_secrets_in_url(clean1, &[]),
+            clean1,
+            "clean URL with id= must be bytewise-equal"
+        );
+
+        let clean2 = "https://arxiv.org/abs/2401.12345.pdf";
+        assert_eq!(
+            redact_secrets_in_url(clean2, &[]),
+            clean2,
+            "clean arxiv URL must be bytewise-equal"
+        );
+    }
+
+    #[test]
+    fn redact_bearer_value_in_query_string() {
+        // `Bearer ` (with space) is a value-bearing pattern after percent-decode.
+        // Acceptable to emit either `Bearer%20***` or `Bearer ***` — gate is just that
+        // the literal `sk-abc` value MUST NOT remain.
+        let out = redact_secrets_in_url("https://example.com/?h=Bearer%20sk-abc", &[]);
+        assert!(
+            !out.contains("sk-abc"),
+            "redacted URL must NOT contain bearer value 'sk-abc': {}",
+            out
+        );
+    }
+
+    #[test]
+    fn secret_url_patterns_const_count_unchanged() {
+        // Plan 16 must NOT modify the const list — only add a new function.
+        assert_eq!(
+            SECRET_URL_PATTERNS.len(),
+            9,
+            "Plan 16 forbids modifying SECRET_URL_PATTERNS — count must stay at 9"
+        );
     }
 }

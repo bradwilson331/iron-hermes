@@ -27,7 +27,7 @@ use crate::web_local::truncate_content;
 use self::backends::{exa, firecrawl, local, tavily};
 use self::dispatch::{classify_url, reroute_for_pdf, UrlClass};
 use self::pdf::{extract_pdf, extract_pdf_bytes};
-use self::sanitize::{contains_secret, strip_base64_images};
+use self::sanitize::{contains_secret, redact_secrets_in_url, strip_base64_images};
 use self::summary::tiers::route_tiers;
 use self::youtube::extract_youtube;
 
@@ -232,9 +232,12 @@ async fn process_one_url(
     registry: &Arc<SkillRegistry>,
     sem: Arc<Semaphore>,
 ) -> ExtractionResult {
-    // Step 1: D-19 secret-URL check BEFORE any network call.
+    // Step 1: D-19 secret-URL check BEFORE any network call. When secrets are
+    // detected, echo the REDACTED URL in the error envelope so the model never
+    // sees the cleartext token (Plan 16 / UAT Issue 9 fix).
     if contains_secret(url, &cfg.extract.redact_url_patterns) {
-        return ExtractionResult::error(url, "url_contains_secret");
+        let redacted = redact_secrets_in_url(url, &cfg.extract.redact_url_patterns);
+        return ExtractionResult::error(&redacted, "url_contains_secret");
     }
 
     // Step 2: classify (D-03) → branch.
@@ -303,6 +306,12 @@ async fn process_one_url(
         extraction.error = Some("content_below_min_length".into());
     }
 
+    // Defense-in-depth (Plan 16 / UAT Issue 9): redact extraction.url before
+    // returning. The contains_secret pre-gate (step 1) already short-circuited the
+    // common case; this catches operator-extended pattern lists that match a
+    // backend-returned URL the pre-gate did not (e.g. final URL after redirects).
+    extraction.url = redact_secrets_in_url(&extraction.url, &cfg.extract.redact_url_patterns);
+
     extraction
 }
 
@@ -315,13 +324,18 @@ async fn fetch_web_with_chain(
     cfg: &Config,
     format: &str,
 ) -> Result<ExtractionResult> {
+    // Plan 16 / UAT Issue 9: log the REDACTED URL in every warn! site so secrets
+    // never leak via tracing. cfg.extract.redact_url_patterns is the operator's
+    // extension list (D-22).
+    let url_for_log = redact_secrets_in_url(url, &cfg.extract.redact_url_patterns);
+
     // 1. Firecrawl
     if std::env::var("FIRECRAWL_API_KEY").is_ok() {
         match firecrawl::fetch_with_firecrawl(url).await {
             Ok(r) => return Ok(r),
             Err(e) => warn!(
                 "web_extract: Firecrawl failed for {}: {}; trying Exa",
-                url, e
+                url_for_log, e
             ),
         }
     }
@@ -331,7 +345,7 @@ async fn fetch_web_with_chain(
             Ok(r) => return Ok(r),
             Err(e) => warn!(
                 "web_extract: Exa failed for {}: {}; trying Tavily",
-                url, e
+                url_for_log, e
             ),
         }
     }
@@ -341,7 +355,7 @@ async fn fetch_web_with_chain(
             Ok(r) => return Ok(r),
             Err(e) => warn!(
                 "web_extract: Tavily failed for {}: {}; trying Local",
-                url, e
+                url_for_log, e
             ),
         }
     }
@@ -372,7 +386,7 @@ async fn fetch_web_with_chain(
             Ok(outcome.result)
         }
         Err(e) => {
-            warn!("web_extract: all backends failed for {}: {}", url, e);
+            warn!("web_extract: all backends failed for {}: {}", url_for_log, e);
             Err(anyhow::anyhow!("backend_chain_exhausted: {}", e))
         }
     }
@@ -402,5 +416,50 @@ mod tests {
         assert!(r.content.is_empty());
         assert!(r.title.is_empty());
         assert_eq!(r.url, "https://example.com");
+    }
+
+    /// Plan 25.2-16 (UAT Issue 9): integration-style assertion that the
+    /// process_one_url secret-rejection branch puts the REDACTED URL into the
+    /// ExtractionResult.url echo, never the raw cleartext token.
+    ///
+    /// This mirrors process_one_url step 1's behavior without requiring a full
+    /// Config + SummarizationClientHandle + SkillRegistry harness — the
+    /// substantive contract is "contains_secret triggers, redact_secrets_in_url
+    /// runs, the literal value is gone".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_one_url_redacts_secret_in_error_envelope() {
+        use crate::web_extract::sanitize::{contains_secret, redact_secrets_in_url};
+
+        let url = "https://example.com/?api_key=sk-or-v1-fakekeyabc123";
+        let extras: Vec<String> = vec![];
+        assert!(
+            contains_secret(url, &extras),
+            "test pre-condition: pattern matches"
+        );
+
+        let redacted = redact_secrets_in_url(url, &extras);
+        // The redacted URL must NOT contain the literal secret value.
+        assert!(
+            !redacted.contains("sk-or-v1-fakekeyabc123"),
+            "redacted URL must not contain the cleartext secret: {}",
+            redacted
+        );
+        // The redacted URL must STILL identify the parameter (operator readability).
+        assert!(
+            redacted.to_lowercase().contains("api_key"),
+            "redacted URL must preserve the parameter name: {}",
+            redacted
+        );
+
+        // The synthesized error envelope (mirrors process_one_url step 1 behavior):
+        let envelope = ExtractionResult::error(&redacted, "url_contains_secret");
+        assert!(
+            !envelope.url.contains("sk-or-v1-fakekeyabc123"),
+            "envelope.url must not contain cleartext secret: {}",
+            envelope.url
+        );
+        assert_eq!(envelope.error.as_deref(), Some("url_contains_secret"));
+        assert!(envelope.content.is_empty());
+        assert!(envelope.title.is_empty());
     }
 }
