@@ -75,11 +75,54 @@ impl WebExtractTool {
     }
 }
 
+/// Phase 25.3 D-T-1 / Discretion D-2 (Option B): redact secrets from URL-shaped args
+/// before they land in the trajectory ledger.
+///
+/// Extracted as a `pub(crate)` free function (instead of inlined inside the trait
+/// impl) so unit tests can exercise the redaction logic without constructing a full
+/// `WebExtractTool` (which requires `Arc<dyn SummarizationClientHandle>` +
+/// `Arc<SkillRegistry>`). The redaction reads no fields of `self` — this is the
+/// Phase 24 Plan 03 `run_memory_setup_with_io` testable-seam pattern.
+///
+/// The web_extract schema accepts a `urls: Vec<String>` argument. Each URL may
+/// contain query-parameter secrets (api_key, token, etc.). This applies
+/// `redact_secrets_in_url` (Phase 25.2 Plan 16) to every URL string. Other arg
+/// fields (e.g., `use_llm_processing`, `format`) pass through verbatim.
+///
+/// Structural shape (object/array/scalar) is preserved per the `Tool::redact_args`
+/// contract — only string LEAVES are mutated.
+pub(crate) fn redact_url_args(raw: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = raw.clone();
+    if let Some(obj) = redacted.as_object_mut() {
+        if let Some(urls) = obj.get_mut("urls") {
+            if let Some(arr) = urls.as_array_mut() {
+                for u in arr.iter_mut() {
+                    if let Some(s) = u.as_str() {
+                        let redacted_url = redact_secrets_in_url(s, &[]);
+                        *u = serde_json::Value::String(redacted_url);
+                    }
+                }
+            } else if let Some(s) = urls.as_str() {
+                // Tolerate single-string url field (some callers may pass a scalar).
+                let redacted_url = redact_secrets_in_url(s, &[]);
+                *urls = serde_json::Value::String(redacted_url);
+            }
+        }
+    }
+    redacted
+}
+
 #[async_trait]
 impl Tool for WebExtractTool {
     fn name(&self) -> &str { "web_extract" }
     fn toolset(&self) -> &str { "web" }
     fn is_available(&self) -> bool { true }
+
+    /// Phase 25.3 D-T-1 / Discretion D-2 override: delegate to `redact_url_args`
+    /// (testable seam). See the free function's doc-comment for the contract.
+    fn redact_args(&self, raw: &serde_json::Value) -> serde_json::Value {
+        redact_url_args(raw)
+    }
 
     fn description(&self) -> &str {
         "Extract clean Markdown content from one or more URLs. Routes by URL type: \
@@ -416,6 +459,86 @@ mod tests {
         assert!(r.content.is_empty());
         assert!(r.title.is_empty());
         assert_eq!(r.url, "https://example.com");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 25.3 Plan 05 (D-T-1 / Discretion D-2):
+    // WebExtractTool::redact_args override tests via the redact_url_args free
+    // function (testable seam — the trait impl delegates to this fn so tests
+    // do NOT need to construct a full WebExtractTool with SummarizationClientHandle
+    // + SkillRegistry deps; redact_args reads no fields of self).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn web_extract_redact_args_redacts_url_secrets() {
+        let raw = serde_json::json!({
+            "urls": ["https://example.com/?api_key=sk-or-v1-fakekeyabc123"],
+            "use_llm_processing": false
+        });
+        let redacted = redact_url_args(&raw);
+        let urls = redacted
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .expect("urls array preserved");
+        assert_eq!(urls.len(), 1);
+        let s = urls[0].as_str().expect("url is a string");
+        assert!(
+            !s.contains("sk-or-v1-fakekeyabc123"),
+            "secret token must be redacted; got: {s}"
+        );
+        // Other fields preserved verbatim
+        assert_eq!(
+            redacted.get("use_llm_processing").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn web_extract_redact_args_preserves_safe_urls() {
+        let raw = serde_json::json!({
+            "urls": ["https://example.com/path?query=visible"]
+        });
+        let redacted = redact_url_args(&raw);
+        let urls = redacted
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .expect("urls array preserved");
+        assert_eq!(
+            urls[0].as_str(),
+            Some("https://example.com/path?query=visible"),
+            "safe URL must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn web_extract_redact_args_passes_non_url_args_through() {
+        let raw = serde_json::json!({"use_llm_processing": true, "format": "markdown"});
+        let redacted = redact_url_args(&raw);
+        assert_eq!(
+            redacted, raw,
+            "args without a urls field must pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn web_extract_redact_args_preserves_array_shape_with_multiple_urls() {
+        // Plan 9 / RL pipelines need to count the urls field — the array shape
+        // and length MUST be preserved across redaction.
+        let raw = serde_json::json!({
+            "urls": [
+                "https://safe.example.com/a",
+                "https://example.com/?api_key=sk-secret-token-xyz",
+                "https://safe.example.com/b"
+            ]
+        });
+        let redacted = redact_url_args(&raw);
+        let urls = redacted
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .expect("urls array preserved");
+        assert_eq!(urls.len(), 3, "array length preserved across redaction");
+        assert!(!serde_json::to_string(&redacted).unwrap().contains("sk-secret-token-xyz"),
+            "no leaf in the redacted JSON may contain the cleartext secret");
     }
 
     /// Plan 25.2-16 (UAT Issue 9): integration-style assertion that the
