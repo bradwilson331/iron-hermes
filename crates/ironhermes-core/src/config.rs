@@ -1895,14 +1895,14 @@ custom_providers:
     // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
     // =========================================================================
 
-    /// D-05 + Phase 25.2 D-13: RESERVED_ROLE_NAMES must hold exactly the six roles
-    /// (5 from Phase 26 + summarization from Phase 25.2).
+    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1: RESERVED_ROLE_NAMES must hold exactly
+    /// the seven roles (5 from Phase 26 + summarization from Phase 25.2 + curator from Phase 25.3).
     #[test]
-    fn reserved_role_names_contains_all_six_roles_with_summarization() {
+    fn reserved_role_names_contains_all_seven_roles_with_curator() {
         assert_eq!(
             RESERVED_ROLE_NAMES.len(),
-            6,
-            "Phase 26 D-05 + Phase 25.2 D-13 specify exactly 6 reserved roles (5 + summarization)"
+            7,
+            "Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 specify exactly 7 reserved roles"
         );
         for required in &[
             "vision",
@@ -1911,6 +1911,7 @@ custom_providers:
             "skills_hub",
             "mcp_helper",
             "summarization",
+            "curator",
         ] {
             assert!(
                 RESERVED_ROLE_NAMES.contains(required),
