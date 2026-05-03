@@ -912,6 +912,13 @@ impl AgentLoop {
                 messages.push(tool_msg.clone());
                 appended.push(tool_msg);
             }
+
+            // Phase 25.3 D-T-1: increment per-turn counter AFTER tool calls execute.
+            // The trajectory append site reads this with Ordering::Relaxed during
+            // execute_tool_call, so each tool call within a turn shares the same
+            // turn_index — incrementing here means the NEXT turn's tool calls see
+            // the next index. Phase 25.4 Curator can correlate calls within a turn.
+            self.turn_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Note: ResponseSent is NOT fired here. It is fired by the platform layer
@@ -1221,11 +1228,53 @@ impl AgentLoop {
                     return format!(r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#);
                 }
 
+                // Take an `args` snapshot for the trajectory append site BEFORE
+                // execute_tool consumes the original. Cheap clone — Plan 9 trades
+                // a JSON Value clone for a redaction seam (Plan 5 Tool::redact_args).
+                let raw_args_for_traj = args.clone();
                 let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
 
                 match dispatch_result {
                     Ok(result) => {
+                        // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (success path).
+                        // Best-effort: append failure logs warn! and does NOT abort the turn.
+                        // Plan 6 cycle-break: trajectory_writer is Arc<dyn TrajectoryWriterHandle>.
+                        // We serialize the entry to a single JSONL line and hand it to the trait;
+                        // the impl (TrajectoryWriterHandleImpl in ironhermes-trajectory) handles
+                        // locking, write, and fsync.
+                        if let Some(ref handle) = self.trajectory_writer {
+                            // Look up the tool to call its redact_args override (Plan 5 trait extension).
+                            let registry_guard = self.registry.read().await;
+                            let redacted = if let Some(t) = registry_guard.get(name.as_str()) {
+                                t.redact_args(&raw_args_for_traj)
+                            } else {
+                                raw_args_for_traj.clone()
+                            };
+                            drop(registry_guard);
+                            let entry = TrajectoryEntry::success(
+                                name.as_str(),
+                                redacted,
+                                result.clone(),
+                                duration_ms,
+                                classify_impact_level(name.as_str()),
+                                self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                                tool_call.id.clone(),
+                            );
+                            match serde_json::to_string(&entry) {
+                                Ok(line) => {
+                                    if let Err(e) = handle.append_json_line(&line) {
+                                        tracing::warn!(error = %e, tool = %name,
+                                            "Phase 25.3: trajectory append failed; ledger entry lost for this call");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, tool = %name,
+                                        "Phase 25.3: trajectory entry serialize failed; ledger entry skipped");
+                                }
+                            }
+                        }
+
                         self.fire_hook(HookEventKind::ToolCompleted {
                             tool_name: name.to_string(),
                             success: true,
@@ -1257,6 +1306,40 @@ impl AgentLoop {
                     Err(e) => {
                         let err_msg = format!("Tool '{}' failed: {}", name, e);
                         warn!(%err_msg);
+
+                        // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (failure path).
+                        // Plan 6 cycle-break: serialize then hand to TrajectoryWriterHandle.
+                        if let Some(ref handle) = self.trajectory_writer {
+                            let registry_guard = self.registry.read().await;
+                            let redacted = if let Some(t) = registry_guard.get(name.as_str()) {
+                                t.redact_args(&raw_args_for_traj)
+                            } else {
+                                raw_args_for_traj.clone()
+                            };
+                            drop(registry_guard);
+                            let entry = TrajectoryEntry::failure(
+                                name.as_str(),
+                                redacted,
+                                err_msg.clone(),
+                                duration_ms,
+                                classify_impact_level(name.as_str()),
+                                self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                                tool_call.id.clone(),
+                            );
+                            match serde_json::to_string(&entry) {
+                                Ok(line) => {
+                                    if let Err(append_err) = handle.append_json_line(&line) {
+                                        tracing::warn!(error = %append_err, tool = %name,
+                                            "Phase 25.3: trajectory append failed (failure path)");
+                                    }
+                                }
+                                Err(serr) => {
+                                    tracing::warn!(error = %serr, tool = %name,
+                                        "Phase 25.3: trajectory entry serialize failed (failure path); ledger entry skipped");
+                                }
+                            }
+                        }
+
                         self.fire_hook(HookEventKind::ToolCompleted {
                             tool_name: name.to_string(),
                             success: false,
