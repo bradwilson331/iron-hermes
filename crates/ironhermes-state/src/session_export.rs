@@ -9,7 +9,7 @@
 //! this for each one.
 
 use crate::SessionExport;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
 /// 4-file directory writer for a single session export (D-F-1).
@@ -39,12 +39,46 @@ impl SessionDirectoryExport {
     /// trajectories.jsonl in the export will be missing or empty, which is operator-tolerant).
     pub fn write(
         &self,
-        _export: &SessionExport,
-        _context_json: Option<&str>,
-        _trajectory_source: Option<&Path>,
+        export: &SessionExport,
+        context_json: Option<&str>,
+        trajectory_source: Option<&Path>,
     ) -> Result<()> {
-        // RED gate stub — TDD: tests below should fail until GREEN lands.
-        unimplemented!("Phase 25.3 Plan 10 Task 1 GREEN: write 4-file directory export")
+        std::fs::create_dir_all(&self.output_dir)
+            .with_context(|| format!("create export dir {}", self.output_dir.display()))?;
+
+        // 1. messages.json — array of StoredMessage
+        let messages_json = serde_json::to_string_pretty(&export.messages)
+            .context("serialize messages")?;
+        std::fs::write(self.output_dir.join("messages.json"), messages_json)
+            .with_context(|| format!("write messages.json to {}", self.output_dir.display()))?;
+
+        // 2. metadata.json — Session struct (includes workspace_root from Plan 0)
+        let metadata_json = serde_json::to_string_pretty(&export.session)
+            .context("serialize session metadata")?;
+        std::fs::write(self.output_dir.join("metadata.json"), metadata_json)
+            .with_context(|| format!("write metadata.json to {}", self.output_dir.display()))?;
+
+        // 3. context.json — Phase 18 compressor output (empty object if None)
+        let context_payload = context_json.unwrap_or("{}");
+        std::fs::write(self.output_dir.join("context.json"), context_payload)
+            .with_context(|| format!("write context.json to {}", self.output_dir.display()))?;
+
+        // 4. trajectories.jsonl — copy from the trajectory crate's primary location.
+        // Operator-tolerant: missing source => no trajectories.jsonl in the export
+        // (matches D-T-4 "no automatic eviction" semantic; absence is informative).
+        if let Some(src) = trajectory_source {
+            if src.exists() {
+                let dst = self.output_dir.join("trajectories.jsonl");
+                std::fs::copy(src, &dst).with_context(|| {
+                    format!(
+                        "copy trajectories.jsonl from {} to {}",
+                        src.display(),
+                        dst.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
