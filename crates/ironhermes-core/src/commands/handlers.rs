@@ -443,7 +443,11 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
             // Bare --workspace: use ctx.workspace
             match &ctx.workspace {
                 Some(ws) => {
-                    workspace_filter = Some(ws.root.display().to_string());
+                    // Phase 25.3-16 CR-03: canonical_root_string MUST match what
+                    // create_session persisted. Without this match, SQL filter
+                    // `workspace_root = ?2` returns empty for non-UTF-8 paths
+                    // even when sessions exist.
+                    workspace_filter = Some(ws.canonical_root_string());
                 }
                 None => {
                     return CommandResult::Output(
@@ -461,6 +465,11 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
         .and_then(|s| s.parse().ok())
         .unwrap_or(20)
         .max(1);
+
+    // Phase 25.3-16 IN-03 close-out: normalize empty-string filter to None so a
+    // misconfigured caller doesn't silently get "no sessions" from SQL NULL
+    // semantics.
+    let workspace_filter = workspace_filter.filter(|s| !s.is_empty());
 
     let text = match workspace_filter {
         Some(ws) => store.list_sessions_text_filtered(limit, Some(&ws)),

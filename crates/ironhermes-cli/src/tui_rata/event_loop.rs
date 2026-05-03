@@ -405,16 +405,17 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // workspace_root filter all fail on the default chat surface.
     let state_store = match ironhermes_state::StateStore::open_default() {
         Ok(mut s) => {
-            // Phase 25.3 D-W-1: persist resolved workspace_root onto the row.
+            // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with the
+            // prompt-line and /sessions --workspace filter (single source of truth).
             // workspace was resolved at line 309 (see above in this function).
-            let ws_root_str = workspace.as_ref().and_then(|ws| ws.root.to_str());
+            let workspace_root_canon = workspace.as_ref().map(|ws| ws.canonical_root_string());
             if let Err(e) = s.create_session(
                 &session_id,
                 "cli-repl",
                 Some(client.model()),
                 None,
                 None,
-                ws_root_str,
+                workspace_root_canon.as_deref(),
             ) {
                 // Best-effort: log and continue with None state_store. /sessions,
                 // /resume, etc. will report "session storage not configured".

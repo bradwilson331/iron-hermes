@@ -626,10 +626,12 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
+    // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with the
+    // prompt-line and /sessions --workspace filter (single source of truth).
+    let workspace_root_canon = workspace.as_ref().map(|ws| ws.canonical_root_string());
     state_store.create_session(
         &session_id, "cli", Some(client.model()), None, None,
-        // Phase 25.3 D-W-1: persist the resolved workspace_root onto the sessions row.
-        workspace.as_ref().and_then(|ws| ws.root.to_str()),
+        workspace_root_canon.as_deref(),
     )
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
@@ -1103,10 +1105,12 @@ async fn run_chat(
     let mut state_store = ironhermes_state::StateStore::open_default()
         .context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
+    // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with the
+    // prompt-line and /sessions --workspace filter (single source of truth).
+    let workspace_root_canon = workspace.as_ref().map(|ws| ws.canonical_root_string());
     state_store.create_session(
         &session_id, "cli", Some(client.model()), None, None,
-        // Phase 25.3 D-W-1: persist resolved workspace_root onto sessions row.
-        workspace.as_ref().and_then(|ws| ws.root.to_str()),
+        workspace_root_canon.as_deref(),
     )
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
