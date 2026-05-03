@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: executing
-stopped_at: Phase 25.3 context gathered
-last_updated: "2026-05-03T13:34:51.908Z"
-last_activity: 2026-05-03 -- Phase 25.3 planning complete
+status: ready
+stopped_at: Phase 25.3 plans regrouped into 6 waves
+last_updated: "2026-05-03T13:41:04.592Z"
+last_activity: 2026-05-03 -- Phase 25.3 wave grouping fixed (surgical replan)
 progress:
   total_phases: 25
   completed_phases: 15
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 25.2 — web-extract-tools
+**Current focus:** Phase 25.3 — session-workspace-parity
 
 ## Current Position
 
-Phase: 25.3 (session-workspace parity) — NOT PLANNED
-Plan: 0 of 0
-Status: Ready to execute
-Last activity: 2026-05-03 -- Phase 25.3 planning complete
+Phase: 25.3 (session-workspace-parity) — READY TO EXECUTE
+Plan: 0 of 12
+Status: Replanned — 6 waves, all dependencies satisfied, no intra-wave overlaps
+Last activity: 2026-05-03 -- Phase 25.3 wave grouping fixed (surgical replan)
 
 ## Performance Metrics
 
