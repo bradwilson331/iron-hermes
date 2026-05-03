@@ -98,6 +98,51 @@ impl StateStoreHandle for TestStateStoreAdapter {
         }
     }
 
+    fn export_to_directory_text(&self, session_id: &str) -> String {
+        // Phase 25.3 Plan 11 (D-F-1): mirror StateStoreAdapter behavior so
+        // existing /export-session behavioral tests can exercise the slash
+        // path. Writes the canonical 4-file layout to the session-scoped
+        // directory under `<hermes_home>/sessions/<session_id>/`.
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "error: StateStore lock poisoned.".to_string(),
+        };
+        let export = match guard.export_session(session_id) {
+            Ok(e) => e,
+            Err(e) => {
+                return format!(
+                    "error: failed to fetch session {session_id}: {e}"
+                )
+            }
+        };
+        drop(guard);
+
+        let output_dir = ironhermes_core::constants::get_hermes_home()
+            .join("sessions")
+            .join(session_id);
+        let cwd = std::env::current_dir().ok();
+        let traj_root = match cwd
+            .as_ref()
+            .and_then(|c| ironhermes_core::workspace::resolve_from_cwd(c))
+        {
+            Some(ws) => ws.root.join(".ironhermes"),
+            None => ironhermes_core::constants::get_hermes_home(),
+        };
+        let traj_src = traj_root
+            .join("sessions")
+            .join(session_id)
+            .join("trajectories.jsonl");
+        let exporter =
+            ironhermes_state::SessionDirectoryExport::new(session_id, &output_dir);
+        match exporter.write(&export, None, Some(traj_src.as_path())) {
+            Ok(()) => format!(
+                "Session {session_id} exported to {}",
+                output_dir.display()
+            ),
+            Err(e) => format!("error: export failed: {e}"),
+        }
+    }
+
     fn update_title(&self, session_id: &str, title: &str) -> Result<(), String> {
         let mut guard = self
             .0

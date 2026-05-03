@@ -95,4 +95,36 @@ pub enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Manage sessions — export to flat-file layout (Phase 25.3 D-F-1 / D-F-2).
+    ///
+    /// Subcommands:
+    ///   export <session-id> [--output <dir>]    Export one session to 4 files (D-F-1)
+    ///   export-all [--since YYYY-MM-DD]         Export all sessions; optional date filter (D-F-2)
+    Session {
+        #[command(subcommand)]
+        subcommand: SessionSubcommand,
+    },
+}
+
+/// Subcommands for `hermes session` (Phase 25.3 D-F-1 / D-F-2).
+///
+/// Lib-reachable mirror of `crate::session_cmd::SessionSubcommand`. The two
+/// definitions intentionally share field names so parse-level tests in this
+/// module exercise the same surface the binary's dispatcher consumes.
+#[derive(Subcommand, Debug, Clone)]
+pub enum SessionSubcommand {
+    /// Export a single session to flat-file layout (D-F-1).
+    Export {
+        /// Session ID (full UUID or unique prefix).
+        session_id: String,
+        /// Output directory. Default: ~/.ironhermes/sessions/<session-id>/
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Export all sessions to flat-file layout (D-F-2).
+    ExportAll {
+        /// Filter to sessions started on or after this date (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+    },
 }

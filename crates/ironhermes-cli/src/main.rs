@@ -39,6 +39,8 @@ mod preflight;
 mod setup;
 mod tui;
 use ironhermes_cli::skills_cmd;
+// Phase 25.3 Plan 11: `hermes session export[-all]` (D-F-1 / D-F-2).
+use ironhermes_cli::session_cmd;
 
 #[derive(Parser)]
 #[command(
@@ -175,6 +177,15 @@ enum Commands {
     Provider {
         #[command(subcommand)]
         subcommand: provider_cmd::ProviderSubcommand,
+    },
+    /// Manage sessions — export to flat-file layout (Phase 25.3 D-F-1 / D-F-2).
+    ///
+    /// Subcommands:
+    ///   export <session-id> [--output <dir>]    Export one session to 4 files (D-F-1)
+    ///   export-all [--since YYYY-MM-DD]         Export all sessions; optional date filter (D-F-2)
+    Session {
+        #[command(subcommand)]
+        subcommand: session_cmd::SessionSubcommand,
     },
 }
 
@@ -401,6 +412,10 @@ async fn main() -> Result<()> {
         Some(Commands::Provider { subcommand }) => {
             let profile_name = cli.profile.as_deref().unwrap_or("default").to_string();
             provider_cmd::handle_provider_command(subcommand, &profile_name).await
+        }
+        Some(Commands::Session { subcommand }) => {
+            // Phase 25.3 Plan 11 (D-F-1 / D-F-2): single + bulk session export.
+            session_cmd::handle_session_command(subcommand).await
         }
         None => {
             if let Some(ref prompt) = cli.execute {

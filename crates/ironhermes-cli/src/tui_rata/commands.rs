@@ -174,6 +174,54 @@ impl StateStoreHandle for StateStoreAdapter {
             Err(e) => format!("Error exporting session: {e}"),
         }
     }
+    /// Phase 25.3 D-F-1: write the 4-file directory export for `session_id`.
+    ///
+    /// Output dir: `<hermes_home>/sessions/<session_id>/`. Trajectory source
+    /// resolves workspace-aware (cwd walk-up; falls back to global hermes_home)
+    /// to match Plan 8's writer-attach resolution.
+    fn export_to_directory_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "error: StateStore lock poisoned.".to_string(),
+        };
+        let export = match guard.export_session(session_id) {
+            Ok(e) => e,
+            Err(e) => {
+                return format!(
+                    "error: failed to fetch session {session_id}: {e}"
+                )
+            }
+        };
+        // Drop the lock before doing filesystem IO — `write` is sync but the
+        // SessionDirectoryExport doesn't need the connection.
+        drop(guard);
+
+        let output_dir = ironhermes_core::constants::get_hermes_home()
+            .join("sessions")
+            .join(session_id);
+        // Trajectory source path resolves the same way as Plan 8 wireup.
+        let cwd = std::env::current_dir().ok();
+        let traj_root = match cwd
+            .as_ref()
+            .and_then(|c| ironhermes_core::workspace::resolve_from_cwd(c))
+        {
+            Some(ws) => ws.root.join(".ironhermes"),
+            None => ironhermes_core::constants::get_hermes_home(),
+        };
+        let traj_src = traj_root
+            .join("sessions")
+            .join(session_id)
+            .join("trajectories.jsonl");
+        let exporter =
+            ironhermes_state::SessionDirectoryExport::new(session_id, &output_dir);
+        match exporter.write(&export, None, Some(traj_src.as_path())) {
+            Ok(()) => format!(
+                "Session {session_id} exported to {}",
+                output_dir.display()
+            ),
+            Err(e) => format!("error: export failed: {e}"),
+        }
+    }
     fn update_title(&self, session_id: &str, title: &str) -> Result<(), String> {
         let mut guard = self.0.lock().map_err(|_| "StateStore lock poisoned.".to_string())?;
         guard.update_session_title(session_id, title).map_err(|e| e.to_string())
