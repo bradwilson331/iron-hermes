@@ -132,6 +132,29 @@ pub trait ToolsetSessionHandle: Send + Sync {
 }
 
 // =============================================================================
+// TrajectoryWriterHandle trait — Phase 25.3 Plan 06 (D-T-3)
+// =============================================================================
+
+/// Phase 25.3 D-T-3 cycle-break: trait-object handle for per-tool-call trajectory
+/// logging. Defined here (in ironhermes-core) so `CommandContext` can hold a
+/// trajectory writer without ironhermes-core taking a path dep on
+/// ironhermes-trajectory (which would break the strict leaf-crate convention).
+///
+/// The canonical impl is `ironhermes_trajectory::TrajectoryWriterHandleImpl`,
+/// a thin `Arc<Mutex<TrajectoryWriter>>` wrapper. Callers pass a
+/// pre-serialized JSON line (one trajectory entry, no trailing newline) — the
+/// impl handles locking, write, and fsync.
+///
+/// Mirrors `ToolsetSessionHandle` (Phase 25 Plan 04 D-06),
+/// `MemoryManagerHandle` (Phase 20), and `SummarizationClientHandle` (Phase 25.2).
+pub trait TrajectoryWriterHandle: Send + Sync {
+    /// Append a pre-serialized JSONL line. Implementations are responsible for
+    /// locking, write, and fsync. Returns `Err` only on unrecoverable IO errors;
+    /// callers MUST log + continue (best-effort ledger — never aborts an agent turn).
+    fn append_json_line(&self, line: &str) -> anyhow::Result<()>;
+}
+
+// =============================================================================
 // Phase 22.4.2 Plan 00 — D-04 handle traits
 // =============================================================================
 //

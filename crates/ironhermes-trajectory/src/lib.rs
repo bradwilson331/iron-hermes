@@ -14,7 +14,9 @@
 pub mod format;
 pub mod writer;
 pub mod reader;
+pub mod handle;
 
 pub use format::{ImpactLevel, TrajectoryEntry};
 pub use writer::TrajectoryWriter;
 pub use reader::TrajectoryReader;
+pub use handle::TrajectoryWriterHandleImpl;
