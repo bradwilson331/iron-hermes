@@ -87,6 +87,12 @@ impl GatewaySession {
 pub struct SessionStore {
     state: Arc<Mutex<StateStore>>,
     sessions: HashMap<String, GatewaySession>,
+    /// Phase 25.3-14 verifier-blocker close-out: per-cwd workspace resolved by
+    /// GatewayRunner at startup. Threaded into state.create_session as
+    /// workspace_root so /sessions --workspace + Phase 25.4 Curator see
+    /// gateway-originated sessions. Set via SessionStore::set_workspace from
+    /// GatewayRunner::set_workspace.
+    workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
 }
 
 impl SessionStore {
@@ -94,7 +100,15 @@ impl SessionStore {
         Self {
             state,
             sessions: HashMap::new(),
+            workspace: None,
         }
+    }
+
+    /// Phase 25.3-14: install the resolved Workspace so get_or_create can persist
+    /// workspace_root onto the sessions table. Mirrors GatewayRunner::set_workspace
+    /// — GatewayRunner calls this on the inner SessionStore so both sides agree.
+    pub fn set_workspace(&mut self, workspace: Arc<ironhermes_core::workspace::Workspace>) {
+        self.workspace = Some(workspace);
     }
 
     /// Get or create a session for the given key. On creation, writes through to SQLite.
@@ -102,7 +116,12 @@ impl SessionStore {
         let string_key = key.to_string_key();
         if !self.sessions.contains_key(&string_key) {
             let session = GatewaySession::new(key.clone(), model);
-            // Write-through: persist to SQLite immediately
+            // Write-through: persist to SQLite immediately.
+            // Phase 25.3-14 verifier-blocker close-out: thread the resolved workspace
+            // root into state.create_session so Telegram session rows carry the
+            // workspace metadata (D-W-1). Without this, /sessions --workspace and
+            // Phase 25.4 Curator are starved on the primary user-facing surface.
+            let workspace_root = self.workspace.as_ref().and_then(|ws| ws.root.to_str());
             if let Ok(mut state) = self.state.lock() {
                 if let Err(e) = state.create_session(
                     &session.session_id,
@@ -110,7 +129,7 @@ impl SessionStore {
                     Some(model),
                     None, // system_prompt set later
                     None, // no parent
-                    None, // workspace_root: Plan 0 placeholder — Plan 8 wires resolved workspace
+                    workspace_root,
                 ) {
                     warn!("Failed to persist session to SQLite: {e}");
                 }

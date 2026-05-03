@@ -122,12 +122,36 @@ impl GatewayRunner {
         self.toolset_session = Some(handle);
     }
 
-    /// Phase 25.3 D-W-2: install the resolved Workspace for the gateway surface.
-    /// Caller is `run_gateway` in ironhermes-cli (resolved via resolve_from_cwd at startup).
-    /// `build_gateway_handler` clones it into the handler so the per-message
-    /// CommandContext sees the resolved root for /sessions --workspace + trajectory scoping.
+    /// Phase 25.3 D-W-2 + Phase 25.3-14 verifier-blocker close-out:
+    /// install the resolved Workspace and ALSO propagate it to the inner
+    /// SessionStore so per-message session rows carry workspace_root. The
+    /// SessionStore needs the same Arc the runner holds — its get_or_create
+    /// path runs on a different code path from the per-message slash dispatch,
+    /// and was the surface flagged in the 25.3 verifier BLOCKER (#28).
+    ///
+    /// Caller is `run_gateway` in ironhermes-cli (resolved via resolve_from_cwd
+    /// at startup). `build_gateway_handler` clones the runner's workspace into
+    /// the per-message handler so /sessions --workspace and trajectory scoping
+    /// see the resolved root; this method ALSO ensures the SessionStore (which
+    /// runs `state.create_session(..., workspace_root)` on first message per
+    /// chat) sees the same Arc.
     pub fn set_workspace(&mut self, workspace: Arc<ironhermes_core::workspace::Workspace>) {
-        self.workspace = Some(workspace);
+        self.workspace = Some(workspace.clone());
+        // Phase 25.3-14: propagate to SessionStore so create_session passes
+        // workspace_root onto each gateway-originated sessions row.
+        // RwLock::try_write avoids blocking; SessionStore is exclusively held by
+        // GatewayRunner during the setup phase before start() is called, so the
+        // try_write can never legitimately fail. We log and continue rather than
+        // panic on the impossible-failure path so a future refactor that moves
+        // the call onto a contended path surfaces the misuse loudly without
+        // crashing the gateway.
+        match self.session_store.try_write() {
+            Ok(mut s) => s.set_workspace(workspace),
+            Err(_) => tracing::warn!(
+                "Phase 25.3-14: SessionStore was held during set_workspace; \
+                 workspace_root may not propagate to gateway sessions"
+            ),
+        }
     }
 
     /// Phase 25.3 D-T-3: install the TrajectoryWriter for the gateway surface.
