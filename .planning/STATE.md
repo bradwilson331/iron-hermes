@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Carry-Overs
-status: executing
+status: ready_to_plan
 stopped_at: Phase 25.3 context gathered
 last_updated: "2026-05-03T13:58:43.872Z"
 last_activity: 2026-05-03 -- Phase 25.3 execution started
 progress:
   total_phases: 25
-  completed_phases: 15
+  completed_phases: 16
   total_plans: 117
   completed_plans: 105
-  percent: 90
+  percent: 64
 ---
 
 # Project State
@@ -25,16 +25,16 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 25.3 (session-workspace-parity) — EXECUTING
-Plan: 1 of 12
-Status: Executing Phase 25.3
-Last activity: 2026-05-03 -- Phase 25.3 execution started
+Phase: 25.4
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-05-03
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 69
+- Total plans completed: 87
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -59,6 +59,7 @@ Last activity: 2026-05-03 -- Phase 25.3 execution started
 | 22.4.2 | 5 | - | - |
 | 22.4.2.2 | 2 | - | - |
 | 22.4.2.3 | 1 | - | - |
+| 25.3 | 18 | - | - |
 
 **Recent Trend:**
 
