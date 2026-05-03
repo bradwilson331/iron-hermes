@@ -2320,3 +2320,48 @@ mod memory_provider_wiring_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 9 (D-T-1 / D-T-3): trajectory wireup tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod trajectory_wireup_tests {
+    use super::*;
+    use ironhermes_trajectory::ImpactLevel;
+
+    #[test]
+    fn classify_impact_level_known_categories() {
+        assert_eq!(classify_impact_level("read_file"), ImpactLevel::Read);
+        assert_eq!(classify_impact_level("web_extract"), ImpactLevel::Read);
+        assert_eq!(classify_impact_level("write_file"), ImpactLevel::Write);
+        assert_eq!(classify_impact_level("patch"), ImpactLevel::Write);
+        assert_eq!(classify_impact_level("terminal"), ImpactLevel::SystemChange);
+        assert_eq!(classify_impact_level("execute_code"), ImpactLevel::SystemChange);
+    }
+
+    #[test]
+    fn classify_impact_level_mcp_default_system_change() {
+        assert_eq!(classify_impact_level("mcp__github_create_issue"), ImpactLevel::SystemChange);
+        assert_eq!(classify_impact_level("mcp_filesystem_write"), ImpactLevel::SystemChange);
+    }
+
+    #[test]
+    fn classify_impact_level_unknown_default_write() {
+        assert_eq!(classify_impact_level("brand_new_tool_2030"), ImpactLevel::Write);
+        assert_eq!(classify_impact_level(""), ImpactLevel::Write);
+    }
+
+    #[test]
+    fn agent_loop_trajectory_writer_default_none() {
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
+        let agent = AgentLoop::new(client, registry, 4);
+        assert!(
+            agent.trajectory_writer.is_none(),
+            "Phase 25.3 D-T-3: AgentLoop::new MUST default trajectory_writer to None"
+        );
+    }
+}
