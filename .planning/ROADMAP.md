@@ -516,7 +516,7 @@ Plans:
 **Goal:** Land three foundational subsystems from the hermes-agent parity work, plus the Phase 26 cascade prerequisite for Phase 25.4's Curator: (1) new `ironhermes-trajectory` crate — append-only JSONL ledger writing per-tool-call records to `<workspace-or-home>/.ironhermes/sessions/<id>/trajectories.jsonl` from all four dispatch surfaces (CLI run_single, classic-TUI run_chat, ratatui run_chat_ratatui, Telegram gateway); (2) hybrid flat-file session export — SQLite stays canonical, on-demand `hermes session export <id>` + `/export-session` slash produce the four-file folder layout (`messages.json` + `metadata.json` + `context.json` + `trajectories.jsonl`); (3) `Workspace` newtype with cwd walk-up resolution, frozen-snapshot semantics, `[Workspace: <root>]` system prompt slot, `/sessions --workspace` filter, schema migration v8 adding `workspace_root TEXT NULL` to the sessions table; (4) Plan 0 mechanical addition of `"curator"` to `RESERVED_ROLE_NAMES` (6 -> 7) so Phase 25.4 can `resolve_role("curator")` without forward references. Curator subsystem itself is carved out into Phase 25.4.
 **Requirements**: D-T-1 through D-T-4, D-F-1, D-F-2, D-W-1, D-W-2 (CONTEXT-locked decisions; D-C-1..4 moved to Phase 25.4 after the 2026-05-03 scope split). No REQUIREMENTS.md tags pre-mapped — these CONTEXT decisions are the requirement set.
 **Depends on:** Phase 25 (toolset management infrastructure precedent), Phase 25.2 (CommandContext parity-guard pattern + AnyClient*Handle template + redact_secrets_in_url precedent)
-**Plans:** 11/12 plans executed
+**Plans:** 12/12 plans complete
 
 Plans:
 - [x] 25.3-00-PLAN.md — D-P0-1 RESERVED_ROLE_NAMES["curator"] (6→7) + D-W-1 schema migration v8 (workspace_root TEXT NULL) + 26-CONTEXT.md doc-update
@@ -530,7 +530,7 @@ Plans:
 - [x] 25.3-08-PLAN.md — D-W-1 / D-W-2 / D-T-3 4-site wireup (main.rs + tui_rata + gateway handler + gateway runner setters); turns 25.3-03 parity tests GREEN
 - [x] 25.3-09-PLAN.md — D-T-1 / D-T-3 AgentLoop trajectory append callback (post-redact via Tool::redact_args + impact-level classifier + turn_index)
 - [x] 25.3-10-PLAN.md — D-F-1 / D-W-2 SessionDirectoryExport (4-file layout) + StateStore::list_sessions_filtered + cmd_sessions --workspace
-- [ ] 25.3-11-PLAN.md — D-F-1 / D-F-2 hermes session export + export-all CLI + /export-session slash + e2e test + VALIDATION.md reconciliation
+- [x] 25.3-11-PLAN.md — D-F-1 / D-F-2 hermes session export + export-all CLI + /export-session slash + e2e test + VALIDATION.md reconciliation
 
 ### Phase 25.2: web extract tools (INSERTED)
 
