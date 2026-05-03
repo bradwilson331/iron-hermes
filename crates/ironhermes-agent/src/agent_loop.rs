@@ -3,6 +3,11 @@ use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
+// Phase 25.3 D-T-1 / D-T-3: trajectory ledger types.
+// `TrajectoryEntry` + `ImpactLevel` come from `ironhermes-trajectory` (Plan 1 wire format).
+// `TrajectoryWriterHandle` lives in `ironhermes-core` per Plan 6's cycle-break;
+// AgentLoop holds the trait-object form.
+use ironhermes_trajectory::{ImpactLevel, TrajectoryEntry};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -184,6 +189,16 @@ pub struct AgentLoop {
     /// clone also drops (all tools dropped with the registry), the Mutex drops,
     /// and BrowserSession::drop kills the handler task (T-25.1-04 drop semantics).
     browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    /// Phase 25.3 D-T-3: per-session trajectory writer handle (trait-object form
+    /// from Plan 6 cycle-break — `TrajectoryWriterHandle` lives in `ironhermes-core`,
+    /// `TrajectoryWriterHandleImpl` lives in `ironhermes-trajectory`). None means
+    /// trajectory logging is disabled for this session. Plan 8 wires the Some-case
+    /// from each `run_*` function (CLI/REPL/gateway). Append site is in execute_tool_call.
+    pub trajectory_writer: Option<std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    /// Phase 25.3 D-T-1: 0-indexed turn counter — incremented per agent turn (one
+    /// complete user-assistant exchange). Recorded in TrajectoryEntry.turn_index
+    /// so Phase 25.4 Curator can correlate tool calls within a turn.
+    turn_index: std::sync::atomic::AtomicUsize,
 }
 
 impl AgentLoop {
@@ -215,6 +230,9 @@ impl AgentLoop {
             memory_manager: None,
             memory_provider_tool_names: std::collections::HashSet::new(),
             browser_session: None,
+            // Phase 25.3 D-T-3 / D-T-1: trajectory ledger fields default to disabled / 0.
+            trajectory_writer: None,
+            turn_index: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -243,6 +261,19 @@ impl AgentLoop {
         session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
     ) -> Self {
         self.browser_session = Some(session);
+        self
+    }
+
+    /// Phase 25.3 D-T-3: attach a `TrajectoryWriterHandle` (trait-object from Plan 6)
+    /// so per-tool-call entries are recorded to
+    /// `<workspace-or-home>/.ironhermes/sessions/<id>/trajectories.jsonl`.
+    /// Append failures are logged via `tracing::warn!` but do NOT abort the agent
+    /// turn (best-effort ledger).
+    pub fn with_trajectory_writer(
+        mut self,
+        handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) -> Self {
+        self.trajectory_writer = Some(handle);
         self
     }
 
@@ -881,6 +912,13 @@ impl AgentLoop {
                 messages.push(tool_msg.clone());
                 appended.push(tool_msg);
             }
+
+            // Phase 25.3 D-T-1: increment per-turn counter AFTER tool calls execute.
+            // The trajectory append site reads this with Ordering::Relaxed during
+            // execute_tool_call, so each tool call within a turn shares the same
+            // turn_index — incrementing here means the NEXT turn's tool calls see
+            // the next index. Phase 25.4 Curator can correlate calls within a turn.
+            self.turn_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Note: ResponseSent is NOT fired here. It is fired by the platform layer
@@ -1190,11 +1228,53 @@ impl AgentLoop {
                     return format!(r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#);
                 }
 
+                // Take an `args` snapshot for the trajectory append site BEFORE
+                // execute_tool consumes the original. Cheap clone — Plan 9 trades
+                // a JSON Value clone for a redaction seam (Plan 5 Tool::redact_args).
+                let raw_args_for_traj = args.clone();
                 let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
 
                 match dispatch_result {
                     Ok(result) => {
+                        // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (success path).
+                        // Best-effort: append failure logs warn! and does NOT abort the turn.
+                        // Plan 6 cycle-break: trajectory_writer is Arc<dyn TrajectoryWriterHandle>.
+                        // We serialize the entry to a single JSONL line and hand it to the trait;
+                        // the impl (TrajectoryWriterHandleImpl in ironhermes-trajectory) handles
+                        // locking, write, and fsync.
+                        if let Some(ref handle) = self.trajectory_writer {
+                            // Look up the tool to call its redact_args override (Plan 5 trait extension).
+                            let registry_guard = self.registry.read().await;
+                            let redacted = if let Some(t) = registry_guard.get(name.as_str()) {
+                                t.redact_args(&raw_args_for_traj)
+                            } else {
+                                raw_args_for_traj.clone()
+                            };
+                            drop(registry_guard);
+                            let entry = TrajectoryEntry::success(
+                                name.as_str(),
+                                redacted,
+                                result.clone(),
+                                duration_ms,
+                                classify_impact_level(name.as_str()),
+                                self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                                tool_call.id.clone(),
+                            );
+                            match serde_json::to_string(&entry) {
+                                Ok(line) => {
+                                    if let Err(e) = handle.append_json_line(&line) {
+                                        tracing::warn!(error = %e, tool = %name,
+                                            "Phase 25.3: trajectory append failed; ledger entry lost for this call");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, tool = %name,
+                                        "Phase 25.3: trajectory entry serialize failed; ledger entry skipped");
+                                }
+                            }
+                        }
+
                         self.fire_hook(HookEventKind::ToolCompleted {
                             tool_name: name.to_string(),
                             success: true,
@@ -1226,6 +1306,40 @@ impl AgentLoop {
                     Err(e) => {
                         let err_msg = format!("Tool '{}' failed: {}", name, e);
                         warn!(%err_msg);
+
+                        // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (failure path).
+                        // Plan 6 cycle-break: serialize then hand to TrajectoryWriterHandle.
+                        if let Some(ref handle) = self.trajectory_writer {
+                            let registry_guard = self.registry.read().await;
+                            let redacted = if let Some(t) = registry_guard.get(name.as_str()) {
+                                t.redact_args(&raw_args_for_traj)
+                            } else {
+                                raw_args_for_traj.clone()
+                            };
+                            drop(registry_guard);
+                            let entry = TrajectoryEntry::failure(
+                                name.as_str(),
+                                redacted,
+                                err_msg.clone(),
+                                duration_ms,
+                                classify_impact_level(name.as_str()),
+                                self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                                tool_call.id.clone(),
+                            );
+                            match serde_json::to_string(&entry) {
+                                Ok(line) => {
+                                    if let Err(append_err) = handle.append_json_line(&line) {
+                                        tracing::warn!(error = %append_err, tool = %name,
+                                            "Phase 25.3: trajectory append failed (failure path)");
+                                    }
+                                }
+                                Err(serr) => {
+                                    tracing::warn!(error = %serr, tool = %name,
+                                        "Phase 25.3: trajectory entry serialize failed (failure path); ledger entry skipped");
+                                }
+                            }
+                        }
+
                         self.fire_hook(HookEventKind::ToolCompleted {
                             tool_name: name.to_string(),
                             success: false,
@@ -1240,6 +1354,63 @@ impl AgentLoop {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 9 (D-T-1): tool-name -> ImpactLevel classifier.
+// ---------------------------------------------------------------------------
+
+/// Phase 25.3 D-T-1: classify a tool name into an `ImpactLevel` for the trajectory ledger.
+///
+/// Used by `AgentLoop`'s trajectory append site to populate
+/// `TrajectoryEntry.impact_level`. Phase 25.4 Curator's heuristic gate (D-C-2)
+/// sums these weights to decide curation eligibility.
+///
+/// Classification rules:
+/// - **Read (0)**: pure read operations (read_file, search_files, web_search,
+///   web_read, web_extract, session_search, status checks).
+/// - **Write (5)**: persistent state changes that don't run untrusted code or
+///   invoke external systems (write_file, patch, patch_file, MEMORY.md writes).
+/// - **SystemChange (10)**: code execution, shell, MCP, anything that can have
+///   side effects beyond the local filesystem (terminal, execute_code, mcp_*,
+///   browser_* navigation/actions).
+///
+/// Conservative defaults:
+/// - Unknown tools default to **Write (5)**: not a no-op, not a code-execution risk.
+/// - MCP tools (any name starting with `mcp_` or `mcp__`) default to
+///   **SystemChange (10)**: operator-defined, treat as untrusted code path.
+pub(crate) fn classify_impact_level(tool_name: &str) -> ImpactLevel {
+    // Read-only tools (heuristic by name + known catalog).
+    const READ_TOOLS: &[&str] = &[
+        "read_file", "search_files", "web_search", "web_read", "web_extract",
+        "session_search", "status", "list_files", "browser_snapshot",
+        "browser_get_images", "browser_console", "memory_search",
+    ];
+    // Write-but-local tools.
+    const WRITE_TOOLS: &[&str] = &[
+        "write_file", "patch", "patch_file", "create_file", "delete_file",
+        "memory_write", "skill_install", "skill_remove",
+    ];
+    // System-changing tools.
+    const SYSTEM_CHANGE_TOOLS: &[&str] = &[
+        "terminal", "execute_code", "delegate_task", "browser_click",
+        "browser_navigate", "browser_type", "browser_press", "browser_scroll",
+        "browser_back", "browser_close",
+    ];
+
+    if READ_TOOLS.contains(&tool_name) {
+        ImpactLevel::Read
+    } else if WRITE_TOOLS.contains(&tool_name) {
+        ImpactLevel::Write
+    } else if SYSTEM_CHANGE_TOOLS.contains(&tool_name)
+        || tool_name.starts_with("mcp_")
+        || tool_name.starts_with("mcp__")
+    {
+        ImpactLevel::SystemChange
+    } else {
+        // Conservative default for unknown tools — Curator heuristic D-C-2 weights this as 5.
+        ImpactLevel::Write
     }
 }
 
@@ -1716,6 +1887,141 @@ mod hooks_ordering_tests {
             !src.contains(resp_sent_fire),
             "agent_loop.rs must not call fire_hook for ResponseSent (D-01, audit warning #4)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 25.3 D-T-1 / D-T-3: trajectory append tests (Plan 9 Task 2)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal AgentLoop with the given trajectory writer attached
+    /// AND `OkMockTool` registered, for trajectory append tests.
+    fn build_agent_with_trajectory(
+        trajectory: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) -> AgentLoop {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        build_agent(tool_registry, hook_registry).with_trajectory_writer(trajectory)
+    }
+
+    fn build_agent_with_trajectory_and_failmock(
+        trajectory: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    ) -> AgentLoop {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(FailMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        build_agent(tool_registry, hook_registry).with_trajectory_writer(trajectory)
+    }
+
+    /// Phase 25.3 D-T-1 / D-T-3: a successful tool call appends exactly one
+    /// JSONL entry to the trajectory file with name="mock", result populated,
+    /// error None, and impact_level matching the classifier's verdict for the
+    /// unknown tool name "mock" (default Write).
+    #[tokio::test]
+    async fn execute_tool_call_appends_trajectory_entry_on_success() {
+        use ironhermes_trajectory::{
+            ImpactLevel, TrajectoryReader, TrajectoryWriter, TrajectoryWriterHandleImpl,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trajectories.jsonl");
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(
+            TrajectoryWriter::open(&path).expect("open writer"),
+        ));
+        let handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+            std::sync::Arc::new(TrajectoryWriterHandleImpl::new(writer.clone()));
+
+        let agent = build_agent_with_trajectory(handle);
+        let _ = agent.execute_tool_call(&tool_call("mock")).await;
+
+        // Drop any owned writer references and force the Mutex<Writer> to flush
+        // by reading the file (TrajectoryWriter calls sync_data per append).
+        let reader = TrajectoryReader::open(&path);
+        let entries = reader.read_all().expect("read trajectory file");
+        assert_eq!(
+            entries.len(),
+            1,
+            "execute_tool_call must append exactly one trajectory entry; got {}",
+            entries.len()
+        );
+        assert_eq!(entries[0].name, "mock", "trajectory entry name must match tool name");
+        assert!(
+            entries[0].result.is_some(),
+            "success entry must have result populated"
+        );
+        assert!(
+            entries[0].error.is_none(),
+            "success entry must have error None"
+        );
+        // "mock" is an unknown tool name to classify_impact_level → Write (5) default.
+        assert_eq!(
+            entries[0].impact_level,
+            ImpactLevel::Write,
+            "unknown tool name 'mock' must default to ImpactLevel::Write"
+        );
+        assert_eq!(
+            entries[0].turn_index, 0,
+            "default turn_index from a fresh AgentLoop must be 0"
+        );
+        assert_eq!(
+            entries[0].tool_call_id, "call-1",
+            "tool_call_id must reflect the LLM-supplied ToolCall.id"
+        );
+    }
+
+    /// Phase 25.3 D-T-1 / D-T-3: a failing tool call appends one entry with
+    /// `error` populated and `result` None.
+    #[tokio::test]
+    async fn execute_tool_call_appends_trajectory_entry_on_failure() {
+        use ironhermes_trajectory::{
+            TrajectoryReader, TrajectoryWriter, TrajectoryWriterHandleImpl,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trajectories.jsonl");
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(
+            TrajectoryWriter::open(&path).expect("open writer"),
+        ));
+        let handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+            std::sync::Arc::new(TrajectoryWriterHandleImpl::new(writer.clone()));
+
+        let agent = build_agent_with_trajectory_and_failmock(handle);
+        let _ = agent.execute_tool_call(&tool_call("failmock")).await;
+
+        let reader = TrajectoryReader::open(&path);
+        let entries = reader.read_all().expect("read trajectory file");
+        assert_eq!(
+            entries.len(),
+            1,
+            "execute_tool_call must append exactly one trajectory entry on failure"
+        );
+        assert_eq!(entries[0].name, "failmock");
+        assert!(
+            entries[0].result.is_none(),
+            "failure entry must have result None"
+        );
+        assert!(
+            entries[0].error.is_some(),
+            "failure entry must have error populated"
+        );
+    }
+
+    /// Phase 25.3 D-T-3: when no trajectory writer is attached, execute_tool_call
+    /// works without panicking and produces no entries (Option<...> field is None).
+    #[tokio::test]
+    async fn execute_tool_call_without_trajectory_writer_is_a_noop_for_ledger() {
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(OkMockTool));
+        let (hook_registry, _captured) = capture_registry();
+        let agent = build_agent(tool_registry, hook_registry);
+        // Sanity: no trajectory writer attached.
+        assert!(
+            agent.trajectory_writer.is_none(),
+            "default AgentLoop must have trajectory_writer None"
+        );
+        // Should not panic, should return the tool result text.
+        let result = agent.execute_tool_call(&tool_call("mock")).await;
+        assert_eq!(result, "mock result", "tool result must pass through unchanged");
     }
 }
 
@@ -2317,6 +2623,51 @@ mod memory_provider_wiring_tests {
         assert!(
             source.contains("browser_session: None"),
             "AgentLoop::new MUST initialize browser_session to None"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 9 (D-T-1 / D-T-3): trajectory wireup tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod trajectory_wireup_tests {
+    use super::*;
+    use ironhermes_trajectory::ImpactLevel;
+
+    #[test]
+    fn classify_impact_level_known_categories() {
+        assert_eq!(classify_impact_level("read_file"), ImpactLevel::Read);
+        assert_eq!(classify_impact_level("web_extract"), ImpactLevel::Read);
+        assert_eq!(classify_impact_level("write_file"), ImpactLevel::Write);
+        assert_eq!(classify_impact_level("patch"), ImpactLevel::Write);
+        assert_eq!(classify_impact_level("terminal"), ImpactLevel::SystemChange);
+        assert_eq!(classify_impact_level("execute_code"), ImpactLevel::SystemChange);
+    }
+
+    #[test]
+    fn classify_impact_level_mcp_default_system_change() {
+        assert_eq!(classify_impact_level("mcp__github_create_issue"), ImpactLevel::SystemChange);
+        assert_eq!(classify_impact_level("mcp_filesystem_write"), ImpactLevel::SystemChange);
+    }
+
+    #[test]
+    fn classify_impact_level_unknown_default_write() {
+        assert_eq!(classify_impact_level("brand_new_tool_2030"), ImpactLevel::Write);
+        assert_eq!(classify_impact_level(""), ImpactLevel::Write);
+    }
+
+    #[test]
+    fn agent_loop_trajectory_writer_default_none() {
+        let client = AnyClient::ChatCompletions(
+            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
+        );
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
+        let agent = AgentLoop::new(client, registry, 4);
+        assert!(
+            agent.trajectory_writer.is_none(),
+            "Phase 25.3 D-T-3: AgentLoop::new MUST default trajectory_writer to None"
         );
     }
 }

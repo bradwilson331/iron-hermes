@@ -373,7 +373,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // D-18 item 1 (continued): AgentLoop — App stores Arc<AgentLoop> for integrations.
     // (client + context_length + budget moved UP above the registry block — see Plan 22.4-15.)
     // Per-turn spawn in spawn_turn builds a fresh loop with streaming callback.
-    let agent_loop_inst = ironhermes_agent::agent_loop::AgentLoop::new(
+    let mut agent_loop_inst = ironhermes_agent::agent_loop::AgentLoop::new(
         client.clone(),
         registry.clone(),
         cli.max_turns.unwrap_or(config.agent.max_turns),
@@ -383,6 +383,11 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     .with_hook_registry(hook_registry.clone())
     .with_compression(context_length, config.agent.context_compression)
     .with_browser_session(browser_session.clone()); // Phase 25.1 D-17 / GAP-8
+    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
+    // tool call lands a TrajectoryEntry on disk.
+    if let Some(ref handle) = trajectory_writer {
+        agent_loop_inst = agent_loop_inst.with_trajectory_writer(handle.clone());
+    }
     let agent_loop = Arc::new(agent_loop_inst);
 
     // D-18 item 14: StatusLineState initial seed
@@ -598,6 +603,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let memory_manager = app.memory_manager.clone();
     let fallback_client = app.fallback_client.clone();
     let browser_session = app.browser_session.clone(); // Phase 25.1 GAP-8 (plan 25.1-19)
+    let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
     let messages_snapshot = app.history.clone();
     let session_id = app.session_id.clone();
@@ -657,6 +663,13 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // AgentLoop" invariant holds across turns (lazy-spawn on first browser_*
         // call, reuse on subsequent calls, browser_close re-spawns next time).
         agent = agent.with_browser_session(browser_session);
+
+        // Phase 25.3 D-T-3: per-turn AgentLoop also holds the trajectory_writer
+        // handle so every tool call lands a TrajectoryEntry on disk; same Arc as
+        // the App-level AgentLoop.
+        if let Some(handle) = trajectory_writer {
+            agent = agent.with_trajectory_writer(handle);
+        }
 
         if let Some(mm) = memory_manager {
             agent = agent.with_memory_manager(mm);

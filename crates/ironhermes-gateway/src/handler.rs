@@ -667,6 +667,12 @@ impl GatewayMessageHandler {
             agent = agent.with_browser_session(sess.clone());
         }
 
+        // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
+        // tool call in this per-message AgentLoop lands a TrajectoryEntry on disk.
+        if let Some(ref tw) = self.trajectory_writer {
+            agent = agent.with_trajectory_writer(tw.clone());
+        }
+
         // Phase 18 Plan 09: wire agent-side context compression (honors
         // config.agent.context_engine + config.agent.compression_threshold).
         // GAP-2/GAP-3: pass memory_manager so on_pre_compress fires on compression.
