@@ -857,3 +857,93 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         finish_reason: r.get(9)?,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 0 Task 2: Schema migration v8 — workspace_root column (D-W-1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod schema_migration_v8_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    #[test]
+    fn schema_version_constant_is_8() {
+        assert_eq!(SCHEMA_VERSION, 8, "Phase 25.3 D-W-1: SCHEMA_VERSION must be bumped to 8");
+    }
+
+    #[test]
+    fn fresh_install_has_workspace_root_column() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let _store = StateStore::new(&path).expect("open fresh store");
+        let conn = Connection::open(&path).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
+        let cols: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            cols.iter().any(|(n, t)| n == "workspace_root" && t.eq_ignore_ascii_case("TEXT")),
+            "v8 fresh install must include workspace_root TEXT in sessions; got cols={:?}",
+            cols
+        );
+    }
+
+    #[test]
+    fn v7_db_upgrades_to_v8_preserving_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Manually create a v7 DB shape (no workspace_root)
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL); \
+                 INSERT INTO schema_version (version) VALUES (7); \
+                 CREATE TABLE sessions ( \
+                   id TEXT PRIMARY KEY, source TEXT NOT NULL, user_id TEXT, model TEXT, \
+                   system_prompt TEXT, parent_session_id TEXT, started_at REAL NOT NULL, \
+                   ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0, \
+                   tool_call_count INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, \
+                   output_tokens INTEGER DEFAULT 0, title TEXT \
+                 ); \
+                 INSERT INTO sessions (id, source, started_at) VALUES ('legacy-1', 'cli', 1.0);"
+            ).unwrap();
+        }
+        // Open with the new code — should ALTER + bump to 8
+        let _store = StateStore::new(&path).expect("upgrade open");
+        let conn = Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8, "schema_version must be 8 after upgrade");
+        let wr: Option<String> = conn
+            .query_row("SELECT workspace_root FROM sessions WHERE id = 'legacy-1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(wr.is_none(), "pre-v8 row must have NULL workspace_root after upgrade");
+    }
+
+    #[test]
+    fn create_session_with_workspace_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("s1", "cli", None, None, None, Some("/repo/foo"))
+            .unwrap();
+        store
+            .create_session("s2", "cli", None, None, None, None)
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let r1: Option<String> = conn
+            .query_row("SELECT workspace_root FROM sessions WHERE id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        let r2: Option<String> = conn
+            .query_row("SELECT workspace_root FROM sessions WHERE id = 's2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(r1.as_deref(), Some("/repo/foo"));
+        assert!(r2.is_none());
+    }
+}
