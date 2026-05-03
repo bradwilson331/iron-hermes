@@ -158,4 +158,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-27 — v2.1 milestone expanded to "Carry-Overs + Learning Loop" (34 reqs across 8 categories, 11 phases). 7 architectural principles from canonical hermes-agent threaded through every phase. v2.0 archive deferred.*
+*Last updated: 2026-05-03 — Phase 25.3 (session-workspace-parity) complete. Workspace newtype + per-tool-call trajectory ledger + workspace_root persistence + canonical session UUID landed across CLI/REPL/Telegram surfaces. 28/28 must-haves verified. Phase 25.4 Curator unblocked.*
