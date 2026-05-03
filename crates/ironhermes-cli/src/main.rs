@@ -736,6 +736,17 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 
     let registry = Arc::new(RwLock::new(registry));
 
+    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
+    // RegistryToolsetSession so /toolset list/show/enable/disable work in
+    // run_single. Reuses the existing Arc<RwLock<ToolRegistry>> — DOES NOT
+    // introduce a second Arc layer. INV-21.7-08 lock-step: this same Arc
+    // is threaded through build_cmd_ctx to both dispatch sites.
+    let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
+        Arc::new(ironhermes_tools::RegistryToolsetSession::new(
+            registry.clone(),
+            config.tools.clone(),
+        ));
+
     // Phase 21.2: MCP tool discovery (run_single)
     let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
 
@@ -920,6 +931,10 @@ fn build_cmd_ctx(
     budget: BudgetHandle,
     subagent_semaphore: Arc<tokio::sync::Semaphore>,
     max_subagents: usize,
+    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): APPEND-ONLY widening —
+    // optional ToolsetSessionHandle threaded through to attach to CommandContext
+    // via .with_toolset_session(handle). Phase 25 Plan 04 deferred this wireup.
+    toolset_session: Option<Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle>>,
 ) -> CommandContext {
     let base = CommandContext::new(
         Platform::Local,
@@ -931,7 +946,7 @@ fn build_cmd_ctx(
     } else {
         base
     };
-    base
+    let ctx = base
         .with_subagent_registry(Arc::new(
             ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
                 subagent_registry,
@@ -944,7 +959,16 @@ fn build_cmd_ctx(
         ))
         .with_budget(Arc::new(budget))
         .with_subagent_semaphore(subagent_semaphore)
-        .with_max_subagents(max_subagents)
+        .with_max_subagents(max_subagents);
+    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): conditionally attach the
+    // live ToolsetSessionHandle so /toolset list/show/enable/disable work in
+    // REPL + Telegram. EVERY existing .with_* call above is preserved verbatim —
+    // this `if let` is the ONLY net-new code in build_cmd_ctx's body.
+    if let Some(handle) = toolset_session {
+        ctx.with_toolset_session(handle)
+    } else {
+        ctx
+    }
 }
 
 /// Run interactive chat mode.
@@ -1245,6 +1269,18 @@ async fn run_chat(
 
     let registry = Arc::new(RwLock::new(registry));
 
+    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
+    // RegistryToolsetSession so /toolset list/show/enable/disable work in
+    // run_chat (the REPL). Reuses the existing Arc<RwLock<ToolRegistry>> —
+    // DOES NOT introduce a second Arc layer. INV-21.7-08 lock-step: the
+    // same Arc<dyn ToolsetSessionHandle> is passed through build_cmd_ctx
+    // at BOTH the prompt-time dispatch site AND the mid-turn dispatch arm.
+    let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
+        Arc::new(ironhermes_tools::RegistryToolsetSession::new(
+            registry.clone(),
+            config.tools.clone(),
+        ));
+
     // Phase 21.2: MCP tool discovery (run_chat)
     let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
 
@@ -1466,6 +1502,7 @@ async fn run_chat(
                         budget.clone(),
                         subagent_semaphore.clone(),
                         config.subagent.max_subagents,
+                        Some(toolset_session.clone()),
                     );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -1763,6 +1800,7 @@ async fn run_chat(
                                         budget.clone(),
                                         subagent_semaphore.clone(),
                                         config.subagent.max_subagents,
+                                        Some(toolset_session.clone()),
                                     );
                                     match dispatch_command(
                                         tui.extensions(),
@@ -2255,6 +2293,16 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     registry.set_error_detail(hooks_config.error_detail.clone());
 
     let registry = Arc::new(RwLock::new(registry));
+
+    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
+    // RegistryToolsetSession so /toolset list/show/enable/disable work in
+    // run_gateway (Telegram). Reuses the existing Arc<RwLock<ToolRegistry>>
+    // — DOES NOT introduce a second Arc layer.
+    let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
+        Arc::new(ironhermes_tools::RegistryToolsetSession::new(
+            registry.clone(),
+            config.tools.clone(),
+        ));
 
     // Phase 21.2: MCP tool discovery (run_gateway)
     let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
@@ -2880,6 +2928,36 @@ mod mcp_wiring_tests {
             "Phase 25.2 D-13: AnyClientSummarizationHandle::new MUST be constructed once per CLI \
              entry point so the Phase 26 D-07 cascade reaches WebExtractTool; got {} occurrences",
             handle_count
+        );
+    }
+
+    /// Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix) parity guard:
+    /// `with_toolset_session(` MUST be reachable from run_chat, run_single, AND
+    /// run_gateway. We assert the build_cmd_ctx call sites all pass
+    /// `Some(toolset_session.clone())` (≥2 occurrences — prompt-time + mid-turn)
+    /// AND that RegistryToolsetSession::new is constructed at ≥3 sites.
+    #[test]
+    fn with_toolset_session_wired_in_all_three_sites() {
+        let source = include_str!("main.rs");
+        // Strip line comments so a doc-comment that mentions the symbol does not inflate the count.
+        let non_comment_source: String = source
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let session_count = non_comment_source.matches("RegistryToolsetSession::new(").count();
+        assert!(
+            session_count >= 3,
+            "Phase 25.2 Plan 15: RegistryToolsetSession::new MUST be constructed in run_chat, \
+             run_single, AND run_gateway (≥3 sites); found {}",
+            session_count
+        );
+        let pass_count = non_comment_source.matches("Some(toolset_session.clone())").count();
+        assert!(
+            pass_count >= 2,
+            "Phase 25.2 Plan 15: build_cmd_ctx call sites MUST pass \
+             Some(toolset_session.clone()) at ≥2 sites (prompt-time + mid-turn); found {}",
+            pass_count
         );
     }
 }

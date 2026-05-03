@@ -20,6 +20,7 @@ pub mod memory_tool;
 pub mod registry;
 pub mod skills_tool;
 pub mod terminal;
+pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
 pub mod web_extract;   // Phase 25.2
 pub mod web_local;     // Phase 25.2 — shared HTML→Markdown helpers (extract_content_local target)
 pub mod web_read;
@@ -27,4 +28,5 @@ pub mod web_search;
 
 pub use memory_manager_handle::MemoryManagerHandle;
 pub use registry::{InterceptHandler, Prerequisite, Tool, ToolRegistry, todo_read_schema, todo_write_schema};
+pub use toolset_session::RegistryToolsetSession;
 pub use web_extract::WebExtractTool;
