@@ -186,6 +186,38 @@ impl PromptBuilder {
         self.skill_registry = Some(registry);
     }
 
+    /// Phase 25.3 D-W-2: append `[Workspace: <root>]` to the Identity slot for
+    /// session-scoped project resolution awareness.
+    ///
+    /// MUST be called AFTER any SOUL.md / identity load so the Workspace line
+    /// appends to whatever identity text was set (not before — pre-init Identity
+    /// slot is empty and the line would be lost when SOUL.md overwrites later).
+    ///
+    /// Cache-stability (Pitfall 2): the Workspace line MUST go in a DURABLE slot
+    /// (slots 1-6); placing it in an ephemeral slot (>= Timestamp = 7) collapses
+    /// the Anthropic prompt cache hit rate to ~0%. The Identity slot (slot 1)
+    /// is durable. The Workspace root is frozen at session start (frozen-snapshot
+    /// pattern, mirrors Phase 17/18 memory) so the line is naturally cache-stable.
+    ///
+    /// Idempotency: if `[Workspace: <root>]` is already present in the Identity
+    /// slot text, this is a no-op (prevents double-append on repeated calls).
+    pub fn with_workspace_root(mut self, root: &std::path::Path) -> Self {
+        let workspace_line = format!("[Workspace: {}]", root.display());
+        // Read current Identity slot, falling back to DEFAULT_AGENT_IDENTITY.
+        let current = self
+            .slots
+            .get(&PromptSlot::Identity)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_AGENT_IDENTITY.to_string());
+        // Idempotency guard: skip if line already present (e.g., re-call with same root).
+        if current.contains(&workspace_line) {
+            return self;
+        }
+        let with_workspace = format!("{}\n\n{}", current, workspace_line);
+        self.set_slot(PromptSlot::Identity, with_workspace);
+        self
+    }
+
     /// Phase 18 D-01/D-02: populate the SystemMessage slot from `config.agent.system_message`.
     /// Empty input is ignored (slot omitted). Content is security-scanned and capped at 20K chars.
     pub fn with_system_message(mut self, msg: impl Into<String>) -> Self {
@@ -1322,6 +1354,114 @@ mod tests {
         assert!(
             !output.contains("filtered-skill"),
             "filtered-skill (requires nonexistent toolset) must be hidden: {output}"
+        );
+    }
+
+    // ====================================================================
+    // Phase 25.3 D-W-2: with_workspace_root tests (Pitfall 2 cache stability)
+    // ====================================================================
+
+    #[test]
+    fn with_workspace_root_appends_to_default_identity() {
+        // No SOUL.md loaded — Identity slot starts empty and falls back to
+        // DEFAULT_AGENT_IDENTITY when read.
+        let pb = PromptBuilder::new("test-model", "cli")
+            .with_workspace_root(std::path::Path::new("/tmp/myrepo"));
+        let identity = pb
+            .slots
+            .get(&PromptSlot::Identity)
+            .expect("with_workspace_root must set Identity slot");
+        assert!(
+            identity.contains("[Workspace: /tmp/myrepo]"),
+            "Workspace line missing from Identity; got: {identity}"
+        );
+        assert!(
+            identity.contains("IronHermes"),
+            "DEFAULT_AGENT_IDENTITY content must be preserved as the prefix; got: {identity}"
+        );
+    }
+
+    #[test]
+    fn with_workspace_root_appends_to_existing_soul_text() {
+        // Simulate SOUL.md load by manually setting Identity first
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.set_slot(PromptSlot::Identity, "Custom soul text".to_string());
+        let pb = pb.with_workspace_root(std::path::Path::new("/repo/x"));
+        let identity = pb.slots.get(&PromptSlot::Identity).unwrap();
+        assert!(
+            identity.starts_with("Custom soul text"),
+            "soul text must remain at the start; got: {identity}"
+        );
+        assert!(
+            identity.contains("[Workspace: /repo/x]"),
+            "workspace line must be appended; got: {identity}"
+        );
+    }
+
+    #[test]
+    fn with_workspace_root_is_idempotent() {
+        let pb = PromptBuilder::new("test-model", "cli")
+            .with_workspace_root(std::path::Path::new("/tmp/x"))
+            .with_workspace_root(std::path::Path::new("/tmp/x"));
+        let identity = pb.slots.get(&PromptSlot::Identity).unwrap();
+        let count = identity.matches("[Workspace: /tmp/x]").count();
+        assert_eq!(
+            count, 1,
+            "duplicate call must not double-append; got {count} occurrences in: {identity}"
+        );
+    }
+
+    #[test]
+    fn with_workspace_root_lands_in_identity_slot_only() {
+        // Confirm the line is in slot 1 and NOT in any other slot (cache-stability gate)
+        let pb = PromptBuilder::new("test-model", "cli")
+            .with_workspace_root(std::path::Path::new("/tmp/x"));
+        for (slot, content) in &pb.slots {
+            if *slot == PromptSlot::Identity {
+                assert!(
+                    content.contains("[Workspace: /tmp/x]"),
+                    "Workspace line must be IN Identity slot"
+                );
+            } else {
+                assert!(
+                    !content.contains("[Workspace: /tmp/x]"),
+                    "Workspace line must NOT appear in slot {slot:?} (cache-stability — Pitfall 2)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn with_workspace_root_returns_self_for_chaining() {
+        // Compile-time confirmation that the method is chainable
+        let _pb: PromptBuilder = PromptBuilder::new("test-model", "cli")
+            .with_workspace_root(std::path::Path::new("/a"));
+    }
+
+    #[test]
+    fn workspace_line_is_in_durable_slot_region() {
+        // The Workspace line must be in a slot < PromptSlot::Timestamp (slot 7).
+        // PromptSlot::Identity = 1 satisfies this. This test locks the durable-slot
+        // contract structurally — if a future refactor moves the line to an ephemeral
+        // slot, this test fails immediately.
+        let pb = PromptBuilder::new("test-model", "cli")
+            .with_workspace_root(std::path::Path::new("/tmp/x"));
+        // Find the slot containing the Workspace line
+        let containing_slot: PromptSlot = pb
+            .slots
+            .iter()
+            .find(|(_, content)| content.contains("[Workspace: /tmp/x]"))
+            .map(|(slot, _)| *slot)
+            .expect("Workspace line must be in some slot");
+        assert!(
+            !containing_slot.is_ephemeral(),
+            "Workspace line is in slot {containing_slot:?} — must be DURABLE for prompt-cache stability \
+             (Pitfall 2). Move it to PromptSlot::Identity or another durable slot (1-6)."
+        );
+        assert_eq!(
+            containing_slot,
+            PromptSlot::Identity,
+            "Workspace line should specifically be in Identity slot per CONTEXT.md Discretion + RESEARCH.md recommendation"
         );
     }
 }
