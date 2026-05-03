@@ -406,7 +406,12 @@ fn cmd_title(args: &[&str], ctx: &CommandContext) -> CommandResult {
     }
 }
 
-/// `/sessions` — list recent sessions from StateStore.
+/// `/sessions [--workspace [path]] [limit]` — list recent sessions from StateStore.
+///
+/// Phase 25.3 D-W-2: `--workspace` filters by workspace_root column. With no
+/// path argument, uses the resolved workspace from `ctx.workspace`; with an
+/// explicit path, uses that. Without `--workspace`, lists all sessions
+/// (backward compat with Phase 22.4.2 behavior).
 ///
 /// Guard pattern (D-05): when `ctx.state_store` is None, returns informational
 /// text rather than panicking (backwards-compat with gateway / classic-tui).
@@ -417,12 +422,50 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
             "Session storage not configured.".to_string()
         ),
     };
-    let limit: usize = args
-        .first()
+
+    // Parse --workspace flag: supports `--workspace` (use ctx workspace) or
+    // `--workspace <path>` (explicit). Bare numeric arg is treated as a limit.
+    let mut workspace_filter: Option<String> = None;
+    let mut limit_arg: Option<&str> = None;
+    let mut iter = args.iter().peekable();
+    while let Some(a) = iter.next() {
+        if *a == "--workspace" {
+            // Peek for an explicit path argument: not another flag, not a bare number.
+            let take_explicit = iter
+                .peek()
+                .map(|n| !n.starts_with("--") && n.parse::<usize>().is_err())
+                .unwrap_or(false);
+            if take_explicit {
+                workspace_filter = Some(iter.next().unwrap().to_string());
+                continue;
+            }
+            // Bare --workspace: use ctx.workspace
+            match &ctx.workspace {
+                Some(ws) => {
+                    workspace_filter = Some(ws.root.display().to_string());
+                }
+                None => {
+                    return CommandResult::Output(
+                        "No workspace resolved at cwd. Pass --workspace <path> explicitly, \
+                         or run /sessions from a directory under a .ironhermes/ or .hermes/ marker."
+                            .to_string(),
+                    );
+                }
+            }
+        } else if a.parse::<usize>().is_ok() {
+            limit_arg = Some(*a);
+        }
+    }
+    let limit: usize = limit_arg
         .and_then(|s| s.parse().ok())
         .unwrap_or(20)
         .max(1);
-    CommandResult::Output(store.list_sessions_text(limit))
+
+    let text = match workspace_filter {
+        Some(ws) => store.list_sessions_text_filtered(limit, Some(&ws)),
+        None => store.list_sessions_text(limit),
+    };
+    CommandResult::Output(text)
 }
 
 /// `/resume [name|id]` — restore a previous session by name or id.
@@ -1883,5 +1926,205 @@ mod tests {
             ),
             other => panic!("expected Output, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // Phase 25.3 Plan 10 — /sessions --workspace filter tests (D-W-2)
+    // =========================================================================
+
+    use crate::commands::context::StateStoreHandle;
+    use crate::workspace::Workspace;
+    use std::path::PathBuf;
+    use std::sync::Mutex as StdMutex;
+
+    /// Fake StateStoreHandle that records the limit + workspace_root passed
+    /// to the two list-sessions methods. Records the LAST call only — tests
+    /// always invoke a single dispatch, so this is sufficient.
+    struct FakeStateStore {
+        last_filtered: StdMutex<Option<(usize, Option<String>)>>,
+        last_unfiltered: StdMutex<Option<usize>>,
+    }
+    impl FakeStateStore {
+        fn new() -> Self {
+            Self {
+                last_filtered: StdMutex::new(None),
+                last_unfiltered: StdMutex::new(None),
+            }
+        }
+    }
+    impl StateStoreHandle for FakeStateStore {
+        fn list_sessions_text(&self, limit: usize) -> String {
+            *self.last_unfiltered.lock().unwrap() = Some(limit);
+            format!("Recent sessions (unfiltered, limit={limit})")
+        }
+        fn list_sessions_text_filtered(
+            &self,
+            limit: usize,
+            workspace_root: Option<&str>,
+        ) -> String {
+            *self.last_filtered.lock().unwrap() =
+                Some((limit, workspace_root.map(|s| s.to_string())));
+            format!(
+                "Recent sessions (limit={limit}, ws={})",
+                workspace_root.unwrap_or("<none>")
+            )
+        }
+        fn history_text(&self, _session_id: &str) -> String {
+            "history".to_string()
+        }
+        fn export_session_text(&self, _session_id: &str) -> String {
+            "export".to_string()
+        }
+        fn update_title(&self, _session_id: &str, _title: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn get_session_id(&self, _name_or_id: &str) -> Option<String> {
+            None
+        }
+    }
+
+    fn fake_workspace(root: &str) -> Workspace {
+        Workspace {
+            root: PathBuf::from(root),
+            soul_path: None,
+            agents_chain: vec![],
+            memory_dir: PathBuf::from(format!("{root}/.ironhermes/memory")),
+            skills_dir: PathBuf::from(format!("{root}/skills")),
+            tools_config: None,
+        }
+    }
+
+    fn find_sessions_cmd() -> CommandDef {
+        build_registry()
+            .into_iter()
+            .find(|c| c.name == "sessions")
+            .expect("sessions must be in registry")
+    }
+
+    #[test]
+    fn cmd_sessions_no_state_store_says_not_configured() {
+        let ctx = make_ctx(false); // no state_store
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+        let result = dispatch(&cmd, &[], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("Session storage not configured"),
+                "expected guard message, got: {}",
+                s
+            ),
+            other => panic!("expected Output, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cmd_sessions_no_args_uses_unfiltered_path() {
+        let store = StdArc::new(FakeStateStore::new());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+
+        dispatch(&cmd, &[], &ctx, &router);
+
+        // unfiltered path called with default limit=20
+        assert_eq!(*store.last_unfiltered.lock().unwrap(), Some(20));
+        // filtered path NOT touched
+        assert!(store.last_filtered.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cmd_sessions_bare_limit_preserves_unfiltered_path() {
+        let store = StdArc::new(FakeStateStore::new());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+
+        dispatch(&cmd, &["20"], &ctx, &router);
+
+        assert_eq!(*store.last_unfiltered.lock().unwrap(), Some(20));
+        assert!(store.last_filtered.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cmd_sessions_workspace_explicit_path_filters() {
+        let store = StdArc::new(FakeStateStore::new());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+
+        dispatch(&cmd, &["--workspace", "/explicit/path"], &ctx, &router);
+
+        let last = store.last_filtered.lock().unwrap().clone();
+        assert_eq!(last, Some((20, Some("/explicit/path".to_string()))));
+        assert!(store.last_unfiltered.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cmd_sessions_bare_workspace_uses_ctx_workspace() {
+        let store = StdArc::new(FakeStateStore::new());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ws = StdArc::new(fake_workspace("/repo/x"));
+        let ctx = make_ctx(false)
+            .with_state_store(store_handle)
+            .with_workspace(ws);
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+
+        dispatch(&cmd, &["--workspace"], &ctx, &router);
+
+        let last = store.last_filtered.lock().unwrap().clone();
+        assert_eq!(last, Some((20, Some("/repo/x".to_string()))));
+    }
+
+    #[test]
+    fn cmd_sessions_bare_workspace_no_ctx_workspace_returns_helpful_error() {
+        let store = StdArc::new(FakeStateStore::new());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        // No .with_workspace(...) — ctx.workspace = None
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+
+        let result = dispatch(&cmd, &["--workspace"], &ctx, &router);
+        match result {
+            CommandResult::Output(s) => {
+                assert!(
+                    s.contains("No workspace resolved"),
+                    "expected helpful error, got: {}",
+                    s
+                );
+                assert!(
+                    s.contains("--workspace <path>"),
+                    "expected hint about explicit path, got: {}",
+                    s
+                );
+            }
+            other => panic!("expected Output, got {:?}", other),
+        }
+        // Neither store path should have been called
+        assert!(store.last_filtered.lock().unwrap().is_none());
+        assert!(store.last_unfiltered.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cmd_sessions_workspace_with_limit() {
+        let store = StdArc::new(FakeStateStore::new());
+        let store_handle: StdArc<dyn StateStoreHandle> = store.clone();
+        let ctx = make_ctx(false).with_state_store(store_handle);
+        let router = make_router();
+        let cmd = find_sessions_cmd();
+
+        dispatch(
+            &cmd,
+            &["--workspace", "/explicit/path", "5"],
+            &ctx,
+            &router,
+        );
+
+        let last = store.last_filtered.lock().unwrap().clone();
+        assert_eq!(last, Some((5, Some("/explicit/path".to_string()))));
     }
 }

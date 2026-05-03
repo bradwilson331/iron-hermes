@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
 
+// Phase 25.3 D-F-1: 4-file directory export (messages/metadata/context/trajectories).
+pub mod session_export;
+pub use session_export::SessionDirectoryExport;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -494,30 +498,49 @@ impl StateStore {
     }
 
     /// List sessions, optionally filtered by source, most recent first.
+    ///
+    /// Backward-compat shim: pre-25.3 `list_sessions` signature, no workspace
+    /// filter. Delegates to `list_sessions_filtered` with workspace_root_filter=None.
     pub fn list_sessions(
         &self,
         source: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Session>> {
-        if let Some(src) = source {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
-                 started_at, ended_at, end_reason, message_count, tool_call_count, \
-                 input_tokens, output_tokens, title, workspace_root \
-                 FROM sessions WHERE source = ?1 ORDER BY started_at DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![src, limit as i64], session_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
-        } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
-                 started_at, ended_at, end_reason, message_count, tool_call_count, \
-                 input_tokens, output_tokens, title, workspace_root \
-                 FROM sessions ORDER BY started_at DESC LIMIT ?1",
-            )?;
-            let rows = stmt.query_map(params![limit as i64], session_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
-        }
+        self.list_sessions_filtered(source, limit, None)
+    }
+
+    /// Phase 25.3 D-W-2: list sessions, optionally filtered by source AND/OR workspace_root.
+    ///
+    /// `source`: filter by `Session.source` ("cli" / "telegram" / etc.) — pre-25.3 semantics.
+    /// `limit`: caps the result count.
+    /// `workspace_root_filter`:
+    /// - `None`: return sessions ignoring workspace_root.
+    /// - `Some("/path")`: return only sessions whose `workspace_root` column equals "/path".
+    ///   Empty-string filter does NOT match NULL workspace_root rows (SQL NULL semantics).
+    ///
+    /// SQL injection is impossible by construction — both filter values are bound via rusqlite
+    /// positional params (T-25.3-10-01 mitigation).
+    pub fn list_sessions_filtered(
+        &self,
+        source: Option<&str>,
+        limit: usize,
+        workspace_root_filter: Option<&str>,
+    ) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source, user_id, model, system_prompt, parent_session_id, \
+             started_at, ended_at, end_reason, message_count, tool_call_count, \
+             input_tokens, output_tokens, title, workspace_root \
+             FROM sessions \
+             WHERE (?1 IS NULL OR source = ?1) \
+               AND (?2 IS NULL OR workspace_root = ?2) \
+             ORDER BY started_at DESC \
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![source, workspace_root_filter, limit as i64],
+            session_from_row,
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     /// Full-text and metadata search across messages.
@@ -882,6 +905,60 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         token_count: r.get(8)?,
         finish_reason: r.get(9)?,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25.3 Plan 10 Task 2: list_sessions_filtered tests (D-W-2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod list_sessions_filtered_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn list_sessions_filtered_by_workspace() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("a", "cli", None, None, None, Some("/repo/x"))
+            .unwrap();
+        store
+            .create_session("b", "cli", None, None, None, Some("/repo/y"))
+            .unwrap();
+        store
+            .create_session("c", "cli", None, None, None, None)
+            .unwrap();
+
+        let all = store.list_sessions(None, 100).unwrap();
+        assert_eq!(all.len(), 3, "no filter -> all sessions");
+
+        let only_x = store
+            .list_sessions_filtered(None, 100, Some("/repo/x"))
+            .unwrap();
+        assert_eq!(only_x.len(), 1);
+        assert_eq!(only_x[0].id, "a");
+
+        // empty-string filter does NOT match NULL workspace_root
+        let only_global = store
+            .list_sessions_filtered(None, 100, Some(""))
+            .unwrap();
+        assert_eq!(only_global.len(), 0);
+
+        // None filter behaves identically to list_sessions(None, ...)
+        let unfiltered = store
+            .list_sessions_filtered(None, 100, None)
+            .unwrap();
+        assert_eq!(unfiltered.len(), 3);
+
+        // source filter still works alongside workspace filter
+        let cli_x = store
+            .list_sessions_filtered(Some("cli"), 100, Some("/repo/x"))
+            .unwrap();
+        assert_eq!(cli_x.len(), 1);
+        assert_eq!(cli_x[0].id, "a");
+    }
 }
 
 // ---------------------------------------------------------------------------
