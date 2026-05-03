@@ -303,6 +303,21 @@ pub struct CommandContext {
     /// Slash command enable/disable mutate ONLY the session's live toolset config; they do
     /// NOT write to config.yaml (D-06). The CLI subcommand writes to config.yaml instead.
     pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+
+    /// Phase 25.3 D-W-2: per-cwd Workspace resolved at session start (frozen-snapshot
+    /// pattern, mirrors Phase 17/18). Consumed by `/sessions --workspace` filter (cmd_sessions),
+    /// `/export-session` slash (cmd_export_session), and the trajectory directory scoping
+    /// in CommandContext.trajectory_writer. PromptBuilder Identity-slot Workspace line
+    /// is wired separately at session-start (Plan 7 — does NOT go through CommandContext).
+    pub workspace: Option<Arc<crate::workspace::Workspace>>,
+
+    /// Phase 25.3 D-T-3: trait-object handle for per-tool-call JSONL ledger.
+    /// Trait-object form (NOT Arc<Mutex<TrajectoryWriter>>) preserves the strict
+    /// leaf-crate status of ironhermes-core. The impl lives in ironhermes-trajectory
+    /// (`TrajectoryWriterHandleImpl`); the dep direction is `trajectory -> core`.
+    /// Mirrors the ToolsetSessionHandle / MemoryManagerHandle / SummarizationClientHandle
+    /// cycle-break pattern.
+    pub trajectory_writer: Option<Arc<dyn TrajectoryWriterHandle>>,
 }
 
 impl CommandContext {
@@ -336,6 +351,10 @@ impl CommandContext {
             cron_store: None,
             // Phase 25 Plan 04 (D-06): ToolsetSessionHandle for /toolset slash UI.
             toolset_session: None,
+            // Phase 25.3 D-W-2: Workspace newtype for /sessions filter + Curator output destination.
+            workspace: None,
+            // Phase 25.3 D-T-3: TrajectoryWriter for per-tool-call JSONL ledger.
+            trajectory_writer: None,
         }
     }
 
@@ -452,6 +471,31 @@ impl CommandContext {
     /// Builder: attach a ToolsetSessionHandle for `/toolset` session-only mutations (Phase 25 D-06).
     pub fn with_toolset_session(mut self, handle: Arc<dyn ToolsetSessionHandle>) -> Self {
         self.toolset_session = Some(handle);
+        self
+    }
+
+    /// Builder: attach a Workspace for session-scoped project resolution (Phase 25.3 D-W-2).
+    ///
+    /// Resolved ONCE at session start by `ironhermes_core::workspace::resolve_from_cwd`
+    /// (Plan 8 wires this at all 4 CommandContext-construction sites). Frozen-snapshot
+    /// — never mutated mid-session (Pitfall 2 cache stability).
+    pub fn with_workspace(mut self, workspace: Arc<crate::workspace::Workspace>) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
+    /// Builder: attach a trajectory writer handle for per-tool-call JSONL logging
+    /// (Phase 25.3 D-T-3). Accepts any `TrajectoryWriterHandle` impl; the canonical
+    /// implementation is `ironhermes_trajectory::TrajectoryWriterHandleImpl`.
+    ///
+    /// Plan 9 wires the AgentLoop callback that serializes a `TrajectoryEntry` and
+    /// calls `handle.append_json_line(&line)`. Plan 8 attaches this at all 4
+    /// CommandContext-construction sites.
+    pub fn with_trajectory_writer(
+        mut self,
+        handle: Arc<dyn TrajectoryWriterHandle>,
+    ) -> Self {
+        self.trajectory_writer = Some(handle);
         self
     }
 }
