@@ -19,7 +19,12 @@ Key principles:
 - Use tools proactively when they would help
 - Ask for clarification when the task is ambiguous
 - Be transparent about what you're doing and why
-- Respect the user's system and data"#;
+- Respect the user's system and data
+
+Secret handling:
+- When a user-provided URL, command, or message contains what appears to be a credential (api key, token, password, bearer string, secret, access token, or similar), NEVER echo the literal secret value back to the user — refer to it as 'the redacted credential' or 'the [param_name] value' instead.
+- Tools that accept URLs (web_extract, web_read, web_search, browser_navigate) have built-in redaction — call them anyway when the user asks; the tool will gate or redact as needed and return a safe response. Do NOT pre-emptively refuse to call a tool because a URL looks sensitive; the tool's gate is the authoritative decision.
+- When you must mention that a URL contains a secret, paraphrase the parameter name without quoting the value. Bad: 'your URL contains api_key=sk-abc123'. Good: 'your URL contains an api_key parameter — I have redacted the value before logging.'"#;
 
 const TOOL_USE_GUIDANCE: &str = r#"When you need to use tools:
 1. Choose the most appropriate tool for the task
@@ -632,6 +637,25 @@ mod tests {
         let output = builder.build();
         assert!(output.contains("IronHermes"));
         assert!(output.contains("Nous Research"));
+    }
+
+    #[test]
+    fn default_agent_identity_includes_secret_handling_rule() {
+        // Plan 25.2-16 / UAT Issue 9 R1 fix: the system prompt must instruct the model
+        // to redact rather than echo secret-looking tokens. Lock the rule against
+        // future prompt-tuning regressions.
+        assert!(
+            DEFAULT_AGENT_IDENTITY.contains("Secret handling:"),
+            "DEFAULT_AGENT_IDENTITY must contain 'Secret handling:' rule"
+        );
+        assert!(
+            DEFAULT_AGENT_IDENTITY.contains("NEVER echo the literal secret value"),
+            "DEFAULT_AGENT_IDENTITY must instruct model to NEVER echo secrets"
+        );
+        assert!(
+            DEFAULT_AGENT_IDENTITY.contains("call them anyway"),
+            "DEFAULT_AGENT_IDENTITY must instruct model to call tools rather than pre-refuse"
+        );
     }
 
     #[test]
