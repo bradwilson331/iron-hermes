@@ -74,6 +74,77 @@ pub fn contains_secret(url: &str, extra_patterns: &[String]) -> bool {
             .any(|p| haystack.contains(&p.to_lowercase()))
 }
 
+/// Plan 25.2-16 (D-19): transform sibling of [`contains_secret`] — preserves URL structure
+/// while replacing each secret-valued query parameter's value with `***`. Single source of
+/// truth: same `SECRET_URL_PATTERNS` const + same `extras` list as the predicate.
+///
+/// Behavior contract (locked by 8 unit tests in this module):
+/// - Clean URLs are returned bytewise-equal (fast-path via [`contains_secret`] gate).
+/// - Secret-keyed values are replaced with `***`; the parameter NAME and surrounding URL
+///   structure (host, path, other params) are preserved.
+/// - Match is case-insensitive; the original case of the parameter name is preserved
+///   in the output.
+/// - The decoded URL form is what's emitted on dirty URLs — percent-encoding fidelity
+///   of the redacted span is traded for redaction completeness. Cleartext secrets must
+///   never leak; preserving `%20` in the output is cosmetic by comparison.
+pub fn redact_secrets_in_url(url: &str, extras: &[String]) -> String {
+    // Fast-path: clean URLs are returned untouched (bytewise-equal).
+    if !contains_secret(url, extras) {
+        return url.to_string();
+    }
+
+    // Decode once. We emit the decoded form because percent-encoded keys (e.g.
+    // `?token%3Dabc`) can only be detected after decode — and we must not let
+    // an undetected percent-encoded form silently round-trip the cleartext value
+    // back to the caller.
+    let decoded = percent_decode_lossy(url);
+    let decoded_lower = decoded.to_lowercase();
+    let bytes = decoded.as_bytes();
+
+    // Build the combined pattern list once (lowercase), so we can scan in a single pass.
+    // SECRET_URL_PATTERNS is already lowercase by construction.
+    let mut all_patterns: Vec<String> = SECRET_URL_PATTERNS.iter().map(|p| (*p).to_string()).collect();
+    for extra in extras {
+        all_patterns.push(extra.to_lowercase());
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Try to match any pattern beginning at byte position `i`.
+        let remaining_lower = &decoded_lower[i..];
+        let matched = all_patterns
+            .iter()
+            .find(|p| remaining_lower.starts_with(p.as_str()));
+
+        if let Some(p) = matched {
+            // Copy through the matched pattern (preserving original case of the key).
+            let plen = p.len();
+            out.extend_from_slice(&bytes[i..i + plen]);
+            i += plen;
+            // Now we're at the start of the value. Scan to next delimiter.
+            // Delimiters that end a query value: `&`, `#`. End-of-string also stops.
+            let value_start = i;
+            while i < bytes.len() && bytes[i] != b'&' && bytes[i] != b'#' {
+                i += 1;
+            }
+            // Only emit `***` if there was actually a value to redact (avoid empty `auth=`
+            // becoming `auth=***` which would be a false positive for `?auth=` with no value).
+            if i > value_start {
+                out.extend_from_slice(b"***");
+            }
+            // Loop continues; delimiter byte (or EOS) handled by outer copy below.
+            continue;
+        }
+
+        // No pattern at this position; copy one byte and advance.
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Minimal `%xx` percent-decoder. Ignores invalid escapes (passes them through verbatim).
 /// This is intentionally simpler than the `percent-encoding` / `urlencoding` crate APIs —
 /// we only need it for substring matching, not roundtrip-correct URL parsing.
