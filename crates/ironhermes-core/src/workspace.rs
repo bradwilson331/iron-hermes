@@ -42,10 +42,33 @@ impl Workspace {
     ///
     /// Marker dir argument is the actual on-disk directory NAME found
     /// (".ironhermes" or ".hermes") — the leading dot is included.
-    #[allow(dead_code)]
-    fn from_root_and_marker(_root: PathBuf, _marker_name: &str) -> Self {
-        // RED: stub — real impl ships in GREEN commit.
-        unimplemented!("RED stub — implementation pending GREEN commit")
+    fn from_root_and_marker(root: PathBuf, marker_name: &str) -> Self {
+        let marker_dir = root.join(marker_name);
+        let soul_path = {
+            let top = root.join("SOUL.md");
+            let nested = marker_dir.join("SOUL.md");
+            if top.exists() {
+                Some(top)
+            } else if nested.exists() {
+                Some(nested)
+            } else {
+                None
+            }
+        };
+        let memory_dir = marker_dir.join("memory");
+        let skills_dir = root.join("skills");
+        let tools_config = {
+            let p = marker_dir.join("tools.yaml");
+            if p.exists() { Some(p) } else { None }
+        };
+        Self {
+            root,
+            soul_path,
+            agents_chain: Vec::new(), // 25.3: placeholder; chain scanning deferred
+            memory_dir,
+            skills_dir,
+            tools_config,
+        }
     }
 }
 
@@ -59,9 +82,22 @@ impl Workspace {
 ///
 /// Preference: when both markers exist in the same directory, `.ironhermes/` wins
 /// (per PATTERNS.md "NEW: workspace.rs" — IronHermes is the canonical brand).
-pub fn resolve_from_cwd(_cwd: &Path) -> Option<Workspace> {
-    // RED: stub — real impl ships in GREEN commit.
-    None
+pub fn resolve_from_cwd(cwd: &Path) -> Option<Workspace> {
+    let mut current = cwd.to_path_buf();
+    loop {
+        let ironhermes = current.join(".ironhermes");
+        let hermes = current.join(".hermes");
+        if ironhermes.is_dir() {
+            return Some(Workspace::from_root_and_marker(current, ".ironhermes"));
+        }
+        if hermes.is_dir() {
+            return Some(Workspace::from_root_and_marker(current, ".hermes"));
+        }
+        // Walk to parent; pop returns false at filesystem root
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 #[cfg(test)]
