@@ -11,51 +11,30 @@ use tokio::sync::mpsc;
 #[cfg(feature = "server")]
 use tokio::task::JoinHandle;
 #[cfg(feature = "server")]
-use tracing::warn;
+use tracing::{info, warn};
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
 /// Server-side application-level WebSocket keepalive interval.
 ///
-/// HUMAN-UAT Gap 3 (follow-up): even with proper close-frame emission,
-/// live browser UAT showed `dx serve` / hyper proxy terminating idle
-/// WebSocket connections after ~9-10s with no traffic. That close arrives
-/// at the gloo-net client as `WebsocketError::ConnectionClosed`
-/// ("Connection closed"), with no teardown log on the server because the
-/// server loop never observed a recv error — it was simply idle on
-/// `socket.recv()` when the proxy dropped the socket.
+/// Application-level Ping frames keep intermediate proxy idle timers
+/// reset and detect half-broken sockets promptly. Browsers automatically
+/// respond to Ping with Pong at the WebSocket protocol level, so the
+/// client requires no changes. Pong frames are skipped in the recv_raw
+/// match arm.
 ///
-/// Application-level Ping frames keep any intermediate proxy's idle
-/// timer reset and also exercise the send path so broken sockets are
-/// detected promptly (the first failed Ping is classified as a
-/// send-path failure per D-05, aborting any in-flight turn). Browsers
-/// automatically respond to Ping with Pong at the WebSocket protocol
-/// level, so the client requires no changes.
-///
-/// 5 seconds is well below the observed ~9s idle-close threshold and
-/// matches the low end of common reverse-proxy keepalive intervals.
+/// 5 seconds is well below the ~9s idle-close threshold observed with
+/// the dx serve proxy and matches the low end of common reverse-proxy
+/// keepalive intervals.
 #[cfg(feature = "server")]
 const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
-
-#[cfg(feature = "server")]
-fn is_clean_ws_disconnect(reason: &str) -> bool {
-    let lower = reason.to_ascii_lowercase();
-    lower.contains("closed")
-        || lower.contains("close frame")
-        || lower.contains("connection reset by peer")
-        || lower.contains("eof")
-}
 
 /// Best-effort WebSocket close-frame emit before dropping the socket.
 ///
 /// Ensures every teardown branch completes the WebSocket close handshake
-/// so upstream proxies do not observe `Connection reset without closing
-/// handshake`. Errors are intentionally swallowed: if the send fails, the
-/// transport was already broken and the handler is exiting regardless —
-/// we must not block teardown on close-frame delivery (respects D-06's
-/// intent not to hang on broken-send paths, while closing HUMAN-UAT Gap 3
-/// where the server previously dropped the socket with no close frame at
-/// all).
+/// so upstream proxies do not observe a raw transport reset.
+/// Errors are intentionally swallowed — if the send fails the transport
+/// is already broken and we must not block teardown.
 #[cfg(feature = "server")]
 async fn send_close_frame(
     socket: &mut TypedWebsocket<String, String>,
@@ -88,28 +67,57 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                     handle: JoinHandle<()>,
                 }
 
+                info!("websocket chat connection established");
                 let mut in_flight_turn: Option<InFlightTurn> = None;
 
-                // Keepalive interval closes HUMAN-UAT Gap 3 follow-up:
-                // without periodic Pings the dev proxy (dx serve/hyper)
-                // idle-closes the socket after ~9s, surfacing at the
-                // client as `WebsocketError::ConnectionClosed`
-                // ("Connection closed") with no server-side teardown
-                // trace. See `WS_KEEPALIVE_INTERVAL` above for the full
-                // rationale.
                 let mut keepalive = tokio::time::interval(WS_KEEPALIVE_INTERVAL);
-                keepalive
-                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                // First tick fires immediately; skip it so we don't
-                // emit a Ping on connect before any idle window has
-                // elapsed.
+                keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // Skip first tick so we don't Ping immediately on connect.
                 keepalive.tick().await;
 
                 loop {
                     tokio::select! {
-                        msg = socket.recv() => {
-                            let msg = match msg {
-                                Ok(msg) => msg,
+                        // ── Incoming frames from the client ──────────────────────
+                        //
+                        // Use recv_raw so we handle each frame type explicitly.
+                        // TypedWebsocket::recv() (the typed/Stream path) tries to
+                        // JSON-decode the text frame as type String, which fails for
+                        // raw JSON object payloads like {"session_id":...,"message":...}
+                        // because a JSON object is not a JSON string literal. Using
+                        // recv_raw bypasses that decode layer entirely — we read the
+                        // raw text and parse it ourselves as ChatRequest.
+                        raw = socket.recv_raw() => {
+                            let text = match raw {
+                                Ok(Message::Text(t)) => {
+                                    info!("websocket chat message received (len={})", t.len());
+                                    t
+                                }
+                                Ok(Message::Close { code, reason }) => {
+                                    let in_flight = in_flight_turn.is_some();
+                                    let session_id = in_flight_turn
+                                        .as_ref()
+                                        .map(|t| t.session_id.as_str())
+                                        .unwrap_or("unknown");
+                                    warn!(
+                                        session_id = %session_id,
+                                        code = ?code,
+                                        reason = %reason,
+                                        in_flight,
+                                        "websocket close frame received; exiting connection"
+                                    );
+                                    if let Some(turn) = in_flight_turn.take() {
+                                        let _ = turn.handle.await;
+                                    }
+                                    send_close_frame(
+                                        &mut socket,
+                                        CloseCode::Normal,
+                                        "recv closed cleanly",
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                // Ping/Pong/Binary — skip silently.
+                                Ok(_) => continue,
                                 Err(err) => {
                                     let reason = err.to_string();
                                     let in_flight = in_flight_turn.is_some();
@@ -117,73 +125,32 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         .as_ref()
                                         .map(|t| t.session_id.as_str())
                                         .unwrap_or("unknown");
-
-                                    if is_clean_ws_disconnect(&reason) {
-                                        warn!(
-                                            session_id = %session_id,
-                                            reason = %reason,
-                                            in_flight,
-                                            "websocket recv closed cleanly; exiting connection"
-                                        );
-                                    } else {
-                                        warn!(
-                                            session_id = %session_id,
-                                            reason = %reason,
-                                            in_flight,
-                                            "websocket recv failed; closing connection"
-                                        );
-                                    }
-
+                                    warn!(
+                                        session_id = %session_id,
+                                        reason = %reason,
+                                        in_flight,
+                                        "websocket recv failed; closing connection"
+                                    );
                                     if let Some(turn) = in_flight_turn.take() {
-                                        if is_clean_ws_disconnect(&reason) {
-                                            if let Err(join_err) = turn.handle.await {
-                                                warn!(
-                                                    session_id = %turn.session_id,
-                                                    reason = %join_err,
-                                                    in_flight = false,
-                                                    "turn task join failed after clean websocket close"
-                                                );
-                                            }
-                                        } else {
-                                            turn.handle.abort();
-                                        }
+                                        turn.handle.abort();
                                     }
-
-                                    // Close HUMAN-UAT Gap 3: proactively emit a
-                                    // WebSocket close frame on every recv-error
-                                    // teardown branch so upstream proxies
-                                    // observe a proper close handshake instead
-                                    // of `Connection reset without closing
-                                    // handshake`. Best-effort — swallow errors
-                                    // since the transport may already be
-                                    // half-broken.
-                                    if is_clean_ws_disconnect(&reason) {
-                                        send_close_frame(
-                                            &mut socket,
-                                            CloseCode::Normal,
-                                            "recv closed cleanly",
-                                        )
+                                    send_close_frame(&mut socket, CloseCode::Away, "recv failed")
                                         .await;
-                                    } else {
-                                        send_close_frame(
-                                            &mut socket,
-                                            CloseCode::Away,
-                                            "recv failed",
-                                        )
-                                        .await;
-                                    }
                                     break;
                                 }
                             };
 
-                            let req: ChatRequest = match serde_json::from_str(&msg) {
+                            let req: ChatRequest = match serde_json::from_str(&text) {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    let err = ChatStreamEvent::Error {
+                                    let err_event = ChatStreamEvent::Error {
                                         message: format!("Invalid request: {e}"),
                                     };
                                     let _ = socket
-                                        .send(serde_json::to_string(&err).unwrap_or_default())
+                                        .send_raw(Message::Text(
+                                            serde_json::to_string(&err_event)
+                                                .unwrap_or_default(),
+                                        ))
                                         .await;
                                     continue;
                                 }
@@ -194,7 +161,9 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                     message: "Another request is already in progress".to_string(),
                                 };
                                 let _ = socket
-                                    .send(serde_json::to_string(&busy).unwrap_or_default())
+                                    .send_raw(Message::Text(
+                                        serde_json::to_string(&busy).unwrap_or_default(),
+                                    ))
                                     .await;
                                 continue;
                             }
@@ -244,7 +213,8 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 match result {
                                     Ok(agent_result) => {
                                         let _ = tx.send(ChatStreamEvent::Finished {
-                                            total_tokens: agent_result.total_usage.total_tokens as u32,
+                                            total_tokens: agent_result.total_usage.total_tokens
+                                                as u32,
                                         });
                                     }
                                     Err(e) => {
@@ -262,6 +232,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             });
                         }
 
+                        // ── Agent stream events → client ──────────────────────────
                         maybe_event = async {
                             match in_flight_turn.as_mut() {
                                 Some(turn) => turn.rx.recv().await,
@@ -270,22 +241,24 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                         } => {
                             match maybe_event {
                                 Some(event) => {
+                                    // Use send_raw(Text) so the client receives a plain
+                                    // JSON text frame. TypedWebsocket::send() (the Sink
+                                    // path) encodes via JsonEncoding into a binary frame,
+                                    // which doesn't match the client's recv_raw Text arm.
                                     let json = serde_json::to_string(&event).unwrap_or_default();
-                                    if let Err(err) = socket.send(json).await {
+                                    if let Err(err) = socket
+                                        .send_raw(Message::Text(json))
+                                        .await
+                                    {
                                         if let Some(turn) = in_flight_turn.take() {
-                                            warn!(session_id = %turn.session_id, reason = %err, in_flight = true, "websocket send failed; aborting in-flight turn");
+                                            warn!(
+                                                session_id = %turn.session_id,
+                                                reason = %err,
+                                                in_flight = true,
+                                                "websocket send failed; aborting in-flight turn"
+                                            );
                                             turn.handle.abort();
                                         }
-                                        // Close HUMAN-UAT Gap 3: even on
-                                        // broken-send paths, attempt a
-                                        // best-effort close frame so the proxy
-                                        // sees a close handshake instead of a
-                                        // raw transport reset. The write will
-                                        // most likely fail silently (transport
-                                        // is already broken), which is
-                                        // consistent with D-06's intent that
-                                        // teardown not block on close-frame
-                                        // delivery.
                                         send_close_frame(
                                             &mut socket,
                                             CloseCode::Away,
@@ -298,20 +271,20 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 None => {
                                     if let Some(turn) = in_flight_turn.take() {
                                         if let Err(err) = turn.handle.await {
-                                            warn!(session_id = %turn.session_id, reason = %err, in_flight = false, "turn task join failed");
+                                            warn!(
+                                                session_id = %turn.session_id,
+                                                reason = %err,
+                                                in_flight = false,
+                                                "turn task join failed"
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
 
+                        // ── Keepalive Ping ────────────────────────────────────────
                         _ = keepalive.tick() => {
-                            // Keep intermediate proxies' idle timers
-                            // reset and detect half-broken sockets
-                            // promptly. A failed Ping is classified as
-                            // a send-path failure per D-05: abort any
-                            // in-flight turn, emit a close frame, and
-                            // exit the connection loop.
                             if let Err(err) = socket
                                 .send_raw(Message::Ping(Bytes::new()))
                                 .await
@@ -350,7 +323,9 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             .to_string(),
                     };
                     let _ = socket
-                        .send(serde_json::to_string(&unavailable).unwrap_or_default())
+                        .send_raw(Message::Text(
+                            serde_json::to_string(&unavailable).unwrap_or_default(),
+                        ))
                         .await;
                 }
             }

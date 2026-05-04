@@ -1,12 +1,12 @@
 mod app;
 mod components;
 mod fonts;
+#[cfg(any(test, feature = "demo"))]
+mod mocks;
 mod platform;
 mod protocol;
 mod server;
 mod state;
-#[cfg(any(test, feature = "demo"))]
-mod mocks;
 
 use app::App;
 
@@ -15,10 +15,26 @@ use app::App;
 async fn main() {
     use dioxus::prelude::*;
 
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
+    // Load ~/.ironhermes/.env so OPENROUTER_API_KEY / ANTHROPIC_API_KEY etc.
+    // are available to the embedded agent — mirrors what the CLI does in main.rs.
+    let env_path = ironhermes_core::config::Config::env_path();
+    if env_path.exists() {
+        dotenvy::from_path(&env_path).ok();
+    }
+
     // Initialize shared state at server startup.
     let app_state = server::state::AppState::init()
         .await
         .expect("Failed to initialize AppState");
+    server::state::install_global_app_state(app_state.clone())
+        .expect("Failed to install global AppState");
 
     let address = dioxus::cli_config::fullstack_address_or_localhost();
 

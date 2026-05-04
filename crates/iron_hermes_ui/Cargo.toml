@@ -42,6 +42,8 @@ ironhermes-tools = { path = "../ironhermes-tools" }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dotenvy = { workspace = true }
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
