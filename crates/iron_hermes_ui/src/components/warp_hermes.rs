@@ -103,17 +103,17 @@ pub fn WarpHermes() -> Element {
         loop {
             let state = ws.connect().await;
             if ws.is_err() {
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(
-                    &format!("WebSocket connect failed; retrying: {:?}", state).into(),
-                );
-                #[cfg(not(target_arch = "wasm32"))]
-                eprintln!("WebSocket connect failed; retrying: {:?}", state);
-
                 scanner_active.set(false);
                 streaming_block_id.set(None);
 
                 if !disconnect_notified {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(
+                        &format!("WebSocket connect failed; retrying: {:?}", state).into(),
+                    );
+                    #[cfg(not(target_arch = "wasm32"))]
+                    eprintln!("WebSocket connect failed; retrying: {:?}", state);
+
                     push_disconnect_notice(&mut blocks, &mut next_id);
                     disconnect_notified = true;
                 }
@@ -124,15 +124,35 @@ pub fn WarpHermes() -> Element {
             loop {
                 match ws.recv_raw().await {
                     Ok(raw_msg) => {
-                        disconnect_notified = false;
-
                         // Extract text from the raw message.
                         let msg_text = match raw_msg {
-                            dioxus_fullstack::Message::Text(t) => t,
+                            dioxus_fullstack::Message::Text(t) => {
+                                disconnect_notified = false;
+                                t
+                            }
                             dioxus_fullstack::Message::Binary(b) => {
+                                disconnect_notified = false;
                                 String::from_utf8_lossy(&b).to_string()
                             }
-                            _ => continue, // Skip ping/pong/close
+                            dioxus_fullstack::Message::Close { .. } => {
+                                scanner_active.set(false);
+                                streaming_block_id.set(None);
+
+                                if !disconnect_notified {
+                                    #[cfg(target_arch = "wasm32")]
+                                    web_sys::console::warn_1(
+                                        &"WebSocket closed; reconnecting".into(),
+                                    );
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    eprintln!("WebSocket closed; reconnecting");
+
+                                    push_disconnect_notice(&mut blocks, &mut next_id);
+                                    disconnect_notified = true;
+                                }
+
+                                break;
+                            }
+                            _ => continue, // Skip ping/pong
                         };
 
                         // Parse the JSON-encoded ChatStreamEvent.
@@ -284,17 +304,17 @@ pub fn WarpHermes() -> Element {
                         }
                     }
                     Err(err) => {
-                        #[cfg(target_arch = "wasm32")]
-                        web_sys::console::warn_1(
-                            &format!("WebSocket receive failed; reconnecting: {err}").into(),
-                        );
-                        #[cfg(not(target_arch = "wasm32"))]
-                        eprintln!("WebSocket receive failed; reconnecting: {err}");
-
                         scanner_active.set(false);
                         streaming_block_id.set(None);
 
                         if !disconnect_notified {
+                            #[cfg(target_arch = "wasm32")]
+                            web_sys::console::warn_1(
+                                &format!("WebSocket receive failed; reconnecting: {err}").into(),
+                            );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            eprintln!("WebSocket receive failed; reconnecting: {err}");
+
                             push_disconnect_notice(&mut blocks, &mut next_id);
                             disconnect_notified = true;
                         }

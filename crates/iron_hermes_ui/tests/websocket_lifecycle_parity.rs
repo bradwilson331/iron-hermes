@@ -132,4 +132,12 @@ fn client_ws_disconnect_notices_are_generic_and_deduplicated_per_disconnect_wind
         ui.contains("Connection interrupted. Please retry your message once reconnected."),
         "disconnect transcript copy must remain generic and user-facing"
     );
+
+    assert!(
+        ui.contains("dioxus_fullstack::Message::Close { .. }")
+            && ui.contains("WebSocket closed; reconnecting")
+            && ui.contains("if !disconnect_notified {")
+            && ui.contains("break;"),
+        "close frames should trigger one reconnect boundary, not repeated receive-error churn"
+    );
 }
