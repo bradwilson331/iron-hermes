@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: idle
-stopped_at: Phase 26.1 complete — all 3 plans done, UAT passed
-last_updated: "2026-05-04T20:40:00.000Z"
-last_activity: 2026-05-04 -- Phase 26.1 completed (WebSocket chat end-to-end fix)
+status: Not started
+stopped_at: Phase 26.2 context gathered
+last_updated: "2026-05-04T21:23:47.799Z"
+last_activity: 2026-05-04 -- Phase 26.1 execution started
 progress:
-  total_phases: 20
-  completed_phases: 20
-  total_plans: 106
-  completed_plans: 106
+  total_phases: 29
+  completed_phases: 19
+  total_plans: 134
+  completed_plans: 134
   percent: 100
 ---
 
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 26.1 (fix-websocket-error-for-chat) — COMPLETE
-Plan: 3 of 3
-Status: All plans complete, UAT passed 2026-05-04
+Phase: 26.2 (fix-dioxus-ui-session-tabs) — Not planned yet
+Plan: 0 of 0
+Status: Not started
 Last activity: 2026-05-04 -- Phase 26.1 execution started
 
 ## Performance Metrics
@@ -398,6 +398,7 @@ Recent decisions affecting current work:
 - Phase 25.5 inserted after Phase 25: iron_hermes_ui (URGENT)
 - Phase 25.6 inserted after Phase 25: replicate CLI web wiring (URGENT)
 - Phase 26.1 inserted after Phase 26: Fix websocket error for chat (URGENT)
+- Phase 26.2 inserted after Phase 26: Fix Dioxus ui session tabs (URGENT)
 
 ### Pending Todos
 
@@ -415,6 +416,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-04T
-Stopped at: Phase 26.1 complete — browser chat end-to-end working, UAT passed
-Resume file: none
+Last session: 2026-05-04T21:23:47.793Z
+Stopped at: Phase 26.2 context gathered
+Resume file: .planning/phases/26.2-fix-dioxus-ui-session-tabs/26.2-CONTEXT.md
