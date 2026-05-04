@@ -15,6 +15,7 @@ IronHermes is organized as a Cargo workspace with modular crates:
 | `ironhermes-cli` | Interactive CLI binary |
 | `ironhermes-gateway` | Multi-platform messaging gateway (Telegram adapter) |
 | `ironhermes-cron` | Cron job scheduler |
+| `iron_hermes_ui` | Dioxus 0.7 web UI — terminal-style chat shell with streaming LLM responses |
 
 ## Quick Start
 
@@ -61,6 +62,52 @@ Built-in tools available to the agent:
 - **patch** — Find-and-replace in files
 - **search_files** — Regex search across files
 - **web_search** — Web search via Firecrawl API
+
+## Web UI (`iron_hermes_ui`)
+
+A Dioxus 0.7 fullstack web app — a terminal-style chat shell that streams LLM responses
+directly from an embedded agent server. Requires the Dioxus CLI (`dx`).
+
+### Prerequisites
+
+```bash
+# Install the Dioxus CLI
+cargo install dioxus-cli
+
+# Ensure your API key is in ~/.ironhermes/.env
+echo "OPENROUTER_API_KEY=your-key-here" >> ~/.ironhermes/.env
+```
+
+### Build and run (standalone binary)
+
+```bash
+# Build the web bundle (run from workspace root)
+dx bundle --platform web -p iron_hermes_ui
+
+# Run the server
+RUST_LOG=info ./target/dx/iron_hermes_ui/debug/web/iron_hermes_ui
+```
+
+The server starts on `http://localhost:8080` by default. Set `IP` / `PORT` environment
+variables or use `DIOXUS_ADDRESS` to change the bind address.
+
+### Development mode (hot reload)
+
+```bash
+# Run from workspace root — proxies through dx serve
+dx serve --package iron_hermes_ui
+```
+
+> **Note:** `dx serve` routes WebSocket traffic through a proxy that may impose a short
+> idle-close timeout (~9 seconds). The standalone binary above does not have this
+> limitation and is recommended for normal use.
+
+### Release build
+
+```bash
+dx bundle --platform web -p iron_hermes_ui --release
+./target/dx/iron_hermes_ui/release/web/iron_hermes_ui
+```
 
 ## License
 
