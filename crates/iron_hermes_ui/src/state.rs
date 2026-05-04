@@ -441,6 +441,10 @@ pub fn demo_messages() -> Vec<Message> {
 
 /// 10 palette items (6 slash + 4 workflow). Order mirrors UI-SPEC lines
 /// 282-298 and app.jsx `PALETTE_ITEMS` lines 12-48.
+///
+/// Gated behind `cfg(test)` or `feature = "demo"` — production code fetches
+/// real commands from the server via `list_slash_commands()` (Plan 03).
+#[cfg(any(test, feature = "demo"))]
 pub fn demo_palette_items() -> Vec<PaletteItem> {
     vec![
         // Slash commands
@@ -509,6 +513,10 @@ pub fn demo_palette_items() -> Vec<PaletteItem> {
 }
 
 /// 3 title-bar tabs (UI-SPEC lines 200-204).
+///
+/// Gated behind `cfg(test)` or `feature = "demo"` — production code fetches
+/// real sessions from the server via `list_sessions()` (Plan 03).
+#[cfg(any(test, feature = "demo"))]
 pub fn demo_tabs() -> Vec<Tab> {
     vec![
         Tab {
