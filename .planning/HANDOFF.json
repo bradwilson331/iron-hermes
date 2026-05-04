@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-04T15:24:28.702Z",
+  "timestamp": "2026-05-04T16:05:25.205Z",
   "phase": "26.1",
   "phase_name": "fix-websocket-error-for-chat",
   "phase_dir": ".planning/phases/26.1-fix-websocket-error-for-chat",
@@ -9,85 +9,36 @@
   "total_tasks": 3,
   "status": "paused",
   "completed_tasks": [
-    {
-      "id": 1,
-      "name": "Normalize server disconnect teardown for live proxy stability",
-      "status": "done",
-      "commit": "e3c6f20,9e1fed8"
-    },
-    {
-      "id": 2,
-      "name": "Harden client reconnect receive lifecycle against repeated reset loops",
-      "status": "done",
-      "commit": "017392e,7081711,e830039"
-    },
-    {
-      "id": 3,
-      "name": "Validate live browser disconnect and race behavior",
-      "status": "in_progress",
-      "progress": "checkpoint reached; manual UAT rerun still reports reset-without-close-handshake loop"
-    }
+    {"id": 1, "name": "Normalize server disconnect teardown for live proxy stability", "status": "done", "commit": "9e1fed8"},
+    {"id": 2, "name": "Harden client reconnect receive lifecycle against repeated reset loops", "status": "done", "commit": "7081711"},
+    {"id": "2b", "name": "Close-frame reconnect boundary (Task 2 follow-up after first failed UAT)", "status": "done", "commit": "e830039"},
+    {"id": "3a", "name": "Emit close frame on every ws teardown branch (fix raw-reset class of failure)", "status": "done", "commit": "e950d71"},
+    {"id": "3b", "name": "Add 5s server ws keepalive ping against proxy idle-close (fix clean-close-after-idle class of failure)", "status": "done", "commit": "434e2ca"},
+    {"id": 3, "name": "Validate live browser disconnect and race behavior (human-verify checkpoint)", "status": "in_progress", "progress": "Iteration 2 code + automated verify done; awaiting live browser UAT approval from user"}
   ],
   "remaining_tasks": [
-    {
-      "id": 3,
-      "name": "Complete human-verify checkpoint for live browser UAT",
-      "status": "not_started"
-    },
-    {
-      "id": 4,
-      "name": "If UAT still fails, create next gap plan and execute gaps-only again",
-      "status": "not_started"
-    }
+    {"id": 3, "name": "Re-run live browser UAT against 434e2ca and confirm all checkpoint criteria (or produce fresh failing logs)", "status": "not_started"},
+    {"id": "post-3", "name": "If approved: create 26.1-03-SUMMARY.md, run code-review gate, regression gate, schema-drift gate, verify-phase, update ROADMAP/STATE/PROJECT.md, close parent UAT gaps (phase 26)", "status": "not_started"}
   ],
   "blockers": [
-    {
-      "description": "Live browser/proxy run still throws 'Connection reset without closing handshake' during LLM chat",
-      "type": "technical",
-      "workaround": "Continue checkpoint cycle with real UAT evidence and scoped websocket lifecycle fixes"
-    },
-    {
-      "description": "Task 3 is a blocking human-verify checkpoint",
-      "type": "human_action",
-      "workaround": "Run manual steps via dx serve and respond approved or provide logs"
-    }
+    {"description": "Task 3 human-verify checkpoint (blocking gate) cannot self-approve per .continue-here.md blocking anti-pattern: completion must be gated on live UAT, not static evidence.", "type": "human_action", "workaround": "User must run dx serve --package iron_hermes_ui and manually verify against 6 criteria in the latest checkpoint payload."},
+    {"description": "Two successive live-UAT failures have revealed two distinct root causes (raw TCP reset → close-frame fix; idle-close after 9s → keepalive fix). A third failure mode is possible if neither fix is sufficient in combination.", "type": "technical", "workaround": "If next UAT fails, user must paste any [server] warn lines (especially 'websocket keepalive ping failed; closing connection') so the next iteration has transport-failure evidence rather than speculation."}
   ],
   "human_actions_pending": [
-    {
-      "action": "Run manual Task 3 UAT in browser using dx serve and reconnect/race scenarios",
-      "context": "Phase 26.1 cannot complete until checkpoint is approved",
-      "blocking": true
-    },
-    {
-      "action": "If failure repeats, provide fresh log snippets tied to scenario timing",
-      "context": "Required input for continuation-agent fix pass",
-      "blocking": true
-    }
+    {"action": "Run dx serve --package iron_hermes_ui and execute Task 3 manual verification steps against commit 434e2ca", "context": "This is the blocking human-verify checkpoint for plan 26.1-03. Phase 26.1 cannot be marked complete without either 'approved' or fresh failing logs from this step.", "blocking": true}
   ],
   "decisions": [
-    {
-      "decision": "Treat websocket close frames as reconnect boundaries",
-      "rationale": "Prevents receiver loop from skipping close events and falling into reconnect churn",
-      "phase": "26.1"
-    },
-    {
-      "decision": "Deduplicate disconnect notices within a single disconnect window",
-      "rationale": "Reduce repeated reconnect noise while preserving one generic user-facing message",
-      "phase": "26.1"
-    },
-    {
-      "decision": "Keep D-01..D-15 contracts locked while iterating gaps",
-      "rationale": "Scope control: fix live reset-loop behavior without redesigning protocol or route",
-      "phase": "26.1"
-    }
+    {"decision": "Use server-side Message::Ping every 5s (not client-side, not custom reconnect backoff) for keepalive", "rationale": "Browsers auto-respond with Pong at WS protocol level, so no warp_hermes.rs change is required and D-10 (automatic-reconnect-only) + D-11 (scoped transient-state reset) stay intact. 5s is well under common proxy idle thresholds (typical ~10s).", "phase": "26.1"},
+    {"decision": "Classify failed keepalive Ping as a send-path failure per D-05", "rationale": "A Ping that cannot be delivered proves the transport is broken, which matches D-05's broken-send semantics: abort in-flight turn, emit CloseCode::Away with reason 'keepalive failed', break loop.", "phase": "26.1"},
+    {"decision": "Use tokio::time::interval with MissedTickBehavior::Skip and consume the first immediate tick before entering the select! loop", "rationale": "Prevents a Ping burst at connect and prevents back-to-back catch-up Pings after long select! wake gaps.", "phase": "26.1"},
+    {"decision": "Swallow errors from send_close_frame() calls", "rationale": "A half-broken transport may already reject the close frame; teardown must not block on its delivery (respects D-06's intent not to hang on broken-send paths).", "phase": "26.1"},
+    {"decision": "D-01..D-15 lifecycle decisions treated as immutable throughout plan 26.1-03", "rationale": "Locked by user in 26.1-CONTEXT.md. Never redesign protocol, route path, reconnect strategy, or in-flight-gate location. All fixes must fit inside that contract.", "phase": "26.1"}
   ],
   "uncommitted_files": [
     ".planning/ROADMAP.md",
     ".planning/STATE.md",
-    ".planning/phases/26.1-fix-websocket-error-for-chat/26.1-03-PLAN.md",
-    ".planning/phases/26.1-fix-websocket-error-for-chat/26.1-HUMAN-UAT.md",
-    "plus 303 additional pre-existing modified/untracked files (run git status --short for full list)"
+    ".planning/phases/26.1-fix-websocket-error-for-chat/26.1-HUMAN-UAT.md"
   ],
-  "next_action": "Resume Task 3 checkpoint: run dx serve manual UAT steps, then continue /gsd-execute-phase 26.1 --gaps-only with approved or failing logs.",
-  "context_notes": "Execution is paused at a blocking human checkpoint after Task 1 and Task 2 fixes plus a close-frame follow-up. Automated checks pass, but live browser/proxy behavior still reports reset-without-close-handshake; phase completion is blocked on manual UAT evidence."
+  "next_action": "User runs dx serve --package iron_hermes_ui and manually executes the 6 verification steps in the latest checkpoint payload (idle check, stream check, race check, regression check on prior signatures). On approval: run /gsd-resume-work, then continue /gsd-execute-phase 26.1 --gaps-only to drive through code-review gate → regression gate → schema-drift gate → verify-phase → update-roadmap → close parent UAT gaps for phase 26.",
+  "context_notes": "Plan 26.1-03 has gone through 4 distinct fix iterations against live UAT. Each iteration peeled one layer of the onion. Iteration 1-2 (Tasks 1-2) addressed server teardown classification and client disconnect dedupe. Iteration 3 (close-frame fix e950d71) eliminated the raw TCP reset signature. Iteration 4 (keepalive 434e2ca) addresses the ~9s idle-close signature exposed after iteration 3. The next UAT run tests whether (a) both fixes together are sufficient, or (b) there is a third root cause. The ws.rs file is now 350+ lines of carefully-balanced lifecycle code — any future changes should read the current state end-to-end and reason against D-01..D-15 before editing. Staging discipline is critical: the worktree has 300+ unrelated dirty entries."
 }
