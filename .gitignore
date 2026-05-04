@@ -8,3 +8,5 @@ Cargo.lock
 **/.DS_Store
 .omc/state/
 .omc/sessions/
+node_modules/
+package-lock.json
