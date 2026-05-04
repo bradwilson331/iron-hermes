@@ -7,9 +7,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-dioxus = { version = "=0.7.1", features = [] }
-gloo-timers = { version = "0.3", features = ["futures"] }
+dioxus = { version = "=0.7.1", features = ["fullstack"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Minimal tokio for platform/timer.rs (native sleep); `server` feature adds `full`.
 tokio = { version = "1", features = ["time"], default-features = false }
+
+# Client-only deps (WASM)
+gloo-timers = { version = "0.3", features = ["futures"] }
 web-sys = { version = "0.3", features = [
     "Window",
     "Element",
@@ -22,9 +28,18 @@ web-sys = { version = "0.3", features = [
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 
+# Server-only deps — optional, activated by `server` feature
+axum = { version = "=0.8.4", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Server-only deps — behind cfg gate so WASM client never compiles them
+ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-agent = { path = "../ironhermes-agent" }
+ironhermes-state = { path = "../ironhermes-state" }
+ironhermes-tools = { path = "../ironhermes-tools" }
+
 [dev-dependencies]
-# Test-only features for `#[tokio::test]` (macros + rt). Production tokio
-# stays at `time` only per CONTEXT D-05 to keep native binary lean.
+# Test-only features for `#[tokio::test]` (macros + rt).
 tokio = { version = "1", features = ["macros", "rt", "time"], default-features = false }
 
 [features]
@@ -32,3 +47,4 @@ default = ["web"]
 web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
+server = ["dioxus/server", "dep:axum", "tokio/full"]
