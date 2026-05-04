@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: "Phase 25.5-05 Task 1 complete; Task 2 checkpoint:human-verify pending"
-last_updated: "2026-05-04T01:43:26.659Z"
+stopped_at: Phase 25.6 context gathered
+last_updated: "2026-05-04T07:54:54.511Z"
 last_activity: 2026-05-04
 progress:
   total_phases: 20
@@ -395,6 +395,7 @@ Recent decisions affecting current work:
 - Phase 25.2 inserted after Phase 25: web extract tools (URGENT)
 - Phase 25.3 inserted after Phase 25: session-workspace parity (URGENT)
 - Phase 25.5 inserted after Phase 25: iron_hermes_ui (URGENT)
+- Phase 25.6 inserted after Phase 25: replicate CLI web wiring (URGENT)
 
 ### Pending Todos
 
@@ -412,8 +413,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-04T01:43:26.655Z
-Stopped at: Phase 25.5-05 Task 1 complete; Task 2 checkpoint:human-verify pending
-Resume file: None
+Last session: 2026-05-04T07:54:54.507Z
+Stopped at: Phase 25.6 context gathered
+Resume file: .planning/phases/25.6-replicate-cli-web-wiring/25.6-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
