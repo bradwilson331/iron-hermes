@@ -4,7 +4,6 @@ mod fonts;
 mod state;
 mod mocks;
 mod platform;
-#[cfg(feature = "server")]
 mod server;
 
 use app::App;

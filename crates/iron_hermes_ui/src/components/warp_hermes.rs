@@ -8,9 +8,9 @@ use crate::components::shell::{
     AgentPanel, BlockStream, CommandPalette, InputBox, StatusBar, TitleBar,
 };
 use crate::state::{
-    demo_block_entries, demo_messages, demo_palette_items, demo_tabs, now_time,
+    demo_block_entries, demo_messages, now_time,
     Block, BlockEntry, Mode, PaletteItem, PaletteState, Personality, ShellSettings,
-    TokenBudget,
+    Tab, TokenBudget,
 };
 
 /// Top-level desktop/web shell composer — Phase 4 integration.
@@ -44,9 +44,52 @@ pub fn WarpHermes() -> Element {
     let tokens             = use_signal(|| TokenBudget { used: 12_300, max: 128_000 });
     let mut next_id        = use_signal(|| 1000_u64);
 
-    // Static (per-render-once) data.
-    let palette_items = demo_palette_items();
-    let tabs = demo_tabs();
+    // ── Fetch real data from server functions (Plan 03 wiring). ──
+
+    // Fetch real slash commands from CommandRouter via server function.
+    let slash_commands = use_server_future(move || {
+        crate::server::api::list_slash_commands()
+    })?;
+
+    // Fetch real config (model/provider/context_length) from server.
+    let config_summary = use_server_future(move || {
+        crate::server::api::get_config_summary()
+    })?;
+
+    // Fetch real sessions from StateStore via server function.
+    let sessions = use_server_future(move || {
+        crate::server::api::list_sessions()
+    })?;
+
+    // Convert server data to UI types — map inside component, no cross-module From impls.
+    let palette_items: Vec<PaletteItem> = match slash_commands() {
+        Some(Ok(cmds)) => cmds
+            .into_iter()
+            .map(|cmd| PaletteItem {
+                section: "slash".into(),
+                cmd: format!("/{}", cmd.name),
+                label: cmd.description,
+                kbd: vec![],
+            })
+            .collect(),
+        _ => vec![], // Loading or error — empty palette until data arrives
+    };
+
+    let tabs: Vec<Tab> = match sessions() {
+        Some(Ok(sessions)) if !sessions.is_empty() => sessions
+            .into_iter()
+            .map(|s| Tab {
+                label: s.title.unwrap_or(s.id),
+                live: true,
+            })
+            .collect(),
+        _ => vec![Tab { label: "New Session".into(), live: true }],
+    };
+
+    let (model_name, provider_name) = match config_summary() {
+        Some(Ok(cfg)) => (cfg.model, cfg.provider),
+        _ => ("loading...".to_string(), "...".to_string()),
+    };
 
     // ── ShellSettings via use_context_provider (D-02 + Pattern 5). ──
     let mut personality = use_signal(|| Personality::Default);
@@ -309,8 +352,8 @@ pub fn WarpHermes() -> Element {
                     }
                     StatusBar {
                         mode: "Chat".to_string(),
-                        model: "claude-sonnet-4".to_string(),
-                        provider: "anthropic".to_string(),
+                        model: model_name.clone(),
+                        provider: provider_name.clone(),
                         tokens: tokens,
                         scanner_active: scanner_active,
                         hint: "/help · ⌃C cancel · ⌘K palette".to_string(),

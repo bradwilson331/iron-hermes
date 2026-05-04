@@ -1,9 +1,9 @@
 //! Server-side modules for the Dioxus UI backend.
 //!
-//! All sub-modules are gated behind `#[cfg(feature = "server")]` so the WASM
-//! client binary never compiles server-only code.
+//! `api` is compiled on BOTH client and server — the `#[get]`/`#[post]` macros
+//! generate HTTP-call stubs on the client and API endpoints on the server.
+//! Only `ws` and `state` (pure server-side logic) stay behind `#[cfg(feature = "server")]`.
 
-#[cfg(feature = "server")]
 pub mod api;
 #[cfg(feature = "server")]
 pub mod ws;
