@@ -159,7 +159,10 @@ pub enum TuiEvent {
     /// Remove the widget with the given `id`.
     RemoveWidget { id: String },
     /// Flash a transient hint message in the status bar for `duration_ticks` frames.
-    FlashHint { message: String, duration_ticks: u16 },
+    FlashHint {
+        message: String,
+        duration_ticks: u16,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +318,12 @@ mod tests {
             content: "hello".to_string(),
             height: 2,
         };
-        if let TuiEvent::UpdateWidget { id, content, height } = ev {
+        if let TuiEvent::UpdateWidget {
+            id,
+            content,
+            height,
+        } = ev
+        {
             assert_eq!(id, "w1");
             assert_eq!(content, "hello");
             assert_eq!(height, 2);
@@ -326,7 +334,9 @@ mod tests {
 
     #[test]
     fn tui_event_remove_widget_carries_id() {
-        let ev = TuiEvent::RemoveWidget { id: "w2".to_string() };
+        let ev = TuiEvent::RemoveWidget {
+            id: "w2".to_string(),
+        };
         if let TuiEvent::RemoveWidget { id } = ev {
             assert_eq!(id, "w2");
         } else {
@@ -340,7 +350,11 @@ mod tests {
             message: "done!".to_string(),
             duration_ticks: 5,
         };
-        if let TuiEvent::FlashHint { message, duration_ticks } = ev {
+        if let TuiEvent::FlashHint {
+            message,
+            duration_ticks,
+        } = ev
+        {
             assert_eq!(message, "done!");
             assert_eq!(duration_ticks, 5);
         } else {

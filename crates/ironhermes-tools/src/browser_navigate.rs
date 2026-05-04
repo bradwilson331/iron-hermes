@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserNavigateTool {
@@ -31,8 +31,12 @@ impl BrowserNavigateTool {
 
 #[async_trait]
 impl Tool for BrowserNavigateTool {
-    fn name(&self) -> &str { "browser_navigate" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_navigate"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Navigate the browser session to a URL. Validated against browser.allowed_domains \
          and browser.allowed_schemes. Returns {status, url, title} on success or \
@@ -62,14 +66,17 @@ impl Tool for BrowserNavigateTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -88,7 +95,9 @@ impl Tool for BrowserNavigateTool {
             .map(|(s, _)| s.to_string())
             .unwrap_or_else(|| {
                 // Bare schemes like "javascript:..." or "data:..." (no //)
-                url.split_once(':').map(|(s, _)| s.to_string()).unwrap_or_default()
+                url.split_once(':')
+                    .map(|(s, _)| s.to_string())
+                    .unwrap_or_default()
             });
         if !cfg.allowed_schemes.iter().any(|s| s == &scheme) {
             return Ok(json!({
@@ -97,7 +106,8 @@ impl Tool for BrowserNavigateTool {
                 "scheme": scheme,
                 "allowed": cfg.allowed_schemes.clone(),
                 "hint": "Add the scheme to browser.allowed_schemes to permit"
-            }).to_string());
+            })
+            .to_string());
         }
 
         // D-15: host allowlist (empty = allow all).
@@ -144,7 +154,8 @@ impl Tool for BrowserNavigateTool {
             "status": 200,                  // chromiumoxide goto returns Err on non-2xx; success path = 200
             "url": final_url,
             "title": title
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -189,14 +200,22 @@ mod tests {
         let t = dummy_navigate_tool(vec![]);
         let result = t.execute(json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required parameter: url"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing required parameter: url")
+        );
     }
 
     #[tokio::test]
     async fn execute_rejects_disallowed_scheme() {
         // Default config has allowed_schemes = ["http", "https"]
         let t = dummy_navigate_tool(vec![]);
-        let result = t.execute(json!({"url": "javascript:alert(1)"})).await.unwrap();
+        let result = t
+            .execute(json!({"url": "javascript:alert(1)"}))
+            .await
+            .unwrap();
         assert!(result.contains("\"error\":\"scheme_blocked\""));
         assert!(result.contains("javascript"));
     }
@@ -204,7 +223,10 @@ mod tests {
     #[tokio::test]
     async fn execute_rejects_file_scheme_by_default() {
         let t = dummy_navigate_tool(vec![]);
-        let result = t.execute(json!({"url": "file:///etc/passwd"})).await.unwrap();
+        let result = t
+            .execute(json!({"url": "file:///etc/passwd"}))
+            .await
+            .unwrap();
         assert!(result.contains("\"error\":\"scheme_blocked\""));
     }
 
@@ -213,10 +235,22 @@ mod tests {
     #[tokio::test]
     async fn execute_blocks_navigate_when_host_not_in_allowlist() {
         let t = dummy_navigate_tool(vec!["example.com".to_string()]);
-        let result = t.execute(json!({"url": "https://wikipedia.org"})).await.unwrap();
-        assert!(result.contains("\"error\":\"domain_blocked\""), "expected domain_blocked, got: {result}");
-        assert!(result.contains("wikipedia.org"), "host must appear in envelope: {result}");
-        assert!(result.contains("example.com"), "allowed list must appear in envelope: {result}");
+        let result = t
+            .execute(json!({"url": "https://wikipedia.org"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("\"error\":\"domain_blocked\""),
+            "expected domain_blocked, got: {result}"
+        );
+        assert!(
+            result.contains("wikipedia.org"),
+            "host must appear in envelope: {result}"
+        );
+        assert!(
+            result.contains("example.com"),
+            "allowed list must appear in envelope: {result}"
+        );
     }
 
     /// GAP-3 / T-25.1-01: uses a DISTINCT_TEST_HOSTNAME that no real config file would ever contain.
@@ -226,11 +260,19 @@ mod tests {
     #[tokio::test]
     async fn execute_uses_injected_config_not_disk() {
         let t = dummy_navigate_tool(vec!["DISTINCT_TEST_HOSTNAME.example".to_string()]);
-        let result = t.execute(json!({"url": "https://wikipedia.org"})).await.unwrap();
+        let result = t
+            .execute(json!({"url": "https://wikipedia.org"}))
+            .await
+            .unwrap();
         // Must be rejected (domain_blocked) — not a scheme_blocked or success
-        assert!(result.contains("\"error\":\"domain_blocked\""), "expected domain_blocked, got: {result}");
+        assert!(
+            result.contains("\"error\":\"domain_blocked\""),
+            "expected domain_blocked, got: {result}"
+        );
         // The injected distinct hostname must appear in the allowed list in the envelope
-        assert!(result.contains("DISTINCT_TEST_HOSTNAME.example"),
-            "injected allowed_domains must appear in rejection envelope — proves disk Config::load() is NOT used: {result}");
+        assert!(
+            result.contains("DISTINCT_TEST_HOSTNAME.example"),
+            "injected allowed_domains must appear in rejection envelope — proves disk Config::load() is NOT used: {result}"
+        );
     }
 }

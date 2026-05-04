@@ -31,13 +31,11 @@ pub struct DeliveryTarget {
 pub fn resolve_delivery_target(job: &CronJob) -> Option<DeliveryTarget> {
     match job.deliver.as_str() {
         "local" => None,
-        "origin" => {
-            job.origin.as_ref().map(|o: &JobOrigin| DeliveryTarget {
-                platform: o.platform.clone(),
-                chat_id: o.chat_id.clone(),
-                thread_id: o.thread_id.clone(),
-            })
-        }
+        "origin" => job.origin.as_ref().map(|o: &JobOrigin| DeliveryTarget {
+            platform: o.platform.clone(),
+            chat_id: o.chat_id.clone(),
+            thread_id: o.thread_id.clone(),
+        }),
         other => {
             if let Some(colon_pos) = other.find(':') {
                 let platform = other[..colon_pos].to_string();
@@ -74,11 +72,7 @@ pub fn is_silent(output: &str) -> bool {
 /// Returns the path that was written.
 pub fn save_job_output(job_id: &str, output: &str) -> Result<PathBuf> {
     // Reject any job_id that could escape the output directory via path traversal
-    if job_id.contains('/')
-        || job_id.contains('\\')
-        || job_id.contains("..")
-        || job_id.is_empty()
-    {
+    if job_id.contains('/') || job_id.contains('\\') || job_id.contains("..") || job_id.is_empty() {
         anyhow::bail!("invalid job_id for filesystem use: {:?}", job_id);
     }
 

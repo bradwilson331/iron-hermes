@@ -136,7 +136,8 @@ pub fn advisory_text(tier: PressureTier) -> Option<&'static str> {
 pub const CAUTION_ADVISORY: &str = "You have used approximately 70% of your iteration budget. Consider consolidating remaining work and moving toward a final answer.";
 
 /// Advisory string appended to the prompt when pressure hits the 90% mark.
-pub const WARNING_ADVISORY: &str = "You have used approximately 90% of your iteration budget. Respond with your final answer now.";
+pub const WARNING_ADVISORY: &str =
+    "You have used approximately 90% of your iteration budget. Respond with your final answer now.";
 
 #[cfg(test)]
 mod tests {

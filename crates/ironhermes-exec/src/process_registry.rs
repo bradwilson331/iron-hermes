@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 // -- hermes-agent parity constants (verified against process_registry.py:57-64) --
@@ -26,8 +26,8 @@ pub const WATCH_OVERLOAD_KILL_SECONDS: u64 = 45;
 /// A tracked background process. Runtime state includes the rolling output
 /// buffer; output is truncated at a UTF-8 char boundary per Pitfall 8.
 pub struct ProcessSession {
-    pub id: String,        // "proc_" + 12 hex chars
-    pub task_id: String,   // session scoping key (D-24)
+    pub id: String,      // "proc_" + 12 hex chars
+    pub task_id: String, // session scoping key (D-24)
     pub command: String,
     pub pid: Option<u32>,
     pub cwd: Option<PathBuf>,
@@ -258,11 +258,7 @@ impl ProcessRegistry {
 
     /// Wait up to `timeout` for the process to exit. On exit, moves the
     /// session to `finished`. On timeout, leaves it running.
-    pub async fn wait(
-        &mut self,
-        id: &str,
-        timeout: Duration,
-    ) -> anyhow::Result<ProcessStatus> {
+    pub async fn wait(&mut self, id: &str, timeout: Duration) -> anyhow::Result<ProcessStatus> {
         let child_arc = {
             let s = self
                 .running
@@ -450,10 +446,7 @@ impl ProcessRegistry {
     /// The tasks exit cleanly on EOF (child stdout/stderr closes on exit).
     /// No `JoinHandle` is returned — the tasks are fire-and-forget; shutdown
     /// happens naturally via EOF when `drain_and_kill` kills the child.
-    pub async fn start_output_drain(
-        reg: Arc<RwLock<Self>>,
-        id: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn start_output_drain(reg: Arc<RwLock<Self>>, id: &str) -> anyhow::Result<()> {
         let (stdout_pipe_arc, stderr_pipe_arc) = {
             let r = reg.read().await;
             let s = r
@@ -565,9 +558,8 @@ impl ProcessRegistry {
     /// exposed for targeted tests and for the snapshot call-path.
     pub fn prune_finished_ttl(&mut self) {
         let cutoff = Duration::from_secs(FINISHED_TTL_SECONDS);
-        self.finished.retain(|_, s| {
-            s.finished_at.map(|t| t.elapsed() < cutoff).unwrap_or(true)
-        });
+        self.finished
+            .retain(|_, s| s.finished_at.map(|t| t.elapsed() < cutoff).unwrap_or(true));
     }
 
     /// Test-only: insert a pre-built finished session without spawning a real

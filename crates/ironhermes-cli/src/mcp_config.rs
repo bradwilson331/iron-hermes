@@ -56,7 +56,12 @@ pub enum McpAction {
 
 pub async fn handle_mcp_command(action: McpAction) -> anyhow::Result<()> {
     match action {
-        McpAction::Add { name, url, command, args } => cmd_add(name, url, command, args).await,
+        McpAction::Add {
+            name,
+            url,
+            command,
+            args,
+        } => cmd_add(name, url, command, args).await,
         McpAction::Remove { name } => cmd_remove(name).await,
         McpAction::List => cmd_list().await,
         McpAction::Test { name } => cmd_test(name).await,
@@ -397,7 +402,10 @@ async fn cmd_test(name: String) -> anyhow::Result<()> {
     match attempt_connect_and_list_with_timeout(&server).await {
         Ok(tools) => {
             let n = tools.len();
-            println!("  {}", format!("Connected \u{2014} {} tool(s) available", n).green());
+            println!(
+                "  {}",
+                format!("Connected \u{2014} {} tool(s) available", n).green()
+            );
             // Tool list: name (yellow) + description (plain), truncated at 80 cols
             // Format: 2 indent + 30 name + 3 separator + 47 desc = 82 max
             for (tool_name, description) in &tools {
@@ -419,10 +427,7 @@ async fn cmd_test(name: String) -> anyhow::Result<()> {
         }
         Err(e) => {
             let sanitized = sanitize_error(&e.to_string());
-            println!(
-                "  {}",
-                format!("Connection failed: {}", sanitized).red()
-            );
+            println!("  {}", format!("Connection failed: {}", sanitized).red());
         }
     }
     Ok(())
@@ -457,11 +462,7 @@ async fn cmd_configure(name: String) -> anyhow::Result<()> {
         Ok(t) => t,
         Err(e) => {
             let sanitized = sanitize_error(&e.to_string());
-            eprintln!(
-                "{}: Failed to connect: {}",
-                "Error".red().bold(),
-                sanitized
-            );
+            eprintln!("{}: Failed to connect: {}", "Error".red().bold(), sanitized);
             return Err(anyhow::anyhow!("Connection failed: {}", sanitized));
         }
     };
@@ -575,8 +576,7 @@ fn save_mcp_server_config(name: &str, server: &McpServerConfig) -> anyhow::Resul
     let config_path = Config::config_path();
     let mut doc: serde_yaml::Value = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
-        serde_yaml::from_str(&content)
-            .unwrap_or(serde_yaml::Value::Mapping(Default::default()))
+        serde_yaml::from_str(&content).unwrap_or(serde_yaml::Value::Mapping(Default::default()))
     } else {
         serde_yaml::Value::Mapping(Default::default())
     };
@@ -614,7 +614,9 @@ fn remove_mcp_server_config(name: &str) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&config_path)?;
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
     if let Some(mapping) = doc.as_mapping_mut() {
-        if let Some(servers) = mapping.get_mut(&serde_yaml::Value::String("mcp_servers".to_string())) {
+        if let Some(servers) =
+            mapping.get_mut(&serde_yaml::Value::String("mcp_servers".to_string()))
+        {
             if let Some(s) = servers.as_mapping_mut() {
                 s.remove(&serde_yaml::Value::String(name.to_string()));
             }
@@ -735,14 +737,23 @@ mod tests {
             .or_insert(serde_yaml::Value::Mapping(Default::default()))
             .as_mapping_mut()
             .unwrap()
-            .insert(serde_yaml::Value::String("test_server".to_string()), server_val);
+            .insert(
+                serde_yaml::Value::String("test_server".to_string()),
+                server_val,
+            );
         let serialized = serde_yaml::to_string(&doc).unwrap();
         std::fs::write(&config_path, &serialized).unwrap();
 
         // Verify original key preserved
         let re_read = std::fs::read_to_string(&config_path).unwrap();
-        assert!(re_read.contains("default: gpt-4"), "original model key should be preserved");
-        assert!(re_read.contains("test_server"), "new mcp server should be written");
+        assert!(
+            re_read.contains("default: gpt-4"),
+            "original model key should be preserved"
+        );
+        assert!(
+            re_read.contains("test_server"),
+            "new mcp server should be written"
+        );
         assert!(re_read.contains("npx"), "command should be present");
     }
 
@@ -776,7 +787,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attempt_connect_and_list_with_timeout_returns_elapsed_error_when_config_demands_instant() {
+    async fn attempt_connect_and_list_with_timeout_returns_elapsed_error_when_config_demands_instant()
+     {
         use ironhermes_mcp::McpServerConfig;
         // A config with connect_timeout=0 and a stdio command that will never produce an
         // MCP initialize response fast enough. We don't need it to be reachable — the
@@ -792,8 +804,10 @@ mod tests {
             msg.contains("Timed out waiting for MCP initialize response after"),
             "error message must begin with the literal GAP-1 contract string; got: {msg}"
         );
-        assert!(msg.contains("Check command and args."),
-            "error message must carry the user-actionable hint; got: {msg}");
+        assert!(
+            msg.contains("Check command and args."),
+            "error message must carry the user-actionable hint; got: {msg}"
+        );
     }
 
     #[test]
@@ -809,7 +823,9 @@ mcp_servers:
 "#;
         let mut doc: serde_yaml::Value = serde_yaml::from_str(content).unwrap();
         if let Some(mapping) = doc.as_mapping_mut() {
-            if let Some(servers) = mapping.get_mut(&serde_yaml::Value::String("mcp_servers".to_string())) {
+            if let Some(servers) =
+                mapping.get_mut(&serde_yaml::Value::String("mcp_servers".to_string()))
+            {
                 if let Some(s) = servers.as_mapping_mut() {
                     s.remove(&serde_yaml::Value::String("github".to_string()));
                 }
@@ -817,7 +833,13 @@ mcp_servers:
         }
         let serialized = serde_yaml::to_string(&doc).unwrap();
         assert!(!serialized.contains("github"), "github should be removed");
-        assert!(serialized.contains("filesystem"), "filesystem should remain");
-        assert!(serialized.contains("gpt-4"), "model key should be preserved");
+        assert!(
+            serialized.contains("filesystem"),
+            "filesystem should remain"
+        );
+        assert!(
+            serialized.contains("gpt-4"),
+            "model key should be preserved"
+        );
     }
 }

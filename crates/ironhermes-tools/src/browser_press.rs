@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserPressTool {
@@ -27,8 +27,12 @@ impl BrowserPressTool {
 
 #[async_trait]
 impl Tool for BrowserPressTool {
-    fn name(&self) -> &str { "browser_press" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_press"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Press a keyboard key in the page. Names match standard JS KeyboardEvent.key (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown', 'a'). Optional modifiers: ['ctrl', 'shift', 'alt', 'meta']."
     }
@@ -56,14 +60,17 @@ impl Tool for BrowserPressTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -76,7 +83,11 @@ impl Tool for BrowserPressTool {
         let modifiers: Vec<String> = args
             .get("modifiers")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let ctrl = modifiers.iter().any(|m| m == "ctrl");
@@ -102,7 +113,11 @@ impl Tool for BrowserPressTool {
                 target.dispatchEvent(new KeyboardEvent('keyup', opts));
                 return true;
             }})()"#,
-            key_json = key_json, ctrl = ctrl, shift = shift, alt = alt, meta = meta
+            key_json = key_json,
+            ctrl = ctrl,
+            shift = shift,
+            alt = alt,
+            meta = meta
         );
 
         sess.page
@@ -118,7 +133,9 @@ async fn ensure_session<'a>(
     guard: &'a mut tokio::sync::MutexGuard<'_, Option<BrowserSession>>,
 ) -> anyhow::Result<&'a mut BrowserSession> {
     if guard.is_none() {
-        let cfg = ironhermes_core::config::Config::load().unwrap_or_default().browser;
+        let cfg = ironhermes_core::config::Config::load()
+            .unwrap_or_default()
+            .browser;
         let new = BrowserSession::spawn(&cfg).await?;
         **guard = Some(new);
     }
@@ -144,8 +161,16 @@ mod tests {
     fn schema_requires_key_arg() {
         let t = BrowserPressTool::new(dummy_session());
         let s = t.schema();
-        let required = s.function.parameters.get("required").and_then(|v| v.as_array()).unwrap();
-        assert!(required.iter().any(|v| v.as_str() == Some("key")), "key MUST be required");
+        let required = s
+            .function
+            .parameters
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("key")),
+            "key MUST be required"
+        );
     }
 
     #[tokio::test]
@@ -153,6 +178,11 @@ mod tests {
         let t = BrowserPressTool::new(dummy_session());
         let result = t.execute(json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required parameter: key"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing required parameter: key")
+        );
     }
 }

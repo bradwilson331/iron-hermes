@@ -12,9 +12,9 @@
 
 #![cfg(feature = "test-support")]
 
-use ironhermes_cli::tui_rata::{App, StreamEvent};
 use ironhermes_cli::tui_rata::ui::ui;
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use ironhermes_cli::tui_rata::{App, StreamEvent};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
@@ -47,10 +47,7 @@ fn snap_empty_transcript() {
 // ——————————————————————————————————————————————————————————————————————
 #[test]
 fn snap_two_message_conversation() {
-    let app = App::new_test_with_messages(vec![
-        ("user", "hello"),
-        ("assistant", "hi there"),
-    ]);
+    let app = App::new_test_with_messages(vec![("user", "hello"), ("assistant", "hi there")]);
     insta::assert_snapshot!(render(&app));
 }
 
@@ -76,7 +73,9 @@ fn snap_in_flight_streaming_partial_delta() {
 fn snap_tool_call_activity_row() {
     let mut app = App::new_test_with_messages(vec![("user", "run bash")]);
     app.handle_stream_event(StreamEvent::Started);
-    app.handle_stream_event(StreamEvent::ToolCall { name: "bash".into() });
+    app.handle_stream_event(StreamEvent::ToolCall {
+        name: "bash".into(),
+    });
     app.knight_rider_tick = 5;
     seed_in_flight(&mut app); // WARNING-01
     insta::assert_snapshot!(render(&app));
@@ -89,10 +88,15 @@ fn snap_tool_call_activity_row() {
 // ——————————————————————————————————————————————————————————————————————
 #[test]
 fn snap_scroll_active_indicator() {
-    let lines: Vec<(&str, &str)> = (0..30).map(|i| {
-        if i % 2 == 0 { ("user", "Lorem ipsum dolor sit amet") }
-        else          { ("assistant", "consectetur adipiscing elit") }
-    }).collect();
+    let lines: Vec<(&str, &str)> = (0..30)
+        .map(|i| {
+            if i % 2 == 0 {
+                ("user", "Lorem ipsum dolor sit amet")
+            } else {
+                ("assistant", "consectetur adipiscing elit")
+            }
+        })
+        .collect();
     let mut app = App::new_test_with_messages(lines);
     app.auto_follow = false;
     app.transcript_scroll = 20;

@@ -22,7 +22,10 @@ fn grafeo_provider_config_schema_shape() {
     let graph_dir = &schema[0];
     assert_eq!(graph_dir.key, "graph_dir");
     assert!(
-        graph_dir.description.as_ref().is_some_and(|d| !d.is_empty()),
+        graph_dir
+            .description
+            .as_ref()
+            .is_some_and(|d| !d.is_empty()),
         "graph_dir description must be non-empty"
     );
     assert!(!graph_dir.required);

@@ -1,6 +1,6 @@
-use dioxus::prelude::*;
-use crate::state::{ShellSettings, TokenBudget};
 use super::scanner::Scanner;
+use crate::state::{ShellSettings, TokenBudget};
+use dioxus::prelude::*;
 
 /// Status bar — bottom of terminal column. Five `.wh-pill` spans
 /// (mode/model/provider/tokens/personality) separated by `.wh-sep`

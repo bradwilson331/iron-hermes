@@ -89,8 +89,7 @@ impl SubagentRegistryHandle {
 impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegistryHandle {
     fn active_count(&self) -> usize {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.0.read().await.active_count() })
+            tokio::runtime::Handle::current().block_on(async { self.0.read().await.active_count() })
         })
     }
 

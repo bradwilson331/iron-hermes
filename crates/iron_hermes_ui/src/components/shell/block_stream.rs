@@ -1,6 +1,6 @@
-use dioxus::prelude::*;
-use crate::state::{Block as BlockData, BlockEntry, Token};
 use super::block::Block;
+use crate::state::{Block as BlockData, BlockEntry, Token};
+use dioxus::prelude::*;
 
 /// Block stream — owns the `wh-stream` / `wh-stream-scroll` chrome and
 /// iterates over a reactive `ReadSignal<Vec<BlockEntry>>` per
@@ -16,10 +16,7 @@ use super::block::Block;
 /// to the browser clipboard fire-and-forget. `on_rerun: EventHandler<u64>`
 /// forwards the entry id up to WarpHermes which dispatches `run_shell`.
 #[component]
-pub fn BlockStream(
-    blocks: ReadSignal<Vec<BlockEntry>>,
-    on_rerun: EventHandler<u64>,
-) -> Element {
+pub fn BlockStream(blocks: ReadSignal<Vec<BlockEntry>>, on_rerun: EventHandler<u64>) -> Element {
     rsx! {
         div { class: "wh-stream",
             div { class: "wh-stream-scroll",
@@ -55,8 +52,8 @@ fn block_text_for_copy(entry: &BlockEntry) -> String {
             .collect::<Vec<_>>()
             .join(" "),
         BlockData::Out { text, .. } => text.clone(),
-        BlockData::Ai  { markdown, .. } => markdown.clone(),
-        BlockData::Ok  { message, .. } => message.clone(),
+        BlockData::Ai { markdown, .. } => markdown.clone(),
+        BlockData::Ok { message, .. } => message.clone(),
         BlockData::Err { message, .. } => message.clone(),
         BlockData::Tool { call } => format!("{} {}", call.name, call.args_summary),
     }

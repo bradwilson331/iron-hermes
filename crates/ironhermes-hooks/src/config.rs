@@ -135,7 +135,10 @@ queue_ttl_hours = 12
         let cfg = HooksConfig::load_from(tmp.path()).expect("load");
 
         assert!(cfg.event_log.enabled);
-        assert_eq!(cfg.event_log.path.as_deref(), Some("/tmp/test_events.jsonl"));
+        assert_eq!(
+            cfg.event_log.path.as_deref(),
+            Some("/tmp/test_events.jsonl")
+        );
         assert_eq!(cfg.blocked_tools, vec!["terminal", "write_file"]);
         assert_eq!(cfg.error_detail, ErrorDetailLevel::Minimal);
         assert_eq!(cfg.webhooks.len(), 1);

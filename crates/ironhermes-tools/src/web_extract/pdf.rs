@@ -52,8 +52,7 @@ pub async fn extract_pdf(url: &str) -> Result<ExtractionResult> {
                 // scope here (extract_pdf takes only `url: &str`); the const
                 // SECRET_URL_PATTERNS list still fires via &[]. Threading operator
                 // extras through pdf.rs is a future ≤5-LOC refactor (out of Plan 16 scope).
-                let url_for_log =
-                    crate::web_extract::sanitize::redact_secrets_in_url(url, &[]);
+                let url_for_log = crate::web_extract::sanitize::redact_secrets_in_url(url, &[]);
                 warn!(
                     "Firecrawl failed for PDF {}: {}; falling back to pdf-extract",
                     url_for_log, e
@@ -134,9 +133,9 @@ async fn fetch_pdf_bytes(url: &str) -> Result<Vec<u8>> {
     // D-18 post-redirect re-validation
     let final_url = response.url().as_str().to_string();
     if final_url != url {
-        validate_url_async(&final_url).await.map_err(|_| {
-            anyhow!("URL blocked by security policy (private IP) after redirect")
-        })?;
+        validate_url_async(&final_url)
+            .await
+            .map_err(|_| anyhow!("URL blocked by security policy (private IP) after redirect"))?;
     }
 
     if !response.status().is_success() {

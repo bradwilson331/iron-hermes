@@ -23,11 +23,7 @@ pub const HERMES_TOOLS_PY: &str = include_str!("hermes_tools.py");
 /// an `Arc<ToolRegistry>`.
 #[async_trait::async_trait]
 pub trait ToolDispatch: Send + Sync {
-    async fn dispatch(
-        &self,
-        tool_name: &str,
-        args: serde_json::Value,
-    ) -> anyhow::Result<String>;
+    async fn dispatch(&self, tool_name: &str, args: serde_json::Value) -> anyhow::Result<String>;
 }
 
 // =============================================================================

@@ -29,10 +29,7 @@ fn profile_line() {
         .expect("ironhermes config show");
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Find the first non-empty line.
-    let first = stdout
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
+    let first = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     assert!(
         first.starts_with("Profile:"),
         "expected first non-empty line to start with 'Profile:', got: {:?}\n--- full stdout ---\n{}",

@@ -37,7 +37,8 @@ struct TavilyResult {
 #[derive(Debug, Deserialize)]
 struct TavilyFailedResult {
     #[serde(default)]
-    #[allow(dead_code)] // Reserved for future per-URL failure surfacing (mirrors exa status pattern).
+    #[allow(dead_code)]
+    // Reserved for future per-URL failure surfacing (mirrors exa status pattern).
     url: Option<String>,
     #[serde(default)]
     error: Option<String>,
@@ -50,8 +51,7 @@ pub async fn fetch_with_tavily(url: &str) -> Result<ExtractionResult> {
     // D-18: SSRF pre-validation BEFORE any network construction.
     validate_url_async(url).await?;
 
-    let api_key =
-        std::env::var("TAVILY_API_KEY").map_err(|_| anyhow!("TAVILY_API_KEY not set"))?;
+    let api_key = std::env::var("TAVILY_API_KEY").map_err(|_| anyhow!("TAVILY_API_KEY not set"))?;
 
     let timeout_secs = Config::load().map(|c| c.web.timeout_secs).unwrap_or(30);
     debug!("web_extract: fetching {} via Tavily", url);

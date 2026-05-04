@@ -12,11 +12,11 @@
 //! Plan 9: AgentLoop callback wires writer.append() after each tool result.
 
 pub mod format;
-pub mod writer;
-pub mod reader;
 pub mod handle;
+pub mod reader;
+pub mod writer;
 
 pub use format::{ImpactLevel, TrajectoryEntry};
-pub use writer::TrajectoryWriter;
-pub use reader::TrajectoryReader;
 pub use handle::TrajectoryWriterHandleImpl;
+pub use reader::TrajectoryReader;
+pub use writer::TrajectoryWriter;

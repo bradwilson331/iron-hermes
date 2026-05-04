@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserTypeTool {
@@ -29,13 +29,18 @@ fn element_stale(ref_id: u64) -> String {
         "error": "element_stale",
         "ref": ref_id,
         "hint": format!("ref {ref_id} not found in current snapshot — call browser_snapshot first")
-    }).to_string()
+    })
+    .to_string()
 }
 
 #[async_trait]
 impl Tool for BrowserTypeTool {
-    fn name(&self) -> &str { "browser_type" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_type"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Type text into an input or textarea by its ref ID (from browser_snapshot). \
          Pass {submit: true} to press Enter after typing. Returns element_stale envelope \
@@ -69,14 +74,17 @@ impl Tool for BrowserTypeTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -93,7 +101,10 @@ impl Tool for BrowserTypeTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: text (string)"))?
             .to_string();
 
-        let submit = args.get("submit").and_then(|v| v.as_bool()).unwrap_or(false);
+        let submit = args
+            .get("submit")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         debug!(ref_id, submit, text_len = text.len(), "browser_type");
 
@@ -168,7 +179,8 @@ impl Tool for BrowserTypeTool {
             "typed": text,
             "ref": ref_id,
             "submitted": submitted
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -176,7 +188,9 @@ async fn ensure_session<'a>(
     guard: &'a mut tokio::sync::MutexGuard<'_, Option<BrowserSession>>,
 ) -> anyhow::Result<&'a mut BrowserSession> {
     if guard.is_none() {
-        let cfg = ironhermes_core::config::Config::load().unwrap_or_default().browser;
+        let cfg = ironhermes_core::config::Config::load()
+            .unwrap_or_default()
+            .browser;
         let new = BrowserSession::spawn(&cfg).await?;
         **guard = Some(new);
     }
@@ -203,7 +217,12 @@ mod tests {
         let t = BrowserTypeTool::new(dummy_session());
         let result = t.execute(json!({"text": "hi"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required parameter: ref"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing required parameter: ref")
+        );
     }
 
     #[tokio::test]
@@ -211,7 +230,12 @@ mod tests {
         let t = BrowserTypeTool::new(dummy_session());
         let result = t.execute(json!({"ref": 5})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required parameter: text"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing required parameter: text")
+        );
     }
 
     #[test]

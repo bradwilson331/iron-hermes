@@ -8,7 +8,7 @@
 //! to avoid env_lock contention with parallel tests.
 
 use ironhermes_gateway::pid::{
-    acquire_pid_lock, read_gateway_pid, write_gateway_pid, GatewayPidRecord,
+    GatewayPidRecord, acquire_pid_lock, read_gateway_pid, write_gateway_pid,
 };
 use tempfile::TempDir;
 

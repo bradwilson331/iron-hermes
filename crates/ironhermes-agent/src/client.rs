@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tokio::time::{timeout, Duration};
 use ironhermes_core::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk,
-    ToolCall, FunctionCall, ToolSchema, Usage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk, FunctionCall, ToolCall, ToolSchema,
+    Usage,
 };
 use reqwest::Client;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
 /// Events emitted during streaming.
@@ -38,7 +38,11 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             http: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(30))
@@ -221,7 +225,8 @@ impl LlmClient {
                             }
                             for choice in &chunk.choices {
                                 if let Some(ref content) = choice.delta.content {
-                                    let _ = tx.send(StreamEvent::ContentDelta(content.clone())).await;
+                                    let _ =
+                                        tx.send(StreamEvent::ContentDelta(content.clone())).await;
                                 }
                                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                                     for tc in tool_calls {
@@ -229,8 +234,14 @@ impl LlmClient {
                                             .send(StreamEvent::ToolCallDelta {
                                                 index: tc.index,
                                                 id: tc.id.clone(),
-                                                name: tc.function.as_ref().and_then(|f| f.name.clone()),
-                                                arguments: tc.function.as_ref().and_then(|f| f.arguments.clone()),
+                                                name: tc
+                                                    .function
+                                                    .as_ref()
+                                                    .and_then(|f| f.name.clone()),
+                                                arguments: tc
+                                                    .function
+                                                    .as_ref()
+                                                    .and_then(|f| f.arguments.clone()),
                                             })
                                             .await;
                                     }

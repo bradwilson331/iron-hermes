@@ -1,9 +1,9 @@
+use crate::adapter::PlatformAdapter;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use crate::adapter::PlatformAdapter;
 
 // ---------------------------------------------------------------------------
 // TgSendApi — testable seam for cron delivery dispatch (Phase 22.4.2.1 Plan 02)
@@ -159,12 +159,7 @@ impl PlatformAdapter for TelegramAdapter {
         })
     }
 
-    async fn edit_message(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        content: &str,
-    ) -> Result<()> {
+    async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()> {
         // Plain text during streaming edits per D-03 (no parse_mode)
         let params = serde_json::json!({
             "chat_id": chat_id,
@@ -203,12 +198,7 @@ impl PlatformAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn add_reaction(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<()> {
+    async fn add_reaction(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let params = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id.parse::<i64>().unwrap_or(0),
@@ -345,7 +335,11 @@ pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
             .as_ref()
             .map(|u| u.id.to_string())
             .unwrap_or_default(),
-        content: msg.text.clone().or_else(|| msg.caption.clone()).unwrap_or_default(),
+        content: msg
+            .text
+            .clone()
+            .or_else(|| msg.caption.clone())
+            .unwrap_or_default(),
         attachments,
         thread_id: None,
         chat_type: match msg.chat.chat_type.as_str() {
@@ -359,4 +353,3 @@ pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
         replied_to_id: None,
     }
 }
-

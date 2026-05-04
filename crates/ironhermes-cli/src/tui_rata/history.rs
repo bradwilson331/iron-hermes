@@ -32,7 +32,12 @@ pub struct ReplHistory {
 
 impl ReplHistory {
     pub fn new(max: usize) -> Self {
-        Self { entries: Vec::new(), cursor: None, max, dirty: false }
+        Self {
+            entries: Vec::new(),
+            cursor: None,
+            max,
+            dirty: false,
+        }
     }
 
     pub fn with_default_max() -> Self {
@@ -52,7 +57,9 @@ impl ReplHistory {
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             let decoded = decode_entry(&line);
             hist.entries.push(decoded);
         }
@@ -81,9 +88,13 @@ impl ReplHistory {
 
     /// Append a new entry with dedupe-consecutive + cap enforcement.
     pub fn push(&mut self, entry: String) {
-        if entry.is_empty() { return; }
+        if entry.is_empty() {
+            return;
+        }
         if let Some(last) = self.entries.last() {
-            if *last == entry { return; }
+            if *last == entry {
+                return;
+            }
         }
         self.entries.push(entry);
         if self.entries.len() > self.max {
@@ -95,7 +106,9 @@ impl ReplHistory {
 
     /// Recall: step backward (older). Called on KeyCode::Up per D-06.
     pub fn prev(&mut self) -> Option<&str> {
-        if self.entries.is_empty() { return None; }
+        if self.entries.is_empty() {
+            return None;
+        }
         let next_cursor = match self.cursor {
             None => self.entries.len().saturating_sub(1),
             Some(0) => 0, // stay at oldest
@@ -118,13 +131,21 @@ impl ReplHistory {
         self.entries.get(new_cursor).map(String::as_str)
     }
 
-    pub fn reset_cursor(&mut self) { self.cursor = None; }
+    pub fn reset_cursor(&mut self) {
+        self.cursor = None;
+    }
 
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
-    pub fn is_dirty(&self) -> bool { self.dirty }
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 }
 
 fn encode_entry(entry: &str) -> String {
@@ -144,8 +165,14 @@ mod tests {
     fn unit_separator_roundtrip_preserves_newlines() {
         let multi = "line 1\nline 2\nline 3";
         let encoded = encode_entry(multi);
-        assert!(!encoded.contains('\n'), "encoded entry must not contain raw \\n");
-        assert!(encoded.contains(UNIT_SEP), "encoded entry must contain \\u{{1F}}");
+        assert!(
+            !encoded.contains('\n'),
+            "encoded entry must not contain raw \\n"
+        );
+        assert!(
+            encoded.contains(UNIT_SEP),
+            "encoded entry must contain \\u{{1F}}"
+        );
         let decoded = decode_entry(&encoded);
         assert_eq!(decoded, multi);
     }
@@ -154,7 +181,10 @@ mod tests {
     fn single_line_entry_has_no_unit_separator() {
         let single = "just one line";
         let encoded = encode_entry(single);
-        assert_eq!(encoded, single, "single-line entries pass through unchanged (backward-compat)");
+        assert_eq!(
+            encoded, single,
+            "single-line entries pass through unchanged (backward-compat)"
+        );
     }
 
     #[test]
@@ -208,7 +238,8 @@ mod tests {
 
     #[test]
     fn save_then_load_roundtrip_including_multiline() {
-        let path = std::env::temp_dir().join(format!("tui_rata_hist_rt_{}.txt", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tui_rata_hist_rt_{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let mut h = ReplHistory::new(100);
@@ -232,7 +263,8 @@ mod tests {
     fn load_legacy_rustyline_single_line_entries_unchanged() {
         // Simulate a pre-Phase-22.4 history file written by rustyline
         // (no \u{1F}). Should load as single-line entries.
-        let path = std::env::temp_dir().join(format!("tui_rata_hist_legacy_{}.txt", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tui_rata_hist_legacy_{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "hello").unwrap();

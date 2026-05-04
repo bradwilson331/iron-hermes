@@ -73,15 +73,11 @@ async fn key_does_not_leak_to_wrong_provider() {
     // Mount a wiremock server to capture any outbound requests.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": []})))
         .mount(&server)
         .await;
 
@@ -102,8 +98,8 @@ async fn key_does_not_leak_to_wrong_provider() {
         },
     );
 
-    let resolver = ironhermes_core::ProviderResolver::build(&config)
-        .expect("resolver build must succeed");
+    let resolver =
+        ironhermes_core::ProviderResolver::build(&config).expect("resolver build must succeed");
     let endpoint = resolver
         .resolve("my-local-llm")
         .expect("my-local-llm must resolve");
@@ -172,8 +168,8 @@ async fn custom_provider_selectable_by_name() {
         },
     );
 
-    let resolver = ironhermes_core::ProviderResolver::build(&config)
-        .expect("resolver build must succeed");
+    let resolver =
+        ironhermes_core::ProviderResolver::build(&config).expect("resolver build must succeed");
     let endpoint = resolver
         .resolve("my-local-llm")
         .expect("my-local-llm must resolve");
@@ -307,7 +303,9 @@ fn legacy_env_banner_emitted_once_per_process() {
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
-            eprintln!("Skip legacy_env_banner_emitted_once_per_process: CARGO_BIN_EXE_ironhermes not set");
+            eprintln!(
+                "Skip legacy_env_banner_emitted_once_per_process: CARGO_BIN_EXE_ironhermes not set"
+            );
             return;
         }
     };
@@ -407,7 +405,9 @@ fn cache_break_banner_on_persistent_enable_disable() {
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
-            eprintln!("Skip cache_break_banner_on_persistent_enable_disable: CARGO_BIN_EXE_ironhermes not set");
+            eprintln!(
+                "Skip cache_break_banner_on_persistent_enable_disable: CARGO_BIN_EXE_ironhermes not set"
+            );
             return;
         }
     };
@@ -464,27 +464,25 @@ async fn auxiliary_routes_to_separate_model() {
     // the configured base_url (which is aux_server.uri() + "/v1").
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "chatcmpl-test",
-                "object": "chat.completion",
-                "created": 1700000000u64,
-                "model": "gpt-4o-mini",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "compressed summary"
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 5,
-                    "total_tokens": 15
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1700000000u64,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "compressed summary"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })))
         .mount(&aux_server)
         .await;
 
@@ -529,8 +527,8 @@ async fn auxiliary_routes_to_separate_model() {
         model: "gpt-4o-mini".to_string(),
     };
 
-    let resolver = ironhermes_core::ProviderResolver::build(&config)
-        .expect("resolver build must succeed");
+    let resolver =
+        ironhermes_core::ProviderResolver::build(&config).expect("resolver build must succeed");
 
     // build_role_client("compression") resolves via D-05 cascade level 2 (auxiliary).
     let client = ironhermes_agent::build_role_client(&resolver, "compression")
@@ -606,7 +604,9 @@ fn auxiliary_provider_unknown_name_fails_at_load() {
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
-            eprintln!("Skip auxiliary_provider_unknown_name_fails_at_load: CARGO_BIN_EXE_ironhermes not set");
+            eprintln!(
+                "Skip auxiliary_provider_unknown_name_fails_at_load: CARGO_BIN_EXE_ironhermes not set"
+            );
             return;
         }
     };
@@ -666,7 +666,9 @@ fn provider_enable_rejects_slug_injection() {
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
-            eprintln!("Skip provider_enable_rejects_slug_injection: CARGO_BIN_EXE_ironhermes not set");
+            eprintln!(
+                "Skip provider_enable_rejects_slug_injection: CARGO_BIN_EXE_ironhermes not set"
+            );
             return;
         }
     };
@@ -685,8 +687,7 @@ fn provider_enable_rejects_slug_injection() {
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.to_lowercase().contains("invalid")
-                || stderr.to_lowercase().contains("name"),
+            stderr.to_lowercase().contains("invalid") || stderr.to_lowercase().contains("name"),
             "T-26-03: rejection message unhelpful for {:?}: {}",
             bad,
             stderr

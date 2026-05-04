@@ -53,7 +53,11 @@ impl MemoryManager {
             let mg = m.lock().await;
             Self::validate_schemas(mg.get_tool_schemas())?;
         }
-        Ok(Self { primary, mirror, user_profile_enabled: true })
+        Ok(Self {
+            primary,
+            mirror,
+            user_profile_enabled: true,
+        })
     }
 
     /// Set whether the User profile target (USER.md) is enabled.
@@ -89,20 +93,14 @@ impl MemoryManager {
         p.get_tool_schemas()
     }
 
-    pub async fn handle_tool_call(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> MemoryResult {
+    pub async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult {
         // GAP-4 / T-21.4-03: reject User-target writes when user_profile_enabled=false.
         if !self.user_profile_enabled {
             if let Some(target_str) = args.get("target").and_then(|v| v.as_str()) {
                 if target_str == "user" {
-                    return Err(
-                        "User profile memory is disabled via configuration. \
+                    return Err("User profile memory is disabled via configuration. \
                          Enable it with memory.user_profile_enabled=true in config.yaml."
-                            .to_string(),
-                    );
+                        .to_string());
                 }
             }
         }
@@ -219,11 +217,7 @@ impl MemoryManager {
         p.on_session_end(session_id, entries).await
     }
 
-    pub async fn sync_turn(
-        &self,
-        session_id: &str,
-        entries: &MemoryEntries,
-    ) -> anyhow::Result<()> {
+    pub async fn sync_turn(&self, session_id: &str, entries: &MemoryEntries) -> anyhow::Result<()> {
         let p = self.primary.lock().await;
         p.sync_turn(session_id, entries).await
     }
@@ -259,11 +253,7 @@ fn target_as_str(t: MemoryTarget) -> &'static str {
 // ----------------------------------------------------------------------------
 #[async_trait::async_trait]
 impl ironhermes_tools::MemoryManagerHandle for MemoryManager {
-    async fn handle_tool_call(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> MemoryResult {
+    async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult {
         MemoryManager::handle_tool_call(self, name, args).await
     }
 }
@@ -528,9 +518,7 @@ mod tests {
     #[tokio::test]
     async fn construction() {
         let (primary, _tmp) = primary_file();
-        assert!(MemoryManager::new(Arc::clone(&primary), None)
-            .await
-            .is_ok());
+        assert!(MemoryManager::new(Arc::clone(&primary), None).await.is_ok());
 
         let (mirror_provider, _inner) = MockRecorderProvider::new();
         let mirror: SharedProvider = Arc::new(Mutex::new(mirror_provider));
@@ -541,8 +529,7 @@ mod tests {
     async fn reserved_tool_name_is_rejected() {
         // A provider whose get_tool_schemas returns a schema named "session_search"
         // must cause MemoryManager::new to fail with a message naming the reserved tool.
-        let primary_reserved: SharedProvider =
-            Arc::new(Mutex::new(ReservedNameProvider));
+        let primary_reserved: SharedProvider = Arc::new(Mutex::new(ReservedNameProvider));
         let result = MemoryManager::new(primary_reserved, None).await;
         assert!(result.is_err(), "reserved-name primary must be rejected");
         let msg = result.err().unwrap().to_string();
@@ -557,8 +544,7 @@ mod tests {
 
         // Also test: reserved-name MIRROR is rejected.
         let (primary_ok, _tmp) = primary_file();
-        let mirror_reserved: SharedProvider =
-            Arc::new(Mutex::new(ReservedNameProvider));
+        let mirror_reserved: SharedProvider = Arc::new(Mutex::new(ReservedNameProvider));
         let result2 = MemoryManager::new(primary_ok, Some(mirror_reserved)).await;
         assert!(result2.is_err(), "reserved-name mirror must be rejected");
     }

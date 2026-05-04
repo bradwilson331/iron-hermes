@@ -31,8 +31,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_drains_workers_within_timeout() {
     let cancel = CancellationToken::new();
-    let worker_join_set: Arc<TokioMutex<JoinSet<()>>> =
-        Arc::new(TokioMutex::new(JoinSet::new()));
+    let worker_join_set: Arc<TokioMutex<JoinSet<()>>> = Arc::new(TokioMutex::new(JoinSet::new()));
 
     // Spawn a long-running worker that respects the CancellationToken —
     // mirrors the per-chat worker body in runner.rs (cancel_task.is_cancelled() check).
@@ -57,13 +56,12 @@ async fn gateway_drains_workers_within_timeout() {
     // Drain with 5s deadline — mirrors the runner.rs drain block (D-11)
     let start = std::time::Instant::now();
     let drain_result = timeout(Duration::from_secs(6), async {
-        let abort_deadline =
-            tokio::time::Instant::now() + Duration::from_secs(5);
+        let abort_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut wjs = worker_join_set.lock().await;
         loop {
             match tokio::time::timeout_at(abort_deadline, wjs.join_next()).await {
-                Ok(Some(_)) => {}   // worker finished — keep draining
-                Ok(None) => break,  // all done
+                Ok(Some(_)) => {}  // worker finished — keep draining
+                Ok(None) => break, // all done
                 Err(_elapsed) => {
                     wjs.abort_all();
                     break;

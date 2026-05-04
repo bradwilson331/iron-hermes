@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironhermes_core::ToolSchema;
-use ironhermes_cron::{scan_cron_prompt, JobOrigin, JobStore, JobUpdate, ScheduleParsed};
 use ironhermes_cron::parse_schedule;
-use serde_json::{json, Value};
+use ironhermes_cron::{JobOrigin, JobStore, JobUpdate, ScheduleParsed, scan_cron_prompt};
+use serde_json::{Value, json};
 
 use crate::registry::Tool;
 
@@ -86,15 +86,13 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
     let schedule_str = match args.get("schedule").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            return json!({"status": "error", "message": "Missing required parameter 'schedule'"})
+            return json!({"status": "error", "message": "Missing required parameter 'schedule'"});
         }
     };
 
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'prompt'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'prompt'"}),
     };
 
     // Security scan on prompt
@@ -105,9 +103,7 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
     // Parse schedule
     let schedule = match parse_schedule(&schedule_str) {
         Ok(s) => s,
-        Err(e) => {
-            return json!({"status": "error", "message": format!("Invalid schedule: {}", e)})
-        }
+        Err(e) => return json!({"status": "error", "message": format!("Invalid schedule: {}", e)}),
     };
 
     let schedule_display = match &schedule {
@@ -157,7 +153,15 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
         })
         .unwrap_or_default();
 
-    match store.add_job(name, prompt, schedule, schedule_display, deliver, skills, origin_opt) {
+    match store.add_job(
+        name,
+        prompt,
+        schedule,
+        schedule_display,
+        deliver,
+        skills,
+        origin_opt,
+    ) {
         Ok(job) => json!({"status": "created", "job": job_to_json(&job)}),
         Err(e) => json!({"status": "error", "message": format!("Failed to create job: {}", e)}),
     }
@@ -172,9 +176,7 @@ fn handle_list(store: &JobStore) -> Value {
 fn handle_get(store: &JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id,
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'job_id'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
     match store.find_job(job_id) {
@@ -186,9 +188,7 @@ fn handle_get(store: &JobStore, args: &Value) -> Value {
 fn handle_update(store: &mut JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'job_id'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
     // Resolve canonical ID (find_job matches by ID or name, but update_job
@@ -198,7 +198,10 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         None => return json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
     };
 
-    let new_prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let new_prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Security scan on new prompt if being updated
     if let Some(ref p) = new_prompt
@@ -208,7 +211,9 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
     }
 
     // Parse schedule if provided
-    let (new_schedule, new_schedule_display) = if let Some(s) = args.get("schedule").and_then(|v| v.as_str()) {
+    let (new_schedule, new_schedule_display) = if let Some(s) =
+        args.get("schedule").and_then(|v| v.as_str())
+    {
         match parse_schedule(s) {
             Ok(schedule) => {
                 let display = match &schedule {
@@ -219,7 +224,7 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
                 (Some(schedule), Some(display))
             }
             Err(e) => {
-                return json!({"status": "error", "message": format!("Invalid schedule: {}", e)})
+                return json!({"status": "error", "message": format!("Invalid schedule: {}", e)});
             }
         }
     } else {
@@ -233,9 +238,15 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
     });
 
     let updates = JobUpdate {
-        name: args.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        name: args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         prompt: new_prompt,
-        deliver: args.get("deliver").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        deliver: args
+            .get("deliver")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         schedule: new_schedule,
         schedule_display: new_schedule_display,
         skills,
@@ -250,9 +261,7 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
 fn handle_pause(store: &mut JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'job_id'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
     // Resolve canonical ID (find_job matches by name too, toggle_job only by ID)
@@ -270,9 +279,7 @@ fn handle_pause(store: &mut JobStore, args: &Value) -> Value {
 fn handle_resume(store: &mut JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'job_id'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
     // Resolve canonical ID (find_job matches by name too, toggle_job only by ID)
@@ -301,9 +308,7 @@ fn handle_resume(store: &mut JobStore, args: &Value) -> Value {
 fn handle_run(store: &JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'job_id'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
     match store.find_job(&job_id) {
@@ -319,9 +324,7 @@ fn handle_run(store: &JobStore, args: &Value) -> Value {
 fn handle_remove(store: &mut JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'job_id'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
     match store.remove_job(&job_id) {
@@ -398,7 +401,9 @@ impl Tool for CronjobTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'action'"))?;
 
         let result = {
-            let mut store = self.store.lock()
+            let mut store = self
+                .store
+                .lock()
                 .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
             match action {
                 "create" => handle_create(&mut store, &args),
@@ -515,7 +520,12 @@ mod tests {
             .unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "error");
-        assert!(v["message"].as_str().unwrap().contains("restricted pattern"));
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("restricted pattern")
+        );
     }
 
     // --- list ---
@@ -533,9 +543,11 @@ mod tests {
     #[tokio::test]
     async fn test_list_after_create() {
         let (tool, _dir) = make_tool();
-        tool.execute(json!({"action": "create", "name": "j1", "schedule": "every 1h", "prompt": "p"}))
-            .await
-            .unwrap();
+        tool.execute(
+            json!({"action": "create", "name": "j1", "schedule": "every 1h", "prompt": "p"}),
+        )
+        .await
+        .unwrap();
         let result = tool.execute(json!({"action": "list"})).await.unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "ok");
@@ -602,7 +614,9 @@ mod tests {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
-                .execute(json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}))
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
                 .await
                 .unwrap(),
         );
@@ -622,7 +636,9 @@ mod tests {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
-                .execute(json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}))
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
                 .await
                 .unwrap(),
         );
@@ -634,7 +650,12 @@ mod tests {
             .unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "error");
-        assert!(v["message"].as_str().unwrap().contains("restricted pattern"));
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("restricted pattern")
+        );
     }
 
     // --- pause ---
@@ -644,7 +665,9 @@ mod tests {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
-                .execute(json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}))
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
                 .await
                 .unwrap(),
         );
@@ -665,7 +688,9 @@ mod tests {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
-                .execute(json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}))
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
                 .await
                 .unwrap(),
         );
@@ -691,7 +716,9 @@ mod tests {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
-                .execute(json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}))
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
                 .await
                 .unwrap(),
         );
@@ -713,7 +740,9 @@ mod tests {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
-                .execute(json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}))
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
                 .await
                 .unwrap(),
         );
@@ -732,10 +761,7 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_action_returns_error() {
         let (tool, _dir) = make_tool();
-        let result = tool
-            .execute(json!({"action": "unknown"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"action": "unknown"})).await.unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "error");
     }

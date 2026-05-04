@@ -146,7 +146,10 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
     // returns only baked-in literals today, but this is cheap defense in
     // depth for future dynamic registration.
     if selected.contains('/') || selected.contains('\\') || selected.contains("..") {
-        anyhow::bail!("provider name `{}` contains path traversal characters", selected);
+        anyhow::bail!(
+            "provider name `{}` contains path traversal characters",
+            selected
+        );
     }
 
     // Build the provider (read-only; no writes yet) via the factory so we
@@ -215,10 +218,7 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
             use std::os::unix::fs::PermissionsExt;
             // Best-effort tighten to 0600; fine to ignore failures on
             // non-local filesystems.
-            let _ = std::fs::set_permissions(
-                &env_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
+            let _ = std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
         }
         for (key, value) in &secrets_to_env {
             let quoted = posix_single_quote(value.reveal())?;
@@ -229,7 +229,8 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
     // 2. Call save_config for non-secrets.
     {
         let p = provider_arc.lock().expect("provider lock poisoned");
-        p.save_config(&collected, hermes_home).context("save_config")?;
+        p.save_config(&collected, hermes_home)
+            .context("save_config")?;
     }
 
     // 3. Update config.yaml `memory.provider` (resolves Open Question #1).
@@ -237,11 +238,7 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
 
     writeln!(writer, "\nSetup complete. Provider: {}", selected)?;
     if !secrets_to_env.is_empty() {
-        writeln!(
-            writer,
-            "Secrets written to {}/.env",
-            hermes_home.display()
-        )?;
+        writeln!(writer, "Secrets written to {}/.env", hermes_home.display())?;
     }
     Ok(())
 }
@@ -270,10 +267,7 @@ pub(crate) fn prompt_line<R: BufRead, W: Write>(
 
 /// Parse-then-write update of `$HERMES_HOME/config.yaml` setting
 /// `memory.provider` to `selected`. Preserves all other keys.
-pub(crate) fn update_config_yaml_memory_provider(
-    hermes_home: &Path,
-    selected: &str,
-) -> Result<()> {
+pub(crate) fn update_config_yaml_memory_provider(hermes_home: &Path, selected: &str) -> Result<()> {
     let cfg_path = hermes_home.join("config.yaml");
     let mut doc: serde_yaml::Value = if cfg_path.exists() {
         let text = std::fs::read_to_string(&cfg_path)?;
@@ -466,7 +460,8 @@ mod tests {
 
         let text = std::fs::read_to_string(&env_path).unwrap();
         assert_eq!(
-            text.matches("TEST_API_KEY='sk-scripted-test-value'").count(),
+            text.matches("TEST_API_KEY='sk-scripted-test-value'")
+                .count(),
             1,
             ".env must contain exactly one TEST_API_KEY line"
         );

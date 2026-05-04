@@ -143,7 +143,9 @@ impl PressureTracker {
     #[cfg(test)]
     pub fn was_warned(&self, session_id: &str) -> bool {
         let map = self.inner.lock().unwrap();
-        map.get(session_id).map(|s| s.above_threshold).unwrap_or(false)
+        map.get(session_id)
+            .map(|s| s.above_threshold)
+            .unwrap_or(false)
     }
 
     /// Phase 18-14: test-only accessor — returns the running count of
@@ -208,7 +210,11 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.kind, HookEventKind::ContextPressure { .. }))
             .collect();
-        assert_eq!(pressure_events.len(), 1, "exactly one ContextPressure event");
+        assert_eq!(
+            pressure_events.len(),
+            1,
+            "exactly one ContextPressure event"
+        );
 
         if let HookEventKind::ContextPressure {
             session_id,
@@ -262,7 +268,10 @@ mod tests {
         let fired4 = tracker
             .check_and_maybe_emit("sess-b", 0.5, 450, 1000, "hard", None)
             .await;
-        assert!(fired4, "should fire again after cooldown cleared on descent");
+        assert!(
+            fired4,
+            "should fire again after cooldown cleared on descent"
+        );
     }
 
     /// Sessions A and B are independent: both fire on first crossing without
@@ -311,7 +320,10 @@ mod tests {
         );
 
         let second = tracker.take_transient("sess-e");
-        assert!(second.is_none(), "second take should return None (consumed)");
+        assert!(
+            second.is_none(),
+            "second take should return None (consumed)"
+        );
     }
 
     /// No warning fires when the ratio is below the 85% trigger.
@@ -334,7 +346,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.kind, HookEventKind::ContextPressure { .. }))
             .collect();
-        assert!(pressure_events.is_empty(), "no hook event should be emitted");
+        assert!(
+            pressure_events.is_empty(),
+            "no hook event should be emitted"
+        );
 
         let msg = tracker.take_transient("sess-f");
         assert!(msg.is_none(), "no transient message below threshold");

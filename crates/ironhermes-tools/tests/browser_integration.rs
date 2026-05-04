@@ -8,7 +8,7 @@
 
 use std::sync::OnceLock;
 
-use ironhermes_tools::browser_session::{find_chromium_binary, BrowserSession};
+use ironhermes_tools::browser_session::{BrowserSession, find_chromium_binary};
 use ironhermes_tools::browser_vision::VisionClientHandle;
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -72,8 +72,7 @@ fn chromium_available() -> bool {
 // Registry construction helper
 // =============================================================================
 
-type BrowserSessionArc =
-    std::sync::Arc<tokio::sync::Mutex<Option<BrowserSession>>>;
+type BrowserSessionArc = std::sync::Arc<tokio::sync::Mutex<Option<BrowserSession>>>;
 
 /// Build a ToolRegistry with all 11 browser tools registered.
 ///
@@ -84,8 +83,7 @@ fn make_browser_registry(
     resolver: std::sync::Arc<ironhermes_core::provider::ProviderResolver>,
     vision_client: std::sync::Arc<dyn VisionClientHandle>,
 ) -> (ironhermes_tools::ToolRegistry, BrowserSessionArc) {
-    let session: BrowserSessionArc =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let session: BrowserSessionArc = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let mut registry = ironhermes_tools::ToolRegistry::new();
     let config = std::sync::Arc::new(ironhermes_core::config::Config::default());
     registry.register_browser_tools_with_vision(session.clone(), resolver, vision_client, config);
@@ -158,9 +156,7 @@ async fn browser_navigate_then_snapshot_returns_refs() {
         "expected button \"Submit\" in snapshot output, got:\n{snap}"
     );
     let has_ref_line = snap.lines().any(|line| {
-        line.trim_start().starts_with('[')
-            && line.contains("button")
-            && line.contains("Submit")
+        line.trim_start().starts_with('[') && line.contains("button") && line.contains("Submit")
     });
     assert!(
         has_ref_line,
@@ -180,31 +176,27 @@ async fn browser_navigate_then_snapshot_returns_refs() {
 async fn browser_click_with_stale_ref_returns_structured_error() {
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     if !chromium_available() {
-        eprintln!("SKIP browser_click_with_stale_ref_returns_structured_error: no chromium binary (D-22)");
+        eprintln!(
+            "SKIP browser_click_with_stale_ref_returns_structured_error: no chromium binary (D-22)"
+        );
         return;
     }
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/page-a"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(
-                    r#"<!doctype html><html><body><button>Original</button></body></html>"#,
-                    "text/html; charset=utf-8",
-                ),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<!doctype html><html><body><button>Original</button></body></html>"#,
+            "text/html; charset=utf-8",
+        ))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/page-b"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(
-                    r#"<!doctype html><html><body><p>different page</p></body></html>"#,
-                    "text/html; charset=utf-8",
-                ),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<!doctype html><html><body><p>different page</p></body></html>"#,
+            "text/html; charset=utf-8",
+        ))
         .mount(&server)
         .await;
 
@@ -288,11 +280,7 @@ struct ResolverVisionHandle {
 
 #[async_trait::async_trait]
 impl VisionClientHandle for ResolverVisionHandle {
-    async fn vision_call(
-        &self,
-        prompt: String,
-        image_data_url: String,
-    ) -> anyhow::Result<String> {
+    async fn vision_call(&self, prompt: String, image_data_url: String) -> anyhow::Result<String> {
         // D-07 cascade: resolve vision role (level 1 override or level 2 auxiliary).
         let endpoint = match self.resolver.resolve_role("vision") {
             Some(ep) => ep,
@@ -338,8 +326,8 @@ impl VisionClientHandle for ResolverVisionHandle {
         }
 
         // Extract content from OpenAI-shaped response.
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or(serde_json::Value::String(text.clone()));
+        let json: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text.clone()));
         let content = json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("(no content)")
@@ -384,9 +372,10 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
 
     // Main server: any POST returns 500 — proves vision did NOT hit main.
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(500).set_body_string(
-            "main_server should NOT receive vision requests — D-07 violated",
-        ))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_string("main_server should NOT receive vision requests — D-07 violated"),
+        )
         .mount(&main_server)
         .await;
 
@@ -394,12 +383,10 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
     let page_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/page"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(
-                r#"<!doctype html><html><body><h1>Vision Test Page</h1></body></html>"#,
-                "text/html; charset=utf-8",
-            ),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<!doctype html><html><body><h1>Vision Test Page</h1></body></html>"#,
+            "text/html; charset=utf-8",
+        ))
         .mount(&page_server)
         .await;
 
@@ -438,8 +425,7 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
     };
 
     let resolver = std::sync::Arc::new(
-        ironhermes_core::ProviderResolver::build(&config)
-            .expect("resolver build must succeed"),
+        ironhermes_core::ProviderResolver::build(&config).expect("resolver build must succeed"),
     );
 
     // Wire the ResolverVisionHandle — routes through the resolver's D-07 cascade.
@@ -459,9 +445,13 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
     .expect("navigate should succeed");
 
     // Run browser_vision — must hit aux_server, NOT main_server.
-    let vision_result = invoke(&registry, "browser_vision", json!({"prompt": "describe this"}))
-        .await
-        .expect("vision should succeed against aux mock");
+    let vision_result = invoke(
+        &registry,
+        "browser_vision",
+        json!({"prompt": "describe this"}),
+    )
+    .await
+    .expect("vision should succeed against aux mock");
 
     // D-07 invariant: aux server got the multimodal request; main server did NOT.
     let aux_received = aux_server.received_requests().await.unwrap_or_default();
@@ -473,7 +463,9 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
          vision_result={vision_result}"
     );
     assert!(
-        main_received.iter().all(|r| r.url.path() != "/v1/chat/completions"),
+        main_received
+            .iter()
+            .all(|r| r.url.path() != "/v1/chat/completions"),
         "main server must NOT receive the vision call when aux.vision is configured \
          (got {} requests to main server)",
         main_received.len()

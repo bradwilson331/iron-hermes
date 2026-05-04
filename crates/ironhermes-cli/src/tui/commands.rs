@@ -8,12 +8,12 @@
 
 use crate::tui::extension::{CommandResult, TuiExtension};
 use crate::tui::keybindings::KeybindingRegistry;
-use ironhermes_core::commands::{
-    CommandCategory, CommandResult as CoreCommandResult, CommandRouter, ResolveResult,
-};
 use ironhermes_core::commands::context::CommandContext;
 use ironhermes_core::commands::registry::build_registry;
 use ironhermes_core::commands::typo::suggest_typo;
+use ironhermes_core::commands::{
+    CommandCategory, CommandResult as CoreCommandResult, CommandRouter, ResolveResult,
+};
 use ironhermes_core::types::Platform;
 
 // ---------------------------------------------------------------------------
@@ -77,8 +77,7 @@ pub fn dispatch_command(
 
     match router.resolve(&full_input, &ctx.platform) {
         ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
-            let core_result =
-                ironhermes_core::commands::handlers::dispatch(def, args, ctx, router);
+            let core_result = ironhermes_core::commands::handlers::dispatch(def, args, ctx, router);
             map_core_to_tui(core_result)
         }
         ResolveResult::Ambiguous(candidates) => {
@@ -127,9 +126,7 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         }
         CoreCommandResult::NewSession { message } => {
             if message.is_empty() {
-                CommandResult::ClearSession(
-                    "Conversation cleared. Starting fresh.".to_string(),
-                )
+                CommandResult::ClearSession("Conversation cleared. Starting fresh.".to_string())
             } else {
                 CommandResult::ClearSession(message)
             }
@@ -219,12 +216,12 @@ mod tests {
     use crate::tui::extension::{CommandResult, KeyContext, Keybinding, TuiExtension};
     use crate::tui::keybindings::KeybindingRegistry;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use ironhermes_core::commands::CommandRouter;
     use ironhermes_core::commands::context::CommandContext;
     use ironhermes_core::commands::registry::build_registry;
-    use ironhermes_core::commands::CommandRouter;
     use ironhermes_core::types::Platform;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -386,7 +383,10 @@ mod tests {
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "help", &[], &router, &ctx);
-        assert_eq!(result, CommandResult::Handled("extension help!".to_string()));
+        assert_eq!(
+            result,
+            CommandResult::Handled("extension help!".to_string())
+        );
     }
 
     #[test]
@@ -401,10 +401,8 @@ mod tests {
     #[test]
     fn dispatch_extension_returning_none_falls_through_to_next_extension() {
         // PassThroughExt returns None, FooCommandExt handles "foo"
-        let exts: Vec<Box<dyn TuiExtension>> = vec![
-            Box::new(PassThroughExt),
-            Box::new(FooCommandExt),
-        ];
+        let exts: Vec<Box<dyn TuiExtension>> =
+            vec![Box::new(PassThroughExt), Box::new(FooCommandExt)];
         let router = test_router();
         let ctx = test_ctx();
         let result = dispatch_command(&exts, "foo", &[], &router, &ctx);

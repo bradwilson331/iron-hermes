@@ -28,7 +28,10 @@ use rmcp::{RoleClient, ServiceExt};
 /// to `Some(child)` without any call-site changes (Option A upgrade).
 pub async fn connect_stdio(
     config: &McpServerConfig,
-) -> Result<(RunningService<RoleClient, ()>, Option<tokio::process::Child>)> {
+) -> Result<(
+    RunningService<RoleClient, ()>,
+    Option<tokio::process::Child>,
+)> {
     let command = config
         .command
         .as_ref()
@@ -38,8 +41,8 @@ pub async fn connect_stdio(
     let args = config.args.clone();
 
     use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-    let transport = TokioChildProcess::new(
-        tokio::process::Command::new(command).configure(move |cmd| {
+    let transport =
+        TokioChildProcess::new(tokio::process::Command::new(command).configure(move |cmd| {
             for arg in &args {
                 cmd.arg(arg);
             }
@@ -65,8 +68,7 @@ pub async fn connect_stdio(
             for (k, v) in &safe_env {
                 cmd.env(k, v);
             }
-        }),
-    )?;
+        }))?;
 
     let client = ().serve(transport).await?;
     // GAP-8 Option B: rmcp 1.5's TokioChildProcess owns the spawned Child
@@ -172,7 +174,10 @@ mod tests {
 /// always `None`. Kept for call-site uniformity in `server_task::connect_and_serve`.
 pub async fn connect_http(
     config: &McpServerConfig,
-) -> Result<(RunningService<RoleClient, ()>, Option<tokio::process::Child>)> {
+) -> Result<(
+    RunningService<RoleClient, ()>,
+    Option<tokio::process::Child>,
+)> {
     let url = config
         .url
         .as_ref()

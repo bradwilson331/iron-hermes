@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserClickTool {
@@ -30,13 +30,18 @@ fn element_stale(ref_id: u64) -> String {
         "error": "element_stale",
         "ref": ref_id,
         "hint": format!("ref {ref_id} not found in current snapshot — call browser_snapshot first")
-    }).to_string()
+    })
+    .to_string()
 }
 
 #[async_trait]
 impl Tool for BrowserClickTool {
-    fn name(&self) -> &str { "browser_click" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_click"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Click an element by its ref ID (refs come from browser_snapshot or browser_get_images). \
          If the ref no longer exists (DOM mutated, or page navigated), returns \
@@ -67,14 +72,17 @@ impl Tool for BrowserClickTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -88,7 +96,11 @@ impl Tool for BrowserClickTool {
         let modifiers: Vec<String> = args
             .get("modifiers")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         debug!(ref_id, ?modifiers, "browser_click");
@@ -135,7 +147,10 @@ impl Tool for BrowserClickTool {
                 }})()"#,
                 selector_lit = serde_json::to_string(&selector).unwrap_or("\"\"".to_string())
             );
-            let result = sess.page.evaluate(js.as_str()).await
+            let result = sess
+                .page
+                .evaluate(js.as_str())
+                .await
                 .map_err(|e| anyhow::anyhow!("modifier click failed: {e}"))?;
             let succeeded = result.into_value::<bool>().unwrap_or(false);
             if !succeeded {
@@ -151,7 +166,9 @@ async fn ensure_session<'a>(
     guard: &'a mut tokio::sync::MutexGuard<'_, Option<BrowserSession>>,
 ) -> anyhow::Result<&'a mut BrowserSession> {
     if guard.is_none() {
-        let cfg = ironhermes_core::config::Config::load().unwrap_or_default().browser;
+        let cfg = ironhermes_core::config::Config::load()
+            .unwrap_or_default()
+            .browser;
         let new = BrowserSession::spawn(&cfg).await?;
         **guard = Some(new);
     }
@@ -178,7 +195,12 @@ mod tests {
         let t = BrowserClickTool::new(dummy_session());
         let result = t.execute(json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required parameter: ref"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing required parameter: ref")
+        );
     }
 
     #[test]

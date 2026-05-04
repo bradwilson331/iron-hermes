@@ -24,11 +24,7 @@ async fn spawn_then_drain_kills_all_children() {
     assert_eq!(reg.running_count(), 1);
 
     reg.drain_and_kill().await.expect("drain");
-    assert_eq!(
-        reg.running_count(),
-        0,
-        "E-03: drain must empty running map"
-    );
+    assert_eq!(reg.running_count(), 0, "E-03: drain must empty running map");
     assert!(
         reg.finished_count() >= 1,
         "drained entries become finished, not dropped"

@@ -23,12 +23,17 @@ pub struct DoubleCtrlCState {
 }
 
 impl Default for DoubleCtrlCState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DoubleCtrlCState {
     pub fn new() -> Self {
-        Self { window: Duration::from_millis(1500), last_cancel_at: None }
+        Self {
+            window: Duration::from_millis(1500),
+            last_cancel_at: None,
+        }
     }
 
     /// Returns the decision for THIS ctrl-c event.
@@ -53,7 +58,9 @@ impl DoubleCtrlCState {
     }
 
     /// Reset on successful turn completion OR on fresh user input (D-13).
-    pub fn reset(&mut self) { self.last_cancel_at = None; }
+    pub fn reset(&mut self) {
+        self.last_cancel_at = None;
+    }
 }
 
 #[cfg(test)]
@@ -72,10 +79,7 @@ mod tests {
     #[test]
     fn first_ctrlc_in_flight_cancels() {
         let mut s = DoubleCtrlCState::new();
-        assert_eq!(
-            s.on_ctrl_c(Instant::now(), true),
-            CtrlCDecision::CancelTurn
-        );
+        assert_eq!(s.on_ctrl_c(Instant::now(), true), CtrlCDecision::CancelTurn);
     }
 
     #[test]

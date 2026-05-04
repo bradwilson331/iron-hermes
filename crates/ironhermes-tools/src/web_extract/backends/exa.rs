@@ -42,7 +42,8 @@ struct ExaStatus {
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)] // Reserved for future per-URL status surfacing (mirrors firecrawl status_code).
+    #[allow(dead_code)]
+    // Reserved for future per-URL status surfacing (mirrors firecrawl status_code).
     status: Option<String>,
 }
 

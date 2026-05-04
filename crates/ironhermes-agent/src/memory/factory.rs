@@ -65,7 +65,8 @@ pub async fn build_memory_provider(
             let provider_config = load_provider_config(&hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.initialize("factory-boot", &hermes_home, &provider_config)
+                .await?;
             p.load_from_disk()?;
             if !p.is_available() {
                 let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
@@ -90,7 +91,8 @@ pub async fn build_memory_provider(
             let provider_config = load_provider_config(&hermes_home, "duckdb");
             let db_path = hermes_home.join("memory_duckdb.db");
             let mut p = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.initialize("factory-boot", &hermes_home, &provider_config)
+                .await?;
             p.load_from_disk()?;
             if !p.is_available() {
                 let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
@@ -119,7 +121,8 @@ pub async fn build_memory_provider(
             // new nodes to disk between process lifetimes.
             let db_path = hermes_home.join("memory_graph.grafeo");
             let mut p = memory_grafeo::GrafeoMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.initialize("factory-boot", &hermes_home, &provider_config)
+                .await?;
             p.load_from_disk()?;
             if !p.is_available() {
                 let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
@@ -143,9 +146,21 @@ pub async fn build_memory_provider(
             anyhow::bail!(
                 "Unknown memory provider '{}'. Available providers: file{}{}{}",
                 other,
-                if cfg!(feature = "memory-sqlite") { ", sqlite" } else { "" },
-                if cfg!(feature = "memory-grafeo") { ", grafeo" } else { "" },
-                if cfg!(feature = "memory-duckdb") { ", duckdb" } else { "" }
+                if cfg!(feature = "memory-sqlite") {
+                    ", sqlite"
+                } else {
+                    ""
+                },
+                if cfg!(feature = "memory-grafeo") {
+                    ", grafeo"
+                } else {
+                    ""
+                },
+                if cfg!(feature = "memory-duckdb") {
+                    ", duckdb"
+                } else {
+                    ""
+                }
             );
         }
     };
@@ -235,7 +250,8 @@ async fn build_tokio_provider(
             let provider_config = load_provider_config(&hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.initialize("factory-boot", &hermes_home, &provider_config)
+                .await?;
             p.load_from_disk()?;
             if !p.is_available() {
                 let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
@@ -260,7 +276,8 @@ async fn build_tokio_provider(
             let provider_config = load_provider_config(&hermes_home, "duckdb");
             let db_path = hermes_home.join("memory_duckdb.db");
             let mut p = memory_duckdb::DuckDbMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.initialize("factory-boot", &hermes_home, &provider_config)
+                .await?;
             p.load_from_disk()?;
             if !p.is_available() {
                 let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
@@ -285,7 +302,8 @@ async fn build_tokio_provider(
             let provider_config = load_provider_config(&hermes_home, "grafeo");
             let db_path = hermes_home.join("memory_graph.grafeo");
             let mut p = memory_grafeo::GrafeoMemoryProvider::new(&db_path)?;
-            p.initialize("factory-boot", &hermes_home, &provider_config).await?;
+            p.initialize("factory-boot", &hermes_home, &provider_config)
+                .await?;
             p.load_from_disk()?;
             if !p.is_available() {
                 let reason = p.unavailable_reason().unwrap_or_else(|| "unknown".into());
@@ -309,9 +327,21 @@ async fn build_tokio_provider(
             anyhow::bail!(
                 "Unknown memory provider '{}'. Available providers: file{}{}{}",
                 other,
-                if cfg!(feature = "memory-sqlite") { ", sqlite" } else { "" },
-                if cfg!(feature = "memory-grafeo") { ", grafeo" } else { "" },
-                if cfg!(feature = "memory-duckdb") { ", duckdb" } else { "" }
+                if cfg!(feature = "memory-sqlite") {
+                    ", sqlite"
+                } else {
+                    ""
+                },
+                if cfg!(feature = "memory-grafeo") {
+                    ", grafeo"
+                } else {
+                    ""
+                },
+                if cfg!(feature = "memory-duckdb") {
+                    ", duckdb"
+                } else {
+                    ""
+                }
             );
         }
     };
@@ -337,7 +367,11 @@ async fn build_tokio_file_provider(
 mod tests {
     use super::*;
     use ironhermes_core::config::MemoryConfig;
-    #[cfg(any(feature = "memory-sqlite", feature = "memory-duckdb", feature = "memory-grafeo"))]
+    #[cfg(any(
+        feature = "memory-sqlite",
+        feature = "memory-duckdb",
+        feature = "memory-grafeo"
+    ))]
     use ironhermes_core::memory_store::MemoryTarget;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -379,9 +413,15 @@ mod tests {
         // NOTE: `get_hermes_home()` reads `IRONHERMES_HOME` (not `HERMES_HOME`).
         // Using the wrong name falls through to `~/.ironhermes`, which is
         // the user's real directory — tests must never write there.
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let result = build_memory_provider(&cfg("file")).await;
-        assert!(result.is_ok(), "file provider should build, got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "file provider should build, got {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
@@ -398,7 +438,10 @@ mod tests {
             msg.contains("Unknown memory provider 'totally-unknown'"),
             "got: {msg}",
         );
-        assert!(msg.contains("file"), "available providers must include 'file', got: {msg}");
+        assert!(
+            msg.contains("file"),
+            "available providers must include 'file', got: {msg}"
+        );
     }
 
     #[cfg(feature = "memory-sqlite")]
@@ -408,7 +451,9 @@ mod tests {
         // `cargo test -p ironhermes-agent --features memory-sqlite`.
         let _guard = env_lock();
         let _tmp = tempfile::TempDir::new().expect("tempdir");
-        unsafe { std::env::set_var("IRONHERMES_HOME", _tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", _tmp.path());
+        }
         let result = build_memory_provider(&cfg("sqlite")).await;
         assert!(
             result.is_ok(),
@@ -421,9 +466,15 @@ mod tests {
     #[tokio::test]
     async fn sqlite_provider_without_feature_returns_err_naming_feature() {
         let result = build_memory_provider(&cfg("sqlite")).await;
-        assert!(result.is_err(), "sqlite provider without feature must error");
+        assert!(
+            result.is_err(),
+            "sqlite provider without feature must error"
+        );
         let msg = result.err().unwrap().to_string();
-        assert!(msg.contains("memory-sqlite"), "error must name the feature, got: {msg}");
+        assert!(
+            msg.contains("memory-sqlite"),
+            "error must name the feature, got: {msg}"
+        );
         assert!(
             msg.contains("cargo build --features memory-sqlite"),
             "error must include the rebuild instruction, got: {msg}",
@@ -448,7 +499,9 @@ mod tests {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         {
             let p = build_memory_provider(&cfg("sqlite")).await.unwrap();
             let mut guard = p.lock().unwrap();
@@ -457,7 +510,9 @@ mod tests {
                 .expect("add should succeed");
         } // drop provider
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let p2 = build_memory_provider(&cfg("sqlite")).await.unwrap();
         let guard2 = p2.lock().unwrap();
         let block = guard2
@@ -476,7 +531,9 @@ mod tests {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         {
             let p = build_memory_provider(&cfg("duckdb")).await.unwrap();
             let mut guard = p.lock().unwrap();
@@ -485,7 +542,9 @@ mod tests {
                 .expect("add should succeed");
         }
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let p2 = build_memory_provider(&cfg("duckdb")).await.unwrap();
         let guard2 = p2.lock().unwrap();
         let block = guard2
@@ -503,7 +562,9 @@ mod tests {
     async fn factory_builds_manager_with_no_mirror() {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let result = build_memory_manager(&cfg("file")).await;
         assert!(
             result.is_ok(),
@@ -525,7 +586,9 @@ mod tests {
     async fn factory_returns_none_when_memory_disabled() {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let disabled_cfg = MemoryConfig {
             provider: "file".to_string(),
             memory_enabled: false,
@@ -549,7 +612,9 @@ mod tests {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         {
             let p = build_memory_provider(&cfg("grafeo")).await.unwrap();
             let mut guard = p.lock().unwrap();
@@ -558,7 +623,9 @@ mod tests {
                 .expect("add should succeed");
         }
 
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let p2 = build_memory_provider(&cfg("grafeo")).await.unwrap();
         let guard2 = p2.lock().unwrap();
         let block = guard2
@@ -579,7 +646,10 @@ mod tests {
         let config_path = tmp.path().join("sqlite.json");
         std::fs::write(&config_path, r#"{"db_path": "/custom/path.db"}"#).unwrap();
         let loaded = load_provider_config(tmp.path(), "sqlite");
-        assert!(loaded.is_object(), "loaded config should be an object, got: {loaded}");
+        assert!(
+            loaded.is_object(),
+            "loaded config should be an object, got: {loaded}"
+        );
         assert_eq!(loaded["db_path"], "/custom/path.db");
     }
 
@@ -588,7 +658,10 @@ mod tests {
         let _guard = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let loaded = load_provider_config(tmp.path(), "nonexistent");
-        assert!(loaded.is_null(), "missing config should return Null, got: {loaded}");
+        assert!(
+            loaded.is_null(),
+            "missing config should return Null, got: {loaded}"
+        );
     }
 
     #[tokio::test]
@@ -598,6 +671,9 @@ mod tests {
         let config_path = tmp.path().join("sqlite.json");
         std::fs::write(&config_path, "not valid json {{{").unwrap();
         let loaded = load_provider_config(tmp.path(), "sqlite");
-        assert!(loaded.is_null(), "malformed config should return Null, got: {loaded}");
+        assert!(
+            loaded.is_null(),
+            "malformed config should return Null, got: {loaded}"
+        );
     }
 }

@@ -36,8 +36,8 @@ fn profile_env_var_set_before_scaffold() {
     // set to dirs::home_dir().join(".ironhermes/profiles/<name>"). Plan 07's
     // smoke test exercises the full main() pivot via an apply_minimum_viable
     // round trip.
-    let validated = ironhermes_core::profile::validate_profile_name("work")
-        .expect("'work' is a valid slug");
+    let validated =
+        ironhermes_core::profile::validate_profile_name("work").expect("'work' is a valid slug");
     let home = dirs::home_dir().expect("home_dir resolves");
     let expected = home
         .join(".ironhermes")
@@ -57,8 +57,7 @@ fn profile_env_var_set_before_scaffold() {
     let expected_str = expected.to_string_lossy().to_string();
     let actual_str = actual_path.to_string_lossy().to_string();
     assert!(
-        actual_str.ends_with(".ironhermes/profiles/work")
-            || actual_str == expected_str,
+        actual_str.ends_with(".ironhermes/profiles/work") || actual_str == expected_str,
         "IRONHERMES_HOME should end with .ironhermes/profiles/work, got: {}",
         actual_str
     );
@@ -81,7 +80,9 @@ fn profile_banner_printed_to_stderr() {
     let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
         Ok(p) => p,
         Err(_) => {
-            eprintln!("Skipping profile_banner_printed_to_stderr: CARGO_BIN_EXE_ironhermes not set");
+            eprintln!(
+                "Skipping profile_banner_printed_to_stderr: CARGO_BIN_EXE_ironhermes not set"
+            );
             return;
         }
     };
@@ -235,7 +236,10 @@ fn profile_isolation_smoke() {
         a_canon, b_canon,
         "two distinct tempdirs must canonicalize to distinct paths"
     );
-    assert_ne!(a_db, b_db, "state.db paths must be distinct across profiles");
+    assert_ne!(
+        a_db, b_db,
+        "state.db paths must be distinct across profiles"
+    );
 
     // Assert configs diverge (proves apply_minimum_viable_answers honored
     // the per-profile call and didn't bleed across).

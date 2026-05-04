@@ -120,9 +120,18 @@ mod tests {
 
         let json = serde_json::to_string(&event).expect("serialize");
         // The flattened tag should appear in the JSON
-        assert!(json.contains("\"kind\""), "kind field must be present: {json}");
-        assert!(json.contains("message_received"), "kind value must be present: {json}");
-        assert!(json.contains("req-123"), "request_id must be present: {json}");
+        assert!(
+            json.contains("\"kind\""),
+            "kind field must be present: {json}"
+        );
+        assert!(
+            json.contains("message_received"),
+            "kind value must be present: {json}"
+        );
+        assert!(
+            json.contains("req-123"),
+            "request_id must be present: {json}"
+        );
 
         // Round-trip
         let decoded: HookEvent = serde_json::from_str(&json).expect("deserialize");

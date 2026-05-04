@@ -10,8 +10,8 @@
 
 pub mod activity;
 pub mod commands;
-pub mod extension;
 pub mod double_ctrl_c;
+pub mod extension;
 pub mod keybindings;
 pub mod knight_rider;
 pub mod pills;
@@ -22,7 +22,11 @@ pub mod status_line;
 pub use activity::ActivityState;
 #[allow(unused_imports)] // Used in Task 2 (ctrl-c state machine wiring)
 pub use double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
-pub use render::{TuiHandle, prepare_prompt, finish_prompt, prepare_prompt_with_reserve, finish_prompt_with_reserve, prompt_position_ansi, reset_terminal_visual, write_into_scroll_region};
+pub use render::{
+    TuiHandle, finish_prompt, finish_prompt_with_reserve, prepare_prompt,
+    prepare_prompt_with_reserve, prompt_position_ansi, reset_terminal_visual,
+    write_into_scroll_region,
+};
 pub use status_line::StatusLineState;
 
 // Re-exports for Phase 22.1 extension system (consumed by Plan 22.1-02).

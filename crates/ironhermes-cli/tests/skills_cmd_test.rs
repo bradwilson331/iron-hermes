@@ -39,10 +39,7 @@ fn write_config(config_path: &std::path::Path, trusted_repos: &[&str]) {
             .join("\n");
         format!("      trusted_repos:\n{}", list)
     };
-    let yaml = format!(
-        "skills:\n  hub:\n{}\n",
-        repos_yaml
-    );
+    let yaml = format!("skills:\n  hub:\n{}\n", repos_yaml);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -67,7 +64,10 @@ fn cli_trust_add_writes_config() {
         // Reload config and assert the repo is present
         let cfg2 = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
         assert!(
-            cfg2.skills.hub.trusted_repos.contains(&"anthropics/skills".to_string()),
+            cfg2.skills
+                .hub
+                .trusted_repos
+                .contains(&"anthropics/skills".to_string()),
             "expected trusted_repos to contain anthropics/skills after trust add"
         );
     });
@@ -126,11 +126,18 @@ fn cli_trust_remove_writes_config() {
 
         let cfg2 = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
         assert!(
-            !cfg2.skills.hub.trusted_repos.contains(&"anthropics/skills".to_string()),
+            !cfg2
+                .skills
+                .hub
+                .trusted_repos
+                .contains(&"anthropics/skills".to_string()),
             "anthropics/skills should be removed"
         );
         assert!(
-            cfg2.skills.hub.trusted_repos.contains(&"openai/skills".to_string()),
+            cfg2.skills
+                .hub
+                .trusted_repos
+                .contains(&"openai/skills".to_string()),
             "openai/skills should remain"
         );
     });
@@ -156,7 +163,10 @@ fn cli_trust_remove_absent_is_noop() {
         .unwrap();
 
         let cfg2 = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
-        assert_eq!(cfg2.skills.hub.trusted_repos, vec!["openai/skills".to_string()]);
+        assert_eq!(
+            cfg2.skills.hub.trusted_repos,
+            vec!["openai/skills".to_string()]
+        );
     });
 }
 
@@ -171,10 +181,18 @@ fn cli_trust_list_text_output() {
         write_config(&config_path, &["openai/skills", "anthropics/skills"]);
 
         let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
-        let output =
-            ironhermes_cli::skills_cmd::cmd_trust_list_impl(&cfg, ironhermes_cli::skills_cmd::Format::Text);
-        assert!(output.contains("openai/skills"), "text output should contain openai/skills");
-        assert!(output.contains("anthropics/skills"), "text output should contain anthropics/skills");
+        let output = ironhermes_cli::skills_cmd::cmd_trust_list_impl(
+            &cfg,
+            ironhermes_cli::skills_cmd::Format::Text,
+        );
+        assert!(
+            output.contains("openai/skills"),
+            "text output should contain openai/skills"
+        );
+        assert!(
+            output.contains("anthropics/skills"),
+            "text output should contain anthropics/skills"
+        );
     });
 }
 
@@ -189,15 +207,14 @@ fn cli_trust_list_json_output() {
         write_config(&config_path, &["openai/skills", "anthropics/skills"]);
 
         let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
-        let output =
-            ironhermes_cli::skills_cmd::cmd_trust_list_impl(&cfg, ironhermes_cli::skills_cmd::Format::Json);
+        let output = ironhermes_cli::skills_cmd::cmd_trust_list_impl(
+            &cfg,
+            ironhermes_cli::skills_cmd::Format::Json,
+        );
         // Must be valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
         let arr = parsed.as_array().expect("JSON array");
-        let repos: Vec<&str> = arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let repos: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
         assert!(repos.contains(&"openai/skills"));
         assert!(repos.contains(&"anthropics/skills"));
     });
@@ -214,10 +231,16 @@ fn cli_list_reads_manifest() {
         write_config(&config_path, &[]);
 
         let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
-        let output = ironhermes_cli::skills_cmd::cmd_list_impl(&cfg, ironhermes_cli::skills_cmd::Format::Json);
+        let output = ironhermes_cli::skills_cmd::cmd_list_impl(
+            &cfg,
+            ironhermes_cli::skills_cmd::Format::Json,
+        );
         // Must be valid JSON array (empty since nothing is installed)
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
-        assert!(parsed.is_array(), "list --format json should return a JSON array");
+        assert!(
+            parsed.is_array(),
+            "list --format json should return a JSON array"
+        );
     });
 }
 
@@ -232,7 +255,10 @@ fn cli_list_text_format_contains_substrings() {
         write_config(&config_path, &[]);
 
         let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
-        let output = ironhermes_cli::skills_cmd::cmd_list_impl(&cfg, ironhermes_cli::skills_cmd::Format::Text);
+        let output = ironhermes_cli::skills_cmd::cmd_list_impl(
+            &cfg,
+            ironhermes_cli::skills_cmd::Format::Text,
+        );
         // When nothing is installed, at minimum the output should be non-panicking and a string
         let _ = output;
     });
@@ -251,7 +277,9 @@ async fn cli_search_json_format_returns_valid_json() {
 
     // Set HERMES_HOME for this test (single-threaded tokio test, no parallelism issue).
     let prev = std::env::var("HERMES_HOME").ok();
-    unsafe { std::env::set_var("HERMES_HOME", &home); }
+    unsafe {
+        std::env::set_var("HERMES_HOME", &home);
+    }
 
     let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
     // Use limit=1 so we fail fast on live network; returns empty array in offline CI.
@@ -279,9 +307,18 @@ async fn cli_search_json_format_returns_valid_json() {
         for item in arr {
             assert!(item.get("name").is_some(), "item missing 'name'");
             assert!(item.get("source").is_some(), "item missing 'source'");
-            assert!(item.get("identifier").is_some(), "item missing 'identifier'");
-            assert!(item.get("description").is_some(), "item missing 'description'");
-            assert!(item.get("trust_level").is_some(), "item missing 'trust_level'");
+            assert!(
+                item.get("identifier").is_some(),
+                "item missing 'identifier'"
+            );
+            assert!(
+                item.get("description").is_some(),
+                "item missing 'description'"
+            );
+            assert!(
+                item.get("trust_level").is_some(),
+                "item missing 'trust_level'"
+            );
         }
     }
 }
@@ -383,8 +420,7 @@ fn skills_action_install_parses_skip_audit() {
 #[test]
 fn skills_action_install_defaults_skip_audit_false() {
     use clap::Parser;
-    let parsed =
-        SkillsTestCli::try_parse_from(["install", "foo"]).expect("parse install no flags");
+    let parsed = SkillsTestCli::try_parse_from(["install", "foo"]).expect("parse install no flags");
     match parsed.action {
         ironhermes_cli::skills_cmd::SkillsAction::Install { skip_audit, .. } => {
             assert!(!skip_audit, "default skip_audit should be false");
@@ -432,13 +468,9 @@ fn cmd_list_reads_from_lock() {
             &cfg,
             ironhermes_cli::skills_cmd::Format::Json,
         );
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_out).expect("list json parses");
+        let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("list json parses");
         let arr = parsed.as_array().expect("json array");
-        let names: Vec<&str> = arr
-            .iter()
-            .filter_map(|v| v["name"].as_str())
-            .collect();
+        let names: Vec<&str> = arr.iter().filter_map(|v| v["name"].as_str()).collect();
         assert!(names.contains(&"alpha"), "list missing alpha: {names:?}");
         assert!(names.contains(&"beta"), "list missing beta: {names:?}");
 
@@ -465,8 +497,7 @@ fn cmd_list_empty_when_no_lock() {
             &cfg,
             ironhermes_cli::skills_cmd::Format::Json,
         );
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_out).expect("list json parses");
+        let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("list json parses");
         let arr = parsed.as_array().expect("array");
         assert!(
             arr.is_empty(),

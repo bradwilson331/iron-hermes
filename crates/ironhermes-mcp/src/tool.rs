@@ -131,9 +131,7 @@ impl Tool for McpTool {
                 response_tx: resp_tx,
             })
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("MCP server '{}' disconnected", self.server_name)
-            })?;
+            .map_err(|_| anyhow::anyhow!("MCP server '{}' disconnected", self.server_name))?;
         match resp_rx.await {
             Ok(result) => result.map_err(|e| {
                 anyhow::anyhow!("{}", crate::security::sanitize_error(&e.to_string()))
@@ -152,12 +150,18 @@ mod tests {
 
     #[test]
     fn test_make_prefixed_name_basic() {
-        assert_eq!(make_prefixed_name("github", "create_issue"), "github__create_issue");
+        assert_eq!(
+            make_prefixed_name("github", "create_issue"),
+            "github__create_issue"
+        );
     }
 
     #[test]
     fn test_make_prefixed_name_hyphen_sanitization() {
-        assert_eq!(make_prefixed_name("my-server", "read-file"), "my_server__read_file");
+        assert_eq!(
+            make_prefixed_name("my-server", "read-file"),
+            "my_server__read_file"
+        );
     }
 
     #[test]
@@ -186,10 +190,7 @@ mod tests {
     #[test]
     fn sanitize_server_name_replaces_all_four_characters() {
         // All four characters GAP-4 requires, in one payload.
-        assert_eq!(
-            sanitize_server_name("@a-b.c/d"),
-            "_a_b_c_d"
-        );
+        assert_eq!(sanitize_server_name("@a-b.c/d"), "_a_b_c_d");
     }
 
     #[test]

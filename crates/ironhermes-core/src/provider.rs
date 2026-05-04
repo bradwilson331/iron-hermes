@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -46,8 +46,8 @@ pub struct ResolvedEndpoint {
     pub api_mode: ApiMode,
     pub default_model: String,
     pub fallback_providers: Vec<String>,
-    pub model_metadata: Option<ModelMetadata>,       // Phase 21.3 D-14
-    pub config_context_length: Option<usize>,        // Phase 21.3 D-06
+    pub model_metadata: Option<ModelMetadata>, // Phase 21.3 D-14
+    pub config_context_length: Option<usize>,  // Phase 21.3 D-06
 }
 
 impl ResolvedEndpoint {
@@ -117,7 +117,7 @@ pub struct ProviderResolver {
     endpoints: HashMap<String, ResolvedEndpoint>,
     roles: HashMap<String, ModelRoleConfig>,
     main_provider: String,
-    model_registry: ModelRegistry,  // Phase 21.3
+    model_registry: ModelRegistry, // Phase 21.3
     /// Resolved auxiliary endpoint (D-05/D-06, Phase 26).
     /// `None` when no `auxiliary:` block is configured — callers fall through to main.
     auxiliary_endpoint: Option<ResolvedEndpoint>,
@@ -186,15 +186,17 @@ impl ProviderResolver {
                 endpoints.remove(name.as_str());
                 continue;
             }
-            let entry = endpoints.entry(name.clone()).or_insert_with(|| ResolvedEndpoint {
-                base_url: String::new(),
-                api_key: None,
-                api_mode: ApiMode::ChatCompletions,
-                default_model: String::new(),
-                fallback_providers: vec![],
-                model_metadata: None,
-                config_context_length: None,
-            });
+            let entry = endpoints
+                .entry(name.clone())
+                .or_insert_with(|| ResolvedEndpoint {
+                    base_url: String::new(),
+                    api_key: None,
+                    api_mode: ApiMode::ChatCompletions,
+                    default_model: String::new(),
+                    fallback_providers: vec![],
+                    model_metadata: None,
+                    config_context_length: None,
+                });
             if let Some(ref url) = prov_cfg.base_url {
                 entry.base_url = url.clone();
             }
@@ -214,13 +216,16 @@ impl ProviderResolver {
         let main = &config.model.provider;
         if !endpoints.contains_key(main.as_str()) {
             // Check if explicitly disabled vs genuinely unknown
-            let is_disabled = config.providers.get(main.as_str())
+            let is_disabled = config
+                .providers
+                .get(main.as_str())
                 .and_then(|p| p.disabled)
                 .unwrap_or(false);
             if is_disabled {
                 return Err(anyhow!(
                     "main provider '{}' is disabled — re-enable it with `hermes provider enable {}` or change model.provider in config.yaml",
-                    main, main
+                    main,
+                    main
                 ));
             }
             // Unknown main provider will be caught at resolve_for_main() time; allow build to succeed
@@ -255,12 +260,16 @@ impl ProviderResolver {
         // --- 4. Resolve API keys with precedence (D-03, PROV-03, PROV-04, D-11, D-12, D-13) ---
         for (name, endpoint) in endpoints.iter_mut() {
             // Priority 1: api_key_env from config.providers[name] (D-01 / D-04)
-            let api_key_env_key: Option<String> = config.providers.get(name.as_str())
+            let api_key_env_key: Option<String> = config
+                .providers
+                .get(name.as_str())
                 .and_then(|p| p.api_key_env.as_deref())
                 .and_then(|env_name| std::env::var(env_name).ok());
 
             // Priority 2 (deprecated): api_key literal from config.providers[name] (D-01 / Pitfall 5)
-            let config_literal_key: Option<String> = config.providers.get(name.as_str())
+            let config_literal_key: Option<String> = config
+                .providers
+                .get(name.as_str())
                 .and_then(|p| p.api_key.clone());
             if let Some(ref _key) = config_literal_key {
                 emit_deprecation_once(
@@ -403,9 +412,12 @@ impl ProviderResolver {
 
     /// Resolve the main provider. Panics if missing (startup validation prevents this).
     pub fn resolve_for_main(&self) -> &ResolvedEndpoint {
-        self.endpoints
-            .get(&self.main_provider)
-            .unwrap_or_else(|| panic!("main provider '{}' not found in endpoints", self.main_provider))
+        self.endpoints.get(&self.main_provider).unwrap_or_else(|| {
+            panic!(
+                "main provider '{}' not found in endpoints",
+                self.main_provider
+            )
+        })
     }
 
     /// Resolve an auxiliary model role (D-05, D-07, PROV-06, Phase 26).
@@ -520,8 +532,14 @@ mod tests {
     fn test_build_default_config_has_three_providers() {
         let config = default_config();
         let resolver = ProviderResolver::build(&config).expect("build should succeed");
-        assert!(resolver.resolve("openrouter").is_some(), "openrouter should exist");
-        assert!(resolver.resolve("anthropic").is_some(), "anthropic should exist");
+        assert!(
+            resolver.resolve("openrouter").is_some(),
+            "openrouter should exist"
+        );
+        assert!(
+            resolver.resolve("anthropic").is_some(),
+            "anthropic should exist"
+        );
         assert!(resolver.resolve("openai").is_some(), "openai should exist");
     }
 
@@ -578,7 +596,9 @@ mod tests {
             },
         );
         let resolver = ProviderResolver::build(&config).expect("build");
-        let ep = resolver.resolve_role("vision").expect("vision role via main");
+        let ep = resolver
+            .resolve_role("vision")
+            .expect("vision role via main");
         // Should return the openrouter endpoint (main provider)
         assert_eq!(ep.base_url, OPENROUTER_BASE_URL);
         assert_eq!(ep.default_model, "openai/gpt-4o-vision");
@@ -598,7 +618,9 @@ mod tests {
 
         // Set env var — config key should win
         // SAFETY: test-only env var mutation, held behind env_lock
-        unsafe { std::env::set_var("OPENROUTER_API_KEY", "env-key"); }
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "env-key");
+        }
 
         // We test by setting config.providers key and verifying the resolved key
         let resolver = ProviderResolver::build(&config).expect("build");
@@ -606,7 +628,9 @@ mod tests {
         assert_eq!(ep.api_key.as_deref(), Some("config-key"));
 
         // SAFETY: test-only cleanup
-        unsafe { std::env::remove_var("OPENROUTER_API_KEY"); }
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
     }
 
     #[test]
@@ -666,7 +690,10 @@ mod tests {
             config_context_length: None,
         };
         let debug_str = format!("{:?}", ep);
-        assert!(!debug_str.contains("super-secret"), "Debug should redact api_key");
+        assert!(
+            !debug_str.contains("super-secret"),
+            "Debug should redact api_key"
+        );
         assert!(debug_str.contains("REDACTED"), "Debug should show REDACTED");
     }
 
@@ -740,7 +767,10 @@ mod tests {
             config_context_length: None,
             ..default_endpoint()
         };
-        assert_eq!(ep2.context_length(), crate::constants::DEFAULT_CONTEXT_LENGTH);
+        assert_eq!(
+            ep2.context_length(),
+            crate::constants::DEFAULT_CONTEXT_LENGTH
+        );
     }
 
     #[test]
@@ -814,21 +844,30 @@ mod tests {
                 fetched_at: Utc::now(),
             },
         );
-        cache.save_to(&tmp.path().join("models-cache.json")).unwrap();
+        cache
+            .save_to(&tmp.path().join("models-cache.json"))
+            .unwrap();
 
         // SAFETY: test-only env var mutation, held behind env_lock
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
 
         let mut config = default_config();
         config.model.default = "test-cache-only-model".to_string();
         let resolver = ProviderResolver::build(&config).expect("build");
         let ep = resolver.resolve_for_main();
 
-        assert!(ep.model_metadata.is_some(), "cache-only model should have metadata");
+        assert!(
+            ep.model_metadata.is_some(),
+            "cache-only model should have metadata"
+        );
         assert_eq!(ep.model_metadata.as_ref().unwrap().context_length, 500_000);
 
         // SAFETY: test-only cleanup
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
     }
 
     #[test]
@@ -853,10 +892,14 @@ mod tests {
                 fetched_at: Utc::now(),
             },
         );
-        cache.save_to(&tmp.path().join("models-cache.json")).unwrap();
+        cache
+            .save_to(&tmp.path().join("models-cache.json"))
+            .unwrap();
 
         // SAFETY: test-only env var mutation, held behind env_lock
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
 
         let mut config = default_config();
         config.model.default = "claude-sonnet-4".to_string();
@@ -870,7 +913,9 @@ mod tests {
         );
 
         // SAFETY: test-only cleanup
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
     }
 
     // =========================================================================
@@ -884,27 +929,32 @@ mod tests {
         let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
 
         // SAFETY: test-only env var mutation, held behind env_lock
-        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-leaked"); }
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-leaked");
+        }
 
         let mut config = default_config();
         config.providers.insert(
             "my-local-llm".to_string(),
             ProviderConfig {
                 base_url: Some("http://localhost:8080/v1".to_string()),
-                api_key_env: None,  // explicitly unset
+                api_key_env: None, // explicitly unset
                 ..Default::default()
             },
         );
         let resolver = ProviderResolver::build(&config).expect("build");
-        let endpoint = resolver.resolve("my-local-llm").expect("my-local-llm should exist");
+        let endpoint = resolver
+            .resolve("my-local-llm")
+            .expect("my-local-llm should exist");
         assert_eq!(
-            endpoint.api_key,
-            None,
+            endpoint.api_key, None,
             "OPENAI_API_KEY MUST NOT leak to my-local-llm — D-11 PROV-04 regression"
         );
 
         // SAFETY: test-only cleanup
-        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
     }
 
     /// D-11 variant: api_key_env on a custom provider resolves its own env var,
@@ -929,7 +979,9 @@ mod tests {
             },
         );
         let resolver = ProviderResolver::build(&config).expect("build");
-        let endpoint = resolver.resolve("my-local-llm").expect("my-local-llm should exist");
+        let endpoint = resolver
+            .resolve("my-local-llm")
+            .expect("my-local-llm should exist");
         assert_eq!(
             endpoint.api_key.as_deref(),
             Some("my-custom-key"),
@@ -979,9 +1031,15 @@ mod tests {
             },
         );
         let result = ProviderResolver::build(&config);
-        assert!(result.is_err(), "Disabled main provider must error at build");
+        assert!(
+            result.is_err(),
+            "Disabled main provider must error at build"
+        );
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("disabled"), "Error message must mention 'disabled'");
+        assert!(
+            msg.contains("disabled"),
+            "Error message must mention 'disabled'"
+        );
     }
 
     // =========================================================================
@@ -1006,8 +1064,13 @@ mod tests {
             model: "openrouter/aux-model".to_string(),
         };
         let resolver = ProviderResolver::build(&config).expect("build");
-        let ep = resolver.resolve_role("vision").expect("vision must resolve");
-        assert_eq!(ep.base_url, "https://api.openai.com/v1", "per-task override must win");
+        let ep = resolver
+            .resolve_role("vision")
+            .expect("vision must resolve");
+        assert_eq!(
+            ep.base_url, "https://api.openai.com/v1",
+            "per-task override must win"
+        );
         assert_eq!(ep.default_model, "gpt-4o-vision");
     }
 
@@ -1022,8 +1085,13 @@ mod tests {
             model: "gpt-4o-mini".to_string(),
         };
         let resolver = ProviderResolver::build(&config).expect("build");
-        let ep = resolver.resolve_role("compression").expect("compression must fall through to aux");
-        assert_eq!(ep.base_url, "https://api.openai.com/v1", "auxiliary must be used");
+        let ep = resolver
+            .resolve_role("compression")
+            .expect("compression must fall through to aux");
+        assert_eq!(
+            ep.base_url, "https://api.openai.com/v1",
+            "auxiliary must be used"
+        );
         assert_eq!(ep.default_model, "gpt-4o-mini");
     }
 
@@ -1034,7 +1102,10 @@ mod tests {
         // No roles, no auxiliary
         let resolver = ProviderResolver::build(&config).expect("build");
         let result = resolver.resolve_role("compression");
-        assert!(result.is_none(), "must return None when neither per-task nor auxiliary is configured");
+        assert!(
+            result.is_none(),
+            "must return None when neither per-task nor auxiliary is configured"
+        );
     }
 
     // =========================================================================
@@ -1049,7 +1120,10 @@ mod tests {
             model: "some-model".to_string(),
         };
         let result = ProviderResolver::build(&config);
-        assert!(result.is_err(), "Unknown auxiliary.provider must fail build");
+        assert!(
+            result.is_err(),
+            "Unknown auxiliary.provider must fail build"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("nonexistent-provider"),
@@ -1064,9 +1138,12 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
         };
-        let resolver = ProviderResolver::build(&config).expect("Known auxiliary.provider must build");
+        let resolver =
+            ProviderResolver::build(&config).expect("Known auxiliary.provider must build");
         // Verify the auxiliary endpoint is used for an unconfigured role
-        let ep = resolver.resolve_role("session_search").expect("should fall through to auxiliary");
+        let ep = resolver
+            .resolve_role("session_search")
+            .expect("should fall through to auxiliary");
         assert_eq!(ep.base_url, "https://api.openai.com/v1");
         assert_eq!(ep.default_model, "gpt-4o-mini");
     }

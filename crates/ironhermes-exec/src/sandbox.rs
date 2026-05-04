@@ -3,8 +3,8 @@
 #[allow(unused_imports)]
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -12,15 +12,32 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::rpc_server::RpcServer;
-use crate::{SandboxConfig, ToolDispatch, HERMES_TOOLS_PY};
+use crate::{HERMES_TOOLS_PY, SandboxConfig, ToolDispatch};
 
 /// D-35: Env var name patterns that indicate secrets — stripped from child environment.
-const SECRET_PATTERNS: &[&str] = &["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD", "AUTH"];
+const SECRET_PATTERNS: &[&str] = &[
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+    "PASSWD",
+    "AUTH",
+];
 
 /// D-36: Safe system vars that always pass through regardless of secret patterns.
 const SAFE_VARS: &[&str] = &[
-    "PATH", "HOME", "LANG", "SHELL", "USER", "LOGNAME", "TERM",
-    "PYTHONPATH", "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE", "TMPDIR",
+    "PATH",
+    "HOME",
+    "LANG",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "TERM",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "PYTHONDONTWRITEBYTECODE",
+    "TMPDIR",
 ];
 
 /// Result of a sandboxed Python script execution.
@@ -86,7 +103,12 @@ impl Sandbox {
         let call_count = Arc::new(AtomicU32::new(0));
 
         // Create and spawn RPC server
-        let rpc_server = RpcServer::new(listener, tool_dispatch, self.config.max_rpc_calls, Arc::clone(&call_count));
+        let rpc_server = RpcServer::new(
+            listener,
+            tool_dispatch,
+            self.config.max_rpc_calls,
+            Arc::clone(&call_count),
+        );
         let rpc_handle = tokio::spawn(async move {
             if let Err(e) = rpc_server.serve().await {
                 debug!("RPC server ended: {}", e);
@@ -131,7 +153,11 @@ impl Sandbox {
         let timeout_duration = Duration::from_secs(self.config.timeout_secs);
 
         enum Outcome {
-            Completed(Result<std::process::ExitStatus, std::io::Error>, Vec<u8>, Vec<u8>),
+            Completed(
+                Result<std::process::ExitStatus, std::io::Error>,
+                Vec<u8>,
+                Vec<u8>,
+            ),
             TimedOut,
             Interrupted,
         }
@@ -177,8 +203,10 @@ impl Sandbox {
         match outcome {
             Outcome::Completed(status, stdout_bytes, stderr_bytes) => {
                 let status = status?;
-                let stdout = self.maybe_truncate(String::from_utf8_lossy(&stdout_bytes).into_owned());
-                let stderr = self.maybe_truncate_stderr(String::from_utf8_lossy(&stderr_bytes).into_owned());
+                let stdout =
+                    self.maybe_truncate(String::from_utf8_lossy(&stdout_bytes).into_owned());
+                let stderr =
+                    self.maybe_truncate_stderr(String::from_utf8_lossy(&stderr_bytes).into_owned());
 
                 Ok(SandboxResult {
                     stdout,
@@ -195,9 +223,13 @@ impl Sandbox {
                 // D-31: SIGTERM -> 5s grace -> SIGKILL on process group
                 if let Some(pid) = child_pid {
                     let pgid = pid as i32;
-                    unsafe { libc::killpg(pgid, libc::SIGTERM); }
+                    unsafe {
+                        libc::killpg(pgid, libc::SIGTERM);
+                    }
                     tokio::time::sleep(Duration::from_secs(5)).await;
-                    unsafe { libc::killpg(pgid, libc::SIGKILL); }
+                    unsafe {
+                        libc::killpg(pgid, libc::SIGKILL);
+                    }
                 }
 
                 Ok(SandboxResult {
@@ -218,7 +250,9 @@ impl Sandbox {
                 // D-39: Kill process group immediately (SIGKILL, no grace period)
                 if let Some(pid) = child_pid {
                     let pgid = pid as i32;
-                    unsafe { libc::killpg(pgid, libc::SIGKILL); }
+                    unsafe {
+                        libc::killpg(pgid, libc::SIGKILL);
+                    }
                 }
 
                 Ok(SandboxResult {
@@ -270,10 +304,18 @@ impl Sandbox {
         }
 
         // D-37: always inject these (overriding if already present)
-        env.retain(|(n, _)| n != "IRONHERMES_RPC_ADDR" && n != "IRONHERMES_SESSION_ID" && n != "PYTHONPATH");
-        env.push(("IRONHERMES_RPC_ADDR".into(), socket_path.to_str().unwrap_or_default().into()));
+        env.retain(|(n, _)| {
+            n != "IRONHERMES_RPC_ADDR" && n != "IRONHERMES_SESSION_ID" && n != "PYTHONPATH"
+        });
+        env.push((
+            "IRONHERMES_RPC_ADDR".into(),
+            socket_path.to_str().unwrap_or_default().into(),
+        ));
         env.push(("IRONHERMES_SESSION_ID".into(), "sandbox".into()));
-        env.push(("PYTHONPATH".into(), temp_dir.to_str().unwrap_or_default().into()));
+        env.push((
+            "PYTHONPATH".into(),
+            temp_dir.to_str().unwrap_or_default().into(),
+        ));
 
         env
     }
@@ -367,7 +409,10 @@ import os
 env = dict(os.environ)
 print(repr(env))
 "#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         let output = &result.stdout;
 
@@ -440,7 +485,10 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"print("A" * 60000)"#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         // stdout should be truncated: 100 bytes + truncation notice
         let notice = "\n[truncated: output exceeded limit]";
@@ -461,7 +509,10 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"import sys; sys.stderr.write("err msg")"#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         assert!(
             result.stderr.contains("err msg"),
@@ -476,7 +527,10 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let script = r#"import sys; sys.exit(42)"#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         assert_eq!(result.exit_code, Some(42));
     }
@@ -492,7 +546,10 @@ print(repr(env))
 
         // Write >100 bytes to stderr
         let script = r#"import sys; sys.stderr.write("X" * 60000)"#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         let notice = "\n[stderr truncated at 10KB]";
         assert!(
@@ -513,7 +570,12 @@ print(repr(env))
         let dispatch: Arc<dyn ToolDispatch> = Arc::new(NoOpDispatch);
 
         let result = sandbox
-            .run(r#"import time; time.sleep(0.1); print("done")"#, dispatch, None, &[])
+            .run(
+                r#"import time; time.sleep(0.1); print("done")"#,
+                dispatch,
+                None,
+                &[],
+            )
             .await
             .expect("should succeed");
 
@@ -560,9 +622,12 @@ print(repr(env))
         }
 
         assert!(
-            env.iter().any(|(k, v)| k == "HERMES_TEST_API_KEY" && v == "testval"),
+            env.iter()
+                .any(|(k, v)| k == "HERMES_TEST_API_KEY" && v == "testval"),
             "whitelisted HERMES_TEST_API_KEY should be kept; got: {:?}",
-            env.iter().filter(|(k, _)| k.contains("HERMES_TEST")).collect::<Vec<_>>()
+            env.iter()
+                .filter(|(k, _)| k.contains("HERMES_TEST"))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -612,7 +677,8 @@ print(repr(env))
         }
 
         assert!(
-            env.iter().any(|(k, v)| k == "HERMES_TEST_PLAIN" && v == "keepme"),
+            env.iter()
+                .any(|(k, v)| k == "HERMES_TEST_PLAIN" && v == "keepme"),
             "non-secret HERMES_TEST_PLAIN must be kept regardless of whitelist"
         );
     }
@@ -640,7 +706,8 @@ print(repr(env))
         }
 
         assert!(
-            env.iter().any(|(k, v)| k == "HERMES_TEST_CASEKEY" && v == "x"),
+            env.iter()
+                .any(|(k, v)| k == "HERMES_TEST_CASEKEY" && v == "x"),
             "whitelist match should be case-insensitive; env did not contain HERMES_TEST_CASEKEY"
         );
     }
@@ -677,7 +744,8 @@ print(os.environ.get('HERMES_TEST_SKILL_KEY', 'MISSING'))
         assert!(
             result.stdout.contains("integrationval"),
             "expected Python child to read skill-declared env var; stdout: {:?}, stderr: {:?}",
-            result.stdout, result.stderr
+            result.stdout,
+            result.stderr
         );
         assert!(
             !result.stdout.contains("MISSING"),

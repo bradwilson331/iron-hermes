@@ -5,8 +5,7 @@ pub fn skills_root() -> anyhow::Result<PathBuf> {
     if let Ok(home) = std::env::var("HERMES_HOME") {
         return Ok(PathBuf::from(home).join("skills"));
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
     Ok(home.join(".ironhermes").join("skills"))
 }
 
@@ -32,7 +31,6 @@ pub fn skills_lock_path() -> anyhow::Result<PathBuf> {
     if let Ok(home) = std::env::var("HERMES_HOME") {
         return Ok(PathBuf::from(home).join("skills-lock.json"));
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
     Ok(home.join(".ironhermes").join("skills-lock.json"))
 }

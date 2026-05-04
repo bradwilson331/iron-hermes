@@ -1,5 +1,5 @@
 use ironhermes_core::ChatMessage;
-use ironhermes_state::{sanitize_fts_query, SearchFilter, StateStore};
+use ironhermes_state::{SearchFilter, StateStore, sanitize_fts_query};
 use tempfile::NamedTempFile;
 
 /// Create a fresh StateStore backed by a temporary file.
@@ -254,9 +254,7 @@ fn test_export_session() {
     store
         .create_session("s1", "cli", None, None, None, None)
         .unwrap();
-    store
-        .add_message("s1", &ChatMessage::user("msg1"))
-        .unwrap();
+    store.add_message("s1", &ChatMessage::user("msg1")).unwrap();
     store
         .add_message("s1", &ChatMessage::assistant("msg2"))
         .unwrap();
@@ -267,7 +265,10 @@ fn test_export_session() {
 
     // Verify JSON structure via serde_json.
     let val = serde_json::to_value(&export).unwrap();
-    assert!(val.get("session").is_some(), "JSON should have 'session' key");
+    assert!(
+        val.get("session").is_some(),
+        "JSON should have 'session' key"
+    );
     assert!(
         val.get("messages").is_some(),
         "JSON should have 'messages' key"

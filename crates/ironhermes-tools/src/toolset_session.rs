@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use ironhermes_core::commands::context::ToolsetSessionHandle;
 use ironhermes_core::commands::toolset_display::{
-    render_toolset_list, render_toolset_show, ToolsetRow,
+    ToolsetRow, render_toolset_list, render_toolset_show,
 };
 use ironhermes_core::config::{ToolsConfig, ToolsetEntry};
 use tokio::sync::RwLock as TokioRwLock;
@@ -36,10 +36,7 @@ impl RegistryToolsetSession {
     /// The config is wrapped in `Arc<Mutex<_>>` so enable/disable mutations
     /// are visible to subsequent `set_toolset_config` calls without requiring
     /// a registry rebuild.
-    pub fn new(
-        registry: Arc<TokioRwLock<ToolRegistry>>,
-        initial_config: ToolsConfig,
-    ) -> Self {
+    pub fn new(registry: Arc<TokioRwLock<ToolRegistry>>, initial_config: ToolsConfig) -> Self {
         Self {
             registry,
             config: Arc::new(std::sync::Mutex::new(initial_config)),
@@ -125,10 +122,7 @@ impl RegistryToolsetSession {
         let known = Self::members_map();
         if !known.contains_key(name) {
             let names: Vec<&&str> = known.keys().collect();
-            return Err(format!(
-                "unknown toolset '{}'. Known: {:?}",
-                name, names
-            ));
+            return Err(format!("unknown toolset '{}'. Known: {:?}", name, names));
         }
         Ok(())
     }

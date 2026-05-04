@@ -70,11 +70,7 @@ impl MemoryProvider for MockRecorderProvider {
         Ok(MemoryEntries::default())
     }
 
-    async fn sync_turn(
-        &self,
-        _session_id: &str,
-        _entries: &MemoryEntries,
-    ) -> anyhow::Result<()> {
+    async fn sync_turn(&self, _session_id: &str, _entries: &MemoryEntries) -> anyhow::Result<()> {
         self.record("sync_turn");
         Ok(())
     }
@@ -168,9 +164,7 @@ async fn hook_ordering_contract() {
     let entries = provider.prefetch(session_id).await.expect("prefetch");
 
     // 3. add (write path)
-    provider
-        .add(MemoryTarget::Memory, "fact-A")
-        .expect("add");
+    provider.add(MemoryTarget::Memory, "fact-A").expect("add");
 
     // 4. sync_turn after writes land
     provider

@@ -1,8 +1,8 @@
+use super::types::CheckpointEntry;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use super::types::CheckpointEntry;
 
 /// SHA-256 hash of the prompt string, returned as 64-char lowercase hex (D-05).
 pub fn prompt_hash(prompt: &str) -> String {

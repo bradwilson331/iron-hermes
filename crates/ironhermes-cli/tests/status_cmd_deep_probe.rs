@@ -55,11 +55,7 @@ impl DeepProbe for FaultyProbe {
         }
     }
 
-    async fn fts5_integrity(
-        &self,
-        _db_path: &Path,
-        _timeout: Duration,
-    ) -> anyhow::Result<bool> {
+    async fn fts5_integrity(&self, _db_path: &Path, _timeout: Duration) -> anyhow::Result<bool> {
         match self.fts5.lock().unwrap().take() {
             Some(Ok(b)) => Ok(b),
             Some(Err(e)) => Err(anyhow::anyhow!("{}", e)),
@@ -67,11 +63,7 @@ impl DeepProbe for FaultyProbe {
         }
     }
 
-    async fn mcp_server(
-        &self,
-        name: &str,
-        _timeout: Duration,
-    ) -> anyhow::Result<McpProbeResult> {
+    async fn mcp_server(&self, name: &str, _timeout: Duration) -> anyhow::Result<McpProbeResult> {
         match self.mcp.lock().unwrap().remove(name) {
             Some(Ok(r)) => Ok(r),
             Some(Err(e)) => Err(anyhow::anyhow!("{}", e)),
@@ -111,8 +103,7 @@ async fn s14_provider_500_reflected_in_report() {
 
 #[tokio::test]
 async fn s14_provider_err_surfaces_as_unhealthy_not_panic() {
-    let probe = FaultyProbe::new()
-        .with_provider(Err(anyhow::anyhow!("connection refused")));
+    let probe = FaultyProbe::new().with_provider(Err(anyhow::anyhow!("connection refused")));
     let config = ironhermes_core::Config::default();
     let tmp = tempfile::tempdir().unwrap();
     let args = baseline_args(true, false);

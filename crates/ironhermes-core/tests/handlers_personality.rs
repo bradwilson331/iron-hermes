@@ -5,12 +5,12 @@
 //! Note: ironhermes-agent is NOT a dep of ironhermes-core (leaf crate invariant),
 //! so we implement PersonalityHandle directly via a fake struct.
 
-use std::sync::{Arc, atomic::AtomicBool};
 use ironhermes_core::commands::context::{CommandContext, PersonalityHandle};
-use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
+use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::types::Platform;
+use std::sync::{Arc, atomic::AtomicBool};
 
 // =============================================================================
 // Fake PersonalityHandle implementation (PATTERNS.md Cat-5B)
@@ -81,7 +81,11 @@ fn make_router() -> CommandRouter {
 fn personality_list_mode_returns_preset_names() {
     let ctx = make_test_ctx_with_personality();
     let router = make_router();
-    let def = router.commands.iter().find(|c| c.name == "personality").unwrap();
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == "personality")
+        .unwrap();
     let result = dispatch(def, &[], &ctx, &router);
     match result {
         CommandResult::Output(text) => {
@@ -99,7 +103,11 @@ fn personality_list_mode_returns_preset_names() {
 fn personality_apply_known_preset_returns_overlay_text() {
     let ctx = make_test_ctx_with_personality();
     let router = make_router();
-    let def = router.commands.iter().find(|c| c.name == "personality").unwrap();
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == "personality")
+        .unwrap();
     let result = dispatch(def, &["concise"], &ctx, &router);
     match result {
         CommandResult::Output(text) => {
@@ -118,7 +126,11 @@ fn personality_apply_known_preset_returns_overlay_text() {
 fn personality_apply_unknown_returns_error() {
     let ctx = make_test_ctx_with_personality();
     let router = make_router();
-    let def = router.commands.iter().find(|c| c.name == "personality").unwrap();
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == "personality")
+        .unwrap();
     let result = dispatch(def, &["nonexistent_preset_xyz"], &ctx, &router);
     match result {
         CommandResult::Error(msg) => {
@@ -136,7 +148,11 @@ fn personality_apply_unknown_returns_error() {
 fn personality_no_registry_returns_not_configured() {
     let ctx = make_ctx_no_personality();
     let router = make_router();
-    let def = router.commands.iter().find(|c| c.name == "personality").unwrap();
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == "personality")
+        .unwrap();
     let result = dispatch(def, &[], &ctx, &router);
     match result {
         CommandResult::Output(text) => {

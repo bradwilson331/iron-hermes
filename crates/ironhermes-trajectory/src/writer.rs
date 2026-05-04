@@ -57,9 +57,11 @@ impl TrajectoryWriter {
         let mut line =
             serde_json::to_string(entry).with_context(|| "serialize trajectory entry")?;
         line.push('\n');
-        self.file.write_all(line.as_bytes())
+        self.file
+            .write_all(line.as_bytes())
             .with_context(|| format!("write trajectory line to {}", self.path.display()))?;
-        self.file.sync_data()
+        self.file
+            .sync_data()
             .with_context(|| format!("fsync trajectory file {}", self.path.display()))?;
         Ok(())
     }
@@ -72,11 +74,14 @@ impl TrajectoryWriter {
     /// Caller passes the JSON line WITHOUT a trailing newline — this method
     /// appends `\n` and calls `sync_data()` (same crash-safety contract as `append`).
     pub fn append_raw_line(&mut self, line: &str) -> Result<()> {
-        self.file.write_all(line.as_bytes())
+        self.file
+            .write_all(line.as_bytes())
             .with_context(|| format!("write trajectory raw line to {}", self.path.display()))?;
-        self.file.write_all(b"\n")
+        self.file
+            .write_all(b"\n")
             .with_context(|| format!("write trajectory newline to {}", self.path.display()))?;
-        self.file.sync_data()
+        self.file
+            .sync_data()
             .with_context(|| format!("fsync trajectory file {}", self.path.display()))?;
         Ok(())
     }
@@ -127,10 +132,18 @@ mod tests {
     #[test]
     fn open_creates_parent_directories() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("a").join("b").join("c").join("trajectories.jsonl");
+        let path = dir
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("trajectories.jsonl");
         assert!(!path.parent().unwrap().exists());
         let _w = TrajectoryWriter::open(&path).expect("open with missing parent dirs");
-        assert!(path.parent().unwrap().exists(), "parent dirs must be created");
+        assert!(
+            path.parent().unwrap().exists(),
+            "parent dirs must be created"
+        );
         assert!(path.exists(), "trajectory file must be created");
     }
 
@@ -143,7 +156,11 @@ mod tests {
         // Read back via separate handle to verify on-disk state
         let lines = read_lines(&path);
         assert_eq!(lines.len(), 1, "exactly one line after one append");
-        assert!(lines[0].contains("\"tool_call_id\":\"t1\""), "got: {:?}", lines[0]);
+        assert!(
+            lines[0].contains("\"tool_call_id\":\"t1\""),
+            "got: {:?}",
+            lines[0]
+        );
         // Verify no embedded newline INSIDE the JSON (the serializer's job, locked by Plan 1)
         assert!(!lines[0].contains('\n'));
     }
@@ -158,7 +175,13 @@ mod tests {
         for i in 0..5 {
             w.append(&sample_entry(&format!("t{i}"), i)).unwrap();
             let lines = read_lines(&path);
-            assert_eq!(lines.len(), i + 1, "after {} appends, {} lines on disk", i + 1, i + 1);
+            assert_eq!(
+                lines.len(),
+                i + 1,
+                "after {} appends, {} lines on disk",
+                i + 1,
+                i + 1
+            );
         }
     }
 
@@ -221,8 +244,10 @@ mod tests {
         // Critical: NO panic, error message contains the path.
         if let Err(e) = res {
             let msg = format!("{:#}", e);
-            assert!(msg.contains("trajectory") || msg.contains("/proc"),
-                "error must reference the failed path/op; got: {msg}");
+            assert!(
+                msg.contains("trajectory") || msg.contains("/proc"),
+                "error must reference the failed path/op; got: {msg}"
+            );
         }
     }
 }

@@ -16,6 +16,7 @@ members = [
     "providers/memory-grafeo",
     "providers/memory-duckdb",
     "crates/iron_hermes_ui",
+    "crates/ironagent-tools-api",
 ]
 default-members = [
     "crates/ironhermes-core",

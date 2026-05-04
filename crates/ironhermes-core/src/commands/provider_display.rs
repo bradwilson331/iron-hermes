@@ -52,12 +52,7 @@ pub fn render_provider_list(rows: Vec<ProviderRow>) -> String {
         };
         out.push_str(&format!(
             "{:<18} {:<36} {:<22} {:<20} {:<10} {}\n",
-            name_disp,
-            row.base_url,
-            row.api_key_status,
-            row.default_model,
-            row.role,
-            row.fallbacks,
+            name_disp, row.base_url, row.api_key_status, row.default_model, row.role, row.fallbacks,
         ));
     }
     out
@@ -155,7 +150,10 @@ mod tests {
         assert!(out.contains("API key:"), "missing API key label");
         assert!(out.contains("Fallbacks:"), "missing Fallbacks label");
         // T-26-01: no key value leakage
-        assert!(!out.contains("sk-"), "sk- prefix must not appear in show output");
+        assert!(
+            !out.contains("sk-"),
+            "sk- prefix must not appear in show output"
+        );
     }
 
     #[test]

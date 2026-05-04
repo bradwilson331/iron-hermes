@@ -20,18 +20,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use ironhermes_core::provider::ProviderResolver;
 use ironhermes_core::ToolSchema;
+use ironhermes_core::provider::ProviderResolver;
 use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 /// Phase 25.1 D-09: default prompt when `browser_vision` is called without a prompt arg.
-pub const DEFAULT_PROMPT: &str =
-    "Describe what's visible on this page in detail, including any interactive elements, \
+pub const DEFAULT_PROMPT: &str = "Describe what's visible on this page in detail, including any interactive elements, \
      text content, and visual structure.";
 
 // =============================================================================
@@ -50,11 +49,7 @@ pub const DEFAULT_PROMPT: &str =
 /// - Returns the LLM response text on success.
 #[async_trait]
 pub trait VisionClientHandle: Send + Sync {
-    async fn vision_call(
-        &self,
-        prompt: String,
-        image_data_url: String,
-    ) -> anyhow::Result<String>;
+    async fn vision_call(&self, prompt: String, image_data_url: String) -> anyhow::Result<String>;
 }
 
 // =============================================================================
@@ -82,7 +77,11 @@ impl BrowserVisionTool {
         resolver: Arc<ProviderResolver>,
         vision_client: Arc<dyn VisionClientHandle>,
     ) -> Self {
-        Self { session, resolver, vision_client }
+        Self {
+            session,
+            resolver,
+            vision_client,
+        }
     }
 
     /// D-06 helper: vision is available when EITHER a vision role is resolvable OR
@@ -177,8 +176,8 @@ impl Tool for BrowserVisionTool {
             let mut guard = self.session.lock().await;
             let sess = ensure_session(&mut guard).await?;
 
-            use chromiumoxide::page::ScreenshotParams;
             use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+            use chromiumoxide::page::ScreenshotParams;
 
             sess.page
                 .screenshot(
@@ -193,7 +192,10 @@ impl Tool for BrowserVisionTool {
             // so other browser_* tools are not blocked during the network call.
         };
 
-        debug!(bytes = screenshot_bytes.len(), "browser_vision: screenshot captured");
+        debug!(
+            bytes = screenshot_bytes.len(),
+            "browser_vision: screenshot captured"
+        );
 
         // 2. Base64 encode + assemble data URL (D-08).
         let b64 = base64::engine::general_purpose::STANDARD.encode(&screenshot_bytes);
@@ -250,7 +252,9 @@ impl VisionClientHandle for NoOpVisionHandle {
         _prompt: String,
         _image_data_url: String,
     ) -> anyhow::Result<String> {
-        anyhow::bail!("browser_vision: no vision client wired — call register_browser_tools_with_vision instead of register_browser_tools")
+        anyhow::bail!(
+            "browser_vision: no vision client wired — call register_browser_tools_with_vision instead of register_browser_tools"
+        )
     }
 }
 
@@ -319,11 +323,15 @@ mod tests {
             "browser_vision MUST declare BOTH chromium binary AND vision-or-multimodal-main"
         );
         assert!(
-            prereqs.iter().any(|p| p.kind == "binary_present" && p.name == "chromium-or-chrome"),
+            prereqs
+                .iter()
+                .any(|p| p.kind == "binary_present" && p.name == "chromium-or-chrome"),
             "missing binary_present/chromium-or-chrome prereq"
         );
         assert!(
-            prereqs.iter().any(|p| p.kind == "config_field" && p.name.contains("vision")),
+            prereqs
+                .iter()
+                .any(|p| p.kind == "config_field" && p.name.contains("vision")),
             "missing config_field/vision prereq"
         );
     }

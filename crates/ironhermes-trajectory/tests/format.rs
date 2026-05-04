@@ -23,14 +23,35 @@ fn trajectory_entry_jsonl_format_matches_golden() {
     let line = serde_json::to_string(&entry).unwrap();
 
     // Required D-T-1 fields:
-    assert!(line.contains("\"name\":\"write_file\""), "missing name; got: {line}");
-    assert!(line.contains("\"impact_level\":\"write\""), "missing impact_level; got: {line}");
-    assert!(line.contains("\"turn_index\":1"), "missing turn_index; got: {line}");
-    assert!(line.contains("\"duration_ms\":42"), "missing duration_ms; got: {line}");
-    assert!(line.contains("\"tool_call_id\":\"toolu_abc123\""), "missing tool_call_id; got: {line}");
-    assert!(line.contains("\"ts\":\"2026-05-03T10:00:00+00:00\""), "missing ts; got: {line}");
+    assert!(
+        line.contains("\"name\":\"write_file\""),
+        "missing name; got: {line}"
+    );
+    assert!(
+        line.contains("\"impact_level\":\"write\""),
+        "missing impact_level; got: {line}"
+    );
+    assert!(
+        line.contains("\"turn_index\":1"),
+        "missing turn_index; got: {line}"
+    );
+    assert!(
+        line.contains("\"duration_ms\":42"),
+        "missing duration_ms; got: {line}"
+    );
+    assert!(
+        line.contains("\"tool_call_id\":\"toolu_abc123\""),
+        "missing tool_call_id; got: {line}"
+    );
+    assert!(
+        line.contains("\"ts\":\"2026-05-03T10:00:00+00:00\""),
+        "missing ts; got: {line}"
+    );
     assert!(line.contains("\"args\":"), "missing args; got: {line}");
-    assert!(line.contains("\"result\":\"wrote 5 bytes\""), "missing result; got: {line}");
+    assert!(
+        line.contains("\"result\":\"wrote 5 bytes\""),
+        "missing result; got: {line}"
+    );
 
     // Wire-shape invariants for Plan 4 writer:
     assert!(
@@ -46,9 +67,18 @@ fn trajectory_entry_jsonl_format_matches_golden() {
 #[test]
 fn impact_level_wire_strings_locked() {
     // Phase 25.4 Curator heuristic D-C-2 expects these literal strings.
-    assert_eq!(serde_json::to_string(&ImpactLevel::Read).unwrap(), "\"read\"");
-    assert_eq!(serde_json::to_string(&ImpactLevel::Write).unwrap(), "\"write\"");
-    assert_eq!(serde_json::to_string(&ImpactLevel::SystemChange).unwrap(), "\"system_change\"");
+    assert_eq!(
+        serde_json::to_string(&ImpactLevel::Read).unwrap(),
+        "\"read\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ImpactLevel::Write).unwrap(),
+        "\"write\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ImpactLevel::SystemChange).unwrap(),
+        "\"system_change\""
+    );
 }
 
 #[test]
@@ -79,7 +109,10 @@ fn jsonl_lines_concatenate_cleanly() {
             ts: "2026-05-03T10:00:01+00:00".to_string(),
         },
     ];
-    let blob: String = entries.iter().map(|e| serde_json::to_string(e).unwrap() + "\n").collect();
+    let blob: String = entries
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap() + "\n")
+        .collect();
     let lines: Vec<&str> = blob.split_terminator('\n').collect();
     assert_eq!(lines.len(), 2, "two entries -> two lines");
     for (i, l) in lines.iter().enumerate() {

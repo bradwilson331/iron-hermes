@@ -17,8 +17,8 @@ use anyhow::Result;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::tui_rata::app::{App, AppDeps};
@@ -110,10 +110,15 @@ async fn run_with_deps(
 ///
 /// Concrete identifiers — grep-verified iteration 2. All 14 D-18 items below.
 async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDeps> {
-    use ironhermes_agent::{build_main_client, build_client as build_provider_client, AgentSubagentRunner, AnyClientVisionHandle};
     use ironhermes_agent::budget::BudgetHandle;
+    use ironhermes_agent::{
+        AgentSubagentRunner, AnyClientVisionHandle, AppRuntimeFactoryInput, DelegateTaskWiring,
+        build_app_runtime_bundle, build_client as build_provider_client, build_main_client,
+    };
+    use ironhermes_core::commands::{
+        CommandRouter, registry::build_registry as build_command_registry,
+    };
     use ironhermes_core::{Config, ProviderResolver};
-    use ironhermes_core::commands::{CommandRouter, registry::build_registry as build_command_registry};
 
     // UAT Gap 3 (Phase 22.4 Plan 22.4-16): shared mouse-capture state. Initial
     // value `true` matches the EnableMouseCapture call at run_chat_ratatui.
@@ -130,8 +135,16 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
 
     // Session setup — D-08 parity: ensure home dirs before anything else.
     let hermes_home = ironhermes_core::get_hermes_home();
-    for sub in &["cron", "sessions", "logs", "hooks", "memories", "skills",
-                 "workspace", "subagent-transcripts"] {
+    for sub in &[
+        "cron",
+        "sessions",
+        "logs",
+        "hooks",
+        "memories",
+        "skills",
+        "workspace",
+        "subagent-transcripts",
+    ] {
         std::fs::create_dir_all(hermes_home.join(sub))?;
     }
     ensure_home_dirs(&hermes_home)?;
@@ -157,8 +170,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     ));
 
     // D-18 item 4: MemoryManager (Option — None when config.memory.memory_enabled=false)
-    let memory_manager = ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
-        .await?;
+    let memory_manager =
+        ironhermes_agent::memory::factory::build_memory_manager(&config.memory).await?;
 
     // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — moved UP from later in build_app_deps so
     // delegate_task and fallback_client (both need `client`) can be constructed before
@@ -171,29 +184,31 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         build_main_client(&resolver)?
     };
     let context_length = resolver.resolve_for_main().context_length();
-    let budget = BudgetHandle::new(
-        cli.max_turns.unwrap_or(config.agent.max_turns),
-    );
+    let budget = BudgetHandle::new(cli.max_turns.unwrap_or(config.agent.max_turns));
 
     // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — PROV-07 fallback parity with classic
     // main.rs:631-637. Resolve once per session; spawn_turn clones the
     // Option<AnyClient> and chains .with_fallback(...) per turn.
     let fallback_client: Option<ironhermes_agent::AnyClient> = {
         let main_endpoint = resolver.resolve_for_main();
-        main_endpoint.fallback_providers.first().and_then(|fb_name| {
-            build_provider_client(&resolver, fb_name, &main_endpoint.default_model).ok()
-        })
+        main_endpoint
+            .fallback_providers
+            .first()
+            .and_then(|fb_name| {
+                build_provider_client(&resolver, fb_name, &main_endpoint.default_model).ok()
+            })
     };
+
+    let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
 
     // D-18 item 10: ToolRegistry + tool registrations
     let cron_dir = hermes_home.join("cron");
-    let job_store = Arc::new(Mutex::new(
-        ironhermes_cron::JobStore::open(cron_dir)?,
-    ));
+    let job_store = Arc::new(Mutex::new(ironhermes_cron::JobStore::open(cron_dir)?));
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(
-        ironhermes_core::SkillRegistry::load_with_config(&cwd, &config.skills)
-    );
+    let skill_registry = Arc::new(ironhermes_core::SkillRegistry::load_with_config(
+        &cwd,
+        &config.skills,
+    ));
     let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
@@ -220,22 +235,39 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // execute_code's safe subset still needs them.
 
     // (a) delegate_task — D-18 item 5 / AGENT-01..05 (lift from main.rs:487-507)
-    let subagent_semaphore = Arc::new(
-        tokio::sync::Semaphore::new(config.subagent.max_subagents),
-    );
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(
-            client.clone(),
-            resolver.clone(),
-            Some(budget.clone()),
-        )
-        .with_subagent_registry(subagent_registry.clone())
-        .with_transcript_scope(hermes_home.clone(), session_id.clone()),
+        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
+            .with_subagent_registry(subagent_registry.clone())
+            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
     );
+
+    let _runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+        config: Arc::new(config.clone()),
+        resolver: Arc::new(resolver.clone()),
+        cwd: cwd.clone(),
+        process_registry: process_registry.clone(),
+        memory_manager: memory_manager
+            .clone()
+            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
+        delegate_task: Some(DelegateTaskWiring {
+            runner: subagent_runner.clone(),
+            semaphore: subagent_semaphore.clone(),
+            config: config.subagent.clone(),
+            cancel_token: Some(cancel_parent.clone()),
+            progress_callback: None,
+        }),
+        hooks_config: hooks_config.clone(),
+        emit_mcp_startup_logs: true,
+    })
+    .await?;
+
     registry.register_delegate_task_tool(
         subagent_runner,
         subagent_semaphore,
-        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
+        memory_manager
+            .clone()
+            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
         config.subagent.clone(),
         Some(cancel_parent.clone()),
         None, // no progress callback in Phase 22.4 (status-pill integration is follow-up)
@@ -269,9 +301,12 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // Wired identically across run_chat / run_single / run_gateway / run_chat_ratatui (Phase 22 D-04 invariant).
     // Phase 25.1 GAP-8 closure (plan 25.1-19): mirror of run_chat (main.rs:1173-1184) into the rata REPL bootstrap.
     // Without this block, `ironhermes chat` (which dispatches to run_chat_ratatui) omits all 11 browser_* tools.
-    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
+    let browser_session: std::sync::Arc<
+        tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+    > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(
+        resolver.clone(),
+    )));
     registry.register_browser_tools_with_vision(
         browser_session.clone(),
         std::sync::Arc::new(resolver.clone()),
@@ -280,11 +315,10 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     );
 
     // D-18 item 9: BlocklistGuardrail (before Arc wrap — D-05)
-    let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
     if !hooks_config.blocked_tools.is_empty() {
-        registry.add_guardrail(Box::new(
-            ironhermes_hooks::BlocklistGuardrail::from_config(&hooks_config),
-        ));
+        registry.add_guardrail(Box::new(ironhermes_hooks::BlocklistGuardrail::from_config(
+            &hooks_config,
+        )));
     }
     registry.set_error_detail(hooks_config.error_detail.clone());
 
@@ -315,9 +349,15 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
     // Workspace is resolved, else ~/.ironhermes/sessions/<id>/trajectories.jsonl.
     // Uses the same session_id as the StateStore canonical UUID (resolved at L143).
-    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+    let trajectory_writer: Option<
+        Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    > = {
         let traj_dir = match &workspace {
-            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&session_id),
+            Some(ws) => ws
+                .root
+                .join(".ironhermes")
+                .join("sessions")
+                .join(&session_id),
             None => hermes_home.join("sessions").join(&session_id),
         };
         let traj_path = traj_dir.join("trajectories.jsonl");
@@ -327,7 +367,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
                 // so the handle satisfies Arc<dyn TrajectoryWriterHandle>.
                 let arc_writer = Arc::new(std::sync::Mutex::new(w));
                 let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
-                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                        arc_writer,
+                    ));
                 Some(handle)
             }
             Err(e) => {
@@ -344,28 +386,29 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // D-18 item 2: HookRegistry + listeners (JSONL + webhooks + drain_retry_queue)
     let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
     if hooks_config.event_log.enabled {
-        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
+        let log_path = hooks_config
+            .event_log
+            .path
+            .as_ref()
+            .map(std::path::PathBuf::from);
         hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
     }
-    let retry_queue = Arc::new(
-        ironhermes_hooks::RetryQueue::new(
-            ironhermes_hooks::RetryQueue::default_path(),
-        )?,
-    );
+    let retry_queue = Arc::new(ironhermes_hooks::RetryQueue::new(
+        ironhermes_hooks::RetryQueue::default_path(),
+    )?);
     for endpoint in &hooks_config.webhooks {
-        hook_registry.add_listener(
-            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone()),
-        );
+        hook_registry.add_listener(ironhermes_hooks::create_webhook_listener(
+            endpoint.clone(),
+            retry_queue.clone(),
+        ));
     }
     let hook_registry = Arc::new(hook_registry);
-    let default_ttl = hooks_config.webhooks.first()
+    let default_ttl = hooks_config
+        .webhooks
+        .first()
         .and_then(|e| e.queue_ttl_hours)
         .unwrap_or(24);
-    ironhermes_hooks::drain_retry_queue(
-        retry_queue,
-        &hooks_config.webhooks,
-        default_ttl,
-    ).await;
+    ironhermes_hooks::drain_retry_queue(retry_queue, &hooks_config.webhooks, default_ttl).await;
 
     // D-18 item 7: CommandRouter from build_command_registry
     let command_router = Arc::new(CommandRouter::new(build_command_registry()));
@@ -446,10 +489,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     //
     // Mirrors run_chat field-for-field except for `source = "cli-repl"`.
     let system_message: Option<ironhermes_core::types::ChatMessage> = {
-        let mut prompt_builder = ironhermes_agent::prompt_builder::PromptBuilder::new(
-            client.model(),
-            "cli-repl",
-        );
+        let mut prompt_builder =
+            ironhermes_agent::prompt_builder::PromptBuilder::new(client.model(), "cli-repl");
         // Identity-slot workspace line — frozen at session start; never mutated mid-session
         // (D-W-1 frozen-snapshot pattern). Cache-stable in the durable slot 1.
         if let Some(ref ws) = workspace {
@@ -466,12 +507,10 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     };
 
     // PersonalityRegistry: load built-ins + any custom presets from hermes_home.
-    let personality_overlay = Arc::new(
-        ironhermes_agent::personality::PersonalityRegistry::load(
-            &std::collections::HashMap::new(),
-            &hermes_home,
-        )
-    );
+    let personality_overlay = Arc::new(ironhermes_agent::personality::PersonalityRegistry::load(
+        &std::collections::HashMap::new(),
+        &hermes_home,
+    ));
 
     // Phase 22.4.2 Plan 00: D-09 session-toggle Arc fields
     let yolo_enabled = Arc::new(std::sync::atomic::AtomicBool::new(yolo));
@@ -528,8 +567,16 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
 
 /// Create subdirectories under hermes_home (D-21 / ensure_home_dirs parity).
 fn ensure_home_dirs(hermes_home: &std::path::Path) -> Result<()> {
-    for sub in &["cron", "sessions", "logs", "hooks", "memories", "skills",
-                 "workspace", "subagent-transcripts"] {
+    for sub in &[
+        "cron",
+        "sessions",
+        "logs",
+        "hooks",
+        "memories",
+        "skills",
+        "workspace",
+        "subagent-transcripts",
+    ] {
         std::fs::create_dir_all(hermes_home.join(sub))?;
     }
     Ok(())
@@ -566,8 +613,8 @@ async fn build_mcp_manager(
 
 async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     use crossterm::event::EventStream;
-    use tokio_stream::StreamExt;
     use tokio::{signal, time};
+    use tokio_stream::StreamExt;
 
     let mut events = EventStream::new(); // Pitfall 10 — local to fn, not on App
 
@@ -625,7 +672,12 @@ async fn recv_pending(app: &mut App) -> Option<StreamEvent> {
 /// Used by `run_app_inner` to pass `transcript_area` to `reconcile_scroll`.
 fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
-    let frame_area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+    let frame_area = Rect {
+        x: 0,
+        y: 0,
+        width: size.width,
+        height: size.height,
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -678,9 +730,10 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
 
         // Build a per-turn AgentLoop with streaming + tool callbacks that send StreamEvents.
         let tx_delta = tx.clone();
-        let streaming_cb: ironhermes_agent::agent_loop::StreamCallback = Box::new(move |chunk: &str| {
-            let _ = tx_delta.send(StreamEvent::Delta(chunk.to_string()));
-        });
+        let streaming_cb: ironhermes_agent::agent_loop::StreamCallback =
+            Box::new(move |chunk: &str| {
+                let _ = tx_delta.send(StreamEvent::Delta(chunk.to_string()));
+            });
 
         // Phase 22.4 D-17 / CR-02 gap closure: forward every tool invocation
         // to the UI event loop. The (name, preview) pair is authored by
@@ -690,7 +743,9 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         let tx_tool_progress = tx.clone();
         let tool_progress_cb: ironhermes_agent::agent_loop::ToolProgressCallback =
             Box::new(move |name: &str, phase: &str| {
-                let _ = tx_tool_progress.send(StreamEvent::ToolCall { name: name.to_string() });
+                let _ = tx_tool_progress.send(StreamEvent::ToolCall {
+                    name: name.to_string(),
+                });
                 let _ = tx_tool_progress.send(StreamEvent::ToolProgress {
                     name: name.to_string(),
                     phase: phase.to_string(),
@@ -709,18 +764,14 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                 });
             });
 
-        let mut agent = ironhermes_agent::agent_loop::AgentLoop::new(
-            client,
-            registry,
-            max_turns,
-        )
-        .with_budget(budget)
-        .with_cancellation_token(cancel_token.clone())
-        .with_hook_registry(hook_registry)
-        .with_compression(context_length, config_compression)
-        .with_streaming(streaming_cb)
-        .with_tool_progress(tool_progress_cb)
-        .with_tool_result(tool_result_cb);
+        let mut agent = ironhermes_agent::agent_loop::AgentLoop::new(client, registry, max_turns)
+            .with_budget(budget)
+            .with_cancellation_token(cancel_token.clone())
+            .with_hook_registry(hook_registry)
+            .with_compression(context_length, config_compression)
+            .with_streaming(streaming_cb)
+            .with_tool_progress(tool_progress_cb)
+            .with_tool_result(tool_result_cb);
 
         // Phase 25.1 D-17 / GAP-8 (plan 25.1-19): per-turn AgentLoop holds the same
         // browser_session Arc as the App-level AgentLoop, so D-03's "one browser per
@@ -770,32 +821,42 @@ mod tests {
     fn inv_25_1_gap8_browser_tools_wired_in_rata_chat() {
         let source = include_str!("event_loop.rs");
         // Filter comments to dodge the self-invalidating-grep-gate trap.
-        let non_comment: String = source.lines()
+        let non_comment: String = source
+            .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
 
-        let reg_count = non_comment.matches("register_browser_tools_with_vision(").count();
-        assert!(reg_count >= 1,
+        let reg_count = non_comment
+            .matches("register_browser_tools_with_vision(")
+            .count();
+        assert!(
+            reg_count >= 1,
             "Phase 25.1 GAP-8 (plan 25.1-19): rata bootstrap MUST call \
              register_browser_tools_with_vision in build_app_deps; got {} non-comment calls",
-            reg_count);
+            reg_count
+        );
 
         // Plan-14 Arc<Config> threading: the call MUST receive Arc::new(config.clone()) as its 4th arg.
         let cfg_count = non_comment.matches("Arc::new(config.clone())").count();
-        assert!(cfg_count >= 1,
+        assert!(
+            cfg_count >= 1,
             "Phase 25.1 GAP-8 + plan 25.1-14: register_browser_tools_with_vision in the \
              rata bootstrap MUST receive Arc::new(config.clone()) so allowlist (D-15) and \
              yolo gating (D-13) reach the chat REPL's browser tools; got {} occurrences",
-            cfg_count);
+            cfg_count
+        );
 
         // Both AgentLoop builders MUST chain .with_browser_session(...) — one in build_app_deps,
         // one in spawn_turn. So we expect at least 2 occurrences.
         let with_count = non_comment.matches(".with_browser_session(").count();
-        assert!(with_count >= 2,
+        assert!(
+            with_count >= 2,
             "Phase 25.1 GAP-8 (plan 25.1-19): BOTH the App-level AgentLoop (build_app_deps) \
              AND the per-turn AgentLoop (spawn_turn) MUST chain .with_browser_session(); \
-             got {} occurrences", with_count);
+             got {} occurrences",
+            with_count
+        );
     }
 
     /// Phase 25.1 GAP-8 behavioral test: verify that calling register_browser_tools_with_vision
@@ -825,23 +886,38 @@ mod tests {
             Arc::new(config),
         );
 
-        let names: std::collections::HashSet<String> = registry.list_tools()
+        let names: std::collections::HashSet<String> = registry
+            .list_tools()
             .into_iter()
             .map(|s| s.to_string())
             .collect();
 
         for expected in &[
-            "browser_back", "browser_click", "browser_close", "browser_console",
-            "browser_get_images", "browser_navigate", "browser_press", "browser_scroll",
-            "browser_snapshot", "browser_type", "browser_vision",
+            "browser_back",
+            "browser_click",
+            "browser_close",
+            "browser_console",
+            "browser_get_images",
+            "browser_navigate",
+            "browser_press",
+            "browser_scroll",
+            "browser_snapshot",
+            "browser_type",
+            "browser_vision",
         ] {
-            assert!(names.contains(*expected),
+            assert!(
+                names.contains(*expected),
                 "Phase 25.1 GAP-8 (plan 25.1-19): rata bootstrap call shape MUST register \
-                 {} (got: {:?})", expected, names);
+                 {} (got: {:?})",
+                expected,
+                names
+            );
         }
 
         let browser_count = names.iter().filter(|n| n.starts_with("browser_")).count();
-        assert_eq!(browser_count, 11,
-            "Phase 25.1 D-04: exactly 11 browser_* tools must be registered");
+        assert_eq!(
+            browser_count, 11,
+            "Phase 25.1 D-04: exactly 11 browser_* tools must be registered"
+        );
     }
 }

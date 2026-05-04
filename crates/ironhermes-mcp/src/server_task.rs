@@ -2,10 +2,10 @@ use crate::config::McpServerConfig;
 use crate::security::sanitize_error;
 use crate::tool::{McpCallRequest, McpTool};
 use crate::transport;
-use ironhermes_tools::registry::Tool;
 use ironhermes_tools::ToolRegistry;
-use std::sync::atomic::{AtomicBool, Ordering};
+use ironhermes_tools::registry::Tool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -57,7 +57,16 @@ pub async fn run_server_task(
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match connect_and_serve(&name, &config, &registry, &cancel_token, &connected, &child_slot).await {
+        match connect_and_serve(
+            &name,
+            &config,
+            &registry,
+            &cancel_token,
+            &connected,
+            &child_slot,
+        )
+        .await
+        {
             Ok(names) => {
                 registered_names = names;
                 failure_reason = None; // connected successfully; clean exit
@@ -327,10 +336,7 @@ mod tests {
             tool_names: vec![],
             failure_reason: Some("connection refused".to_string()),
         };
-        assert_eq!(
-            result.failure_reason.as_deref(),
-            Some("connection refused")
-        );
+        assert_eq!(result.failure_reason.as_deref(), Some("connection refused"));
 
         let success = ServerTaskResult {
             server_name: "test".to_string(),

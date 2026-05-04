@@ -49,11 +49,19 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let m = a.len();
     let n = b.len();
-    if m == 0 { return n; }
-    if n == 0 { return m; }
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m { dp[i][0] = i; }
-    for j in 0..=n { dp[0][j] = j; }
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
     for i in 1..=m {
         for j in 1..=n {
             dp[i][j] = if a[i - 1] == b[j - 1] {
@@ -97,12 +105,18 @@ mod tests {
     fn typo_three_candidates_returns_some() {
         // All three within distance 2 of "ax".
         let result = suggest_typo("ax", &["a", "ab", "axe"]);
-        assert!(result.is_some(), "3 matches within threshold should return Some");
+        assert!(
+            result.is_some(),
+            "3 matches within threshold should return Some"
+        );
         let s = result.unwrap();
         assert!(s.contains("/a"), "should include /a");
         assert!(s.contains("/ab"), "should include /ab");
         assert!(s.contains("/axe"), "should include /axe");
-        assert!(s.starts_with("— did you mean one of:"), "multi-candidate prefix");
+        assert!(
+            s.starts_with("— did you mean one of:"),
+            "multi-candidate prefix"
+        );
     }
 
     #[test]

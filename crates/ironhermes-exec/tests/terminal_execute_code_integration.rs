@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn drain_kills_all_tracked_children_no_zombies() {
-    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     use nix::unistd::Pid as NixPid;
     use sysinfo::{Pid, System};
 
@@ -97,7 +97,10 @@ async fn drain_kills_all_tracked_children_no_zombies() {
                 panic!("E-03: pid {} still alive after drain via WNOHANG", pid)
             }
             Ok(WaitStatus::Stopped(_, _)) => {
-                panic!("E-03: pid {} in Stopped state after drain (not reaped)", pid)
+                panic!(
+                    "E-03: pid {} in Stopped state after drain (not reaped)",
+                    pid
+                )
             }
             // All other outcomes (ECHILD / Exited / Signaled etc.) are fine — the
             // child is not a zombie from this process's perspective.
@@ -198,11 +201,10 @@ async fn start_output_drain_broadcasts_watch_event_on_match() {
         .expect("start_output_drain");
 
     // Wait for the drain task to flow the matched line → broadcast.
-    let event =
-        tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("drain + broadcast must complete within 5s")
-            .expect("broadcast channel must yield a WatchEvent");
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("drain + broadcast must complete within 5s")
+        .expect("broadcast channel must yield a WatchEvent");
 
     assert_eq!(event.session_id, id);
     assert!(

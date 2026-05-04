@@ -18,12 +18,17 @@ pub struct KeybindingRegistry {
 impl KeybindingRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
-        Self { bindings: Vec::new() }
+        Self {
+            bindings: Vec::new(),
+        }
     }
 
     /// Collect keybindings from all extensions into a single registry.
     pub fn register_from_extensions(extensions: &[Box<dyn TuiExtension>]) -> Self {
-        let bindings = extensions.iter().flat_map(|ext| ext.keybindings()).collect();
+        let bindings = extensions
+            .iter()
+            .flat_map(|ext| ext.keybindings())
+            .collect();
         Self { bindings }
     }
 
@@ -38,11 +43,14 @@ impl KeybindingRegistry {
     ///   - `KeyContext::InFlight` matches `InFlight` context
     ///   - `KeyContext::Always` matches both
     pub fn match_key(&self, key: &KeyEvent, context: &KeyContext) -> Option<&str> {
-        self.bindings.iter().find(|b| {
-            b.key.code == key.code
-                && b.key.modifiers == key.modifiers
-                && context_matches(&b.when, context)
-        }).map(|b| b.action_name.as_str())
+        self.bindings
+            .iter()
+            .find(|b| {
+                b.key.code == key.code
+                    && b.key.modifiers == key.modifiers
+                    && context_matches(&b.when, context)
+            })
+            .map(|b| b.action_name.as_str())
     }
 
     /// Return tuples of `(key_display, description, context)` for all registered
@@ -144,7 +152,12 @@ mod tests {
         make_key(code, KeyModifiers::NONE)
     }
 
-    fn make_binding(code: KeyCode, modifiers: KeyModifiers, when: KeyContext, action: &str) -> Keybinding {
+    fn make_binding(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        when: KeyContext,
+        action: &str,
+    ) -> Keybinding {
         Keybinding {
             key: make_key(code, modifiers),
             description: format!("Action: {}", action),
@@ -158,13 +171,19 @@ mod tests {
     }
 
     impl TuiExtension for ExtWithBindings {
-        fn name(&self) -> &str { "ext_with_bindings" }
-        fn keybindings(&self) -> Vec<Keybinding> { self.bindings.clone() }
+        fn name(&self) -> &str {
+            "ext_with_bindings"
+        }
+        fn keybindings(&self) -> Vec<Keybinding> {
+            self.bindings.clone()
+        }
     }
 
     struct NoOpExt;
     impl TuiExtension for NoOpExt {
-        fn name(&self) -> &str { "noop" }
+        fn name(&self) -> &str {
+            "noop"
+        }
     }
 
     // --- Construction ---
@@ -181,8 +200,18 @@ mod tests {
     fn register_from_extensions_collects_bindings() {
         let ext: Box<dyn TuiExtension> = Box::new(ExtWithBindings {
             bindings: vec![
-                make_binding(KeyCode::Char('t'), KeyModifiers::CONTROL, KeyContext::Idle, "toggle"),
-                make_binding(KeyCode::F(1), KeyModifiers::NONE, KeyContext::Always, "help"),
+                make_binding(
+                    KeyCode::Char('t'),
+                    KeyModifiers::CONTROL,
+                    KeyContext::Idle,
+                    "toggle",
+                ),
+                make_binding(
+                    KeyCode::F(1),
+                    KeyModifiers::NONE,
+                    KeyContext::Always,
+                    "help",
+                ),
             ],
         });
         let registry = KeybindingRegistry::register_from_extensions(&[ext]);
@@ -201,7 +230,10 @@ mod tests {
     fn match_key_idle_context_matches_idle_binding() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::Char('t'), KeyModifiers::CONTROL, KeyContext::Idle, "toggle",
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+            KeyContext::Idle,
+            "toggle",
         ));
         let result = registry.match_key(&ctrl_key(KeyCode::Char('t')), &KeyContext::Idle);
         assert_eq!(result, Some("toggle"));
@@ -211,7 +243,10 @@ mod tests {
     fn match_key_idle_context_matches_always_binding() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::F(1), KeyModifiers::NONE, KeyContext::Always, "help",
+            KeyCode::F(1),
+            KeyModifiers::NONE,
+            KeyContext::Always,
+            "help",
         ));
         let result = registry.match_key(&plain_key(KeyCode::F(1)), &KeyContext::Idle);
         assert_eq!(result, Some("help"));
@@ -221,7 +256,10 @@ mod tests {
     fn match_key_idle_context_does_not_match_inflight_binding() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::Char('c'), KeyModifiers::CONTROL, KeyContext::InFlight, "cancel",
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyContext::InFlight,
+            "cancel",
         ));
         let result = registry.match_key(&ctrl_key(KeyCode::Char('c')), &KeyContext::Idle);
         assert_eq!(result, None);
@@ -231,7 +269,10 @@ mod tests {
     fn match_key_inflight_context_matches_inflight_binding() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::Char('c'), KeyModifiers::CONTROL, KeyContext::InFlight, "cancel",
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyContext::InFlight,
+            "cancel",
         ));
         let result = registry.match_key(&ctrl_key(KeyCode::Char('c')), &KeyContext::InFlight);
         assert_eq!(result, Some("cancel"));
@@ -241,7 +282,10 @@ mod tests {
     fn match_key_inflight_context_matches_always_binding() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::F(1), KeyModifiers::NONE, KeyContext::Always, "help",
+            KeyCode::F(1),
+            KeyModifiers::NONE,
+            KeyContext::Always,
+            "help",
         ));
         let result = registry.match_key(&plain_key(KeyCode::F(1)), &KeyContext::InFlight);
         assert_eq!(result, Some("help"));
@@ -251,7 +295,10 @@ mod tests {
     fn match_key_inflight_context_does_not_match_idle_only_binding() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::Char('t'), KeyModifiers::CONTROL, KeyContext::Idle, "toggle",
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+            KeyContext::Idle,
+            "toggle",
         ));
         let result = registry.match_key(&ctrl_key(KeyCode::Char('t')), &KeyContext::InFlight);
         assert_eq!(result, None);
@@ -270,10 +317,16 @@ mod tests {
     fn help_entries_returns_descriptions_for_all_bindings() {
         let mut registry = KeybindingRegistry::new();
         registry.bindings.push(make_binding(
-            KeyCode::Char('t'), KeyModifiers::CONTROL, KeyContext::Idle, "toggle",
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+            KeyContext::Idle,
+            "toggle",
         ));
         registry.bindings.push(make_binding(
-            KeyCode::F(1), KeyModifiers::NONE, KeyContext::Always, "help",
+            KeyCode::F(1),
+            KeyModifiers::NONE,
+            KeyContext::Always,
+            "help",
         ));
         let entries = registry.help_entries();
         assert_eq!(entries.len(), 2);

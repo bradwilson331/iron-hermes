@@ -5,12 +5,12 @@
 //! Note: ironhermes-agent is NOT a dep of ironhermes-core (leaf crate invariant),
 //! so we implement ContextCompressorHandle directly via a stub struct.
 
-use std::sync::{Arc, atomic::AtomicBool};
 use ironhermes_core::commands::context::{CommandContext, ContextCompressorHandle};
-use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
+use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::types::Platform;
+use std::sync::{Arc, atomic::AtomicBool};
 
 // =============================================================================
 // StubContextEngine — fake ContextCompressorHandle (PATTERNS.md Cat-5B)
@@ -67,7 +67,11 @@ fn make_router() -> CommandRouter {
 fn compress_with_no_engine_returns_not_configured() {
     let ctx = make_ctx_no_compressor();
     let router = make_router();
-    let def = router.commands.iter().find(|c| c.name == "compress").unwrap();
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == "compress")
+        .unwrap();
     let result = dispatch(def, &[], &ctx, &router);
     match result {
         CommandResult::Output(text) => {
@@ -86,7 +90,11 @@ fn compress_with_no_engine_returns_not_configured() {
 fn compress_with_stub_engine_returns_status_text() {
     let ctx = make_test_ctx_with_compressor();
     let router = make_router();
-    let def = router.commands.iter().find(|c| c.name == "compress").unwrap();
+    let def = router
+        .commands
+        .iter()
+        .find(|c| c.name == "compress")
+        .unwrap();
     let result = dispatch(def, &[], &ctx, &router);
     match result {
         CommandResult::Output(text) => {
@@ -95,10 +103,7 @@ fn compress_with_stub_engine_returns_status_text() {
                 "status must mention compressor, got: {text}"
             );
             // The handler returns status_text from the engine — verify it's informational.
-            assert!(
-                !text.is_empty(),
-                "compress status text must not be empty"
-            );
+            assert!(!text.is_empty(), "compress status text must not be empty");
         }
         other => panic!("expected Output for compress status, got {other:?}"),
     }

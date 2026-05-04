@@ -21,11 +21,17 @@ pub struct MemoryTool {
 
 impl MemoryTool {
     pub fn new(manager: SharedMemoryManager) -> Self {
-        Self { manager, read_only: false }
+        Self {
+            manager,
+            read_only: false,
+        }
     }
 
     pub fn new_read_only(manager: SharedMemoryManager) -> Self {
-        Self { manager, read_only: true }
+        Self {
+            manager,
+            read_only: true,
+        }
     }
 }
 
@@ -67,7 +73,11 @@ fn format_success_response(action: &str, target: MemoryTarget, json_str: &str) -
             let chars_used = v.get("chars_used").and_then(|x| x.as_u64()).unwrap_or(0);
             let chars_limit = v.get("chars_limit").and_then(|x| x.as_u64()).unwrap_or(0);
             let entries = v.get("entries").and_then(|x| x.as_u64()).unwrap_or(0);
-            let pct = if chars_limit > 0 { chars_used * 100 / chars_limit } else { 0 };
+            let pct = if chars_limit > 0 {
+                chars_used * 100 / chars_limit
+            } else {
+                0
+            };
             format!(
                 "{} to memory. {}: {}% -- {}/{} chars ({} {})",
                 action,
@@ -102,13 +112,11 @@ fn format_error_response(json_str: &str, content: Option<&str>) -> String {
                     })
                     .to_string()
                 }
-                "blocked" => {
-                    serde_json::json!({
-                        "error": "content_rejected",
-                        "reason": "injection_pattern_detected"
-                    })
-                    .to_string()
-                }
+                "blocked" => serde_json::json!({
+                    "error": "content_rejected",
+                    "reason": "injection_pattern_detected"
+                })
+                .to_string(),
                 _ => json_str.to_string(),
             }
         }
@@ -218,7 +226,9 @@ impl Tool for MemoryTool {
                 let content = args
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'content' for 'add' action"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Missing required parameter 'content' for 'add' action")
+                    })?
                     .to_string();
 
                 let mgr_args = serde_json::json!({
@@ -238,12 +248,18 @@ impl Tool for MemoryTool {
                 let old_text = args
                     .get("old_text")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'old_text' for 'replace' action"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Missing required parameter 'old_text' for 'replace' action"
+                        )
+                    })?
                     .to_string();
                 let content = args
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'content' for 'replace' action"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Missing required parameter 'content' for 'replace' action")
+                    })?
                     .to_string();
 
                 let mgr_args = serde_json::json!({
@@ -264,7 +280,9 @@ impl Tool for MemoryTool {
                 let old_text = args
                     .get("old_text")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'old_text' for 'remove' action"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Missing required parameter 'old_text' for 'remove' action")
+                    })?
                     .to_string();
 
                 let mgr_args = serde_json::json!({
@@ -316,19 +334,15 @@ mod tests {
 
     #[async_trait]
     impl MemoryManagerHandle for MockManager {
-        async fn handle_tool_call(
-            &self,
-            name: &str,
-            args: serde_json::Value,
-        ) -> MemoryResult {
+        async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult {
             self.writes.lock().unwrap().push((name.to_string(), args));
             self.response.clone()
         }
     }
 
-    fn make_tool_with_ok(response: &str)
-        -> (MemoryTool, Arc<StdMutex<Vec<(String, serde_json::Value)>>>)
-    {
+    fn make_tool_with_ok(
+        response: &str,
+    ) -> (MemoryTool, Arc<StdMutex<Vec<(String, serde_json::Value)>>>) {
         let (mock, writes) = MockManager::new_ok(response);
         let manager: SharedMemoryManager = Arc::new(Mutex::new(mock));
         (MemoryTool::new(manager), writes)
@@ -336,17 +350,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_name() {
-        let (tool, _writes) = make_tool_with_ok(
-            r#"{"chars_used": 10, "chars_limit": 2200, "entries": 1}"#,
-        );
+        let (tool, _writes) =
+            make_tool_with_ok(r#"{"chars_used": 10, "chars_limit": 2200, "entries": 1}"#);
         assert_eq!(tool.name(), "memory");
     }
 
     #[tokio::test]
     async fn test_add_delegates_to_manager() {
-        let (tool, writes) = make_tool_with_ok(
-            r#"{"chars_used": 9, "chars_limit": 2200, "entries": 1}"#,
-        );
+        let (tool, writes) =
+            make_tool_with_ok(r#"{"chars_used": 9, "chars_limit": 2200, "entries": 1}"#);
         let result = tool
             .execute(json!({
                 "action": "add",
@@ -356,7 +368,10 @@ mod tests {
             .await;
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.contains("Added to memory"), "Expected 'Added to memory' in: {output}");
+        assert!(
+            output.contains("Added to memory"),
+            "Expected 'Added to memory' in: {output}"
+        );
 
         // Verify the manager saw the delegated call with the canonical tool name.
         let writes = writes.lock().unwrap();
@@ -368,9 +383,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_replace_delegates_with_new_content() {
-        let (tool, writes) = make_tool_with_ok(
-            r#"{"chars_used": 10, "chars_limit": 2200, "entries": 1}"#,
-        );
+        let (tool, writes) =
+            make_tool_with_ok(r#"{"chars_used": 10, "chars_limit": 2200, "entries": 1}"#);
         let result = tool
             .execute(json!({
                 "action": "replace",
@@ -388,9 +402,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_delegates_to_manager() {
-        let (tool, writes) = make_tool_with_ok(
-            r#"{"chars_used": 0, "chars_limit": 2200, "entries": 0}"#,
-        );
+        let (tool, writes) =
+            make_tool_with_ok(r#"{"chars_used": 0, "chars_limit": 2200, "entries": 0}"#);
         let result = tool
             .execute(json!({
                 "action": "remove",
@@ -417,9 +430,15 @@ mod tests {
                 "content": "should fail"
             }))
             .await;
-        assert!(result.is_ok(), "read-only should return Ok with error message");
+        assert!(
+            result.is_ok(),
+            "read-only should return Ok with error message"
+        );
         let output = result.unwrap();
-        assert!(output.contains("read-only"), "should mention read-only: {output}");
+        assert!(
+            output.contains("read-only"),
+            "should mention read-only: {output}"
+        );
     }
 
     #[tokio::test]
@@ -437,7 +456,10 @@ mod tests {
             .await;
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.contains("read-only"), "should mention read-only: {output}");
+        assert!(
+            output.contains("read-only"),
+            "should mention read-only: {output}"
+        );
     }
 
     #[tokio::test]

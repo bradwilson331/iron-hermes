@@ -13,7 +13,9 @@ pub enum ActivityState {
     #[default]
     Idle,
     Streaming,
-    ToolCall { name: String },
+    ToolCall {
+        name: String,
+    },
 }
 
 #[cfg(test)]
@@ -27,7 +29,9 @@ mod tests {
 
     #[test]
     fn tool_call_carries_name() {
-        let s = ActivityState::ToolCall { name: "bash".to_string() };
+        let s = ActivityState::ToolCall {
+            name: "bash".to_string(),
+        };
         let cloned = s.clone();
         assert_eq!(s, cloned);
     }
@@ -37,7 +41,9 @@ mod tests {
         assert_ne!(ActivityState::Idle, ActivityState::Streaming);
         assert_ne!(
             ActivityState::Streaming,
-            ActivityState::ToolCall { name: "bash".to_string() }
+            ActivityState::ToolCall {
+                name: "bash".to_string()
+            }
         );
     }
 }

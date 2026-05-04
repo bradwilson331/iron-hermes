@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserScrollTool {
@@ -23,8 +23,12 @@ impl BrowserScrollTool {
 
 #[async_trait]
 impl Tool for BrowserScrollTool {
-    fn name(&self) -> &str { "browser_scroll" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_scroll"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Scroll the page. direction: 'up' | 'down' (default 'down'). amount: 'page' | 'half' | <integer pixels> (default 'page')."
     }
@@ -52,23 +56,30 @@ impl Tool for BrowserScrollTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
-        let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+        let direction = args
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("down");
         if !matches!(direction, "up" | "down") {
             return Err(anyhow::anyhow!(
-                "Invalid direction '{}'. Allowed: 'up' | 'down'", direction
+                "Invalid direction '{}'. Allowed: 'up' | 'down'",
+                direction
             ));
         }
         let sign: i64 = if direction == "down" { 1 } else { -1 };
@@ -119,7 +130,8 @@ impl Tool for BrowserScrollTool {
         Ok(json!({
             "scrolled": direction,
             "result": value
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -127,7 +139,9 @@ async fn ensure_session<'a>(
     guard: &'a mut tokio::sync::MutexGuard<'_, Option<BrowserSession>>,
 ) -> anyhow::Result<&'a mut BrowserSession> {
     if guard.is_none() {
-        let cfg = ironhermes_core::config::Config::load().unwrap_or_default().browser;
+        let cfg = ironhermes_core::config::Config::load()
+            .unwrap_or_default()
+            .browser;
         let new = BrowserSession::spawn(&cfg).await?;
         **guard = Some(new);
     }
@@ -154,7 +168,12 @@ mod tests {
         let t = BrowserScrollTool::new(dummy_session());
         let result = t.execute(json!({"direction": "left"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid direction"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid direction")
+        );
     }
 
     #[tokio::test]

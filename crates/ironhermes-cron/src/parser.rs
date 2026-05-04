@@ -12,10 +12,9 @@ use crate::job::ScheduleParsed;
 
 /// Parse a duration string like "30m", "2h", "1d" into minutes.
 pub fn parse_duration(input: &str) -> Result<u32> {
-    let re = Regex::new(
-        r"(?i)^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$",
-    )
-    .expect("static regex");
+    let re =
+        Regex::new(r"(?i)^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$")
+            .expect("static regex");
 
     let caps = re
         .captures(input.trim())
@@ -50,8 +49,8 @@ pub fn parse_schedule(input: &str) -> Result<ScheduleParsed> {
 
     // Rule 1: "every X" → Interval
     if let Some(rest) = s.strip_prefix("every ") {
-        let minutes = parse_duration(rest)
-            .with_context(|| format!("invalid interval in {:?}", s))?;
+        let minutes =
+            parse_duration(rest).with_context(|| format!("invalid interval in {:?}", s))?;
         let display = format!("every {}m", minutes);
         return Ok(ScheduleParsed::Interval { minutes, display });
     }
@@ -61,9 +60,8 @@ pub fn parse_schedule(input: &str) -> Result<ScheduleParsed> {
         let fields: Vec<&str> = s.split_whitespace().collect();
         if fields.len() >= 5 {
             let all_cron = fields.iter().all(|f| {
-                f.chars().all(|c| {
-                    c.is_ascii_digit() || matches!(c, '*' | '-' | ',' | '/' | '?')
-                })
+                f.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '*' | '-' | ',' | '/' | '?'))
             });
             if all_cron {
                 // Validate with the cron crate (normalise 5-field to 6-field)
@@ -107,8 +105,8 @@ pub fn parse_schedule(input: &str) -> Result<ScheduleParsed> {
     }
 
     // Rule 4: bare duration → Once
-    let minutes = parse_duration(s)
-        .with_context(|| format!("unrecognised schedule: {:?}", input))?;
+    let minutes =
+        parse_duration(s).with_context(|| format!("unrecognised schedule: {:?}", input))?;
     let run_at = Utc::now() + Duration::minutes(minutes as i64);
     let display = format!("once in {}m", minutes);
     Ok(ScheduleParsed::Once { run_at, display })

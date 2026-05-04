@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use chrono::Utc;
-use ironhermes_core::{get_hermes_home, ChatMessage, Role};
-use rusqlite::{params, Connection, OptionalExtension};
+use ironhermes_core::{ChatMessage, Role, get_hermes_home};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -389,9 +389,19 @@ impl StateStore {
             "INSERT OR IGNORE INTO sessions \
              (id, source, model, system_prompt, parent_session_id, started_at, workspace_root) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, source, model, system_prompt, parent_session_id, now, workspace_root],
+            params![
+                id,
+                source,
+                model,
+                system_prompt,
+                parent_session_id,
+                now,
+                workspace_root
+            ],
         )?;
-        debug!("created session {id} source={source} parent={parent_session_id:?} workspace_root={workspace_root:?}");
+        debug!(
+            "created session {id} source={source} parent={parent_session_id:?} workspace_root={workspace_root:?}"
+        );
         Ok(())
     }
 
@@ -415,7 +425,11 @@ impl StateStore {
     /// Append a [`ChatMessage`] to a session. Returns the new row id.
     pub fn add_message(&mut self, session_id: &str, msg: &ChatMessage) -> Result<i64> {
         let role = role_str(&msg.role);
-        let content = msg.content.as_ref().and_then(|c| c.as_text()).map(str::to_owned);
+        let content = msg
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .map(str::to_owned);
         let tool_calls_json = msg
             .tool_calls
             .as_ref()
@@ -441,7 +455,11 @@ impl StateStore {
         let row_id = self.conn.last_insert_rowid();
 
         // Increment message_count (and tool_call_count when appropriate).
-        let is_tool_call = msg.tool_calls.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        let is_tool_call = msg
+            .tool_calls
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         if is_tool_call {
             self.conn.execute(
                 "UPDATE sessions SET message_count = message_count + 1, \
@@ -494,18 +512,15 @@ impl StateStore {
              FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], message_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// List sessions, optionally filtered by source, most recent first.
     ///
     /// Backward-compat shim: pre-25.3 `list_sessions` signature, no workspace
     /// filter. Delegates to `list_sessions_filtered` with workspace_root_filter=None.
-    pub fn list_sessions(
-        &self,
-        source: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<Session>> {
+    pub fn list_sessions(&self, source: Option<&str>, limit: usize) -> Result<Vec<Session>> {
         self.list_sessions_filtered(source, limit, None)
     }
 
@@ -540,7 +555,8 @@ impl StateStore {
             params![source, workspace_root_filter, limit as i64],
             session_from_row,
         )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Full-text and metadata search across messages.
@@ -723,8 +739,7 @@ impl StateStore {
 
     /// Run a passive WAL checkpoint to keep the WAL file from growing unbounded.
     pub fn wal_checkpoint(&self) -> Result<()> {
-        self.conn
-            .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
     }
 
@@ -842,7 +857,10 @@ fn with_busy_retry<T, F: FnMut() -> Result<T>>(mut f: F) -> Result<T> {
 /// Check whether a [`StateError`] is a `SQLITE_BUSY` error.
 fn is_busy(e: &StateError) -> bool {
     if let StateError::Sqlite(sq) = e {
-        matches!(sq.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy))
+        matches!(
+            sq.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        )
     } else {
         false
     }
@@ -941,15 +959,11 @@ mod list_sessions_filtered_tests {
         assert_eq!(only_x[0].id, "a");
 
         // empty-string filter does NOT match NULL workspace_root
-        let only_global = store
-            .list_sessions_filtered(None, 100, Some(""))
-            .unwrap();
+        let only_global = store.list_sessions_filtered(None, 100, Some("")).unwrap();
         assert_eq!(only_global.len(), 0);
 
         // None filter behaves identically to list_sessions(None, ...)
-        let unfiltered = store
-            .list_sessions_filtered(None, 100, None)
-            .unwrap();
+        let unfiltered = store.list_sessions_filtered(None, 100, None).unwrap();
         assert_eq!(unfiltered.len(), 3);
 
         // source filter still works alongside workspace filter
@@ -973,7 +987,10 @@ mod schema_migration_v8_tests {
 
     #[test]
     fn schema_version_constant_is_8() {
-        assert_eq!(SCHEMA_VERSION, 8, "Phase 25.3 D-W-1: SCHEMA_VERSION must be bumped to 8");
+        assert_eq!(
+            SCHEMA_VERSION, 8,
+            "Phase 25.3 D-W-1: SCHEMA_VERSION must be bumped to 8"
+        );
     }
 
     #[test]
@@ -984,12 +1001,15 @@ mod schema_migration_v8_tests {
         let conn = Connection::open(&path).unwrap();
         let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
         let cols: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
         assert!(
-            cols.iter().any(|(n, t)| n == "workspace_root" && t.eq_ignore_ascii_case("TEXT")),
+            cols.iter()
+                .any(|(n, t)| n == "workspace_root" && t.eq_ignore_ascii_case("TEXT")),
             "v8 fresh install must include workspace_root TEXT in sessions; got cols={:?}",
             cols
         );
@@ -1012,20 +1032,30 @@ mod schema_migration_v8_tests {
                    tool_call_count INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, \
                    output_tokens INTEGER DEFAULT 0, title TEXT \
                  ); \
-                 INSERT INTO sessions (id, source, started_at) VALUES ('legacy-1', 'cli', 1.0);"
-            ).unwrap();
+                 INSERT INTO sessions (id, source, started_at) VALUES ('legacy-1', 'cli', 1.0);",
+            )
+            .unwrap();
         }
         // Open with the new code — should ALTER + bump to 8
         let _store = StateStore::new(&path).expect("upgrade open");
         let conn = Connection::open(&path).unwrap();
         let v: i64 = conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(v, 8, "schema_version must be 8 after upgrade");
         let wr: Option<String> = conn
-            .query_row("SELECT workspace_root FROM sessions WHERE id = 'legacy-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT workspace_root FROM sessions WHERE id = 'legacy-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(wr.is_none(), "pre-v8 row must have NULL workspace_root after upgrade");
+        assert!(
+            wr.is_none(),
+            "pre-v8 row must have NULL workspace_root after upgrade"
+        );
     }
 
     #[test]
@@ -1041,10 +1071,18 @@ mod schema_migration_v8_tests {
             .unwrap();
         let conn = Connection::open(&path).unwrap();
         let r1: Option<String> = conn
-            .query_row("SELECT workspace_root FROM sessions WHERE id = 's1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT workspace_root FROM sessions WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let r2: Option<String> = conn
-            .query_row("SELECT workspace_root FROM sessions WHERE id = 's2'", [], |r| r.get(0))
+            .query_row(
+                "SELECT workspace_root FROM sessions WHERE id = 's2'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(r1.as_deref(), Some("/repo/foo"));
         assert!(r2.is_none());

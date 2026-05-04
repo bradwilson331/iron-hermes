@@ -7,7 +7,7 @@
 //! The fixture provides deterministic bytes; real runs through
 //! `StatusReport::collect` are covered by status_cmd_deep_probe.rs.
 
-use ironhermes_cli::status_cmd::{format_styled, StatusReport};
+use ironhermes_cli::status_cmd::{StatusReport, format_styled};
 
 #[test]
 fn default_text_output_e10_snapshot() {

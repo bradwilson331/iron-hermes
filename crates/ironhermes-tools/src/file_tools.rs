@@ -4,7 +4,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use glob::glob;
-use ironhermes_core::{scan_context_content, ToolSchema};
+use ironhermes_core::{ToolSchema, scan_context_content};
 use regex::Regex;
 use serde_json::json;
 use tracing::debug;
@@ -150,8 +150,9 @@ impl Tool for WriteFileTool {
         if let Some(parent) = Path::new(path).parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("Failed to create directories for '{}': {}", path, e))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!("Failed to create directories for '{}': {}", path, e)
+            })?;
         }
 
         // D-01: Block writes to context files containing prompt injection
@@ -172,7 +173,10 @@ impl Tool for WriteFileTool {
             write_file_atomic(Path::new(path), content.as_bytes())?;
             let bytes = content.len();
             let lines = content.lines().count();
-            return Ok(format!("Successfully wrote {} bytes ({} lines) to '{}'.", bytes, lines, path));
+            return Ok(format!(
+                "Successfully wrote {} bytes ({} lines) to '{}'.",
+                bytes, lines, path
+            ));
         }
 
         // Non-context files: use normal fs::write (unchanged behavior)
@@ -181,7 +185,10 @@ impl Tool for WriteFileTool {
 
         let bytes = content.len();
         let lines = content.lines().count();
-        Ok(format!("Successfully wrote {} bytes ({} lines) to '{}'.", bytes, lines, path))
+        Ok(format!(
+            "Successfully wrote {} bytes ({} lines) to '{}'.",
+            bytes, lines, path
+        ))
     }
 }
 
@@ -335,7 +342,10 @@ impl Tool for SearchFilesTool {
         let search_path = args["path"].as_str().unwrap_or(".");
         let file_pattern = args["file_pattern"].as_str().unwrap_or("**/*");
 
-        debug!("Searching files in '{}' for pattern '{}'", search_path, query);
+        debug!(
+            "Searching files in '{}' for pattern '{}'",
+            search_path, query
+        );
 
         let re = Regex::new(query)
             .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", query, e))?;
@@ -496,7 +506,11 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("blocked"), "Error should mention blocked: {}", err);
+        assert!(
+            err.contains("blocked"),
+            "Error should mention blocked: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -554,7 +568,11 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("blocked"), "Error should mention blocked: {}", err);
+        assert!(
+            err.contains("blocked"),
+            "Error should mention blocked: {}",
+            err
+        );
         // Original file should be unchanged
         let content = fs::read_to_string(&agents_path).unwrap();
         assert_eq!(content, "# Agents\nBe helpful.");

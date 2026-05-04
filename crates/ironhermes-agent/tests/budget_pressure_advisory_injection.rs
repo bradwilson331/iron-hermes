@@ -16,7 +16,7 @@
 //! a recording provider mock.
 
 use ironhermes_agent::budget::{
-    advisory_text, BudgetHandle, PressureTier, CAUTION_ADVISORY, WARNING_ADVISORY,
+    BudgetHandle, CAUTION_ADVISORY, PressureTier, WARNING_ADVISORY, advisory_text,
 };
 use ironhermes_core::ChatMessage;
 

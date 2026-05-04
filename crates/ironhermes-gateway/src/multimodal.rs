@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use base64::Engine as _;
 use tracing::{info, warn};
 
@@ -65,10 +65,7 @@ pub async fn process_attachments(
             .mime_type
             .as_deref()
             .unwrap_or("application/octet-stream");
-        let filename = doc
-            .file_name
-            .as_deref()
-            .unwrap_or("document");
+        let filename = doc.file_name.as_deref().unwrap_or("document");
 
         info!(file_id = %doc.file_id, mime_type = %mime, filename = %filename, "Downloading document from Telegram");
         let tg_file = adapter.get_file(&doc.file_id).await?;
@@ -80,20 +77,21 @@ pub async fn process_attachments(
         let bytes = adapter.download_file(file_path).await?;
 
         let text = match mime {
-            "application/pdf" => {
-                match pdf_extract::extract_text_from_mem(&bytes) {
-                    Ok(extracted) => extracted,
-                    Err(e) => {
-                        warn!(error = %e, "PDF text extraction failed, returning error");
-                        bail!("Could not extract text from PDF: {}", e);
-                    }
+            "application/pdf" => match pdf_extract::extract_text_from_mem(&bytes) {
+                Ok(extracted) => extracted,
+                Err(e) => {
+                    warn!(error = %e, "PDF text extraction failed, returning error");
+                    bail!("Could not extract text from PDF: {}", e);
                 }
-            }
+            },
             "text/plain" | "text/markdown" | "text/csv" | "text/html" => {
                 String::from_utf8_lossy(&bytes).into_owned()
             }
             other => {
-                bail!("Unsupported document type: {}. Supported types: PDF, plain text, markdown, CSV.", other);
+                bail!(
+                    "Unsupported document type: {}. Supported types: PDF, plain text, markdown, CSV.",
+                    other
+                );
             }
         };
 

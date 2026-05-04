@@ -16,25 +16,45 @@ fn env_lock() -> &'static std::sync::Mutex<()> {
 async fn tool_excluded_when_prereq_missing() {
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 D Rust 2024).
-    unsafe { std::env::remove_var("FIRECRAWL_API_KEY"); }
+    unsafe {
+        std::env::remove_var("FIRECRAWL_API_KEY");
+    }
 
     let mut registry = ironhermes_tools::ToolRegistry::new();
     registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
     let mut cfg = ironhermes_core::config::ToolsConfig::default();
-    cfg.toolsets.insert("web".to_string(),
-        ironhermes_core::config::ToolsetEntry { enabled: true });
+    cfg.toolsets.insert(
+        "web".to_string(),
+        ironhermes_core::config::ToolsetEntry { enabled: true },
+    );
     registry.set_toolset_config(Some(cfg.clone()));
 
-    let names: Vec<String> = registry.get_definitions(None)
-        .iter().map(|s| s.function.name.clone()).collect();
-    assert!(!names.iter().any(|n| n == "web_search"),
-        "web_search MUST be filtered out without FIRECRAWL_API_KEY — got: {:?}", names);
+    let names: Vec<String> = registry
+        .get_definitions(None)
+        .iter()
+        .map(|s| s.function.name.clone())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n == "web_search"),
+        "web_search MUST be filtered out without FIRECRAWL_API_KEY — got: {:?}",
+        names
+    );
 
-    unsafe { std::env::set_var("FIRECRAWL_API_KEY", "test_value"); }
-    let names: Vec<String> = registry.get_definitions(None)
-        .iter().map(|s| s.function.name.clone()).collect();
-    assert!(names.iter().any(|n| n == "web_search"),
-        "web_search MUST be present with FIRECRAWL_API_KEY set — got: {:?}", names);
+    unsafe {
+        std::env::set_var("FIRECRAWL_API_KEY", "test_value");
+    }
+    let names: Vec<String> = registry
+        .get_definitions(None)
+        .iter()
+        .map(|s| s.function.name.clone())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "web_search"),
+        "web_search MUST be present with FIRECRAWL_API_KEY set — got: {:?}",
+        names
+    );
 
-    unsafe { std::env::remove_var("FIRECRAWL_API_KEY"); }
+    unsafe {
+        std::env::remove_var("FIRECRAWL_API_KEY");
+    }
 }

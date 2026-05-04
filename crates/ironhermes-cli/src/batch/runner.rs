@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -36,8 +36,9 @@ pub async fn cmd_run(
                 .and_then(|s| s.to_str())
                 .unwrap_or("batch");
             let output_dir = PathBuf::from(&config.batch.output_dir);
-            std::fs::create_dir_all(&output_dir)
-                .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
+            std::fs::create_dir_all(&output_dir).with_context(|| {
+                format!("Failed to create output dir: {}", output_dir.display())
+            })?;
             output_dir.join(format!("{}_output.jsonl", stem))
         }
     };
@@ -50,13 +51,15 @@ pub async fn cmd_run(
         output_path
             .parent()
             .unwrap_or(std::path::Path::new("."))
-            .join(format!("{}_rejected.jsonl", stem.trim_end_matches("_output")))
+            .join(format!(
+                "{}_rejected.jsonl",
+                stem.trim_end_matches("_output")
+            ))
     };
 
     // Load checkpoint
     let checkpoint_path = output_path.with_extension("checkpoint.json");
-    let checkpoint = load_checkpoint(&checkpoint_path)
-        .context("Failed to load checkpoint")?;
+    let checkpoint = load_checkpoint(&checkpoint_path).context("Failed to load checkpoint")?;
 
     // Resolve worker count
     let worker_count = workers.unwrap_or(config.batch.workers).max(1);
@@ -64,8 +67,7 @@ pub async fn cmd_run(
 
     // Resolve model and build provider resolver
     let model_name = model.unwrap_or_else(|| config.model.default.clone());
-    let resolver = ProviderResolver::build(&config)
-        .context("Failed to build provider resolver")?;
+    let resolver = ProviderResolver::build(&config).context("Failed to build provider resolver")?;
 
     // Read all entries from input JSONL
     let input_file = tokio::fs::File::open(&input)
@@ -146,8 +148,8 @@ pub async fn cmd_run(
     let _run_id_clone = run_id.clone();
 
     let writer_handle = tokio::spawn(async move {
-        let mut checkpoint_data: HashMap<String, CheckpointEntry> = load_checkpoint(&checkpoint_path_clone)
-            .unwrap_or_default();
+        let mut checkpoint_data: HashMap<String, CheckpointEntry> =
+            load_checkpoint(&checkpoint_path_clone).unwrap_or_default();
         let mut passed_count = 0usize;
         let mut rejected_count = 0usize;
 
@@ -280,7 +282,12 @@ pub async fn cmd_run(
                     let _ = tx.send((trajectory, hash_clone)).await;
                 }
                 Err(e) => {
-                    eprintln!("{} Agent error for prompt hash {}: {}", "Error:".red(), &hash_clone[..8], e);
+                    eprintln!(
+                        "{} Agent error for prompt hash {}: {}",
+                        "Error:".red(),
+                        &hash_clone[..8],
+                        e
+                    );
                 }
             }
         });
@@ -408,7 +415,7 @@ pub async fn cmd_list() -> Result<()> {
     for record in &records {
         let id_short = &record.id[..8.min(record.id.len())];
         let input_short = if record.input_file.len() > 28 {
-            format!("...{}", &record.input_file[record.input_file.len()-25..])
+            format!("...{}", &record.input_file[record.input_file.len() - 25..])
         } else {
             record.input_file.clone()
         };
@@ -467,7 +474,9 @@ pub fn reject_file_path(output: &std::path::Path) -> std::path::PathBuf {
 // =============================================================================
 
 fn runs_file_path() -> PathBuf {
-    ironhermes_core::get_hermes_home().join("batch").join("runs.json")
+    ironhermes_core::get_hermes_home()
+        .join("batch")
+        .join("runs.json")
 }
 
 async fn load_run_records() -> Result<Vec<BatchRunRecord>> {

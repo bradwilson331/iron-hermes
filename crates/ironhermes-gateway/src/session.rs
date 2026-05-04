@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Utc};
 use ironhermes_core::{ChatMessage, Platform};
 use ironhermes_state::StateStore;
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
 
 /// Unique key for a gateway session (platform + chat_id + optional user_id).
@@ -155,11 +155,10 @@ impl SessionStore {
         match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
             Ok(w) => {
                 let arc_writer = Arc::new(Mutex::new(w));
-                let handle: Arc<
-                    dyn ironhermes_core::commands::context::TrajectoryWriterHandle,
-                > = Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
-                    arc_writer,
-                ));
+                let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                        arc_writer,
+                    ));
                 self.trajectory_writers
                     .insert(session_id.to_string(), handle.clone());
                 Some(handle)
@@ -176,7 +175,12 @@ impl SessionStore {
     }
 
     /// Get or create a session for the given key. On creation, writes through to SQLite.
-    pub fn get_or_create(&mut self, key: SessionKey, model: &str, source: &str) -> &mut GatewaySession {
+    pub fn get_or_create(
+        &mut self,
+        key: SessionKey,
+        model: &str,
+        source: &str,
+    ) -> &mut GatewaySession {
         let string_key = key.to_string_key();
         if !self.sessions.contains_key(&string_key) {
             let session = GatewaySession::new(key.clone(), model);
@@ -254,7 +258,8 @@ impl SessionStore {
     pub fn expire_stale(&mut self, timeout_hours: u64) {
         let before = self.sessions.len();
         let cutoff = Utc::now() - chrono::Duration::hours(timeout_hours as i64);
-        let expired_keys: Vec<String> = self.sessions
+        let expired_keys: Vec<String> = self
+            .sessions
             .iter()
             .filter(|(_, session)| session.updated_at < cutoff)
             .map(|(k, _)| k.clone())

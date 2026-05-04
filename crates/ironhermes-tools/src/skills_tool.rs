@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironhermes_core::config::SkillsConfig;
 use ironhermes_core::{CredentialFileEntry, HubConfig, SkillRegistry, ToolSchema};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::registry::Tool;
 
@@ -13,8 +13,7 @@ use crate::registry::Tool;
 // Description
 // ---------------------------------------------------------------------------
 
-const SKILLS_DESCRIPTION: &str =
-    "Browse and activate skill documents, and search the Hub for new skills. Actions: list, view, activate, deactivate, hub_search.";
+const SKILLS_DESCRIPTION: &str = "Browse and activate skill documents, and search the Hub for new skills. Actions: list, view, activate, deactivate, hub_search.";
 
 // ---------------------------------------------------------------------------
 // Credential directory resolution (Phase 19 Plan 03, D-10)
@@ -178,15 +177,15 @@ fn handle_list(registry: &SkillRegistry) -> Value {
 fn handle_view(registry: &SkillRegistry, args: &Value) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'name'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'name'"}),
     };
 
     match registry.find(name) {
         Some(record) => match std::fs::read_to_string(&record.path) {
             Ok(content) => json!({"status": "ok", "name": record.name, "content": content}),
-            Err(e) => json!({"status": "error", "message": format!("Failed to read skill file: {}", e)}),
+            Err(e) => {
+                json!({"status": "error", "message": format!("Failed to read skill file: {}", e)})
+            }
         },
         None => json!({"status": "error", "message": format!("Skill not found: {}", name)}),
     }
@@ -209,17 +208,13 @@ fn handle_activate(
 ) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
-        None => {
-            return json!({"status": "error", "message": "Missing required parameter 'name'"})
-        }
+        None => return json!({"status": "error", "message": "Missing required parameter 'name'"}),
     };
 
     // Branch 1: not found
     let record = match registry.find(name) {
         Some(r) => r.clone(),
-        None => {
-            return json!({"status": "error", "message": format!("Skill not found: {}", name)})
-        }
+        None => return json!({"status": "error", "message": format!("Skill not found: {}", name)}),
     };
 
     // Branch 2: evaluate requirements
@@ -303,7 +298,10 @@ fn handle_activate(
     }
 }
 
-fn handle_deactivate(args: &Value, active_skills: &std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>) -> Value {
+fn handle_deactivate(
+    args: &Value,
+    active_skills: &std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>,
+) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return json!({"status": "error", "message": "Missing required parameter 'name'"}),
@@ -361,10 +359,20 @@ fn hub_search_error_envelope(
 async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
     let query = match args.get("query").and_then(|v| v.as_str()) {
         Some(q) if !q.is_empty() => q,
-        _ => return hub_search_error_envelope("invalid_identifier", "query parameter is required and must be non-empty", None, None),
+        _ => {
+            return hub_search_error_envelope(
+                "invalid_identifier",
+                "query parameter is required and must be non-empty",
+                None,
+                None,
+            );
+        }
     };
 
-    let source_filter = args.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let source_filter = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Build sources from hub_config (same pattern as CLI build_sources)
     let auth = ironhermes_hub::GitHubAuth::resolve(hub_config.github_token_env.as_deref()).await;
@@ -392,7 +400,10 @@ async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
         Some(other) => {
             return hub_search_error_envelope(
                 "invalid_identifier",
-                &format!("unknown source '{}'; valid values: github, well-known, skills-sh", other),
+                &format!(
+                    "unknown source '{}'; valid values: github, well-known, skills-sh",
+                    other
+                ),
                 Some("Use one of: github, well-known, skills-sh"),
                 None,
             );
@@ -407,8 +418,11 @@ async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
         match ironhermes_hub::HubSource::search(gh.as_ref(), query, limit).await {
             Ok(metas) => {
                 for m in metas {
-                    if results.len() >= HARD_CAP { break; }
-                    let trust = ironhermes_hub::HubSource::trust_level_for(gh.as_ref(), &m.identifier);
+                    if results.len() >= HARD_CAP {
+                        break;
+                    }
+                    let trust =
+                        ironhermes_hub::HubSource::trust_level_for(gh.as_ref(), &m.identifier);
                     results.push(json!({
                         "name": m.name,
                         "source": m.source_id,
@@ -430,7 +444,9 @@ async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
         match ironhermes_hub::HubSource::search(&wk, query, limit).await {
             Ok(metas) => {
                 for m in metas {
-                    if results.len() >= HARD_CAP { break; }
+                    if results.len() >= HARD_CAP {
+                        break;
+                    }
                     let trust = ironhermes_hub::HubSource::trust_level_for(&wk, &m.identifier);
                     results.push(json!({
                         "name": m.name,
@@ -453,7 +469,9 @@ async fn handle_hub_search(hub_config: &HubConfig, args: &Value) -> Value {
         match ironhermes_hub::HubSource::search(&sh, query, limit).await {
             Ok(metas) => {
                 for m in metas {
-                    if results.len() >= HARD_CAP { break; }
+                    if results.len() >= HARD_CAP {
+                        break;
+                    }
                     let trust = ironhermes_hub::HubSource::trust_level_for(&sh, &m.identifier);
                     results.push(json!({
                         "name": m.name,
@@ -562,7 +580,10 @@ mod tests {
     use std::sync::Arc;
 
     fn make_skill_md(name: &str, description: &str, body: &str) -> String {
-        format!("---\nname: {}\ndescription: {}\n---\n{}", name, description, body)
+        format!(
+            "---\nname: {}\ndescription: {}\n---\n{}",
+            name, description, body
+        )
     }
 
     fn make_tool_with_skills(skills: &[(&str, &str, &str)]) -> (SkillsTool, tempfile::TempDir) {
@@ -592,7 +613,13 @@ mod tests {
         (tool, dir)
     }
 
-    fn make_tool_with_skills_and_active(skills: &[(&str, &str, &str)]) -> (SkillsTool, tempfile::TempDir, Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) {
+    fn make_tool_with_skills_and_active(
+        skills: &[(&str, &str, &str)],
+    ) -> (
+        SkillsTool,
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let skills_dir = dir.path().join("skills");
         fs::create_dir_all(&skills_dir).unwrap();
@@ -738,16 +765,18 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_action_returns_error_with_valid_list() {
         let (tool, _dir) = make_empty_tool();
-        let result = tool
-            .execute(json!({"action": "unknown"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"action": "unknown"})).await.unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "error");
         let msg = v["message"].as_str().unwrap();
         assert!(msg.contains("unknown"));
         // Should list valid actions
-        assert!(msg.contains("list") && msg.contains("view") && msg.contains("activate") && msg.contains("deactivate"));
+        assert!(
+            msg.contains("list")
+                && msg.contains("view")
+                && msg.contains("activate")
+                && msg.contains("deactivate")
+        );
     }
 
     // --- missing action ---
@@ -788,7 +817,11 @@ mod tests {
             .await
             .unwrap();
         let skills = active_skills.lock().unwrap();
-        assert_eq!(skills.len(), 1, "duplicate activate should not add a second entry");
+        assert_eq!(
+            skills.len(),
+            1,
+            "duplicate activate should not add a second entry"
+        );
     }
 
     // --- deactivate ---
@@ -821,16 +854,18 @@ mod tests {
             .unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "ok");
-        assert!(v["message"].as_str().unwrap().contains("not currently active"));
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("not currently active")
+        );
     }
 
     #[tokio::test]
     async fn test_deactivate_missing_name_returns_error() {
         let (tool, _dir, _active_skills) = make_tool_with_skills_and_active(&[]);
-        let result = tool
-            .execute(json!({"action": "deactivate"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"action": "deactivate"})).await.unwrap();
         let v = parse_response(&result);
         assert_eq!(v["status"], "error");
         assert!(v["message"].as_str().unwrap().contains("name"));
@@ -871,7 +906,11 @@ mod tests {
     fn make_p03_tool(
         skills: &[(&str, &str, &str, &str)],
         credential_dir: std::path::PathBuf,
-    ) -> (SkillsTool, tempfile::TempDir, Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) {
+    ) -> (
+        SkillsTool,
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let skills_dir = dir.path().join("skills");
         fs::create_dir_all(&skills_dir).unwrap();
@@ -921,14 +960,20 @@ mod tests {
         let v = parse_response(&result);
 
         assert_eq!(v["status"], "setup_needed");
-        let missing_env = v["missing_required_environment_variables"].as_array().unwrap();
+        let missing_env = v["missing_required_environment_variables"]
+            .as_array()
+            .unwrap();
         assert!(
             missing_env.iter().any(|e| e == "HERMES_TEST_MISSING_KEY"),
             "expected HERMES_TEST_MISSING_KEY in missing_required_environment_variables: {:?}",
             missing_env
         );
         let missing_creds = v["missing_credential_files"].as_array().unwrap();
-        assert!(missing_creds.is_empty(), "missing_credential_files should be empty: {:?}", missing_creds);
+        assert!(
+            missing_creds.is_empty(),
+            "missing_credential_files should be empty: {:?}",
+            missing_creds
+        );
         let setup_note = v["setup_note"].as_str().unwrap();
         assert!(!setup_note.is_empty(), "setup_note must be non-empty");
         assert!(
@@ -966,7 +1011,9 @@ mod tests {
             "expected oauth_token.json in missing_credential_files: {:?}",
             missing_creds
         );
-        let missing_env = v["missing_required_environment_variables"].as_array().unwrap();
+        let missing_env = v["missing_required_environment_variables"]
+            .as_array()
+            .unwrap();
         assert!(missing_env.is_empty());
 
         assert_eq!(active_skills.lock().unwrap().len(), 0);
@@ -988,7 +1035,12 @@ mod tests {
 
         let hermes_yaml = "    required_environment_variables:\n      - name: HERMES_TEST_PRESENT_KEY\n    required_credential_files:\n      - oauth_token.json";
         let (tool, _dir, active_skills) = make_p03_tool(
-            &[("all-set", "All requirements met", hermes_yaml, "Happy body content")],
+            &[(
+                "all-set",
+                "All requirements met",
+                hermes_yaml,
+                "Happy body content",
+            )],
             cred_dir.path().to_path_buf(),
         );
 
@@ -1035,7 +1087,9 @@ mod tests {
         let v = parse_response(&result);
 
         assert_eq!(v["status"], "setup_needed");
-        let missing_env = v["missing_required_environment_variables"].as_array().unwrap();
+        let missing_env = v["missing_required_environment_variables"]
+            .as_array()
+            .unwrap();
         assert!(missing_env.iter().any(|e| e == "HERMES_TEST_MIXED_KEY"));
         let missing_creds = v["missing_credential_files"].as_array().unwrap();
         assert!(missing_creds.iter().any(|e| e == "creds.json"));
@@ -1093,12 +1147,7 @@ mod tests {
         let registry = SkillRegistry::load_with_paths(&[skills_dir]);
         let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cred_dir = tempfile::tempdir().unwrap().keep();
-        let tool = SkillsTool::new(
-            Arc::new(registry),
-            active_skills,
-            cred_dir,
-            skills_config,
-        );
+        let tool = SkillsTool::new(Arc::new(registry), active_skills, cred_dir, skills_config);
         (tool, dir)
     }
 
@@ -1116,10 +1165,7 @@ mod tests {
         );
         cfg.insert("wiki".to_string(), wiki_cfg);
 
-        let (tool, _dir) = make_p04_tool(
-            &[("wiki", "Wiki skill", "Wiki body content")],
-            cfg,
-        );
+        let (tool, _dir) = make_p04_tool(&[("wiki", "Wiki skill", "Wiki body content")], cfg);
 
         let result = tool
             .execute(json!({"action": "activate", "name": "wiki"}))
@@ -1133,8 +1179,16 @@ mod tests {
             "content should start with skill-config header, got: {:?}",
             content
         );
-        assert!(content.contains("path = ~/research"), "missing path pair: {:?}", content);
-        assert!(content.contains("format = markdown"), "missing format pair: {:?}", content);
+        assert!(
+            content.contains("path = ~/research"),
+            "missing path pair: {:?}",
+            content
+        );
+        assert!(
+            content.contains("format = markdown"),
+            "missing format pair: {:?}",
+            content
+        );
         // header is followed by \n\n then the original body
         assert!(
             content.contains("]\n\nWiki body content"),
@@ -1178,16 +1232,10 @@ mod tests {
             "alpha".to_string(),
             serde_yaml::Value::String("a".to_string()),
         );
-        inner.insert(
-            "mu".to_string(),
-            serde_yaml::Value::String("m".to_string()),
-        );
+        inner.insert("mu".to_string(), serde_yaml::Value::String("m".to_string()));
         cfg.insert("wiki".to_string(), inner);
 
-        let (tool, _dir) = make_p04_tool(
-            &[("wiki", "Wiki skill", "Body")],
-            cfg,
-        );
+        let (tool, _dir) = make_p04_tool(&[("wiki", "Wiki skill", "Body")], cfg);
 
         let r1 = tool
             .execute(json!({"action": "activate", "name": "wiki"}))
@@ -1315,7 +1363,11 @@ mod tests {
     fn test_active_skill_env_names_empty() {
         let active: Vec<SkillRecord> = Vec::new();
         let names = active_skill_env_names(&active);
-        assert!(names.is_empty(), "empty active_skills must yield empty Vec, got: {:?}", names);
+        assert!(
+            names.is_empty(),
+            "empty active_skills must yield empty Vec, got: {:?}",
+            names
+        );
     }
 
     #[test]

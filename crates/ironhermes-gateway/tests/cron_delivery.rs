@@ -68,7 +68,10 @@ async fn local_target_does_not_call_tg() {
     let tg_client: Option<Arc<dyn TgSendApi>> = Some(fake.clone());
     dispatch_delivery(None, "some output", &tg_client, "test-job").await;
     let calls = fake.calls.lock().unwrap();
-    assert!(calls.is_empty(), "local target must not invoke send_message");
+    assert!(
+        calls.is_empty(),
+        "local target must not invoke send_message"
+    );
 }
 
 /// A TG send failure must be non-fatal: dispatch_delivery returns normally, no panic,
@@ -86,6 +89,10 @@ async fn tg_send_failure_is_non_fatal() {
     dispatch_delivery(Some(target), "error output", &tg_client, "test-job").await;
     // Call was attempted (captures before failure)
     let calls = fake.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1, "send_message was attempted even though it failed");
+    assert_eq!(
+        calls.len(),
+        1,
+        "send_message was attempted even though it failed"
+    );
     assert_eq!(calls[0].0, "99999");
 }

@@ -88,19 +88,16 @@ async fn run_export_one(session_id: &str, output_override: Option<&str>) -> Resu
     let exporter = SessionDirectoryExport::new(session_id, &output_dir);
     exporter.write(
         &export,
-        None,                     // context_json: Phase 18 compressor output not threaded here yet
+        None, // context_json: Phase 18 compressor output not threaded here yet
         Some(traj_src.as_path()), // trajectory_source: SessionDirectoryExport tolerates non-existent
     )?;
-    eprintln!(
-        "Session {session_id} exported to {}",
-        output_dir.display()
-    );
+    eprintln!("Session {session_id} exported to {}", output_dir.display());
     Ok(())
 }
 
 async fn run_export_all(since: Option<&str>) -> Result<()> {
-    let store = StateStore::open_default()
-        .with_context(|| "open default state store for export-all")?;
+    let store =
+        StateStore::open_default().with_context(|| "open default state store for export-all")?;
 
     // Resolve `since` (YYYY-MM-DD) into a unix timestamp.
     let since_unix: Option<f64> = match since {
@@ -137,10 +134,7 @@ async fn run_export_all(since: Option<&str>) -> Result<()> {
         let export = match store.export_session(&session.id) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!(
-                    "Warning: failed to export session {}: {e}",
-                    session.id
-                );
+                eprintln!("Warning: failed to export session {}: {e}", session.id);
                 continue;
             }
         };

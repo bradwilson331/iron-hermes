@@ -53,20 +53,18 @@ pub async fn fetch_audit(
         .query(&[("source", owner_repo), ("skills", joined.as_str())]);
 
     match tokio::time::timeout(AUDIT_TIMEOUT, request.send()).await {
-        Ok(Ok(resp)) if resp.status().is_success() => {
-            match resp.json::<AuditData>().await {
-                Ok(data) => Some(data),
-                Err(e) => {
-                    let msg = strip_terminal_escapes(&format!("{e}"));
-                    tracing::warn!(
-                        audit_url = %url,
-                        error = %msg,
-                        "audit parse failed — soft-fail, proceeding without risk data"
-                    );
-                    None
-                }
+        Ok(Ok(resp)) if resp.status().is_success() => match resp.json::<AuditData>().await {
+            Ok(data) => Some(data),
+            Err(e) => {
+                let msg = strip_terminal_escapes(&format!("{e}"));
+                tracing::warn!(
+                    audit_url = %url,
+                    error = %msg,
+                    "audit parse failed — soft-fail, proceeding without risk data"
+                );
+                None
             }
-        }
+        },
         Ok(Ok(resp)) => {
             let status = resp.status();
             tracing::warn!(

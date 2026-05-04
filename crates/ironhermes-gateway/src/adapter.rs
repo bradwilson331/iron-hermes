@@ -32,12 +32,7 @@ pub trait PlatformAdapter: Send + Sync {
     ) -> Result<MessageResponse>;
 
     /// Edit an existing message (plain text — for streaming edits).
-    async fn edit_message(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        content: &str,
-    ) -> Result<()>;
+    async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()>;
 
     /// Edit an existing message with Markdown formatting (final edit per D-03).
     async fn edit_message_markdown(
@@ -51,12 +46,7 @@ pub trait PlatformAdapter: Send + Sync {
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()>;
 
     /// Add a reaction to a message.
-    async fn add_reaction(
-        &self,
-        _chat_id: &str,
-        _message_id: &str,
-        _emoji: &str,
-    ) -> Result<()> {
+    async fn add_reaction(&self, _chat_id: &str, _message_id: &str, _emoji: &str) -> Result<()> {
         Ok(()) // Default no-op for platforms that don't support reactions
     }
 

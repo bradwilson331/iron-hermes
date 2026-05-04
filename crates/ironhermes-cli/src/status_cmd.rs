@@ -69,7 +69,10 @@ pub fn current_profile() -> String {
 ///
 /// Returns an empty Vec if the profiles dir does not exist (the bare-hermes
 /// install case before any --profile has been used).
-pub fn enumerate_profiles(ironhermes_root: &std::path::Path, active_profile: &str) -> Vec<ProfileSummary> {
+pub fn enumerate_profiles(
+    ironhermes_root: &std::path::Path,
+    active_profile: &str,
+) -> Vec<ProfileSummary> {
     let profiles_dir = ironhermes_root.join(ironhermes_core::PROFILES_SUBDIR);
     if !profiles_dir.exists() {
         return Vec::new();
@@ -98,10 +101,7 @@ pub fn enumerate_profiles(ironhermes_root: &std::path::Path, active_profile: &st
             .and_then(|t| {
                 use std::time::UNIX_EPOCH;
                 t.duration_since(UNIX_EPOCH).ok().map(|d| {
-                    chrono::DateTime::<chrono::Utc>::from(
-                        std::time::UNIX_EPOCH + d,
-                    )
-                    .to_rfc3339()
+                    chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + d).to_rfc3339()
                 })
             });
         // Per-profile gateway.pid probe via Plan 02 helpers.
@@ -119,8 +119,8 @@ pub fn enumerate_profiles(ironhermes_root: &std::path::Path, active_profile: &st
         // Phase 23 Learning Loop banner re-use: parse config.yaml and
         // mirror the cmd_config_show logic. Best-effort — on parse error,
         // emit "unknown".
-        let learning_loop = read_learning_loop_status(&cfg_path)
-            .unwrap_or_else(|| "unknown".to_string());
+        let learning_loop =
+            read_learning_loop_status(&cfg_path).unwrap_or_else(|| "unknown".to_string());
         entries.push(ProfileSummary {
             name: name.clone(),
             active: name == active_profile,
@@ -624,8 +624,7 @@ pub fn format_styled(s: &StatusReport) -> String {
             out,
             "  {} {}",
             "--yolo enabled:".bold().red(),
-            "approvals bypassed; iteration budget + ctrl-c + fatal error remain."
-                .red()
+            "approvals bypassed; iteration budget + ctrl-c + fatal error remain.".red()
         );
     }
     let _ = writeln!(out);
@@ -684,11 +683,7 @@ pub fn format_styled(s: &StatusReport) -> String {
     let _ = writeln!(out);
 
     // Subagents + Processes + MCP --------------------------------------
-    let _ = writeln!(
-        out,
-        "{}",
-        "Subagents + Processes + MCP".bold().underline()
-    );
+    let _ = writeln!(out, "{}", "Subagents + Processes + MCP".bold().underline());
     let _ = writeln!(
         out,
         "  subagents:  {} / {} active",
@@ -767,10 +762,7 @@ fn resolve_api_mode(config: &ironhermes_core::Config, provider_name: &str) -> St
     }
 }
 
-fn resolve_fallback_chain(
-    config: &ironhermes_core::Config,
-    provider_name: &str,
-) -> Vec<String> {
+fn resolve_fallback_chain(config: &ironhermes_core::Config, provider_name: &str) -> Vec<String> {
     if let Some(pc) = config.providers.get(provider_name) {
         if !pc.fallback_providers.is_empty() {
             let mut chain = vec![provider_name.to_string()];
@@ -884,7 +876,10 @@ mod tests {
         let profiles = dir.path().join("profiles");
         std::fs::create_dir_all(profiles.join("empty")).unwrap();
         let entries = enumerate_profiles(dir.path(), "default");
-        assert!(entries.is_empty(), "subdir without config.yaml must be skipped");
+        assert!(
+            entries.is_empty(),
+            "subdir without config.yaml must be skipped"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use ironhermes_core::{scan_context_content, truncate_content, CONTEXT_FILE_MAX_CHARS};
+use ironhermes_core::{CONTEXT_FILE_MAX_CHARS, scan_context_content, truncate_content};
 use tracing::debug;
 
 /// Registry of personality presets.
@@ -194,8 +194,20 @@ mod tests {
 
         // All 14 names present
         let expected = [
-            "helpful", "concise", "technical", "creative", "teacher", "kawaii", "catgirl",
-            "pirate", "shakespeare", "surfer", "noir", "uwu", "philosopher", "hype",
+            "helpful",
+            "concise",
+            "technical",
+            "creative",
+            "teacher",
+            "kawaii",
+            "catgirl",
+            "pirate",
+            "shakespeare",
+            "surfer",
+            "noir",
+            "uwu",
+            "philosopher",
+            "hype",
         ];
         for name in &expected {
             assert!(

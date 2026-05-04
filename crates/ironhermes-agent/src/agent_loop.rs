@@ -14,9 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::any_client::AnyClient;
-use crate::budget::{advisory_text, BudgetHandle, PressureTier};
+use crate::budget::{BudgetHandle, PressureTier, advisory_text};
 use crate::client::{StreamEvent, ToolCallDelta};
-use crate::context_compressor::{estimate_messages_tokens, ContextCompressor};
+use crate::context_compressor::{ContextCompressor, estimate_messages_tokens};
 use crate::context_engine::{ContextEngine, ContextStats};
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
@@ -188,13 +188,18 @@ pub struct AgentLoop {
     /// On AgentLoop drop, the Arc reference count decrements; when the last tool
     /// clone also drops (all tools dropped with the registry), the Mutex drops,
     /// and BrowserSession::drop kills the handler task (T-25.1-04 drop semantics).
-    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    browser_session: Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
+    >,
     /// Phase 25.3 D-T-3: per-session trajectory writer handle (trait-object form
     /// from Plan 6 cycle-break — `TrajectoryWriterHandle` lives in `ironhermes-core`,
     /// `TrajectoryWriterHandleImpl` lives in `ironhermes-trajectory`). None means
     /// trajectory logging is disabled for this session. Plan 8 wires the Some-case
     /// from each `run_*` function (CLI/REPL/gateway). Append site is in execute_tool_call.
-    pub trajectory_writer: Option<std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    pub trajectory_writer:
+        Option<std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
     /// Phase 25.3 D-T-1: 0-indexed turn counter — incremented per agent turn (one
     /// complete user-assistant exchange). Recorded in TrajectoryEntry.turn_index
     /// so Phase 25.4 Curator can correlate tool calls within a turn.
@@ -202,7 +207,11 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
-    pub fn new(client: AnyClient, registry: Arc<RwLock<ToolRegistry>>, max_iterations: usize) -> Self {
+    pub fn new(
+        client: AnyClient,
+        registry: Arc<RwLock<ToolRegistry>>,
+        max_iterations: usize,
+    ) -> Self {
         Self {
             client,
             registry,
@@ -258,7 +267,9 @@ impl AgentLoop {
     /// BrowserSession::drop kills the handler task (T-25.1-04 resource cleanup).
     pub fn with_browser_session(
         mut self,
-        session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+        session: std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
     ) -> Self {
         self.browser_session = Some(session);
         self
@@ -333,7 +344,10 @@ impl AgentLoop {
         self
     }
 
-    pub fn with_active_skills(mut self, active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) -> Self {
+    pub fn with_active_skills(
+        mut self,
+        active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    ) -> Self {
         self.active_skills = active_skills;
         self
     }
@@ -343,7 +357,10 @@ impl AgentLoop {
     }
 
     /// Set subdirectory discovery for progressive context injection (CTX-03/CTX-04).
-    pub fn with_subdir_discovery(mut self, discovery: Arc<std::sync::Mutex<SubdirDiscovery>>) -> Self {
+    pub fn with_subdir_discovery(
+        mut self,
+        discovery: Arc<std::sync::Mutex<SubdirDiscovery>>,
+    ) -> Self {
         self.subdir_discovery = Some(discovery);
         self
     }
@@ -378,7 +395,6 @@ impl AgentLoop {
             // the lock — try_write() always succeeds. unwrap() is safe here.
             let mut reg = self.registry.try_write().expect("with_intercepts: failed to acquire registry write lock (concurrent modification during construction)");
             #[allow(unused_mut)]
-
             if let Some(state) = state_store {
                 let s = state.clone();
                 reg.register_intercepted(
@@ -404,7 +420,8 @@ impl AgentLoop {
             if let Some(mm) = memory_manager {
                 // Get memory schema from a temporary MemoryTool instance (canonical schema source per D-14).
                 use ironhermes_tools::Tool as _;
-                let memory_schema = ironhermes_tools::memory_tool::MemoryTool::new(mm.clone()).schema();
+                let memory_schema =
+                    ironhermes_tools::memory_tool::MemoryTool::new(mm.clone()).schema();
                 let m = mm.clone();
                 reg.register_intercepted(
                     "memory",
@@ -473,9 +490,7 @@ impl AgentLoop {
                         let st = write_state.clone();
                         Box::pin(async move {
                             let items: Vec<String> = serde_json::from_value(
-                                args.get("items")
-                                    .cloned()
-                                    .unwrap_or(serde_json::json!([])),
+                                args.get("items").cloned().unwrap_or(serde_json::json!([])),
                             )
                             .unwrap_or_default();
                             let mut g = st.lock().await;
@@ -686,7 +701,8 @@ impl AgentLoop {
             let guard = mgr.lock().await;
             let schemas = guard.get_tool_schemas().await;
             for s in &schemas {
-                self.memory_provider_tool_names.insert(s.function.name.clone());
+                self.memory_provider_tool_names
+                    .insert(s.function.name.clone());
             }
             tool_schemas.extend(schemas);
         }
@@ -771,7 +787,11 @@ impl AgentLoop {
             }
 
             turns_used += 1;
-            debug!(turn = turns_used, messages = messages.len(), "Agent loop turn");
+            debug!(
+                turn = turns_used,
+                messages = messages.len(),
+                "Agent loop turn"
+            );
 
             // Plan 21.7-05 / D-15 / T-21.7-05-02: inject pressure-tier advisory
             // EXACTLY ONCE per tier crossing — never on steady-state turns.
@@ -819,7 +839,8 @@ impl AgentLoop {
                         }
                     }
                 } else if self.streaming {
-                    self.call_llm_streaming(&messages, tools_option.as_deref()).await
+                    self.call_llm_streaming(&messages, tools_option.as_deref())
+                        .await
                 } else {
                     self.call_llm(&messages, tools_option.as_deref()).await
                 };
@@ -844,7 +865,10 @@ impl AgentLoop {
                         if should_retry && retry_count < MAX_RETRIES {
                             retry_count += 1;
                             warn!(retry = retry_count, "LLM call failed, retrying: {err:#}");
-                            tokio::time::sleep(tokio::time::Duration::from_millis(500 * retry_count as u64)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                500 * retry_count as u64,
+                            ))
+                            .await;
                             continue;
                         }
 
@@ -875,7 +899,10 @@ impl AgentLoop {
             appended.push(assistant_message.clone());
 
             if !has_tool_calls {
-                debug!(turn = turns_used, "Agent completed naturally (no tool calls)");
+                debug!(
+                    turn = turns_used,
+                    "Agent completed naturally (no tool calls)"
+                );
                 // Plan 20-02: fire the provider's `queue_prefetch` hook on the
                 // natural-end break so the primary can warm its cache for the
                 // next turn. The query is the most recent user message content.
@@ -918,7 +945,8 @@ impl AgentLoop {
             // execute_tool_call, so each tool call within a turn shares the same
             // turn_index — incrementing here means the NEXT turn's tool calls see
             // the next index. Phase 25.4 Curator can correlate calls within a turn.
-            self.turn_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.turn_index
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Note: ResponseSent is NOT fired here. It is fired by the platform layer
@@ -1195,7 +1223,8 @@ impl AgentLoop {
                         let result = async move {
                             let guard = mgr_clone.lock().await;
                             guard.handle_tool_call(&name_owned, args_clone).await
-                        }.await;
+                        }
+                        .await;
 
                         let tool_duration = tool_start.elapsed().as_millis() as u64;
                         return match result {
@@ -1225,7 +1254,9 @@ impl AgentLoop {
                             }
                         };
                     }
-                    return format!(r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#);
+                    return format!(
+                        r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#
+                    );
                 }
 
                 // Take an `args` snapshot for the trajectory append site BEFORE
@@ -1287,7 +1318,8 @@ impl AgentLoop {
 
                         // CTX-03/CTX-04: progressive subdirectory discovery for file-access tools
                         let mut final_result = result;
-                        const FILE_ACCESS_TOOLS: &[&str] = &["read_file", "write_file", "patch", "search_files"];
+                        const FILE_ACCESS_TOOLS: &[&str] =
+                            &["read_file", "write_file", "patch", "search_files"];
                         if FILE_ACCESS_TOOLS.contains(&name.as_str()) {
                             if let Some(ref disc) = self.subdir_discovery {
                                 if let Some(ref path_str) = tool_path_arg {
@@ -1383,20 +1415,42 @@ impl AgentLoop {
 pub(crate) fn classify_impact_level(tool_name: &str) -> ImpactLevel {
     // Read-only tools (heuristic by name + known catalog).
     const READ_TOOLS: &[&str] = &[
-        "read_file", "search_files", "web_search", "web_read", "web_extract",
-        "session_search", "status", "list_files", "browser_snapshot",
-        "browser_get_images", "browser_console", "memory_search",
+        "read_file",
+        "search_files",
+        "web_search",
+        "web_read",
+        "web_extract",
+        "session_search",
+        "status",
+        "list_files",
+        "browser_snapshot",
+        "browser_get_images",
+        "browser_console",
+        "memory_search",
     ];
     // Write-but-local tools.
     const WRITE_TOOLS: &[&str] = &[
-        "write_file", "patch", "patch_file", "create_file", "delete_file",
-        "memory_write", "skill_install", "skill_remove",
+        "write_file",
+        "patch",
+        "patch_file",
+        "create_file",
+        "delete_file",
+        "memory_write",
+        "skill_install",
+        "skill_remove",
     ];
     // System-changing tools.
     const SYSTEM_CHANGE_TOOLS: &[&str] = &[
-        "terminal", "execute_code", "delegate_task", "browser_click",
-        "browser_navigate", "browser_type", "browser_press", "browser_scroll",
-        "browser_back", "browser_close",
+        "terminal",
+        "execute_code",
+        "delegate_task",
+        "browser_click",
+        "browser_navigate",
+        "browser_type",
+        "browser_press",
+        "browser_scroll",
+        "browser_back",
+        "browser_close",
     ];
 
     if READ_TOOLS.contains(&tool_name) {
@@ -1531,10 +1585,13 @@ mod hooks_ordering_tests {
     }
 
     fn build_agent(tool_registry: ToolRegistry, hook_registry: Arc<HookRegistry>) -> AgentLoop {
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
-        AgentLoop::new(client, Arc::new(RwLock::new(tool_registry)), 4).with_hook_registry(hook_registry)
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
+        AgentLoop::new(client, Arc::new(RwLock::new(tool_registry)), 4)
+            .with_hook_registry(hook_registry)
     }
 
     // -----------------------------------------------------------------------
@@ -1548,8 +1605,7 @@ mod hooks_ordering_tests {
     async fn test_blocked_tool_no_tool_called_event() {
         let mut tool_registry = ToolRegistry::new();
         tool_registry.register(Box::new(OkMockTool));
-        tool_registry
-            .add_guardrail(Box::new(BlocklistGuardrail::new(vec!["mock".to_string()])));
+        tool_registry.add_guardrail(Box::new(BlocklistGuardrail::new(vec!["mock".to_string()])));
 
         let (hook_registry, captured) = capture_registry();
         let agent = build_agent(tool_registry, hook_registry);
@@ -1694,7 +1750,10 @@ mod hooks_ordering_tests {
     // Skill enforcement tests (SKILL-06 / 07.5-01 Task 2)
     // -----------------------------------------------------------------------
 
-    fn make_skill_record(name: &str, allowed_tools: Option<Vec<&str>>) -> ironhermes_core::SkillRecord {
+    fn make_skill_record(
+        name: &str,
+        allowed_tools: Option<Vec<&str>>,
+    ) -> ironhermes_core::SkillRecord {
         ironhermes_core::SkillRecord {
             name: name.to_string(),
             description: format!("{} skill", name),
@@ -1758,7 +1817,10 @@ mod hooks_ordering_tests {
 
         // No active skills — everything is allowed
         let result = agent.execute_tool_call(&tool_call("mock")).await;
-        assert_eq!(result, "mock result", "no active skills = all tools allowed");
+        assert_eq!(
+            result, "mock result",
+            "no active skills = all tools allowed"
+        );
     }
 
     #[tokio::test]
@@ -1768,11 +1830,21 @@ mod hooks_ordering_tests {
         struct SkillsMockTool;
         #[async_trait]
         impl Tool for SkillsMockTool {
-            fn name(&self) -> &str { "skills" }
-            fn toolset(&self) -> &str { "test" }
-            fn description(&self) -> &str { "mock skills" }
+            fn name(&self) -> &str {
+                "skills"
+            }
+            fn toolset(&self) -> &str {
+                "test"
+            }
+            fn description(&self) -> &str {
+                "mock skills"
+            }
             fn schema(&self) -> ToolSchema {
-                ToolSchema::new("skills", "mock skills", serde_json::json!({"type": "object", "properties": {}}))
+                ToolSchema::new(
+                    "skills",
+                    "mock skills",
+                    serde_json::json!({"type": "object", "properties": {}}),
+                )
             }
             async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
                 Ok("skills result".to_string())
@@ -1788,7 +1860,10 @@ mod hooks_ordering_tests {
         }
 
         let result = agent.execute_tool_call(&tool_call("skills")).await;
-        assert_eq!(result, "skills result", "skills tool must always be permitted (D-07)");
+        assert_eq!(
+            result, "skills result",
+            "skills tool must always be permitted (D-07)"
+        );
     }
 
     #[tokio::test]
@@ -1842,34 +1917,48 @@ mod hooks_ordering_tests {
     #[test]
     fn test_agent_loop_with_cancellation_token_sets_token() {
         use tokio_util::sync::CancellationToken;
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let token = CancellationToken::new();
-        let agent = AgentLoop::new(client, registry, 4)
-            .with_cancellation_token(token.clone());
+        let agent = AgentLoop::new(client, registry, 4).with_cancellation_token(token.clone());
         // Verify the token is set (it exists on the struct)
-        assert!(agent.cancel_token.is_some(), "cancel_token should be set after with_cancellation_token");
+        assert!(
+            agent.cancel_token.is_some(),
+            "cancel_token should be set after with_cancellation_token"
+        );
     }
 
     #[tokio::test]
     async fn test_agent_loop_run_returns_early_when_cancelled_before_first_iteration() {
         use tokio_util::sync::CancellationToken;
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let token = CancellationToken::new();
         // Cancel BEFORE run
         token.cancel();
-        let mut agent = AgentLoop::new(client, registry, 4)
-            .with_cancellation_token(token);
+        let mut agent = AgentLoop::new(client, registry, 4).with_cancellation_token(token);
         let messages = vec![ChatMessage::user("hello")];
         let result = agent.run(messages).await.unwrap();
-        assert!(!result.finished_naturally, "should not finish naturally when cancelled");
-        assert_eq!(result.final_response.as_deref(), Some("Cancelled by parent"));
-        assert_eq!(result.turns_used, 0, "should use 0 turns when cancelled before first iteration");
+        assert!(
+            !result.finished_naturally,
+            "should not finish naturally when cancelled"
+        );
+        assert_eq!(
+            result.final_response.as_deref(),
+            Some("Cancelled by parent")
+        );
+        assert_eq!(
+            result.turns_used, 0,
+            "should use 0 turns when cancelled before first iteration"
+        );
     }
 
     #[tokio::test]
@@ -1944,7 +2033,10 @@ mod hooks_ordering_tests {
             "execute_tool_call must append exactly one trajectory entry; got {}",
             entries.len()
         );
-        assert_eq!(entries[0].name, "mock", "trajectory entry name must match tool name");
+        assert_eq!(
+            entries[0].name, "mock",
+            "trajectory entry name must match tool name"
+        );
         assert!(
             entries[0].result.is_some(),
             "success entry must have result populated"
@@ -2021,7 +2113,10 @@ mod hooks_ordering_tests {
         );
         // Should not panic, should return the tool result text.
         let result = agent.execute_tool_call(&tool_call("mock")).await;
-        assert_eq!(result, "mock result", "tool result must pass through unchanged");
+        assert_eq!(
+            result, "mock result",
+            "tool result must pass through unchanged"
+        );
     }
 }
 
@@ -2036,9 +2131,11 @@ mod budget_tests {
     use std::sync::Arc;
 
     fn make_agent(max_iterations: usize) -> AgentLoop {
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "test"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "test",
+        ));
         let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         AgentLoop::new(client, registry, max_iterations)
     }
@@ -2064,7 +2161,11 @@ mod budget_tests {
         drive_used(&handle, 7); // 70% → Caution70 → first observation injects
         let mut agent = make_agent(10).with_budget(handle);
         let result = agent.check_budget_threshold();
-        assert_eq!(result, Some(CAUTION_ADVISORY), "expected CAUTION_ADVISORY at 70%");
+        assert_eq!(
+            result,
+            Some(CAUTION_ADVISORY),
+            "expected CAUTION_ADVISORY at 70%"
+        );
         // Exactly-once: second call at steady-state returns None (no spam).
         assert_eq!(
             agent.check_budget_threshold(),
@@ -2079,7 +2180,11 @@ mod budget_tests {
         drive_used(&handle, 9); // 90% → Warning90 → first observation injects
         let mut agent = make_agent(10).with_budget(handle);
         let result = agent.check_budget_threshold();
-        assert_eq!(result, Some(WARNING_ADVISORY), "expected WARNING_ADVISORY at 90%");
+        assert_eq!(
+            result,
+            Some(WARNING_ADVISORY),
+            "expected WARNING_ADVISORY at 90%"
+        );
     }
 
     #[test]
@@ -2102,7 +2207,10 @@ mod budget_tests {
         let handle = BudgetHandle::new(10);
         let agent = make_agent(10).with_budget(handle.clone());
         let retrieved = agent.budget();
-        assert!(retrieved.is_some(), "budget() should return Some after with_budget");
+        assert!(
+            retrieved.is_some(),
+            "budget() should return Some after with_budget"
+        );
         retrieved.unwrap().consume();
         assert_eq!(handle.used(), 1, "retrieved handle shares the same counter");
     }
@@ -2163,13 +2271,21 @@ mod fallback_tests {
 
     #[test]
     fn test_fallback_state_initial() {
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "test"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "test",
+        ));
         let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         let agent = AgentLoop::new(client, registry, 10);
-        assert!(!agent.fallback_activated, "fallback_activated should start false");
-        assert!(agent.fallback_client.is_none(), "fallback_client should start None");
+        assert!(
+            !agent.fallback_activated,
+            "fallback_activated should start false"
+        );
+        assert!(
+            agent.fallback_client.is_none(),
+            "fallback_client should start None"
+        );
     }
 
     #[test]
@@ -2193,17 +2309,24 @@ mod fallback_tests {
         let err = anyhow!("Connection refused: failed to connect to LLM");
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "generic errors should be retryable");
-        assert!(!should_fallback, "generic errors should not trigger fallback");
+        assert!(
+            !should_fallback,
+            "generic errors should not trigger fallback"
+        );
     }
 
     #[test]
     fn test_fallback_activated_prevents_refire() {
-        let primary = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://primary".to_string(), "key1".to_string(), "model1"),
-        );
-        let fallback = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://fallback".to_string(), "key2".to_string(), "model2"),
-        );
+        let primary = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://primary".to_string(),
+            "key1".to_string(),
+            "model1",
+        ));
+        let fallback = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://fallback".to_string(),
+            "key2".to_string(),
+            "model2",
+        ));
         let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         let mut agent = AgentLoop::new(primary, registry, 10).with_fallback(fallback);
 
@@ -2217,7 +2340,10 @@ mod fallback_tests {
         }
 
         assert!(agent.fallback_activated);
-        assert!(agent.fallback_client.is_none(), "take() should leave None — one-shot guarantee");
+        assert!(
+            agent.fallback_client.is_none(),
+            "take() should leave None — one-shot guarantee"
+        );
     }
 
     #[test]
@@ -2275,7 +2401,14 @@ mod plan_18_06_tests {
         }
     }
 
-    fn make_engine(threshold: f32) -> (Arc<RecordingEngine>, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<&'static str>>>) {
+    fn make_engine(
+        threshold: f32,
+    ) -> (
+        Arc<RecordingEngine>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<&'static str>>>,
+    ) {
         let c = Arc::new(AtomicUsize::new(0));
         let p = Arc::new(AtomicUsize::new(0));
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2314,16 +2447,32 @@ mod plan_18_06_tests {
         let mut agent = make_agent_with_engine(engine.clone(), 1_000_000);
         let mut messages = filler_messages(5);
         agent.pre_chat_compress(&mut messages).await;
-        assert_eq!(compress_calls.load(AtomicOrdering::SeqCst), 0, "below threshold must not compress");
-        assert_eq!(pressure_calls.load(AtomicOrdering::SeqCst), 1, "below threshold must run pressure check");
+        assert_eq!(
+            compress_calls.load(AtomicOrdering::SeqCst),
+            0,
+            "below threshold must not compress"
+        );
+        assert_eq!(
+            pressure_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "below threshold must run pressure check"
+        );
 
         // Above threshold: tiny ctx_len forces ratio > 0.5.
         let (engine2, compress_calls2, pressure_calls2, _log2) = make_engine(0.5);
         let mut agent2 = make_agent_with_engine(engine2.clone(), 100);
         let mut msgs2 = filler_messages(20);
         agent2.pre_chat_compress(&mut msgs2).await;
-        assert_eq!(compress_calls2.load(AtomicOrdering::SeqCst), 1, "above threshold must compress");
-        assert_eq!(pressure_calls2.load(AtomicOrdering::SeqCst), 0, "above threshold must NOT also run pressure check");
+        assert_eq!(
+            compress_calls2.load(AtomicOrdering::SeqCst),
+            1,
+            "above threshold must compress"
+        );
+        assert_eq!(
+            pressure_calls2.load(AtomicOrdering::SeqCst),
+            0,
+            "above threshold must NOT also run pressure check"
+        );
     }
 
     /// Transient pressure message is drained and injected as a system message
@@ -2338,8 +2487,8 @@ mod plan_18_06_tests {
         assert!(fired, "precondition: tracker must fire the transient");
 
         let (engine, _c, _p, _log) = make_engine(0.5);
-        let mut agent = make_agent_with_engine(engine, 1_000_000)
-            .with_pressure_tracker(tracker.clone());
+        let mut agent =
+            make_agent_with_engine(engine, 1_000_000).with_pressure_tracker(tracker.clone());
 
         let mut messages = filler_messages(3);
         let before_len = messages.len();
@@ -2348,7 +2497,12 @@ mod plan_18_06_tests {
         assert_eq!(messages.len(), before_len + 1, "transient must be appended");
         let injected = messages.last().unwrap();
         assert_eq!(injected.role, ironhermes_core::Role::System);
-        assert!(injected.content_text().unwrap_or("").contains("CONTEXT PRESSURE HIGH"));
+        assert!(
+            injected
+                .content_text()
+                .unwrap_or("")
+                .contains("CONTEXT PRESSURE HIGH")
+        );
 
         // Transient is one-shot — subsequent drain returns None.
         assert!(tracker.take_transient("sess-test").is_none());
@@ -2396,9 +2550,9 @@ mod plan_18_06_tests {
             assert_eq!(a.content_text(), b.content_text());
         }
         assert!(
-            messages.iter().all(|m| {
-                m.content_text().map(|t| t != "CORRUPTED").unwrap_or(true)
-            }),
+            messages
+                .iter()
+                .all(|m| { m.content_text().map(|t| t != "CORRUPTED").unwrap_or(true) }),
             "corruption sentinel must not appear in restored vec"
         );
     }
@@ -2413,7 +2567,11 @@ mod plan_18_06_tests {
         let mut messages = filler_messages(20);
         agent.pre_chat_compress(&mut messages).await;
         let final_log = log.lock().unwrap().clone();
-        assert_eq!(final_log, vec!["compress"], "compress must be the pre-chat event");
+        assert_eq!(
+            final_log,
+            vec!["compress"],
+            "compress must be the pre-chat event"
+        );
     }
 }
 
@@ -2426,13 +2584,11 @@ mod memory_provider_wiring_tests {
     use super::*;
 
     fn make_agent() -> AgentLoop {
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new(
-                "http://localhost".to_string(),
-                "".to_string(),
-                "mock-model",
-            ),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         AgentLoop::new(client, registry, 4)
     }
@@ -2479,15 +2635,24 @@ mod memory_provider_wiring_tests {
         let store = ironhermes_state::StateStore::new(db_path).unwrap();
         let state = std::sync::Arc::new(std::sync::Mutex::new(store));
 
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
-        let agent = AgentLoop::new(client, registry, 1)
-            .with_intercepts(None, Some(state.clone()), None, None, None);
+        let agent = AgentLoop::new(client, registry, 1).with_intercepts(
+            None,
+            Some(state.clone()),
+            None,
+            None,
+            None,
+        );
 
         let reg = agent.registry.read().await;
-        let result = reg.dispatch_intercepts("session_search", serde_json::json!({"query": "test"})).await;
+        let result = reg
+            .dispatch_intercepts("session_search", serde_json::json!({"query": "test"}))
+            .await;
         assert!(
             result.is_some(),
             "session_search must be registered as intercept via with_intercepts"
@@ -2498,21 +2663,32 @@ mod memory_provider_wiring_tests {
     /// todo_write and todo_read are registered.
     #[tokio::test]
     async fn agent_loop_with_intercepts_registers_todo_pair() {
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let todo_state: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let agent = AgentLoop::new(client, registry, 1)
-            .with_intercepts(None, None, None, Some(todo_state), None);
+        let agent = AgentLoop::new(client, registry, 1).with_intercepts(
+            None,
+            None,
+            None,
+            Some(todo_state),
+            None,
+        );
 
         let reg = agent.registry.read().await;
         assert!(
-            reg.dispatch_intercepts("todo_write", serde_json::json!({"items": []})).await.is_some(),
+            reg.dispatch_intercepts("todo_write", serde_json::json!({"items": []}))
+                .await
+                .is_some(),
             "todo_write must be registered via with_intercepts"
         );
         assert!(
-            reg.dispatch_intercepts("todo_read", serde_json::json!({})).await.is_some(),
+            reg.dispatch_intercepts("todo_read", serde_json::json!({}))
+                .await
+                .is_some(),
             "todo_read must be registered via with_intercepts"
         );
     }
@@ -2526,7 +2702,8 @@ mod memory_provider_wiring_tests {
         let forbidden_push: String = [
             "tool_schemas.push(crate::session_search::",
             "session_search_schema())",
-        ].concat();
+        ]
+        .concat();
         assert!(
             !source.contains(&forbidden_push),
             "D-14: session_search schema push injection must be deleted from run(); \
@@ -2541,10 +2718,7 @@ mod memory_provider_wiring_tests {
     fn agent_loop_session_search_match_block_removed() {
         let source = include_str!("agent_loop.rs");
         // Build the forbidden string at runtime to avoid it appearing in test source.
-        let forbidden_match: String = [
-            "if name == ",
-            "\"session_search\"",
-        ].concat();
+        let forbidden_match: String = ["if name == ", "\"session_search\""].concat();
         assert!(
             !source.contains(&forbidden_match),
             "D-12: hardcoded session_search name-equality block must be deleted \
@@ -2563,12 +2737,19 @@ mod memory_provider_wiring_tests {
         let state = std::sync::Arc::new(std::sync::Mutex::new(store));
         let todo_state: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
-        let agent = AgentLoop::new(client, registry, 1)
-            .with_intercepts(None, Some(state), None, Some(todo_state), None);
+        let agent = AgentLoop::new(client, registry, 1).with_intercepts(
+            None,
+            Some(state),
+            None,
+            Some(todo_state),
+            None,
+        );
 
         let reg = agent.registry.read().await;
         let schemas = reg.get_definitions(None);
@@ -2580,7 +2761,8 @@ mod memory_provider_wiring_tests {
             assert_eq!(
                 count, 1,
                 "intercepted tool '{}' must appear exactly once in get_definitions(None); \
-                 all: {:?}", expected, names
+                 all: {:?}",
+                expected, names
             );
         }
     }
@@ -2593,16 +2775,13 @@ mod memory_provider_wiring_tests {
     async fn agent_loop_with_browser_session_sets_field() {
         use ironhermes_tools::browser_session::BrowserSession;
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(None::<BrowserSession>));
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new(
-                "http://localhost".to_string(),
-                "".to_string(),
-                "mock-model",
-            ),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
-        let agent = AgentLoop::new(client, registry, 1)
-            .with_browser_session(arc.clone());
+        let agent = AgentLoop::new(client, registry, 1).with_browser_session(arc.clone());
         assert!(
             agent.browser_session.is_some(),
             "Phase 25.1 D-17: with_browser_session MUST populate the field"
@@ -2643,26 +2822,40 @@ mod trajectory_wireup_tests {
         assert_eq!(classify_impact_level("write_file"), ImpactLevel::Write);
         assert_eq!(classify_impact_level("patch"), ImpactLevel::Write);
         assert_eq!(classify_impact_level("terminal"), ImpactLevel::SystemChange);
-        assert_eq!(classify_impact_level("execute_code"), ImpactLevel::SystemChange);
+        assert_eq!(
+            classify_impact_level("execute_code"),
+            ImpactLevel::SystemChange
+        );
     }
 
     #[test]
     fn classify_impact_level_mcp_default_system_change() {
-        assert_eq!(classify_impact_level("mcp__github_create_issue"), ImpactLevel::SystemChange);
-        assert_eq!(classify_impact_level("mcp_filesystem_write"), ImpactLevel::SystemChange);
+        assert_eq!(
+            classify_impact_level("mcp__github_create_issue"),
+            ImpactLevel::SystemChange
+        );
+        assert_eq!(
+            classify_impact_level("mcp_filesystem_write"),
+            ImpactLevel::SystemChange
+        );
     }
 
     #[test]
     fn classify_impact_level_unknown_default_write() {
-        assert_eq!(classify_impact_level("brand_new_tool_2030"), ImpactLevel::Write);
+        assert_eq!(
+            classify_impact_level("brand_new_tool_2030"),
+            ImpactLevel::Write
+        );
         assert_eq!(classify_impact_level(""), ImpactLevel::Write);
     }
 
     #[test]
     fn agent_loop_trajectory_writer_default_none() {
-        let client = AnyClient::ChatCompletions(
-            crate::client::LlmClient::new("http://localhost".to_string(), "".to_string(), "mock-model"),
-        );
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "mock-model",
+        ));
         let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
         let agent = AgentLoop::new(client, registry, 4);
         assert!(

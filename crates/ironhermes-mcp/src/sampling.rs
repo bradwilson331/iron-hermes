@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// This is the closure/function signature that callers must provide to enable
 /// server-initiated LLM requests (D-03). The future must be `'static + Send`.
 pub type SamplingCallback = Arc<
-    dyn Fn(String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + 'static>>
+    dyn Fn(
+            String,
+            Option<String>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + 'static>>
         + Send
         + Sync,
 >;
@@ -103,9 +106,7 @@ mod tests {
             .unwrap();
 
         // Third call exceeds limit
-        let result = handler
-            .handle_sampling_request("c".to_string(), None)
-            .await;
+        let result = handler.handle_sampling_request("c".to_string(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("rate limit"));
     }
@@ -113,9 +114,7 @@ mod tests {
     #[tokio::test]
     async fn test_sampling_handler_passes_model_hint() {
         let callback: SamplingCallback = Arc::new(|_prompt, model_hint| {
-            Box::pin(async move {
-                Ok(model_hint.unwrap_or_else(|| "no-hint".to_string()))
-            })
+            Box::pin(async move { Ok(model_hint.unwrap_or_else(|| "no-hint".to_string())) })
         });
         let handler = SamplingHandler::new(callback, 10, 5);
         let result = handler

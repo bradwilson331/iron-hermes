@@ -100,7 +100,11 @@ pub fn render_status_line(state: &StatusLineState) -> String {
         ));
     }
 
-    let hint = if state.hint.is_empty() { None } else { Some(state.hint.as_str()) };
+    let hint = if state.hint.is_empty() {
+        None
+    } else {
+        Some(state.hint.as_str())
+    };
     let colored_cells = rotate_pill_colors(&pills, hint);
 
     let dot_sep = format!(" {} ", "·".dimmed());

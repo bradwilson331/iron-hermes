@@ -237,11 +237,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".ironhermes")).unwrap();
         let ws = resolve_from_cwd(&root).unwrap();
         assert_eq!(ws.tools_config, None);
-        std::fs::write(
-            root.join(".ironhermes").join("tools.yaml"),
-            b"toolsets: {}",
-        )
-        .unwrap();
+        std::fs::write(root.join(".ironhermes").join("tools.yaml"), b"toolsets: {}").unwrap();
         let ws2 = resolve_from_cwd(&root).unwrap();
         assert_eq!(
             ws2.tools_config,
@@ -310,7 +306,10 @@ mod tests {
         // canonical_root_string MUST agree with Path::display() so the SQL filter
         // string and the SQLite column never diverge for non-UTF-8 paths.
         assert_eq!(canonical, format!("{}", ws.root.display()));
-        assert!(!canonical.is_empty(), "must NOT return empty for non-UTF-8 paths");
+        assert!(
+            !canonical.is_empty(),
+            "must NOT return empty for non-UTF-8 paths"
+        );
         assert!(!canonical.contains('\0'));
     }
 }

@@ -106,7 +106,11 @@ pub struct FunctionSchema {
 }
 
 impl ToolSchema {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: serde_json::Value) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
         Self {
             schema_type: "function".to_string(),
             function: FunctionSchema {
@@ -246,7 +250,7 @@ pub enum Platform {
     HomeAssistant,
     Webhook,
     ApiServer,
-    Web,  // Phase 25.5: Dioxus web UI sessions
+    Web, // Phase 25.5: Dioxus web UI sessions
 }
 
 impl std::fmt::Display for Platform {
@@ -545,7 +549,10 @@ mod tool_pair_invariant_tests {
             ChatMessage::assistant("done"),
         ];
         let err = validate_tool_call_pairing(&msgs).expect_err("must err");
-        assert!(err.contains("b"), "diagnostic must reference 'b'; got: {err}");
+        assert!(
+            err.contains("b"),
+            "diagnostic must reference 'b'; got: {err}"
+        );
     }
 
     #[test]
@@ -559,7 +566,10 @@ mod tool_pair_invariant_tests {
             ChatMessage::tool_result("c1", "late"),
         ];
         let err = validate_tool_call_pairing(&msgs).expect_err("must err");
-        assert!(err.contains("c1"), "diagnostic must reference 'c1'; got: {err}");
+        assert!(
+            err.contains("c1"),
+            "diagnostic must reference 'c1'; got: {err}"
+        );
     }
 
     #[test]
@@ -571,7 +581,10 @@ mod tool_pair_invariant_tests {
             ChatMessage::user("ignoring the pending tool"),
         ];
         let err = validate_tool_call_pairing(&msgs).expect_err("must err");
-        assert!(err.contains("c1"), "diagnostic must reference 'c1'; got: {err}");
+        assert!(
+            err.contains("c1"),
+            "diagnostic must reference 'c1'; got: {err}"
+        );
     }
 
     #[test]
@@ -583,6 +596,9 @@ mod tool_pair_invariant_tests {
             ChatMessage::tool_result("c2", "r"),
         ];
         let err = validate_tool_call_pairing(&msgs).expect_err("must err");
-        assert!(err.contains("c2"), "diagnostic must reference 'c2'; got: {err}");
+        assert!(
+            err.contains("c2"),
+            "diagnostic must reference 'c2'; got: {err}"
+        );
     }
 }

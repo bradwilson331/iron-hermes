@@ -3,8 +3,8 @@ use clap::Subcommand;
 use colored::Colorize;
 use std::fmt::Write as FmtWrite;
 
-use ironhermes_core::{ModelMetadata, ModelRegistry, ModelsCache, fetch_all};
 use crate::tui::status_line::format_token_count;
+use ironhermes_core::{ModelMetadata, ModelRegistry, ModelsCache, fetch_all};
 
 // ---------------------------------------------------------------------------
 // ModelsSubcommand
@@ -186,10 +186,16 @@ async fn cmd_fetch() -> Result<()> {
     // Warn on partial failure
     if fetch_result.models_dev_error.is_some() || fetch_result.openrouter_error.is_some() {
         if let Some(ref e) = fetch_result.models_dev_error {
-            println!("  {}", format!("Warning: models.dev fetch failed - {}", e).yellow());
+            println!(
+                "  {}",
+                format!("Warning: models.dev fetch failed - {}", e).yellow()
+            );
         }
         if let Some(ref e) = fetch_result.openrouter_error {
-            println!("  {}", format!("Warning: OpenRouter fetch failed - {}", e).yellow());
+            println!(
+                "  {}",
+                format!("Warning: OpenRouter fetch failed - {}", e).yellow()
+            );
         }
     }
 
@@ -276,7 +282,10 @@ async fn cmd_info(model: &str) -> Result<()> {
             // since the alias map is private. Pass empty.
             // This is acceptable since the primary use case is model info display.
 
-            print!("{}", render_model_info(canonical, metadata, &source, &aliases));
+            print!(
+                "{}",
+                render_model_info(canonical, metadata, &source, &aliases)
+            );
             Ok(())
         }
         None => {
@@ -349,25 +358,41 @@ fn render_model_info(
         out,
         "  {:<18} {}",
         "Vision:".dimmed(),
-        if metadata.capabilities.vision { yes.clone() } else { no.clone() }
+        if metadata.capabilities.vision {
+            yes.clone()
+        } else {
+            no.clone()
+        }
     );
     let _ = writeln!(
         out,
         "  {:<18} {}",
         "Tool use:".dimmed(),
-        if metadata.capabilities.tool_use { yes.clone() } else { no.clone() }
+        if metadata.capabilities.tool_use {
+            yes.clone()
+        } else {
+            no.clone()
+        }
     );
     let _ = writeln!(
         out,
         "  {:<18} {}",
         "Reasoning:".dimmed(),
-        if metadata.capabilities.reasoning { yes.clone() } else { no.clone() }
+        if metadata.capabilities.reasoning {
+            yes.clone()
+        } else {
+            no.clone()
+        }
     );
     let _ = writeln!(
         out,
         "  {:<18} {}",
         "Streaming:".dimmed(),
-        if metadata.capabilities.streaming { yes.clone() } else { no.clone() }
+        if metadata.capabilities.streaming {
+            yes.clone()
+        } else {
+            no.clone()
+        }
     );
 
     let _ = writeln!(out, "  {:<18} {}", "Source:".dimmed(), source);
@@ -419,7 +444,10 @@ mod tests {
         assert!(output.contains("64.0K"), "missing output tokens");
         assert!(output.contains("cl100k_base"), "missing tokenizer");
         assert!(output.contains("1 model(s) total"), "missing footer count");
-        assert!(output.contains("fetched 2026-04-19"), "missing cache status");
+        assert!(
+            output.contains("fetched 2026-04-19"),
+            "missing cache status"
+        );
     }
 
     #[test]
@@ -455,7 +483,10 @@ mod tests {
         };
         let output = render_model_info("test-model", &meta, "static table", &[]);
 
-        assert!(output.contains("unknown"), "missing 'unknown' for max output");
+        assert!(
+            output.contains("unknown"),
+            "missing 'unknown' for max output"
+        );
     }
 
     #[test]
@@ -469,7 +500,13 @@ mod tests {
         let aliases = vec!["claude-sonnet-4-20250514", "anthropic/claude-sonnet-4"];
         let output = render_model_info("claude-sonnet-4", &meta, "static table", &aliases);
 
-        assert!(output.contains("claude-sonnet-4-20250514"), "missing alias 1");
-        assert!(output.contains("anthropic/claude-sonnet-4"), "missing alias 2");
+        assert!(
+            output.contains("claude-sonnet-4-20250514"),
+            "missing alias 1"
+        );
+        assert!(
+            output.contains("anthropic/claude-sonnet-4"),
+            "missing alias 2"
+        );
     }
 }

@@ -146,7 +146,9 @@ fn toolset_enable_rejects_path_traversal_name() {
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let bin = std::env::var("CARGO_BIN_EXE_ironhermes").unwrap_or_default();
     if bin.is_empty() {
-        eprintln!("Skipping toolset_enable_rejects_path_traversal_name: CARGO_BIN_EXE_ironhermes not set");
+        eprintln!(
+            "Skipping toolset_enable_rejects_path_traversal_name: CARGO_BIN_EXE_ironhermes not set"
+        );
         return;
     }
     let tmp = tempfile::TempDir::new().unwrap();
@@ -189,7 +191,9 @@ fn toolset_enable_emits_cache_break_banner_on_stderr() {
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let bin = std::env::var("CARGO_BIN_EXE_ironhermes").unwrap_or_default();
     if bin.is_empty() {
-        eprintln!("Skipping toolset_enable_emits_cache_break_banner_on_stderr: CARGO_BIN_EXE_ironhermes not set");
+        eprintln!(
+            "Skipping toolset_enable_emits_cache_break_banner_on_stderr: CARGO_BIN_EXE_ironhermes not set"
+        );
         return;
     }
     let tmp = tempfile::TempDir::new().unwrap();
@@ -270,7 +274,9 @@ fn preflight_banner_appears_for_required_missing_prereq() {
     let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
         Ok(p) => p,
         Err(_) => {
-            eprintln!("Skipping preflight_banner_appears_for_required_missing_prereq: CARGO_BIN_EXE_ironhermes not set");
+            eprintln!(
+                "Skipping preflight_banner_appears_for_required_missing_prereq: CARGO_BIN_EXE_ironhermes not set"
+            );
             return;
         }
     };

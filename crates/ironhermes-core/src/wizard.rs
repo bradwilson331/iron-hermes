@@ -29,7 +29,11 @@ always disable later with `hermes config set memory.enabled false`).";
 
 /// Apply a wizard answer for `model.default`. Empty input accepts default.
 pub fn apply_model_answer(config: &mut Config, raw_input: &str, default: &str) {
-    let val = if raw_input.trim().is_empty() { default } else { raw_input.trim() };
+    let val = if raw_input.trim().is_empty() {
+        default
+    } else {
+        raw_input.trim()
+    };
     config.model.default = val.to_string();
 }
 
@@ -62,10 +66,7 @@ pub fn apply_api_key_answer(config: &mut Config, raw_input: &str) {
 /// merged into config.yaml. The caller (Plan 23-02 setup.rs) is responsible
 /// for splicing this into the live config.yaml using `serde_yaml::Value`
 /// load-mutate-save (so unknown keys survive — D-15).
-pub fn apply_learning_loop_answer(
-    config: &mut Config,
-    raw_input: &str,
-) -> serde_yaml::Mapping {
+pub fn apply_learning_loop_answer(config: &mut Config, raw_input: &str) -> serde_yaml::Mapping {
     let trimmed = raw_input.trim();
     let enabled = trimmed.is_empty()
         || trimmed.eq_ignore_ascii_case("y")
@@ -110,7 +111,11 @@ pub fn apply_memory_provider_answer(
     let chosen = if val.is_empty() { default } else { val };
     const VALID: &[&str] = &["file", "sqlite", "grafeo", "duckdb"];
     if !VALID.contains(&chosen) {
-        anyhow::bail!("unknown memory provider: {} (valid: {})", chosen, VALID.join(", "));
+        anyhow::bail!(
+            "unknown memory provider: {} (valid: {})",
+            chosen,
+            VALID.join(", ")
+        );
     }
     config.memory.provider = chosen.to_string();
     Ok(())
@@ -120,11 +125,18 @@ pub fn apply_memory_provider_answer(
 /// Path normalization (~ expansion, abs-path) is the caller's job.
 pub fn apply_hermes_home_answer(raw_input: &str, default: &str) -> String {
     let trimmed = raw_input.trim();
-    if trimmed.is_empty() { default.to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Apply gateway section answer (stub — Phase 25/26 hooks plug in later).
-pub fn apply_gateway_section_answer(_config: &mut Config, _enable_telegram: &str) -> anyhow::Result<()> {
+pub fn apply_gateway_section_answer(
+    _config: &mut Config,
+    _enable_telegram: &str,
+) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -160,7 +172,10 @@ mod tests {
     fn apply_auxiliary_answer_writes_when_provider_nonempty() {
         let mut config = Config::default();
         apply_auxiliary_answer(&mut config, "openai", "gpt-4o-mini");
-        assert!(config.auxiliary.is_set(), "auxiliary must be set after non-empty provider");
+        assert!(
+            config.auxiliary.is_set(),
+            "auxiliary must be set after non-empty provider"
+        );
         assert_eq!(config.auxiliary.provider, "openai");
         assert_eq!(config.auxiliary.model, "gpt-4o-mini");
     }
@@ -170,15 +185,24 @@ mod tests {
         let mut config = Config::default();
         // D-06: empty provider = skip, auxiliary stays unset.
         apply_auxiliary_answer(&mut config, "", "gpt-4o-mini");
-        assert!(!config.auxiliary.is_set(), "auxiliary MUST remain unset when provider is empty (D-06)");
+        assert!(
+            !config.auxiliary.is_set(),
+            "auxiliary MUST remain unset when provider is empty (D-06)"
+        );
     }
 
     #[test]
     fn apply_auxiliary_answer_trims_whitespace() {
         let mut config = Config::default();
         apply_auxiliary_answer(&mut config, "  openai  ", "  gpt-4o-mini  ");
-        assert_eq!(config.auxiliary.provider, "openai", "provider must be trimmed");
-        assert_eq!(config.auxiliary.model, "gpt-4o-mini", "model must be trimmed");
+        assert_eq!(
+            config.auxiliary.provider, "openai",
+            "provider must be trimmed"
+        );
+        assert_eq!(
+            config.auxiliary.model, "gpt-4o-mini",
+            "model must be trimmed"
+        );
     }
 
     #[test]
@@ -190,7 +214,13 @@ mod tests {
             model: "old-model".to_string(),
         };
         apply_auxiliary_answer(&mut config, "openai", "gpt-4o-mini");
-        assert_eq!(config.auxiliary.provider, "openai", "must overwrite existing provider");
-        assert_eq!(config.auxiliary.model, "gpt-4o-mini", "must overwrite existing model");
+        assert_eq!(
+            config.auxiliary.provider, "openai",
+            "must overwrite existing provider"
+        );
+        assert_eq!(
+            config.auxiliary.model, "gpt-4o-mini",
+            "must overwrite existing model"
+        );
     }
 }

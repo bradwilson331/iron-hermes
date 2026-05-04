@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 const GET_IMAGES_JS: &str = r#"
@@ -87,8 +87,9 @@ impl Tool for BrowserGetImagesTool {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -128,7 +129,8 @@ impl Tool for BrowserGetImagesTool {
             for img in arr {
                 if let Some(r) = img.get("ref").and_then(|v| v.as_u64()) {
                     if r > start_counter {
-                        sess.ref_table.insert(r, format!("[data-ironhermes-ref=\"{r}\"]"));
+                        sess.ref_table
+                            .insert(r, format!("[data-ironhermes-ref=\"{r}\"]"));
                     }
                 }
             }

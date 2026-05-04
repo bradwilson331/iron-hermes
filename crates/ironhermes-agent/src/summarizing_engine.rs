@@ -16,11 +16,11 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::any_client::AnyClient;
 use crate::context_compressor::{estimate_message_tokens, estimate_messages_tokens};
-use crate::memory::MemoryManager;
 use crate::context_engine::{
     CompressionMode, CompressionOutcome, ContextEngine, ContextError, ContextStats,
     LocalPruningEngine,
 };
+use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::tool_pair;
 
@@ -315,9 +315,7 @@ impl ContextEngine for SummarizingEngine {
             );
             reg.fire_awaitable(event).await;
         } else {
-            tracing::debug!(
-                "no pre_compress handler registered, proceeding without memory flush"
-            );
+            tracing::debug!("no pre_compress handler registered, proceeding without memory flush");
         }
 
         // Snapshot the caller's vec BEFORE any mutation so we can roll back
@@ -483,11 +481,9 @@ impl ContextEngine for SummarizingEngine {
         let pruned_blocks: Vec<ChatMessage> = messages[prune_start..prune_end]
             .iter()
             .enumerate()
-            .filter(|(offset, _)| {
-                match history_idx {
-                    Some(h) => h != prune_start + offset,
-                    None => true,
-                }
+            .filter(|(offset, _)| match history_idx {
+                Some(h) => h != prune_start + offset,
+                None => true,
             })
             .map(|(_, m)| m.clone())
             .collect();
@@ -661,7 +657,9 @@ mod tests {
     }
 
     impl MockSummarizer {
-        fn new(responses: Vec<Result<String, ContextError>>) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
+        fn new(
+            responses: Vec<Result<String, ContextError>>,
+        ) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
             let calls = Arc::new(Mutex::new(Vec::new()));
             let m = Arc::new(Self {
                 calls: calls.clone(),
@@ -677,7 +675,9 @@ mod tests {
             self.calls.lock().unwrap().push(prompt);
             let mut r = self.responses.lock().await;
             if r.is_empty() {
-                return Err(ContextError::SummarizationFailed("no more mock responses".into()));
+                return Err(ContextError::SummarizationFailed(
+                    "no more mock responses".into(),
+                ));
             }
             r.remove(0)
         }
@@ -786,10 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn iterative_summary() {
-        let (mock, calls) = MockSummarizer::new(vec![
-            Ok("Summary1".into()),
-            Ok("Summary2".into()),
-        ]);
+        let (mock, calls) = MockSummarizer::new(vec![Ok("Summary1".into()), Ok("Summary2".into())]);
         let engine = SummarizingEngine::new(1000, 0.5, mock);
         let mut msgs = build_large(30);
 
@@ -818,11 +815,17 @@ mod tests {
             .filter(|m| m.name.as_deref() == Some("context_history"))
             .collect();
         assert_eq!(pins.len(), 1, "single pin after iterative compression");
-        assert_eq!(pins[0].content_text().unwrap(), "[CONTEXT HISTORY]\nSummary2");
+        assert_eq!(
+            pins[0].content_text().unwrap(),
+            "[CONTEXT HISTORY]\nSummary2"
+        );
 
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded.len(), 2, "two summarization calls");
-        assert!(recorded[1].contains("Summary1"), "second prompt includes prior summary");
+        assert!(
+            recorded[1].contains("Summary1"),
+            "second prompt includes prior summary"
+        );
         assert!(
             recorded[1].contains("New pruned blocks"),
             "second prompt uses iterative template"
@@ -862,7 +865,10 @@ mod tests {
         msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
             id: "orphan-id".into(),
             call_type: "function".into(),
-            function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+            function: FunctionCall {
+                name: "fn".into(),
+                arguments: "{}".into(),
+            },
         }]));
         let snapshot = msgs.clone();
 
@@ -887,8 +893,7 @@ mod tests {
         // Must NOT contain a [CONTEXT HISTORY] pin — that would mean the
         // mutated state leaked through.
         assert!(
-            msgs.iter()
-                .all(|m| m.name.as_deref() != Some(HISTORY_NAME)),
+            msgs.iter().all(|m| m.name.as_deref() != Some(HISTORY_NAME)),
             "no pinned history segment in restored vec"
         );
     }
@@ -975,7 +980,9 @@ mod tests {
         };
         let result_pos = |v: &Vec<ChatMessage>| {
             v.iter()
-                .position(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("web_read_1"))
+                .position(|m| {
+                    m.role == Role::Tool && m.tool_call_id.as_deref() == Some("web_read_1")
+                })
                 .unwrap()
         };
 
@@ -1066,15 +1073,18 @@ mod tests {
             .iter()
             .filter(|m| m.name.as_deref() == Some(HISTORY_NAME))
             .collect();
-        assert_eq!(pins.len(), 1, "exactly one pinned [CONTEXT HISTORY] segment");
+        assert_eq!(
+            pins.len(),
+            1,
+            "exactly one pinned [CONTEXT HISTORY] segment"
+        );
     }
 
     /// Assert the fixture actually places the pair straddling the protect
     /// boundary (assistant prunable, at least one tool_result protected).
     /// Guards against silent false-GREEN from a miscounted fixture.
     fn assert_pair_straddles(msgs: &[ChatMessage], protect_last_tokens: usize) {
-        let protect_start =
-            ContextCompressor::compute_protect_start(msgs, protect_last_tokens, 3);
+        let protect_start = ContextCompressor::compute_protect_start(msgs, protect_last_tokens, 3);
         let pairs = tool_pair::detect_tool_pairs(msgs);
         assert_eq!(pairs.len(), 1, "fixture must contain exactly one tool-pair");
         let p = &pairs[0];
@@ -1206,7 +1216,10 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         assert!(
             pairs[0].assistant_idx < protect_start
-                && pairs[0].tool_result_indices.iter().all(|&i| i < protect_start),
+                && pairs[0]
+                    .tool_result_indices
+                    .iter()
+                    .all(|&i| i < protect_start),
             "fixture must place pair fully in prunable range"
         );
         let before = estimate_messages_tokens(&msgs);
@@ -1244,16 +1257,17 @@ mod tests {
         assert!(outcome.compressed);
         assert_compress_ok_no_orphan(&msgs);
         // Original pair survived untouched.
-        assert!(msgs.iter().any(
-            |m| m.role == Role::Assistant
+        assert!(msgs.iter().any(|m| {
+            m.role == Role::Assistant
                 && m.tool_calls
                     .as_ref()
                     .map(|v| v.iter().any(|c| c.id == "web_read_1"))
                     .unwrap_or(false)
-        ));
-        assert!(msgs.iter().any(
-            |m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("web_read_1")
-        ));
+        }));
+        assert!(
+            msgs.iter()
+                .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("web_read_1"))
+        );
     }
 
     // ── Phase 18 Plan 10 Task 3: regression matrix ──────────────────────────
@@ -1295,9 +1309,7 @@ mod tests {
         loop {
             let result_idx = msgs
                 .iter()
-                .rposition(|m| {
-                    m.role == Role::Tool && m.tool_call_id.as_deref() == Some(*last_id)
-                })
+                .rposition(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some(*last_id))
                 .unwrap();
             let ps = ContextCompressor::compute_protect_start(&msgs, protect_last_tokens, 3);
             if result_idx >= ps {
@@ -1326,8 +1338,7 @@ mod tests {
             }
             if let Some(ref mut calls) = msgs[ai].tool_calls {
                 for c in calls.iter_mut() {
-                    c.function.arguments =
-                        format!("{}{}", c.function.arguments, " ".repeat(40));
+                    c.function.arguments = format!("{}{}", c.function.arguments, " ".repeat(40));
                 }
             }
             if msgs[ai]
@@ -1428,13 +1439,19 @@ mod tests {
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "pA".into(),
                 call_type: "function".into(),
-                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: "{}".into(),
+                },
             }]),
             ChatMessage::tool_result("pA", "rA"),
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "pB".into(),
                 call_type: "function".into(),
-                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: "{}".into(),
+                },
             }]),
             ChatMessage::tool_result("pB", "rB"),
         ];
@@ -1503,7 +1520,10 @@ mod tests {
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "only".into(),
                 call_type: "function".into(),
-                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: "{}".into(),
+                },
             }]),
             ChatMessage::tool_result("only", "r"),
         ];
@@ -1573,7 +1593,10 @@ mod tests {
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "pA".into(),
                 call_type: "function".into(),
-                function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: "{}".into(),
+                },
             }]),
             ChatMessage::tool_result("pA", "r_a"),
         ];
@@ -1585,7 +1608,10 @@ mod tests {
         msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
             id: "pB".into(),
             call_type: "function".into(),
-            function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+            function: FunctionCall {
+                name: "web_read".into(),
+                arguments: "{}".into(),
+            },
         }]));
         msgs.push(ChatMessage::tool_result("pB", "r_b"));
         // tail filler
@@ -1596,7 +1622,10 @@ mod tests {
         msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
             id: "pC".into(),
             call_type: "function".into(),
-            function: FunctionCall { name: "web_read".into(), arguments: "{}".into() },
+            function: FunctionCall {
+                name: "web_read".into(),
+                arguments: "{}".into(),
+            },
         }]));
         msgs.push(ChatMessage::tool_result("pC", "r_c"));
 
@@ -1663,11 +1692,8 @@ mod tests {
         protect_first_n: usize,
         protect_last_tokens: usize,
     ) {
-        let protect_start = ContextCompressor::compute_protect_start(
-            msgs,
-            protect_last_tokens,
-            protect_first_n,
-        );
+        let protect_start =
+            ContextCompressor::compute_protect_start(msgs, protect_last_tokens, protect_first_n);
         let pairs = tool_pair::detect_tool_pairs(msgs);
         assert_eq!(pairs.len(), 1, "fixture must contain exactly one tool-pair");
         let p = &pairs[0];
@@ -1833,10 +1859,8 @@ mod tests {
         let protect_last = 100;
         let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
         let body = "x".repeat(12_000);
-        let mut msgs = build_minimal_front_straddle_default_first_n(
-            &["web_read_p1", "web_read_p2"],
-            &body,
-        );
+        let mut msgs =
+            build_minimal_front_straddle_default_first_n(&["web_read_p1", "web_read_p2"], &body);
         assert_pair_front_straddles(&msgs, 3, protect_last);
         let before = estimate_messages_tokens(&msgs);
         let outcome = engine
@@ -1874,12 +1898,18 @@ mod tests {
             pairs[0].assistant_idx
         );
         assert!(
-            pairs[0].tool_result_indices.iter().all(|&i| i < protect_start),
+            pairs[0]
+                .tool_result_indices
+                .iter()
+                .all(|&i| i < protect_start),
             "fixture must place pair fully in prunable range"
         );
         // Auto-shrink must be dormant: effective == configured.
         let eff = tool_pair::compute_effective_protect_first_n(&msgs, 3, &pairs);
-        assert_eq!(eff, 3, "auto-shrink must be DORMANT when pair fully prunable");
+        assert_eq!(
+            eff, 3,
+            "auto-shrink must be DORMANT when pair fully prunable"
+        );
         let before = estimate_messages_tokens(&msgs);
         let outcome = engine
             .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
@@ -1908,7 +1938,10 @@ mod tests {
             .compress(&mut msgs, uat_stats(ctx_len, protect_last, before))
             .await
             .expect("compress must succeed with protect_first_n=0");
-        assert!(outcome.compressed, "compressed flag must be true — zero first_n path");
+        assert!(
+            outcome.compressed,
+            "compressed flag must be true — zero first_n path"
+        );
         assert_compress_ok_no_orphan(&msgs);
     }
 
@@ -2012,10 +2045,7 @@ mod tests {
                     arguments: r#"{"url":"https://example.com/rust"}"#.into(),
                 },
             }]),
-            ChatMessage::tool_result(
-                "tc1",
-                "Rust async uses Futures, poll model, executors...",
-            ),
+            ChatMessage::tool_result("tc1", "Rust async uses Futures, poll model, executors..."),
             ChatMessage::user("ok summarize"),
             // padding (~5000 chars) to guarantee we are above the 0.001 threshold
             ChatMessage::user("pad ".repeat(1250)),
@@ -2062,8 +2092,7 @@ mod tests {
         let capturer = Arc::new(PromptCapturingSummarizer::new("model-summary-body"));
         let ctx_len = 1_000_000;
         let protect_last = 100;
-        let engine =
-            SummarizingEngine::new(ctx_len, 0.001, capturer).with_protect(3, protect_last);
+        let engine = SummarizingEngine::new(ctx_len, 0.001, capturer).with_protect(3, protect_last);
         let mut msgs = build_prompt_capture_fixture();
         let before = estimate_messages_tokens(&msgs);
         let outcome = engine
@@ -2099,11 +2128,12 @@ mod tests {
     #[tokio::test]
     async fn compressed_history_body_retains_sentinel_after_iterative_compression() {
         use ironhermes_core::{FunctionCall, ToolCall};
-        let capturer = Arc::new(PromptCapturingSummarizer::new("plain summary with no sentinel"));
+        let capturer = Arc::new(PromptCapturingSummarizer::new(
+            "plain summary with no sentinel",
+        ));
         let ctx_len = 1_000_000;
         let protect_last = 100;
-        let engine =
-            SummarizingEngine::new(ctx_len, 0.001, capturer).with_protect(3, protect_last);
+        let engine = SummarizingEngine::new(ctx_len, 0.001, capturer).with_protect(3, protect_last);
 
         // Pass 1 fixture: asst(tool_A) + tool_result(A) + threshold-crossing padding.
         let mut msgs: Vec<ChatMessage> = vec![

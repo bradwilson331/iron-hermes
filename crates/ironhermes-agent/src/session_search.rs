@@ -142,10 +142,7 @@ pub fn handle_session_search(args: &serde_json::Value, state_store: &StateStore)
                 .context_before
                 .as_deref()
                 .map(|s| truncate_context(s, 200));
-            let context_after = r
-                .context_after
-                .as_deref()
-                .map(|s| truncate_context(s, 200));
+            let context_after = r.context_after.as_deref().map(|s| truncate_context(s, 200));
 
             json!({
                 "session_id": r.session_id,
@@ -160,7 +157,8 @@ pub fn handle_session_search(args: &serde_json::Value, state_store: &StateStore)
         })
         .collect();
 
-    serde_json::to_string(&output).unwrap_or_else(|_| r#"{"error":"serialization_failed"}"#.to_string())
+    serde_json::to_string(&output)
+        .unwrap_or_else(|_| r#"{"error":"serialization_failed"}"#.to_string())
 }
 
 #[cfg(test)]
@@ -181,7 +179,10 @@ mod tests {
         let (store, _dir) = make_store();
         let result = handle_session_search(&json!({}), &store);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["error"], "missing_query", "Expected missing_query error, got: {result}");
+        assert_eq!(
+            v["error"], "missing_query",
+            "Expected missing_query error, got: {result}"
+        );
     }
 
     #[test]
@@ -189,7 +190,10 @@ mod tests {
         let (store, _dir) = make_store();
         let result = handle_session_search(&json!({"query": ""}), &store);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["error"], "missing_query", "Expected missing_query for empty query: {result}");
+        assert_eq!(
+            v["error"], "missing_query",
+            "Expected missing_query for empty query: {result}"
+        );
     }
 
     #[test]
@@ -198,11 +202,23 @@ mod tests {
         let input = "some <<match>> text <<another>> word";
         let output = convert_markers(input);
         // <<match>> -> >>>match<<<
-        assert!(output.contains(">>>match<<<"), "Expected >>>match<<< in: {output}");
-        assert!(output.contains(">>>another<<<"), "Expected >>>another<<< in: {output}");
+        assert!(
+            output.contains(">>>match<<<"),
+            "Expected >>>match<<< in: {output}"
+        );
+        assert!(
+            output.contains(">>>another<<<"),
+            "Expected >>>another<<< in: {output}"
+        );
         // No original <<marker>> patterns should remain (original markers used <<...>>)
-        assert!(!output.contains("<<match>>"), "Original <<match>> pattern should not remain: {output}");
-        assert!(!output.contains("<<another>>"), "Original <<another>> pattern should not remain: {output}");
+        assert!(
+            !output.contains("<<match>>"),
+            "Original <<match>> pattern should not remain: {output}"
+        );
+        assert!(
+            !output.contains("<<another>>"),
+            "Original <<another>> pattern should not remain: {output}"
+        );
     }
 
     #[test]
@@ -232,7 +248,14 @@ mod tests {
         // Query on empty DB should return empty results message
         let result = handle_session_search(&json!({"query": "nonexistent_xyz_query"}), &store);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["results"], json!([]), "Expected empty results array: {result}");
-        assert!(v["message"].as_str().is_some(), "Expected message field: {result}");
+        assert_eq!(
+            v["results"],
+            json!([]),
+            "Expected empty results array: {result}"
+        );
+        assert!(
+            v["message"].as_str().is_some(),
+            "Expected message field: {result}"
+        );
     }
 }

@@ -47,9 +47,7 @@ impl HubManifest {
         Ok(serde_json::from_str(&std::fs::read_to_string(p)?)?)
     }
 
-    #[deprecated(
-        note = "Use SkillLock::save_atomic. HubManifest is migration-read-only in 21.8."
-    )]
+    #[deprecated(note = "Use SkillLock::save_atomic. HubManifest is migration-read-only in 21.8.")]
     pub fn save(&self) -> anyhow::Result<()> {
         let p = crate::paths::manifest_path()?;
         if let Some(parent) = p.parent() {

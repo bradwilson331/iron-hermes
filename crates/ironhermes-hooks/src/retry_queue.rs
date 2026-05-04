@@ -149,8 +149,12 @@ mod tests {
         let queue = RetryQueue::new(path).expect("new");
 
         let now = Utc::now();
-        queue.enqueue(&make_entry("https://example.com/a", now)).expect("enqueue 1");
-        queue.enqueue(&make_entry("https://example.com/b", now)).expect("enqueue 2");
+        queue
+            .enqueue(&make_entry("https://example.com/a", now))
+            .expect("enqueue 1");
+        queue
+            .enqueue(&make_entry("https://example.com/b", now))
+            .expect("enqueue 2");
 
         let entries = queue.drain(24);
         assert_eq!(entries.len(), 2);
@@ -164,7 +168,9 @@ mod tests {
 
         // Entry queued 48 hours ago — should be discarded with 24h TTL
         let old_time = Utc::now() - chrono::Duration::hours(48);
-        queue.enqueue(&make_entry("https://example.com/old", old_time)).expect("enqueue");
+        queue
+            .enqueue(&make_entry("https://example.com/old", old_time))
+            .expect("enqueue");
 
         let entries = queue.drain(24);
         assert!(entries.is_empty(), "expected expired entry to be discarded");
@@ -187,11 +193,16 @@ mod tests {
         let queue = RetryQueue::new(path.clone()).expect("new");
 
         let now = Utc::now();
-        queue.enqueue(&make_entry("https://example.com/x", now)).expect("enqueue");
+        queue
+            .enqueue(&make_entry("https://example.com/x", now))
+            .expect("enqueue");
 
         // File should have content before drain
         let content_before = std::fs::read_to_string(&path).expect("read before");
-        assert!(!content_before.trim().is_empty(), "file should have content before drain");
+        assert!(
+            !content_before.trim().is_empty(),
+            "file should have content before drain"
+        );
 
         queue.drain(24);
 

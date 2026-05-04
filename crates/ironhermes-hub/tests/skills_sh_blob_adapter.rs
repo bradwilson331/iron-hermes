@@ -50,7 +50,10 @@ impl EnvGuard {
                 }
             }
         }
-        Self { _lock: lock, restore }
+        Self {
+            _lock: lock,
+            restore,
+        }
     }
 }
 
@@ -191,10 +194,9 @@ async fn install_happy_path() {
     std::fs::create_dir_all(&skills_root).unwrap();
     let scanner = AlwaysCleanScanner;
 
-    let outcome =
-        ironhermes_hub::install(&src, "foo/bar/ascii-art", &scanner, &skills_root, false)
-            .await
-            .expect("install happy path");
+    let outcome = ironhermes_hub::install(&src, "foo/bar/ascii-art", &scanner, &skills_root, false)
+        .await
+        .expect("install happy path");
 
     assert_eq!(outcome.name, "ascii-art");
     assert!(outcome.install_path.exists(), "install dir must exist");
@@ -352,7 +354,10 @@ async fn no_retry_on_404() {
 
     // No partial state under skills_root (except possibly .hub/quarantine cleanup).
     let has_skill_md = any_file_named(&skills_root, "SKILL.md");
-    assert!(!has_skill_md, "no SKILL.md must exist under skills_root after 404");
+    assert!(
+        !has_skill_md,
+        "no SKILL.md must exist under skills_root after 404"
+    );
 
     // Lock file empty / has no entry.
     let lock = SkillLock::load_or_default().unwrap();
@@ -617,27 +622,37 @@ async fn install_succeeds_when_server_hash_diverges_from_client_hash() {
 
     let outcome = ironhermes_hub::install(&src, "foo/bar/ascii-art", &scanner, &skills_root, true)
         .await
-        .expect("install must succeed when server hash diverges (advisory posture, UAT gap 21.8-06)");
+        .expect(
+            "install must succeed when server hash diverges (advisory posture, UAT gap 21.8-06)",
+        );
 
     let lock = SkillLock::load_or_default().unwrap();
     let entry = lock.get("ascii-art").expect("lock entry present");
 
     // D-14: server hash round-trips verbatim even when it doesn't match our D-13 algorithm.
-    assert_eq!(entry.snapshot_hash, server_hash,
-        "D-14 opaque contract: server snapshotHash MUST round-trip verbatim regardless of parity with compute_folder_hash");
+    assert_eq!(
+        entry.snapshot_hash, server_hash,
+        "D-14 opaque contract: server snapshotHash MUST round-trip verbatim regardless of parity with compute_folder_hash"
+    );
 
     // D-13: local computed hash still matches the on-disk folder.
     let disk_hash = ironhermes_hub::compute_folder_hash(&outcome.install_path).unwrap();
-    assert_eq!(disk_hash, entry.computed_hash,
-        "D-13: SkillLockEntry.computed_hash MUST equal compute_folder_hash(install_path)");
+    assert_eq!(
+        disk_hash, entry.computed_hash,
+        "D-13: SkillLockEntry.computed_hash MUST equal compute_folder_hash(install_path)"
+    );
 
     // Divergence precondition — if equal, the test is vacuous.
-    assert_ne!(disk_hash, server_hash,
-        "test precondition: server hash MUST differ from client D-13 hash — if equal, this test is vacuous");
+    assert_ne!(
+        disk_hash, server_hash,
+        "test precondition: server hash MUST differ from client D-13 hash — if equal, this test is vacuous"
+    );
 
     // Advisory posture: install dir survives the (now log-only) mismatch branch.
-    assert!(outcome.install_path.exists(),
-        "advisory branch MUST NOT cleanup the final install path on divergence");
+    assert!(
+        outcome.install_path.exists(),
+        "advisory branch MUST NOT cleanup the final install path on divergence"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -735,7 +750,11 @@ async fn user_agent_advertises_openclaw_ride() {
     let requests = server.received_requests().await.unwrap();
     let ua = requests
         .iter()
-        .find_map(|r| r.headers.get("user-agent").map(|h| h.to_str().unwrap_or("").to_string()))
+        .find_map(|r| {
+            r.headers
+                .get("user-agent")
+                .map(|h| h.to_str().unwrap_or("").to_string())
+        })
         .expect("at least one request captured");
 
     assert!(
@@ -815,7 +834,10 @@ async fn install_bare_name_resolves_via_search() {
         .iter()
         .filter(|r| r.url.path() == "/api/search")
         .count();
-    assert_eq!(search_count, 1, "bare name must hit /api/search once; got {search_count}");
+    assert_eq!(
+        search_count, 1,
+        "bare name must hit /api/search once; got {search_count}"
+    );
 }
 
 #[tokio::test]
@@ -920,7 +942,10 @@ async fn install_bare_name_not_found_returns_error() {
         .await
         .expect_err("empty search hits must surface as NotFound");
     match err {
-        HubError::Typed { kind: HubErrorKind::NotFound, .. } => {}
+        HubError::Typed {
+            kind: HubErrorKind::NotFound,
+            ..
+        } => {}
         other => panic!("expected NotFound, got {other:?}"),
     }
 }
@@ -959,7 +984,10 @@ async fn install_bare_name_rejects_unsafe_id_from_search() {
         .await
         .expect_err("unsafe id must be rejected");
     match err {
-        HubError::Typed { kind: HubErrorKind::InvalidIdentifier, .. } => {}
+        HubError::Typed {
+            kind: HubErrorKind::InvalidIdentifier,
+            ..
+        } => {}
         other => panic!("expected InvalidIdentifier, got {other:?}"),
     }
 }

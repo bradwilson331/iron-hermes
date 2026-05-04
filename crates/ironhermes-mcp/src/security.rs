@@ -54,7 +54,9 @@ pub static CREDENTIAL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// Replaces all credential matches with `[REDACTED]`.
 /// Matches hermes-agent's `_sanitize_error()`.
 pub fn sanitize_error(text: &str) -> String {
-    CREDENTIAL_PATTERN.replace_all(text, "[REDACTED]").into_owned()
+    CREDENTIAL_PATTERN
+        .replace_all(text, "[REDACTED]")
+        .into_owned()
 }
 
 #[cfg(test)]

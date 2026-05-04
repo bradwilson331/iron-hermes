@@ -79,7 +79,13 @@ pub fn render_toolset_show(row: &ToolsetRow, members: &[(String, bool, String)])
 mod tests {
     use super::*;
 
-    fn make_row(name: &str, enabled: bool, total: usize, avail: usize, summary: &str) -> ToolsetRow {
+    fn make_row(
+        name: &str,
+        enabled: bool,
+        total: usize,
+        avail: usize,
+        summary: &str,
+    ) -> ToolsetRow {
         ToolsetRow {
             name: name.to_string(),
             enabled,
@@ -91,7 +97,13 @@ mod tests {
 
     #[test]
     fn render_toolset_list_includes_header() {
-        let rows = vec![make_row("web", true, 2, 1, "web_search \u{2713}, web_read \u{2717}")];
+        let rows = vec![make_row(
+            "web",
+            true,
+            2,
+            1,
+            "web_search \u{2713}, web_read \u{2717}",
+        )];
         let out = render_toolset_list(rows);
         assert!(out.contains("TOOLSET"), "missing TOOLSET header");
         assert!(out.contains("STATUS"), "missing STATUS header");
@@ -120,7 +132,11 @@ mod tests {
         let row = make_row("web", true, 2, 1, "");
         let members = vec![
             ("web_search".to_string(), true, String::new()),
-            ("web_read".to_string(), false, "FIRECRAWL_API_KEY".to_string()),
+            (
+                "web_read".to_string(),
+                false,
+                "FIRECRAWL_API_KEY".to_string(),
+            ),
         ];
         let out = render_toolset_show(&row, &members);
         assert!(out.contains("web"), "missing toolset name");

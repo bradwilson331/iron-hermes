@@ -241,10 +241,7 @@ mod tests {
                 pruned_range: Some((3, 7)),
             },
         );
-        assert!(matches!(
-            e.kind,
-            HookEventKind::ContextPreCompress { .. }
-        ));
+        assert!(matches!(e.kind, HookEventKind::ContextPreCompress { .. }));
     }
 
     #[test]

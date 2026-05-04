@@ -62,8 +62,7 @@ impl ProcessRegistrySnapshotHandle for FakeProc {
     }
     fn drain_and_kill<'a>(
         &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         let flag = self.drained.clone();
         Box::pin(async move {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);

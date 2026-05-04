@@ -41,7 +41,7 @@ pub fn build_context_engine(
     session_id: impl Into<String>,
     hooks: Option<Arc<HookRegistry>>,
     tracker: Option<Arc<PressureTracker>>,
-    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,  // GAP-2: forward to engine before Arc wrap
+    memory_manager: Option<Arc<TokioMutex<MemoryManager>>>, // GAP-2: forward to engine before Arc wrap
 ) -> Arc<dyn ContextEngine> {
     let sid = session_id.into();
     let protect_first = config.compression.protect_first_n;
@@ -102,9 +102,7 @@ pub fn build_context_engine(
             let client = match build_role_client(resolver, "compression") {
                 Ok(Some(c)) => c,
                 Ok(None) => {
-                    tracing::warn!(
-                        "compression role unconfigured, falling back to main client"
-                    );
+                    tracing::warn!("compression role unconfigured, falling back to main client");
                     match build_main_client(resolver) {
                         Ok(c) => c,
                         Err(e) => {
@@ -172,8 +170,8 @@ pub fn build_context_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironhermes_core::{Config, ProviderResolver};
     use crate::context_engine::CompressionMode;
+    use ironhermes_core::{Config, ProviderResolver};
 
     fn default_resolver() -> ProviderResolver {
         ProviderResolver::build(&Config::default()).expect("resolver ok")
@@ -307,7 +305,9 @@ mod tests {
         );
 
         // Confirm the resolved endpoint is the openai one (base_url contains api.openai.com).
-        let ep = resolver.resolve_role("compression").expect("resolve_role must return Some");
+        let ep = resolver
+            .resolve_role("compression")
+            .expect("resolve_role must return Some");
         assert!(
             ep.base_url.contains("api.openai.com"),
             "compression role must resolve to openai base_url via auxiliary cascade; got: {}",

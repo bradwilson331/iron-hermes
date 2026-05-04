@@ -21,7 +21,9 @@ use dioxus::prelude::Signal;
 /// `is-tool` block (D-13).
 #[derive(Clone, PartialEq, Debug)]
 pub enum Block {
-    Cmd { command: CommandLine },
+    Cmd {
+        command: CommandLine,
+    },
     Out {
         author: Option<String>,
         time: Option<String>,
@@ -43,7 +45,9 @@ pub enum Block {
         exit_code: i32,
         message: String,
     },
-    Tool { call: ToolCall },
+    Tool {
+        call: ToolCall,
+    },
 }
 
 impl Block {

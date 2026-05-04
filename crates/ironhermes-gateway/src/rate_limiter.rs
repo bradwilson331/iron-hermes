@@ -49,8 +49,8 @@ impl PerUserRateLimiter {
 
         // Refill tokens based on elapsed time
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * self.messages_per_minute / 60.0)
-            .min(self.burst_size);
+        bucket.tokens =
+            (bucket.tokens + elapsed * self.messages_per_minute / 60.0).min(self.burst_size);
         bucket.last_refill = now;
 
         // Try to consume a token

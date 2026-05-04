@@ -13,8 +13,8 @@
 //! tool execution) run on spawned tasks whose lifetime is controlled by the
 //! shared cancel token, NOT by `Drop` of the outer future.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;

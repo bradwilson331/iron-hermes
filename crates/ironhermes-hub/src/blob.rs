@@ -79,8 +79,7 @@ fn resolve_raw_content_base() -> String {
 /// Test mirrors are responsible for operating on loopback / private networks;
 /// SSRF defense remains intact for production (default) URIs.
 fn any_override_is_http() -> bool {
-    let is_http =
-        |s: &str| s.starts_with("http://");
+    let is_http = |s: &str| s.starts_with("http://");
     is_http(&resolve_download_base_url())
         || is_http(&resolve_github_api_base())
         || is_http(&resolve_raw_content_base())
@@ -277,9 +276,7 @@ impl SkillsShBlobSource {
         let skill_md_entry = find_skill_md_in_tree(&tree.tree, &folder_norm).ok_or_else(|| {
             typed(
                 HubErrorKind::NotFound,
-                format!(
-                    "SKILL.md not found for slug '{folder_norm}' in {owner_repo}"
-                ),
+                format!("SKILL.md not found for slug '{folder_norm}' in {owner_repo}"),
             )
         })?;
 
@@ -341,11 +338,7 @@ impl SkillsShBlobSource {
     ) -> Result<RepoTree, HubError> {
         let branches: Vec<String> = match git_ref {
             Some(r) => vec![r.to_string()],
-            None => vec![
-                "HEAD".to_string(),
-                "main".to_string(),
-                "master".to_string(),
-            ],
+            None => vec!["HEAD".to_string(), "main".to_string(), "master".to_string()],
         };
 
         let auth_header = self.github.auth().authorization_header();
@@ -547,9 +540,8 @@ impl SkillsShBlobSource {
         let safe = segments.len() == 3
             && segments.iter().all(|s| {
                 !s.is_empty()
-                    && s.bytes().all(|b| {
-                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
-                    })
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
             });
         if !safe {
             return Err(typed(
@@ -641,9 +633,7 @@ pub(crate) fn find_skill_md_in_tree<'a>(
         }
 
         let needle = format!("/{folder}/SKILL.md");
-        let mut nested: Vec<&TreeEntry> = blobs()
-            .filter(|e| e.path.ends_with(&needle))
-            .collect();
+        let mut nested: Vec<&TreeEntry> = blobs().filter(|e| e.path.ends_with(&needle)).collect();
         if !nested.is_empty() {
             nested.sort_by_key(|e| e.path.matches('/').count());
             return nested.first().copied();
@@ -832,9 +822,10 @@ mod tests {
         }
         // Construct AFTER setting env so resolve_download_base_url picks it up.
         let s = SkillsShBlobSource::new(fake_github());
-        assert!(s
-            .build_download_url("o", "r", "s")
-            .starts_with("http://127.0.0.1:9999/api/download/"));
+        assert!(
+            s.build_download_url("o", "r", "s")
+                .starts_with("http://127.0.0.1:9999/api/download/")
+        );
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("SKILLS_DOWNLOAD_URL", v),
@@ -1014,11 +1005,7 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "no retry on PathTraversal"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry on PathTraversal");
     }
 
     #[tokio::test]
@@ -1082,10 +1069,7 @@ mod tests {
     fn find_skill_md_root_fallback_for_single_skill_repo() {
         // Matches the real neethanwu/ascii-art layout (SKILL.md at root, slug
         // matches repo name — no `<slug>/` subdir).
-        let tree = vec![
-            blob("SKILL.md"),
-            blob("scripts/convert.py"),
-        ];
+        let tree = vec![blob("SKILL.md"), blob("scripts/convert.py")];
         let got = find_skill_md_in_tree(&tree, "ascii-art").unwrap();
         assert_eq!(got.path, "SKILL.md");
     }
@@ -1112,10 +1096,7 @@ mod tests {
 
     #[test]
     fn find_skill_md_direct_beats_nested() {
-        let tree = vec![
-            blob("ascii-art/SKILL.md"),
-            blob("other/ascii-art/SKILL.md"),
-        ];
+        let tree = vec![blob("ascii-art/SKILL.md"), blob("other/ascii-art/SKILL.md")];
         let got = find_skill_md_in_tree(&tree, "ascii-art").unwrap();
         assert_eq!(got.path, "ascii-art/SKILL.md", "direct match must win");
     }

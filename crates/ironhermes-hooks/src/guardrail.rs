@@ -114,24 +114,55 @@ mod tests {
     #[test]
     fn test_blocklist_empty_allows_all() {
         let guardrail = BlocklistGuardrail::new(vec![]);
-        assert_eq!(guardrail.check("terminal", &json_null()), GuardrailDecision::Allow);
-        assert_eq!(guardrail.check("write_file", &json_null()), GuardrailDecision::Allow);
-        assert_eq!(guardrail.check("any_tool", &json_null()), GuardrailDecision::Allow);
+        assert_eq!(
+            guardrail.check("terminal", &json_null()),
+            GuardrailDecision::Allow
+        );
+        assert_eq!(
+            guardrail.check("write_file", &json_null()),
+            GuardrailDecision::Allow
+        );
+        assert_eq!(
+            guardrail.check("any_tool", &json_null()),
+            GuardrailDecision::Allow
+        );
     }
 
     #[test]
     fn test_format_guardrail_error_full() {
-        let msg = format_guardrail_error("terminal", "on the blocklist", "blocklist", &ErrorDetailLevel::Full);
-        assert!(msg.contains("terminal"), "expected tool name in full message: {msg}");
-        assert!(msg.contains("on the blocklist"), "expected reason in full message: {msg}");
-        assert!(msg.contains("blocklist"), "expected guardrail name in full message: {msg}");
+        let msg = format_guardrail_error(
+            "terminal",
+            "on the blocklist",
+            "blocklist",
+            &ErrorDetailLevel::Full,
+        );
+        assert!(
+            msg.contains("terminal"),
+            "expected tool name in full message: {msg}"
+        );
+        assert!(
+            msg.contains("on the blocklist"),
+            "expected reason in full message: {msg}"
+        );
+        assert!(
+            msg.contains("blocklist"),
+            "expected guardrail name in full message: {msg}"
+        );
     }
 
     #[test]
     fn test_format_guardrail_error_minimal() {
-        let msg = format_guardrail_error("terminal", "on the blocklist", "blocklist", &ErrorDetailLevel::Minimal);
+        let msg = format_guardrail_error(
+            "terminal",
+            "on the blocklist",
+            "blocklist",
+            &ErrorDetailLevel::Minimal,
+        );
         assert_eq!(msg, "Tool call blocked by security policy");
-        assert!(!msg.contains("terminal"), "tool name must not appear in minimal message: {msg}");
+        assert!(
+            !msg.contains("terminal"),
+            "tool name must not appear in minimal message: {msg}"
+        );
     }
 
     #[test]
@@ -149,8 +180,17 @@ mod tests {
         let mut config = HooksConfig::default();
         config.blocked_tools = vec!["terminal".to_string(), "write_file".to_string()];
         let guardrail = BlocklistGuardrail::from_config(&config);
-        assert!(matches!(guardrail.check("terminal", &json_null()), GuardrailDecision::Block { .. }));
-        assert!(matches!(guardrail.check("write_file", &json_null()), GuardrailDecision::Block { .. }));
-        assert_eq!(guardrail.check("read_file", &json_null()), GuardrailDecision::Allow);
+        assert!(matches!(
+            guardrail.check("terminal", &json_null()),
+            GuardrailDecision::Block { .. }
+        ));
+        assert!(matches!(
+            guardrail.check("write_file", &json_null()),
+            GuardrailDecision::Block { .. }
+        ));
+        assert_eq!(
+            guardrail.check("read_file", &json_null()),
+            GuardrailDecision::Allow
+        );
     }
 }

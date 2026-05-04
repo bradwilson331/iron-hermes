@@ -53,8 +53,7 @@ const DEFAULT_SAFE_TOOLS: &[&str] = &[
 ];
 
 /// Structured summary instructions appended to child system prompts (D-10).
-const STRUCTURED_SUMMARY_INSTRUCTIONS: &str =
-    "\n\nWhen you complete the task, provide a structured summary with these sections:\n\
+const STRUCTURED_SUMMARY_INSTRUCTIONS: &str = "\n\nWhen you complete the task, provide a structured summary with these sections:\n\
      - **Actions Taken**: What you did step by step\n\
      - **Files Modified**: Any files created or changed (with paths)\n\
      - **Findings**: Key results or information discovered\n\
@@ -159,7 +158,11 @@ impl DelegateTaskTool {
     ///
     /// Tasks are truncated to `config.max_subagents` (D-06), spawned as tokio tasks
     /// sharing the global semaphore, and results are sorted by original index (D-07).
-    async fn execute_batch(&self, tasks_val: &serde_json::Value, detach: bool) -> anyhow::Result<String> {
+    async fn execute_batch(
+        &self,
+        tasks_val: &serde_json::Value,
+        detach: bool,
+    ) -> anyhow::Result<String> {
         let tasks_array = tasks_val
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("tasks must be an array"))?;
@@ -221,7 +224,12 @@ impl DelegateTaskTool {
                 progress_cb.as_ref().map(|cb| {
                     let cb = cb.clone();
                     Box::new(move |tool_name: &str, _args: &str| {
-                        cb(index, SubagentProgress::ToolCall { tool_name: tool_name.to_string() });
+                        cb(
+                            index,
+                            SubagentProgress::ToolCall {
+                                tool_name: tool_name.to_string(),
+                            },
+                        );
                     }) as ChildToolProgressCallback
                 });
 
@@ -246,7 +254,12 @@ impl DelegateTaskTool {
                     } else {
                         &goal
                     };
-                    cb(index, SubagentProgress::Started { task_summary: summary.to_string() });
+                    cb(
+                        index,
+                        SubagentProgress::Started {
+                            task_summary: summary.to_string(),
+                        },
+                    );
                 }
 
                 // Each task gets its own temp dir for isolation
@@ -380,19 +393,21 @@ pub fn build_child_registry(
             // Memory — read-only in child context (D-12)
             "memory" => {
                 if let Some(ref mgr) = memory_manager {
-                    registry.register(Box::new(
-                        crate::memory_tool::MemoryTool::new_read_only(mgr.clone()),
-                    ));
+                    registry.register(Box::new(crate::memory_tool::MemoryTool::new_read_only(
+                        mgr.clone(),
+                    )));
                 } else {
-                    tracing::warn!("memory tool requested but no MemoryManager available; skipping");
+                    tracing::warn!(
+                        "memory tool requested but no MemoryManager available; skipping"
+                    );
                 }
             }
 
             // Terminal — isolated CWD (AGENT-04)
             "terminal" => {
-                registry.register(Box::new(
-                    crate::terminal::TerminalTool::with_cwd(child_cwd.to_path_buf()),
-                ));
+                registry.register(Box::new(crate::terminal::TerminalTool::with_cwd(
+                    child_cwd.to_path_buf(),
+                )));
             }
 
             // Unknown tool — fail early (D-04)
@@ -477,7 +492,10 @@ impl Tool for DelegateTaskTool {
 
         // Detect mode: batch (tasks array) vs single (task string)
         if let Some(tasks_val) = args.get("tasks") {
-            let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
+            let detach = args
+                .get("detach")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             return self.execute_batch(tasks_val, detach).await;
         }
 
@@ -519,7 +537,10 @@ impl Tool for DelegateTaskTool {
 
         // Acquire semaphore permit (D-14), measuring actual wait time (D-15)
         let acquire_start = std::time::Instant::now();
-        let _permit = self.semaphore.acquire().await
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
             .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
         let wait_duration = acquire_start.elapsed();
         if wait_duration > std::time::Duration::from_millis(50) {
@@ -557,7 +578,10 @@ impl Tool for DelegateTaskTool {
         );
 
         // D-21/D-22: Create child cancel token based on detach flag
-        let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
+        let detach = args
+            .get("detach")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let child_cancel_token = if detach {
             // D-22: independent token — parent interrupt does not cancel this child
             None
@@ -579,7 +603,12 @@ impl Tool for DelegateTaskTool {
             } else {
                 task
             };
-            cb(0, SubagentProgress::Started { task_summary: summary.to_string() });
+            cb(
+                0,
+                SubagentProgress::Started {
+                    task_summary: summary.to_string(),
+                },
+            );
         }
 
         // D-19: Create per-child tool progress callback that routes through progress_callback
@@ -587,7 +616,12 @@ impl Tool for DelegateTaskTool {
             self.progress_callback.as_ref().map(|cb| {
                 let cb = cb.clone();
                 Box::new(move |tool_name: &str, _args: &str| {
-                    cb(0, SubagentProgress::ToolCall { tool_name: tool_name.to_string() });
+                    cb(
+                        0,
+                        SubagentProgress::ToolCall {
+                            tool_name: tool_name.to_string(),
+                        },
+                    );
                 }) as ChildToolProgressCallback
             });
 
@@ -628,9 +662,7 @@ impl Tool for DelegateTaskTool {
         // child_dir (TempDir) drops here, cleaning up the temp directory (D-13)
 
         let response = match result {
-            Ok(Ok(final_response)) => {
-                final_response.unwrap_or_else(|| "(no response)".to_string())
-            }
+            Ok(Ok(final_response)) => final_response.unwrap_or_else(|| "(no response)".to_string()),
             Ok(Err(e)) => return Err(e),
             Err(_) => {
                 // D-08 / AI-SPEC Pitfall 5: hard-cancel the inner future.
@@ -652,7 +684,11 @@ impl Tool for DelegateTaskTool {
         };
 
         if wait_duration > std::time::Duration::from_millis(50) {
-            Ok(format!("[Waited {}ms for subagent slot]\n{}", wait_duration.as_millis(), response))
+            Ok(format!(
+                "[Waited {}ms for subagent slot]\n{}",
+                wait_duration.as_millis(),
+                response
+            ))
         } else {
             Ok(response)
         }
@@ -685,10 +721,7 @@ mod tests {
     fn test_build_child_registry_strips_delegate_task() {
         // AGENT-05: delegate_task must never appear in child registry
         let registry = build_child_registry(
-            &[
-                "read_file".to_string(),
-                "delegate_task".to_string(),
-            ],
+            &["read_file".to_string(), "delegate_task".to_string()],
             None,
             Path::new("/tmp"),
         )
@@ -720,11 +753,8 @@ mod tests {
     #[test]
     fn test_build_child_registry_unknown_tool_errors() {
         // D-04: fail-early on unknown tools
-        let result = build_child_registry(
-            &["nonexistent_tool".to_string()],
-            None,
-            Path::new("/tmp"),
-        );
+        let result =
+            build_child_registry(&["nonexistent_tool".to_string()], None, Path::new("/tmp"));
         assert!(result.is_err(), "unknown tool should cause error");
         let err = result.err().unwrap().to_string();
         assert!(
@@ -743,12 +773,7 @@ mod tests {
     #[test]
     fn test_build_child_registry_terminal_gets_cwd() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = build_child_registry(
-            &["terminal".to_string()],
-            None,
-            dir.path(),
-        )
-        .unwrap();
+        let registry = build_child_registry(&["terminal".to_string()], None, dir.path()).unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"terminal"), "should have terminal");
     }
@@ -772,15 +797,10 @@ mod tests {
             }
         }
 
-        let mgr: SharedMemoryManager =
-            Arc::new(tokio::sync::Mutex::new(NoopManager));
+        let mgr: SharedMemoryManager = Arc::new(tokio::sync::Mutex::new(NoopManager));
 
-        let registry = build_child_registry(
-            &["memory".to_string()],
-            Some(mgr),
-            Path::new("/tmp"),
-        )
-        .unwrap();
+        let registry =
+            build_child_registry(&["memory".to_string()], Some(mgr), Path::new("/tmp")).unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"memory"), "should have memory");
         // The actual read-only behavior is tested in memory_tool::tests
@@ -852,8 +872,14 @@ mod tests {
             "schema 'required' must be empty — mutual exclusivity is enforced at runtime"
         );
         let props = &params["properties"];
-        assert!(props.get("task").is_some(), "schema should expose 'task' property");
-        assert!(props.get("tasks").is_some(), "schema should expose 'tasks' property");
+        assert!(
+            props.get("task").is_some(),
+            "schema should expose 'task' property"
+        );
+        assert!(
+            props.get("tasks").is_some(),
+            "schema should expose 'tasks' property"
+        );
     }
 
     #[tokio::test]
@@ -872,7 +898,10 @@ mod tests {
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let props = &schema.function.parameters["properties"];
-        assert!(props.get("allowed_tools").is_some(), "schema should have allowed_tools");
+        assert!(
+            props.get("allowed_tools").is_some(),
+            "schema should have allowed_tools"
+        );
         assert_eq!(
             props["allowed_tools"]["type"].as_str(),
             Some("array"),
@@ -961,9 +990,7 @@ mod tests {
             None,
         );
 
-        let result = tool
-            .execute(json!({"task": "slow task"}))
-            .await;
+        let result = tool.execute(json!({"task": "slow task"})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
     }
@@ -995,10 +1022,7 @@ mod tests {
             None,
         );
 
-        let result = tool
-            .execute(json!({"task": "silent task"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"task": "silent task"})).await.unwrap();
         assert_eq!(result, "(no response)");
     }
 
@@ -1049,18 +1073,14 @@ mod tests {
 
         // Child built from DEFAULT_SAFE_TOOLS must NOT have delegate_task
         let child_tools: Vec<String> = DEFAULT_SAFE_TOOLS.iter().map(|s| s.to_string()).collect();
-        let child_registry =
-            build_child_registry(&child_tools, None, Path::new("/tmp")).unwrap();
+        let child_registry = build_child_registry(&child_tools, None, Path::new("/tmp")).unwrap();
         assert!(
             !child_registry.list_tools().contains(&"delegate_task"),
             "AGENT-05: child registry must never contain delegate_task"
         );
 
         // Even if explicitly requested, delegate_task is stripped
-        let with_delegate: Vec<String> = vec![
-            "read_file".to_string(),
-            "delegate_task".to_string(),
-        ];
+        let with_delegate: Vec<String> = vec!["read_file".to_string(), "delegate_task".to_string()];
         let child_registry2 =
             build_child_registry(&with_delegate, None, Path::new("/tmp")).unwrap();
         assert!(
@@ -1082,7 +1102,10 @@ mod tests {
     #[test]
     fn test_resolve_toolset_file() {
         let tools = resolve_toolset_tools("file").unwrap();
-        assert_eq!(tools, vec!["read_file", "write_file", "patch", "search_files"]);
+        assert_eq!(
+            tools,
+            vec!["read_file", "write_file", "patch", "search_files"]
+        );
     }
 
     #[test]
@@ -1095,7 +1118,12 @@ mod tests {
     fn test_resolve_toolset_unknown_errors() {
         let result = resolve_toolset_tools("unknown");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown toolset group"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown toolset group")
+        );
     }
 
     #[test]
@@ -1125,7 +1153,10 @@ mod tests {
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let props = &schema.function.parameters["properties"];
-        assert!(props.get("toolsets").is_some(), "schema should have toolsets");
+        assert!(
+            props.get("toolsets").is_some(),
+            "schema should have toolsets"
+        );
         assert_eq!(
             props["toolsets"]["type"].as_str(),
             Some("array"),
@@ -1166,10 +1197,22 @@ mod tests {
         );
 
         let result = tool.execute(json!({"task": "test task"})).await.unwrap();
-        assert!(result.contains("Actions Taken"), "prompt should contain Actions Taken");
-        assert!(result.contains("Files Modified"), "prompt should contain Files Modified");
-        assert!(result.contains("Findings"), "prompt should contain Findings");
-        assert!(result.contains("Issues Encountered"), "prompt should contain Issues Encountered");
+        assert!(
+            result.contains("Actions Taken"),
+            "prompt should contain Actions Taken"
+        );
+        assert!(
+            result.contains("Files Modified"),
+            "prompt should contain Files Modified"
+        );
+        assert!(
+            result.contains("Findings"),
+            "prompt should contain Findings"
+        );
+        assert!(
+            result.contains("Issues Encountered"),
+            "prompt should contain Issues Encountered"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1239,7 +1282,10 @@ mod tests {
                 "allowed_tools": ["bogus_tool"]  // would error if used
             }))
             .await;
-        assert!(result.is_ok(), "toolsets should take precedence over allowed_tools");
+        assert!(
+            result.is_ok(),
+            "toolsets should take precedence over allowed_tools"
+        );
     }
 
     #[test]
@@ -1310,8 +1356,14 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(result.contains("Task 1 Result"), "should have Task 1 header");
-        assert!(result.contains("Task 2 Result"), "should have Task 2 header");
+        assert!(
+            result.contains("Task 1 Result"),
+            "should have Task 1 header"
+        );
+        assert!(
+            result.contains("Task 2 Result"),
+            "should have Task 2 header"
+        );
         assert!(result.contains("Task A"), "should contain goal A result");
         assert!(result.contains("Task B"), "should contain goal B result");
     }
@@ -1395,7 +1447,10 @@ mod tests {
         // Task 1 should appear before Task 2
         let pos1 = result.find("Task 1").unwrap();
         let pos2 = result.find("Task 2").unwrap();
-        assert!(pos1 < pos2, "Task 1 should appear before Task 2 regardless of completion order");
+        assert!(
+            pos1 < pos2,
+            "Task 1 should appear before Task 2 regardless of completion order"
+        );
     }
 
     #[tokio::test]
@@ -1409,7 +1464,10 @@ mod tests {
             .await
             .unwrap();
         // Should use single-task mode, not batch
-        assert!(!result.contains("## Task"), "single mode should not have batch headers");
+        assert!(
+            !result.contains("## Task"),
+            "single mode should not have batch headers"
+        );
     }
 
     #[tokio::test]
@@ -1489,8 +1547,14 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(result.contains("Task 1 Result"), "should complete with per-task toolsets");
-        assert!(result.contains("Task 2 Result"), "should complete with per-task toolsets");
+        assert!(
+            result.contains("Task 1 Result"),
+            "should complete with per-task toolsets"
+        );
+        assert!(
+            result.contains("Task 2 Result"),
+            "should complete with per-task toolsets"
+        );
     }
 
     #[tokio::test]
@@ -1506,7 +1570,10 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(result.contains("Task 1 Result"), "should complete with default toolsets");
+        assert!(
+            result.contains("Task 1 Result"),
+            "should complete with default toolsets"
+        );
     }
 
     #[tokio::test]
@@ -1546,7 +1613,10 @@ mod tests {
             .await
             .unwrap();
         assert!(result.contains("my goal"), "should contain the goal");
-        assert!(result.contains("extra context here"), "should contain the context");
+        assert!(
+            result.contains("extra context here"),
+            "should contain the context"
+        );
     }
 
     #[test]
@@ -1554,7 +1624,10 @@ mod tests {
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let props = &schema.function.parameters["properties"];
-        assert!(props.get("tasks").is_some(), "schema should have tasks property");
+        assert!(
+            props.get("tasks").is_some(),
+            "schema should have tasks property"
+        );
         assert_eq!(
             props["tasks"]["type"].as_str(),
             Some("array"),

@@ -146,7 +146,10 @@ pub fn render_status_line_ratatui(state: &StatusLineState) -> Line<'static> {
     }
     if let Some(hint) = hint_text {
         spans.push(dot_sep.clone());
-        spans.push(Span::styled(hint, Style::default().add_modifier(Modifier::DIM)));
+        spans.push(Span::styled(
+            hint,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
     }
     Line::from(spans)
 }
@@ -337,10 +340,7 @@ mod tests {
                     "dot separator at index {} must be DIM",
                     i
                 );
-                assert_eq!(
-                    span.content, " · ",
-                    "separator content must be ' · '"
-                );
+                assert_eq!(span.content, " · ", "separator content must be ' · '");
             }
         }
     }

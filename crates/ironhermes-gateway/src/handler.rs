@@ -1,22 +1,27 @@
-use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock};
+use std::sync::Arc;
+use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use ironhermes_core::{ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform, ProviderResolver, Role, SkillRegistry};
-use ironhermes_core::commands::{
-    CommandResult as CoreCommandResult, CommandRouter, ResolveResult,
-    registry::build_registry,
-};
-use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
-use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, build_client as build_provider_client};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::budget::BudgetHandle;
-use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
+use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::subagent_registry::SubagentRegistry;
+use ironhermes_agent::{
+    AgentLoop, MemoryManager, PromptBuilder, build_client as build_provider_client,
+    build_main_client,
+};
+use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
+use ironhermes_core::commands::{
+    CommandResult as CoreCommandResult, CommandRouter, ResolveResult, registry::build_registry,
+};
+use ironhermes_core::{
+    ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform,
+    ProviderResolver, Role, SkillRegistry,
+};
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_tools::ToolRegistry;
 
@@ -39,7 +44,11 @@ where
                 let err_str = e.to_string();
                 if err_str.contains("429") || err_str.contains("Too Many Requests") {
                     let wait = (attempt + 1) * 2; // 2s, 4s, 6s
-                    warn!("Telegram rate limit hit, retrying in {}s (attempt {})", wait, attempt + 1);
+                    warn!(
+                        "Telegram rate limit hit, retrying in {}s (attempt {})",
+                        wait,
+                        attempt + 1
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                     continue;
                 }
@@ -91,7 +100,11 @@ pub struct GatewayMessageHandler {
     /// in main.rs run_gateway). Per-request AgentLoop calls with_browser_session
     /// so the AgentLoop holds a reference — ensuring drop semantics clean up the
     /// browser process when the last Arc clone drops (T-25.1-04).
-    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    browser_session: Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
+    >,
     /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): production
     /// `ToolsetSessionHandle` for the gateway's `/toolset` slash dispatch.
     /// Plan 15 wired this in main.rs run_gateway but never threaded the Arc
@@ -146,9 +159,9 @@ impl GatewayMessageHandler {
             subagent_registry: None,
             browser_session: None,
             toolset_session: None,
-            workspace: None,        // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
-            // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
-            // writers live in SessionStore, looked up by canonical session UUID.
+            workspace: None, // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
+                             // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
+                             // writers live in SessionStore, looked up by canonical session UUID.
         }
     }
 
@@ -201,7 +214,9 @@ impl GatewayMessageHandler {
     /// when the last Arc clone drops (T-25.1-04 resource exhaustion mitigation).
     pub fn set_browser_session(
         &mut self,
-        session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+        session: std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
     ) {
         self.browser_session = Some(session);
     }
@@ -239,7 +254,10 @@ impl GatewayMessageHandler {
             context_length: self.context_length,
             estimated_tokens: estimated,
             protect_first_n: self.config.compression.protect_first_n,
-            protect_last_tokens: self.config.compression.protect_last_tokens
+            protect_last_tokens: self
+                .config
+                .compression
+                .protect_last_tokens
                 .min(self.context_length / 4),
             compression_count: 0,
             prior_summary: None,
@@ -273,7 +291,10 @@ impl GatewayMessageHandler {
     /// Set the shared active skills tracker. Must be the same Arc given to SkillsTool
     /// so that skill activations reach AgentLoop enforcement.
     /// NOTE: global-shared across all users — would need per-session isolation for multi-user support (per D-06).
-    pub fn set_active_skills(&mut self, skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>) {
+    pub fn set_active_skills(
+        &mut self,
+        skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
+    ) {
         self.active_skills = skills;
     }
 
@@ -292,17 +313,13 @@ impl GatewayMessageHandler {
         let command_input = event.content.split('@').next().unwrap_or(&event.content);
 
         let platform = &event.platform;
-        let session_key = SessionKey::new(platform.clone(), &event.chat_id)
-            .with_user(&event.sender_id);
+        let session_key =
+            SessionKey::new(platform.clone(), &event.chat_id).with_user(&event.sender_id);
 
         // Build CommandContext (agent_running always false for gateway slash commands —
         // the running-agent guard is a future enhancement using per-session state).
         let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ctx = CommandContext::new(
-            platform.clone(),
-            session_key.to_string_key(),
-            agent_running,
-        );
+        let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running);
         // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
         // production toolset session handle so /toolset list/show/enable/disable
         // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
@@ -328,12 +345,19 @@ impl GatewayMessageHandler {
         // the per-session handle out of `SessionStore` here.
 
         let parts: Vec<&str> = command_input.split_whitespace().collect();
-        let args: Vec<&str> = if parts.len() > 1 { parts[1..].to_vec() } else { vec![] };
+        let args: Vec<&str> = if parts.len() > 1 {
+            parts[1..].to_vec()
+        } else {
+            vec![]
+        };
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
                 let core_result = ironhermes_core::commands::handlers::dispatch(
-                    def, &args, &ctx, &self.command_router,
+                    def,
+                    &args,
+                    &ctx,
+                    &self.command_router,
                 );
                 match core_result {
                     CoreCommandResult::Output(text) => {
@@ -436,8 +460,7 @@ impl GatewayMessageHandler {
                     "Ambiguous command: {}. Matches: {}. Be more specific.",
                     first, list
                 );
-                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None))
-                    .await?;
+                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None)).await?;
             }
             ResolveResult::NotFound => {
                 // D-08: Unknown commands pass through to agent as normal message, preserving attachments
@@ -462,7 +485,9 @@ impl GatewayMessageHandler {
         }
 
         if event.content.starts_with('/') {
-            return self.handle_slash_command(event, adapter, cancel, processed).await;
+            return self
+                .handle_slash_command(event, adapter, cancel, processed)
+                .await;
         }
         self.run_agent(event, adapter, cancel, processed).await
     }
@@ -490,10 +515,9 @@ impl GatewayMessageHandler {
         }
 
         // 1. Send initial placeholder message; get message_id for StreamConsumer
-        let placeholder = with_rate_limit_retry(|| {
-            adapter.send_message(&event.chat_id, "\u{2588}", None)
-        })
-        .await?;
+        let placeholder =
+            with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "\u{2588}", None))
+                .await?;
         let placeholder_id = placeholder.message_id.clone();
 
         // 2. Spawn typing indicator task (D-16): sends "typing" every 5 seconds
@@ -515,8 +539,7 @@ impl GatewayMessageHandler {
 
         // 3. Get or create session; clone messages immediately to avoid holding lock across await
         let model = self.config.model.default.clone();
-        let key = SessionKey::new(Platform::Telegram, &event.chat_id)
-            .with_user(&event.sender_id);
+        let key = SessionKey::new(Platform::Telegram, &event.chat_id).with_user(&event.sender_id);
         let source = key.platform.to_string();
 
         // Build user message content — incorporate multimodal data
@@ -527,7 +550,10 @@ impl GatewayMessageHandler {
             let _session = store.get_or_create(key.clone(), &model, &source);
             // Add user message via write-through (persists to SQLite)
             store.add_message_to_session(&key, user_message);
-            store.get(&key).map(|s| s.messages.clone()).unwrap_or_default()
+            store
+                .get(&key)
+                .map(|s| s.messages.clone())
+                .unwrap_or_default()
         };
 
         // 4. Build system message via PromptBuilder (loads SOUL.md + project context + memory)
@@ -646,7 +672,9 @@ impl GatewayMessageHandler {
         // Wire fallback for main agent path
         let main_endpoint = self.resolver.resolve_for_main();
         if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-            if let Ok(fb_client) = build_provider_client(&self.resolver, fb_name, &main_endpoint.default_model) {
+            if let Ok(fb_client) =
+                build_provider_client(&self.resolver, fb_name, &main_endpoint.default_model)
+            {
                 agent = agent.with_fallback(fb_client);
             }
         }
@@ -711,7 +739,7 @@ impl GatewayMessageHandler {
             &self.resolver,
             &session_id_str,
             self.hook_registry.clone(),
-            None, // Phase 18-14: gateway constructs a fresh tracker per request
+            None,           // Phase 18-14: gateway constructs a fresh tracker per request
             context_length, // Phase 21.3
             self.memory_manager.clone(), // GAP-2/GAP-3: wire into context engine
         );
@@ -837,7 +865,9 @@ impl MessageHandler for GatewayMessageHandler {
                 text_prefix: None,
                 image_data_uri: None,
             };
-            return self.handle_slash_command(event, adapter, cancel, no_attachments).await;
+            return self
+                .handle_slash_command(event, adapter, cancel, no_attachments)
+                .await;
         }
         // No multimodal data via this path (text-only fallback)
         let no_attachments = ProcessedAttachments {
@@ -912,17 +942,19 @@ mod tests {
         // Populate with a restrictive skill
         {
             let mut skills = shared.lock().unwrap();
-            skills.push(make_skill_record("restrictive-skill", Some(vec!["skills".to_string()])));
+            skills.push(make_skill_record(
+                "restrictive-skill",
+                Some(vec!["skills".to_string()]),
+            ));
         }
 
         // Create AgentLoop with the shared Arc (same one handler would pass after fix)
-        let client = ironhermes_agent::AnyClient::ChatCompletions(
-            ironhermes_agent::LlmClient::new(
+        let client =
+            ironhermes_agent::AnyClient::ChatCompletions(ironhermes_agent::LlmClient::new(
                 "http://localhost:0".to_string(),
                 "test-key".to_string(),
                 "test-model",
-            ),
-        );
+            ));
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let loop_instance = ironhermes_agent::AgentLoop::new(client, tool_registry, 4)
             .with_active_skills(shared.clone());
@@ -938,7 +970,10 @@ mod tests {
         // The actual enforcement logic is already regression-tested in agent_loop.rs.
         // Here we confirm the Arc flows from handler to AgentLoop correctly.
         let skills_count = shared.lock().unwrap().len();
-        assert_eq!(skills_count, 1, "Restrictive skill should be visible through the shared Arc");
+        assert_eq!(
+            skills_count, 1,
+            "Restrictive skill should be visible through the shared Arc"
+        );
 
         let enforcement_would_trigger = {
             let skills = loop_instance.active_skills();
@@ -955,7 +990,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironhermes_agent::context_engine::{
-        CompressionMode, CompressionOutcome, ContextError, ContextEngine, ContextStats,
+        CompressionMode, CompressionOutcome, ContextEngine, ContextError, ContextStats,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -971,10 +1006,17 @@ mod tests {
             _stats: ContextStats,
         ) -> Result<CompressionOutcome, ContextError> {
             self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(CompressionOutcome { compressed: true, ..CompressionOutcome::default() })
+            Ok(CompressionOutcome {
+                compressed: true,
+                ..CompressionOutcome::default()
+            })
         }
-        fn threshold(&self) -> f32 { 0.85 }
-        fn mode(&self) -> CompressionMode { CompressionMode::Hard }
+        fn threshold(&self) -> f32 {
+            0.85
+        }
+        fn mode(&self) -> CompressionMode {
+            CompressionMode::Hard
+        }
     }
 
     fn filler_messages(n: usize) -> Vec<ChatMessage> {
@@ -990,24 +1032,36 @@ mod tests {
         // Above threshold: tiny context_length forces ratio > 0.85.
         let mut handler = make_handler();
         let calls = Arc::new(AtomicUsize::new(0));
-        let engine: Arc<dyn ContextEngine> = Arc::new(RecordingGatewayEngine { calls: calls.clone() });
+        let engine: Arc<dyn ContextEngine> = Arc::new(RecordingGatewayEngine {
+            calls: calls.clone(),
+        });
         handler.set_gateway_engine(engine, 100);
 
         let mut msgs = filler_messages(20);
         let fired = handler.maybe_compress_gateway(&mut msgs).await;
         assert!(fired, "hygiene must fire above 0.85 threshold");
-        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "exactly one compress call");
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "exactly one compress call"
+        );
 
         // Below threshold: huge context_length keeps ratio << 0.85.
         let mut handler2 = make_handler();
         let calls2 = Arc::new(AtomicUsize::new(0));
-        let engine2: Arc<dyn ContextEngine> = Arc::new(RecordingGatewayEngine { calls: calls2.clone() });
+        let engine2: Arc<dyn ContextEngine> = Arc::new(RecordingGatewayEngine {
+            calls: calls2.clone(),
+        });
         handler2.set_gateway_engine(engine2, 10_000_000);
 
         let mut msgs2 = filler_messages(3);
         let fired2 = handler2.maybe_compress_gateway(&mut msgs2).await;
         assert!(!fired2, "hygiene must not fire below 0.85 threshold");
-        assert_eq!(calls2.load(AtomicOrdering::SeqCst), 0, "no compress call below threshold");
+        assert_eq!(
+            calls2.load(AtomicOrdering::SeqCst),
+            0,
+            "no compress call below threshold"
+        );
     }
 
     // ── Phase 18 Plan 09: UAT gap closure — agent engine wiring ────────────
@@ -1018,19 +1072,15 @@ mod tests {
     #[tokio::test]
     async fn gateway_handler_attaches_agent_engine() {
         let handler = make_handler();
-        let client = ironhermes_agent::AnyClient::ChatCompletions(
-            ironhermes_agent::LlmClient::new(
+        let client =
+            ironhermes_agent::AnyClient::ChatCompletions(ironhermes_agent::LlmClient::new(
                 "http://localhost:0".to_string(),
                 "k".to_string(),
                 "test-model",
-            ),
-        );
+            ));
         let max_turns = handler.config.agent.max_turns;
-        let agent = ironhermes_agent::AgentLoop::new(
-            client,
-            handler.tool_registry.clone(),
-            max_turns,
-        );
+        let agent =
+            ironhermes_agent::AgentLoop::new(client, handler.tool_registry.clone(), max_turns);
         let context_length = handler.resolver.resolve_for_main().context_length();
         let agent = ironhermes_agent::attach_context_engine(
             agent,
@@ -1038,12 +1088,18 @@ mod tests {
             &handler.resolver,
             "sess-gw",
             handler.hook_registry.clone(),
-            None, // Phase 18-14: fresh tracker per gateway test
+            None,           // Phase 18-14: fresh tracker per gateway test
             context_length, // Phase 21.3
-            None, // memory_manager: None in gateway unit test
+            None,           // memory_manager: None in gateway unit test
         );
-        assert!(agent.has_context_engine(), "agent must have context engine attached");
-        assert!(agent.has_pressure_tracker(), "agent must have pressure tracker attached");
+        assert!(
+            agent.has_context_engine(),
+            "agent must have context engine attached"
+        );
+        assert!(
+            agent.has_pressure_tracker(),
+            "agent must have pressure tracker attached"
+        );
         assert_eq!(agent.session_id(), Some("sess-gw".to_string()));
     }
 
@@ -1097,7 +1153,9 @@ mod tests {
         // Verify the field is present and initialized — construction succeeds.
         let handler = make_handler();
         // CommandRouter construction panics on duplicate names — if it succeeds, registry is valid.
-        let _ = handler.command_router.resolve("/help", &ironhermes_core::types::Platform::Telegram);
+        let _ = handler
+            .command_router
+            .resolve("/help", &ironhermes_core::types::Platform::Telegram);
     }
 }
 

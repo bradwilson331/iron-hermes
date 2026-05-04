@@ -134,8 +134,14 @@ mod tests {
 
     #[test]
     fn impact_level_serializes_as_snake_case() {
-        assert_eq!(serde_json::to_string(&ImpactLevel::Read).unwrap(), "\"read\"");
-        assert_eq!(serde_json::to_string(&ImpactLevel::Write).unwrap(), "\"write\"");
+        assert_eq!(
+            serde_json::to_string(&ImpactLevel::Read).unwrap(),
+            "\"read\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImpactLevel::Write).unwrap(),
+            "\"write\""
+        );
         assert_eq!(
             serde_json::to_string(&ImpactLevel::SystemChange).unwrap(),
             "\"system_change\""

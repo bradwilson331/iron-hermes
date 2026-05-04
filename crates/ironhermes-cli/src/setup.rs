@@ -6,13 +6,13 @@
 //! is the testability seam — drives the wizard with pre-scripted strings
 //! so integration tests don't need a real TTY.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ironhermes_core::config::Config;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::wizard::{
-    apply_api_key_answer, apply_auxiliary_answer, apply_learning_loop_answer,
-    apply_memory_provider_answer, apply_model_answer, apply_provider_answer, WizardMode,
-    LEARNING_LOOP_FRAMING,
+    LEARNING_LOOP_FRAMING, WizardMode, apply_api_key_answer, apply_auxiliary_answer,
+    apply_learning_loop_answer, apply_memory_provider_answer, apply_model_answer,
+    apply_provider_answer,
 };
 use std::path::Path;
 
@@ -180,10 +180,7 @@ async fn run_minimum_viable_flow(
     Ok(())
 }
 
-async fn run_model_section(
-    config: &mut Config,
-    rl: &mut rustyline::DefaultEditor,
-) -> Result<()> {
+async fn run_model_section(config: &mut Config, rl: &mut rustyline::DefaultEditor) -> Result<()> {
     let provider = prompt_with_default(rl, "Provider", &config.model.provider)?;
     apply_provider_answer(config, &provider, "openrouter");
     let api_key = prompt_required(rl, &format!("API key for {}", provider))?;
@@ -268,12 +265,11 @@ async fn run_gateway_section(
 /// Presents the same prompt as the inline auxiliary stage in run_minimum_viable_flow
 /// but as a stand-alone section for re-configuration.
 /// EOF (Ctrl-D) or interrupt is treated as a graceful skip — no error.
-async fn run_agent_section(
-    config: &mut Config,
-    rl: &mut rustyline::DefaultEditor,
-) -> Result<()> {
+async fn run_agent_section(config: &mut Config, rl: &mut rustyline::DefaultEditor) -> Result<()> {
     println!("\nConfigure auxiliary model routing (PROV-06).\n");
-    println!("Auxiliary routing sends helper tasks (compression, vision, etc.) to a cheaper model.");
+    println!(
+        "Auxiliary routing sends helper tasks (compression, vision, etc.) to a cheaper model."
+    );
     let current = if config.auxiliary.is_set() {
         format!("{}/{}", config.auxiliary.provider, config.auxiliary.model)
     } else {
@@ -282,18 +278,15 @@ async fn run_agent_section(
     println!("Current: {}\n", current);
 
     // Treat EOF/interrupt as graceful skip (non-interactive invocation is valid).
-    let aux_provider = match prompt_with_default(
-        rl,
-        "Auxiliary provider (Enter to skip / keep current)",
-        "",
-    ) {
-        Ok(v) => v,
-        Err(e) if e.to_string().contains("EOF") || e.to_string().contains("interrupted") => {
-            println!("No change to auxiliary routing.");
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
+    let aux_provider =
+        match prompt_with_default(rl, "Auxiliary provider (Enter to skip / keep current)", "") {
+            Ok(v) => v,
+            Err(e) if e.to_string().contains("EOF") || e.to_string().contains("interrupted") => {
+                println!("No change to auxiliary routing.");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
     if !aux_provider.trim().is_empty() {
         let aux_model = match prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini") {
             Ok(v) => v,
@@ -303,7 +296,10 @@ async fn run_agent_section(
             Err(e) => return Err(e),
         };
         apply_auxiliary_answer(config, &aux_provider, &aux_model);
-        println!("Auxiliary routing set to {}/{}.", config.auxiliary.provider, config.auxiliary.model);
+        println!(
+            "Auxiliary routing set to {}/{}.",
+            config.auxiliary.provider, config.auxiliary.model
+        );
     } else {
         println!("No change to auxiliary routing.");
     }
@@ -333,11 +329,7 @@ pub fn build_full_registry() -> ironhermes_tools::ToolRegistry {
 
 /// Prompt for yes/no; returns true for "y"/"yes" (case-insensitive), false for everything else.
 /// Default is "No" when user presses Enter — matches D-19 contract.
-fn prompt_yes_no(
-    rl: &mut rustyline::DefaultEditor,
-    prompt: &str,
-    default: bool,
-) -> Result<bool> {
+fn prompt_yes_no(rl: &mut rustyline::DefaultEditor, prompt: &str, default: bool) -> Result<bool> {
     use rustyline::error::ReadlineError;
     let hint = if default { "Y/n" } else { "y/N" };
     let full = format!("{} [{}]: ", prompt, hint);
@@ -377,10 +369,7 @@ fn prompt_for_prereq_value(
         "config_field" => format!("config field {}", prereq.name),
         other => format!("{}: {}", other, prereq.name),
     };
-    println!(
-        "  Prerequisite: {} — {}",
-        kind_label, prereq.description
-    );
+    println!("  Prerequisite: {} — {}", kind_label, prereq.description);
 
     let is_secret = is_secret_prereq_name(&prereq.name);
     let prompt = if is_secret {
@@ -400,8 +389,9 @@ fn prompt_for_prereq_value(
     let raw = if is_secret {
         use rustyline::config::Builder;
         let masked_cfg = Builder::new().build();
-        let mut masked_rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::with_config(masked_cfg)
-            .context("initializing masked readline")?;
+        let mut masked_rl =
+            rustyline::Editor::<(), rustyline::history::DefaultHistory>::with_config(masked_cfg)
+                .context("initializing masked readline")?;
         match masked_rl.readline(&format!("{}: ", prompt)) {
             Ok(s) => s,
             Err(ReadlineError::Interrupted) => return Err(anyhow!("interrupted")),
@@ -436,9 +426,11 @@ fn apply_prereq_value(
 ) -> Result<()> {
     match prereq.kind.as_str() {
         "env_var" => write_env_var_to_dotenv(hermes_home, &prereq.name, value),
-        "config_field" => ironhermes_core::config_setter::config_set(hermes_home, &prereq.name, value)
-            .with_context(|| format!("failed to set config field {}", prereq.name))
-            .map(|_| ()),
+        "config_field" => {
+            ironhermes_core::config_setter::config_set(hermes_home, &prereq.name, value)
+                .with_context(|| format!("failed to set config field {}", prereq.name))
+                .map(|_| ())
+        }
         other => anyhow::bail!("unknown prereq kind '{}' for {}", other, prereq.name),
     }
 }
@@ -483,8 +475,8 @@ pub(crate) fn write_env_var_to_dotenv(hermes_home: &Path, name: &str, value: &st
     let parent = hermes_home;
     std::fs::create_dir_all(parent).context("creating hermes_home dir for .env")?;
 
-    let tmp = tempfile::NamedTempFile::new_in(parent)
-        .context("creating tempfile for .env write")?;
+    let tmp =
+        tempfile::NamedTempFile::new_in(parent).context("creating tempfile for .env write")?;
 
     #[cfg(unix)]
     {
@@ -510,7 +502,9 @@ pub(crate) fn apply_skip_prompts(hermes_home: &Path, tool_name: &str) -> Result<
     let mut config = ironhermes_core::config::Config::load_from(&config_path)?;
     if !config.tools.skip_prompts.iter().any(|s| s == tool_name) {
         config.tools.skip_prompts.push(tool_name.to_string());
-        config.save_to(&config_path).context("writing config.yaml after skip_prompts update")?;
+        config
+            .save_to(&config_path)
+            .context("writing config.yaml after skip_prompts update")?;
     }
     Ok(())
 }
@@ -590,12 +584,30 @@ mod tests {
 
     #[test]
     fn is_secret_prereq_name_matches_key_token_secret_password() {
-        assert!(is_secret_prereq_name("FIRECRAWL_API_KEY"), "FIRECRAWL_API_KEY must match _KEY");
-        assert!(is_secret_prereq_name("GITHUB_TOKEN"), "GITHUB_TOKEN must match _TOKEN");
-        assert!(is_secret_prereq_name("MY_SECRET"), "MY_SECRET must match _SECRET");
-        assert!(is_secret_prereq_name("DB_PASSWORD"), "DB_PASSWORD must match _PASSWORD");
-        assert!(!is_secret_prereq_name("LOG_LEVEL"), "LOG_LEVEL must NOT match");
-        assert!(!is_secret_prereq_name("HERMES_HOME"), "HERMES_HOME must NOT match");
+        assert!(
+            is_secret_prereq_name("FIRECRAWL_API_KEY"),
+            "FIRECRAWL_API_KEY must match _KEY"
+        );
+        assert!(
+            is_secret_prereq_name("GITHUB_TOKEN"),
+            "GITHUB_TOKEN must match _TOKEN"
+        );
+        assert!(
+            is_secret_prereq_name("MY_SECRET"),
+            "MY_SECRET must match _SECRET"
+        );
+        assert!(
+            is_secret_prereq_name("DB_PASSWORD"),
+            "DB_PASSWORD must match _PASSWORD"
+        );
+        assert!(
+            !is_secret_prereq_name("LOG_LEVEL"),
+            "LOG_LEVEL must NOT match"
+        );
+        assert!(
+            !is_secret_prereq_name("HERMES_HOME"),
+            "HERMES_HOME must NOT match"
+        );
     }
 
     #[test]
@@ -605,7 +617,8 @@ mod tests {
         apply_tool_prereq_answers(
             tmp.path(),
             &[("web_search", "FIRECRAWL_API_KEY", "test_value")],
-        ).expect("apply_tool_prereq_answers failed");
+        )
+        .expect("apply_tool_prereq_answers failed");
 
         let env_path = tmp.path().join(".env");
         assert!(env_path.exists(), ".env file should exist");
@@ -634,7 +647,8 @@ mod tests {
         apply_tool_prereq_answers(
             tmp.path(),
             &[("web_search", "FIRECRAWL_API_KEY", "test_value")],
-        ).expect("apply_tool_prereq_answers failed");
+        )
+        .expect("apply_tool_prereq_answers failed");
 
         let contents = std::fs::read_to_string(tmp.path().join(".env")).unwrap();
         assert!(
@@ -656,7 +670,8 @@ mod tests {
         std::fs::write(
             tmp.path().join("config.yaml"),
             "tools:\n  skip_prompts:\n    - foo\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         apply_skip_prompts(tmp.path(), "bar").expect("apply_skip_prompts failed");
 
@@ -677,8 +692,17 @@ mod tests {
         apply_skip_prompts(tmp.path(), "bar").expect("apply_skip_prompts idempotent failed");
         let cfg2 = ironhermes_core::config::Config::load_from(&tmp.path().join("config.yaml"))
             .expect("Config should load again");
-        let bar_count = cfg2.tools.skip_prompts.iter().filter(|s| *s == "bar").count();
-        assert_eq!(bar_count, 1, "skip_prompts must not duplicate 'bar', got: {:?}", cfg2.tools.skip_prompts);
+        let bar_count = cfg2
+            .tools
+            .skip_prompts
+            .iter()
+            .filter(|s| *s == "bar")
+            .count();
+        assert_eq!(
+            bar_count, 1,
+            "skip_prompts must not duplicate 'bar', got: {:?}",
+            cfg2.tools.skip_prompts
+        );
     }
 
     #[test]

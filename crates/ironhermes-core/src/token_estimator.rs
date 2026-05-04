@@ -39,12 +39,12 @@ impl TokenEstimator {
             return 0;
         }
         match self.encoding {
-            TiktokenEncoding::O200kBase => {
-                o200k_base_singleton().encode_with_special_tokens(text).len()
-            }
-            TiktokenEncoding::Cl100kBase => {
-                cl100k_base_singleton().encode_with_special_tokens(text).len()
-            }
+            TiktokenEncoding::O200kBase => o200k_base_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            TiktokenEncoding::Cl100kBase => cl100k_base_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
         }
     }
 

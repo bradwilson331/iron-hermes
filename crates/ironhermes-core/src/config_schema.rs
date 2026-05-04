@@ -270,9 +270,18 @@ mod tests {
 
     #[test]
     fn memory_action_lowercase_serde() {
-        assert_eq!(serde_json::to_string(&MemoryAction::Add).unwrap(), "\"add\"");
-        assert_eq!(serde_json::to_string(&MemoryAction::Replace).unwrap(), "\"replace\"");
-        assert_eq!(serde_json::to_string(&MemoryAction::Remove).unwrap(), "\"remove\"");
+        assert_eq!(
+            serde_json::to_string(&MemoryAction::Add).unwrap(),
+            "\"add\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MemoryAction::Replace).unwrap(),
+            "\"replace\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MemoryAction::Remove).unwrap(),
+            "\"remove\""
+        );
         let a: MemoryAction = serde_json::from_str("\"add\"").unwrap();
         assert_eq!(a, MemoryAction::Add);
     }
@@ -280,7 +289,8 @@ mod tests {
     #[test]
     fn schema_contains_all_cache_breaking_fields() {
         let s = schema();
-        let cache_breaking_keys: Vec<&str> = s.iter()
+        let cache_breaking_keys: Vec<&str> = s
+            .iter()
             .filter(|f| f.cache_breaking)
             .map(|f| f.key.as_str())
             .collect();
@@ -307,7 +317,8 @@ mod tests {
     #[test]
     fn schema_contains_all_secret_fields() {
         let s = schema();
-        let secret_keys: Vec<&str> = s.iter()
+        let secret_keys: Vec<&str> = s
+            .iter()
             .filter(|f| f.secret)
             .map(|f| f.key.as_str())
             .collect();
@@ -331,10 +342,15 @@ mod tests {
     #[test]
     fn model_api_key_is_both_secret_and_cache_breaking() {
         let s = schema();
-        let api_key = s.iter().find(|f| f.key == "model.api_key")
+        let api_key = s
+            .iter()
+            .find(|f| f.key == "model.api_key")
             .expect("model.api_key must be in schema");
         assert!(api_key.secret, "model.api_key must be secret");
-        assert!(api_key.cache_breaking, "model.api_key must be cache_breaking (D-13 exception)");
+        assert!(
+            api_key.cache_breaking,
+            "model.api_key must be cache_breaking (D-13 exception)"
+        );
 
         // All other secret fields must NOT be cache_breaking
         for f in s.iter().filter(|f| f.secret && f.key != "model.api_key") {

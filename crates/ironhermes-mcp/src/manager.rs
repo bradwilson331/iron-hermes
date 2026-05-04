@@ -3,8 +3,8 @@ use crate::server_task::{self, ServerTaskResult};
 use crate::tool::sanitize_server_name;
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -43,11 +43,16 @@ pub struct McpManager {
     /// GAP-8 at the user-facing level. When rmcp later exposes a pre-spawned-
     /// Child constructor, the slot becomes load-bearing without any manager
     /// changes (Option A upgrade).
-    tasks: Mutex<HashMap<String, (
-        JoinHandle<ServerTaskResult>,
-        CancellationToken,
-        Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
-    )>>,
+    tasks: Mutex<
+        HashMap<
+            String,
+            (
+                JoinHandle<ServerTaskResult>,
+                CancellationToken,
+                Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+            ),
+        >,
+    >,
     /// Last-known configs for each active server (used by reconnect/reload).
     configs: Mutex<HashMap<String, McpServerConfig>>,
     /// GAP-7: per-server connected flag flipped to `true` by `server_task::connect_and_serve`
@@ -114,7 +119,10 @@ impl McpManager {
     /// returns a `StartResult` with preliminary connected/failed status.
     ///
     /// Used by `reload_and_report()` to aggregate failures for D-12 status reporting.
-    pub async fn start_all_and_wait(&self, configs: HashMap<String, McpServerConfig>) -> StartResult {
+    pub async fn start_all_and_wait(
+        &self,
+        configs: HashMap<String, McpServerConfig>,
+    ) -> StartResult {
         let mut task_names: Vec<String> = Vec::new();
         {
             let mut tasks = self.tasks.lock().await;
@@ -181,10 +189,7 @@ impl McpManager {
                         connected.push(name.clone());
                     } else if handle.is_finished() && !has_tools {
                         // Task exited (e.g. child crashed before initialize completed).
-                        failed.push((
-                            name.clone(),
-                            "connection failed after retries".to_string(),
-                        ));
+                        failed.push((name.clone(), "connection failed after retries".to_string()));
                     }
                     // flag_true==false + task still running + no tools yet = still connecting
                 }
@@ -192,7 +197,11 @@ impl McpManager {
         }
 
         let tool_count = self.registered_tool_count().await;
-        StartResult { connected, failed, tool_count }
+        StartResult {
+            connected,
+            failed,
+            tool_count,
+        }
     }
 
     /// Shutdown all running server tasks and unregister their tools.
@@ -293,7 +302,10 @@ impl McpManager {
     /// Disconnects all servers, starts new tasks, waits briefly for connections,
     /// then aggregates `ServerTaskResult.failure_reason` into `StartResult.failed`.
     /// This is the method called by `McpReloader::reload()` in Plan 04.
-    pub async fn reload_and_report(&self, new_configs: HashMap<String, McpServerConfig>) -> StartResult {
+    pub async fn reload_and_report(
+        &self,
+        new_configs: HashMap<String, McpServerConfig>,
+    ) -> StartResult {
         // Shutdown existing servers + unregister their tools
         self.shutdown_all().await;
         // Start new servers and wait for initial connection status
@@ -350,19 +362,18 @@ impl ironhermes_core::commands::context::McpReloader for McpManager {
     /// via `StartResult.failed` (D-12 full delivery).
     async fn reload(&self) -> ironhermes_core::commands::context::McpReloadResult {
         // Re-read config to pick up any changes since startup.
-        let new_configs: HashMap<String, McpServerConfig> =
-            match ironhermes_core::Config::load() {
-                Ok(config) => config
-                    .mcp_servers
-                    .into_iter()
-                    .filter_map(|(name, val)| {
-                        serde_yaml::from_value::<McpServerConfig>(val)
-                            .ok()
-                            .map(|c| (name, c))
-                    })
-                    .collect(),
-                Err(_) => HashMap::new(),
-            };
+        let new_configs: HashMap<String, McpServerConfig> = match ironhermes_core::Config::load() {
+            Ok(config) => config
+                .mcp_servers
+                .into_iter()
+                .filter_map(|(name, val)| {
+                    serde_yaml::from_value::<McpServerConfig>(val)
+                        .ok()
+                        .map(|c| (name, c))
+                })
+                .collect(),
+            Err(_) => HashMap::new(),
+        };
 
         // reload_and_report: shutdown all + start_all_and_wait; aggregates
         // ServerTaskResult.failure_reason into StartResult.failed (D-12).
@@ -496,11 +507,10 @@ mod tests {
                     failure_reason: None,
                 }
             });
-            manager
-                .tasks
-                .lock()
-                .await
-                .insert(server_name.to_string(), (handle, cancel, Arc::new(tokio::sync::Mutex::new(None))));
+            manager.tasks.lock().await.insert(
+                server_name.to_string(),
+                (handle, cancel, Arc::new(tokio::sync::Mutex::new(None))),
+            );
         }
 
         // Pre-condition: both tools visible under sanitized prefix.
@@ -542,7 +552,10 @@ mod tests {
         assert!(
             leftover.is_empty(),
             "GAP-4: shutdown_all must remove all tools of a special-char-named server; leftover={:?}",
-            leftover.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()
+            leftover
+                .iter()
+                .map(|t| t.function.name.clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -644,13 +657,7 @@ mod tests {
             let mut guard = registry.write().await;
             for tool_original in ["a", "b", "c"] {
                 let (tx, _rx) = mpsc::channel(1);
-                let tool = McpTool::new(
-                    server_name,
-                    tool_original,
-                    "d",
-                    serde_json::json!({}),
-                    tx,
-                );
+                let tool = McpTool::new(server_name, tool_original, "d", serde_json::json!({}), tx);
                 guard.register_dynamic(Box::new(tool));
             }
             drop(guard);
@@ -662,11 +669,10 @@ mod tests {
                     failure_reason: None,
                 }
             });
-            manager
-                .tasks
-                .lock()
-                .await
-                .insert(server_name.to_string(), (handle, cancel, Arc::new(tokio::sync::Mutex::new(None))));
+            manager.tasks.lock().await.insert(
+                server_name.to_string(),
+                (handle, cancel, Arc::new(tokio::sync::Mutex::new(None))),
+            );
         }
 
         // Cycle 1: register + shutdown (simulates one reload iteration)
@@ -693,7 +699,10 @@ mod tests {
         assert!(
             residue.is_empty(),
             "GAP-4: two reload cycles must not leave duplicates; residue={:?}",
-            residue.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>()
+            residue
+                .iter()
+                .map(|t| t.function.name.clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -753,6 +762,9 @@ mod tests {
         // Post-condition: the manager's task map is empty (drained) and
         // the connected_server_names reports empty.
         let names = manager.connected_server_names();
-        assert!(names.is_empty(), "GAP-8: post-shutdown, connected_server_names must be empty");
+        assert!(
+            names.is_empty(),
+            "GAP-8: post-shutdown, connected_server_names must be empty"
+        );
     }
 }

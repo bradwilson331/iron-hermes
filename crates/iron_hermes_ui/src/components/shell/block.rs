@@ -1,8 +1,8 @@
-use dioxus::prelude::*;
-use crate::state::{Block as BlockData, BlockEntry};
 use super::command_line::CommandLine;
-use super::tool_call::ToolCall;
 use super::markdown::render_inline_code;
+use super::tool_call::ToolCall;
+use crate::state::{Block as BlockData, BlockEntry};
+use dioxus::prelude::*;
 
 /// Block — outer chrome for any of the six block kinds with a variant-
 /// dispatched body and a hover-action button row.
@@ -18,23 +18,24 @@ use super::markdown::render_inline_code;
 /// render unconditionally; `assets/warp-ih.css` `.wh-block:hover
 /// .wh-block-actions { opacity: 1 }` controls visibility.
 #[component]
-pub fn Block(
-    entry: BlockEntry,
-    on_copy: EventHandler<()>,
-    on_rerun: EventHandler<()>,
-) -> Element {
+pub fn Block(entry: BlockEntry, on_copy: EventHandler<()>, on_rerun: EventHandler<()>) -> Element {
     let data = entry.block.clone();
     let kind_class = data.kind_class();
 
     let (author, time, exit_code) = match &data {
         BlockData::Cmd { command } => (None, command.time.clone(), None),
         BlockData::Out { author, time, .. } => (author.clone(), time.clone(), None),
-        BlockData::Ai  { author, time, .. } => (author.clone(), time.clone(), None),
-        BlockData::Ok  { author, time, .. } => (author.clone(), time.clone(), None),
-        BlockData::Err { author, time, exit_code, .. } => (author.clone(), time.clone(), Some(*exit_code)),
+        BlockData::Ai { author, time, .. } => (author.clone(), time.clone(), None),
+        BlockData::Ok { author, time, .. } => (author.clone(), time.clone(), None),
+        BlockData::Err {
+            author,
+            time,
+            exit_code,
+            ..
+        } => (author.clone(), time.clone(), Some(*exit_code)),
         BlockData::Tool { .. } => (None, None, None),
     };
-    let is_ok  = matches!(data, BlockData::Ok  { .. });
+    let is_ok = matches!(data, BlockData::Ok { .. });
     let is_err = matches!(data, BlockData::Err { .. });
     let is_cmd = matches!(data, BlockData::Cmd { .. });
 

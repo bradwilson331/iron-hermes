@@ -138,7 +138,10 @@ env:
         let cfg: McpServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.command.as_deref(), Some("npx"));
         assert_eq!(cfg.args, vec!["-y", "@modelcontextprotocol/server-github"]);
-        assert_eq!(cfg.env.get("GITHUB_TOKEN").map(|s| s.as_str()), Some("ghp_test"));
+        assert_eq!(
+            cfg.env.get("GITHUB_TOKEN").map(|s| s.as_str()),
+            Some("ghp_test")
+        );
         assert!(cfg.url.is_none());
     }
 
@@ -285,7 +288,10 @@ auth: "${IH_MCP_TEST_TOKEN}"
         let mut cfg: McpServerConfig = serde_yaml::from_str(yaml).unwrap();
         interpolate_config(&mut cfg);
         assert_eq!(cfg.args[0], "--token=test_token_value");
-        assert_eq!(cfg.env.get("TOKEN").map(|s| s.as_str()), Some("test_token_value"));
+        assert_eq!(
+            cfg.env.get("TOKEN").map(|s| s.as_str()),
+            Some("test_token_value")
+        );
         assert_eq!(
             cfg.headers.get("Authorization").map(|s| s.as_str()),
             Some("Bearer test_token_value")

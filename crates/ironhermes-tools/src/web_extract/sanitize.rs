@@ -9,8 +9,8 @@
 //! The `regex` crate uses an RE2 NFA engine (no backtracking) so the base64 pattern is
 //! safe against adversarial input — see RESEARCH.md Pitfall 4 for analysis.
 
-use std::sync::OnceLock;
 use regex::Regex;
+use std::sync::OnceLock;
 
 /// D-08 base64 image data-URL pattern. Matches `data:image/<mime>;base64,<payload>`.
 /// Bounded character classes only — no nested quantifiers, no catastrophic backtracking risk
@@ -28,7 +28,7 @@ pub const SECRET_URL_PATTERNS: &[&str] = &[
     "api-key=",
     "password=",
     "secret=",
-    "bearer ",         // matches "Bearer ABC" after lowercasing
+    "bearer ", // matches "Bearer ABC" after lowercasing
     "auth=",
     "access_token=",
     "access-token=",
@@ -36,15 +36,15 @@ pub const SECRET_URL_PATTERNS: &[&str] = &[
 
 fn base64_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(BASE64_PATTERN).expect("D-08 base64 pattern compiles")
-    })
+    RE.get_or_init(|| Regex::new(BASE64_PATTERN).expect("D-08 base64 pattern compiles"))
 }
 
 /// D-08: strip `data:image/...;base64,...` URLs from a Markdown body, replacing each with
 /// the literal `[image stripped]`. Single regex pass; UTF-8 safe via `regex::Regex::replace_all`.
 pub fn strip_base64_images(content: &str) -> String {
-    base64_regex().replace_all(content, STRIPPED_IMAGE_PLACEHOLDER).into_owned()
+    base64_regex()
+        .replace_all(content, STRIPPED_IMAGE_PLACEHOLDER)
+        .into_owned()
 }
 
 /// D-19: returns `true` if `url` contains any pattern from `SECRET_URL_PATTERNS` OR the
@@ -103,7 +103,10 @@ pub fn redact_secrets_in_url(url: &str, extras: &[String]) -> String {
 
     // Build the combined pattern list once (lowercase), so we can scan in a single pass.
     // SECRET_URL_PATTERNS is already lowercase by construction.
-    let mut all_patterns: Vec<String> = SECRET_URL_PATTERNS.iter().map(|p| (*p).to_string()).collect();
+    let mut all_patterns: Vec<String> = SECRET_URL_PATTERNS
+        .iter()
+        .map(|p| (*p).to_string())
+        .collect();
     for extra in extras {
         all_patterns.push(extra.to_lowercase());
     }
@@ -186,7 +189,12 @@ mod tests {
         let md = "A ![](data:image/jpeg;base64,abc\ndef) B ![](data:image/svg+xml;base64,xyz=) C";
         let stripped = strip_base64_images(md);
         // Should have stripped both
-        assert_eq!(stripped.matches("[image stripped]").count(), 2, "{}", stripped);
+        assert_eq!(
+            stripped.matches("[image stripped]").count(),
+            2,
+            "{}",
+            stripped
+        );
     }
 
     #[test]
@@ -203,7 +211,16 @@ mod tests {
 
     #[test]
     fn contains_secret_matches_each_pattern() {
-        for p in &["token=", "api_key=", "api-key=", "password=", "secret=", "auth=", "access_token=", "access-token="] {
+        for p in &[
+            "token=",
+            "api_key=",
+            "api-key=",
+            "password=",
+            "secret=",
+            "auth=",
+            "access_token=",
+            "access-token=",
+        ] {
             let url = format!("https://example.com/?{p}foo");
             assert!(contains_secret(&url, &[]), "should detect {p} in {url}");
         }
@@ -211,8 +228,10 @@ mod tests {
 
     #[test]
     fn contains_secret_matches_bearer_with_space() {
-        assert!(contains_secret("https://example.com/?h=Bearer%20abc", &[]),
-            "URL-decoded `Bearer ` (with space) must match");
+        assert!(
+            contains_secret("https://example.com/?h=Bearer%20abc", &[]),
+            "URL-decoded `Bearer ` (with space) must match"
+        );
     }
 
     #[test]
@@ -224,29 +243,50 @@ mod tests {
     #[test]
     fn contains_secret_decodes_percent_encoded_param_name() {
         // ?token%3Dabc decodes to ?token=abc
-        assert!(contains_secret("https://example.com/?token%3Dabc", &[]),
-            "percent-encoded `token=` must be detected after decode");
+        assert!(
+            contains_secret("https://example.com/?token%3Dabc", &[]),
+            "percent-encoded `token=` must be detected after decode"
+        );
     }
 
     #[test]
     fn contains_secret_respects_extra_patterns() {
         // Operator-supplied extension list
         let extras = vec!["x_custom_secret=".to_string()];
-        assert!(contains_secret("https://example.com/?x_custom_secret=foo", &extras));
+        assert!(contains_secret(
+            "https://example.com/?x_custom_secret=foo",
+            &extras
+        ));
         assert!(!contains_secret("https://example.com/?safe=foo", &extras));
     }
 
     #[test]
     fn contains_secret_returns_false_for_clean_url() {
         assert!(!contains_secret("https://example.com/article?id=1234", &[]));
-        assert!(!contains_secret("https://arxiv.org/abs/2401.12345.pdf", &[]));
+        assert!(!contains_secret(
+            "https://arxiv.org/abs/2401.12345.pdf",
+            &[]
+        ));
     }
 
     #[test]
     fn secret_url_patterns_const_contains_required_entries() {
-        for required in &["token=", "api_key=", "api-key=", "password=", "secret=", "bearer ", "auth=", "access_token=", "access-token="] {
-            assert!(SECRET_URL_PATTERNS.contains(required),
-                "SECRET_URL_PATTERNS missing required entry: {}", required);
+        for required in &[
+            "token=",
+            "api_key=",
+            "api-key=",
+            "password=",
+            "secret=",
+            "bearer ",
+            "auth=",
+            "access_token=",
+            "access-token=",
+        ] {
+            assert!(
+                SECRET_URL_PATTERNS.contains(required),
+                "SECRET_URL_PATTERNS missing required entry: {}",
+                required
+            );
         }
         assert_eq!(SECRET_URL_PATTERNS.len(), 9, "exactly 9 patterns expected");
     }
@@ -265,10 +305,7 @@ mod tests {
 
     #[test]
     fn redact_handles_multiple_secrets_in_one_url() {
-        let out = redact_secrets_in_url(
-            "https://example.com/?token=abc&api_key=def&safe=ok",
-            &[],
-        );
+        let out = redact_secrets_in_url("https://example.com/?token=abc&api_key=def&safe=ok", &[]);
         assert_eq!(
             out, "https://example.com/?token=***&api_key=***&safe=ok",
             "multi-secret redaction must only touch matched values: {}",

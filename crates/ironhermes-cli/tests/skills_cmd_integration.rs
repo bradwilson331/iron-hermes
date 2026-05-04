@@ -135,14 +135,17 @@ fn cmd_list_reads_lock_file() {
 /// Canonical SKILL.md frontmatter that the test serves on hop 2 AND places in
 /// the /api/download blob response. Duplicating the small string avoids
 /// pulling in the hub crate's test fixtures from the CLI crate.
-const SKILL_MD: &str = "---\nname: ascii-art\ndescription: ASCII art skill\n---\n# ASCII Art\nBody.\n";
+const SKILL_MD: &str =
+    "---\nname: ascii-art\ndescription: ASCII art skill\n---\n# ASCII Art\nBody.\n";
 const HELPER_PY: &str = "print('hi')\n";
 
 fn expected_folder_hash() -> String {
     use sha2::{Digest, Sha256};
     // Match D-13: sort by path, hash `path || content` (no separators).
-    let mut files: Vec<(&str, &[u8])> =
-        vec![("SKILL.md", SKILL_MD.as_bytes()), ("helper.py", HELPER_PY.as_bytes())];
+    let mut files: Vec<(&str, &[u8])> = vec![
+        ("SKILL.md", SKILL_MD.as_bytes()),
+        ("helper.py", HELPER_PY.as_bytes()),
+    ];
     files.sort_by(|a, b| a.0.cmp(b.0));
     let mut hasher = Sha256::new();
     for (p, c) in &files {
@@ -215,7 +218,12 @@ async fn install_list_remove_round_trip() {
 
     // 3a. Install (with --skip-audit so the subprocess does NOT need the
     // audit endpoint to be up — keeps the mock set small and deterministic).
-    let install_out = run(&["skills", "install", "skills-sh:foo/bar/ascii-art", "--skip-audit"]);
+    let install_out = run(&[
+        "skills",
+        "install",
+        "skills-sh:foo/bar/ascii-art",
+        "--skip-audit",
+    ]);
     let install_stdout = String::from_utf8_lossy(&install_out.stdout);
     let install_stderr = String::from_utf8_lossy(&install_out.stderr);
     assert!(
@@ -276,7 +284,12 @@ async fn install_list_remove_round_trip() {
     }
 
     // 3d. Uninstall alias — re-install, then remove via `uninstall`.
-    let install2 = run(&["skills", "install", "skills-sh:foo/bar/ascii-art", "--skip-audit"]);
+    let install2 = run(&[
+        "skills",
+        "install",
+        "skills-sh:foo/bar/ascii-art",
+        "--skip-audit",
+    ]);
     assert!(
         install2.status.success(),
         "second install failed: stderr={}",

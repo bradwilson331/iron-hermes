@@ -8,7 +8,7 @@ use tracing::debug;
 /// Reduced from CONTEXT_FILE_MAX_CHARS (20,000) to limit tool result bloat.
 const SUBDIR_CONTEXT_MAX_CHARS: usize = 8_000;
 
-use crate::context_loader::{strip_yaml_frontmatter, CONTEXT_CANDIDATES};
+use crate::context_loader::{CONTEXT_CANDIDATES, strip_yaml_frontmatter};
 
 /// Progressive subdirectory context discovery.
 ///
@@ -159,7 +159,10 @@ mod tests {
         assert!(first.is_some(), "First call should find context");
 
         let second = disc.check_path(&file_path);
-        assert!(second.is_none(), "Second call should return None (already visited)");
+        assert!(
+            second.is_none(),
+            "Second call should return None (already visited)"
+        );
     }
 
     #[test]

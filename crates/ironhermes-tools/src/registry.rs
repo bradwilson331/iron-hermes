@@ -202,7 +202,11 @@ impl ToolRegistry {
                             }
                     })
                     .collect();
-                if missing.is_empty() { None } else { Some((t.name().to_string(), missing)) }
+                if missing.is_empty() {
+                    None
+                } else {
+                    Some((t.name().to_string(), missing))
+                }
             })
             .collect()
     }
@@ -212,8 +216,11 @@ impl ToolRegistry {
     /// Only includes regular tools (from the `tools` map); intercepted tools have no Tool::toolset()
     /// method. Plan 4's `hermes toolset list` presents intercepted-only names through a separate path.
     pub fn list_toolsets(&self) -> Vec<String> {
-        let mut s: std::collections::HashSet<String> =
-            self.tools.values().map(|t| t.toolset().to_string()).collect();
+        let mut s: std::collections::HashSet<String> = self
+            .tools
+            .values()
+            .map(|t| t.toolset().to_string())
+            .collect();
         let mut v: Vec<String> = s.drain().collect();
         v.sort();
         v
@@ -311,12 +318,9 @@ impl ToolRegistry {
         schemas
     }
 
-    pub async fn dispatch(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> anyhow::Result<String> {
-        self.dispatch_with_hook(name, args, None::<fn(&str, &str)>).await
+    pub async fn dispatch(&self, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
+        self.dispatch_with_hook(name, args, None::<fn(&str, &str)>)
+            .await
     }
 
     /// Check all registered guardrails for the given tool call WITHOUT executing the tool.
@@ -533,14 +537,24 @@ impl ToolRegistry {
         self.register(Box::new(BrowserBackTool::new(session.clone())));
         self.register(Box::new(BrowserClickTool::new(session.clone())));
         self.register(Box::new(BrowserCloseTool::new(session.clone())));
-        self.register(Box::new(BrowserConsoleTool::new(session.clone(), config.clone())));
+        self.register(Box::new(BrowserConsoleTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
-        self.register(Box::new(BrowserNavigateTool::new(session.clone(), config.clone())));
+        self.register(Box::new(BrowserNavigateTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserPressTool::new(session.clone())));
         self.register(Box::new(BrowserScrollTool::new(session.clone())));
         self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
         self.register(Box::new(BrowserTypeTool::new(session.clone())));
-        self.register(Box::new(BrowserVisionTool::new(session.clone(), resolver, vision_client)));
+        self.register(Box::new(BrowserVisionTool::new(
+            session.clone(),
+            resolver,
+            vision_client,
+        )));
     }
 
     /// Phase 25.1 D-07 / OQ-5: register all 11 browser_* tools with a real VisionClientHandle.
@@ -570,14 +584,24 @@ impl ToolRegistry {
         self.register(Box::new(BrowserBackTool::new(session.clone())));
         self.register(Box::new(BrowserClickTool::new(session.clone())));
         self.register(Box::new(BrowserCloseTool::new(session.clone())));
-        self.register(Box::new(BrowserConsoleTool::new(session.clone(), config.clone())));
+        self.register(Box::new(BrowserConsoleTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
-        self.register(Box::new(BrowserNavigateTool::new(session.clone(), config.clone())));
+        self.register(Box::new(BrowserNavigateTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserPressTool::new(session.clone())));
         self.register(Box::new(BrowserScrollTool::new(session.clone())));
         self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
         self.register(Box::new(BrowserTypeTool::new(session.clone())));
-        self.register(Box::new(BrowserVisionTool::new(session.clone(), resolver, vision_client)));
+        self.register(Box::new(BrowserVisionTool::new(
+            session.clone(),
+            resolver,
+            vision_client,
+        )));
     }
 
     /// Phase 25.2 D-13: register `web_extract` tool with injected summarization client handle
@@ -607,7 +631,10 @@ impl ToolRegistry {
         registry: Arc<ironhermes_core::SkillRegistry>,
         active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
         credential_dir: std::path::PathBuf,
-        skills_config: std::collections::HashMap<String, std::collections::HashMap<String, serde_yaml::Value>>,
+        skills_config: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, serde_yaml::Value>,
+        >,
     ) {
         use crate::skills_tool::SkillsTool;
         self.register(Box::new(SkillsTool::new(
@@ -632,9 +659,8 @@ impl ToolRegistry {
         progress_callback: Option<crate::delegate_task::SubagentProgressCallback>,
     ) {
         use crate::delegate_task::DelegateTaskTool;
-        let mut tool = DelegateTaskTool::new(
-            runner, semaphore, memory_manager, config, cancel_token,
-        );
+        let mut tool =
+            DelegateTaskTool::new(runner, semaphore, memory_manager, config, cancel_token);
         if let Some(cb) = progress_callback {
             tool = tool.with_progress_callback(cb);
         }
@@ -684,16 +710,13 @@ impl ToolRegistry {
         rpc_registry: Arc<ToolRegistry>,
         config: ironhermes_core::ExecConfig,
         active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
-        process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
+        process_registry: Arc<
+            tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>,
+        >,
     ) {
         use crate::execute_code::ExecuteCodeTool;
-        let tool = ExecuteCodeTool::with_active_skills(
-            rpc_registry,
-            config,
-            None,
-            active_skills,
-        )
-        .with_process_registry(process_registry);
+        let tool = ExecuteCodeTool::with_active_skills(rpc_registry, config, None, active_skills)
+            .with_process_registry(process_registry);
         self.register(Box::new(tool));
     }
 
@@ -703,7 +726,9 @@ impl ToolRegistry {
     /// runner when background spawning is desired.
     pub fn register_terminal_tool_with_process_registry(
         &mut self,
-        process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
+        process_registry: Arc<
+            tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>,
+        >,
     ) {
         use crate::terminal::TerminalTool;
         let tool = TerminalTool::new().with_process_registry(process_registry);
@@ -876,12 +901,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for NoPrereqTool {
-        fn name(&self) -> &str { "no_prereq" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "tool with no prerequisites" }
+        fn name(&self) -> &str {
+            "no_prereq"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tool with no prerequisites"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new("no_prereq", "tool with no prerequisites",
-                serde_json::json!({ "type": "object", "properties": {} }))
+            ToolSchema::new(
+                "no_prereq",
+                "tool with no prerequisites",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -894,12 +928,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for RequiredEnvPrereqTool {
-        fn name(&self) -> &str { "required_env_prereq" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "tool with required env_var prerequisite" }
+        fn name(&self) -> &str {
+            "required_env_prereq"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tool with required env_var prerequisite"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new("required_env_prereq", "tool with required env_var prerequisite",
-                serde_json::json!({ "type": "object", "properties": {} }))
+            ToolSchema::new(
+                "required_env_prereq",
+                "tool with required env_var prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -908,7 +951,8 @@ mod tests {
             vec![Prerequisite {
                 kind: "env_var".to_string(),
                 name: "TEST_PREREQ_25_01_PRESENT".to_string(),
-                description: "Test prerequisite env var for Phase 25 Plan 01 unit tests.".to_string(),
+                description: "Test prerequisite env var for Phase 25 Plan 01 unit tests."
+                    .to_string(),
                 required: true,
             }]
         }
@@ -919,12 +963,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for OptionalEnvPrereqTool {
-        fn name(&self) -> &str { "optional_env_prereq" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "tool with optional env_var prerequisite" }
+        fn name(&self) -> &str {
+            "optional_env_prereq"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tool with optional env_var prerequisite"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new("optional_env_prereq", "tool with optional env_var prerequisite",
-                serde_json::json!({ "type": "object", "properties": {} }))
+            ToolSchema::new(
+                "optional_env_prereq",
+                "tool with optional env_var prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -944,12 +997,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for ConfigFieldPrereqTool {
-        fn name(&self) -> &str { "config_field_prereq" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "tool with config_field prerequisite" }
+        fn name(&self) -> &str {
+            "config_field_prereq"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tool with config_field prerequisite"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new("config_field_prereq", "tool with config_field prerequisite",
-                serde_json::json!({ "type": "object", "properties": {} }))
+            ToolSchema::new(
+                "config_field_prereq",
+                "tool with config_field prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -958,7 +1020,8 @@ mod tests {
             vec![Prerequisite {
                 kind: "config_field".to_string(),
                 name: "search.brave_api_key".to_string(),
-                description: "Config field prerequisite — checked at config load, not trait level.".to_string(),
+                description: "Config field prerequisite — checked at config load, not trait level."
+                    .to_string(),
                 required: true,
             }]
         }
@@ -974,7 +1037,10 @@ mod tests {
     fn prerequisite_default_impl_returns_empty() {
         let tool = NoPrereqTool;
         let prereqs = tool.prerequisites();
-        assert!(prereqs.is_empty(), "default prerequisites() must return empty Vec");
+        assert!(
+            prereqs.is_empty(),
+            "default prerequisites() must return empty Vec"
+        );
     }
 
     /// Test 2: A test Tool whose prerequisites() returns one required env_var prereq,
@@ -987,7 +1053,10 @@ mod tests {
         let tool = RequiredEnvPrereqTool;
         let available = tool.is_available();
         unsafe { std::env::remove_var("TEST_PREREQ_25_01_PRESENT") };
-        assert!(available, "is_available() must be true when required env_var prereq is set");
+        assert!(
+            available,
+            "is_available() must be true when required env_var prereq is set"
+        );
     }
 
     /// Test 3: Same Tool when the env var is NOT set has is_available() == false.
@@ -998,7 +1067,10 @@ mod tests {
         unsafe { std::env::remove_var("TEST_PREREQ_25_01_PRESENT") };
         let tool = RequiredEnvPrereqTool;
         let available = tool.is_available();
-        assert!(!available, "is_available() must be false when required env_var prereq is absent");
+        assert!(
+            !available,
+            "is_available() must be false when required env_var prereq is absent"
+        );
     }
 
     /// Test 4: A test Tool with required:false for an unset env var has is_available() == true
@@ -1010,7 +1082,10 @@ mod tests {
         unsafe { std::env::remove_var("TEST_PREREQ_25_01_PRESENT") };
         let tool = OptionalEnvPrereqTool;
         let available = tool.is_available();
-        assert!(available, "is_available() must be true when only optional prereqs are absent");
+        assert!(
+            available,
+            "is_available() must be true when only optional prereqs are absent"
+        );
     }
 
     /// Test 5: A prerequisite with kind "config_field" (or any non-"env_var" kind) does NOT
@@ -1021,8 +1096,10 @@ mod tests {
         let tool = ConfigFieldPrereqTool;
         // config_field prereqs are required:true but still non-blocking at trait level
         let available = tool.is_available();
-        assert!(available,
-            "is_available() must be true for config_field prereqs (checked at config load, not here)");
+        assert!(
+            available,
+            "is_available() must be true for config_field prereqs (checked at config load, not here)"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1041,9 +1118,15 @@ mod tests {
         struct DefaultMock;
         #[async_trait]
         impl Tool for DefaultMock {
-            fn name(&self) -> &str { "default_mock" }
-            fn toolset(&self) -> &str { "test" }
-            fn description(&self) -> &str { "test mock for redact_args default" }
+            fn name(&self) -> &str {
+                "default_mock"
+            }
+            fn toolset(&self) -> &str {
+                "test"
+            }
+            fn description(&self) -> &str {
+                "test mock for redact_args default"
+            }
             fn schema(&self) -> ToolSchema {
                 ToolSchema::new(
                     "default_mock",
@@ -1088,16 +1171,31 @@ mod tests {
         use crate::terminal::TerminalTool;
 
         // Direct instantiation for tools with trivial constructors
-        assert_eq!(TerminalTool::new().toolset(), "code",
-            "TerminalTool must be in 'code' toolset per D-01");
-        assert_eq!(ReadFileTool.toolset(), "code",
-            "ReadFileTool must be in 'code' toolset per D-01");
-        assert_eq!(WriteFileTool.toolset(), "code",
-            "WriteFileTool must be in 'code' toolset per D-01");
-        assert_eq!(PatchFileTool.toolset(), "code",
-            "PatchFileTool must be in 'code' toolset per D-01");
-        assert_eq!(SearchFilesTool.toolset(), "code",
-            "SearchFilesTool must be in 'code' toolset per D-01");
+        assert_eq!(
+            TerminalTool::new().toolset(),
+            "code",
+            "TerminalTool must be in 'code' toolset per D-01"
+        );
+        assert_eq!(
+            ReadFileTool.toolset(),
+            "code",
+            "ReadFileTool must be in 'code' toolset per D-01"
+        );
+        assert_eq!(
+            WriteFileTool.toolset(),
+            "code",
+            "WriteFileTool must be in 'code' toolset per D-01"
+        );
+        assert_eq!(
+            PatchFileTool.toolset(),
+            "code",
+            "PatchFileTool must be in 'code' toolset per D-01"
+        );
+        assert_eq!(
+            SearchFilesTool.toolset(),
+            "code",
+            "SearchFilesTool must be in 'code' toolset per D-01"
+        );
 
         // Source-text invariant for CronjobTool (requires Arc<Mutex<JobStore>> constructor).
         // Verifies that the toolset() impl block returns "agent" per D-01 Open Question 1 resolution.
@@ -1130,11 +1228,24 @@ mod tests {
     fn web_search_prerequisites_lists_firecrawl_required_true() {
         let tool = crate::web_search::WebSearchTool;
         let prereqs = tool.prerequisites();
-        assert_eq!(prereqs.len(), 1, "WebSearchTool must have exactly one prerequisite");
+        assert_eq!(
+            prereqs.len(),
+            1,
+            "WebSearchTool must have exactly one prerequisite"
+        );
         let p = &prereqs[0];
-        assert_eq!(p.kind, "env_var", "WebSearchTool prereq kind must be 'env_var'");
-        assert_eq!(p.name, "FIRECRAWL_API_KEY", "WebSearchTool prereq name must be FIRECRAWL_API_KEY");
-        assert!(p.required, "WebSearchTool FIRECRAWL_API_KEY prereq must be required:true");
+        assert_eq!(
+            p.kind, "env_var",
+            "WebSearchTool prereq kind must be 'env_var'"
+        );
+        assert_eq!(
+            p.name, "FIRECRAWL_API_KEY",
+            "WebSearchTool prereq name must be FIRECRAWL_API_KEY"
+        );
+        assert!(
+            p.required,
+            "WebSearchTool FIRECRAWL_API_KEY prereq must be required:true"
+        );
     }
 
     /// Test: WebReadTool::prerequisites() returns one Prerequisite with
@@ -1143,11 +1254,24 @@ mod tests {
     fn web_read_prerequisites_lists_firecrawl_required_false() {
         let tool = crate::web_read::WebReadTool;
         let prereqs = tool.prerequisites();
-        assert_eq!(prereqs.len(), 1, "WebReadTool must have exactly one prerequisite");
+        assert_eq!(
+            prereqs.len(),
+            1,
+            "WebReadTool must have exactly one prerequisite"
+        );
         let p = &prereqs[0];
-        assert_eq!(p.kind, "env_var", "WebReadTool prereq kind must be 'env_var'");
-        assert_eq!(p.name, "FIRECRAWL_API_KEY", "WebReadTool prereq name must be FIRECRAWL_API_KEY");
-        assert!(!p.required, "WebReadTool FIRECRAWL_API_KEY prereq must be required:false (plain-text fallback)");
+        assert_eq!(
+            p.kind, "env_var",
+            "WebReadTool prereq kind must be 'env_var'"
+        );
+        assert_eq!(
+            p.name, "FIRECRAWL_API_KEY",
+            "WebReadTool prereq name must be FIRECRAWL_API_KEY"
+        );
+        assert!(
+            !p.required,
+            "WebReadTool FIRECRAWL_API_KEY prereq must be required:false (plain-text fallback)"
+        );
     }
 
     /// Test: With FIRECRAWL_API_KEY unset, WebSearchTool::is_available() == false
@@ -1159,8 +1283,10 @@ mod tests {
         unsafe { std::env::remove_var("FIRECRAWL_API_KEY") };
         let tool = crate::web_search::WebSearchTool;
         let available = tool.is_available();
-        assert!(!available,
-            "WebSearchTool::is_available() must be false when FIRECRAWL_API_KEY is unset");
+        assert!(
+            !available,
+            "WebSearchTool::is_available() must be false when FIRECRAWL_API_KEY is unset"
+        );
     }
 
     /// Test: With FIRECRAWL_API_KEY unset, WebReadTool::is_available() == true
@@ -1172,8 +1298,10 @@ mod tests {
         unsafe { std::env::remove_var("FIRECRAWL_API_KEY") };
         let tool = crate::web_read::WebReadTool;
         let available = tool.is_available();
-        assert!(available,
-            "WebReadTool::is_available() must be true when FIRECRAWL_API_KEY is unset (optional prereq)");
+        assert!(
+            available,
+            "WebReadTool::is_available() must be true when FIRECRAWL_API_KEY is unset (optional prereq)"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1183,15 +1311,24 @@ mod tests {
     #[test]
     fn test_register_dynamic_inserts_tool() {
         let mut registry = ToolRegistry::new();
-        registry.register_dynamic(Box::new(MockTool { tool_name: "dyn_tool" }));
-        assert!(registry.get("dyn_tool").is_some(), "dynamically registered tool must be retrievable by name");
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "dyn_tool",
+        }));
+        assert!(
+            registry.get("dyn_tool").is_some(),
+            "dynamically registered tool must be retrievable by name"
+        );
     }
 
     #[test]
     fn test_register_dynamic_overwrites_existing() {
         let mut registry = ToolRegistry::new();
-        registry.register_dynamic(Box::new(MockTool { tool_name: "my_tool" }));
-        registry.register_dynamic(Box::new(MockTool { tool_name: "my_tool" }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "my_tool",
+        }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "my_tool",
+        }));
         // Should still be exactly one tool named "my_tool"
         let names = registry.list_tools();
         let count = names.iter().filter(|&&n| n == "my_tool").count();
@@ -1205,50 +1342,86 @@ mod tests {
     #[test]
     fn test_unregister_by_prefix_removes_matching_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register_dynamic(Box::new(MockTool { tool_name: "server__tool_a" }));
-        registry.register_dynamic(Box::new(MockTool { tool_name: "server__tool_b" }));
-        registry.register_dynamic(Box::new(MockTool { tool_name: "other__tool_c" }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "server__tool_a",
+        }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "server__tool_b",
+        }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "other__tool_c",
+        }));
 
         let removed = registry.unregister_by_prefix("server");
         assert_eq!(removed, 2, "must remove both 'server__' prefixed tools");
-        assert!(registry.get("server__tool_a").is_none(), "server__tool_a must be removed");
-        assert!(registry.get("server__tool_b").is_none(), "server__tool_b must be removed");
+        assert!(
+            registry.get("server__tool_a").is_none(),
+            "server__tool_a must be removed"
+        );
+        assert!(
+            registry.get("server__tool_b").is_none(),
+            "server__tool_b must be removed"
+        );
     }
 
     #[test]
     fn test_unregister_by_prefix_does_not_remove_other_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register_dynamic(Box::new(MockTool { tool_name: "server__tool_a" }));
-        registry.register_dynamic(Box::new(MockTool { tool_name: "other__tool_c" }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "server__tool_a",
+        }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "other__tool_c",
+        }));
 
         registry.unregister_by_prefix("server");
-        assert!(registry.get("other__tool_c").is_some(), "other__tool_c must NOT be removed");
+        assert!(
+            registry.get("other__tool_c").is_some(),
+            "other__tool_c must NOT be removed"
+        );
     }
 
     #[test]
     fn test_unregister_by_prefix_returns_count() {
         let mut registry = ToolRegistry::new();
-        registry.register_dynamic(Box::new(MockTool { tool_name: "srv__a" }));
-        registry.register_dynamic(Box::new(MockTool { tool_name: "srv__b" }));
-        registry.register_dynamic(Box::new(MockTool { tool_name: "srv__c" }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "srv__a",
+        }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "srv__b",
+        }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "srv__c",
+        }));
 
         let count = registry.unregister_by_prefix("srv");
-        assert_eq!(count, 3, "unregister_by_prefix must return count of removed tools");
+        assert_eq!(
+            count, 3,
+            "unregister_by_prefix must return count of removed tools"
+        );
     }
 
     #[test]
     fn test_unregister_by_prefix_empty_registry_returns_zero() {
         let mut registry = ToolRegistry::new();
         let count = registry.unregister_by_prefix("server");
-        assert_eq!(count, 0, "unregister_by_prefix on empty registry must return 0");
+        assert_eq!(
+            count, 0,
+            "unregister_by_prefix on empty registry must return 0"
+        );
     }
 
     #[test]
     fn test_unregister_by_prefix_no_match_returns_zero() {
         let mut registry = ToolRegistry::new();
-        registry.register_dynamic(Box::new(MockTool { tool_name: "other__tool" }));
+        registry.register_dynamic(Box::new(MockTool {
+            tool_name: "other__tool",
+        }));
         let count = registry.unregister_by_prefix("x");
-        assert_eq!(count, 0, "unregister_by_prefix with no matching prefix must return 0");
+        assert_eq!(
+            count, 0,
+            "unregister_by_prefix with no matching prefix must return 0"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1316,9 +1489,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn test_handler(response: &'static str) -> InterceptHandler {
-        std::sync::Arc::new(move |_args| {
-            Box::pin(async move { Ok(response.to_string()) })
-        })
+        std::sync::Arc::new(move |_args| Box::pin(async move { Ok(response.to_string()) }))
     }
 
     fn test_intercept_schema(name: &str) -> ToolSchema {
@@ -1339,8 +1510,14 @@ mod tests {
             test_handler("hello"),
         );
         let schemas = registry.get_definitions(None);
-        let count = schemas.iter().filter(|s| s.function.name == "test_intercept").count();
-        assert_eq!(count, 1, "intercepted tool must appear exactly once in get_definitions(None)");
+        let count = schemas
+            .iter()
+            .filter(|s| s.function.name == "test_intercept")
+            .count();
+        assert_eq!(
+            count, 1,
+            "intercepted tool must appear exactly once in get_definitions(None)"
+        );
     }
 
     /// Test: register_intercepted panics when name already registered as a regular tool (D-15).
@@ -1348,8 +1525,14 @@ mod tests {
     #[should_panic(expected = "already registered as a regular tool")]
     fn register_intercepted_panics_on_duplicate_with_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool { tool_name: "dup_name" }));
-        registry.register_intercepted("dup_name", test_intercept_schema("dup_name"), test_handler("x"));
+        registry.register(Box::new(MockTool {
+            tool_name: "dup_name",
+        }));
+        registry.register_intercepted(
+            "dup_name",
+            test_intercept_schema("dup_name"),
+            test_handler("x"),
+        );
     }
 
     /// Test: register() panics when name already registered as an intercepted tool (D-15 reciprocal).
@@ -1357,17 +1540,32 @@ mod tests {
     #[should_panic(expected = "already registered as an intercepted tool")]
     fn register_tools_panics_on_duplicate_with_intercepts() {
         let mut registry = ToolRegistry::new();
-        registry.register_intercepted("dup_name", test_intercept_schema("dup_name"), test_handler("x"));
-        registry.register(Box::new(MockTool { tool_name: "dup_name" }));
+        registry.register_intercepted(
+            "dup_name",
+            test_intercept_schema("dup_name"),
+            test_handler("x"),
+        );
+        registry.register(Box::new(MockTool {
+            tool_name: "dup_name",
+        }));
     }
 
     /// Test: dispatch_intercepts returns Some(Ok("hello")) for a known intercepted tool.
     #[tokio::test]
     async fn dispatch_intercepts_returns_some_for_known() {
         let mut registry = ToolRegistry::new();
-        registry.register_intercepted("known", test_intercept_schema("known"), test_handler("hello"));
-        let result = registry.dispatch_intercepts("known", serde_json::json!({})).await;
-        assert!(result.is_some(), "dispatch_intercepts must return Some for a known intercepted name");
+        registry.register_intercepted(
+            "known",
+            test_intercept_schema("known"),
+            test_handler("hello"),
+        );
+        let result = registry
+            .dispatch_intercepts("known", serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_some(),
+            "dispatch_intercepts must return Some for a known intercepted name"
+        );
         let inner = result.unwrap();
         assert!(inner.is_ok(), "handler must return Ok");
         assert_eq!(inner.unwrap(), "hello");
@@ -1377,8 +1575,13 @@ mod tests {
     #[tokio::test]
     async fn dispatch_intercepts_returns_none_for_unknown() {
         let registry = ToolRegistry::new();
-        let result = registry.dispatch_intercepts("unknown", serde_json::json!({})).await;
-        assert!(result.is_none(), "dispatch_intercepts must return None for an unregistered name");
+        let result = registry
+            .dispatch_intercepts("unknown", serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_none(),
+            "dispatch_intercepts must return None for an unregistered name"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1389,11 +1592,22 @@ mod tests {
     #[test]
     fn get_definitions_includes_intercept_schemas() {
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool { tool_name: "regular" }));
-        registry.register_intercepted("intercept_a", test_intercept_schema("intercept_a"), test_handler("a"));
-        registry.register_intercepted("intercept_b", test_intercept_schema("intercept_b"), test_handler("b"));
+        registry.register(Box::new(MockTool {
+            tool_name: "regular",
+        }));
+        registry.register_intercepted(
+            "intercept_a",
+            test_intercept_schema("intercept_a"),
+            test_handler("a"),
+        );
+        registry.register_intercepted(
+            "intercept_b",
+            test_intercept_schema("intercept_b"),
+            test_handler("b"),
+        );
         let schemas = registry.get_definitions(None);
-        let names: std::collections::HashSet<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
+        let names: std::collections::HashSet<String> =
+            schemas.iter().map(|s| s.function.name.clone()).collect();
         assert_eq!(names.len(), 3, "must have 3 schemas: {names:?}");
         assert!(names.contains("regular"), "missing 'regular'");
         assert!(names.contains("intercept_a"), "missing 'intercept_a'");
@@ -1404,16 +1618,34 @@ mod tests {
     #[test]
     fn get_definitions_with_enabled_tools_filter_includes_intercepts() {
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool { tool_name: "regular" }));
-        registry.register_intercepted("intercept_a", test_intercept_schema("intercept_a"), test_handler("a"));
-        registry.register_intercepted("intercept_b", test_intercept_schema("intercept_b"), test_handler("b"));
+        registry.register(Box::new(MockTool {
+            tool_name: "regular",
+        }));
+        registry.register_intercepted(
+            "intercept_a",
+            test_intercept_schema("intercept_a"),
+            test_handler("a"),
+        );
+        registry.register_intercepted(
+            "intercept_b",
+            test_intercept_schema("intercept_b"),
+            test_handler("b"),
+        );
         let enabled = vec!["regular".to_string(), "intercept_a".to_string()];
         let schemas = registry.get_definitions(Some(&enabled));
-        let names: std::collections::HashSet<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
-        assert_eq!(names.len(), 2, "must have 2 schemas after filter: {names:?}");
+        let names: std::collections::HashSet<String> =
+            schemas.iter().map(|s| s.function.name.clone()).collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "must have 2 schemas after filter: {names:?}"
+        );
         assert!(names.contains("regular"), "missing 'regular'");
         assert!(names.contains("intercept_a"), "missing 'intercept_a'");
-        assert!(!names.contains("intercept_b"), "'intercept_b' must be filtered out");
+        assert!(
+            !names.contains("intercept_b"),
+            "'intercept_b' must be filtered out"
+        );
     }
 
     /// Tool whose is_available() returns false — used to test filtering.
@@ -1421,14 +1653,25 @@ mod tests {
 
     #[async_trait]
     impl Tool for UnavailableTool {
-        fn name(&self) -> &str { "unavailable" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "always unavailable" }
-        fn schema(&self) -> ToolSchema {
-            ToolSchema::new("unavailable", "always unavailable",
-                serde_json::json!({ "type": "object", "properties": {} }))
+        fn name(&self) -> &str {
+            "unavailable"
         }
-        fn is_available(&self) -> bool { false }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "always unavailable"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "unavailable",
+                "always unavailable",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        fn is_available(&self) -> bool {
+            false
+        }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("never called".to_string())
         }
@@ -1439,14 +1682,26 @@ mod tests {
     fn get_definitions_filters_unavailable_regular_tools_only() {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(UnavailableTool));
-        registry.register_intercepted("always_on", test_intercept_schema("always_on"), test_handler("ok"));
+        registry.register_intercepted(
+            "always_on",
+            test_intercept_schema("always_on"),
+            test_handler("ok"),
+        );
         let schemas = registry.get_definitions(None);
         let names: Vec<String> = schemas.iter().map(|s| s.function.name.clone()).collect();
-        assert!(!names.contains(&"unavailable".to_string()),
-            "unavailable regular tool must be filtered out; got: {names:?}");
-        assert!(names.contains(&"always_on".to_string()),
-            "intercepted tool must always appear in get_definitions; got: {names:?}");
-        assert_eq!(names.len(), 1, "only intercepted tool should appear; got: {names:?}");
+        assert!(
+            !names.contains(&"unavailable".to_string()),
+            "unavailable regular tool must be filtered out; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"always_on".to_string()),
+            "intercepted tool must always appear in get_definitions; got: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            1,
+            "only intercepted tool should appear; got: {names:?}"
+        );
     }
 
     /// Tool B with a required env_var prerequisite for list_unavailable testing.
@@ -1454,12 +1709,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for MissingKeyTool {
-        fn name(&self) -> &str { "test_b" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "tool requiring MISSING_KEY_25_02" }
+        fn name(&self) -> &str {
+            "test_b"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tool requiring MISSING_KEY_25_02"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new("test_b", "tool requiring MISSING_KEY_25_02",
-                serde_json::json!({ "type": "object", "properties": {} }))
+            ToolSchema::new(
+                "test_b",
+                "tool requiring MISSING_KEY_25_02",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -1479,12 +1743,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for AlwaysAvailTool {
-        fn name(&self) -> &str { "test_a" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "always available tool" }
+        fn name(&self) -> &str {
+            "test_a"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "always available tool"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new("test_a", "always available tool",
-                serde_json::json!({ "type": "object", "properties": {} }))
+            ToolSchema::new(
+                "test_a",
+                "always available tool",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -1501,20 +1774,31 @@ mod tests {
         registry.register(Box::new(AlwaysAvailTool));
         registry.register(Box::new(MissingKeyTool));
         let unavailable = registry.list_unavailable();
-        assert_eq!(unavailable.len(), 1,
-            "exactly one tool must be unavailable when MISSING_KEY_25_02 is unset; got: {unavailable:?}");
+        assert_eq!(
+            unavailable.len(),
+            1,
+            "exactly one tool must be unavailable when MISSING_KEY_25_02 is unset; got: {unavailable:?}"
+        );
         let (tool_name, missing) = &unavailable[0];
-        assert_eq!(tool_name.as_str(), "test_b",
-            "the unavailable tool must be 'test_b'; got: {tool_name}");
-        assert_eq!(missing.len(), 1,
-            "must have exactly one missing prereq; got: {missing:?}");
+        assert_eq!(
+            tool_name.as_str(),
+            "test_b",
+            "the unavailable tool must be 'test_b'; got: {tool_name}"
+        );
+        assert_eq!(
+            missing.len(),
+            1,
+            "must have exactly one missing prereq; got: {missing:?}"
+        );
 
         // With env set, returns empty Vec
         unsafe { std::env::set_var("MISSING_KEY_25_02", "1") };
         let unavailable_after = registry.list_unavailable();
         unsafe { std::env::remove_var("MISSING_KEY_25_02") };
-        assert!(unavailable_after.is_empty(),
-            "list_unavailable must return empty when all prereqs satisfied; got: {unavailable_after:?}");
+        assert!(
+            unavailable_after.is_empty(),
+            "list_unavailable must return empty when all prereqs satisfied; got: {unavailable_after:?}"
+        );
     }
 
     /// Tools with different toolsets for list_toolsets testing.
@@ -1524,35 +1808,71 @@ mod tests {
 
     #[async_trait]
     impl Tool for WebTool1 {
-        fn name(&self) -> &str { "web_tool_1" }
-        fn toolset(&self) -> &str { "web" }
-        fn description(&self) -> &str { "web tool 1" }
-        fn schema(&self) -> ToolSchema {
-            ToolSchema::new("web_tool_1", "web tool 1", serde_json::json!({ "type": "object", "properties": {} }))
+        fn name(&self) -> &str {
+            "web_tool_1"
         }
-        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> { Ok("ok".to_string()) }
+        fn toolset(&self) -> &str {
+            "web"
+        }
+        fn description(&self) -> &str {
+            "web tool 1"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "web_tool_1",
+                "web tool 1",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
     }
 
     #[async_trait]
     impl Tool for CodeTool1 {
-        fn name(&self) -> &str { "code_tool_1" }
-        fn toolset(&self) -> &str { "code" }
-        fn description(&self) -> &str { "code tool 1" }
-        fn schema(&self) -> ToolSchema {
-            ToolSchema::new("code_tool_1", "code tool 1", serde_json::json!({ "type": "object", "properties": {} }))
+        fn name(&self) -> &str {
+            "code_tool_1"
         }
-        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> { Ok("ok".to_string()) }
+        fn toolset(&self) -> &str {
+            "code"
+        }
+        fn description(&self) -> &str {
+            "code tool 1"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "code_tool_1",
+                "code tool 1",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
     }
 
     #[async_trait]
     impl Tool for WebTool2 {
-        fn name(&self) -> &str { "web_tool_2" }
-        fn toolset(&self) -> &str { "web" }
-        fn description(&self) -> &str { "web tool 2" }
-        fn schema(&self) -> ToolSchema {
-            ToolSchema::new("web_tool_2", "web tool 2", serde_json::json!({ "type": "object", "properties": {} }))
+        fn name(&self) -> &str {
+            "web_tool_2"
         }
-        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> { Ok("ok".to_string()) }
+        fn toolset(&self) -> &str {
+            "web"
+        }
+        fn description(&self) -> &str {
+            "web tool 2"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "web_tool_2",
+                "web tool 2",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
     }
 
     /// Test: list_toolsets() returns unique, sorted toolset names from regular tools.
@@ -1563,8 +1883,11 @@ mod tests {
         registry.register(Box::new(CodeTool1));
         registry.register(Box::new(WebTool2));
         let toolsets = registry.list_toolsets();
-        assert_eq!(toolsets, vec!["code", "web"],
-            "list_toolsets must return deduplicated, sorted toolset names; got: {toolsets:?}");
+        assert_eq!(
+            toolsets,
+            vec!["code", "web"],
+            "list_toolsets must return deduplicated, sorted toolset names; got: {toolsets:?}"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1576,21 +1899,31 @@ mod tests {
     #[test]
     fn todo_write_schema_minimal_shape() {
         let schema = crate::registry::todo_write_schema();
-        assert_eq!(schema.function.name, "todo_write",
-            "todo_write_schema must have name 'todo_write'");
+        assert_eq!(
+            schema.function.name, "todo_write",
+            "todo_write_schema must have name 'todo_write'"
+        );
         let params = serde_json::to_value(&schema.function.parameters).unwrap();
         let props = &params["properties"];
-        assert!(props.get("items").is_some(),
-            "todo_write_schema must have 'items' in properties; got: {props}");
+        assert!(
+            props.get("items").is_some(),
+            "todo_write_schema must have 'items' in properties; got: {props}"
+        );
         let items_type = props["items"]["type"].as_str().unwrap_or("");
-        assert_eq!(items_type, "array",
-            "todo_write_schema 'items' must be of type 'array'; got: {items_type}");
+        assert_eq!(
+            items_type, "array",
+            "todo_write_schema 'items' must be of type 'array'; got: {items_type}"
+        );
         let item_item_type = props["items"]["items"]["type"].as_str().unwrap_or("");
-        assert_eq!(item_item_type, "string",
-            "todo_write_schema items.items.type must be 'string'; got: {item_item_type}");
+        assert_eq!(
+            item_item_type, "string",
+            "todo_write_schema items.items.type must be 'string'; got: {item_item_type}"
+        );
         let required = params["required"].as_array().unwrap();
-        assert!(required.iter().any(|v| v.as_str() == Some("items")),
-            "todo_write_schema must have 'items' in required; got: {required:?}");
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("items")),
+            "todo_write_schema must have 'items' in required; got: {required:?}"
+        );
     }
 
     /// Test: todo_read_schema() returns a ToolSchema with name "todo_read"
@@ -1598,8 +1931,10 @@ mod tests {
     #[test]
     fn todo_read_schema_minimal_shape() {
         let schema = crate::registry::todo_read_schema();
-        assert_eq!(schema.function.name, "todo_read",
-            "todo_read_schema must have name 'todo_read'");
+        assert_eq!(
+            schema.function.name, "todo_read",
+            "todo_read_schema must have name 'todo_read'"
+        );
         let params = serde_json::to_value(&schema.function.parameters).unwrap();
         let props = params["properties"].as_object();
         assert!(
@@ -1620,7 +1955,14 @@ mod tests {
     #[tokio::test]
     async fn intercepted_tool_no_schema_duplicate() {
         let mut registry = ToolRegistry::new();
-        let names = ["memory", "session_search", "delegate_task", "todo_write", "todo_read", "cronjob"];
+        let names = [
+            "memory",
+            "session_search",
+            "delegate_task",
+            "todo_write",
+            "todo_read",
+            "cronjob",
+        ];
         for name in names {
             registry.register_intercepted(
                 name,
@@ -1629,9 +1971,7 @@ mod tests {
                     "stub intercepted tool for D-26 Test 3",
                     serde_json::json!({ "type": "object", "properties": {} }),
                 ),
-                std::sync::Arc::new(|_args| {
-                    Box::pin(async move { Ok("stub".to_string()) })
-                }),
+                std::sync::Arc::new(|_args| Box::pin(async move { Ok("stub".to_string()) })),
             );
         }
         let schemas = registry.get_definitions(None);
@@ -1658,9 +1998,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for ToolsetMockTool {
-        fn name(&self) -> &str { self.tool_name }
-        fn toolset(&self) -> &str { self.toolset_name }
-        fn description(&self) -> &str { "toolset mock tool" }
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+        fn toolset(&self) -> &str {
+            self.toolset_name
+        }
+        fn description(&self) -> &str {
+            "toolset mock tool"
+        }
         fn schema(&self) -> ToolSchema {
             ToolSchema::new(
                 self.tool_name,
@@ -1691,7 +2037,10 @@ mod tests {
     #[test]
     fn set_toolset_config_then_get_definitions_filters_by_toolset() {
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(ToolsetMockTool { tool_name: "web_mock", toolset_name: "web" }));
+        registry.register(Box::new(ToolsetMockTool {
+            tool_name: "web_mock",
+            toolset_name: "web",
+        }));
 
         // With web disabled (default)
         registry.set_toolset_config(Some(make_tools_config_with_web_disabled()));
@@ -1699,7 +2048,8 @@ mod tests {
         let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
         assert!(
             !names.iter().any(|n| n == "web_mock"),
-            "web_mock must be filtered out when web toolset is disabled; got: {:?}", names
+            "web_mock must be filtered out when web toolset is disabled; got: {:?}",
+            names
         );
 
         // Enable web
@@ -1708,7 +2058,8 @@ mod tests {
         let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
         assert!(
             names.iter().any(|n| n == "web_mock"),
-            "web_mock must appear when web toolset is enabled; got: {:?}", names
+            "web_mock must appear when web toolset is enabled; got: {:?}",
+            names
         );
     }
 
@@ -1726,7 +2077,8 @@ mod tests {
         let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
         assert!(
             names.iter().any(|n| n == "any_tool"),
-            "With no toolset_config, any_tool must appear regardless of toolset; got: {:?}", names
+            "With no toolset_config, any_tool must appear regardless of toolset; got: {:?}",
+            names
         );
     }
 
@@ -1746,7 +2098,8 @@ mod tests {
         let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
         assert!(
             !names.iter().any(|n| n == "regular"),
-            "Tool in disabled list must be excluded even when toolset is enabled; got: {:?}", names
+            "Tool in disabled list must be excluded even when toolset is enabled; got: {:?}",
+            names
         );
     }
 
@@ -1756,21 +2109,27 @@ mod tests {
         let mut registry = ToolRegistry::new();
         // Register 3 intercepts: memory (memory toolset), session_search (session), delegate_task (agent)
         for name in &["memory", "session_search", "delegate_task"] {
-            registry.register_intercepted(
-                name,
-                test_intercept_schema(name),
-                test_handler("ok"),
-            );
+            registry.register_intercepted(name, test_intercept_schema(name), test_handler("ok"));
         }
 
         // Default config: memory+session+agent all enabled → all 3 present
         let cfg = ironhermes_core::config::ToolsConfig::default();
         registry.set_toolset_config(Some(cfg));
         let defs = registry.get_definitions(None);
-        let names: std::collections::HashSet<String> = defs.iter().map(|s| s.function.name.clone()).collect();
-        assert!(names.contains("memory"), "memory intercept must be present when memory toolset enabled");
-        assert!(names.contains("session_search"), "session_search must be present when session toolset enabled");
-        assert!(names.contains("delegate_task"), "delegate_task must be present when agent toolset enabled");
+        let names: std::collections::HashSet<String> =
+            defs.iter().map(|s| s.function.name.clone()).collect();
+        assert!(
+            names.contains("memory"),
+            "memory intercept must be present when memory toolset enabled"
+        );
+        assert!(
+            names.contains("session_search"),
+            "session_search must be present when session toolset enabled"
+        );
+        assert!(
+            names.contains("delegate_task"),
+            "delegate_task must be present when agent toolset enabled"
+        );
 
         // Disable agent toolset → delegate_task disappears, others remain
         let mut cfg2 = ironhermes_core::config::ToolsConfig::default();
@@ -1780,10 +2139,17 @@ mod tests {
         );
         registry.set_toolset_config(Some(cfg2));
         let defs2 = registry.get_definitions(None);
-        let names2: std::collections::HashSet<String> = defs2.iter().map(|s| s.function.name.clone()).collect();
-        assert!(!names2.contains("delegate_task"), "delegate_task must be absent when agent toolset disabled");
+        let names2: std::collections::HashSet<String> =
+            defs2.iter().map(|s| s.function.name.clone()).collect();
+        assert!(
+            !names2.contains("delegate_task"),
+            "delegate_task must be absent when agent toolset disabled"
+        );
         assert!(names2.contains("memory"), "memory must still be present");
-        assert!(names2.contains("session_search"), "session_search must still be present");
+        assert!(
+            names2.contains("session_search"),
+            "session_search must still be present"
+        );
     }
 
     /// Test (D-15 collision guard): registering non-intercepted regular tool + intercepted names
@@ -1792,16 +2158,33 @@ mod tests {
     fn with_intercepts_does_not_collide_with_regular_registration() {
         let mut registry = ToolRegistry::new();
         // Register a non-intercepted regular tool (like web_search in the binary)
-        registry.register(Box::new(ToolsetMockTool { tool_name: "web_search", toolset_name: "web" }));
+        registry.register(Box::new(ToolsetMockTool {
+            tool_name: "web_search",
+            toolset_name: "web",
+        }));
         // Register intercepted names (different from the regular tool's name)
         registry.register_intercepted("memory", test_intercept_schema("memory"), test_handler("m"));
-        registry.register_intercepted("delegate_task", test_intercept_schema("delegate_task"), test_handler("dt"));
-        registry.register_intercepted("cronjob", test_intercept_schema("cronjob"), test_handler("cj"));
+        registry.register_intercepted(
+            "delegate_task",
+            test_intercept_schema("delegate_task"),
+            test_handler("dt"),
+        );
+        registry.register_intercepted(
+            "cronjob",
+            test_intercept_schema("cronjob"),
+            test_handler("cj"),
+        );
         // Reaching here means no D-15 panic fired — the test passes by completing
         let defs = registry.get_definitions(None);
         let names: Vec<String> = defs.iter().map(|s| s.function.name.clone()).collect();
-        assert!(names.contains(&"web_search".to_string()), "regular tool must appear");
-        assert!(names.contains(&"memory".to_string()), "memory intercept must appear");
+        assert!(
+            names.contains(&"web_search".to_string()),
+            "regular tool must appear"
+        );
+        assert!(
+            names.contains(&"memory".to_string()),
+            "memory intercept must appear"
+        );
     }
 
     #[tokio::test]
@@ -1902,13 +2285,21 @@ mod tests {
         let schemas = registry.get_definitions(None);
 
         let close = schemas.iter().find(|s| s.function.name == "browser_close");
-        let navigate = schemas.iter().find(|s| s.function.name == "browser_navigate");
+        let navigate = schemas
+            .iter()
+            .find(|s| s.function.name == "browser_navigate");
 
         // Hypothesis 3 floor: if browser_close is missing here, the registry filter
         // (is_available / toolset / disabled) is excluding it. This MUST not be the case
         // because both share identical impls.
-        assert!(close.is_some(), "GAP-5 hypothesis 3: browser_close MUST appear in get_definitions");
-        assert!(navigate.is_some(), "browser_navigate MUST appear in get_definitions");
+        assert!(
+            close.is_some(),
+            "GAP-5 hypothesis 3: browser_close MUST appear in get_definitions"
+        );
+        assert!(
+            navigate.is_some(),
+            "browser_navigate MUST appear in get_definitions"
+        );
 
         let close = close.unwrap();
         let navigate = navigate.unwrap();
@@ -1925,12 +2316,22 @@ mod tests {
         // Structural sanity (hypothesis 2 — schema malformation):
         assert!(
             close.function.description.len() >= 10,
-            "browser_close description too short: {:?}", close.function.description
+            "browser_close description too short: {:?}",
+            close.function.description
         );
         let params = &close.function.parameters;
-        assert_eq!(params["type"], "object", "browser_close.schema parameters MUST be type:object");
-        assert!(params["properties"].is_object(), "browser_close.schema MUST have properties:{{}}");
-        assert!(params["required"].is_array(), "browser_close.schema MUST have required:[]");
+        assert_eq!(
+            params["type"], "object",
+            "browser_close.schema parameters MUST be type:object"
+        );
+        assert!(
+            params["properties"].is_object(),
+            "browser_close.schema MUST have properties:{{}}"
+        );
+        assert!(
+            params["required"].is_array(),
+            "browser_close.schema MUST have required:[]"
+        );
     }
 
     /// Phase 25.1 GAP-5 diagnostic: prove browser_close and browser_navigate share
@@ -1948,27 +2349,45 @@ mod tests {
         registry.register_browser_tools(session, resolver, std::sync::Arc::new(config));
 
         // Access tools map directly (we are in the same module as the private field).
-        let close = registry.tools.get("browser_close").expect("browser_close registered");
-        let navigate = registry.tools.get("browser_navigate").expect("browser_navigate registered");
+        let close = registry
+            .tools
+            .get("browser_close")
+            .expect("browser_close registered");
+        let navigate = registry
+            .tools
+            .get("browser_navigate")
+            .expect("browser_navigate registered");
 
         assert_eq!(
-            close.toolset(), navigate.toolset(),
+            close.toolset(),
+            navigate.toolset(),
             "GAP-5 hypothesis 3: toolset() MUST match. close={:?} navigate={:?}",
-            close.toolset(), navigate.toolset()
+            close.toolset(),
+            navigate.toolset()
         );
         assert_eq!(
-            close.is_available(), navigate.is_available(),
+            close.is_available(),
+            navigate.is_available(),
             "GAP-5 hypothesis 3: is_available() MUST match for both tools"
         );
         assert_eq!(
-            close.prerequisites().len(), navigate.prerequisites().len(),
+            close.prerequisites().len(),
+            navigate.prerequisites().len(),
             "GAP-5 hypothesis 3: prerequisites() length MUST match"
         );
 
         println!("\n=== GAP-5 DIAGNOSTIC: filter signals ===");
-        println!("close    toolset={:?}  is_available={}  prerequisites.len={}",
-            close.toolset(), close.is_available(), close.prerequisites().len());
-        println!("navigate toolset={:?}  is_available={}  prerequisites.len={}",
-            navigate.toolset(), navigate.is_available(), navigate.prerequisites().len());
+        println!(
+            "close    toolset={:?}  is_available={}  prerequisites.len={}",
+            close.toolset(),
+            close.is_available(),
+            close.prerequisites().len()
+        );
+        println!(
+            "navigate toolset={:?}  is_available={}  prerequisites.len={}",
+            navigate.toolset(),
+            navigate.is_available(),
+            navigate.prerequisites().len()
+        );
     }
 }

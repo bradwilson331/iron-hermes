@@ -1,6 +1,6 @@
-use dioxus::prelude::*;
-use crate::state::Tab;
 use super::sigil::Sigil;
+use crate::state::Tab;
+use dioxus::prelude::*;
 
 // Wordmark and shield assets are migrated from `src/components/hero.rs` per
 // CONTEXT D-05 / UI-SPEC planner-handoff #2. They are not rendered by the

@@ -17,8 +17,8 @@ use ironhermes_core::SkillSource;
 use tracing::warn;
 
 use crate::{
-    tarball::extract_tarball_prefix, BundleFile, GitHubAuth, HubError, HubErrorKind, HubSource,
-    SkillBundle, SkillMeta,
+    BundleFile, GitHubAuth, HubError, HubErrorKind, HubSource, SkillBundle, SkillMeta,
+    tarball::extract_tarball_prefix,
 };
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -58,7 +58,11 @@ impl GitHubSource {
     ///
     /// `trusted_repos` should come from `config.hub.trusted_repos_set()` (D-04/D-08).
     /// `extra_taps` are appended after `DEFAULT_TAPS` (D-02).
-    pub fn new(auth: GitHubAuth, trusted_repos: HashSet<String>, extra_taps: Vec<GitHubTap>) -> Self {
+    pub fn new(
+        auth: GitHubAuth,
+        trusted_repos: HashSet<String>,
+        extra_taps: Vec<GitHubTap>,
+    ) -> Self {
         let mut taps: Vec<GitHubTap> = Self::DEFAULT_TAPS
             .iter()
             .map(|(repo, p)| GitHubTap {
@@ -101,7 +105,10 @@ impl GitHubSource {
     /// Resolve the default branch for a repo via `GET /repos/{repo}`.
     async fn default_branch(&self, repo: &str) -> Result<String, HubError> {
         let url = format!("{}/repos/{}", self.api_base, repo);
-        let mut req = self.http.get(&url).header("Accept", "application/vnd.github.v3+json");
+        let mut req = self
+            .http
+            .get(&url)
+            .header("Accept", "application/vnd.github.v3+json");
         if let Some(h) = self.auth.authorization_header() {
             req = req.header("Authorization", h);
         }
@@ -145,11 +152,7 @@ impl GitHubSource {
     }
 
     /// Fetch the recursive git tree for a repo at `sha` (branch name or SHA).
-    async fn git_tree(
-        &self,
-        repo: &str,
-        sha: &str,
-    ) -> Result<serde_json::Value, HubError> {
+    async fn git_tree(&self, repo: &str, sha: &str) -> Result<serde_json::Value, HubError> {
         let url = format!("{}/repos/{}/git/trees/{}", self.api_base, repo, sha);
         let mut req = self
             .http
@@ -210,7 +213,9 @@ impl GitHubSource {
         HubError::Typed {
             kind: HubErrorKind::RateLimited,
             message: "GitHub API rate limit exceeded".to_string(),
-            suggestion: Some("Set HERMES_GITHUB_TOKEN or wait for rate-limit window to reset".to_string()),
+            suggestion: Some(
+                "Set HERMES_GITHUB_TOKEN or wait for rate-limit window to reset".to_string(),
+            ),
             retry_after_s,
         }
     }
@@ -220,15 +225,15 @@ impl GitHubSource {
         let branch = self.default_branch(&tap.repo).await?;
         let tree = self.git_tree(&tap.repo, &branch).await?;
 
-        let entries = tree
-            .get("tree")
-            .and_then(|t| t.as_array())
-            .ok_or_else(|| HubError::Typed {
-                kind: HubErrorKind::Parse,
-                message: "git tree response missing 'tree' array".to_string(),
-                suggestion: None,
-                retry_after_s: None,
-            })?;
+        let entries =
+            tree.get("tree")
+                .and_then(|t| t.as_array())
+                .ok_or_else(|| HubError::Typed {
+                    kind: HubErrorKind::Parse,
+                    message: "git tree response missing 'tree' array".to_string(),
+                    suggestion: None,
+                    retry_after_s: None,
+                })?;
 
         let q = query.to_lowercase();
         let mut skills: Vec<SkillMeta> = Vec::new();
@@ -404,7 +409,12 @@ impl HubSource for GitHubSource {
                         break;
                     }
                 }
-                Err(e @ HubError::Typed { kind: HubErrorKind::RateLimited, .. }) => {
+                Err(
+                    e @ HubError::Typed {
+                        kind: HubErrorKind::RateLimited,
+                        ..
+                    },
+                ) => {
                     last_rate_limit = Some(e);
                     // Propagate rate-limit immediately — no point trying other taps.
                     break;
@@ -436,9 +446,7 @@ impl HubSource for GitHubSource {
         if parts.len() < 3 {
             return Err(HubError::Typed {
                 kind: HubErrorKind::InvalidIdentifier,
-                message: format!(
-                    "identifier must be 'owner/repo/skill_path', got: {identifier}"
-                ),
+                message: format!("identifier must be 'owner/repo/skill_path', got: {identifier}"),
                 suggestion: Some("Example: anthropics/skills/tenor-gif".to_string()),
                 retry_after_s: None,
             });
@@ -465,7 +473,9 @@ impl HubSource for GitHubSource {
             return Err(HubError::Typed {
                 kind: HubErrorKind::NotFound,
                 message: format!("no files found under '{keep_prefix}' in tarball"),
-                suggestion: Some(format!("Check that the skill path '{skill_path}' exists in {owner}/{repo}")),
+                suggestion: Some(format!(
+                    "Check that the skill path '{skill_path}' exists in {owner}/{repo}"
+                )),
                 retry_after_s: None,
             });
         }
@@ -479,8 +489,13 @@ impl HubSource for GitHubSource {
         })?;
 
         let skill_md = String::from_utf8_lossy(&skill_md_file.bytes).into_owned();
-        let skill_name = Self::parse_frontmatter_name(&skill_md)
-            .unwrap_or_else(|| skill_path.rsplit('/').next().unwrap_or(skill_path).to_string());
+        let skill_name = Self::parse_frontmatter_name(&skill_md).unwrap_or_else(|| {
+            skill_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(skill_path)
+                .to_string()
+        });
 
         Ok(SkillBundle {
             name: skill_name,
@@ -507,7 +522,10 @@ mod tests {
         assert_eq!(GitHubSource::DEFAULT_TAPS.len(), 4);
         assert_eq!(GitHubSource::DEFAULT_TAPS[0].0, "openai/skills");
         assert_eq!(GitHubSource::DEFAULT_TAPS[1].0, "anthropics/skills");
-        assert_eq!(GitHubSource::DEFAULT_TAPS[2].0, "VoltAgent/awesome-agent-skills");
+        assert_eq!(
+            GitHubSource::DEFAULT_TAPS[2].0,
+            "VoltAgent/awesome-agent-skills"
+        );
         assert_eq!(GitHubSource::DEFAULT_TAPS[3].0, "garrytan/gstack");
     }
 
@@ -516,11 +534,20 @@ mod tests {
         let trusted: HashSet<String> = ["owner/repo"].iter().map(|s| s.to_string()).collect();
         let src = GitHubSource::new(GitHubAuth::anonymous(), trusted, vec![]);
         // Exact match
-        assert_eq!(src.trust_level_for("owner/repo/skill"), SkillSource::Trusted);
+        assert_eq!(
+            src.trust_level_for("owner/repo/skill"),
+            SkillSource::Trusted
+        );
         // Sub-paths don't escape trust boundary
-        assert_eq!(src.trust_level_for("owner/repo/a/b/c"), SkillSource::Trusted);
+        assert_eq!(
+            src.trust_level_for("owner/repo/a/b/c"),
+            SkillSource::Trusted
+        );
         // Different repo
-        assert_eq!(src.trust_level_for("owner/other/skill"), SkillSource::Community);
+        assert_eq!(
+            src.trust_level_for("owner/other/skill"),
+            SkillSource::Community
+        );
         // Too short
         assert_eq!(src.trust_level_for("owner"), SkillSource::Community);
     }

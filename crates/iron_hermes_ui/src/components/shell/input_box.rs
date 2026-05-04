@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::state::Mode;
+use dioxus::prelude::*;
 
 /// InputBox — bottom-row form chrome with mode pill, prompt glyph,
 /// auto-grow textarea, and right-side action buttons.
@@ -25,9 +25,13 @@ pub fn InputBox(
     on_submit: EventHandler<()>,
 ) -> Element {
     let is_agent = matches!(mode(), Mode::Agent);
-    let pill_label   = if is_agent { "Agent" } else { "Shell" };
-    let prompt_glyph = if is_agent { "✦" }     else { "❯" };
-    let placeholder  = if is_agent { "Ask IronHermes anything…" } else { "Type a command, or `/` for commands" };
+    let pill_label = if is_agent { "Agent" } else { "Shell" };
+    let prompt_glyph = if is_agent { "✦" } else { "❯" };
+    let placeholder = if is_agent {
+        "Ask IronHermes anything…"
+    } else {
+        "Type a command, or `/` for commands"
+    };
     rsx! {
         div {
             class: "wh-input-wrap",

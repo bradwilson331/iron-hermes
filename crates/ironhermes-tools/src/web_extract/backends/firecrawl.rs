@@ -41,7 +41,8 @@ struct FirecrawlMetadata {
     #[serde(default)]
     title: Option<String>,
     #[serde(rename = "statusCode", default)]
-    #[allow(dead_code)] // Reserved for future >=400 status detection (web_read.rs:174 pattern).
+    #[allow(dead_code)]
+    // Reserved for future >=400 status detection (web_read.rs:174 pattern).
     status_code: Option<u16>,
 }
 
@@ -53,8 +54,8 @@ pub async fn fetch_with_firecrawl(url: &str) -> Result<ExtractionResult> {
     // D-18: SSRF pre-validation BEFORE any network construction.
     validate_url_async(url).await?;
 
-    let api_key = std::env::var("FIRECRAWL_API_KEY")
-        .map_err(|_| anyhow!("FIRECRAWL_API_KEY not set"))?;
+    let api_key =
+        std::env::var("FIRECRAWL_API_KEY").map_err(|_| anyhow!("FIRECRAWL_API_KEY not set"))?;
 
     let timeout_secs = Config::load().map(|c| c.web.timeout_secs).unwrap_or(30);
     debug!("web_extract: fetching {} via Firecrawl", url);

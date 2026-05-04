@@ -62,8 +62,14 @@ fn invariant_22_4_01_tui_rata_module_exports() {
 
 #[test]
 fn invariant_22_4_02_classic_tui_flag_and_env_present() {
-    assert!(MAIN_RS.contains("classic_tui"), "INV-22.4-02: classic_tui field");
-    assert!(MAIN_RS.contains("IRONHERMES_CLASSIC_TUI"), "INV-22.4-02: env var");
+    assert!(
+        MAIN_RS.contains("classic_tui"),
+        "INV-22.4-02: classic_tui field"
+    );
+    assert!(
+        MAIN_RS.contains("IRONHERMES_CLASSIC_TUI"),
+        "INV-22.4-02: env var"
+    );
 }
 
 #[test]
@@ -88,13 +94,19 @@ fn invariant_22_4_04_agent_loop_streaming_wired() {
         TUI_RATA_EVLOOP.contains("agent.run") || TUI_RATA_EVLOOP.contains("run_agent_turn"),
         "INV-22.4-04: event_loop.rs must call agent.run() or run_agent_turn for per-turn streaming"
     );
-    assert!(TUI_RATA_EVLOOP.contains("StreamEvent::Delta"), "INV-22.4-04: StreamEvent::Delta");
+    assert!(
+        TUI_RATA_EVLOOP.contains("StreamEvent::Delta"),
+        "INV-22.4-04: StreamEvent::Delta"
+    );
 }
 
 #[test]
 fn invariant_22_4_05_hook_registry_wired() {
     assert!(TUI_RATA_EVLOOP.contains("HookRegistry::new"), "INV-22.4-05");
-    assert!(TUI_RATA_EVLOOP.contains("add_listener"), "INV-22.4-05: add_listener");
+    assert!(
+        TUI_RATA_EVLOOP.contains("add_listener"),
+        "INV-22.4-05: add_listener"
+    );
 }
 
 #[test]
@@ -104,24 +116,37 @@ fn invariant_22_4_06_mcp_manager_wired() {
 
 #[test]
 fn invariant_22_4_07_memory_manager_wired() {
-    assert!(TUI_RATA_EVLOOP.contains("build_memory_manager"), "INV-22.4-07");
-    assert!(TUI_RATA_EVLOOP.contains("register_memory_tool"), "INV-22.4-07");
+    assert!(
+        TUI_RATA_EVLOOP.contains("build_memory_manager"),
+        "INV-22.4-07"
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("register_memory_tool"),
+        "INV-22.4-07"
+    );
 }
 
 #[test]
 fn invariant_22_4_08_subagent_registry_wired() {
-    assert!(TUI_RATA_EVLOOP.contains("SubagentRegistry::new"), "INV-22.4-08");
+    assert!(
+        TUI_RATA_EVLOOP.contains("SubagentRegistry::new"),
+        "INV-22.4-08"
+    );
 }
 
 #[test]
 fn invariant_22_4_09_process_registry_wired() {
-    assert!(TUI_RATA_EVLOOP.contains("ProcessRegistry::new_for_session"), "INV-22.4-09");
+    assert!(
+        TUI_RATA_EVLOOP.contains("ProcessRegistry::new_for_session"),
+        "INV-22.4-09"
+    );
 }
 
 #[test]
 fn invariant_22_4_10_slash_router_wired() {
     assert!(
-        TUI_RATA_EVLOOP.contains("CommandRouter") || TUI_RATA_EVLOOP.contains("build_command_registry"),
+        TUI_RATA_EVLOOP.contains("CommandRouter")
+            || TUI_RATA_EVLOOP.contains("build_command_registry"),
         "INV-22.4-10: CommandRouter"
     );
 }
@@ -152,30 +177,46 @@ fn invariant_22_4_11_typo_suggester_wired() {
 
 #[test]
 fn invariant_22_4_12_blocklist_guardrail_wired() {
-    assert!(TUI_RATA_EVLOOP.contains("BlocklistGuardrail"), "INV-22.4-12");
+    assert!(
+        TUI_RATA_EVLOOP.contains("BlocklistGuardrail"),
+        "INV-22.4-12"
+    );
 }
 
 #[test]
 fn invariant_22_4_13_three_tool_registrations_wired() {
-    assert!(TUI_RATA_EVLOOP.contains("register_cronjob_tool"), "INV-22.4-13 cron");
-    assert!(TUI_RATA_EVLOOP.contains("register_skills_tool"), "INV-22.4-13 skills");
-    assert!(TUI_RATA_EVLOOP.contains("register_execute_code_tool"), "INV-22.4-13 exec");
+    assert!(
+        TUI_RATA_EVLOOP.contains("register_cronjob_tool"),
+        "INV-22.4-13 cron"
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("register_skills_tool"),
+        "INV-22.4-13 skills"
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("register_execute_code_tool"),
+        "INV-22.4-13 exec"
+    );
 }
 
 #[test]
 fn invariant_22_4_14_yolo_banner_pre_alt_screen() {
-    assert!(MAIN_RS.contains("print_yolo_banner_to_stderr"), "INV-22.4-14");
+    assert!(
+        MAIN_RS.contains("print_yolo_banner_to_stderr"),
+        "INV-22.4-14"
+    );
 }
 
 /// WARNING-03 (iteration 1): ≥ 2 child_token() calls.
 #[test]
 fn invariant_22_4_15_cancel_cascade_parent_and_child() {
     assert!(
-        TUI_RATA_EVLOOP.contains("CancellationToken::new") || TUI_RATA_APP.contains("CancellationToken::new"),
+        TUI_RATA_EVLOOP.contains("CancellationToken::new")
+            || TUI_RATA_APP.contains("CancellationToken::new"),
         "INV-22.4-15: parent"
     );
     let total = TUI_RATA_EVLOOP.matches(".child_token()").count()
-              + TUI_RATA_APP.matches(".child_token()").count();
+        + TUI_RATA_APP.matches(".child_token()").count();
     assert!(
         total >= 2,
         "INV-22.4-15: `.child_token()` must appear ≥ 2. Found {total}."
@@ -184,8 +225,14 @@ fn invariant_22_4_15_cancel_cascade_parent_and_child() {
 
 #[test]
 fn invariant_22_4_16_double_ctrl_c_wired() {
-    assert!(TUI_RATA_APP.contains("DoubleCtrlCState::new"), "INV-22.4-16");
-    assert!(TUI_RATA_APP.contains("CtrlCDecision::CancelTurn"), "INV-22.4-16");
+    assert!(
+        TUI_RATA_APP.contains("DoubleCtrlCState::new"),
+        "INV-22.4-16"
+    );
+    assert!(
+        TUI_RATA_APP.contains("CtrlCDecision::CancelTurn"),
+        "INV-22.4-16"
+    );
 }
 
 #[test]
@@ -196,14 +243,26 @@ fn invariant_22_4_17_status_and_knight_rider_present() {
 
 #[test]
 fn invariant_22_4_18_ratatui_init_restore_paired() {
-    assert!(TUI_RATA_EVLOOP.contains("ratatui::init()"), "INV-22.4-18 init");
-    assert!(TUI_RATA_EVLOOP.contains("ratatui::restore()"), "INV-22.4-18 restore");
+    assert!(
+        TUI_RATA_EVLOOP.contains("ratatui::init()"),
+        "INV-22.4-18 init"
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("ratatui::restore()"),
+        "INV-22.4-18 restore"
+    );
 }
 
 #[test]
 fn invariant_22_4_19_event_stream_new_in_event_loop() {
-    assert!(TUI_RATA_EVLOOP.contains("EventStream::new()"), "INV-22.4-19");
-    assert!(!TUI_RATA_APP.contains("EventStream"), "INV-22.4-19: not on App");
+    assert!(
+        TUI_RATA_EVLOOP.contains("EventStream::new()"),
+        "INV-22.4-19"
+    );
+    assert!(
+        !TUI_RATA_APP.contains("EventStream"),
+        "INV-22.4-19: not on App"
+    );
 }
 
 #[test]
@@ -213,9 +272,13 @@ fn invariant_22_4_20_key_event_kind_press_filter() {
 
 #[test]
 fn invariant_22_4_21_stream_event_and_unbounded_sender() {
-    assert!(TUI_RATA_STREAM.contains("pub enum StreamEvent"), "INV-22.4-21");
     assert!(
-        TUI_RATA_EVLOOP.contains("unbounded_channel") || TUI_RATA_EVLOOP.contains("UnboundedSender"),
+        TUI_RATA_STREAM.contains("pub enum StreamEvent"),
+        "INV-22.4-21"
+    );
+    assert!(
+        TUI_RATA_EVLOOP.contains("unbounded_channel")
+            || TUI_RATA_EVLOOP.contains("UnboundedSender"),
         "INV-22.4-21: unbounded"
     );
 }
@@ -239,16 +302,30 @@ fn invariant_22_4_22_unit_separator_codec_present() {
 fn invariant_22_4_24_registration_order_parity() {
     let find = |needle: &str| TUI_RATA_EVLOOP.find(needle);
 
-    let agent_loop_pos = find("AgentLoop::new").expect(
-        "INV-22.4-24: event_loop.rs must contain AgentLoop::new (D-18 item 1)"
-    );
+    let agent_loop_pos = find("AgentLoop::new")
+        .expect("INV-22.4-24: event_loop.rs must contain AgentLoop::new (D-18 item 1)");
 
     let ordered_before: &[(&str, &str)] = &[
-        ("HookRegistry::new",                  "D-18 item 2 — HookRegistry before AgentLoop::new"),
-        ("build_memory_manager",               "D-18 item 4 — MemoryManager before AgentLoop::new"),
-        ("build_mcp_manager",                  "D-18 item 3 — McpManager before AgentLoop::new"),
-        ("ProcessRegistry::new_for_session",   "D-18 item 6 — ProcessRegistry before AgentLoop::new"),
-        ("SubagentRegistry::new",              "D-18 item 5 — SubagentRegistry before AgentLoop::new"),
+        (
+            "HookRegistry::new",
+            "D-18 item 2 — HookRegistry before AgentLoop::new",
+        ),
+        (
+            "build_memory_manager",
+            "D-18 item 4 — MemoryManager before AgentLoop::new",
+        ),
+        (
+            "build_mcp_manager",
+            "D-18 item 3 — McpManager before AgentLoop::new",
+        ),
+        (
+            "ProcessRegistry::new_for_session",
+            "D-18 item 6 — ProcessRegistry before AgentLoop::new",
+        ),
+        (
+            "SubagentRegistry::new",
+            "D-18 item 5 — SubagentRegistry before AgentLoop::new",
+        ),
     ];
     for (needle, msg) in ordered_before {
         let pos = find(needle).unwrap_or_else(|| {
@@ -261,12 +338,10 @@ fn invariant_22_4_24_registration_order_parity() {
         );
     }
 
-    let status_pos = find("StatusLineState").expect(
-        "INV-22.4-24: event_loop.rs must reference StatusLineState (D-10)"
-    );
-    let app_new_pos = find("App::new").expect(
-        "INV-22.4-24: event_loop.rs must construct App via App::new"
-    );
+    let status_pos = find("StatusLineState")
+        .expect("INV-22.4-24: event_loop.rs must reference StatusLineState (D-10)");
+    let app_new_pos =
+        find("App::new").expect("INV-22.4-24: event_loop.rs must construct App via App::new");
     assert!(
         status_pos < app_new_pos,
         "INV-22.4-24: StatusLineState seed must appear BEFORE App::new (D-10, D-18 item 14). \
@@ -294,12 +369,12 @@ fn invariant_22_4_25_print_banner_pre_ratatui() {
 
     // Every run_chat_ratatui(...) dispatch site must be preceded by a print_banner()
     // call earlier in the file. Verified via first-occurrence ordering.
-    let first_print_banner = MAIN_RS.find("print_banner();").expect(
-        "INV-22.4-25: main.rs must contain print_banner();"
-    );
-    let first_run_chat_ratatui = MAIN_RS.find("run_chat_ratatui(").expect(
-        "INV-22.4-25: main.rs must call tui_rata::run_chat_ratatui(...)"
-    );
+    let first_print_banner = MAIN_RS
+        .find("print_banner();")
+        .expect("INV-22.4-25: main.rs must contain print_banner();");
+    let first_run_chat_ratatui = MAIN_RS
+        .find("run_chat_ratatui(")
+        .expect("INV-22.4-25: main.rs must call tui_rata::run_chat_ratatui(...)");
     assert!(
         first_print_banner < first_run_chat_ratatui,
         "INV-22.4-25: the first print_banner() must appear BEFORE the first \
@@ -595,7 +670,7 @@ fn invariant_22_4_30_system_messages_visible() {
     // visible-output variants. If a future refactor stops setting the role,
     // System rendering is moot.
     let system_pushes = TUI_RATA_APP.matches("msg.role = Role::System;").count()
-                      + TUI_RATA_APP.matches("system.role = Role::System;").count();
+        + TUI_RATA_APP.matches("system.role = Role::System;").count();
     assert!(
         system_pushes >= 4,
         "INV-22.4-30 sanity: tui_rata/app.rs apply_slash_outcome must push \
@@ -750,11 +825,33 @@ fn invariant_22_4_33_invoke_handler_arms() {
     // These names were in the Phase 22.4.1 Plan 02 expected_arms list.
     let wired_names: &[&str] = &[
         // Session category
-        "history", "save", "retry", "undo", "title", "compress", "rollback", "stop",
-        "background", "btw", "queue", "status", "resume",
+        "history",
+        "save",
+        "retry",
+        "undo",
+        "title",
+        "compress",
+        "rollback",
+        "stop",
+        "background",
+        "btw",
+        "queue",
+        "status",
+        "resume",
         // Configuration category
-        "config", "provider", "prompt", "personality", "statusbar", "verbose",
-        "yolo", "reasoning", "skin", "voice", "model", "fast", "debug",
+        "config",
+        "provider",
+        "prompt",
+        "personality",
+        "statusbar",
+        "verbose",
+        "yolo",
+        "reasoning",
+        "skin",
+        "voice",
+        "model",
+        "fast",
+        "debug",
     ];
     for name in wired_names {
         let needle = format!("\"{name}\" => CommandResult::Output(");
@@ -795,11 +892,9 @@ fn invariant_22_4_33_invoke_handler_arms() {
     );
 }
 
-const CORE_HANDLERS: &str =
-    include_str!("../../ironhermes-core/src/commands/handlers.rs");
+const CORE_HANDLERS: &str = include_str!("../../ironhermes-core/src/commands/handlers.rs");
 
-const CORE_CONTEXT: &str =
-    include_str!("../../ironhermes-core/src/commands/context.rs");
+const CORE_CONTEXT: &str = include_str!("../../ironhermes-core/src/commands/context.rs");
 
 /// INV-22.4-35 (Phase 22.4.2 Plan 00 — D-04 / D-14): the eight new
 /// `Option<Arc<dyn ...>>` / `Option<Arc<std::sync::RwLock<...>>>` handle fields
@@ -1493,8 +1588,14 @@ fn invariant_22_4_59_queue_wired() {
 #[test]
 fn invariant_22_4_2_1_01_no_cron_stub() {
     let src = include_str!("../../../crates/ironhermes-core/src/commands/handlers.rs");
-    assert!(!src.contains("No cron management UI"), "INV-22.4.2.1-01: stub must be absent");
-    assert!(src.contains("cmd_cron"), "INV-22.4.2.1-01: cmd_cron must be present");
+    assert!(
+        !src.contains("No cron management UI"),
+        "INV-22.4.2.1-01: stub must be absent"
+    );
+    assert!(
+        src.contains("cmd_cron"),
+        "INV-22.4.2.1-01: cmd_cron must be present"
+    );
 }
 
 /// INV-22.4.2.1-02 (Phase 22.4.2.1 Plan 02 — D-03/D-07/D-13): cron delivery call site present.

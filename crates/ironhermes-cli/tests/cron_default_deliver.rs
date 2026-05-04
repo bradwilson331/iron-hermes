@@ -43,7 +43,9 @@ fn tg_enabled_single_chat_routes_to_origin() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let config = Config::load().expect("config must load");
     let decision = config.telegram_default_origin();
@@ -62,7 +64,9 @@ fn tg_enabled_multi_chat_falls_back_to_local() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345, 67890]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let config = Config::load().expect("config must load");
     let decision = config.telegram_default_origin();
@@ -81,7 +85,9 @@ fn tg_disabled_falls_back_to_local() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, false, &[12345]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let config = Config::load().expect("config must load");
     assert!(
@@ -96,7 +102,9 @@ fn tg_section_missing_falls_back_to_local() {
     let tmp = TempDir::new().unwrap();
     // Minimal config with no gateway section
     std::fs::write(tmp.path().join("config.yaml"), "model:\n  default: test\n").unwrap();
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let config = Config::load().expect("config must load");
     assert!(
@@ -116,12 +124,17 @@ fn explicit_deliver_flag_skips_helper() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let config = Config::load().expect("config must load");
     // Config IS eligible — explicit flag would bypass this.
     assert!(
-        matches!(config.telegram_default_origin(), OriginDecision::Single { .. }),
+        matches!(
+            config.telegram_default_origin(),
+            OriginDecision::Single { .. }
+        ),
         "config is eligible for auto-routing; explicit flag bypass is in cmd_create match arm"
     );
     // The actual bypass `Some(d) => (d, None)` lives in resolve_cron_deliver.

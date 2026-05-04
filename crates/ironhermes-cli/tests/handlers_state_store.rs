@@ -37,11 +37,7 @@ impl StateStoreHandle for TestStateStoreAdapter {
         self.list_sessions_text_filtered(limit, None)
     }
 
-    fn list_sessions_text_filtered(
-        &self,
-        limit: usize,
-        workspace_root: Option<&str>,
-    ) -> String {
+    fn list_sessions_text_filtered(&self, limit: usize, workspace_root: Option<&str>) -> String {
         let guard = match self.0.lock() {
             Ok(g) => g,
             Err(_) => return "StateStore lock poisoned.".to_string(),
@@ -73,13 +69,7 @@ impl StateStoreHandle for TestStateStoreAdapter {
             Ok(msgs) => {
                 let lines: Vec<String> = msgs
                     .iter()
-                    .map(|m| {
-                        format!(
-                            "  [{}] {}",
-                            m.role,
-                            m.content.as_deref().unwrap_or("")
-                        )
-                    })
+                    .map(|m| format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or("")))
                     .collect();
                 format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
             }
@@ -109,11 +99,7 @@ impl StateStoreHandle for TestStateStoreAdapter {
         };
         let export = match guard.export_session(session_id) {
             Ok(e) => e,
-            Err(e) => {
-                return format!(
-                    "error: failed to fetch session {session_id}: {e}"
-                )
-            }
+            Err(e) => return format!("error: failed to fetch session {session_id}: {e}"),
         };
         drop(guard);
 
@@ -132,13 +118,9 @@ impl StateStoreHandle for TestStateStoreAdapter {
             .join("sessions")
             .join(session_id)
             .join("trajectories.jsonl");
-        let exporter =
-            ironhermes_state::SessionDirectoryExport::new(session_id, &output_dir);
+        let exporter = ironhermes_state::SessionDirectoryExport::new(session_id, &output_dir);
         match exporter.write(&export, None, Some(traj_src.as_path())) {
-            Ok(()) => format!(
-                "Session {session_id} exported to {}",
-                output_dir.display()
-            ),
+            Ok(()) => format!("Session {session_id} exported to {}", output_dir.display()),
             Err(e) => format!("error: export failed: {e}"),
         }
     }
@@ -235,7 +217,8 @@ fn cmd_sessions_with_sessions_lists_them() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("sess-abc", "cli", None, None, None, None).unwrap();
+        g.create_session("sess-abc", "cli", None, None, None, None)
+            .unwrap();
     }
     let result = dispatch("sessions", &[], &ctx);
     match result {
@@ -252,8 +235,10 @@ fn cmd_sessions_accepts_limit_arg() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("s-one", "cli", None, None, None, None).unwrap();
-        g.create_session("s-two", "cli", None, None, None, None).unwrap();
+        g.create_session("s-one", "cli", None, None, None, None)
+            .unwrap();
+        g.create_session("s-two", "cli", None, None, None, None)
+            .unwrap();
     }
     // Limit 1 — should list only 1 session.
     let result = dispatch("sessions", &["1"], &ctx);
@@ -307,7 +292,8 @@ fn cmd_resume_known_session_returns_resuming_message() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("my-session", "cli", None, None, None, None).unwrap();
+        g.create_session("my-session", "cli", None, None, None, None)
+            .unwrap();
     }
     let result = dispatch("resume", &["my-session"], &ctx);
     match result {
@@ -356,7 +342,8 @@ fn cmd_save_with_session_exports_it() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store(session_id);
     {
         let mut g = store.lock().unwrap();
-        g.create_session(session_id, "cli", None, None, None, None).unwrap();
+        g.create_session(session_id, "cli", None, None, None, None)
+            .unwrap();
     }
     let result = dispatch("save", &[], &ctx);
     match result {
@@ -430,7 +417,8 @@ fn cmd_history_with_session_id_arg_queries_store() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store("s1");
     {
         let mut g = store.lock().unwrap();
-        g.create_session("hist-sess", "cli", None, None, None, None).unwrap();
+        g.create_session("hist-sess", "cli", None, None, None, None)
+            .unwrap();
     }
     let result = dispatch("history", &["hist-sess"], &ctx);
     match result {
@@ -478,7 +466,8 @@ fn cmd_title_with_state_store_persists_title() {
     let (ctx, store, _tmp) = make_test_ctx_with_state_store(session_id);
     {
         let mut g = store.lock().unwrap();
-        g.create_session(session_id, "cli", None, None, None, None).unwrap();
+        g.create_session(session_id, "cli", None, None, None, None)
+            .unwrap();
     }
     let result = dispatch("title", &["My", "Session", "Title"], &ctx);
     match result {
@@ -493,7 +482,10 @@ fn cmd_title_with_state_store_persists_title() {
     // Verify the title was actually persisted.
     {
         let g = store.lock().unwrap();
-        let sess = g.get_session(session_id).unwrap().expect("session should exist");
+        let sess = g
+            .get_session(session_id)
+            .unwrap()
+            .expect("session should exist");
         assert_eq!(
             sess.title.as_deref(),
             Some("My Session Title"),

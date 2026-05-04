@@ -32,11 +32,8 @@ pub struct McpProbeResult {
 pub trait DeepProbe: Send + Sync {
     /// Probe provider health (HEAD / lightweight ping).
     /// MUST enforce the given timeout; NEVER hang.
-    async fn provider_health(
-        &self,
-        provider_name: &str,
-        timeout: Duration,
-    ) -> anyhow::Result<bool>;
+    async fn provider_health(&self, provider_name: &str, timeout: Duration)
+    -> anyhow::Result<bool>;
 
     /// Probe state.db FTS5 integrity via PRAGMA integrity_check.
     async fn fts5_integrity(
@@ -46,11 +43,7 @@ pub trait DeepProbe: Send + Sync {
     ) -> anyhow::Result<bool>;
 
     /// Probe MCP server via rmcp tools/list roundtrip.
-    async fn mcp_server(
-        &self,
-        name: &str,
-        timeout: Duration,
-    ) -> anyhow::Result<McpProbeResult>;
+    async fn mcp_server(&self, name: &str, timeout: Duration) -> anyhow::Result<McpProbeResult>;
 }
 
 /// No-op probe returned when `--deep` is NOT set.
@@ -62,18 +55,10 @@ impl DeepProbe for NoopDeepProbe {
     async fn provider_health(&self, _: &str, _: Duration) -> anyhow::Result<bool> {
         Ok(true)
     }
-    async fn fts5_integrity(
-        &self,
-        _: &std::path::Path,
-        _: Duration,
-    ) -> anyhow::Result<bool> {
+    async fn fts5_integrity(&self, _: &std::path::Path, _: Duration) -> anyhow::Result<bool> {
         Ok(true)
     }
-    async fn mcp_server(
-        &self,
-        name: &str,
-        _: Duration,
-    ) -> anyhow::Result<McpProbeResult> {
+    async fn mcp_server(&self, name: &str, _: Duration) -> anyhow::Result<McpProbeResult> {
         Ok(McpProbeResult {
             name: name.into(),
             reachable: true,
@@ -154,10 +139,7 @@ impl DeepProbe for LiveDeepProbe {
                 // 2xx means healthy; 401/403 means the endpoint is reachable
                 // (we're unauthenticated on a HEAD — that's fine for liveness).
                 // 3xx redirects also indicate the endpoint is serving.
-                s.is_success()
-                    || s.is_redirection()
-                    || s.as_u16() == 401
-                    || s.as_u16() == 403
+                s.is_success() || s.is_redirection() || s.as_u16() == 401 || s.as_u16() == 403
             }
             Ok(Err(_)) | Err(_) => false,
         };
@@ -193,8 +175,7 @@ impl DeepProbe for LiveDeepProbe {
                 return Ok(false);
             }
             let conn = rusqlite::Connection::open(&path_clone)?;
-            let res: String =
-                conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+            let res: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
             Ok(res == "ok")
         });
 
@@ -214,11 +195,7 @@ impl DeepProbe for LiveDeepProbe {
         Ok(ok)
     }
 
-    async fn mcp_server(
-        &self,
-        name: &str,
-        _timeout: Duration,
-    ) -> anyhow::Result<McpProbeResult> {
+    async fn mcp_server(&self, name: &str, _timeout: Duration) -> anyhow::Result<McpProbeResult> {
         // ISS-11 (21.7 MVP): `hermes status` does not construct an
         // McpManager for a one-shot probe. Reporting `reachable=false`
         // honestly is better than lying with `reachable=true` (FM-5 —
@@ -280,11 +257,7 @@ impl MockDeepProbe {
         self.fts5_override = Some(v);
         self
     }
-    pub fn set_mcp(
-        mut self,
-        name: impl Into<String>,
-        v: anyhow::Result<McpProbeResult>,
-    ) -> Self {
+    pub fn set_mcp(mut self, name: impl Into<String>, v: anyhow::Result<McpProbeResult>) -> Self {
         self.mcp_overrides.insert(name.into(), v);
         self
     }
@@ -300,22 +273,14 @@ impl DeepProbe for MockDeepProbe {
             None => Ok(true),
         }
     }
-    async fn fts5_integrity(
-        &self,
-        _: &std::path::Path,
-        _: Duration,
-    ) -> anyhow::Result<bool> {
+    async fn fts5_integrity(&self, _: &std::path::Path, _: Duration) -> anyhow::Result<bool> {
         match &self.fts5_override {
             Some(Ok(b)) => Ok(*b),
             Some(Err(e)) => Err(anyhow::anyhow!("{}", e)),
             None => Ok(true),
         }
     }
-    async fn mcp_server(
-        &self,
-        name: &str,
-        _: Duration,
-    ) -> anyhow::Result<McpProbeResult> {
+    async fn mcp_server(&self, name: &str, _: Duration) -> anyhow::Result<McpProbeResult> {
         match self.mcp_overrides.get(name) {
             Some(Ok(r)) => Ok(r.clone()),
             Some(Err(e)) => Err(anyhow::anyhow!("{}", e)),

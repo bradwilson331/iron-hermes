@@ -16,8 +16,7 @@ use tokio_util::sync::CancellationToken;
 /// elapsed.
 async fn single_cascade_run(n_children: usize) -> Duration {
     let parent = CancellationToken::new();
-    let children: Vec<CancellationToken> =
-        (0..n_children).map(|_| parent.child_token()).collect();
+    let children: Vec<CancellationToken> = (0..n_children).map(|_| parent.child_token()).collect();
 
     let start = std::time::Instant::now();
     parent.cancel();

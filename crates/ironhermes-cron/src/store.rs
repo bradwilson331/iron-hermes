@@ -311,13 +311,10 @@ impl JobStore {
 
     /// Find a job by id first, then by name (case-insensitive).
     pub fn find_job(&self, id_or_name: &str) -> Option<&CronJob> {
-        self.jobs
-            .iter()
-            .find(|j| j.id == id_or_name)
-            .or_else(|| {
-                let lower = id_or_name.to_lowercase();
-                self.jobs.iter().find(|j| j.name.to_lowercase() == lower)
-            })
+        self.jobs.iter().find(|j| j.id == id_or_name).or_else(|| {
+            let lower = id_or_name.to_lowercase();
+            self.jobs.iter().find(|j| j.name.to_lowercase() == lower)
+        })
     }
 
     /// Return all jobs.
@@ -387,7 +384,12 @@ impl JobStore {
     }
 
     /// Record a completed run. Advances next_run_at BEFORE marking (at-most-once semantics).
-    pub fn mark_job_run(&mut self, id: &str, output: impl Into<String>, status: &str) -> Result<()> {
+    pub fn mark_job_run(
+        &mut self,
+        id: &str,
+        output: impl Into<String>,
+        status: &str,
+    ) -> Result<()> {
         let now = Utc::now();
         let job = self
             .jobs
@@ -412,12 +414,19 @@ impl JobStore {
         }
 
         // Check if repeat limit reached
-        if job.repeat.times.is_some_and(|times| job.repeat.completed >= times) {
+        if job
+            .repeat
+            .times
+            .is_some_and(|times| job.repeat.completed >= times)
+        {
             job.state = JobState::Completed;
             job.next_run_at = None;
         }
 
-        debug!("Job id={} ran at {}, next_run_at={:?}", id, now, job.next_run_at);
+        debug!(
+            "Job id={} ran at {}, next_run_at={:?}",
+            id, now, job.next_run_at
+        );
         self.save()
     }
 
@@ -563,7 +572,15 @@ mod tests {
             display: "once in 2h".to_string(),
         };
         let job = store
-            .add_job("once-job", "prompt", sched, "once in 2h", "local", vec![], None)
+            .add_job(
+                "once-job",
+                "prompt",
+                sched,
+                "once in 2h",
+                "local",
+                vec![],
+                None,
+            )
             .expect("add");
         assert_eq!(job.repeat.times, Some(1));
         assert_eq!(job.repeat.completed, 0);
@@ -824,7 +841,11 @@ mod tests {
         fs::write(cron_dir.join("jobs.json"), external_jobs.to_string()).unwrap();
 
         store.reload().expect("reload");
-        assert_eq!(store.list_jobs().len(), 1, "reload should replace in-memory jobs");
+        assert_eq!(
+            store.list_jobs().len(),
+            1,
+            "reload should replace in-memory jobs"
+        );
         assert_eq!(store.list_jobs()[0].id, "ext-id-1");
         assert_eq!(store.list_jobs()[0].name, "external-job");
     }

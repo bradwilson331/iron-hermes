@@ -10,7 +10,7 @@
 //! Skill name: `youtube-content` (HYPHENATED) — verified against
 //! skills/media/youtube-content/SKILL.md `name:` frontmatter (RESEARCH.md target #4).
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -27,10 +27,7 @@ const HELPER_SCRIPT_RELPATH: &str = "scripts/fetch_transcript.py";
 /// D-10 entry point. Looks up the youtube-content skill, then shells out to its helper script.
 /// Returns `Err` (mapped by Plan 13 dispatcher into `ExtractionResult.error`) on any failure
 /// of the skill / script / parser layers — partial-success per D-02.
-pub async fn extract_youtube(
-    url: &str,
-    registry: &Arc<SkillRegistry>,
-) -> Result<ExtractionResult> {
+pub async fn extract_youtube(url: &str, registry: &Arc<SkillRegistry>) -> Result<ExtractionResult> {
     // 1. Look up the skill record (case-insensitive per skills.rs:729 verified)
     let record = registry
         .find(YOUTUBE_SKILL_NAME)

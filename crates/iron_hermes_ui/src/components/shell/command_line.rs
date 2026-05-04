@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::state::Token;
+use dioxus::prelude::*;
 
 /// CommandLine row. Renders cwd + prompt glyph + ordered token spans + optional
 /// time. Token kind ("bin"/"arg"/"flag"/"str") drives the per-span class

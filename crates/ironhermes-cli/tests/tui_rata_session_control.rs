@@ -6,11 +6,11 @@
 //! Pattern: `make_test_ctx_with_history()` builds a CommandContext with a
 //! pre-populated history snapshot — matches the `make_ctx` pattern from handlers.rs.
 
-use std::sync::{Arc, atomic::AtomicBool};
 use ironhermes_core::commands::context::CommandContext;
-use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::commands::registry::build_registry;
+use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::types::{ChatMessage, Platform};
+use std::sync::{Arc, atomic::AtomicBool};
 
 // ── Fixture helpers ────────────────────────────────────────────────────���──────
 
@@ -132,7 +132,10 @@ fn retry_with_user_message_returns_retrying() {
                 "Expected retrying message with content, got: {s}"
             );
         }
-        other => panic!("Expected Output from /retry(with user msg), got {:?}", other),
+        other => panic!(
+            "Expected Output from /retry(with user msg), got {:?}",
+            other
+        ),
     }
 }
 
@@ -187,10 +190,7 @@ fn undo_with_history_returns_confirmation() {
     match result {
         CommandResult::Output(s) => {
             // Core confirms the undo is possible; post-router does the truncation.
-            assert!(
-                !s.is_empty(),
-                "Expected non-empty confirmation from /undo"
-            );
+            assert!(!s.is_empty(), "Expected non-empty confirmation from /undo");
         }
         other => panic!("Expected Output from /undo(with history), got {:?}", other),
     }
@@ -247,7 +247,8 @@ fn background_no_agent_loop_returns_informational() {
     let ctx = make_ctx(false); // no agent_loop threaded
     let router = make_router();
     let cmd = find_cmd("background");
-    let result = ironhermes_core::commands::handlers::dispatch(&cmd, &["do something"], &ctx, &router);
+    let result =
+        ironhermes_core::commands::handlers::dispatch(&cmd, &["do something"], &ctx, &router);
     match result {
         CommandResult::Output(s) => {
             assert!(
@@ -269,7 +270,10 @@ fn background_no_args_returns_usage() {
     match result {
         CommandResult::Output(s) => {
             // Either "not configured" (no agent_loop) or "Usage" (no args with loop)
-            assert!(!s.is_empty(), "Expected non-empty response from /background (no args)");
+            assert!(
+                !s.is_empty(),
+                "Expected non-empty response from /background (no args)"
+            );
         }
         other => panic!("Expected Output from /background(no args), got {:?}", other),
     }
@@ -304,7 +308,10 @@ fn btw_no_args_returns_usage() {
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
     match result {
         CommandResult::Output(s) => {
-            assert!(!s.is_empty(), "Expected non-empty response from /btw (no args)");
+            assert!(
+                !s.is_empty(),
+                "Expected non-empty response from /btw (no args)"
+            );
         }
         other => panic!("Expected Output from /btw(no args), got {:?}", other),
     }
@@ -318,7 +325,8 @@ fn queue_no_agent_loop_returns_informational() {
     let ctx = make_ctx(false);
     let router = make_router();
     let cmd = find_cmd("queue");
-    let result = ironhermes_core::commands::handlers::dispatch(&cmd, &["later task"], &ctx, &router);
+    let result =
+        ironhermes_core::commands::handlers::dispatch(&cmd, &["later task"], &ctx, &router);
     match result {
         CommandResult::Output(s) => {
             assert!(
@@ -339,7 +347,10 @@ fn queue_no_args_returns_usage() {
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
     match result {
         CommandResult::Output(s) => {
-            assert!(!s.is_empty(), "Expected non-empty response from /queue (no args)");
+            assert!(
+                !s.is_empty(),
+                "Expected non-empty response from /queue (no args)"
+            );
         }
         other => panic!("Expected Output from /queue(no args), got {:?}", other),
     }

@@ -21,7 +21,9 @@ impl GitHubAuth {
 
         if let Ok(Ok(out)) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            tokio::process::Command::new("gh").args(["auth", "token"]).output(),
+            tokio::process::Command::new("gh")
+                .args(["auth", "token"])
+                .output(),
         )
         .await
         {
@@ -139,9 +141,15 @@ mod tests {
 
     #[test]
     fn test_debug_redacts_token() {
-        let auth = GitHubAuth { token: Some("secret-xyz".to_string()) };
+        let auth = GitHubAuth {
+            token: Some("secret-xyz".to_string()),
+        };
         let dbg = format!("{:?}", auth);
-        assert!(!dbg.contains("secret-xyz"), "token must not leak in Debug: {}", dbg);
+        assert!(
+            !dbg.contains("secret-xyz"),
+            "token must not leak in Debug: {}",
+            dbg
+        );
         assert!(dbg.contains("<redacted>"));
     }
 

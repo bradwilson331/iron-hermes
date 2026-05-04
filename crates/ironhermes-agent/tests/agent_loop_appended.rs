@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironhermes_agent::AgentLoop;
 use ironhermes_agent::any_client::AnyClient;
 use ironhermes_agent::client::LlmClient;
-use ironhermes_agent::AgentLoop;
 use ironhermes_core::{ChatMessage, Role, ToolSchema, validate_tool_call_pairing};
 use ironhermes_tools::{Tool, ToolRegistry};
 use tokio::sync::RwLock;

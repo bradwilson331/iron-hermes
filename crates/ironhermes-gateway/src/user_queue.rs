@@ -1,8 +1,8 @@
+use crate::adapter::PlatformAdapter;
+use ironhermes_core::MessageEvent;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use ironhermes_core::MessageEvent;
-use crate::adapter::PlatformAdapter;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
 
 /// A message dispatched to a per-chat worker.
@@ -164,11 +164,7 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_message(
-            &self,
-            _chat_id: &str,
-            _message_id: &str,
-        ) -> anyhow::Result<()> {
+        async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -211,7 +207,9 @@ mod tests {
         });
         let manager = UserQueueManager::new(adapter, 16);
 
-        let rx = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
+        let rx = manager
+            .dispatch(make_event("chat1", "msg1"), None, None)
+            .await;
         assert!(rx.is_some(), "First dispatch should return Some(receiver)");
     }
 
@@ -224,10 +222,14 @@ mod tests {
         let manager = UserQueueManager::new(adapter, 16);
 
         // First dispatch — creates worker channel (don't consume rx so channel stays alive)
-        let _rx = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
+        let _rx = manager
+            .dispatch(make_event("chat1", "msg1"), None, None)
+            .await;
 
         // Second dispatch for same chat — should queue and return None
-        let rx2 = manager.dispatch(make_event("chat1", "msg2"), None, None).await;
+        let rx2 = manager
+            .dispatch(make_event("chat1", "msg2"), None, None)
+            .await;
         assert!(
             rx2.is_none(),
             "Second dispatch should return None (worker already running)"
@@ -250,8 +252,12 @@ mod tests {
         });
         let manager = UserQueueManager::new(adapter, 16);
 
-        let rx1 = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
-        let rx2 = manager.dispatch(make_event("chat2", "msg2"), None, None).await;
+        let rx1 = manager
+            .dispatch(make_event("chat1", "msg1"), None, None)
+            .await;
+        let rx2 = manager
+            .dispatch(make_event("chat2", "msg2"), None, None)
+            .await;
         assert!(rx1.is_some(), "chat1 should get a worker");
         assert!(rx2.is_some(), "chat2 should get independent worker");
         assert_eq!(
@@ -267,11 +273,15 @@ mod tests {
         let adapter = Arc::new(MockAdapter { reaction_count });
         let manager = UserQueueManager::new(adapter, 16);
 
-        let _rx = manager.dispatch(make_event("chat1", "msg1"), None, None).await;
+        let _rx = manager
+            .dispatch(make_event("chat1", "msg1"), None, None)
+            .await;
         manager.remove("chat1").await;
 
         // After remove, next dispatch should return Some (fresh worker)
-        let rx2 = manager.dispatch(make_event("chat1", "msg3"), None, None).await;
+        let rx2 = manager
+            .dispatch(make_event("chat1", "msg3"), None, None)
+            .await;
         assert!(
             rx2.is_some(),
             "After remove, dispatch should create a new worker"

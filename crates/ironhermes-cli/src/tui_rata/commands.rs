@@ -14,17 +14,17 @@
 //!   System-role transcript entries or `should_quit = true`.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
-use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::commands::context::{
     AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
     MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
 };
 use ironhermes_core::commands::typo::suggest_typo;
+use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::types::Platform;
 
 use crate::tui_rata::app::App;
@@ -54,7 +54,11 @@ impl ProviderResolverHandle for ProviderResolverAdapter {
     }
     fn status_text(&self) -> String {
         let ep = self.0.resolve_for_main();
-        format!("Provider: {} | Model: {}", self.0.main_provider(), ep.default_model)
+        format!(
+            "Provider: {} | Model: {}",
+            self.0.main_provider(),
+            ep.default_model
+        )
     }
     fn validate_model(&self, model: &str) -> Result<String, String> {
         // Accept any non-empty model string; Plans 01-04 will add real validation.
@@ -70,7 +74,8 @@ impl ProviderResolverHandle for ProviderResolverAdapter {
         if models.is_empty() {
             "No models available. Run /reload-mcp to refresh.".to_string()
         } else {
-            let lines: Vec<String> = models.iter()
+            let lines: Vec<String> = models
+                .iter()
                 .take(20)
                 .map(|(id, meta)| format!("  - {} (ctx: {})", id, meta.context_length))
                 .collect();
@@ -83,7 +88,9 @@ impl ProviderResolverHandle for ProviderResolverAdapter {
         }
     }
     fn fast_role_model(&self) -> Option<String> {
-        self.0.resolve_role("fast").map(|ep| ep.default_model.clone())
+        self.0
+            .resolve_role("fast")
+            .map(|ep| ep.default_model.clone())
     }
 }
 
@@ -121,11 +128,7 @@ impl StateStoreHandle for StateStoreAdapter {
     fn list_sessions_text(&self, limit: usize) -> String {
         self.list_sessions_text_filtered(limit, None)
     }
-    fn list_sessions_text_filtered(
-        &self,
-        limit: usize,
-        workspace_root: Option<&str>,
-    ) -> String {
+    fn list_sessions_text_filtered(&self, limit: usize, workspace_root: Option<&str>) -> String {
         let guard = match self.0.lock() {
             Ok(g) => g,
             Err(_) => return "StateStore lock poisoned.".to_string(),
@@ -136,9 +139,7 @@ impl StateStoreHandle for StateStoreAdapter {
                 None => "No sessions found.".to_string(),
             },
             Ok(sessions) => {
-                let lines: Vec<String> = sessions.iter()
-                    .map(|s| format!("  {}", s.id))
-                    .collect();
+                let lines: Vec<String> = sessions.iter().map(|s| format!("  {}", s.id)).collect();
                 let header = match workspace_root {
                     Some(ws) => format!("Recent sessions (workspace={ws}):"),
                     None => "Recent sessions:".to_string(),
@@ -156,7 +157,8 @@ impl StateStoreHandle for StateStoreAdapter {
         match guard.get_messages(session_id) {
             Ok(msgs) if msgs.is_empty() => "No messages in history.".to_string(),
             Ok(msgs) => {
-                let lines: Vec<String> = msgs.iter()
+                let lines: Vec<String> = msgs
+                    .iter()
                     .map(|m| format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or("")))
                     .collect();
                 format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
@@ -186,11 +188,7 @@ impl StateStoreHandle for StateStoreAdapter {
         };
         let export = match guard.export_session(session_id) {
             Ok(e) => e,
-            Err(e) => {
-                return format!(
-                    "error: failed to fetch session {session_id}: {e}"
-                )
-            }
+            Err(e) => return format!("error: failed to fetch session {session_id}: {e}"),
         };
         // Drop the lock before doing filesystem IO — `write` is sync but the
         // SessionDirectoryExport doesn't need the connection.
@@ -212,19 +210,20 @@ impl StateStoreHandle for StateStoreAdapter {
             .join("sessions")
             .join(session_id)
             .join("trajectories.jsonl");
-        let exporter =
-            ironhermes_state::SessionDirectoryExport::new(session_id, &output_dir);
+        let exporter = ironhermes_state::SessionDirectoryExport::new(session_id, &output_dir);
         match exporter.write(&export, None, Some(traj_src.as_path())) {
-            Ok(()) => format!(
-                "Session {session_id} exported to {}",
-                output_dir.display()
-            ),
+            Ok(()) => format!("Session {session_id} exported to {}", output_dir.display()),
             Err(e) => format!("error: export failed: {e}"),
         }
     }
     fn update_title(&self, session_id: &str, title: &str) -> Result<(), String> {
-        let mut guard = self.0.lock().map_err(|_| "StateStore lock poisoned.".to_string())?;
-        guard.update_session_title(session_id, title).map_err(|e| e.to_string())
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| "StateStore lock poisoned.".to_string())?;
+        guard
+            .update_session_title(session_id, title)
+            .map_err(|e| e.to_string())
     }
     fn get_session_id(&self, name_or_id: &str) -> Option<String> {
         let guard = self.0.lock().ok()?;
@@ -232,7 +231,11 @@ impl StateStoreHandle for StateStoreAdapter {
         if let Ok(Some(s)) = guard.get_session(name_or_id) {
             return Some(s.id);
         }
-        guard.get_session_by_title(name_or_id).ok().flatten().map(|s| s.id)
+        guard
+            .get_session_by_title(name_or_id)
+            .ok()
+            .flatten()
+            .map(|s| s.id)
     }
 }
 
@@ -245,10 +248,7 @@ impl ContextCompressorHandle for ContextEngineAdapter {
         "Compression triggered. Use /rollback to revert if needed.".to_string()
     }
     fn status_text(&self) -> String {
-        format!(
-            "Context compressor active. Mode: {:?}",
-            self.0.mode()
-        )
+        format!("Context compressor active. Mode: {:?}", self.0.mode())
     }
 }
 
@@ -354,7 +354,10 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 "Ambiguous command — matches: {}. Type /help for the list.",
                 candidates.join(", ")
             );
-            SlashOutcome::Unknown { input: input.to_string(), hint }
+            SlashOutcome::Unknown {
+                input: input.to_string(),
+                hint,
+            }
         }
         ResolveResult::NotFound => {
             // D-18 item 8 — typo suggester integration point.
@@ -369,7 +372,10 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 Some(candidate) => format!("Did you mean `/{candidate}`?"),
                 None => "Type /help for the list of commands.".to_string(),
             };
-            SlashOutcome::Unknown { input: input.to_string(), hint }
+            SlashOutcome::Unknown {
+                input: input.to_string(),
+                hint,
+            }
         }
     }
 }
@@ -507,11 +513,7 @@ impl CronJobReader for CronJobReaderImpl {
 /// when the handle is None).
 fn build_command_context(app: &App) -> CommandContext {
     let agent_running = Arc::new(AtomicBool::new(app.pending_rx.is_some()));
-    let mut ctx = CommandContext::new(
-        Platform::Local,
-        app.session_id.clone(),
-        agent_running,
-    );
+    let mut ctx = CommandContext::new(Platform::Local, app.session_id.clone(), agent_running);
     if let Some(mgr) = &app.mcp_manager {
         ctx = ctx.with_mcp_reloader(mgr.clone());
         // Also wire the McpManagerHandle for `/mcp` full enumeration (D-04).
@@ -570,8 +572,7 @@ fn build_command_context(app: &App) -> CommandContext {
         ctx = ctx.with_history(snapshot);
     }
     {
-        let handle: Arc<dyn AgentLoopHandle> =
-            Arc::new(AgentLoopAdapter(app.agent_loop.clone()));
+        let handle: Arc<dyn AgentLoopHandle> = Arc::new(AgentLoopAdapter(app.agent_loop.clone()));
         ctx = ctx.with_agent_loop(handle);
     }
     // Phase 22.4.2.1 Plan 01: wire CronJobReader as 11th with_* call.
@@ -603,9 +604,7 @@ fn build_command_context(app: &App) -> CommandContext {
 ///
 /// `CommandRouter.commands: Vec<CommandDef>` is public (mod.rs:165).
 fn collect_known_command_names(router: &CommandRouter) -> Vec<String> {
-    let mut names: Vec<String> = router.commands.iter()
-        .map(|c| c.name.to_string())
-        .collect();
+    let mut names: Vec<String> = router.commands.iter().map(|c| c.name.to_string()).collect();
     for cmd in &router.commands {
         for alias in cmd.aliases {
             names.push(alias.to_string());
@@ -632,7 +631,9 @@ async fn invoke_handler(
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow::anyhow!("unknown command: {name}"))?;
-    Ok(ironhermes_core::commands::handlers::dispatch(def, args, ctx, router))
+    Ok(ironhermes_core::commands::handlers::dispatch(
+        def, args, ctx, router,
+    ))
 }
 
 /// Render router-driven /help text — pure router-driven enumeration of the
@@ -682,27 +683,39 @@ fn handle_toggle(app: &mut App, name: &str, arg: &str) -> SlashOutcome {
         }
         "verbose" => {
             let new_val = !app.verbose_enabled.fetch_xor(true, Ordering::SeqCst);
-            SlashOutcome::Handled(format!("Verbose mode: {}", if new_val { "on" } else { "off" }))
+            SlashOutcome::Handled(format!(
+                "Verbose mode: {}",
+                if new_val { "on" } else { "off" }
+            ))
         }
         "statusbar" => {
             let new_val = !app.statusbar_enabled.fetch_xor(true, Ordering::SeqCst);
-            SlashOutcome::Handled(format!("Status bar: {}", if new_val { "on" } else { "off" }))
+            SlashOutcome::Handled(format!(
+                "Status bar: {}",
+                if new_val { "on" } else { "off" }
+            ))
         }
         "debug" => {
             let new_val = !app.debug_enabled.fetch_xor(true, Ordering::SeqCst);
-            SlashOutcome::Handled(format!("Debug mode: {}", if new_val { "on" } else { "off" }))
+            SlashOutcome::Handled(format!(
+                "Debug mode: {}",
+                if new_val { "on" } else { "off" }
+            ))
         }
         "skin" => {
             if arg.is_empty() {
-                let current = app.skin.read()
+                let current = app
+                    .skin
+                    .read()
                     .map(|s| s.clone())
                     .unwrap_or_else(|p| p.into_inner().clone());
-                SlashOutcome::Handled(format!(
-                    "Current skin: {current}. Usage: /skin <name>"
-                ))
+                SlashOutcome::Handled(format!("Current skin: {current}. Usage: /skin <name>"))
             } else {
                 // T-22.4.2-03-01: validate skin name to alphanumeric + dash + underscore
-                if !arg.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                if !arg
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
                     return SlashOutcome::Handled(format!(
                         "Invalid skin name: {arg} (alphanumeric + - _ only)"
                     ));
@@ -757,7 +770,10 @@ async fn handle_session_control(
         }
         "retry" => {
             // Find the last user message in history.
-            let last_user_text = app.history.iter().rev()
+            let last_user_text = app
+                .history
+                .iter()
+                .rev()
                 .find(|m| m.role == ironhermes_core::types::Role::User)
                 .and_then(|m| m.content.as_ref())
                 .and_then(|c| c.as_text())
@@ -767,11 +783,18 @@ async fn handle_session_control(
                 None => SlashOutcome::Handled("No user messages in history to retry.".to_string()),
                 Some(text) => {
                     // Remove trailing assistant message(s) to re-run from last user turn.
-                    while app.history.last().map(|m| m.role == ironhermes_core::types::Role::Assistant).unwrap_or(false) {
+                    while app
+                        .history
+                        .last()
+                        .map(|m| m.role == ironhermes_core::types::Role::Assistant)
+                        .unwrap_or(false)
+                    {
                         app.history.pop();
                     }
                     // Re-queue the user message as a new pending turn.
-                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::tui_rata::stream_events::StreamEvent>();
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+                        crate::tui_rata::stream_events::StreamEvent,
+                    >();
                     app.pending_rx = Some(rx);
                     app.pending_tx = Some(tx);
                     app.cancel_child = Some(app.cancel_parent.child_token());
@@ -786,11 +809,21 @@ async fn handle_session_control(
                 return SlashOutcome::Handled("No history to undo.".to_string());
             }
             // Remove last assistant message (if present).
-            if app.history.last().map(|m| m.role == ironhermes_core::types::Role::Assistant).unwrap_or(false) {
+            if app
+                .history
+                .last()
+                .map(|m| m.role == ironhermes_core::types::Role::Assistant)
+                .unwrap_or(false)
+            {
                 app.history.pop();
             }
             // Remove last user message (if present).
-            if app.history.last().map(|m| m.role == ironhermes_core::types::Role::User).unwrap_or(false) {
+            if app
+                .history
+                .last()
+                .map(|m| m.role == ironhermes_core::types::Role::User)
+                .unwrap_or(false)
+            {
                 app.history.pop();
                 SlashOutcome::Handled("Last exchange undone.".to_string())
             } else {
@@ -799,7 +832,8 @@ async fn handle_session_control(
         }
         "rollback" => {
             // Parse N (default 1) — number of (user, assistant) pairs to remove.
-            let n: usize = args.first()
+            let n: usize = args
+                .first()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1)
                 .max(1);
@@ -809,11 +843,21 @@ async fn handle_session_control(
             let mut removed = 0usize;
             for _ in 0..n {
                 // Remove trailing assistant message (if any).
-                if app.history.last().map(|m| m.role == ironhermes_core::types::Role::Assistant).unwrap_or(false) {
+                if app
+                    .history
+                    .last()
+                    .map(|m| m.role == ironhermes_core::types::Role::Assistant)
+                    .unwrap_or(false)
+                {
                     app.history.pop();
                 }
                 // Remove trailing user message (if any).
-                if app.history.last().map(|m| m.role == ironhermes_core::types::Role::User).unwrap_or(false) {
+                if app
+                    .history
+                    .last()
+                    .map(|m| m.role == ironhermes_core::types::Role::User)
+                    .unwrap_or(false)
+                {
                     app.history.pop();
                     removed += 1;
                 } else {
@@ -831,13 +875,16 @@ async fn handle_session_control(
             // Uses the same pending_tx/spawn_turn mechanism as submit().
             if args.is_empty() {
                 return SlashOutcome::Handled(
-                    "Usage: /background <message> — run a prompt as a background task.".to_string()
+                    "Usage: /background <message> — run a prompt as a background task.".to_string(),
                 );
             }
             let message = args.join(" ");
             // Push the background message as a user turn and queue for spawn.
-            app.history.push(ironhermes_core::types::ChatMessage::user(message.clone()));
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::tui_rata::stream_events::StreamEvent>();
+            app.history
+                .push(ironhermes_core::types::ChatMessage::user(message.clone()));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+                crate::tui_rata::stream_events::StreamEvent,
+            >();
             app.pending_rx = Some(rx);
             app.pending_tx = Some(tx);
             app.cancel_child = Some(app.cancel_parent.child_token());
@@ -849,28 +896,34 @@ async fn handle_session_control(
             // Inject an aside into the current/next turn.
             if args.is_empty() {
                 return SlashOutcome::Handled(
-                    "Usage: /btw <message> — add an aside to the current/next agent turn.".to_string()
+                    "Usage: /btw <message> — add an aside to the current/next agent turn."
+                        .to_string(),
                 );
             }
             let message = args.join(" ");
             // Append as a user message; it will be included in the next spawn_turn call.
-            app.history.push(ironhermes_core::types::ChatMessage::user(
-                format!("[btw] {message}")
-            ));
+            app.history
+                .push(ironhermes_core::types::ChatMessage::user(format!(
+                    "[btw] {message}"
+                )));
             SlashOutcome::Handled(format!("Aside added: \"{message}\" (active next turn)"))
         }
         "queue" => {
             // Queue a message for submission after the current turn.
             if args.is_empty() {
                 return SlashOutcome::Handled(
-                    "Usage: /queue <message> — add a message to the input queue.".to_string()
+                    "Usage: /queue <message> — add a message to the input queue.".to_string(),
                 );
             }
             let message = args.join(" ");
             // Pre-populate the textarea with the queued message; user can review/submit.
             let mut ta = tui_textarea::TextArea::default();
             ta.set_cursor_line_style(ratatui::style::Style::default());
-            ta.set_block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL).title("Prompt"));
+            ta.set_block(
+                ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .title("Prompt"),
+            );
             for c in message.chars() {
                 ta.insert_char(c);
             }
@@ -924,14 +977,16 @@ async fn handle_subsystem_mutator(
                 // ON: try to rebuild from fast role
                 match ironhermes_agent::build_role_client(&app.resolver, "fast") {
                     Ok(Some(new_client)) => {
-                        let model = app.resolver.resolve_role("fast")
+                        let model = app
+                            .resolver
+                            .resolve_role("fast")
                             .map(|ep| ep.default_model.clone())
                             .unwrap_or_else(|| "fast".to_string());
                         app.client = new_client;
                         SlashOutcome::Handled(format!("Fast mode ON — model {model}"))
                     }
                     Ok(None) => SlashOutcome::Handled(
-                        "Fast mode toggle (no fast preset configured).".to_string()
+                        "Fast mode toggle (no fast preset configured).".to_string(),
                     ),
                     Err(e) => SlashOutcome::Handled(format!("Fast mode ON (rebuild failed: {e})")),
                 }
@@ -979,17 +1034,19 @@ async fn handle_subsystem_mutator(
 /// Map a `ironhermes_core::commands::CommandResult` to a `SlashOutcome`.
 fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
     match result {
-        CommandResult::Output(text)           => SlashOutcome::Handled(text),
-        CommandResult::Handled                => SlashOutcome::Silent,
-        CommandResult::Error(msg)             => SlashOutcome::Error(msg),
-        CommandResult::Quit                   => SlashOutcome::Quit,
-        CommandResult::ClearSession           => SlashOutcome::ClearSession("Conversation cleared.".to_string()),
-        CommandResult::ResetTerminal          => SlashOutcome::ResetTerminal,
+        CommandResult::Output(text) => SlashOutcome::Handled(text),
+        CommandResult::Handled => SlashOutcome::Silent,
+        CommandResult::Error(msg) => SlashOutcome::Error(msg),
+        CommandResult::Quit => SlashOutcome::Quit,
+        CommandResult::ClearSession => {
+            SlashOutcome::ClearSession("Conversation cleared.".to_string())
+        }
+        CommandResult::ResetTerminal => SlashOutcome::ResetTerminal,
         CommandResult::NewSession { message } => SlashOutcome::ClearSession(message),
-        CommandResult::PassThrough            => SlashOutcome::Unknown {
+        CommandResult::PassThrough => SlashOutcome::Unknown {
             input: String::new(),
             hint: "Unknown command. Type /help for the list.".to_string(),
         },
-        CommandResult::McpReload              => SlashOutcome::McpReload,
+        CommandResult::McpReload => SlashOutcome::McpReload,
     }
 }

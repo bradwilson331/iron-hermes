@@ -17,9 +17,7 @@ use crate::memory::MemoryManager;
 ///
 /// The returned listener is `Arc`-cheap-to-clone and can be registered via
 /// [`ironhermes_hooks::HookRegistry::add_async_listener`].
-pub fn build_memory_flush_listener(
-    manager: Arc<Mutex<MemoryManager>>,
-) -> AsyncHookListener {
+pub fn build_memory_flush_listener(manager: Arc<Mutex<MemoryManager>>) -> AsyncHookListener {
     Arc::new(move |event: HookEvent| {
         let manager = Arc::clone(&manager);
         Box::pin(async move {
@@ -70,7 +68,9 @@ mod tests {
 
     #[async_trait]
     impl MemoryProvider for MockProvider {
-        fn name(&self) -> &'static str { "mock" }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
 
         async fn initialize(
             &mut self,
@@ -135,7 +135,9 @@ mod tests {
     ) {
         let (provider, sync_calls, last_session) = MockProvider::new();
         let shared: crate::memory::SharedProvider = Arc::new(Mutex::new(provider));
-        let manager = MemoryManager::new(shared, None).await.expect("MemoryManager");
+        let manager = MemoryManager::new(shared, None)
+            .await
+            .expect("MemoryManager");
         (Arc::new(Mutex::new(manager)), sync_calls, last_session)
     }
 

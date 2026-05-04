@@ -66,10 +66,7 @@ async fn sustained_overload_45s_disables_watch_for_that_process_only() {
     for _second in 0..=WATCH_OVERLOAD_KILL_SECONDS {
         // 9 calls → 8 Fire + 1 Drop within the current window.
         for _ in 0..9 {
-            if matches!(
-                reg.rate_limit_check("proc_hot"),
-                RateDecision::AutoDisable
-            ) {
+            if matches!(reg.rate_limit_check("proc_hot"), RateDecision::AutoDisable) {
                 disabled_seen = true;
             }
         }
@@ -120,8 +117,5 @@ async fn already_disabled_returns_drop_every_time() {
 async fn unknown_id_returns_drop_silently() {
     let mut reg = ProcessRegistry::new_for_session("t-rl5");
     // No insert — the id is unknown.
-    assert_eq!(
-        reg.rate_limit_check("proc_nonexistent"),
-        RateDecision::Drop
-    );
+    assert_eq!(reg.rate_limit_check("proc_nonexistent"), RateDecision::Drop);
 }

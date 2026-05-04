@@ -12,9 +12,9 @@
 
 use ansi_to_tui::IntoText;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use crate::tui_rata::app::App;
@@ -96,7 +96,7 @@ fn render_cursor(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn ui_renders_four_chunks_in_80x24() {

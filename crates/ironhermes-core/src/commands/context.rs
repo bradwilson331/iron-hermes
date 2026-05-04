@@ -188,11 +188,7 @@ pub trait StateStoreHandle: Send + Sync {
     /// `workspace_root` of `None` returns the same listing as `list_sessions_text`
     /// (no filter — backward compat). `Some(path)` filters to sessions whose
     /// `workspace_root` column equals `path` exactly.
-    fn list_sessions_text_filtered(
-        &self,
-        limit: usize,
-        workspace_root: Option<&str>,
-    ) -> String;
+    fn list_sessions_text_filtered(&self, limit: usize, workspace_root: Option<&str>) -> String;
     /// Get history for `session_id` as formatted text.
     fn history_text(&self, session_id: &str) -> String;
     /// Export session as formatted text.
@@ -295,7 +291,6 @@ pub struct CommandContext {
     // ---- Phase 22.4.2 Plan 00: D-04 eight new optional handles.
     // All Option<Arc<...>> for backwards-compat — None when not wired.
     // Guard pattern (D-05): every handler checks .is_some() before use.
-
     /// D-04: McpManager handle for `/mcp` full server enumeration.
     /// Separate from `mcp_reloader` (which only handles reload).
     pub mcp_manager: Option<Arc<dyn McpManagerHandle>>,
@@ -344,11 +339,7 @@ pub struct CommandContext {
 
 impl CommandContext {
     /// Create a minimal context with all optional fields set to None.
-    pub fn new(
-        platform: Platform,
-        session_id: String,
-        agent_running: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn new(platform: Platform, session_id: String, agent_running: Arc<AtomicBool>) -> Self {
         Self {
             platform,
             session_id,
@@ -393,19 +384,13 @@ impl CommandContext {
     }
 
     /// Builder: attach a ProcessRegistry snapshot handle (D-26 / Plan 21.7-07).
-    pub fn with_process_registry(
-        mut self,
-        pr: Arc<dyn ProcessRegistrySnapshotHandle>,
-    ) -> Self {
+    pub fn with_process_registry(mut self, pr: Arc<dyn ProcessRegistrySnapshotHandle>) -> Self {
         self.process_registry = Some(pr);
         self
     }
 
     /// Builder: attach a SubagentRegistry snapshot handle (D-03 / D-09 / Plan 21.7-07).
-    pub fn with_subagent_registry(
-        mut self,
-        reg: Arc<dyn SubagentListSnapshot>,
-    ) -> Self {
+    pub fn with_subagent_registry(mut self, reg: Arc<dyn SubagentListSnapshot>) -> Self {
         self.subagent_registry = Some(reg);
         self
     }
@@ -470,10 +455,7 @@ impl CommandContext {
 
     /// Builder: attach a history snapshot for `/history` `/retry` `/undo` (D-04).
     /// Pass a clone snapshot; mutations apply in the tui_rata post-router hook.
-    pub fn with_history(
-        mut self,
-        history: Arc<std::sync::RwLock<Vec<ChatMessage>>>,
-    ) -> Self {
+    pub fn with_history(mut self, history: Arc<std::sync::RwLock<Vec<ChatMessage>>>) -> Self {
         self.history = Some(history);
         self
     }
@@ -513,10 +495,7 @@ impl CommandContext {
     /// Plan 9 wires the AgentLoop callback that serializes a `TrajectoryEntry` and
     /// calls `handle.append_json_line(&line)`. Plan 8 attaches this at all 4
     /// CommandContext-construction sites.
-    pub fn with_trajectory_writer(
-        mut self,
-        handle: Arc<dyn TrajectoryWriterHandle>,
-    ) -> Self {
+    pub fn with_trajectory_writer(mut self, handle: Arc<dyn TrajectoryWriterHandle>) -> Self {
         self.trajectory_writer = Some(handle);
         self
     }
@@ -625,8 +604,7 @@ mod plan_21_7_07_tests {
         }
         fn drain_and_kill<'a>(
             &'a self,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
-        {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
             Box::pin(async move { /* no-op */ })
         }
     }
@@ -706,16 +684,17 @@ mod plan_25_3_tests {
         let ctx = make_ctx().with_trajectory_writer(handle.clone());
         assert!(ctx.trajectory_writer.is_some());
         // Identity check: the Arc inside ctx points to the same trait object.
-        assert!(Arc::ptr_eq(ctx.trajectory_writer.as_ref().unwrap(), &handle));
+        assert!(Arc::ptr_eq(
+            ctx.trajectory_writer.as_ref().unwrap(),
+            &handle
+        ));
     }
 
     #[test]
     fn builders_chain_with_existing_methods() {
         let handle: Arc<dyn TrajectoryWriterHandle> = Arc::new(NoopHandle);
         let ws = Arc::new(sample_workspace());
-        let ctx = make_ctx()
-            .with_workspace(ws)
-            .with_trajectory_writer(handle);
+        let ctx = make_ctx().with_workspace(ws).with_trajectory_writer(handle);
         assert!(ctx.workspace.is_some());
         assert!(ctx.trajectory_writer.is_some());
         // Pre-existing field defaults preserved

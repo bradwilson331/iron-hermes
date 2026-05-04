@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1777774796060,
+  "lastScanned": 1777910940396,
   "projectRoot": "/Users/twilson/code/ironhermes",
   "techStack": {
     "languages": [
@@ -42,6 +42,7 @@
     "isMonorepo": false,
     "workspaces": [],
     "mainDirectories": [
+      "assets",
       "scripts"
     ],
     "gitBranches": {
@@ -51,18 +52,25 @@
   },
   "customNotes": [],
   "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 0,
+      "lastAccessed": 1777910940382,
+      "keyFiles": []
+    },
     "crates": {
       "path": "crates",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777774796049,
+      "lastAccessed": 1777910940382,
       "keyFiles": []
     },
     "docker": {
       "path": "docker",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777774796049,
+      "lastAccessed": 1777910940385,
       "keyFiles": [
         "SOUL.md",
         "entrypoint.sh"
@@ -72,7 +80,7 @@
       "path": "optional-skills",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777774796051,
+      "lastAccessed": 1777910940386,
       "keyFiles": [
         "DESCRIPTION.md"
       ]
@@ -81,14 +89,14 @@
       "path": "providers",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777774796051,
+      "lastAccessed": 1777910940386,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1777774796051,
+      "lastAccessed": 1777910940386,
       "keyFiles": [
         "ci-gates.sh"
       ]
@@ -97,23 +105,36 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777774796051,
+      "lastAccessed": 1777910940387,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
-      "fileCount": 4,
-      "lastAccessed": 1777774796052,
+      "fileCount": 2,
+      "lastAccessed": 1777910940387,
       "keyFiles": [
         "CACHEDIR.TAG"
+      ]
+    },
+    "tmp": {
+      "path": "tmp",
+      "purpose": null,
+      "fileCount": 8,
+      "lastAccessed": 1777910940387,
+      "keyFiles": [
+        "ComfyUI_LoRA_Guide.md",
+        "ComfyUI_LoRA_Workflow_Examples.json",
+        "hardware_specifications.md",
+        "lora_implementation_guide.md",
+        "lora_local_setup_guide.md"
       ]
     },
     "website": {
       "path": "website",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777774796052,
+      "lastAccessed": 1777910940387,
       "keyFiles": [
         "IronHermes Design System-handoff.zip"
       ]
@@ -128,8 +149,8 @@
     },
     {
       "path": ".planning/STATE.md",
-      "accessCount": 33,
-      "lastAccessed": 1777831935723,
+      "accessCount": 38,
+      "lastAccessed": 1777926631445,
       "type": "file"
     },
     {

@@ -190,10 +190,7 @@ mod tests {
     #[test]
     fn accepts_64_char_boundary() {
         let boundary = "a".repeat(64);
-        assert_eq!(
-            validate_profile_name(&boundary).unwrap().len(),
-            64
-        );
+        assert_eq!(validate_profile_name(&boundary).unwrap().len(), 64);
     }
 
     #[test]

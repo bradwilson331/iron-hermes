@@ -12,21 +12,23 @@
 //! DECSTBM, merged style overrides applied in redraw_with_extensions.
 
 use crate::tui::activity::ActivityState;
-use crate::tui::extension::{LayoutSlot, StyleOverrides, TuiEvent, TuiExtension, Widget, MAX_WIDGET_HEIGHT};
+use crate::tui::extension::{
+    LayoutSlot, MAX_WIDGET_HEIGHT, StyleOverrides, TuiEvent, TuiExtension, Widget,
+};
 use crate::tui::knight_rider;
-use crate::tui::status_line::{render_status_line, StatusLineState};
+use crate::tui::status_line::{StatusLineState, render_status_line};
 use colored::Colorize;
 use crossterm::{
     cursor::{Hide, MoveTo, RestorePosition, SavePosition, Show},
     queue,
     style::Print,
-    terminal::{size, Clear, ClearType},
+    terminal::{Clear, ClearType, size},
     tty::IsTty,
 };
 use std::collections::HashMap;
-use std::io::{stderr, Write};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering as AtomicOrdering};
+use std::io::{Write, stderr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering as AtomicOrdering};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -186,7 +188,9 @@ impl TuiHandle {
         let reserved_atomic = reserved.clone(); // clone for the render loop
 
         // DECSTBM: set scroll region using dynamic reserved row count.
-        if stderr().is_tty() && let Ok((_cols, rows)) = size() {
+        if stderr().is_tty()
+            && let Ok((_cols, rows)) = size()
+        {
             let scroll_end = rows.saturating_sub(initial_reserved);
             if scroll_end > 0 {
                 let mut out = stderr();
@@ -509,11 +513,7 @@ pub fn prepare_prompt_with_reserve(reserved: u16) {
     }
     let Ok((_cols, rows)) = size() else { return };
     let prompt_row = rows.saturating_sub(reserved);
-    let _ = queue!(
-        out,
-        MoveTo(0, prompt_row),
-        Clear(ClearType::CurrentLine),
-    );
+    let _ = queue!(out, MoveTo(0, prompt_row), Clear(ClearType::CurrentLine),);
     let _ = out.flush();
 }
 
@@ -1020,11 +1020,16 @@ mod tests {
     async fn event_sender_returns_some() {
         struct NoOpExt;
         impl TuiExtension for NoOpExt {
-            fn name(&self) -> &str { "noop" }
+            fn name(&self) -> &str {
+                "noop"
+            }
         }
         let exts: Vec<Box<dyn TuiExtension>> = vec![Box::new(NoOpExt)];
         let tui = TuiHandle::new_with_extensions(StatusLineState::default(), exts);
-        assert!(tui.event_sender().is_some(), "event_sender should return Some after construction with extensions");
+        assert!(
+            tui.event_sender().is_some(),
+            "event_sender should return Some after construction with extensions"
+        );
         tui.shutdown().await;
     }
 
@@ -1063,7 +1068,9 @@ mod tests {
     fn merge_style_overrides_single_extension() {
         struct StyleExt;
         impl TuiExtension for StyleExt {
-            fn name(&self) -> &str { "style_ext" }
+            fn name(&self) -> &str {
+                "style_ext"
+            }
             fn style_overrides(&self) -> StyleOverrides {
                 let mut m = StyleOverrides::new();
                 m.insert("scanner.lit".to_string(), "green".to_string());
@@ -1079,7 +1086,9 @@ mod tests {
     fn merge_style_overrides_later_wins() {
         struct EarlyExt;
         impl TuiExtension for EarlyExt {
-            fn name(&self) -> &str { "early" }
+            fn name(&self) -> &str {
+                "early"
+            }
             fn style_overrides(&self) -> StyleOverrides {
                 let mut m = StyleOverrides::new();
                 m.insert("scanner.lit".to_string(), "red".to_string());
@@ -1088,7 +1097,9 @@ mod tests {
         }
         struct LateExt;
         impl TuiExtension for LateExt {
-            fn name(&self) -> &str { "late" }
+            fn name(&self) -> &str {
+                "late"
+            }
             fn style_overrides(&self) -> StyleOverrides {
                 let mut m = StyleOverrides::new();
                 m.insert("scanner.lit".to_string(), "blue".to_string());
@@ -1105,7 +1116,9 @@ mod tests {
     fn merge_style_overrides_panic_extension_skipped() {
         struct PanicStyleExt;
         impl TuiExtension for PanicStyleExt {
-            fn name(&self) -> &str { "panic_style" }
+            fn name(&self) -> &str {
+                "panic_style"
+            }
             fn style_overrides(&self) -> StyleOverrides {
                 panic!("intentional panic in style_overrides");
             }
@@ -1204,11 +1217,11 @@ mod tests {
         // of reset_terminal_visual_is_safe_on_tiny_terminal. The function writes
         // to stdout (not stderr), and in the test harness stdout is captured
         // by libtest, so no escape sequences will reach a real terminal.
-        write_into_scroll_region(b"hello", 3);     // typical reserved-row count
-        write_into_scroll_region(b"", 3);          // empty payload
+        write_into_scroll_region(b"hello", 3); // typical reserved-row count
+        write_into_scroll_region(b"", 3); // empty payload
         write_into_scroll_region(b"with newlines\n", 3);
-        write_into_scroll_region(b"hello", 0);     // edge: no reserved rows
-        write_into_scroll_region(b"hello", 100);   // edge: more reserved than rows
+        write_into_scroll_region(b"hello", 0); // edge: no reserved rows
+        write_into_scroll_region(b"hello", 100); // edge: more reserved than rows
         // No assertion on output bytes — actual visual scroll-region routing is
         // verified by the live-TTY HUMAN-UAT (GAP-22.3-01 closure). This test
         // only proves the function signature, the no-panic guarantee on extreme

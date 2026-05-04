@@ -5,8 +5,8 @@
 //! registry match arm, and the cmd_cron handler body are all exercised.
 //! Tests follow the cmd_agents_and_stop.rs pattern exactly.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use ironhermes_core::commands::context::{CommandContext, CronJobReader};
 use ironhermes_core::commands::handlers::dispatch;
@@ -52,7 +52,11 @@ impl CronJobReader for FakeCronJobReader {
     }
 
     fn pause_job(&self, id_or_name: &str) -> Result<String, String> {
-        if self.jobs.iter().any(|j| j.id == id_or_name || j.name == id_or_name) {
+        if self
+            .jobs
+            .iter()
+            .any(|j| j.id == id_or_name || j.name == id_or_name)
+        {
             Ok(format!("Paused: {}", id_or_name))
         } else {
             Err(format!("No cron job found: {}", id_or_name))
@@ -60,7 +64,11 @@ impl CronJobReader for FakeCronJobReader {
     }
 
     fn resume_job(&self, id_or_name: &str) -> Result<String, String> {
-        if self.jobs.iter().any(|j| j.id == id_or_name || j.name == id_or_name) {
+        if self
+            .jobs
+            .iter()
+            .any(|j| j.id == id_or_name || j.name == id_or_name)
+        {
             Ok(format!("Resumed: {}", id_or_name))
         } else {
             Err(format!("No cron job found: {}", id_or_name))
@@ -68,7 +76,11 @@ impl CronJobReader for FakeCronJobReader {
     }
 
     fn remove_job(&self, id_or_name: &str) -> Result<String, String> {
-        if self.jobs.iter().any(|j| j.id == id_or_name || j.name == id_or_name) {
+        if self
+            .jobs
+            .iter()
+            .any(|j| j.id == id_or_name || j.name == id_or_name)
+        {
             Ok(format!("Removed: {}", id_or_name))
         } else {
             Err(format!("No cron job found: {}", id_or_name))
@@ -76,7 +88,11 @@ impl CronJobReader for FakeCronJobReader {
     }
 
     fn queue_run(&self, id_or_name: &str) -> Result<String, String> {
-        if self.jobs.iter().any(|j| j.id == id_or_name || j.name == id_or_name) {
+        if self
+            .jobs
+            .iter()
+            .any(|j| j.id == id_or_name || j.name == id_or_name)
+        {
             Ok(format!("Job queued for next tick: {}", id_or_name))
         } else {
             Err(format!("No cron job found: {}", id_or_name))

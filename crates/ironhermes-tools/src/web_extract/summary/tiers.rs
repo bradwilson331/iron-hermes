@@ -8,15 +8,15 @@
 //! When `use_llm_processing == false` (D-12): tier 1 raw still works, tiers 2/3 fall back to
 //! `truncate_content(content, web_cfg.max_content_chars)`, tier 4 still refuses.
 
-use std::sync::Arc;
-use anyhow::{anyhow, Result};
-use ironhermes_core::config::{ExtractConfig, WebConfig};
+use anyhow::{Result, anyhow};
 use ironhermes_core::SummarizationClientHandle;
+use ironhermes_core::config::{ExtractConfig, WebConfig};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, info_span, Instrument};
+use tracing::{Instrument, debug, info_span};
 
-use crate::web_local::truncate_content;
 use super::chunked;
+use crate::web_local::truncate_content;
 
 /// System prompt for tier-2 single-pass summary and tier-3 per-chunk summaries.
 pub const SUMMARY_SYSTEM: &str = "You are a content summarizer. Summarize the user's text \
@@ -49,7 +49,10 @@ pub async fn route_tiers(
     let n = content.chars().count();
     let tier_span = info_span!("web_extract.summary.tier", chars = n);
     async move {
-        debug!("tier router: content={} chars, use_llm={}", n, use_llm_processing);
+        debug!(
+            "tier router: content={} chars, use_llm={}",
+            n, use_llm_processing
+        );
 
         // Tier 4: refuse, regardless of use_llm_processing (D-11 + D-12)
         if n > extract_cfg.refuse_threshold_chars {
@@ -68,11 +71,21 @@ pub async fn route_tiers(
 
         // Tier 2: single-pass summary (5K-500K)
         if n <= extract_cfg.summary_tier3_threshold_chars {
-            let _permit = sem.acquire().await
+            let _permit = sem
+                .acquire()
+                .await
                 .map_err(|e| anyhow!("semaphore acquire failed: {}", e))?;
-            let aux_span = info_span!("web_extract.summary.aux_call", tier = 2, max_tokens = TIER2_MAX_TOKENS);
+            let aux_span = info_span!(
+                "web_extract.summary.aux_call",
+                tier = 2,
+                max_tokens = TIER2_MAX_TOKENS
+            );
             return client
-                .summarize_call(SUMMARY_SYSTEM.to_string(), content.to_string(), TIER2_MAX_TOKENS)
+                .summarize_call(
+                    SUMMARY_SYSTEM.to_string(),
+                    content.to_string(),
+                    TIER2_MAX_TOKENS,
+                )
                 .instrument(aux_span)
                 .await;
         }
@@ -97,13 +110,26 @@ mod tests {
 
     #[async_trait]
     impl SummarizationClientHandle for TestHandle {
-        async fn summarize_call(&self, _system: String, user: String, max_tokens: u32) -> anyhow::Result<String> {
-            self.calls.lock().unwrap().push((user.chars().take(20).collect(), max_tokens));
+        async fn summarize_call(
+            &self,
+            _system: String,
+            user: String,
+            max_tokens: u32,
+        ) -> anyhow::Result<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((user.chars().take(20).collect(), max_tokens));
             Ok(self.response.clone())
         }
     }
 
-    fn test_setup() -> (Arc<dyn SummarizationClientHandle>, Arc<Semaphore>, ExtractConfig, WebConfig) {
+    fn test_setup() -> (
+        Arc<dyn SummarizationClientHandle>,
+        Arc<Semaphore>,
+        ExtractConfig,
+        WebConfig,
+    ) {
         let handle = Arc::new(TestHandle {
             calls: std::sync::Mutex::new(Vec::new()),
             response: "MOCK SUMMARY".to_string(),
@@ -124,7 +150,9 @@ mod tests {
     async fn tier4_refuses_above_2m() {
         let (h, s, e, w) = test_setup();
         let content = "a".repeat(2_000_001);
-        let err = route_tiers(&content, true, &e, &w, &h, &s).await.unwrap_err();
+        let err = route_tiers(&content, true, &e, &w, &h, &s)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("content_too_large"), "{err}");
     }
 
@@ -132,7 +160,9 @@ mod tests {
     async fn tier4_refuses_even_with_use_llm_false() {
         let (h, s, e, w) = test_setup();
         let content = "a".repeat(2_000_001);
-        let err = route_tiers(&content, false, &e, &w, &h, &s).await.unwrap_err();
+        let err = route_tiers(&content, false, &e, &w, &h, &s)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("content_too_large"), "{err}");
     }
 
@@ -140,9 +170,16 @@ mod tests {
     async fn use_llm_false_short_circuits_tier2() {
         let (h, s, e, mut w) = test_setup();
         w.max_content_chars = 50;
-        let content = "x".repeat(50_000);  // tier 2 range
+        let content = "x".repeat(50_000); // tier 2 range
         let out = route_tiers(&content, false, &e, &w, &h, &s).await.unwrap();
-        assert!(out.chars().count() <= 200, "use_llm=false → truncate to ~max_content_chars (got {})", out.chars().count());
-        assert!(out.contains("[Content truncated"), "expected truncation marker");
+        assert!(
+            out.chars().count() <= 200,
+            "use_llm=false → truncate to ~max_content_chars (got {})",
+            out.chars().count()
+        );
+        assert!(
+            out.contains("[Content truncated"),
+            "expected truncation marker"
+        );
     }
 }

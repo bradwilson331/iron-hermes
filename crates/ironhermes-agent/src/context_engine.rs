@@ -403,7 +403,10 @@ mod tests {
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "a".into(),
                 call_type: "function".into(),
-                function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+                function: FunctionCall {
+                    name: "fn".into(),
+                    arguments: "{}".into(),
+                },
             }]),
             ChatMessage::tool_result("a", "ok"),
             ChatMessage::assistant("done"),
@@ -424,7 +427,10 @@ mod tests {
         msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
             id: "z".into(),
             call_type: "function".into(),
-            function: FunctionCall { name: "peek".into(), arguments: "{}".into() },
+            function: FunctionCall {
+                name: "peek".into(),
+                arguments: "{}".into(),
+            },
         }]));
         msgs.push(ChatMessage::tool_result("z", "small"));
 
@@ -442,8 +448,7 @@ mod tests {
         use std::sync::Mutex as StdMutex;
 
         let mut registry = HookRegistry::new(HooksConfig::default());
-        let captured: Arc<StdMutex<Vec<HookEvent>>> =
-            Arc::new(StdMutex::new(Vec::new()));
+        let captured: Arc<StdMutex<Vec<HookEvent>>> = Arc::new(StdMutex::new(Vec::new()));
         let cap = Arc::clone(&captured);
         registry.add_async_listener(Arc::new(move |event: HookEvent| {
             let cap = Arc::clone(&cap);
@@ -540,7 +545,10 @@ mod tests {
         msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
             id: "orphan-id".into(),
             call_type: "function".into(),
-            function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+            function: FunctionCall {
+                name: "fn".into(),
+                arguments: "{}".into(),
+            },
         }]));
         let snapshot = msgs.clone();
 
@@ -584,7 +592,7 @@ mod tests {
         // need to craft a correctly-sized message vec.
         let stats = ContextStats {
             context_length: 100_000,
-            estimated_tokens: 46_000,  // ratio=0.46, above 85% warning trigger (0.425)
+            estimated_tokens: 46_000, // ratio=0.46, above 85% warning trigger (0.425)
             protect_first_n: 3,
             protect_last_tokens: 100,
             compression_count: 0,
@@ -614,7 +622,10 @@ mod tests {
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "tc1".into(),
                 call_type: "function".into(),
-                function: FunctionCall { name: "fn".into(), arguments: "{}".into() },
+                function: FunctionCall {
+                    name: "fn".into(),
+                    arguments: "{}".into(),
+                },
             }]),
             ChatMessage::user("hi"),
         ];

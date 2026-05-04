@@ -12,9 +12,9 @@
 use clap::{Subcommand, ValueEnum};
 use ironhermes_core::Config;
 use ironhermes_hub::{
-    install as hub_install, migrate_from_hub_manifest, strip_terminal_escapes,
-    uninstall as hub_uninstall, update as hub_update, CoreSkillScanner, GitHubAuth, GitHubSource,
-    GitHubTap, HubSource, SkillLock, SkillsShBlobSource, WellKnownSkillSource,
+    CoreSkillScanner, GitHubAuth, GitHubSource, GitHubTap, HubSource, SkillLock,
+    SkillsShBlobSource, WellKnownSkillSource, install as hub_install, migrate_from_hub_manifest,
+    strip_terminal_escapes, uninstall as hub_uninstall, update as hub_update,
 };
 use std::sync::Arc;
 
@@ -130,9 +130,7 @@ pub fn save_config_atomic(path: &std::path::Path, cfg: &Config) -> anyhow::Resul
 // ---------------------------------------------------------------------------
 
 async fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
-    let auth = GitHubAuth::resolve(
-        cfg.skills.hub.github_token_env.as_deref(),
-    ).await;
+    let auth = GitHubAuth::resolve(cfg.skills.hub.github_token_env.as_deref()).await;
     let trusted = cfg.skills.hub.trusted_repos_set();
     let extra_taps: Vec<GitHubTap> = cfg
         .skills
@@ -149,11 +147,7 @@ async fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
     let wk = WellKnownSkillSource::new(cfg.skills.hub.well_known_origins.clone());
     let sh = SkillsShBlobSource::new(gh.clone());
 
-    vec![
-        Box::new(SharedGitHubSource(gh)),
-        Box::new(wk),
-        Box::new(sh),
-    ]
+    vec![Box::new(SharedGitHubSource(gh)), Box::new(wk), Box::new(sh)]
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +252,10 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     std::fs::create_dir_all(&skills_root)?;
 
     // D-21 line 1: Resolving.
-    println!("Resolving skills.sh/{}...", strip_terminal_escapes(identifier));
+    println!(
+        "Resolving skills.sh/{}...",
+        strip_terminal_escapes(identifier)
+    );
 
     let sources = build_sources(cfg).await;
     let source: &(dyn HubSource + Send + Sync) = if identifier.starts_with("well-known:") {
@@ -660,9 +657,7 @@ pub fn cmd_trust_list_impl(cfg: &Config, format: Format) -> String {
                 sorted.join("\n")
             }
         }
-        Format::Json => {
-            serde_json::to_string_pretty(&sorted).unwrap_or_else(|_| "[]".to_string())
-        }
+        Format::Json => serde_json::to_string_pretty(&sorted).unwrap_or_else(|_| "[]".to_string()),
     }
 }
 

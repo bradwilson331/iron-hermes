@@ -206,7 +206,11 @@ pub fn format_cron_status(jobs: &[CronJob]) -> String {
         } else {
             format!("{}d {}h", mins / 1440, (mins % 1440) / 60)
         };
-        let _ = writeln!(out, "  {:<14} {} in {}", "Next due:", job.name, duration_str);
+        let _ = writeln!(
+            out,
+            "  {:<14} {} in {}",
+            "Next due:", job.name, duration_str
+        );
     } else {
         let _ = writeln!(out, "  {:<14} none", "Next due:");
     }
@@ -284,6 +288,9 @@ mod tests {
     #[test]
     fn format_cron_status_compiles_and_returns_string() {
         let result = format_cron_status(&[]);
-        assert!(!result.is_empty(), "format_cron_status must return non-empty string");
+        assert!(
+            !result.is_empty(),
+            "format_cron_status must return non-empty string"
+        );
     }
 }

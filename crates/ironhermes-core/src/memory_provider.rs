@@ -59,8 +59,12 @@ pub trait MemoryProvider: Send + Sync + 'static {
     /// Must be a filename-safe literal — no slashes, dots, or `..`.
     fn name(&self) -> &'static str;
 
-    fn is_available(&self) -> bool { true }
-    fn unavailable_reason(&self) -> Option<String> { None }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
 
     // ---- Tool surface (D-04, D-05) ----
     fn get_tool_schemas(&self) -> Vec<ToolSchema> {
@@ -106,7 +110,9 @@ pub trait MemoryProvider: Send + Sync + 'static {
     }
 
     // ---- Config schema (D-06, D-07) ----
-    fn get_config_schema(&self) -> Vec<ConfigField> { vec![] }
+    fn get_config_schema(&self) -> Vec<ConfigField> {
+        vec![]
+    }
 
     fn save_config(
         &self,
@@ -125,7 +131,9 @@ pub trait MemoryProvider: Send + Sync + 'static {
     }
 
     // ---- Prompt integration (D-11) ----
-    fn system_prompt_block(&self) -> Option<String> { None }
+    fn system_prompt_block(&self) -> Option<String> {
+        None
+    }
 
     // ---- Async lifecycle (D-10, D-12..D-15) ----
     async fn initialize(
@@ -138,16 +146,23 @@ pub trait MemoryProvider: Send + Sync + 'static {
     async fn prefetch(&self, session_id: &str) -> anyhow::Result<MemoryEntries>;
     async fn sync_turn(&self, session_id: &str, entries: &MemoryEntries) -> anyhow::Result<()>;
 
-    async fn queue_prefetch(&self, _query: &str) -> anyhow::Result<()> { Ok(()) }
-    async fn on_pre_compress(&self, _messages: &[ChatMessage]) -> anyhow::Result<()> { Ok(()) }
+    async fn queue_prefetch(&self, _query: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn on_pre_compress(&self, _messages: &[ChatMessage]) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn on_memory_write(
         &mut self,
         _action: MemoryAction,
         _target: MemoryTarget,
         _content: &str,
-    ) -> anyhow::Result<()> { Ok(()) }
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 
-    async fn on_session_end(&self, session_id: &str, entries: &MemoryEntries) -> anyhow::Result<()>;
+    async fn on_session_end(&self, session_id: &str, entries: &MemoryEntries)
+    -> anyhow::Result<()>;
     async fn shutdown(&mut self) -> anyhow::Result<()>;
 
     // ---- Sync operations (unchanged) ----
@@ -177,16 +192,16 @@ fn parse_target(args: &Value) -> anyhow::Result<MemoryTarget> {
 
 #[async_trait]
 impl MemoryProvider for MemoryStore {
-    fn name(&self) -> &'static str { "file" }
+    fn name(&self) -> &'static str {
+        "file"
+    }
 
     fn get_config_schema(&self) -> Vec<ConfigField> {
         use serde_json::json;
         vec![
             ConfigField {
                 key: "memory_dir".to_string(),
-                description: Some(
-                    "Directory holding MEMORY.md and USER.md files".to_string(),
-                ),
+                description: Some("Directory holding MEMORY.md and USER.md files".to_string()),
                 secret: false,
                 required: false,
                 cache_breaking: false,
@@ -251,9 +266,13 @@ impl MemoryProvider for MemoryStore {
         Ok(())
     }
 
-    async fn shutdown(&mut self) -> anyhow::Result<()> { Ok(()) }
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
 
-    fn load_from_disk(&mut self) -> anyhow::Result<()> { MemoryStore::load_from_disk(self) }
+    fn load_from_disk(&mut self) -> anyhow::Result<()> {
+        MemoryStore::load_from_disk(self)
+    }
     fn add(&mut self, target: MemoryTarget, content: &str) -> MemoryResult {
         MemoryStore::add(self, target, content)
     }
@@ -267,7 +286,9 @@ impl MemoryProvider for MemoryStore {
         MemoryStore::format_for_system_prompt(self, target)
     }
     fn to_memory_entries(&self) -> MemoryEntries {
-        MemoryEntries { entries: self.entries().clone() }
+        MemoryEntries {
+            entries: self.entries().clone(),
+        }
     }
 }
 
@@ -314,46 +335,68 @@ mod tests {
 
         #[async_trait]
         impl MemoryProvider for MinimalProvider {
-            fn name(&self) -> &'static str { "minimal" }
+            fn name(&self) -> &'static str {
+                "minimal"
+            }
 
             async fn initialize(
                 &mut self,
                 _session_id: &str,
                 _hermes_home: &Path,
                 _provider_config: &Value,
-            ) -> anyhow::Result<()> { Ok(()) }
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
 
             async fn prefetch(&self, _session_id: &str) -> anyhow::Result<MemoryEntries> {
                 Ok(MemoryEntries::default())
             }
-            async fn sync_turn(&self, _s: &str, _e: &MemoryEntries) -> anyhow::Result<()> { Ok(()) }
+            async fn sync_turn(&self, _s: &str, _e: &MemoryEntries) -> anyhow::Result<()> {
+                Ok(())
+            }
             async fn on_session_end(&self, _s: &str, _e: &MemoryEntries) -> anyhow::Result<()> {
                 Ok(())
             }
-            async fn shutdown(&mut self) -> anyhow::Result<()> { Ok(()) }
+            async fn shutdown(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
 
-            fn load_from_disk(&mut self) -> anyhow::Result<()> { Ok(()) }
-            fn add(&mut self, _t: MemoryTarget, _c: &str) -> MemoryResult { Ok("{}".to_string()) }
-            fn replace(
-                &mut self,
-                _t: MemoryTarget,
-                _o: &str,
-                _n: &str,
-            ) -> MemoryResult { Ok("{}".to_string()) }
+            fn load_from_disk(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn add(&mut self, _t: MemoryTarget, _c: &str) -> MemoryResult {
+                Ok("{}".to_string())
+            }
+            fn replace(&mut self, _t: MemoryTarget, _o: &str, _n: &str) -> MemoryResult {
+                Ok("{}".to_string())
+            }
             fn remove(&mut self, _t: MemoryTarget, _o: &str) -> MemoryResult {
                 Ok("{}".to_string())
             }
-            fn format_for_system_prompt(&self, _t: MemoryTarget) -> Option<String> { None }
-            fn to_memory_entries(&self) -> MemoryEntries { MemoryEntries::default() }
+            fn format_for_system_prompt(&self, _t: MemoryTarget) -> Option<String> {
+                None
+            }
+            fn to_memory_entries(&self) -> MemoryEntries {
+                MemoryEntries::default()
+            }
         }
 
         let mut p = MinimalProvider;
         assert_eq!(p.name(), "minimal");
         assert!(p.is_available(), "default is_available should be true");
         assert!(p.unavailable_reason().is_none(), "default reason is None");
-        assert!(p.get_tool_schemas().is_empty(), "default schemas is empty Vec");
-        assert!(p.get_config_schema().is_empty(), "default config schema is empty");
-        assert!(p.system_prompt_block().is_none(), "default prompt block is None");
+        assert!(
+            p.get_tool_schemas().is_empty(),
+            "default schemas is empty Vec"
+        );
+        assert!(
+            p.get_config_schema().is_empty(),
+            "default config schema is empty"
+        );
+        assert!(
+            p.system_prompt_block().is_none(),
+            "default prompt block is None"
+        );
 
         // Default async hooks succeed
         p.queue_prefetch("q").await.unwrap();
@@ -368,10 +411,7 @@ mod tests {
 
         // handle_tool_call default with unknown name errors
         let err = p
-            .handle_tool_call(
-                "totally_unknown",
-                serde_json::json!({ "target": "memory" }),
-            )
+            .handle_tool_call("totally_unknown", serde_json::json!({ "target": "memory" }))
             .expect_err("unknown tool should error");
         assert!(err.contains("unknown memory tool"), "got: {err}");
 

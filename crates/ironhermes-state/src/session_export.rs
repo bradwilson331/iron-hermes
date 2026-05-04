@@ -47,14 +47,14 @@ impl SessionDirectoryExport {
             .with_context(|| format!("create export dir {}", self.output_dir.display()))?;
 
         // 1. messages.json — array of StoredMessage
-        let messages_json = serde_json::to_string_pretty(&export.messages)
-            .context("serialize messages")?;
+        let messages_json =
+            serde_json::to_string_pretty(&export.messages).context("serialize messages")?;
         std::fs::write(self.output_dir.join("messages.json"), messages_json)
             .with_context(|| format!("write messages.json to {}", self.output_dir.display()))?;
 
         // 2. metadata.json — Session struct (includes workspace_root from Plan 0)
-        let metadata_json = serde_json::to_string_pretty(&export.session)
-            .context("serialize session metadata")?;
+        let metadata_json =
+            serde_json::to_string_pretty(&export.session).context("serialize session metadata")?;
         std::fs::write(self.output_dir.join("metadata.json"), metadata_json)
             .with_context(|| format!("write metadata.json to {}", self.output_dir.display()))?;
 

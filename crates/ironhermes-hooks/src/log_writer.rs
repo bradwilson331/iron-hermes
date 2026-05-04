@@ -15,9 +15,8 @@ use std::sync::Arc;
 /// Security: Content previews are already truncated to 200 chars before reaching
 /// the listener, so the log file never contains full message/tool content (T-06-01).
 pub fn create_jsonl_listener(path: Option<PathBuf>) -> HookListener {
-    let resolved_path = path.unwrap_or_else(|| {
-        get_hermes_home().join("hooks").join("events.jsonl")
-    });
+    let resolved_path =
+        path.unwrap_or_else(|| get_hermes_home().join("hooks").join("events.jsonl"));
 
     // Create parent directory eagerly so we surface errors at setup time,
     // not silently at first event.
@@ -101,10 +100,7 @@ mod tests {
                 parsed.get("request_id").is_some(),
                 "request_id field must be present"
             );
-            assert!(
-                parsed.get("kind").is_some(),
-                "kind field must be present"
-            );
+            assert!(parsed.get("kind").is_some(), "kind field must be present");
         }
     }
 

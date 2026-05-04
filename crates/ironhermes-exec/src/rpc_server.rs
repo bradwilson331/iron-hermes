@@ -1,6 +1,6 @@
+use std::sync::Arc;
 /// UDS JSON-RPC 2.0 server with call counter for sandboxed tool dispatch.
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -96,11 +96,7 @@ impl RpcServer {
         // Check method is in allowlist (D-07)
         if !ALLOWED_TOOLS.contains(&method.as_str()) {
             warn!("RPC method not allowed: {}", method);
-            return Self::error_response(
-                id,
-                -32601,
-                &format!("Method not found: {}", method),
-            );
+            return Self::error_response(id, -32601, &format!("Method not found: {}", method));
         }
 
         // Check call limit (D-13)
@@ -116,14 +112,12 @@ impl RpcServer {
 
         // Dispatch tool call
         match self.dispatch.dispatch(&method, params).await {
-            Ok(result) => {
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": result
-                })
-                .to_string()
-            }
+            Ok(result) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result
+            })
+            .to_string(),
             Err(e) => {
                 warn!("Tool dispatch error for {}: {}", method, e);
                 Self::error_response(id, -32603, &format!("Internal error: {}", e))
@@ -202,7 +196,10 @@ from hermes_tools import read_file
 result = read_file("/tmp/test.txt")
 print(result)
 "#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         assert!(
             result.stdout.contains("file contents"),
@@ -239,7 +236,10 @@ if limit_hit:
 else:
     print("limit NOT hit")
 "#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         assert!(
             result.stdout.contains("limit hit"),
@@ -262,7 +262,10 @@ try:
 except HermesRpcError as e:
     print(f"caught error: {e}")
 "#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         assert!(
             result.stdout.contains("caught error"),
@@ -285,7 +288,10 @@ try:
 except HermesRpcError as e:
     print(f"caught: {e}")
 "#;
-        let result = sandbox.run(script, dispatch, None, &[]).await.expect("should succeed");
+        let result = sandbox
+            .run(script, dispatch, None, &[])
+            .await
+            .expect("should succeed");
 
         assert!(
             result.stdout.contains("caught:"),

@@ -28,8 +28,8 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use crate::error::{HubError, HubErrorKind};
-use crate::lock::{compute_folder_hash, SkillLock, SkillLockEntry};
-use crate::scanner::{enforce_trust_gate, SkillScanner};
+use crate::lock::{SkillLock, SkillLockEntry, compute_folder_hash};
+use crate::scanner::{SkillScanner, enforce_trust_gate};
 use crate::source::{HubSource, SkillBundle};
 
 // ── Install outcome ─────────────────────────────────────────────────────────
@@ -242,8 +242,7 @@ pub async fn install(
                 .build()
             {
                 let slug = crate::sanitize::to_skill_slug(&bundle.name);
-                if let Some(audit) =
-                    crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await
+                if let Some(audit) = crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await
                 {
                     for (s, a) in &audit {
                         tracing::info!(skill = %s, risk = %a.risk, alerts = a.alerts, "audit result");
@@ -373,12 +372,15 @@ pub async fn update(
 
     let mut lock = SkillLock::load_or_default()
         .map_err(|e| typed(HubErrorKind::Io, format!("load skills-lock.json: {e}")))?;
-    let entry = lock.get(skill_name).cloned().ok_or_else(|| HubError::Typed {
-        kind: HubErrorKind::NotFound,
-        message: format!("skill '{}' is not installed", skill_name),
-        suggestion: Some("Run 'hermes skills list' to see installed skills.".to_string()),
-        retry_after_s: None,
-    })?;
+    let entry = lock
+        .get(skill_name)
+        .cloned()
+        .ok_or_else(|| HubError::Typed {
+            kind: HubErrorKind::NotFound,
+            message: format!("skill '{}' is not installed", skill_name),
+            suggestion: Some("Run 'hermes skills list' to see installed skills.".to_string()),
+            retry_after_s: None,
+        })?;
 
     let identifier = entry.identifier.clone();
     let old_hash = entry.computed_hash.clone();
@@ -427,8 +429,7 @@ pub async fn update(
                 .build()
             {
                 let slug = crate::sanitize::to_skill_slug(&bundle.name);
-                if let Some(audit) =
-                    crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await
+                if let Some(audit) = crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await
                 {
                     for (s, a) in &audit {
                         tracing::info!(skill = %s, risk = %a.risk, alerts = a.alerts, "audit result");
@@ -535,9 +536,8 @@ pub fn uninstall(skill_name: &str) -> Result<UninstallOutcome, HubError> {
     // dir path, but the category is parsed fresh from the on-disk SKILL.md when
     // possible. For uninstall we search both the general/ default and any
     // existing subdir of skills_root that contains the skill dir.
-    let install_path = find_install_path(&skills_root, &entry.name).unwrap_or_else(|| {
-        skills_root.join("general").join(&entry.name)
-    });
+    let install_path = find_install_path(&skills_root, &entry.name)
+        .unwrap_or_else(|| skills_root.join("general").join(&entry.name));
 
     // Save lock first (de-register before dir removal).
     lock.save_atomic()
@@ -919,8 +919,7 @@ mod tests {
             path: "../evil.md".into(),
             bytes: b"bad".to_vec(),
         }]);
-        let err =
-            write_bundle_to_dir(tmp.path(), &bundle).expect_err("should reject traversal");
+        let err = write_bundle_to_dir(tmp.path(), &bundle).expect_err("should reject traversal");
         match err {
             HubError::Typed { kind, .. } => assert_eq!(kind, HubErrorKind::PathTraversal),
             other => panic!("expected PathTraversal, got {other:?}"),
@@ -1051,7 +1050,10 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn fetch(&self, _identifier: &str) -> Result<crate::source::SkillBundle, crate::HubError> {
+        async fn fetch(
+            &self,
+            _identifier: &str,
+        ) -> Result<crate::source::SkillBundle, crate::HubError> {
             Ok(crate::source::SkillBundle {
                 name: self.bundle.name.clone(),
                 identifier: self.bundle.identifier.clone(),
@@ -1115,8 +1117,7 @@ mod tests {
         );
 
         // D-14: server hash round-trips verbatim.
-        let lock = crate::lock::SkillLock::load_or_default()
-            .expect("lock load");
+        let lock = crate::lock::SkillLock::load_or_default().expect("lock load");
         let entry = lock.get("advisory-skill").expect("lock entry present");
         assert_eq!(
             entry.snapshot_hash, server_hash,
@@ -1166,9 +1167,15 @@ mod tests {
         let src_v1 = FixedBundleSource { bundle: bundle_v1 };
         let scanner = crate::scanner::AlwaysCleanScanner;
 
-        install(&src_v1, "test/repo/advisory-skill", &scanner, &skills_root, true)
-            .await
-            .expect("prime install");
+        install(
+            &src_v1,
+            "test/repo/advisory-skill",
+            &scanner,
+            &skills_root,
+            true,
+        )
+        .await
+        .expect("prime install");
 
         // Step 2 — remount with a divergent server hash.
         // Use a new bundle with slightly different content so drift is also detected.
@@ -1190,8 +1197,7 @@ mod tests {
         );
 
         // D-14: round-trip on update path.
-        let lock = crate::lock::SkillLock::load_or_default()
-            .expect("lock load");
+        let lock = crate::lock::SkillLock::load_or_default().expect("lock load");
         let entry = lock.get("advisory-skill").expect("updated entry present");
         assert_eq!(
             entry.snapshot_hash, server_hash_v2,

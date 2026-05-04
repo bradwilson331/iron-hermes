@@ -49,9 +49,11 @@ fn minimum_viable_answers_seed_full_config() {
 
     assert!(tmp.path().join("config.yaml").exists());
     let loaded = Config::load().expect("config.yaml must reload after wizard");
-    assert!(loaded.memory.memory_enabled, "Learning Loop must default ON");
-    let val =
-        config_setter::config_get(tmp.path(), "learning.skill_generation_enabled").unwrap();
+    assert!(
+        loaded.memory.memory_enabled,
+        "Learning Loop must default ON"
+    );
+    let val = config_setter::config_get(tmp.path(), "learning.skill_generation_enabled").unwrap();
     assert_eq!(
         val.as_deref(),
         Some("true"),
@@ -87,8 +89,7 @@ fn learning_loop_no_writes_explicit_false() {
         };
         config_setter::config_set(tmp.path(), &dotted, &value_str).unwrap();
     }
-    let val =
-        config_setter::config_get(tmp.path(), "learning.skill_generation_enabled").unwrap();
+    let val = config_setter::config_get(tmp.path(), "learning.skill_generation_enabled").unwrap();
     assert_eq!(
         val.as_deref(),
         Some("false"),
@@ -110,8 +111,14 @@ fn setup_source_uses_learning_loop_framing_const() {
 fn wizard_does_not_persist_history() {
     // Anti-Pattern #3: wizard editor must NOT load/save rustyline history.
     let src = std::fs::read_to_string("src/setup.rs").expect("setup.rs readable");
-    assert!(!src.contains("load_history"), "wizard must not call load_history");
-    assert!(!src.contains("save_history"), "wizard must not call save_history");
+    assert!(
+        !src.contains("load_history"),
+        "wizard must not call load_history"
+    );
+    assert!(
+        !src.contains("save_history"),
+        "wizard must not call save_history"
+    );
     assert!(
         !src.contains("set_max_history_size"),
         "wizard must not call set_max_history_size"

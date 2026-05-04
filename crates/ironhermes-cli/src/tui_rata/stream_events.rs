@@ -46,9 +46,17 @@ mod tests {
         let events = vec![
             StreamEvent::Started,
             StreamEvent::Delta("hello".to_string()),
-            StreamEvent::ToolCall { name: "bash".to_string() },
-            StreamEvent::ToolProgress { name: "bash".to_string(), phase: "running".to_string() },
-            StreamEvent::ToolResult { name: "bash".to_string(), ok: true },
+            StreamEvent::ToolCall {
+                name: "bash".to_string(),
+            },
+            StreamEvent::ToolProgress {
+                name: "bash".to_string(),
+                phase: "running".to_string(),
+            },
+            StreamEvent::ToolResult {
+                name: "bash".to_string(),
+                ok: true,
+            },
             StreamEvent::Finished,
             StreamEvent::Error("timeout".to_string()),
             StreamEvent::Cancelled,

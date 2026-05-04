@@ -1,11 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use colored::Colorize;
-use ironhermes_cron::{
-    parse_schedule, run_tick_check, scan_cron_prompt, CronJob, JobStore, JobUpdate,
-    ScheduleParsed,
-};
 use ironhermes_cron::display::{format_cron_status, format_job_detail, format_job_list};
+use ironhermes_cron::{
+    CronJob, JobStore, JobUpdate, ScheduleParsed, parse_schedule, run_tick_check, scan_cron_prompt,
+};
 use std::fmt::Write as FmtWrite;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -192,8 +191,8 @@ fn cmd_create(
     }
 
     // Parse schedule
-    let parsed = parse_schedule(&schedule)
-        .with_context(|| format!("Invalid schedule: {:?}", schedule))?;
+    let parsed =
+        parse_schedule(&schedule).with_context(|| format!("Invalid schedule: {:?}", schedule))?;
 
     let schedule_display = match &parsed {
         ScheduleParsed::Once { display, .. } => display.clone(),
@@ -215,12 +214,13 @@ fn cmd_create(
         origin_opt,
     )?;
 
-    println!("{}: {} ({})", "Job created".bold().cyan(), job.name.bold(), job.id.dimmed());
     println!(
-        "  {:<12} {}",
-        "Schedule:".dimmed(),
-        schedule_display
+        "{}: {} ({})",
+        "Job created".bold().cyan(),
+        job.name.bold(),
+        job.id.dimmed()
     );
+    println!("  {:<12} {}", "Schedule:".dimmed(), schedule_display);
     if let Some(next_run) = job.next_run_at {
         println!(
             "  {:<12} {}",
@@ -294,7 +294,12 @@ fn cmd_edit(
         (None, None)
     };
 
-    let skills_opt = if skills.is_empty() && schedule.is_none() && prompt.is_none() && name.is_none() && deliver.is_none() {
+    let skills_opt = if skills.is_empty()
+        && schedule.is_none()
+        && prompt.is_none()
+        && name.is_none()
+        && deliver.is_none()
+    {
         // If nothing provided, don't touch skills
         None
     } else if !skills.is_empty() {
@@ -526,7 +531,11 @@ mod tests {
             .unwrap();
 
         let rendered = render_job_details(&job);
-        assert!(rendered.contains("test-render"), "name missing: {}", rendered);
+        assert!(
+            rendered.contains("test-render"),
+            "name missing: {}",
+            rendered
+        );
         assert!(rendered.contains(&job.id), "id missing");
         assert!(rendered.contains("every 5m"), "schedule_display missing");
         assert!(rendered.contains("say hello"), "prompt missing");
@@ -546,5 +555,4 @@ mod tests {
         let err_msg = format!("Job not found: {}", "ghost");
         assert!(err_msg.contains("Job not found"));
     }
-
 }

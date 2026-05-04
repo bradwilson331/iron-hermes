@@ -11,7 +11,7 @@ use ironhermes_core::SkillSource;
 use url::Url;
 
 use crate::{
-    tarball::extract_tarball_prefix, HubError, HubErrorKind, HubSource, SkillBundle, SkillMeta,
+    HubError, HubErrorKind, HubSource, SkillBundle, SkillMeta, tarball::extract_tarball_prefix,
 };
 
 // ── Index JSON shape ─────────────────────────────────────────────────────────
@@ -57,7 +57,10 @@ impl WellKnownSkillSource {
                 .https_only(true)
                 .build()
                 .expect("reqwest client"),
-            allowed_origins: allowed_origins.into_iter().map(|s| s.to_lowercase()).collect(),
+            allowed_origins: allowed_origins
+                .into_iter()
+                .map(|s| s.to_lowercase())
+                .collect(),
             test_mode: false,
         }
     }
@@ -74,7 +77,10 @@ impl WellKnownSkillSource {
                 // No https_only — wiremock listens on HTTP
                 .build()
                 .expect("reqwest client"),
-            allowed_origins: allowed_origins.into_iter().map(|s| s.to_lowercase()).collect(),
+            allowed_origins: allowed_origins
+                .into_iter()
+                .map(|s| s.to_lowercase())
+                .collect(),
             test_mode: true,
         }
     }
@@ -101,7 +107,8 @@ impl WellKnownSkillSource {
             format!("https://{trimmed}")
         };
 
-        let url = Url::parse(&url_str).map_err(|e| typed(HubErrorKind::InvalidIdentifier, format!("invalid URL: {e}")))?;
+        let url = Url::parse(&url_str)
+            .map_err(|e| typed(HubErrorKind::InvalidIdentifier, format!("invalid URL: {e}")))?;
 
         // In test mode (wiremock uses HTTP + loopback), skip HTTPS and SSRF checks.
         if !self.test_mode {
@@ -151,18 +158,32 @@ impl WellKnownSkillSource {
     ///
     /// `base_url` should be like `https://example.com` (no trailing slash).
     async fn fetch_index(&self, base_url: &str) -> Result<Vec<IndexEntry>, HubError> {
-        let index_url = format!("{}/.well-known/skills/index.json", base_url.trim_end_matches('/'));
+        let index_url = format!(
+            "{}/.well-known/skills/index.json",
+            base_url.trim_end_matches('/')
+        );
         let resp = self.http.get(&index_url).send().await?;
         let status = resp.status();
 
         if status == 404 {
-            return Err(typed(HubErrorKind::NotFound, format!("index.json not found at {index_url}")));
+            return Err(typed(
+                HubErrorKind::NotFound,
+                format!("index.json not found at {index_url}"),
+            ));
         }
         if !status.is_success() {
-            return Err(typed(HubErrorKind::Network, format!("GET {index_url} returned {status}")));
+            return Err(typed(
+                HubErrorKind::Network,
+                format!("GET {index_url} returned {status}"),
+            ));
         }
 
-        let entries: Vec<IndexEntry> = resp.json().await.map_err(|e| typed(HubErrorKind::Parse, format!("failed to parse index.json: {e}")))?;
+        let entries: Vec<IndexEntry> = resp.json().await.map_err(|e| {
+            typed(
+                HubErrorKind::Parse,
+                format!("failed to parse index.json: {e}"),
+            )
+        })?;
         Ok(entries)
     }
 
@@ -178,7 +199,10 @@ impl WellKnownSkillSource {
         let resp = self.http.get(tarball_url).send().await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(typed(HubErrorKind::Network, format!("tarball download returned {status}")));
+            return Err(typed(
+                HubErrorKind::Network,
+                format!("tarball download returned {status}"),
+            ));
         }
         let bytes = resp.bytes().await?.to_vec();
 
@@ -206,7 +230,10 @@ impl WellKnownSkillSource {
 
     /// Extract the skill name from the last path segment of the identifier URL.
     fn skill_name_from_identifier_url(url: &Url) -> Option<String> {
-        url.path_segments()?.last().map(|s| s.to_string()).filter(|s| !s.is_empty())
+        url.path_segments()?
+            .last()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -332,7 +359,10 @@ impl HubSource for WellKnownSkillSource {
         let url = self.parse_identifier(identifier)?;
         let base_url = Self::base_url_from_identifier_url(&url);
         let skill_name = Self::skill_name_from_identifier_url(&url).ok_or_else(|| {
-            typed(HubErrorKind::InvalidIdentifier, format!("cannot extract skill name from: {identifier}"))
+            typed(
+                HubErrorKind::InvalidIdentifier,
+                format!("cannot extract skill name from: {identifier}"),
+            )
         })?;
 
         // Fetch the index to get the tarball_url.
@@ -340,20 +370,34 @@ impl HubSource for WellKnownSkillSource {
         let entry = entries
             .into_iter()
             .find(|e| e.name == skill_name)
-            .ok_or_else(|| typed(HubErrorKind::NotFound, format!("skill '{skill_name}' not found in index")))?;
+            .ok_or_else(|| {
+                typed(
+                    HubErrorKind::NotFound,
+                    format!("skill '{skill_name}' not found in index"),
+                )
+            })?;
 
         let tarball_url = entry.tarball_url.ok_or_else(|| {
-            typed(HubErrorKind::Parse, format!("index entry for '{skill_name}' has no tarball_url"))
+            typed(
+                HubErrorKind::Parse,
+                format!("index entry for '{skill_name}' has no tarball_url"),
+            )
         })?;
 
         // Validate tarball_url against the same SSRF guards applied to identifiers.
         // A malicious well-known server could set tarball_url to an internal endpoint.
         let tarball_parsed = Url::parse(&tarball_url).map_err(|e| {
-            typed(HubErrorKind::InvalidIdentifier, format!("invalid tarball_url: {e}"))
+            typed(
+                HubErrorKind::InvalidIdentifier,
+                format!("invalid tarball_url: {e}"),
+            )
         })?;
         if !self.test_mode {
             if tarball_parsed.scheme() != "https" {
-                return Err(typed(HubErrorKind::InvalidIdentifier, "tarball_url must use HTTPS"));
+                return Err(typed(
+                    HubErrorKind::InvalidIdentifier,
+                    "tarball_url must use HTTPS",
+                ));
             }
             if let Some(host) = tarball_parsed.host_str() {
                 if is_private_host(host) {
@@ -369,11 +413,17 @@ impl HubSource for WellKnownSkillSource {
         let files = self.fetch_tarball_bundle(&tarball_url, &skill_name).await?;
 
         if files.is_empty() {
-            return Err(typed(HubErrorKind::NotFound, format!("no files extracted from tarball for '{skill_name}'")));
+            return Err(typed(
+                HubErrorKind::NotFound,
+                format!("no files extracted from tarball for '{skill_name}'"),
+            ));
         }
 
         let skill_md_file = files.iter().find(|f| f.path == "SKILL.md").ok_or_else(|| {
-            typed(HubErrorKind::Parse, format!("SKILL.md not found in bundle for '{skill_name}'"))
+            typed(
+                HubErrorKind::Parse,
+                format!("SKILL.md not found in bundle for '{skill_name}'"),
+            )
         })?;
 
         let skill_md = String::from_utf8_lossy(&skill_md_file.bytes).into_owned();
@@ -415,13 +465,13 @@ mod tests {
 
     #[test]
     fn is_private_host_rejects_ipv6_private() {
-        assert!(is_private_host("fe80::1"));         // link-local
-        assert!(is_private_host("FE80::1"));         // case-insensitive
-        assert!(is_private_host("fc00::1"));         // unique-local
-        assert!(is_private_host("fd00::abcd"));      // unique-local
-        assert!(is_private_host("[::1]"));            // bracket-wrapped loopback
-        assert!(is_private_host("[fe80::1]"));        // bracket-wrapped link-local
-        assert!(is_private_host("[fd00::1]"));        // bracket-wrapped unique-local
+        assert!(is_private_host("fe80::1")); // link-local
+        assert!(is_private_host("FE80::1")); // case-insensitive
+        assert!(is_private_host("fc00::1")); // unique-local
+        assert!(is_private_host("fd00::abcd")); // unique-local
+        assert!(is_private_host("[::1]")); // bracket-wrapped loopback
+        assert!(is_private_host("[fe80::1]")); // bracket-wrapped link-local
+        assert!(is_private_host("[fd00::1]")); // bracket-wrapped unique-local
     }
 
     #[test]
@@ -436,7 +486,10 @@ mod tests {
     fn trust_level_always_community() {
         let src = WellKnownSkillSource::new(vec![]);
         assert_eq!(src.trust_level_for("anything"), SkillSource::Community);
-        assert_eq!(src.trust_level_for("well-known:example.com/foo"), SkillSource::Community);
+        assert_eq!(
+            src.trust_level_for("well-known:example.com/foo"),
+            SkillSource::Community
+        );
     }
 
     #[test]
@@ -444,7 +497,11 @@ mod tests {
         let src = WellKnownSkillSource::new(vec![]);
         let err = src.parse_identifier("http://example.com/foo").unwrap_err();
         match err {
-            HubError::Typed { kind: HubErrorKind::InvalidIdentifier, message, .. } => {
+            HubError::Typed {
+                kind: HubErrorKind::InvalidIdentifier,
+                message,
+                ..
+            } => {
                 assert!(message.contains("HTTPS required"), "message: {message}");
             }
             other => panic!("expected InvalidIdentifier, got {other:?}"),
@@ -456,7 +513,10 @@ mod tests {
         let src = WellKnownSkillSource::new(vec![]);
         let err = src.parse_identifier("https://127.0.0.1/foo").unwrap_err();
         match err {
-            HubError::Typed { kind: HubErrorKind::InvalidIdentifier, .. } => {}
+            HubError::Typed {
+                kind: HubErrorKind::InvalidIdentifier,
+                ..
+            } => {}
             other => panic!("expected InvalidIdentifier, got {other:?}"),
         }
     }

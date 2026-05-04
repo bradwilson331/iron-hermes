@@ -39,14 +39,12 @@ static OSC_RE: LazyLock<Regex> =
 static DCS_PM_APC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)\x1b[P^_].*?\x1b\\").unwrap());
 // Simple ESC + single printable char.
-static SIMPLE_ESC_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x1b[\x20-\x7e]").unwrap());
+static SIMPLE_ESC_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b[\x20-\x7e]").unwrap());
 // C1 control codes.
 static C1_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\x80-\x9f]").unwrap());
 // Raw controls except \t (0x09) and \n (0x0a).
-static CONTROL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\x00-\x06\x07\x08\x0b\x0c\x0d-\x1a\x1c-\x1f\x7f]").unwrap()
-});
+static CONTROL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\x00-\x06\x07\x08\x0b\x0c\x0d-\x1a\x1c-\x1f\x7f]").unwrap());
 
 /// Strip all terminal escape sequences and raw control chars from
 /// server-originated strings. Defends the CLI stdout trust boundary
@@ -167,7 +165,9 @@ pub fn sanitize_subpath(subpath: &str) -> Result<String, HubError> {
 /// lexical resolver when either path does not yet exist on disk (e.g., we
 /// are checking the intended install destination).
 pub fn is_path_safe(base: &Path, target: &Path) -> std::io::Result<bool> {
-    let norm_base: PathBuf = base.canonicalize().unwrap_or_else(|_| normalize_lexical(base));
+    let norm_base: PathBuf = base
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_lexical(base));
     let norm_target: PathBuf = target
         .canonicalize()
         .unwrap_or_else(|_| normalize_lexical(target));
@@ -249,9 +249,7 @@ pub fn strict_yaml_delimiter(content: &str) -> Result<(), HubError> {
     if first_line != "---" {
         return Err(typed(
             HubErrorKind::Parse,
-            format!(
-                "SKILL.md frontmatter must use YAML-only '---' delimiter, got: {first_line:?}"
-            ),
+            format!("SKILL.md frontmatter must use YAML-only '---' delimiter, got: {first_line:?}"),
         ));
     }
     Ok(())
@@ -337,10 +335,7 @@ mod tests {
 
     #[test]
     fn metadata_collapses_newlines_and_trims() {
-        assert_eq!(
-            sanitize_metadata("  hello\r\n\r\nworld  "),
-            "hello world"
-        );
+        assert_eq!(sanitize_metadata("  hello\r\n\r\nworld  "), "hello world");
     }
 
     #[test]
@@ -407,7 +402,10 @@ mod tests {
 
     #[test]
     fn sanitize_subpath_allows_normal_path() {
-        assert_eq!(sanitize_subpath("normal/path.md").unwrap(), "normal/path.md");
+        assert_eq!(
+            sanitize_subpath("normal/path.md").unwrap(),
+            "normal/path.md"
+        );
     }
 
     #[test]

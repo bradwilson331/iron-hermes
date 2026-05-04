@@ -7,7 +7,7 @@ use ironhermes_exec::process_registry::{ProcessRegistry, SpawnSpec};
 use serde_json::json;
 use tokio::process::Command;
 use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::debug;
 
 use crate::registry::Tool;
@@ -226,10 +226,9 @@ impl Tool for TerminalTool {
             Ok::<String, anyhow::Error>(combined)
         };
 
-        let result =
-            timeout(Duration::from_secs(timeout_secs), fut)
-                .await
-                .map_err(|_| anyhow::anyhow!("Command timed out after {}s", timeout_secs))??;
+        let result = timeout(Duration::from_secs(timeout_secs), fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("Command timed out after {}s", timeout_secs))??;
 
         if result.len() > MAX_OUTPUT_LEN {
             // Find the nearest char boundary at or before MAX_OUTPUT_LEN
@@ -288,10 +287,7 @@ mod tests {
         let expected = dir.path().canonicalize().unwrap();
         let result_path = std::path::PathBuf::from(result.trim());
         let result_canon = result_path.canonicalize().unwrap_or(result_path);
-        assert_eq!(
-            result_canon, expected,
-            "pwd should match CWD"
-        );
+        assert_eq!(result_canon, expected, "pwd should match CWD");
     }
 
     // --- Plan 21.7-06 / D-29 — background path tests ------------------------
@@ -327,8 +323,7 @@ mod tests {
             .execute(serde_json::json!({"command": "sleep 30", "background": true}))
             .await
             .expect("background spawn must succeed");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&resp).expect("JSON response");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("JSON response");
         assert_eq!(parsed["background"], true);
         let process_id = parsed["process_id"].as_str().unwrap().to_string();
         assert!(process_id.starts_with("proc_"));
@@ -337,7 +332,11 @@ mod tests {
         // Registry accounting reflects the tracked process.
         {
             let r = reg.read().await;
-            assert_eq!(r.running_count(), 1, "must be tracked after background spawn");
+            assert_eq!(
+                r.running_count(),
+                1,
+                "must be tracked after background spawn"
+            );
         }
 
         // Clean up (avoid leaking a real `sleep` child across tests).
@@ -354,10 +353,12 @@ mod tests {
             .await
             .expect("foreground call must succeed");
         // Plain text, not JSON — matches pre-21.7-06 behaviour exactly.
-        assert!(result.contains("hi-foreground"), "foreground stdout: {result}");
         assert!(
-            serde_json::from_str::<serde_json::Value>(&result).is_err()
-                || !result.starts_with('{'),
+            result.contains("hi-foreground"),
+            "foreground stdout: {result}"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&result).is_err() || !result.starts_with('{'),
             "foreground output must not be JSON-wrapped"
         );
     }

@@ -9,8 +9,8 @@
 //! - `dispatch_slash` is a stub in `commands.rs`; plan 22.4-07 Task 4 fills it.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
@@ -23,22 +23,22 @@ use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
 
 use crate::tui_rata::double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
-use crate::tui_rata::history::{ReplHistory, DEFAULT_MAX};
+use crate::tui_rata::history::{DEFAULT_MAX, ReplHistory};
 use crate::tui_rata::status_line::StatusLineState;
 use crate::tui_rata::stream_events::StreamEvent;
 
 // Concrete paths — grep-verified iteration 2.
+use ironhermes_agent::AnyClient;
 use ironhermes_agent::agent_loop::AgentLoop;
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::personality::PersonalityRegistry;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
-use ironhermes_agent::AnyClient;
-use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_core::commands::CommandRouter;
-use ironhermes_core::types::{ChatMessage, MessageContent, Role};
 use ironhermes_core::ProviderResolver;
+use ironhermes_core::commands::CommandRouter;
+use ironhermes_core::commands::context::ToolsetSessionHandle;
+use ironhermes_core::types::{ChatMessage, MessageContent, Role};
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
@@ -79,7 +79,9 @@ pub struct AppDeps {
     /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
     /// AgentLoop builder AND the per-turn AgentLoop in `spawn_turn`. Without
     /// this field the rata REPL omits all 11 browser_* tools (GAP-8 root cause).
-    pub browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+    pub browser_session: std::sync::Arc<
+        tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+    >,
     /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — shared mouse-capture state.
     /// `/mouse on|off` slash command flips this AtomicBool AND executes the
     /// corresponding crossterm command. Initial value `true` matches the
@@ -131,7 +133,8 @@ pub struct AppDeps {
     /// `build_app_deps` opens the writer at workspace-scoped or global path and
     /// wraps it in `TrajectoryWriterHandleImpl`. `build_command_context` attaches
     /// via `.with_trajectory_writer(...)`.
-    pub trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    pub trajectory_writer:
+        Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 
     /// Phase 25.3-13 CR-04: pre-built system message containing the durable
     /// [Workspace: <root>] Identity-slot line. Seeded into App.history at
@@ -212,7 +215,9 @@ pub struct App {
     /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
     /// AgentLoop builder AND the per-turn AgentLoop in `spawn_turn`. Without
     /// this field the rata REPL omits all 11 browser_* tools (GAP-8 root cause).
-    pub browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+    pub browser_session: std::sync::Arc<
+        tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+    >,
     /// UAT Gap 3 (Phase 22.4 Plan 22.4-16) — see AppDeps.mouse_capture_enabled.
     pub mouse_capture_enabled: Arc<AtomicBool>,
 
@@ -242,7 +247,8 @@ pub struct App {
     /// Phase 25.3 D-W-2: resolved Workspace — see `AppDeps.workspace` doc.
     pub workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
     /// Phase 25.3 D-T-3: TrajectoryWriter handle — see `AppDeps.trajectory_writer` doc.
-    pub trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    pub trajectory_writer:
+        Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 }
 
 impl App {
@@ -682,7 +688,8 @@ impl App {
         // UAT Gap 1 (Phase 22.4 Plan 22.4-14): reinstall the bordered "Prompt"
         // block on every reset so the visual frame survives submit + Esc + slash
         // dispatch cycles.
-        self.textarea.set_block(Block::default().borders(Borders::ALL).title("Prompt"));
+        self.textarea
+            .set_block(Block::default().borders(Borders::ALL).title("Prompt"));
     }
 
     /// Load a history entry into the textarea (arrow-key recall).
@@ -848,8 +855,8 @@ fn test_message(role: &str, body: &str) -> ChatMessage {
 
 #[cfg(feature = "test-support")]
 fn test_deps() -> AppDeps {
-    use ironhermes_agent::{AnyClient, agent_loop::AgentLoop};
     use ironhermes_agent::budget::BudgetHandle;
+    use ironhermes_agent::{AnyClient, agent_loop::AgentLoop};
     use ironhermes_core::commands::registry::build_registry;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_tools::ToolRegistry;
@@ -875,15 +882,13 @@ fn test_deps() -> AppDeps {
         mcp_manager: None,
         memory_manager: None,
         subagent_registry: Arc::new(tokio::sync::RwLock::new(SubagentRegistry::new())),
-        process_registry: Arc::new(tokio::sync::RwLock::new(
-            ProcessRegistry::new_for_session("test-session".to_string()),
-        )),
+        process_registry: Arc::new(tokio::sync::RwLock::new(ProcessRegistry::new_for_session(
+            "test-session".to_string(),
+        ))),
         command_router: Arc::new(CommandRouter::new(build_registry())),
         session_id: "test-session".to_string(),
-        history_path: std::env::temp_dir().join(format!(
-            "tui_rata_hist_{}.txt",
-            std::process::id()
-        )),
+        history_path: std::env::temp_dir()
+            .join(format!("tui_rata_hist_{}.txt", std::process::id())),
         status_initial: StatusLineState::default(),
         cancel_parent: CancellationToken::new(),
         client: test_client,
@@ -928,17 +933,23 @@ mod inv_tests {
     #[test]
     fn inv_25_1_gap8_app_carries_browser_session_field() {
         let source = include_str!("app.rs");
-        let non_comment: String = source.lines()
+        let non_comment: String = source
+            .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
         // The field MUST appear in BOTH AppDeps and App (2 struct definitions).
         let count = non_comment.matches("browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>").count();
-        assert!(count >= 2,
-            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST carry the browser_session field; got {} occurrences in non-comment source", count);
+        assert!(
+            count >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST carry the browser_session field; got {} occurrences in non-comment source",
+            count
+        );
         // App::new MUST forward the field from deps.
-        assert!(non_comment.contains("browser_session: deps.browser_session"),
-            "Phase 25.1 GAP-8 (plan 25.1-19): App::new MUST forward browser_session from deps");
+        assert!(
+            non_comment.contains("browser_session: deps.browser_session"),
+            "Phase 25.1 GAP-8 (plan 25.1-19): App::new MUST forward browser_session from deps"
+        );
     }
 }
 
@@ -947,7 +958,12 @@ mod scroll_tests {
     use super::*;
 
     fn area(w: u16, h: u16) -> Rect {
-        Rect { x: 0, y: 0, width: w, height: h }
+        Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        }
     }
 
     // — wrapped_line_count ──────────────────────────────────────────────────
@@ -1054,7 +1070,10 @@ mod scroll_tests {
             !app.status.hint.is_empty(),
             "hint must be set after Ctrl+C at prompt"
         );
-        assert!(!app.should_quit, "should_quit must remain false on first Ctrl+C");
+        assert!(
+            !app.should_quit,
+            "should_quit must remain false on first Ctrl+C"
+        );
     }
 
     #[test]
@@ -1108,7 +1127,10 @@ mod scroll_tests {
             user_entries
         );
         // No agent turn should be scheduled
-        assert!(app.pending_rx.is_none(), "slash submit must not create pending_rx");
+        assert!(
+            app.pending_rx.is_none(),
+            "slash submit must not create pending_rx"
+        );
     }
 
     #[test]
@@ -1134,14 +1156,24 @@ mod scroll_tests {
         let mut app = App::new_test_empty();
         app.textarea.insert_str("hello world");
         app.submit();
-        assert!(app.pending_rx.is_some(), "pending_rx must be Some after submit");
-        assert!(app.pending_tx.is_some(), "pending_tx must be Some after submit");
+        assert!(
+            app.pending_rx.is_some(),
+            "pending_rx must be Some after submit"
+        );
+        assert!(
+            app.pending_tx.is_some(),
+            "pending_tx must be Some after submit"
+        );
         let user_entries: Vec<_> = app
             .history
             .iter()
             .filter(|m| m.role == Role::User)
             .collect();
-        assert_eq!(user_entries.len(), 1, "exactly 1 User-role entry after submit");
+        assert_eq!(
+            user_entries.len(),
+            1,
+            "exactly 1 User-role entry after submit"
+        );
     }
 
     // — misc ─────────────────────────────────────────────────────────────────

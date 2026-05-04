@@ -19,13 +19,13 @@ use ironhermes_core::config::Config;
 use ironhermes_core::{SkillRegistry, SummarizationClientHandle, ToolSchema};
 use serde_json::json;
 use tokio::sync::Semaphore;
-use tracing::{info_span, warn, Instrument};
+use tracing::{Instrument, info_span, warn};
 
 use crate::registry::Tool;
 use crate::web_local::truncate_content;
 
 use self::backends::{exa, firecrawl, local, tavily};
-use self::dispatch::{classify_url, reroute_for_pdf, UrlClass};
+use self::dispatch::{UrlClass, classify_url, reroute_for_pdf};
 use self::pdf::{extract_pdf, extract_pdf_bytes};
 use self::sanitize::{contains_secret, redact_secrets_in_url, strip_base64_images};
 use self::summary::tiers::route_tiers;
@@ -114,9 +114,15 @@ pub(crate) fn redact_url_args(raw: &serde_json::Value) -> serde_json::Value {
 
 #[async_trait]
 impl Tool for WebExtractTool {
-    fn name(&self) -> &str { "web_extract" }
-    fn toolset(&self) -> &str { "web" }
-    fn is_available(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "web_extract"
+    }
+    fn toolset(&self) -> &str {
+        "web"
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
 
     /// Phase 25.3 D-T-1 / Discretion D-2 override: delegate to `redact_url_args`
     /// (testable seam). See the free function's doc-comment for the contract.
@@ -181,10 +187,7 @@ impl Tool for WebExtractTool {
             .get("use_llm_processing")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let min_length = args
-            .get("min_length")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let min_length = args.get("min_length").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let format = args
             .get("format")
             .and_then(|v| v.as_str())
@@ -334,9 +337,9 @@ async fn process_one_url(
                     };
                 }
                 // tier 2/3 LLM failure: D-05 fallback — return truncated raw with warning in error field.
-                extraction.content = truncate_content(&extraction.content, cfg.web.max_content_chars);
-                extraction.error =
-                    Some(format!("summarization_failed_returned_raw: {}", msg));
+                extraction.content =
+                    truncate_content(&extraction.content, cfg.web.max_content_chars);
+                extraction.error = Some(format!("summarization_failed_returned_raw: {}", msg));
             }
         }
     }
@@ -362,11 +365,7 @@ async fn process_one_url(
 /// Tries Firecrawl → Exa → Tavily → Local, with D-03 mid-fetch PDF reroute on the local path.
 /// On TOTAL chain failure, propagates Err so the per-URL pipeline can apply D-05 truncated-raw
 /// fallback on the original extraction (currently mapped to extraction_failed).
-async fn fetch_web_with_chain(
-    url: &str,
-    cfg: &Config,
-    format: &str,
-) -> Result<ExtractionResult> {
+async fn fetch_web_with_chain(url: &str, cfg: &Config, format: &str) -> Result<ExtractionResult> {
     // Plan 16 / UAT Issue 9: log the REDACTED URL in every warn! site so secrets
     // never leak via tracing. cfg.extract.redact_url_patterns is the operator's
     // extension list (D-22).
@@ -406,10 +405,7 @@ async fn fetch_web_with_chain(
     match local::fetch_local_content(url, &cfg.web).await {
         Ok(outcome) => {
             // D-03 mid-fetch reroute: if Content-Type was application/pdf, hand bytes to PDF handler.
-            if outcome
-                .content_type
-                .as_deref()
-                .is_some_and(reroute_for_pdf)
+            if outcome.content_type.as_deref().is_some_and(reroute_for_pdf)
                 && let Some(bytes) = outcome.raw_bytes.clone()
             {
                 return extract_pdf_bytes(url, bytes).await;
@@ -429,7 +425,10 @@ async fn fetch_web_with_chain(
             Ok(outcome.result)
         }
         Err(e) => {
-            warn!("web_extract: all backends failed for {}: {}", url_for_log, e);
+            warn!(
+                "web_extract: all backends failed for {}: {}",
+                url_for_log, e
+            );
             Err(anyhow::anyhow!("backend_chain_exhausted: {}", e))
         }
     }
@@ -537,8 +536,12 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("urls array preserved");
         assert_eq!(urls.len(), 3, "array length preserved across redaction");
-        assert!(!serde_json::to_string(&redacted).unwrap().contains("sk-secret-token-xyz"),
-            "no leaf in the redacted JSON may contain the cleartext secret");
+        assert!(
+            !serde_json::to_string(&redacted)
+                .unwrap()
+                .contains("sk-secret-token-xyz"),
+            "no leaf in the redacted JSON may contain the cleartext secret"
+        );
     }
 
     /// Plan 25.2-16 (UAT Issue 9): integration-style assertion that the

@@ -1,5 +1,5 @@
-use ironhermes_core::{ChatMessage, Role};
 use super::types::ShareGptTurn;
+use ironhermes_core::{ChatMessage, Role};
 
 /// Convert AgentResult messages to ShareGPT conversation turns (D-07, D-08).
 /// Roles: User -> "human", Assistant text -> "gpt", tool_calls -> "tool_call",

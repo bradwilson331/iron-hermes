@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use tar::Builder;
 
 /// Builds a gzipped tarball in memory containing a sample skill under `anthropics/skills`.
@@ -26,11 +26,19 @@ pub fn sample_skill_tarball() -> Vec<u8> {
 
     // SKILL.md content with valid frontmatter
     let skill_md = b"---\nname: tenor-gif\ndescription: Tenor GIF search skill\nversion: 1.0.0\n---\n\n# Tenor GIF\n\nSearches Tenor for animated GIFs.\n";
-    add_file(&mut ar, "anthropics-skills-abc123/tenor-gif/SKILL.md", skill_md);
+    add_file(
+        &mut ar,
+        "anthropics-skills-abc123/tenor-gif/SKILL.md",
+        skill_md,
+    );
 
     // handler.py content
     let handler_py = b"# stub\n";
-    add_file(&mut ar, "anthropics-skills-abc123/tenor-gif/handler.py", handler_py);
+    add_file(
+        &mut ar,
+        "anthropics-skills-abc123/tenor-gif/handler.py",
+        handler_py,
+    );
 
     let enc = ar.into_inner().expect("tar finish");
     enc.finish().expect("gz finish")

@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::approval::should_prompt_for_approval;
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 /// JS injected on demand to install a console override that buffers entries.
@@ -75,8 +75,12 @@ impl BrowserConsoleTool {
 
 #[async_trait]
 impl Tool for BrowserConsoleTool {
-    fn name(&self) -> &str { "browser_console" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_console"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Read browser console logs OR evaluate JS in the page context. \
          mode:'log' (default, never gated) returns accumulated console.log/warn/error/debug entries. \
@@ -107,14 +111,17 @@ impl Tool for BrowserConsoleTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -175,10 +182,14 @@ impl BrowserConsoleTool {
                 "mode": "eval",
                 "expression": expression,
                 "hint": "Set yolo=true or approve to execute JS in the browser page context"
-            }).to_string());
+            })
+            .to_string());
         }
 
-        debug!(expr_len = expression.len(), "browser_console mode=eval (yolo on, gate bypassed)");
+        debug!(
+            expr_len = expression.len(),
+            "browser_console mode=eval (yolo on, gate bypassed)"
+        );
 
         let mut guard = self.session.lock().await;
         let sess = ensure_session(&mut guard, &self.config.browser).await?;
@@ -189,7 +200,10 @@ impl BrowserConsoleTool {
                 Ok(v) => (v, None),
                 Err(_) => (
                     serde_json::Value::Null,
-                    Some("non-serializable value (function, DOM node, undefined, or circular ref)".to_string())
+                    Some(
+                        "non-serializable value (function, DOM node, undefined, or circular ref)"
+                            .to_string(),
+                    ),
                 ),
             },
             Err(e) => return Err(anyhow::anyhow!("eval failed: {e}")),
@@ -244,7 +258,9 @@ mod tests {
     fn schema_default_mode_is_log() {
         let t = dummy_console_tool(false);
         let s = t.schema();
-        let mode_default = s.function.parameters
+        let mode_default = s
+            .function
+            .parameters
             .get("properties")
             .and_then(|p| p.get("mode"))
             .and_then(|m| m.get("default"))
@@ -258,7 +274,12 @@ mod tests {
         let t = dummy_console_tool(true);
         let result = t.execute(json!({"mode": "eval"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required parameter: expression"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing required parameter: expression")
+        );
     }
 
     #[tokio::test]
@@ -295,7 +316,9 @@ mod tests {
     #[test]
     fn inject_js_is_idempotent() {
         // Static invariant: the injection JS short-circuits via the sentinel.
-        assert!(INJECT_CONSOLE_OVERRIDE_JS.contains("if (window.__ironhermes_console__) return false"));
+        assert!(
+            INJECT_CONSOLE_OVERRIDE_JS.contains("if (window.__ironhermes_console__) return false")
+        );
     }
 
     #[test]
@@ -309,15 +332,26 @@ mod tests {
     #[tokio::test]
     async fn execute_eval_returns_approval_envelope_when_yolo_is_false() {
         let t = dummy_console_tool(false);
-        let result = t.execute(json!({"mode": "eval", "expression": "document.title"})).await.unwrap();
-        assert!(result.contains("\"approval_needed\":true"),
-            "expected approval_needed envelope when yolo=false, got: {result}");
-        assert!(result.contains("\"tool\":\"browser_console\""),
-            "envelope must identify the tool: {result}");
-        assert!(result.contains("\"mode\":\"eval\""),
-            "envelope must include mode: {result}");
-        assert!(result.contains("\"expression\":\"document.title\""),
-            "envelope must include expression: {result}");
+        let result = t
+            .execute(json!({"mode": "eval", "expression": "document.title"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("\"approval_needed\":true"),
+            "expected approval_needed envelope when yolo=false, got: {result}"
+        );
+        assert!(
+            result.contains("\"tool\":\"browser_console\""),
+            "envelope must identify the tool: {result}"
+        );
+        assert!(
+            result.contains("\"mode\":\"eval\""),
+            "envelope must include mode: {result}"
+        );
+        assert!(
+            result.contains("\"expression\":\"document.title\""),
+            "envelope must include expression: {result}"
+        );
     }
 
     /// GAP-4 / T-25.1-02: when yolo=true (injected), the approval gate is bypassed.
@@ -327,20 +361,26 @@ mod tests {
     #[tokio::test]
     async fn execute_eval_uses_injected_yolo_not_disk() {
         let t = dummy_console_tool(true);
-        let result = t.execute(json!({"mode": "eval", "expression": "document.title"})).await;
+        let result = t
+            .execute(json!({"mode": "eval", "expression": "document.title"}))
+            .await;
         // Either the result is Ok (chromium happened to be present) or Err (no chromium).
         // Either way, it must NOT be the approval_needed envelope.
         match result {
             Ok(s) => {
-                assert!(!s.contains("\"approval_needed\""),
-                    "yolo=true must NOT produce approval_needed envelope: {s}");
+                assert!(
+                    !s.contains("\"approval_needed\""),
+                    "yolo=true must NOT produce approval_needed envelope: {s}"
+                );
             }
             Err(e) => {
                 // Chromium not found or spawn failed — this is the expected unit-test path.
                 // The important invariant is that we got here at all (gate was bypassed).
                 let err_str = e.to_string();
-                assert!(!err_str.contains("approval_needed"),
-                    "yolo=true must NOT produce approval_needed error: {err_str}");
+                assert!(
+                    !err_str.contains("approval_needed"),
+                    "yolo=true must NOT produce approval_needed error: {err_str}"
+                );
             }
         }
     }

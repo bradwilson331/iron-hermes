@@ -9,8 +9,11 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
 use ironhermes_core::{
-    commands::provider_display::{render_provider_list, render_provider_list_json, render_provider_show, ProviderRow},
-    config_setter, profile, Config, ProviderResolver,
+    Config, ProviderResolver,
+    commands::provider_display::{
+        ProviderRow, render_provider_list, render_provider_list_json, render_provider_show,
+    },
+    config_setter, profile,
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -105,25 +108,20 @@ fn build_provider_row(name: &str, config: &Config, resolver: &ProviderResolver) 
 
     ProviderRow {
         name: name.to_string(),
-        base_url: endpoint
-            .map(|e| e.base_url.clone())
-            .unwrap_or_default(),
+        base_url: endpoint.map(|e| e.base_url.clone()).unwrap_or_default(),
         api_key_status,
         default_model: endpoint
             .map(|e| e.default_model.clone())
             .unwrap_or_default(),
         role,
         fallbacks,
-        disabled: provider_cfg
-            .and_then(|p| p.disabled)
-            .unwrap_or(false),
+        disabled: provider_cfg.and_then(|p| p.disabled).unwrap_or(false),
     }
 }
 
 pub async fn cmd_provider_list(hermes_home: &Path, json: bool) -> Result<()> {
     let config = load_full_config(hermes_home);
-    let resolver =
-        ProviderResolver::build(&config).context("failed to build provider resolver")?;
+    let resolver = ProviderResolver::build(&config).context("failed to build provider resolver")?;
 
     let mut rows: Vec<ProviderRow> = config
         .providers
@@ -296,10 +294,18 @@ mod tests {
         // Construct each variant to ensure they compile.
         let _list = ProviderSubcommand::List { json: false };
         let _list_json = ProviderSubcommand::List { json: true };
-        let _show = ProviderSubcommand::Show { name: "openai".to_string() };
-        let _test = ProviderSubcommand::Test { name: "openai".to_string() };
-        let _enable = ProviderSubcommand::Enable { name: "openai".to_string() };
-        let _disable = ProviderSubcommand::Disable { name: "openai".to_string() };
+        let _show = ProviderSubcommand::Show {
+            name: "openai".to_string(),
+        };
+        let _test = ProviderSubcommand::Test {
+            name: "openai".to_string(),
+        };
+        let _enable = ProviderSubcommand::Enable {
+            name: "openai".to_string(),
+        };
+        let _disable = ProviderSubcommand::Disable {
+            name: "openai".to_string(),
+        };
     }
 
     // Test 2: validate_provider_name — happy path + injection rejection.
@@ -373,7 +379,14 @@ mod tests {
     // Test 5: validate_provider_name accepts known-good provider names.
     #[test]
     fn validate_provider_name_accepts_valid_names() {
-        let valid = ["openai", "anthropic", "openrouter", "my-local-llm", "llm-v2", "a1b2"];
+        let valid = [
+            "openai",
+            "anthropic",
+            "openrouter",
+            "my-local-llm",
+            "llm-v2",
+            "a1b2",
+        ];
         for name in &valid {
             assert!(
                 validate_provider_name(name).is_ok(),

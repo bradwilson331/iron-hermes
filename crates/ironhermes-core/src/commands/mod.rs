@@ -4,8 +4,8 @@ use crate::types::Platform;
 
 pub mod context;
 pub mod handlers;
-pub mod registry;
 pub mod provider_display;
+pub mod registry;
 pub mod toolset_display;
 pub mod typo;
 
@@ -73,11 +73,7 @@ pub struct CommandDef {
 }
 
 impl CommandDef {
-    pub fn new(
-        name: &'static str,
-        description: &'static str,
-        category: CommandCategory,
-    ) -> Self {
+    pub fn new(name: &'static str, description: &'static str, category: CommandCategory) -> Self {
         Self {
             name,
             description,
@@ -190,10 +186,7 @@ impl CommandRouter {
                     );
                 }
                 if by_alias.insert(*alias, idx).is_some() {
-                    panic!(
-                        "Duplicate alias '{}' for command '{}'",
-                        alias, cmd.name
-                    );
+                    panic!("Duplicate alias '{}' for command '{}'", alias, cmd.name);
                 }
             }
         }
@@ -262,8 +255,7 @@ impl CommandRouter {
                     return ResolveResult::PrefixMatch(shortest[0]);
                 }
                 // Still ambiguous — return sorted candidate names
-                let mut names: Vec<&'static str> =
-                    candidates.iter().map(|c| c.name).collect();
+                let mut names: Vec<&'static str> = candidates.iter().map(|c| c.name).collect();
                 names.sort_unstable();
                 ResolveResult::Ambiguous(names)
             }
@@ -700,8 +692,14 @@ mod tests {
         let router = real_router();
         let cmds = router.commands_for_platform(&Platform::Local);
         let names: Vec<_> = cmds.iter().map(|c| c.name).collect();
-        assert!(names.contains(&"quit"), "Expected 'quit' for Local platform");
-        assert!(!names.contains(&"approve"), "'approve' should not be on Local platform");
+        assert!(
+            names.contains(&"quit"),
+            "Expected 'quit' for Local platform"
+        );
+        assert!(
+            !names.contains(&"approve"),
+            "'approve' should not be on Local platform"
+        );
     }
 
     #[test]
@@ -709,8 +707,14 @@ mod tests {
         let router = real_router();
         let cmds = router.commands_for_platform(&Platform::Telegram);
         let names: Vec<_> = cmds.iter().map(|c| c.name).collect();
-        assert!(names.contains(&"approve"), "Expected 'approve' for Telegram platform");
-        assert!(!names.contains(&"quit"), "'quit' should not be on Telegram platform");
+        assert!(
+            names.contains(&"approve"),
+            "Expected 'approve' for Telegram platform"
+        );
+        assert!(
+            !names.contains(&"quit"),
+            "'quit' should not be on Telegram platform"
+        );
     }
 
     #[test]

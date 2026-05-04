@@ -46,10 +46,7 @@ fn config_show_masks_api_key() {
         .args(["config", "show"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("sk-tes***")
-                .or(predicate::str::contains("sk-test***")),
-        )
+        .stdout(predicate::str::contains("sk-tes***").or(predicate::str::contains("sk-test***")))
         .stdout(predicate::str::contains("12345-secret").not())
         .stdout(predicate::str::contains("secret-telegram-token-xyz").not());
 }

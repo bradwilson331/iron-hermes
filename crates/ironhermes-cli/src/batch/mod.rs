@@ -1,10 +1,10 @@
-pub mod types;
-pub mod runner;
 pub mod checkpoint;
-pub mod sharegpt;
 pub mod filters;
+pub mod runner;
+pub mod sharegpt;
 #[cfg(test)]
 mod tests;
+pub mod types;
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -40,17 +40,14 @@ pub enum BatchCommands {
 
 pub async fn handle_batch_command(cmd: BatchCommands) -> Result<()> {
     match cmd {
-        BatchCommands::Run { input, output, workers, model } => {
-            runner::cmd_run(input, output, workers, model).await
-        }
-        BatchCommands::Status => {
-            runner::cmd_status().await
-        }
-        BatchCommands::Cancel => {
-            runner::cmd_cancel().await
-        }
-        BatchCommands::List => {
-            runner::cmd_list().await
-        }
+        BatchCommands::Run {
+            input,
+            output,
+            workers,
+            model,
+        } => runner::cmd_run(input, output, workers, model).await,
+        BatchCommands::Status => runner::cmd_status().await,
+        BatchCommands::Cancel => runner::cmd_cancel().await,
+        BatchCommands::List => runner::cmd_list().await,
     }
 }

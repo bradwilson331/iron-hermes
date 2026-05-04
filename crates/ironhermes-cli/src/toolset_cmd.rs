@@ -7,12 +7,14 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
-use ironhermes_core::{config_setter, profile, ToolsConfig, DEFAULT_TOOLSETS};
+use ironhermes_core::{DEFAULT_TOOLSETS, ToolsConfig, config_setter, profile};
 use ironhermes_tools::ToolRegistry;
 use std::path::Path;
 
 /// D-01/D-04: The seven concrete toolsets shipped in v2.1 (browser added in Phase 25.1).
-const KNOWN_TOOLSETS: &[&str] = &["web", "code", "memory", "agent", "skills", "session", "browser"];
+const KNOWN_TOOLSETS: &[&str] = &[
+    "web", "code", "memory", "agent", "skills", "session", "browser",
+];
 
 #[derive(Subcommand)]
 pub enum ToolsetSubcommand {
@@ -30,10 +32,7 @@ pub enum ToolsetSubcommand {
     Setup,
 }
 
-pub async fn handle_toolset_command(
-    cmd: ToolsetSubcommand,
-    _profile_name: &str,
-) -> Result<()> {
+pub async fn handle_toolset_command(cmd: ToolsetSubcommand, _profile_name: &str) -> Result<()> {
     let hermes_home = ironhermes_core::constants::get_hermes_home();
     match cmd {
         ToolsetSubcommand::List => cmd_toolset_list(&hermes_home).await,
@@ -56,8 +55,7 @@ async fn cmd_toolset_setup(hermes_home: &Path) -> Result<()> {
 /// This is the first call in every state-changing path — any path traversal or
 /// invalid character is rejected BEFORE any config write or registry mutation.
 pub fn validate_toolset_name(name: &str) -> Result<String> {
-    profile::validate_profile_name(name)
-        .map_err(|e| anyhow::anyhow!("invalid toolset name: {}", e))
+    profile::validate_profile_name(name).map_err(|e| anyhow::anyhow!("invalid toolset name: {}", e))
 }
 
 /// Check that the validated name is one of the six D-01 built-in toolsets.
@@ -168,10 +166,8 @@ pub fn build_toolset_show_view(
 
     let enabled = cfg.is_toolset_enabled(validated);
     let unavailable = registry.list_unavailable();
-    let unavailable_names: std::collections::HashSet<&str> = unavailable
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let unavailable_names: std::collections::HashSet<&str> =
+        unavailable.iter().map(|(name, _)| name.as_str()).collect();
 
     // GAP-6: special-case the browser toolset because register_defaults() does
     // not register browser_* tools (they require Arc<Config> from plan 14 and
@@ -281,10 +277,8 @@ pub fn build_toolset_rows(
     members_map: &std::collections::HashMap<&'static str, &'static [&'static str]>,
 ) -> Vec<ironhermes_core::commands::toolset_display::ToolsetRow> {
     let unavailable = registry.list_unavailable();
-    let unavailable_names: std::collections::HashSet<&str> = unavailable
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let unavailable_names: std::collections::HashSet<&str> =
+        unavailable.iter().map(|(name, _)| name.as_str()).collect();
 
     // Use DEFAULT_TOOLSETS order + remaining toolsets.
     let mut ordered: Vec<&str> = DEFAULT_TOOLSETS.to_vec();
@@ -454,11 +448,7 @@ mod tests {
         let result = validate_toolset_name("WEB");
         assert!(result.is_err(), "uppercase name 'WEB' must be rejected");
         let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("invalid toolset name"),
-            "got: {}",
-            msg
-        );
+        assert!(msg.contains("invalid toolset name"), "got: {}", msg);
     }
 
     #[test]
@@ -528,10 +518,8 @@ mod tests {
         }
 
         let mut cfg = ToolsConfig::default();
-        cfg.toolsets.insert(
-            "browser".to_string(),
-            ToolsetEntry { enabled: true },
-        );
+        cfg.toolsets
+            .insert("browser".to_string(), ToolsetEntry { enabled: true });
 
         let mut registry = ToolRegistry::new();
         registry.register_defaults();
@@ -565,7 +553,9 @@ mod tests {
         );
 
         // Tear down so we do not leak BROWSER_PATH into other tests.
-        unsafe { std::env::remove_var("BROWSER_PATH"); }
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+        }
     }
 
     /// GAP-6 SHOW path: when BROWSER_PATH points at a non-existent path, the
@@ -581,10 +571,8 @@ mod tests {
         }
 
         let mut cfg = ToolsConfig::default();
-        cfg.toolsets.insert(
-            "browser".to_string(),
-            ToolsetEntry { enabled: true },
-        );
+        cfg.toolsets
+            .insert("browser".to_string(), ToolsetEntry { enabled: true });
 
         let mut registry = ToolRegistry::new();
         registry.register_defaults();
@@ -596,10 +584,7 @@ mod tests {
             "GAP-6 SHOW: ToolsetRow.available_count must be 0 when chromium missing, got {}",
             row.available_count,
         );
-        assert_eq!(
-            row.member_count, 11,
-            "browser member_count must be 11"
-        );
+        assert_eq!(row.member_count, 11, "browser member_count must be 11");
         assert_eq!(
             members.len(),
             11,
@@ -620,7 +605,9 @@ mod tests {
             );
         }
 
-        unsafe { std::env::remove_var("BROWSER_PATH"); }
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+        }
     }
 
     /// GAP-6 GREEN arm: when chromium IS discoverable (CHROMIUM_PATH points at a
@@ -645,10 +632,8 @@ mod tests {
         }
 
         let mut cfg = ToolsConfig::default();
-        cfg.toolsets.insert(
-            "browser".to_string(),
-            ToolsetEntry { enabled: true },
-        );
+        cfg.toolsets
+            .insert("browser".to_string(), ToolsetEntry { enabled: true });
 
         let mut registry = ToolRegistry::new();
         registry.register_defaults();
@@ -677,7 +662,9 @@ mod tests {
             row.member_summary,
         );
 
-        unsafe { std::env::remove_var("CHROMIUM_PATH"); }
+        unsafe {
+            std::env::remove_var("CHROMIUM_PATH");
+        }
     }
 
     /// Phase 25.2 Plan 15 (UAT Issue 2 side-bug): the static toolset_members_map
@@ -686,7 +673,10 @@ mod tests {
     #[test]
     fn toolset_members_map_web_includes_web_extract() {
         let m = toolset_members_map();
-        let web = m.get("web").copied().expect("web toolset must exist in members map");
+        let web = m
+            .get("web")
+            .copied()
+            .expect("web toolset must exist in members map");
         assert!(
             web.contains(&"web_extract"),
             "web toolset must list web_extract; got {:?}",

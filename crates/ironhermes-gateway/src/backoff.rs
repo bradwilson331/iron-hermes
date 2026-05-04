@@ -28,9 +28,7 @@ impl BackoffState {
     /// Compute next delay with jitter. Uses system time nanos as zero-dependency
     /// jitter source (acceptable for backoff — not cryptographic).
     pub fn next_delay(&self) -> Duration {
-        let exp = self
-            .base_ms
-            .saturating_mul(1u64 << self.failures.min(10));
+        let exp = self.base_ms.saturating_mul(1u64 << self.failures.min(10));
         let max_jitter = exp / 4 + 1;
         let jitter = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

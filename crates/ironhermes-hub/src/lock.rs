@@ -31,7 +31,7 @@ pub struct SkillLockEntry {
     pub name: String,
     pub source: String, // "skills-sh"
     pub identifier: String,
-    pub repo_path: String, // "repoPath" on wire
+    pub repo_path: String,                           // "repoPath" on wire
     pub snapshot_hash: String, // "snapshotHash" — skillsComputedHash from server (D-14)
     pub computed_hash: String, // "computedHash" — SHA-256 over installed folder (D-13)
     pub installed_at: chrono::DateTime<chrono::Utc>, // "installedAt" — NOT in hash (D-12)

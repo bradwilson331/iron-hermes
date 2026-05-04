@@ -189,60 +189,165 @@ fn build_static_table() -> HashMap<&'static str, ModelMetadata> {
 
     // ── Claude family (cl100k_base approximation) ──────────────────────
     // Claude 3.5 series
-    m.insert("claude-haiku-3.5", cl100k(200_000, Some(8_192), true, true, false, true));
-    m.insert("claude-sonnet-3.5", cl100k(200_000, Some(8_192), true, true, false, true));
+    m.insert(
+        "claude-haiku-3.5",
+        cl100k(200_000, Some(8_192), true, true, false, true),
+    );
+    m.insert(
+        "claude-sonnet-3.5",
+        cl100k(200_000, Some(8_192), true, true, false, true),
+    );
 
     // Claude 4 series
-    m.insert("claude-haiku-4", cl100k(200_000, Some(64_000), true, true, false, true));
-    m.insert("claude-sonnet-4", cl100k(200_000, Some(64_000), true, true, false, true));
-    m.insert("claude-opus-4", cl100k(200_000, Some(32_000), true, true, true, true));
+    m.insert(
+        "claude-haiku-4",
+        cl100k(200_000, Some(64_000), true, true, false, true),
+    );
+    m.insert(
+        "claude-sonnet-4",
+        cl100k(200_000, Some(64_000), true, true, false, true),
+    );
+    m.insert(
+        "claude-opus-4",
+        cl100k(200_000, Some(32_000), true, true, true, true),
+    );
 
     // Claude 4.5 series
-    m.insert("claude-sonnet-4.5", cl100k(200_000, Some(64_000), true, true, false, true));
+    m.insert(
+        "claude-sonnet-4.5",
+        cl100k(200_000, Some(64_000), true, true, false, true),
+    );
 
     // Claude 4.6 series
-    m.insert("claude-opus-4.6", cl100k(1_000_000, Some(32_000), true, true, true, true));
+    m.insert(
+        "claude-opus-4.6",
+        cl100k(1_000_000, Some(32_000), true, true, true, true),
+    );
 
     // ── GPT family (o200k_base for 4o+, cl100k_base for older) ────────
-    m.insert("gpt-4o", o200k(128_000, Some(16_384), true, true, false, true));
-    m.insert("gpt-4o-mini", o200k(128_000, Some(16_384), true, true, false, true));
-    m.insert("gpt-4.1", o200k(1_047_576, Some(32_768), true, true, false, true));
-    m.insert("gpt-4.1-mini", o200k(1_047_576, Some(32_768), true, true, false, true));
-    m.insert("gpt-4.1-nano", o200k(1_047_576, Some(32_768), false, true, false, true));
+    m.insert(
+        "gpt-4o",
+        o200k(128_000, Some(16_384), true, true, false, true),
+    );
+    m.insert(
+        "gpt-4o-mini",
+        o200k(128_000, Some(16_384), true, true, false, true),
+    );
+    m.insert(
+        "gpt-4.1",
+        o200k(1_047_576, Some(32_768), true, true, false, true),
+    );
+    m.insert(
+        "gpt-4.1-mini",
+        o200k(1_047_576, Some(32_768), true, true, false, true),
+    );
+    m.insert(
+        "gpt-4.1-nano",
+        o200k(1_047_576, Some(32_768), false, true, false, true),
+    );
     m.insert("o3", o200k(200_000, Some(100_000), true, true, true, true));
-    m.insert("o3-mini", o200k(200_000, Some(100_000), false, true, true, true));
-    m.insert("o4-mini", o200k(200_000, Some(100_000), true, true, true, true));
+    m.insert(
+        "o3-mini",
+        o200k(200_000, Some(100_000), false, true, true, true),
+    );
+    m.insert(
+        "o4-mini",
+        o200k(200_000, Some(100_000), true, true, true, true),
+    );
 
     // ── Llama family (cl100k_base approximation) ──────────────────────
-    m.insert("llama-3.1-8b", cl100k(128_000, Some(4_096), false, true, false, true));
-    m.insert("llama-3.1-70b", cl100k(128_000, Some(4_096), false, true, false, true));
-    m.insert("llama-3.1-405b", cl100k(128_000, Some(4_096), false, true, false, true));
-    m.insert("llama-3.3-70b", cl100k(128_000, Some(4_096), false, true, false, true));
-    m.insert("llama-4-scout", cl100k(512_000, Some(16_384), true, true, false, true));
-    m.insert("llama-4-maverick", cl100k(1_048_576, Some(16_384), true, true, false, true));
+    m.insert(
+        "llama-3.1-8b",
+        cl100k(128_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "llama-3.1-70b",
+        cl100k(128_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "llama-3.1-405b",
+        cl100k(128_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "llama-3.3-70b",
+        cl100k(128_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "llama-4-scout",
+        cl100k(512_000, Some(16_384), true, true, false, true),
+    );
+    m.insert(
+        "llama-4-maverick",
+        cl100k(1_048_576, Some(16_384), true, true, false, true),
+    );
 
     // ── Gemini family (cl100k_base approximation) ─────────────────────
-    m.insert("gemini-2.0-flash", cl100k(1_048_576, Some(8_192), true, true, false, true));
-    m.insert("gemini-2.5-pro", cl100k(1_048_576, Some(65_536), true, true, true, true));
-    m.insert("gemini-2.5-flash", cl100k(1_048_576, Some(65_536), true, true, true, true));
+    m.insert(
+        "gemini-2.0-flash",
+        cl100k(1_048_576, Some(8_192), true, true, false, true),
+    );
+    m.insert(
+        "gemini-2.5-pro",
+        cl100k(1_048_576, Some(65_536), true, true, true, true),
+    );
+    m.insert(
+        "gemini-2.5-flash",
+        cl100k(1_048_576, Some(65_536), true, true, true, true),
+    );
 
     // ── Mistral / Mixtral family (cl100k_base approximation) ──────────
-    m.insert("mistral-large", cl100k(128_000, Some(4_096), false, true, false, true));
-    m.insert("mistral-small", cl100k(128_000, Some(4_096), false, true, false, true));
-    m.insert("mistral-medium", cl100k(32_000, Some(4_096), false, true, false, true));
-    m.insert("mixtral-8x22b", cl100k(65_536, Some(4_096), false, true, false, true));
-    m.insert("mixtral-8x7b", cl100k(32_768, Some(4_096), false, true, false, true));
-    m.insert("codestral", cl100k(256_000, Some(8_192), false, true, false, true));
+    m.insert(
+        "mistral-large",
+        cl100k(128_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "mistral-small",
+        cl100k(128_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "mistral-medium",
+        cl100k(32_000, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "mixtral-8x22b",
+        cl100k(65_536, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "mixtral-8x7b",
+        cl100k(32_768, Some(4_096), false, true, false, true),
+    );
+    m.insert(
+        "codestral",
+        cl100k(256_000, Some(8_192), false, true, false, true),
+    );
 
     // ── DeepSeek family (cl100k_base approximation) ───────────────────
-    m.insert("deepseek-v3", cl100k(128_000, Some(8_192), false, true, false, true));
-    m.insert("deepseek-r1", cl100k(164_000, Some(8_192), false, true, true, true));
+    m.insert(
+        "deepseek-v3",
+        cl100k(128_000, Some(8_192), false, true, false, true),
+    );
+    m.insert(
+        "deepseek-r1",
+        cl100k(164_000, Some(8_192), false, true, true, true),
+    );
 
     // ── Qwen family (cl100k_base approximation) ──────────────────────
-    m.insert("qwen-2.5-72b", cl100k(128_000, Some(8_192), false, true, false, true));
-    m.insert("qwen-2.5-coder-32b", cl100k(32_768, Some(8_192), false, true, false, true));
-    m.insert("qwen-2.5-14b", cl100k(128_000, Some(8_192), false, true, false, true));
-    m.insert("qwen-2.5-7b", cl100k(128_000, Some(8_192), false, true, false, true));
+    m.insert(
+        "qwen-2.5-72b",
+        cl100k(128_000, Some(8_192), false, true, false, true),
+    );
+    m.insert(
+        "qwen-2.5-coder-32b",
+        cl100k(32_768, Some(8_192), false, true, false, true),
+    );
+    m.insert(
+        "qwen-2.5-14b",
+        cl100k(128_000, Some(8_192), false, true, false, true),
+    );
+    m.insert(
+        "qwen-2.5-7b",
+        cl100k(128_000, Some(8_192), false, true, false, true),
+    );
 
     m
 }
@@ -307,7 +412,9 @@ mod tests {
     #[test]
     fn lookup_claude_sonnet_4() {
         let reg = ModelRegistry::new();
-        let meta = reg.lookup("claude-sonnet-4").expect("claude-sonnet-4 should exist");
+        let meta = reg
+            .lookup("claude-sonnet-4")
+            .expect("claude-sonnet-4 should exist");
         assert_eq!(meta.context_length, 200_000);
         assert_eq!(meta.max_output_tokens, Some(64_000));
         assert_eq!(meta.tokenizer, "cl100k_base");
@@ -318,7 +425,9 @@ mod tests {
     #[test]
     fn lookup_claude_opus_4() {
         let reg = ModelRegistry::new();
-        let meta = reg.lookup("claude-opus-4").expect("claude-opus-4 should exist");
+        let meta = reg
+            .lookup("claude-opus-4")
+            .expect("claude-opus-4 should exist");
         assert_eq!(meta.context_length, 200_000);
         assert!(meta.capabilities.reasoning);
     }
@@ -334,21 +443,27 @@ mod tests {
     #[test]
     fn lookup_provider_prefix_stripping() {
         let reg = ModelRegistry::new();
-        let meta = reg.lookup("anthropic/claude-sonnet-4").expect("provider prefix should resolve");
+        let meta = reg
+            .lookup("anthropic/claude-sonnet-4")
+            .expect("provider prefix should resolve");
         assert_eq!(meta.context_length, 200_000);
     }
 
     #[test]
     fn lookup_versioned_alias() {
         let reg = ModelRegistry::new();
-        let meta = reg.lookup("claude-sonnet-4-20250514").expect("versioned alias should resolve");
+        let meta = reg
+            .lookup("claude-sonnet-4-20250514")
+            .expect("versioned alias should resolve");
         assert_eq!(meta.context_length, 200_000);
     }
 
     #[test]
     fn lookup_openai_prefix_stripping() {
         let reg = ModelRegistry::new();
-        let meta = reg.lookup("openai/gpt-4o").expect("openai prefix should resolve");
+        let meta = reg
+            .lookup("openai/gpt-4o")
+            .expect("openai prefix should resolve");
         assert_eq!(meta.tokenizer, "o200k_base");
     }
 
@@ -372,7 +487,9 @@ mod tests {
             },
         );
         reg.merge_cache(entries);
-        let meta = reg.lookup("claude-sonnet-4").expect("should find cached entry");
+        let meta = reg
+            .lookup("claude-sonnet-4")
+            .expect("should find cached entry");
         assert_eq!(meta.context_length, 999_999);
     }
 

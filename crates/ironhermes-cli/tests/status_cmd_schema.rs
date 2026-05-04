@@ -23,10 +23,17 @@ fn top_level_keys_are_exactly_seven() {
     let json = serde_json::to_value(StatusReport::fixture()).unwrap();
     let obj = json.as_object().expect("object");
     let keys: std::collections::HashSet<&str> = obj.keys().map(|s| s.as_str()).collect();
-    let expected: std::collections::HashSet<&str> =
-        ["provider", "memory", "gateway", "subagents", "processes", "mcp", "yolo"]
-            .into_iter()
-            .collect();
+    let expected: std::collections::HashSet<&str> = [
+        "provider",
+        "memory",
+        "gateway",
+        "subagents",
+        "processes",
+        "mcp",
+        "yolo",
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
         keys, expected,
         "D-18 / D-20 v1 top-level keys: missing or extra key detected. \

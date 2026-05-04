@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserBackTool {
@@ -27,8 +27,12 @@ impl BrowserBackTool {
 
 #[async_trait]
 impl Tool for BrowserBackTool {
-    fn name(&self) -> &str { "browser_back" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_back"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Navigate back in browser history. Returns the new URL after the back navigation."
     }
@@ -53,8 +57,9 @@ impl Tool for BrowserBackTool {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -65,14 +70,20 @@ impl Tool for BrowserBackTool {
         let sess = ensure_session(&mut guard).await?;
 
         // Page.goBack via JS — CDP-version-agnostic per RESEARCH §"Navigation API"
-        let _ = sess.page.evaluate("window.history.back()").await
+        let _ = sess
+            .page
+            .evaluate("window.history.back()")
+            .await
             .map_err(|e| anyhow::anyhow!("history.back failed: {e}"))?;
 
         // Brief wait for the new document to commit. 250ms is empirical; if the
         // page is slow, the LLM can call browser_snapshot which has its own waits.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-        let url = sess.page.url().await
+        let url = sess
+            .page
+            .url()
+            .await
             .ok()
             .flatten()
             .unwrap_or_else(|| "about:blank".to_string());
@@ -116,8 +127,10 @@ mod tests {
         let s = t.schema();
         let params = s.function.parameters;
         let required = params.get("required").and_then(|v| v.as_array());
-        assert!(required.map(|a| a.is_empty()).unwrap_or(true),
-            "browser_back takes no required args");
+        assert!(
+            required.map(|a| a.is_empty()).unwrap_or(true),
+            "browser_back takes no required args"
+        );
     }
 
     #[test]

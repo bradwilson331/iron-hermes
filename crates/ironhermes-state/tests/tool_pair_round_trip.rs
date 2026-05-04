@@ -20,10 +20,10 @@
 //!    `ORDER BY timestamp ASC`.
 
 use ironhermes_core::{
-    validate_tool_call_pairing, ChatMessage, FunctionCall, MessageContent, Role, ToolCall,
+    ChatMessage, FunctionCall, MessageContent, Role, ToolCall, validate_tool_call_pairing,
 };
 use ironhermes_state::{StateStore, StoredMessage};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 fn tc(id: &str, name: &str) -> ToolCall {
@@ -124,10 +124,7 @@ fn state_store_round_trip_preserves_tool_pair_order_id_ordering() {
 
         // Order must match input EXACTLY (role + tool_call_id zip).
         for (i, (input, out)) in messages.iter().zip(reconstructed.iter()).enumerate() {
-            assert_eq!(
-                input.role, out.role,
-                "role at idx {i} (iter={iteration})"
-            );
+            assert_eq!(input.role, out.role, "role at idx {i} (iter={iteration})");
             assert_eq!(
                 input.tool_call_id, out.tool_call_id,
                 "tool_call_id at idx {i} (iter={iteration})"

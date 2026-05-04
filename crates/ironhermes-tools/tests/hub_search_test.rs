@@ -10,7 +10,7 @@
 
 use ironhermes_core::{HubConfig, SkillRegistry};
 use ironhermes_tools::skills_tool::SkillsTool;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -62,7 +62,11 @@ fn hub_search_schema_contains_action() {
 
     let arr = action_enum.as_array().expect("action enum is array");
     let has_hub_search = arr.iter().any(|v| v.as_str() == Some("hub_search"));
-    assert!(has_hub_search, "schema action enum must contain 'hub_search'; got: {:?}", arr);
+    assert!(
+        has_hub_search,
+        "schema action enum must contain 'hub_search'; got: {:?}",
+        arr
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -82,16 +86,32 @@ async fn hub_search_response_shape() {
     let v: Value = serde_json::from_str(&result_str).expect("valid JSON response");
 
     // Must have a "results" array (may be empty in offline CI)
-    assert!(v.get("results").is_some(), "response must have 'results' key; got: {}", v);
+    assert!(
+        v.get("results").is_some(),
+        "response must have 'results' key; got: {}",
+        v
+    );
     let results = v["results"].as_array().expect("results must be array");
 
     // Each item must have the required fields with valid trust_level
     let valid_trust = ["builtin", "official", "trusted", "community"];
     for item in results {
         assert!(item.get("name").is_some(), "item missing 'name': {}", item);
-        assert!(item.get("source").is_some(), "item missing 'source': {}", item);
-        assert!(item.get("identifier").is_some(), "item missing 'identifier': {}", item);
-        assert!(item.get("description").is_some(), "item missing 'description': {}", item);
+        assert!(
+            item.get("source").is_some(),
+            "item missing 'source': {}",
+            item
+        );
+        assert!(
+            item.get("identifier").is_some(),
+            "item missing 'identifier': {}",
+            item
+        );
+        assert!(
+            item.get("description").is_some(),
+            "item missing 'description': {}",
+            item
+        );
         let tl = item.get("trust_level").and_then(|v| v.as_str());
         assert!(tl.is_some(), "item missing 'trust_level': {}", item);
         assert!(
@@ -127,7 +147,10 @@ async fn hub_search_invalid_source_returns_error_envelope() {
         v
     );
     let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-    assert_eq!(kind, "invalid_identifier", "error kind must be 'invalid_identifier'");
+    assert_eq!(
+        kind, "invalid_identifier",
+        "error kind must be 'invalid_identifier'"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +245,9 @@ async fn hub_search_no_filesystem_mutation() {
 
     let tmp = tempfile::tempdir().unwrap();
     let prev = std::env::var("HERMES_HOME").ok();
-    unsafe { std::env::set_var("HERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("HERMES_HOME", tmp.path());
+    }
 
     // Snapshot the directory state before the call
     let snapshot_before = dir_snapshot(tmp.path());
@@ -244,8 +269,7 @@ async fn hub_search_no_filesystem_mutation() {
     }
 
     assert_eq!(
-        snapshot_before,
-        snapshot_after,
+        snapshot_before, snapshot_after,
         "hub_search must not mutate HERMES_HOME (D-13 filesystem invariant)"
     );
 }
@@ -263,7 +287,9 @@ fn dir_snapshot(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 fn collect_paths(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();

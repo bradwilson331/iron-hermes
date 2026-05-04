@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ironhermes_hub::{
-    install, uninstall, update, AlwaysBlockedScanner, AlwaysCleanScanner, GitHubAuth,
-    GitHubSource, HubError, HubErrorKind, SkillLock, SkillsShBlobSource,
+    AlwaysBlockedScanner, AlwaysCleanScanner, GitHubAuth, GitHubSource, HubError, HubErrorKind,
+    SkillLock, SkillsShBlobSource, install, uninstall, update,
 };
 
 use fixtures::{sample_blob_response_json, sample_skill_md_frontmatter, sample_tree_json};
@@ -52,8 +52,7 @@ async fn mount_github_mocks(server: &MockServer, tarball_bytes: Vec<u8>) {
     Mock::given(method("GET"))
         .and(path("/repos/anthropics/skills"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"default_branch": "main"})),
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"default_branch": "main"})),
         )
         .mount(server)
         .await;
@@ -68,8 +67,8 @@ async fn mount_github_mocks(server: &MockServer, tarball_bytes: Vec<u8>) {
 /// Build a tarball with customisable SKILL.md body so we can produce different
 /// content hashes on successive fetches.
 fn build_skill_tarball(extra_content: &str) -> Vec<u8> {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
 
     let skill_md = format!(
         "---\nname: tenor-gif\ndescription: Tenor GIF search\nversion: 1.0.0\n---\n\n# Tenor GIF\n\n{}\n",
@@ -140,19 +139,16 @@ async fn update_detects_hash_drift_and_replaces() {
     mount_github_mocks(&server2, build_skill_tarball("v2 updated content")).await;
     let source2 = test_github_source(&server2.uri(), HashSet::new());
 
-    let update_outcome = update(
-        &source2,
-        "tenor-gif",
-        &scanner,
-        &skills_root,
-        false,
-    )
-    .await
-    .expect("update should succeed");
+    let update_outcome = update(&source2, "tenor-gif", &scanner, &skills_root, false)
+        .await
+        .expect("update should succeed");
 
     assert_eq!(update_outcome.name, "tenor-gif");
     assert_eq!(update_outcome.old_hash, old_hash);
-    assert_ne!(update_outcome.old_hash, update_outcome.new_hash, "hashes should differ");
+    assert_ne!(
+        update_outcome.old_hash, update_outcome.new_hash,
+        "hashes should differ"
+    );
     assert_eq!(update_outcome.scan_verdict, "clean");
 
     // Verify skills-lock.json was updated (SkillLockEntry.computed_hash is
@@ -282,15 +278,9 @@ async fn update_rejects_community_scan_blocked() {
     let source2 = test_github_source(&server2.uri(), HashSet::new());
     let blocked_scanner = AlwaysBlockedScanner::new("injection detected");
 
-    let err = update(
-        &source2,
-        "tenor-gif",
-        &blocked_scanner,
-        &skills_root,
-        false,
-    )
-    .await
-    .expect_err("should be blocked");
+    let err = update(&source2, "tenor-gif", &blocked_scanner, &skills_root, false)
+        .await
+        .expect_err("should be blocked");
 
     match err {
         HubError::Typed {
@@ -326,15 +316,24 @@ async fn uninstall_removes_dir_and_manifest() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
-        .await
-        .expect("install");
+    let outcome = install(
+        &source,
+        "anthropics/skills/tenor-gif",
+        &scanner,
+        &skills_root,
+        false,
+    )
+    .await
+    .expect("install");
     assert!(outcome.install_path.exists());
 
     // Uninstall
     let un_outcome = uninstall("tenor-gif").expect("uninstall should succeed");
     assert_eq!(un_outcome.name, "tenor-gif");
-    assert!(!un_outcome.removed_path.exists(), "directory should be removed");
+    assert!(
+        !un_outcome.removed_path.exists(),
+        "directory should be removed"
+    );
 
     // Verify skills-lock.json is clean
     let lock = SkillLock::load_or_default().expect("lock");
@@ -376,13 +375,22 @@ async fn uninstall_cleans_empty_parent_category() {
     let source = test_github_source(&server.uri(), HashSet::new());
     let scanner = AlwaysCleanScanner;
 
-    let outcome = install(&source, "anthropics/skills/tenor-gif", &scanner, &skills_root, false)
-        .await
-        .expect("install");
+    let outcome = install(
+        &source,
+        "anthropics/skills/tenor-gif",
+        &scanner,
+        &skills_root,
+        false,
+    )
+    .await
+    .expect("install");
 
     // The parent dir is the category directory (e.g. "general")
     let category_dir = outcome.install_path.parent().unwrap().to_path_buf();
-    assert!(category_dir.exists(), "category dir should exist before uninstall");
+    assert!(
+        category_dir.exists(),
+        "category dir should exist before uninstall"
+    );
 
     uninstall("tenor-gif").expect("uninstall");
 
@@ -465,11 +473,19 @@ async fn update_tolerates_server_client_hash_divergence() {
     let server1 = MockServer::start().await;
     mount_three_hop_mocks(&server1, &server_hash_v1).await;
 
-    unsafe { std::env::set_var("SKILLS_DOWNLOAD_URL", server1.uri()); }
+    unsafe {
+        std::env::set_var("SKILLS_DOWNLOAD_URL", server1.uri());
+    }
     let src1 = build_blob_source_for_update_test(&server1);
-    ironhermes_hub::install(&src1, "foo/bar/ascii-art", &AlwaysCleanScanner, &skills_root, true)
-        .await
-        .expect("prime install for update divergence test");
+    ironhermes_hub::install(
+        &src1,
+        "foo/bar/ascii-art",
+        &AlwaysCleanScanner,
+        &skills_root,
+        true,
+    )
+    .await
+    .expect("prime install for update divergence test");
 
     // Step 2 — remount a new server with a divergent hash AND content-changed blob.
     // The content delta ensures bundle_folder_hash != old snapshot -> drift detected.
@@ -506,7 +522,9 @@ async fn update_tolerates_server_client_hash_divergence() {
         .mount(&server2)
         .await;
 
-    unsafe { std::env::set_var("SKILLS_DOWNLOAD_URL", server2.uri()); }
+    unsafe {
+        std::env::set_var("SKILLS_DOWNLOAD_URL", server2.uri());
+    }
     let src2 = build_blob_source_for_update_test(&server2);
 
     // Step 3 — update: must succeed despite server hash != D-13 folder hash.

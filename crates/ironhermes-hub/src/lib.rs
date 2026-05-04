@@ -19,24 +19,28 @@ pub mod source;
 pub mod tarball;
 pub mod well_known;
 
-pub use audit::{fetch_audit, AuditData, PartnerAudit};
+pub use audit::{AuditData, PartnerAudit, fetch_audit};
 pub use auth::GitHubAuth;
-pub use blob::{BlobSkill, RepoTree, SkillDownloadResponse, SkillSnapshotFile, SkillsShBlobSource, TreeEntry};
+pub use blob::{
+    BlobSkill, RepoTree, SkillDownloadResponse, SkillSnapshotFile, SkillsShBlobSource, TreeEntry,
+};
 pub use error::{HubError, HubErrorKind};
 pub use github::{GitHubSource, GitHubTap};
 pub use installer::{
-    bundle_content_hash, install, uninstall, update, InstallOutcome, UninstallOutcome,
-    UpdateOutcome,
+    InstallOutcome, UninstallOutcome, UpdateOutcome, bundle_content_hash, install, uninstall,
+    update,
 };
-pub use lock::{compute_folder_hash, migrate_from_hub_manifest, MigrationOutcome, SkillLock, SkillLockEntry};
+pub use lock::{
+    MigrationOutcome, SkillLock, SkillLockEntry, compute_folder_hash, migrate_from_hub_manifest,
+};
 pub use manifest::{HubManifest, ManifestEntry};
 pub use sanitize::{
     assert_temp_contained, is_contained_in, is_path_safe, sanitize_metadata, sanitize_name,
     sanitize_subpath, strict_yaml_delimiter, strip_terminal_escapes, to_skill_slug,
 };
 pub use scanner::{
-    enforce_trust_gate, AlwaysBlockedScanner, AlwaysCleanScanner, CoreSkillScanner, ScanVerdict,
-    SkillScanner,
+    AlwaysBlockedScanner, AlwaysCleanScanner, CoreSkillScanner, ScanVerdict, SkillScanner,
+    enforce_trust_gate,
 };
 pub use source::{BundleFile, HubSource, SkillBundle, SkillMeta};
 pub use well_known::WellKnownSkillSource;

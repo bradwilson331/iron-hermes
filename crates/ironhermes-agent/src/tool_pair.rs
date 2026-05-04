@@ -97,9 +97,7 @@ pub fn apply_adaptive_shift(
             let name = tc
                 .map(|c| c.function.name.clone())
                 .unwrap_or_else(|| "<unknown>".into());
-            let args_full = tc
-                .map(|c| c.function.arguments.clone())
-                .unwrap_or_default();
+            let args_full = tc.map(|c| c.function.arguments.clone()).unwrap_or_default();
             let args_preview = if args_full.len() > 80 {
                 format!("{}…", &args_full[..80])
             } else {
@@ -202,7 +200,10 @@ mod tests {
         let msgs = vec![
             ChatMessage::system("sys"),
             ChatMessage::user("hi"),
-            ChatMessage::assistant_tool_calls(vec![tc("tc1", "fn_a", "{}"), tc("tc2", "fn_b", "{}")]),
+            ChatMessage::assistant_tool_calls(vec![
+                tc("tc1", "fn_a", "{}"),
+                tc("tc2", "fn_b", "{}"),
+            ]),
             ChatMessage::tool_result("tc1", "r1"),
             ChatMessage::tool_result("tc2", "r2"),
             ChatMessage::assistant("done"),
@@ -298,7 +299,8 @@ mod tests {
         assert!(
             returned_small < original,
             "small body must shift boundary FORWARD (returned={} original={})",
-            returned_small, original
+            returned_small,
+            original
         );
         // Content is preserved in-place (no backward summarization).
         assert_eq!(msgs_small[4].content_text(), Some("tiny"));
@@ -323,7 +325,8 @@ mod tests {
         let rewritten = msgs_big[4].content_text().unwrap_or("");
         assert!(
             rewritten.starts_with("[Tool result summarized]"),
-            "large body must be rewritten in place, got: {}", rewritten
+            "large body must be rewritten in place, got: {}",
+            rewritten
         );
         assert!(!rewritten.contains(&big_body));
     }
@@ -352,10 +355,7 @@ mod tests {
         let msgs = vec![
             ChatMessage::system("s"),
             ChatMessage::user("u"),
-            ChatMessage::assistant_tool_calls(vec![
-                tc("p1", "fn_a", "{}"),
-                tc("p2", "fn_b", "{}"),
-            ]),
+            ChatMessage::assistant_tool_calls(vec![tc("p1", "fn_a", "{}"), tc("p2", "fn_b", "{}")]),
             ChatMessage::tool_result("p1", "r1"),
             ChatMessage::tool_result("p2", "r2"),
         ];
@@ -432,10 +432,7 @@ mod tests {
         let pairs = detect_tool_pairs(&msgs);
         assert_eq!(pairs.len(), 2, "two pairs expected");
         let eff = compute_effective_protect_first_n(&msgs, 4, &pairs);
-        assert_eq!(
-            eff, 1,
-            "multiple conflicting pairs must pick min(asst_idx)"
-        );
+        assert_eq!(eff, 1, "multiple conflicting pairs must pick min(asst_idx)");
     }
 
     #[test]

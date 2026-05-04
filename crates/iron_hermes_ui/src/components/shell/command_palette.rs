@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::state::{PaletteItem, PaletteState, Personality};
+use dioxus::prelude::*;
 
 /// CommandPalette — overlay with two substates per CONTEXT D-20:
 ///
@@ -47,8 +47,7 @@ pub fn CommandPalette(
             items
                 .iter()
                 .filter(|p| {
-                    p.cmd.to_lowercase().contains(&q)
-                        || p.label.to_lowercase().contains(&q)
+                    p.cmd.to_lowercase().contains(&q) || p.label.to_lowercase().contains(&q)
                 })
                 .cloned()
                 .collect()

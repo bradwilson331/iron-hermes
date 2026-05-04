@@ -41,7 +41,11 @@ fn s05_budget_latches_at_zero_no_extra_consume_succeeds() {
             i + 4
         );
     }
-    assert_eq!(b.remaining(), 0, "remaining must stay at 0 after None-latch");
+    assert_eq!(
+        b.remaining(),
+        0,
+        "remaining must stay at 0 after None-latch"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -52,8 +56,7 @@ fn s05_budget_latches_at_zero_no_extra_consume_succeeds() {
 #[test]
 fn s06_gateway_and_cli_do_not_read_per_request_yolo() {
     const CLI_MAIN: &str = include_str!("../src/main.rs");
-    const GW_HANDLER: &str =
-        include_str!("../../ironhermes-gateway/src/handler.rs");
+    const GW_HANDLER: &str = include_str!("../../ironhermes-gateway/src/handler.rs");
 
     for (label, src) in [("main.rs", CLI_MAIN), ("handler.rs", GW_HANDLER)] {
         assert!(

@@ -1,42 +1,44 @@
+use crate::tui::extension::{KeyContext, TuiExtension};
+use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
+use crate::tui::{CommandResult, KeybindingRegistry, dispatch_command};
+use crate::tui::{reset_terminal_visual, write_into_scroll_region};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, AgentSubagentRunner, AnyClient, AnyClientSummarizationHandle, AnyClientVisionHandle, PressureTracker, PromptBuilder, build_client as build_provider_client, build_main_client};
 use ironhermes_agent::budget::BudgetHandle;
-use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
-use ironhermes_cron::JobStore;
+use ironhermes_agent::{
+    AgentLoop, AgentSubagentRunner, AnyClient, AppRuntimeFactoryInput, DelegateTaskWiring,
+    PressureTracker, PromptBuilder, build_app_runtime_bundle,
+    build_client as build_provider_client, build_main_client,
+};
+use ironhermes_core::commands::CommandRouter;
+use ironhermes_core::commands::context::CommandContext;
+use ironhermes_core::commands::registry::build_registry as build_command_registry;
+use ironhermes_core::types::Platform;
+use ironhermes_core::{ChatMessage, Config, ProviderResolver};
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState, TuiHandle};
-use crate::tui::{dispatch_command, KeybindingRegistry, CommandResult};
-use crate::tui::{reset_terminal_visual, write_into_scroll_region};
-use crate::tui::extension::{KeyContext, TuiExtension};
-use crate::tui::commands::build_cli_router;
-use ironhermes_core::commands::{CommandResult as CoreCommandResult, CommandRouter};
-use ironhermes_core::commands::context::CommandContext;
-use ironhermes_core::commands::registry::build_registry as build_command_registry;
-use ironhermes_core::types::Platform;
-use std::time::Instant;
 
-mod config_cli;
-mod provider_cmd;
-mod toolset_cmd;
-mod cron;
 mod batch;
+mod config_cli;
+mod cron;
+mod mcp_config;
 mod memory_cmd;
 mod memory_setup;
 mod models_cmd;
-mod mcp_config;
 mod preflight;
+mod provider_cmd;
 mod setup;
+mod toolset_cmd;
 mod tui;
 use ironhermes_cli::skills_cmd;
 // Phase 25.3 Plan 11: `hermes session export[-all]` (D-F-1 / D-F-2).
@@ -287,8 +289,8 @@ async fn main() -> Result<()> {
     //
     // Phase 24 must NOT widen the gate condition. PROF-01..N (full lifecycle)
     // is deferred to v2.2 per REQUIREMENTS.md.
-    let run_preflight = matches!(cli.command, Some(Commands::Chat { .. }) | None)
-        && cli.execute.is_none();
+    let run_preflight =
+        matches!(cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
     if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
@@ -313,8 +315,8 @@ async fn main() -> Result<()> {
     // install to run_chat_ratatui (which installs TuiTracingSubscriberLayer).
     // All other paths (non-chat commands + chat-when-classic-wins) install the
     // standard fmt subscriber here.
-    let is_chat_or_bare = matches!(&cli.command, Some(Commands::Chat { .. }) | None)
-        && cli.execute.is_none();
+    let is_chat_or_bare =
+        matches!(&cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
     let will_use_ratatui_for_chat = is_chat_or_bare && !should_use_classic_tui(&cli);
     if !will_use_ratatui_for_chat {
         tracing_subscriber::fmt()
@@ -331,7 +333,10 @@ async fn main() -> Result<()> {
         Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Version) => cmd_version(),
-        Some(Commands::Chat { ref message, yolo: ref chat_yolo }) => {
+        Some(Commands::Chat {
+            ref message,
+            yolo: ref chat_yolo,
+        }) => {
             // Phase 21.7 Plan 08 (D-12): OR top-level + subcommand yolo flags.
             // `cli.yolo` captures `hermes --yolo chat ...`; `chat_yolo` captures
             // `hermes chat --yolo ...`. Either path reaches the REPL with the
@@ -363,7 +368,12 @@ async fn main() -> Result<()> {
                     quiet: cli.quiet,
                     yolo: cli_yolo_flag,
                 };
-                ironhermes_cli::tui_rata::run_chat_ratatui(&rata_cli, message.clone(), cli_yolo_flag).await
+                ironhermes_cli::tui_rata::run_chat_ratatui(
+                    &rata_cli,
+                    message.clone(),
+                    cli_yolo_flag,
+                )
+                .await
             }
         }
         Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
@@ -372,31 +382,38 @@ async fn main() -> Result<()> {
         Some(Commands::Skills { action }) => {
             let config_path = ironhermes_core::Config::config_path();
             match skills_cmd::dispatch(&config_path, action).await {
-                Ok(code) => { std::process::exit(code); }
-                Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
-            }
-        }
-        Some(Commands::Memory { action: MemorySubcommand::Setup }) => {
-            memory_setup::run_memory_setup(&cli).await
-        }
-        Some(Commands::Memory { action: MemorySubcommand::Status }) => {
-            memory_cmd::handle_memory_status().await
-        }
-        Some(Commands::Memory { action: MemorySubcommand::Off }) => {
-            memory_cmd::handle_memory_off().await
-        }
-        Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
-        Some(Commands::Mcp { action }) => {
-            match mcp_config::handle_mcp_command(action).await {
-                Ok(()) => Ok(()),
+                Ok(code) => {
+                    std::process::exit(code);
+                }
                 Err(e) => {
-                    eprintln!("{}: {}", "Error".red().bold(), e);
+                    eprintln!("error: {}", e);
                     std::process::exit(1);
                 }
             }
+        }
+        Some(Commands::Memory {
+            action: MemorySubcommand::Setup,
+        }) => memory_setup::run_memory_setup(&cli).await,
+        Some(Commands::Memory {
+            action: MemorySubcommand::Status,
+        }) => memory_cmd::handle_memory_status().await,
+        Some(Commands::Memory {
+            action: MemorySubcommand::Off,
+        }) => memory_cmd::handle_memory_off().await,
+        Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
+        Some(Commands::Mcp { action }) => match mcp_config::handle_mcp_command(action).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                std::process::exit(1);
+            }
         },
         Some(Commands::Setup { ref section }) => {
-            setup::run_setup(section.as_deref(), ironhermes_core::wizard::WizardMode::Explicit).await
+            setup::run_setup(
+                section.as_deref(),
+                ironhermes_core::wizard::WizardMode::Explicit,
+            )
+            .await
         }
         Some(Commands::Config { subcommand }) => {
             // Phase 24 D-15: thread the active profile name so cmd_config_show
@@ -481,8 +498,8 @@ fn resolve_and_set_profile(cli: &Cli) -> Result<Option<String>> {
     };
     let validated = ironhermes_core::profile::validate_profile_name(name)
         .map_err(|e| anyhow::anyhow!("Invalid profile name '{}': {}", name, e))?;
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
     let profile_path = home
         .join(".ironhermes")
         .join(ironhermes_core::PROFILES_SUBDIR)
@@ -564,11 +581,13 @@ fn cmd_doctor() -> Result<()> {
         let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
             .ok()
             .flatten()
-            .map(|r| matches!(
-                ironhermes_gateway::pid::is_pid_alive(r.pid),
-                ironhermes_gateway::pid::PidLiveness::Live
-                    | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
-            ))
+            .map(|r| {
+                matches!(
+                    ironhermes_gateway::pid::is_pid_alive(r.pid),
+                    ironhermes_gateway::pid::PidLiveness::Live
+                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
+                )
+            })
             .unwrap_or(false);
         print_check("Gateway PID (gateway.pid → live process)", pid_ok);
     } else {
@@ -577,20 +596,13 @@ fn cmd_doctor() -> Result<()> {
     }
 
     println!();
-    println!(
-        "{}",
-        "Run `ironhermes status` for more details.".dimmed()
-    );
+    println!("{}", "Run `ironhermes status` for more details.".dimmed());
 
     Ok(())
 }
 
 fn print_check(name: &str, ok: bool) {
-    let icon = if ok {
-        "OK".green()
-    } else {
-        "MISSING".yellow()
-    };
+    let icon = if ok { "OK".green() } else { "MISSING".yellow() };
     println!("  [{icon}] {name}");
 }
 
@@ -606,13 +618,14 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 
     // Phase 21.3: initialize global token estimator from model's encoding
     let main_ep = resolver.resolve_for_main();
-    let encoding_name = main_ep.model_metadata
+    let encoding_name = main_ep
+        .model_metadata
         .as_ref()
         .map(|m| m.tokenizer.as_str())
         .unwrap_or("cl100k_base");
-    ironhermes_core::init_global_estimator(
-        ironhermes_core::TiktokenEncoding::from_name(encoding_name)
-    );
+    ironhermes_core::init_global_estimator(ironhermes_core::TiktokenEncoding::from_name(
+        encoding_name,
+    ));
     let context_length = main_ep.context_length();
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
@@ -623,16 +636,21 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         .map(Arc::new);
 
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
-    let mut state_store = ironhermes_state::StateStore::open_default()
-        .context("failed to open state.db for CLI")?;
+    let mut state_store =
+        ironhermes_state::StateStore::open_default().context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
     // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with the
     // prompt-line and /sessions --workspace filter (single source of truth).
     let workspace_root_canon = workspace.as_ref().map(|ws| ws.canonical_root_string());
-    state_store.create_session(
-        &session_id, "cli", Some(client.model()), None, None,
-        workspace_root_canon.as_deref(),
-    )
+    state_store
+        .create_session(
+            &session_id,
+            "cli",
+            Some(client.model()),
+            None,
+            None,
+            workspace_root_canon.as_deref(),
+        )
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
     // the session_search intercept handler (D-07 / session_search regression fix).
@@ -641,18 +659,27 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Phase 25.3 D-T-2 / D-T-3: open TrajectoryWriter at workspace-scoped or global
     // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
     // workspace is resolved, else ~/.ironhermes/sessions/<id>/trajectories.jsonl.
-    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+    let trajectory_writer: Option<
+        Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    > = {
         let traj_dir = match &workspace {
-            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&session_id),
+            Some(ws) => ws
+                .root
+                .join(".ironhermes")
+                .join("sessions")
+                .join(&session_id),
             None => ironhermes_core::get_hermes_home()
-                .join("sessions").join(&session_id),
+                .join("sessions")
+                .join(&session_id),
         };
         let traj_path = traj_dir.join("trajectories.jsonl");
         match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
             Ok(w) => {
                 let arc_writer = Arc::new(std::sync::Mutex::new(w));
                 let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
-                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                        arc_writer,
+                    ));
                 Some(handle)
             }
             Err(e) => {
@@ -677,9 +704,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // terminal/execute_code `background=true` spawns. Kept in scope so
     // on_session_end can call drain_and_kill_session below.
     let process_registry = Arc::new(tokio::sync::RwLock::new(
-        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(
-            session_id.clone(),
-        ),
+        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(session_id.clone()),
     ));
     // Plan 21.7-07 (D-03 / D-04 / D-05): session-scoped SubagentRegistry +
     // HERMES_HOME for transcripts. The runner threads both into each
@@ -688,8 +713,6 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         ironhermes_agent::subagent_registry::SubagentRegistry::new(),
     ));
     let hermes_home = ironhermes_core::get_hermes_home();
-    let mut registry = build_registry_with_process_registry(process_registry.clone());
-
     // Plan 20-03 Fix 2 / GAP-4: build memory manager — returns None when
     // config.memory.memory_enabled=false (T-21.4-02). All downstream
     // consumers guard with if-let so None propagates cleanly.
@@ -697,153 +720,45 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
             .await
             .context("building memory manager for single-prompt mode")?;
-    if let Some(ref mgr) = memory_manager {
-        registry.register_memory_tool(mgr.clone());
-    }
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
     // transcript scope into the runner so lifecycle events update state.
     let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(
-            client.clone(),
-            resolver.clone(),
-            Some(budget.clone()),
-        )
-        .with_subagent_registry(subagent_registry.clone())
-        .with_transcript_scope(hermes_home.clone(), session_id.clone()),
+        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
+            .with_subagent_registry(subagent_registry.clone())
+            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
     );
-    registry.register_delegate_task_tool(
-        subagent_runner,
-        subagent_semaphore,
-        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        config.subagent.clone(),
-        None, // no cancel token in single mode
-        None, // no progress callback in single mode
-    );
-
-    // Phase 22: register cron_tool (per D-02/D-03)
-    let cron_dir = ironhermes_core::get_hermes_home().join("cron");
-    let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
-    registry.register_cronjob_tool(job_store.clone());
-
-    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
-    // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
-    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
-    registry.register_browser_tools_with_vision(
-        browser_session.clone(),
-        std::sync::Arc::new(resolver.clone()),
-        vision_handle,
-        std::sync::Arc::new(config.clone()),
-    );
-
-    // Phase 22: skills tool (per D-02/D-03)
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
-    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
-    registry.register_skills_tool(
-        skill_registry.clone(),
-        active_skills.clone(),
-        credential_dir,
-        std::collections::HashMap::new(),
-    );
-
-    // Phase 25.2 D-13 / D-20: register web_extract tool with summarization handle.
-    // Uses the SAME Arc<ProviderResolver> pattern as the vision handle (Phase 26 cascade — second consumer).
-    // Uses the SAME Arc<SkillRegistry> as register_skills_tool (D-10 youtube-content dispatch reuses it).
-    let summarization_handle = std::sync::Arc::new(
-        AnyClientSummarizationHandle::new(std::sync::Arc::new(resolver.clone())),
-    );
-    registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
-
-    // Phase 22: RPC dispatch registry — safe subset per D-04 (no terminal, no execute_code)
-    let mut rpc_registry = ToolRegistry::new();
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::WriteFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::PatchFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    if let Some(ref mgr) = memory_manager {
-        rpc_registry.register_memory_tool(mgr.clone());
-    }
-    let rpc_registry = Arc::new(rpc_registry);
-
-    // Phase 22 / Plan 21.7-06: execute_code with active_skills bypass AND the
-    // session-scoped ProcessRegistry so `background=true` spawns are tracked
-    // and drained on on_session_end (D-24, D-29).
-    registry.register_execute_code_tool_with_process_registry(
-        rpc_registry,
-        config.exec.clone(),
-        active_skills.clone(),
-        process_registry.clone(),
-    );
-
-    // Phase 22: guardrails (per D-02, D-08 — before Arc wrap)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    if !hooks_config.blocked_tools.is_empty() {
-        registry.add_guardrail(Box::new(
-            ironhermes_hooks::BlocklistGuardrail::from_config(&hooks_config),
-        ));
-    }
-    registry.set_error_detail(hooks_config.error_detail.clone());
+    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+        config: Arc::new(config.clone()),
+        resolver: Arc::new(resolver.clone()),
+        cwd: cwd.clone(),
+        process_registry: process_registry.clone(),
+        memory_manager: memory_manager
+            .clone()
+            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
+        delegate_task: Some(DelegateTaskWiring {
+            runner: subagent_runner,
+            semaphore: subagent_semaphore,
+            config: config.subagent.clone(),
+            cancel_token: None,
+            progress_callback: None,
+        }),
+        hooks_config,
+        emit_mcp_startup_logs: true,
+    })
+    .await
+    .context("building shared app runtime bundle for run_single")?;
 
-    let registry = Arc::new(RwLock::new(registry));
+    let registry = runtime_bundle.registry.clone();
+    let hook_registry = runtime_bundle.hook_registry.clone();
+    let skill_registry = runtime_bundle.skill_registry.clone();
+    let browser_session = runtime_bundle.browser_session.clone();
 
-    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
-    // RegistryToolsetSession so /toolset list/show/enable/disable work in
-    // run_single. Reuses the existing Arc<RwLock<ToolRegistry>> — DOES NOT
-    // introduce a second Arc layer. INV-21.7-08 lock-step: this same Arc
-    // is threaded through build_cmd_ctx to both dispatch sites.
-    let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
-        Arc::new(ironhermes_tools::RegistryToolsetSession::new(
-            registry.clone(),
-            config.tools.clone(),
-        ));
-
-    // Phase 21.2: MCP tool discovery (run_single)
-    let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
-
-    // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
-    let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
-
-    // JSONL listener — default when event_log.enabled (per D-06)
-    if hooks_config.event_log.enabled {
-        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
-        hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
-    }
-
-    // Webhook listeners — opt-in per D-07
-    let retry_queue = Arc::new(
-        ironhermes_hooks::RetryQueue::new(
-            ironhermes_hooks::RetryQueue::default_path()
-        ).context("Failed to initialize webhook retry queue")?
-    );
-    for endpoint in &hooks_config.webhooks {
-        hook_registry.add_listener(
-            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone())
-        );
-    }
-    let hook_registry = Arc::new(hook_registry);
-
-    // Drain persistent retry queue
-    let default_ttl = hooks_config.webhooks.first()
-        .and_then(|e| e.queue_ttl_hours)
-        .unwrap_or(24);
-    ironhermes_hooks::drain_retry_queue(
-        retry_queue.clone(),
-        &hooks_config.webhooks,
-        default_ttl,
-    ).await;
-
-    let max_turns = cli
-        .max_turns
-        .unwrap_or(config.agent.max_turns);
+    let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
@@ -866,7 +781,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let system_msg = prompt_builder.build_system_message();
 
     let user_msg = ChatMessage::user(prompt);
-    state_store.lock().unwrap().add_message(&session_id, &user_msg)
+    state_store
+        .lock()
+        .unwrap()
+        .add_message(&session_id, &user_msg)
         .context("failed to persist user message")?;
     let messages = vec![system_msg, user_msg];
 
@@ -875,7 +793,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 
     let mut agent = AgentLoop::new(client, registry, max_turns)
         .with_budget(budget)
-        .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
+        .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
         .with_compression(context_length, config.agent.context_compression)
         .with_streaming(Box::new(|delta| {
             print!("{}", delta);
@@ -886,7 +804,13 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         }))
         // Phase 25 D-16: wire intercept handlers (todo_write/todo_read only in single mode;
         // memory handled by register_memory_tool; state_store wired for session_search).
-        .with_intercepts(None, Some(state_store.clone()), None, Some(todo_state_single), None)
+        .with_intercepts(
+            None,
+            Some(state_store.clone()),
+            None,
+            Some(todo_state_single),
+            None,
+        )
         // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
         .with_browser_session(browser_session.clone());
 
@@ -899,7 +823,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
     if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-        if let Ok(fb_client) = build_provider_client(&resolver, fb_name, &main_endpoint.default_model) {
+        if let Ok(fb_client) =
+            build_provider_client(&resolver, fb_name, &main_endpoint.default_model)
+        {
             agent = agent.with_fallback(fb_client);
         }
     }
@@ -913,10 +839,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         &config,
         &resolver,
         session_id.as_str(),
-        Some(hook_registry.clone()),   // Phase 22: D-09
-        None, // one-shot: fresh tracker per run
-        context_length, // Phase 21.3
-        memory_manager.clone(), // GAP-1/GAP-2: wire into context engine
+        Some(hook_registry.clone()), // Phase 22: D-09
+        None,                        // one-shot: fresh tracker per run
+        context_length,              // Phase 21.3
+        memory_manager.clone(),      // GAP-1/GAP-2: wire into context engine
     );
 
     let result = agent.run(messages).await?;
@@ -969,7 +895,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             let _ = state_store.lock().unwrap().add_message(&session_id, msg);
         }
     }
-    state_store.lock().unwrap().end_session(&session_id, "completed")
+    state_store
+        .lock()
+        .unwrap()
+        .end_session(&session_id, "completed")
         .context("failed to end CLI session")?;
 
     // Ensure newline after streaming
@@ -1012,11 +941,7 @@ fn build_cmd_ctx(
     workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
 ) -> CommandContext {
-    let base = CommandContext::new(
-        Platform::Local,
-        session_id.to_string(),
-        agent_running,
-    );
+    let base = CommandContext::new(Platform::Local, session_id.to_string(), agent_running);
     let base = if let Some(mgr) = mcp_manager {
         base.with_mcp_reloader(mgr.clone())
     } else {
@@ -1024,14 +949,10 @@ fn build_cmd_ctx(
     };
     let ctx = base
         .with_subagent_registry(Arc::new(
-            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
-                subagent_registry,
-            ),
+            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(subagent_registry),
         ))
         .with_process_registry(Arc::new(
-            ironhermes_exec::process_registry::ProcessRegistryHandle::new(
-                process_registry,
-            ),
+            ironhermes_exec::process_registry::ProcessRegistryHandle::new(process_registry),
         ))
         .with_budget(Arc::new(budget))
         .with_subagent_semaphore(subagent_semaphore)
@@ -1061,11 +982,7 @@ fn build_cmd_ctx(
 }
 
 /// Run interactive chat mode.
-async fn run_chat(
-    cli: &Cli,
-    initial_message: Option<String>,
-    cli_yolo_flag: bool,
-) -> Result<()> {
+async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: bool) -> Result<()> {
     print_banner();
     // GAP-5: force banner to hit the terminal BEFORE any async MCP startup
     // message can interleave on stderr. Without this flush, the stdout buffer
@@ -1085,13 +1002,14 @@ async fn run_chat(
 
     // Phase 21.3: initialize global token estimator from model's encoding
     let main_ep = resolver.resolve_for_main();
-    let encoding_name = main_ep.model_metadata
+    let encoding_name = main_ep
+        .model_metadata
         .as_ref()
         .map(|m| m.tokenizer.as_str())
         .unwrap_or("cl100k_base");
-    ironhermes_core::init_global_estimator(
-        ironhermes_core::TiktokenEncoding::from_name(encoding_name)
-    );
+    ironhermes_core::init_global_estimator(ironhermes_core::TiktokenEncoding::from_name(
+        encoding_name,
+    ));
     let context_length = main_ep.context_length();
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
@@ -1102,16 +1020,21 @@ async fn run_chat(
         .map(Arc::new);
 
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
-    let mut state_store = ironhermes_state::StateStore::open_default()
-        .context("failed to open state.db for CLI")?;
+    let mut state_store =
+        ironhermes_state::StateStore::open_default().context("failed to open state.db for CLI")?;
     let session_id = uuid::Uuid::new_v4().to_string();
     // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with the
     // prompt-line and /sessions --workspace filter (single source of truth).
     let workspace_root_canon = workspace.as_ref().map(|ws| ws.canonical_root_string());
-    state_store.create_session(
-        &session_id, "cli", Some(client.model()), None, None,
-        workspace_root_canon.as_deref(),
-    )
+    state_store
+        .create_session(
+            &session_id,
+            "cli",
+            Some(client.model()),
+            None,
+            None,
+            workspace_root_canon.as_deref(),
+        )
         .context("failed to create CLI session")?;
     // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
     // the session_search intercept handler (D-07 / session_search regression fix).
@@ -1121,18 +1044,27 @@ async fn run_chat(
     // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
     // workspace is resolved, else ~/.ironhermes/sessions/<id>/trajectories.jsonl.
     // Same path scheme used by run_single + tui_rata::build_app_deps + run_gateway.
-    let trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>> = {
+    let trajectory_writer: Option<
+        Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>,
+    > = {
         let traj_dir = match &workspace {
-            Some(ws) => ws.root.join(".ironhermes").join("sessions").join(&session_id),
+            Some(ws) => ws
+                .root
+                .join(".ironhermes")
+                .join("sessions")
+                .join(&session_id),
             None => ironhermes_core::get_hermes_home()
-                .join("sessions").join(&session_id),
+                .join("sessions")
+                .join(&session_id),
         };
         let traj_path = traj_dir.join("trajectories.jsonl");
         match ironhermes_trajectory::TrajectoryWriter::open(&traj_path) {
             Ok(w) => {
                 let arc_writer = Arc::new(std::sync::Mutex::new(w));
                 let handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
-                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(arc_writer));
+                    Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                        arc_writer,
+                    ));
                 Some(handle)
             }
             Err(e) => {
@@ -1152,9 +1084,7 @@ async fn run_chat(
     // terminal/execute_code `background=true` spawns. Cloned into the tool
     // registration below and drained on natural REPL exit.
     let process_registry = Arc::new(tokio::sync::RwLock::new(
-        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(
-            session_id.clone(),
-        ),
+        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(session_id.clone()),
     ));
     // Plan 21.7-07 (D-03 / D-04 / D-05): session-scoped SubagentRegistry +
     // HERMES_HOME for transcripts. Cloned into the runner (so lifecycle
@@ -1170,7 +1100,6 @@ async fn run_chat(
     // survive across all run_agent_turn calls within this session.
     let pressure_tracker = Arc::new(PressureTracker::new());
     let compression_count = Arc::new(AtomicUsize::new(0));
-    let mut registry = build_registry_with_process_registry(process_registry.clone());
 
     // Plan 21-03: spawn the bottom-bar TUI (status line + knight-rider scanner).
     // Activity is Idle at startup; turns publish ActivityState::Streaming/ToolCall.
@@ -1201,22 +1130,15 @@ async fn run_chat(
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory)
             .await
             .context("building memory manager for chat mode")?;
-    if let Some(ref mgr) = memory_manager {
-        registry.register_memory_tool(mgr.clone());
-    }
 
     // Register delegate_task tool (AGENT-01..05)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
     // transcript scope into the runner so lifecycle events update state.
     let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(
-            client.clone(),
-            resolver.clone(),
-            Some(budget.clone()),
-        )
-        .with_subagent_registry(subagent_registry.clone())
-        .with_transcript_scope(hermes_home.clone(), session_id.clone()),
+        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
+            .with_subagent_registry(subagent_registry.clone())
+            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
     );
     // Plan 21-03: parent CancellationToken lives the full chat session; per-turn
     // children are issued via `.child_token()` so cancelling one turn does NOT
@@ -1249,10 +1171,9 @@ async fn run_chat(
     // $HERMES_HOME exists; rustyline creates the file on first save.
     // Scope: run_chat only per CONTEXT D-15 (run_single / run_gateway have no
     // interactive REPL with up-arrow history).
-    let (mut repl_input, external_printer) = ironhermes_cli::ReplInputChannel::spawn(Some(
-        hermes_home.join("repl_history"),
-    ))
-    .context("Failed to initialize concurrent readline channel")?;
+    let (mut repl_input, external_printer) =
+        ironhermes_cli::ReplInputChannel::spawn(Some(hermes_home.join("repl_history")))
+            .context("Failed to initialize concurrent readline channel")?;
 
     // D-19 / Plan 21.7-07 (D-04 / ISS-05 / Pitfall 8): CLI tree-view progress
     // callback for subagent tool calls + status-line pill refresh.
@@ -1317,86 +1238,34 @@ async fn run_chat(
             }
         });
 
-    registry.register_delegate_task_tool(
-        subagent_runner,
-        subagent_semaphore.clone(),
-        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        config.subagent.clone(),
-        Some(chat_cancel_parent.child_token()), // delegate_task gets its own long-lived child
-        Some(subagent_progress),
-    );
-
-    // Phase 22: register cron_tool (per D-02, mirroring run_gateway)
-    let cron_dir = ironhermes_core::get_hermes_home().join("cron");
-    let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
-    registry.register_cronjob_tool(job_store.clone());
-
-    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
-    // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
-    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
-    registry.register_browser_tools_with_vision(
-        browser_session.clone(),
-        std::sync::Arc::new(resolver.clone()),
-        vision_handle,
-        std::sync::Arc::new(config.clone()),
-    );
-
-    // Phase 22: skills tool with shared active_skills Arc (per D-02, D-08)
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
-    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
-    registry.register_skills_tool(
-        skill_registry.clone(),
-        active_skills.clone(),
-        credential_dir,
-        std::collections::HashMap::new(),
-    );
-
-    // Phase 25.2 D-13 / D-20: register web_extract tool with summarization handle.
-    // Uses the SAME Arc<ProviderResolver> pattern as the vision handle (Phase 26 cascade — second consumer).
-    // Uses the SAME Arc<SkillRegistry> as register_skills_tool (D-10 youtube-content dispatch reuses it).
-    let summarization_handle = std::sync::Arc::new(
-        AnyClientSummarizationHandle::new(std::sync::Arc::new(resolver.clone())),
-    );
-    registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
-
-    // Phase 22: RPC dispatch registry — safe subset per D-04 (no terminal, no execute_code)
-    let mut rpc_registry = ToolRegistry::new();
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::WriteFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::PatchFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    if let Some(ref mgr) = memory_manager {
-        rpc_registry.register_memory_tool(mgr.clone());
-    }
-    let rpc_registry = Arc::new(rpc_registry);
-
-    // Phase 22 / Plan 21.7-06: execute_code with active_skills bypass AND the
-    // session-scoped ProcessRegistry so `background=true` spawns are tracked
-    // and drained on REPL exit (D-24, D-29).
-    registry.register_execute_code_tool_with_process_registry(
-        rpc_registry,
-        config.exec.clone(),
-        active_skills.clone(),
-        process_registry.clone(),
-    );
-
-    // Phase 22: guardrails (per D-02, D-08 — before Arc wrap)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    if !hooks_config.blocked_tools.is_empty() {
-        registry.add_guardrail(Box::new(
-            ironhermes_hooks::BlocklistGuardrail::from_config(&hooks_config),
-        ));
-    }
-    registry.set_error_detail(hooks_config.error_detail.clone());
+    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+        config: Arc::new(config.clone()),
+        resolver: Arc::new(resolver.clone()),
+        cwd: cwd.clone(),
+        process_registry: process_registry.clone(),
+        memory_manager: memory_manager
+            .clone()
+            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
+        delegate_task: Some(DelegateTaskWiring {
+            runner: subagent_runner,
+            semaphore: subagent_semaphore.clone(),
+            config: config.subagent.clone(),
+            cancel_token: Some(chat_cancel_parent.child_token()),
+            progress_callback: Some(subagent_progress),
+        }),
+        hooks_config,
+        emit_mcp_startup_logs: true,
+    })
+    .await
+    .context("building shared app runtime bundle for run_chat")?;
 
-    let registry = Arc::new(RwLock::new(registry));
+    let registry = runtime_bundle.registry.clone();
+    let hook_registry = runtime_bundle.hook_registry.clone();
+    let mcp_manager = runtime_bundle.mcp_manager.clone();
+    let skill_registry = runtime_bundle.skill_registry.clone();
+    let browser_session = runtime_bundle.browser_session.clone();
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
@@ -1409,41 +1278,6 @@ async fn run_chat(
             registry.clone(),
             config.tools.clone(),
         ));
-
-    // Phase 21.2: MCP tool discovery (run_chat)
-    let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
-
-    // Phase 22: Build HookRegistry (per D-05, D-06, D-07)
-    let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
-
-    // JSONL listener — default when event_log.enabled (per D-06)
-    if hooks_config.event_log.enabled {
-        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
-        hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
-    }
-
-    // Webhook listeners — opt-in per D-07 (registered only if config has entries)
-    let retry_queue = Arc::new(
-        ironhermes_hooks::RetryQueue::new(
-            ironhermes_hooks::RetryQueue::default_path()
-        ).context("Failed to initialize webhook retry queue")?
-    );
-    for endpoint in &hooks_config.webhooks {
-        hook_registry.add_listener(
-            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone())
-        );
-    }
-    let hook_registry = Arc::new(hook_registry);
-
-    // Drain persistent retry queue from previous runs (mirrors gateway behavior)
-    let default_ttl = hooks_config.webhooks.first()
-        .and_then(|e| e.queue_ttl_hours)
-        .unwrap_or(24);
-    ironhermes_hooks::drain_retry_queue(
-        retry_queue.clone(),
-        &hooks_config.webhooks,
-        default_ttl,
-    ).await;
 
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
@@ -1480,7 +1314,10 @@ async fn run_chat(
     // Handle initial message if provided
     if let Some(msg) = initial_message {
         let user_msg = ChatMessage::user(&msg);
-        let _ = state_store.lock().unwrap().add_message(&session_id, &user_msg);
+        let _ = state_store
+            .lock()
+            .unwrap()
+            .add_message(&session_id, &user_msg);
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
         let response = run_agent_turn(
@@ -1496,18 +1333,21 @@ async fn run_chat(
             compression_count.clone(),
             tui.clone(),
             chat_cancel_token.clone(),
-            hook_registry.clone(),   // Phase 22: D-05
-            context_length, // Phase 21.3
-            memory_manager.clone(), // GAP-1: wire queue_prefetch
-            state_store.clone(), // Phase 25: session_search intercept
+            hook_registry.clone(),         // Phase 22: D-05
+            context_length,                // Phase 21.3
+            memory_manager.clone(),        // GAP-1: wire queue_prefetch
+            state_store.clone(),           // Phase 25: session_search intercept
             Some(browser_session.clone()), // Phase 25.1 D-17
-            trajectory_writer.clone(), // Phase 25.3 D-T-3
+            trajectory_writer.clone(),     // Phase 25.3 D-T-3
         )
         .await?;
         // Persist assistant response
         if let Some(ref text) = response {
             let assistant_msg = ChatMessage::assistant(text);
-            let _ = state_store.lock().unwrap().add_message(&session_id, &assistant_msg);
+            let _ = state_store
+                .lock()
+                .unwrap()
+                .add_message(&session_id, &assistant_msg);
             println!();
             // Phase 22.3 GAP-22.3-01 closure (Plan 22.3-11):
             // Route the post-turn assistant label through the same scroll-region
@@ -1587,12 +1427,10 @@ async fn run_chat(
             Some(ironhermes_cli::ReplLine::Interrupted) => {
                 Err(rustyline::error::ReadlineError::Interrupted)
             }
-            Some(ironhermes_cli::ReplLine::Eof) => {
-                Err(rustyline::error::ReadlineError::Eof)
-            }
-            Some(ironhermes_cli::ReplLine::Error(msg)) => {
-                Err(rustyline::error::ReadlineError::Io(std::io::Error::other(msg)))
-            }
+            Some(ironhermes_cli::ReplLine::Eof) => Err(rustyline::error::ReadlineError::Eof),
+            Some(ironhermes_cli::ReplLine::Error(msg)) => Err(rustyline::error::ReadlineError::Io(
+                std::io::Error::other(msg),
+            )),
             None => {
                 // Worker exited unexpectedly — treat as EOF so the outer
                 // REPL cleanup fires.
@@ -1699,13 +1537,21 @@ async fn run_chat(
                                 if !added.is_empty() {
                                     parts.push(format!(
                                         "Added: {}",
-                                        added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                                        added
+                                            .iter()
+                                            .map(|s| s.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
                                     ));
                                 }
                                 if !removed.is_empty() {
                                     parts.push(format!(
                                         "Removed: {}",
-                                        removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                                        removed
+                                            .iter()
+                                            .map(|s| s.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
                                     ));
                                 }
                                 if !result.failed.is_empty() {
@@ -1726,7 +1572,10 @@ async fn run_chat(
 
                 repl_input.add_history(&input);
                 let user_msg = ChatMessage::user(&input);
-                let _ = state_store.lock().unwrap().add_message(&session_id, &user_msg);
+                let _ = state_store
+                    .lock()
+                    .unwrap()
+                    .add_message(&session_id, &user_msg);
                 messages.push(user_msg);
 
                 // D-13: fresh user input resets the 1.5s debounce window.
@@ -1750,12 +1599,12 @@ async fn run_chat(
                     compression_count.clone(),
                     tui.clone(),
                     chat_cancel_token.clone(),
-                    hook_registry.clone(),   // Phase 22: D-05
-                    context_length, // Phase 21.3
-                    memory_manager.clone(), // GAP-1: wire queue_prefetch
-                    state_store.clone(), // Phase 25: session_search intercept
+                    hook_registry.clone(),         // Phase 22: D-05
+                    context_length,                // Phase 21.3
+                    memory_manager.clone(),        // GAP-1: wire queue_prefetch
+                    state_store.clone(),           // Phase 25: session_search intercept
                     Some(browser_session.clone()), // Phase 25.1 D-17
-                    trajectory_writer.clone(), // Phase 25.3 D-T-3
+                    trajectory_writer.clone(),     // Phase 25.3 D-T-3
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -2054,7 +1903,10 @@ async fn run_chat(
                 // Persist assistant response
                 if let Some(ref text) = response {
                     let assistant_msg = ChatMessage::assistant(text);
-                    let _ = state_store.lock().unwrap().add_message(&session_id, &assistant_msg);
+                    let _ = state_store
+                        .lock()
+                        .unwrap()
+                        .add_message(&session_id, &assistant_msg);
                     // If we were streaming, just add a newline
                     println!();
                 }
@@ -2071,7 +1923,10 @@ async fn run_chat(
                     CtrlCDecision::ExitCleanly => {
                         println!("{}", "Goodbye!".dimmed());
                         tui.cleanup_on_exit();
-                        let _ = state_store.lock().unwrap().end_session(&session_id, "interrupted");
+                        let _ = state_store
+                            .lock()
+                            .unwrap()
+                            .end_session(&session_id, "interrupted");
                         // Break to outer loop cleanup so on_session_end fires.
                         break;
                     }
@@ -2097,7 +1952,9 @@ async fn run_chat(
     // (shouldn't happen), we log and skip — the render task is cancelled on runtime drop.
     match Arc::try_unwrap(tui) {
         Ok(handle) => handle.shutdown().await,
-        Err(_) => tracing::debug!("tui: Arc still has outstanding clones at clean-exit — skipping explicit shutdown"),
+        Err(_) => tracing::debug!(
+            "tui: Arc still has outstanding clones at clean-exit — skipping explicit shutdown"
+        ),
     }
 
     // Plan 21.7-06 (D-24, T-21.7-06-01): drain + kill any background processes
@@ -2136,7 +1993,10 @@ async fn run_chat(
         }
     }
 
-    state_store.lock().unwrap().end_session(&session_id, "completed")
+    state_store
+        .lock()
+        .unwrap()
+        .end_session(&session_id, "completed")
         .context("failed to end CLI session")?;
 
     Ok(())
@@ -2155,14 +2015,18 @@ async fn run_agent_turn(
     session_id: &str,
     pressure_tracker: Arc<PressureTracker>,
     compression_count: Arc<AtomicUsize>,
-    tui: Arc<TuiHandle>,   // Plan 21-03: TUI handle for activity publishing
+    tui: Arc<TuiHandle>, // Plan 21-03: TUI handle for activity publishing
     cancel_token: CancellationToken,
-    hook_registry: Arc<ironhermes_hooks::HookRegistry>,   // Phase 22: D-05
-    context_length: usize,  // Phase 21.3: resolved from model metadata
-    memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>,  // GAP-1: wire queue_prefetch
-    state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>,  // Phase 25: session_search intercept
-    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,  // Phase 25.1 D-17
-    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,  // Phase 25.3 D-T-3
+    hook_registry: Arc<ironhermes_hooks::HookRegistry>, // Phase 22: D-05
+    context_length: usize,                              // Phase 21.3: resolved from model metadata
+    memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>, // GAP-1: wire queue_prefetch
+    state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>, // Phase 25: session_search intercept
+    browser_session: Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
+    >, // Phase 25.1 D-17
+    trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>, // Phase 25.3 D-T-3
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the AgentLoop's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -2175,7 +2039,7 @@ async fn run_agent_turn(
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
         .with_cancellation_token(cancel_token)
-        .with_hook_registry(hook_registry.clone())   // Phase 22: D-05
+        .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
         .with_compression(context_length, config.agent.context_compression)
         .with_compression_count(starting_count)
         .with_streaming(Box::new(move |delta| {
@@ -2202,14 +2066,18 @@ async fn run_agent_turn(
             // D-08: REPLACE the old `eprint!("\r Running: ...")` clutter with a
             // watch publish. The render task renders the scanner + label at bottom row
             // every 100ms — no more inline stderr spray.
-            tui_tool.set_activity(ActivityState::ToolCall { name: name.to_string() });
+            tui_tool.set_activity(ActivityState::ToolCall {
+                name: name.to_string(),
+            });
         }))
         // Phase 25 D-16: wire intercept handlers (todo_write/todo_read per-turn state).
         .with_intercepts(
-            None, // memory handled by register_memory_tool (Plan 4 will migrate)
+            None,                      // memory handled by register_memory_tool (Plan 4 will migrate)
             Some(state_store.clone()), // Phase 25 fix: session_search intercept wired
-            None, // subagent_runner: delegate_task wiring in Plan 4
-            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()))),
+            None,                      // subagent_runner: delegate_task wiring in Plan 4
+            Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+                Vec::<String>::new(),
+            ))),
             None, // cron_router: cronjob wiring in Plan 4
         );
 
@@ -2227,7 +2095,9 @@ async fn run_agent_turn(
     // Wire fallback from resolver
     let main_endpoint = resolver.resolve_for_main();
     if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-        if let Ok(fb_client) = build_provider_client(resolver, fb_name, &main_endpoint.default_model) {
+        if let Ok(fb_client) =
+            build_provider_client(resolver, fb_name, &main_endpoint.default_model)
+        {
             agent = agent.with_fallback(fb_client);
         }
     }
@@ -2247,9 +2117,9 @@ async fn run_agent_turn(
         config,
         resolver,
         session_id,
-        Some(hook_registry.clone()),   // Phase 22: D-09
+        Some(hook_registry.clone()), // Phase 22: D-09
         Some(pressure_tracker.clone()),
-        context_length, // Phase 21.3
+        context_length,         // Phase 21.3
         memory_manager.clone(), // GAP-2: wire into context engine
     );
 
@@ -2293,8 +2163,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // on-disk config ONLY. NO per-request field, NO CLI flag — the clap
     // `Gateway` variant intentionally omits `--yolo`. `resolve_yolo(false, ...)`
     // locks the flag source to `"config"` when enabled.
-    let (yolo_enabled, _yolo_source) =
-        ironhermes_cli::resolve_yolo(false, config.autonomous.yolo);
+    let (yolo_enabled, _yolo_source) = ironhermes_cli::resolve_yolo(false, config.autonomous.yolo);
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at gateway startup
@@ -2333,9 +2202,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // per-request end site is a documented no-op (session_id mismatch);
     // LRU + FINISHED_TTL prune handles cleanup across long-running bots.
     let process_registry = Arc::new(tokio::sync::RwLock::new(
-        ironhermes_exec::process_registry::ProcessRegistry::new_for_session(
-            "gateway".to_string(),
-        ),
+        ironhermes_exec::process_registry::ProcessRegistry::new_for_session("gateway".to_string()),
     ));
     // Plan 21.7-07 (D-03 / D-04 / D-05): gateway-scoped SubagentRegistry +
     // HERMES_HOME for transcripts. Per-request run_agent threads the same
@@ -2347,72 +2214,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     ));
     let hermes_home = ironhermes_core::get_hermes_home();
 
-    // Build registry and register memory tool before Arc wrapping
-    let mut registry = build_registry_with_process_registry(process_registry.clone());
-    if let Some(ref mgr) = memory_manager {
-        registry.register_memory_tool(mgr.clone());
-    }
-
-    // Open cron job store and register the cronjob tool
-    let cron_dir = ironhermes_core::get_hermes_home().join("cron");
-    let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
-    registry.register_cronjob_tool(job_store.clone());
-
-    // Phase 25.1 D-04: build shared browser session Arc and register all 11 browser_* tools.
-    // Wired identically across run_chat / run_single / run_gateway (Phase 22 D-04 invariant).
-    let browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(resolver.clone())));
-    registry.register_browser_tools_with_vision(
-        browser_session.clone(),
-        std::sync::Arc::new(resolver.clone()),
-        vision_handle,
-        std::sync::Arc::new(config.clone()),
-    );
-
-    // Discover skills and register the skills tool
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_registry = Arc::new(SkillRegistry::load_with_config(&cwd, &config.skills));
-    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
-    registry.register_skills_tool(
-        skill_registry.clone(),
-        active_skills.clone(),
-        credential_dir,
-        std::collections::HashMap::new(),
-    );
-
-    // Phase 25.2 D-13 / D-20: register web_extract tool with summarization handle.
-    // Uses the SAME Arc<ProviderResolver> pattern as the vision handle (Phase 26 cascade — second consumer).
-    // Uses the SAME Arc<SkillRegistry> as register_skills_tool (D-10 youtube-content dispatch reuses it).
-    let summarization_handle = std::sync::Arc::new(
-        AnyClientSummarizationHandle::new(std::sync::Arc::new(resolver.clone())),
-    );
-    registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
-
-    // Build RPC dispatch registry — only D-07 safe tools for sandbox (no terminal, no execute_code)
-    let mut rpc_registry = ToolRegistry::new();
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::WriteFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::PatchFileTool));
-    rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    if let Some(ref mgr) = memory_manager {
-        rpc_registry.register_memory_tool(mgr.clone());
-    }
-    let rpc_registry = Arc::new(rpc_registry);
-
-    // Register execute_code tool with the RPC dispatch registry.
-    // Phase 19 Plan 06 (D-05) + Plan 21.7-06 (D-29): active_skills env-var
-    // bypass AND the gateway-scoped ProcessRegistry for background spawns.
-    registry.register_execute_code_tool_with_process_registry(
-        rpc_registry,
-        config.exec.clone(),
-        active_skills.clone(),
-        process_registry.clone(),
-    );
 
     // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
@@ -2436,36 +2238,40 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // which would break the shared delegate_task Arc. Gateway-process
     // scope matches the BudgetHandle + ProcessRegistry Plan 05/06 decision.
     let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(
-            gateway_client,
-            resolver.clone(),
-            Some(budget.clone()),
-        )
-        .with_subagent_registry(subagent_registry.clone())
-        .with_transcript_scope(hermes_home.clone(), "gateway".to_string()),
+        AgentSubagentRunner::new(gateway_client, resolver.clone(), Some(budget.clone()))
+            .with_subagent_registry(subagent_registry.clone())
+            .with_transcript_scope(hermes_home.clone(), "gateway".to_string()),
     );
     let gateway_cancel_token = CancellationToken::new();
-    registry.register_delegate_task_tool(
-        subagent_runner,
-        subagent_semaphore,
-        memory_manager.clone().map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        config.subagent.clone(),
-        Some(gateway_cancel_token.clone()),
-        None, // D-20: gateway uses tracing::info only, no stderr progress
-    );
-
-    // Load hooks config and wire guardrails (before Arc wrapping)
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
+    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+        config: Arc::new(config.clone()),
+        resolver: Arc::new(resolver.clone()),
+        cwd,
+        process_registry: process_registry.clone(),
+        memory_manager: memory_manager
+            .clone()
+            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
+        delegate_task: Some(DelegateTaskWiring {
+            runner: subagent_runner,
+            semaphore: subagent_semaphore,
+            config: config.subagent.clone(),
+            cancel_token: Some(gateway_cancel_token.clone()),
+            progress_callback: None,
+        }),
+        hooks_config,
+        emit_mcp_startup_logs: true,
+    })
+    .await
+    .context("building shared app runtime bundle for run_gateway")?;
 
-    // Register guardrails on ToolRegistry (per D-05) — must happen before Arc wrapping
-    if !hooks_config.blocked_tools.is_empty() {
-        registry.add_guardrail(Box::new(
-            ironhermes_hooks::BlocklistGuardrail::from_config(&hooks_config),
-        ));
-    }
-    registry.set_error_detail(hooks_config.error_detail.clone());
-
-    let registry = Arc::new(RwLock::new(registry));
+    let registry = runtime_bundle.registry.clone();
+    let hook_registry = runtime_bundle.hook_registry.clone();
+    let mcp_manager = runtime_bundle.mcp_manager.clone();
+    let skill_registry = runtime_bundle.skill_registry.clone();
+    let active_skills = runtime_bundle.active_skills.clone();
+    let browser_session = runtime_bundle.browser_session.clone();
+    let job_store = runtime_bundle.job_store.clone();
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
@@ -2476,44 +2282,6 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
             registry.clone(),
             config.tools.clone(),
         ));
-
-    // Phase 21.2: MCP tool discovery (run_gateway)
-    let mcp_manager = build_mcp_manager(&config, registry.clone()).await;
-
-    // Build HookRegistry
-    let mut hook_registry = ironhermes_hooks::HookRegistry::new(hooks_config.clone());
-
-    // Register JSONL event log listener (per D-04)
-    if hooks_config.event_log.enabled {
-        let log_path = hooks_config.event_log.path.as_ref().map(std::path::PathBuf::from);
-        hook_registry.add_listener(ironhermes_hooks::create_jsonl_listener(log_path));
-    }
-
-    // Create shared retry queue for webhook persistence (per D-09)
-    let retry_queue = std::sync::Arc::new(
-        ironhermes_hooks::RetryQueue::new(
-            ironhermes_hooks::RetryQueue::default_path()
-        ).expect("Failed to initialize webhook retry queue")
-    );
-
-    // Register webhook listeners (per D-08, D-09, D-10)
-    for endpoint in &hooks_config.webhooks {
-        hook_registry.add_listener(
-            ironhermes_hooks::create_webhook_listener(endpoint.clone(), retry_queue.clone())
-        );
-    }
-
-    let hook_registry = std::sync::Arc::new(hook_registry);
-
-    // Drain persistent retry queue from previous runs (per D-09)
-    let default_ttl = hooks_config.webhooks.first()
-        .and_then(|e| e.queue_ttl_hours)
-        .unwrap_or(24);
-    ironhermes_hooks::drain_retry_queue(
-        retry_queue.clone(),
-        &hooks_config.webhooks,
-        default_ttl,
-    ).await;
 
     // Override token if provided via --token flag
     if let Some(token) = token_override {
@@ -2620,7 +2388,9 @@ fn build_registry() -> ToolRegistry {
 fn build_registry_with_process_registry(
     process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
 ) -> ToolRegistry {
-    use ironhermes_tools::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+    use ironhermes_tools::file_tools::{
+        PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
+    };
     use ironhermes_tools::web_read::WebReadTool;
     use ironhermes_tools::web_search::WebSearchTool;
     let mut registry = ToolRegistry::new();
@@ -2925,15 +2695,27 @@ mod ensure_home_dirs_tests {
     fn test_ensure_home_dirs_creates_all_subdirs() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         ensure_home_dirs().unwrap();
 
-        for sub in &["cron", "sessions", "logs", "hooks", "memories", "skills", "workspace"] {
+        for sub in &[
+            "cron",
+            "sessions",
+            "logs",
+            "hooks",
+            "memories",
+            "skills",
+            "workspace",
+        ] {
             assert!(tmp.path().join(sub).is_dir(), "Missing directory: {}", sub);
         }
 
         ensure_home_dirs().unwrap();
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
     }
 
     /// D-05 (Phase 21.7): `$HERMES_HOME/subagent-transcripts/` must be part of
@@ -2944,14 +2726,18 @@ mod ensure_home_dirs_tests {
     fn home_dirs_includes_subagent_transcripts() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         ensure_home_dirs().unwrap();
         assert!(
             tmp.path().join("subagent-transcripts").is_dir(),
             "D-05: $HERMES_HOME/subagent-transcripts must exist after first-run scaffold"
         );
         ensure_home_dirs().unwrap();
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
     }
 }
 
@@ -2961,7 +2747,10 @@ mod mcp_wiring_tests {
     #[test]
     fn run_chat_wires_mcp_manager() {
         let src = include_str!("main.rs");
-        assert!(src.contains("McpManager::new"), "run_chat must construct McpManager");
+        assert!(
+            src.contains("McpManager::new"),
+            "run_chat must construct McpManager"
+        );
         assert!(src.contains("start_all"), "run_chat must call start_all");
     }
 
@@ -2969,11 +2758,12 @@ mod mcp_wiring_tests {
     #[test]
     fn run_single_wires_mcp_manager() {
         let src = include_str!("main.rs");
-        // build_mcp_manager is called in run_chat, run_single, and run_gateway
-        let count = src.matches("build_mcp_manager").count();
+        // Phase 25.6: startup wiring is centralized in build_app_runtime_bundle,
+        // which is called from run_chat, run_single, and run_gateway.
+        let count = src.matches("build_app_runtime_bundle").count();
         assert!(
             count >= 3,
-            "build_mcp_manager must be called in at least 3 run paths (chat, single, gateway), got {}",
+            "build_app_runtime_bundle must be called in at least 3 run paths (chat, single, gateway), got {}",
             count
         );
     }
@@ -3012,11 +2802,17 @@ mod mcp_wiring_tests {
     #[test]
     fn commands_enum_has_mcp_variant() {
         let src = include_str!("main.rs");
-        assert!(src.contains("Commands::Mcp"), "Commands enum must have Mcp variant");
-        assert!(src.contains("handle_mcp_command"), "main must dispatch to handle_mcp_command");
+        assert!(
+            src.contains("Commands::Mcp"),
+            "Commands enum must have Mcp variant"
+        );
+        assert!(
+            src.contains("handle_mcp_command"),
+            "main must dispatch to handle_mcp_command"
+        );
     }
 
-    /// INV-25.1: browser session wired in all 3 entry points (Phase 25.1 D-04 mirror-pattern invariant).
+    /// INV-25.1: browser session wiring preserved in all 3 entry points.
     ///
     /// - register_browser_tools must appear in run_chat, run_single, AND run_gateway (≥3)
     /// - with_browser_session must be called on the AgentLoop builder in run_single and run_chat (≥2)
@@ -3024,14 +2820,10 @@ mod mcp_wiring_tests {
     #[test]
     fn inv_25_1_browser_session_wired_in_all_entry_points() {
         let source = include_str!("main.rs");
-        // Count either register_browser_tools( or register_browser_tools_with_vision(
-        // (plan 11 migrated to _with_vision variant; both satisfy the D-04 wiring invariant).
-        let reg_count = source.matches("register_browser_tools(").count()
-            + source.matches("register_browser_tools_with_vision(").count();
+        let reg_count = source.matches("build_app_runtime_bundle(").count();
         assert!(
             reg_count >= 3,
-            "Phase 25.1 D-04: register_browser_tools or register_browser_tools_with_vision MUST be called \
-             in run_chat, run_single, AND run_gateway (Phase 22 D-04 mirror-pattern invariant); got {} calls",
+            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat, run_single, AND run_gateway; got {} calls",
             reg_count
         );
         let with_count = source.matches(".with_browser_session(").count();
@@ -3049,12 +2841,7 @@ mod mcp_wiring_tests {
         );
     }
 
-    /// INV-25.1-14: Phase 25.1 GAP-3 + GAP-4 closure.
-    /// register_browser_tools_with_vision MUST receive Arc::new(config.clone()) at all 3 entry
-    /// points so the runtime Config (with operator's browser.allowed_domains and autonomous.yolo)
-    /// reaches BrowserNavigateTool (T-25.1-01 SSRF) and BrowserConsoleTool (T-25.1-02 arbitrary JS).
-    ///
-    /// Guard against silent removal of the Arc::new(config.clone()) arg at any call site.
+    /// INV-25.1-14: shared runtime bundle input includes config+resolver at all CLI entry points.
     #[test]
     fn inv_25_1_browser_config_threaded_through_all_entry_points() {
         let source = include_str!("main.rs");
@@ -3066,33 +2853,25 @@ mod mcp_wiring_tests {
             .join("\n");
 
         let reg_count = non_comment_source
-            .matches("register_browser_tools_with_vision(")
+            .matches("build_app_runtime_bundle(")
             .count();
         assert!(
             reg_count >= 3,
-            "Phase 25.1 D-04: register_browser_tools_with_vision MUST be called in run_single, \
-             run_chat, and run_gateway; got {} non-comment calls",
+            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_single, run_chat, and run_gateway; got {} non-comment calls",
             reg_count
         );
 
         let config_arg_count = non_comment_source
-            .matches("Arc::new(config.clone())")
+            .matches("config: Arc::new(config.clone())")
             .count();
-        // We expect at least 3 (one per call site). Other code in main.rs may also use this idiom,
-        // so use >= 3 not == 3.
         assert!(
             config_arg_count >= 3,
-            "Phase 25.1 GAP-3+4: each register_browser_tools_with_vision call MUST receive \
-             Arc::new(config.clone()) so runtime Config reaches BrowserNavigateTool (T-25.1-01 SSRF) \
-             and BrowserConsoleTool (T-25.1-02 arbitrary JS); got {} occurrences of \
-             Arc::new(config.clone())",
+            "Phase 25.6 D-05: each build_app_runtime_bundle call must pass config: Arc::new(config.clone()); got {} occurrences",
             config_arg_count
         );
     }
 
-    /// Phase 25.2 D-20 invariant: register_web_extract_tool must appear in run_chat,
-    /// run_single, AND run_gateway — same parity rule as register_browser_tools_with_vision.
-    /// Mirrors the existing browser-tools parity guard above (T-25.2-wire-skip mitigation).
+    /// Phase 25.6 invariant: runtime factory is used for all 3 CLI surfaces.
     #[test]
     fn register_web_extract_tool_wired_in_all_three_sites() {
         let source = include_str!("main.rs");
@@ -3103,19 +2882,21 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let count = non_comment_source.matches("register_web_extract_tool(").count();
+        let count = non_comment_source
+            .matches("build_app_runtime_bundle(")
+            .count();
         assert!(
             count >= 3,
-            "Phase 25.2 D-20: register_web_extract_tool MUST be called in run_chat, \
-             run_single, AND run_gateway (Phase 22 D-04 mirror-pattern invariant); got {} non-comment calls",
+            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat, run_single, AND run_gateway; got {} non-comment calls",
             count
         );
 
-        let handle_count = non_comment_source.matches("AnyClientSummarizationHandle::new").count();
+        let handle_count = non_comment_source
+            .matches("resolver: Arc::new(resolver.clone())")
+            .count();
         assert!(
             handle_count >= 3,
-            "Phase 25.2 D-13: AnyClientSummarizationHandle::new MUST be constructed once per CLI \
-             entry point so the Phase 26 D-07 cascade reaches WebExtractTool; got {} occurrences",
+            "Phase 25.6 D-05: runtime bundle input must thread resolver into all 3 CLI entry points; got {} occurrences",
             handle_count
         );
     }
@@ -3134,14 +2915,18 @@ mod mcp_wiring_tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<&str>>()
             .join("\n");
-        let session_count = non_comment_source.matches("RegistryToolsetSession::new(").count();
+        let session_count = non_comment_source
+            .matches("RegistryToolsetSession::new(")
+            .count();
         assert!(
             session_count >= 3,
             "Phase 25.2 Plan 15: RegistryToolsetSession::new MUST be constructed in run_chat, \
              run_single, AND run_gateway (≥3 sites); found {}",
             session_count
         );
-        let pass_count = non_comment_source.matches("Some(toolset_session.clone())").count();
+        let pass_count = non_comment_source
+            .matches("Some(toolset_session.clone())")
+            .count();
         assert!(
             pass_count >= 2,
             "Phase 25.2 Plan 15: build_cmd_ctx call sites MUST pass \

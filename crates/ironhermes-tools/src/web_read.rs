@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironhermes_core::{config::Config, ToolSchema};
+use ironhermes_core::{ToolSchema, config::Config};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{debug, warn};
@@ -43,9 +43,7 @@ async fn fetch_with_firecrawl(url: &str) -> anyhow::Result<String> {
     let api_key = std::env::var("FIRECRAWL_API_KEY")
         .map_err(|_| anyhow::anyhow!("FIRECRAWL_API_KEY not set"))?;
 
-    let timeout_secs = Config::load()
-        .map(|c| c.web.timeout_secs)
-        .unwrap_or(30);
+    let timeout_secs = Config::load().map(|c| c.web.timeout_secs).unwrap_or(30);
 
     debug!("Fetching {} via Firecrawl", url);
 
@@ -104,10 +102,7 @@ async fn fetch_with_firecrawl(url: &str) -> anyhow::Result<String> {
         return Err(anyhow::anyhow!("Target page returned HTTP {}", code));
     }
 
-    let title = data
-        .metadata
-        .and_then(|m| m.title)
-        .unwrap_or_default();
+    let title = data.metadata.and_then(|m| m.title).unwrap_or_default();
 
     let header = if title.is_empty() {
         format!("Source: {}\n\n", url)
@@ -142,11 +137,9 @@ async fn fetch_local(
     // Post-redirect SSRF re-validation (D-17): if redirected, validate the final URL.
     let final_url = response.url().as_str().to_string();
     if final_url != url {
-        validate_url_async(&final_url).await.map_err(|_| {
-            anyhow::anyhow!(
-                "URL blocked by security policy (private IP)"
-            )
-        })?;
+        validate_url_async(&final_url)
+            .await
+            .map_err(|_| anyhow::anyhow!("URL blocked by security policy (private IP)"))?;
     }
 
     // Content-Type check (D-07): only accept text/html responses.

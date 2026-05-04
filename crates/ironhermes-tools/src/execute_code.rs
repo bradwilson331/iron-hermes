@@ -27,11 +27,7 @@ pub(crate) struct RegistryDispatch {
 
 #[async_trait]
 impl ToolDispatch for RegistryDispatch {
-    async fn dispatch(
-        &self,
-        tool_name: &str,
-        args: serde_json::Value,
-    ) -> anyhow::Result<String> {
+    async fn dispatch(&self, tool_name: &str, args: serde_json::Value) -> anyhow::Result<String> {
         self.registry.dispatch(tool_name, args).await
     }
 }
@@ -203,17 +199,14 @@ impl Tool for ExecuteCodeTool {
                 .map_err(|e| anyhow::anyhow!("execute_code: failed to create tempfile: {}", e))?;
             std::fs::write(tmp.path(), code)
                 .map_err(|e| anyhow::anyhow!("execute_code: failed to write script: {}", e))?;
-            let script_path = tmp.into_temp_path().keep().map_err(|e| {
-                anyhow::anyhow!("execute_code: failed to persist tempfile: {}", e)
-            })?;
+            let script_path = tmp
+                .into_temp_path()
+                .keep()
+                .map_err(|e| anyhow::anyhow!("execute_code: failed to persist tempfile: {}", e))?;
 
             // shell_words-safe: quote the path with single-quotes; paths from
             // tempfile::Builder do not contain single-quotes on unix.
-            let command = format!(
-                "{} '{}'",
-                self.config.python_path,
-                script_path.display()
-            );
+            let command = format!("{} '{}'", self.config.python_path, script_path.display());
 
             let spec = SpawnSpec {
                 command,
@@ -282,7 +275,12 @@ impl Tool for ExecuteCodeTool {
         };
 
         let result = sandbox
-            .run(code, dispatch, self.cancel_token.clone(), &skill_env_whitelist)
+            .run(
+                code,
+                dispatch,
+                self.cancel_token.clone(),
+                &skill_env_whitelist,
+            )
             .await?;
 
         // D-25..D-27: Structured JSON response format
@@ -328,10 +326,15 @@ mod tests {
             .await
             .unwrap();
 
-        let parsed: serde_json::Value = serde_json::from_str(&result)
-            .expect("response should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("response should be valid JSON");
         assert_eq!(parsed["status"], "success");
-        assert!(parsed["output"].as_str().unwrap().contains("hello from python"));
+        assert!(
+            parsed["output"]
+                .as_str()
+                .unwrap()
+                .contains("hello from python")
+        );
         assert_eq!(parsed["exit_code"], 0);
         assert!(parsed["duration_seconds"].as_f64().unwrap() >= 0.0);
         assert_eq!(parsed["tool_calls_made"], 0);
@@ -355,11 +358,14 @@ mod tests {
         );
         let result = tool.execute(json!({"code": script})).await.unwrap();
 
-        let parsed: serde_json::Value = serde_json::from_str(&result)
-            .expect("response should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("response should be valid JSON");
         assert_eq!(parsed["status"], "success");
         assert!(
-            parsed["output"].as_str().unwrap().contains("test content from rust"),
+            parsed["output"]
+                .as_str()
+                .unwrap()
+                .contains("test content from rust"),
             "RPC read_file should return file content, got: {}",
             result
         );
@@ -380,8 +386,8 @@ mod tests {
         .expect("test must complete within 10s")
         .unwrap();
 
-        let parsed: serde_json::Value = serde_json::from_str(&result)
-            .expect("response should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("response should be valid JSON");
         assert_eq!(parsed["status"], "timeout");
         assert!(parsed["stderr"].as_str().unwrap().contains("timed out"));
     }
@@ -397,14 +403,23 @@ mod tests {
             .await
             .unwrap();
 
-        let parsed: serde_json::Value = serde_json::from_str(&result)
-            .expect("response should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("response should be valid JSON");
         assert_eq!(parsed["status"], "success");
-        assert!(parsed["output"].as_str().unwrap().contains("out"), "missing stdout content");
+        assert!(
+            parsed["output"].as_str().unwrap().contains("out"),
+            "missing stdout content"
+        );
         assert_eq!(parsed["stderr"], "err", "missing stderr content");
         assert_eq!(parsed["exit_code"], 0);
-        assert!(parsed.get("tool_calls_made").is_some(), "missing tool_calls_made");
-        assert!(parsed.get("duration_seconds").is_some(), "missing duration_seconds");
+        assert!(
+            parsed.get("tool_calls_made").is_some(),
+            "missing tool_calls_made"
+        );
+        assert!(
+            parsed.get("duration_seconds").is_some(),
+            "missing duration_seconds"
+        );
     }
 
     #[tokio::test]
@@ -450,8 +465,8 @@ mod tests {
         let reg = Arc::new(RwLock::new(ProcessRegistry::new_for_session(
             "t-execute_code-bg",
         )));
-        let tool = ExecuteCodeTool::new(rpc_registry, config, None)
-            .with_process_registry(reg.clone());
+        let tool =
+            ExecuteCodeTool::new(rpc_registry, config, None).with_process_registry(reg.clone());
 
         let resp = tool
             .execute(
@@ -461,10 +476,7 @@ mod tests {
             .expect("background spawn");
         let parsed: serde_json::Value = serde_json::from_str(&resp).expect("JSON");
         assert_eq!(parsed["background"], true);
-        assert!(parsed["process_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("proc_"));
+        assert!(parsed["process_id"].as_str().unwrap().starts_with("proc_"));
         assert!(parsed["pid"].as_u64().is_some());
         {
             let r = reg.read().await;

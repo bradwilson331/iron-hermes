@@ -52,11 +52,10 @@ pub fn filter_hallucinated_tools(result: &AgentResult, registry: &ToolRegistry) 
 ///
 /// Short/empty text without tool calls is still rejected — those are trivial or error responses.
 pub fn filter_no_reasoning(result: &AgentResult) -> Option<String> {
-    let has_tool_calls = result.messages.iter().any(|m| {
-        m.tool_calls
-            .as_ref()
-            .is_some_and(|tc| !tc.is_empty())
-    });
+    let has_tool_calls = result
+        .messages
+        .iter()
+        .any(|m| m.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()));
     if has_tool_calls {
         return None; // Tool usage = reasoning present
     }

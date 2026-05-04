@@ -7,6 +7,6 @@
 //! `ws` and `state` (pure server-side logic) stay behind `#[cfg(feature = "server")]`.
 
 pub mod api;
-pub mod ws;
 #[cfg(feature = "server")]
 pub mod state;
+pub mod ws;

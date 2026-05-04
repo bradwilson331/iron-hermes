@@ -1,7 +1,7 @@
 // Phase 10 Plan 04 + Plan 02 tests — filters + runner integration
-use super::types::*;
 use super::checkpoint::*;
 use super::sharegpt::*;
+use super::types::*;
 
 #[test]
 fn test_prompt_hash_deterministic() {
@@ -31,7 +31,10 @@ fn test_sharegpt_user_message() {
 #[test]
 fn test_sharegpt_skips_system() {
     use ironhermes_core::ChatMessage;
-    let msgs = vec![ChatMessage::system("You are helpful"), ChatMessage::user("Hi")];
+    let msgs = vec![
+        ChatMessage::system("You are helpful"),
+        ChatMessage::user("Hi"),
+    ];
     let turns = messages_to_sharegpt(&msgs);
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].from, "human");
@@ -43,12 +46,24 @@ fn test_trajectory_line_serializes_to_json() {
         id: "abc123".to_string(),
         model: "gpt-4".to_string(),
         timestamp: "2026-04-10T00:00:00Z".to_string(),
-        usage: UsageInfo { prompt_tokens: 100, completion_tokens: 50 },
+        usage: UsageInfo {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+        },
         turns: 3,
-        quality: QualityResult { passed: true, reasons: vec![] },
+        quality: QualityResult {
+            passed: true,
+            reasons: vec![],
+        },
         conversations: vec![
-            ShareGptTurn { from: "human".to_string(), value: "Hello".to_string() },
-            ShareGptTurn { from: "gpt".to_string(), value: "Hi there".to_string() },
+            ShareGptTurn {
+                from: "human".to_string(),
+                value: "Hello".to_string(),
+            },
+            ShareGptTurn {
+                from: "gpt".to_string(),
+                value: "Hi there".to_string(),
+            },
         ],
         rejection_reason: None,
     };
@@ -90,11 +105,11 @@ fn test_batch_entry_with_optional_fields() {
 // Filter tests
 // =============================================================================
 
-use ironhermes_agent::{AgentResult, AggregatedUsage};
+use super::filters::*;
 use ironhermes_agent::agent_loop::StopReason;
+use ironhermes_agent::{AgentResult, AggregatedUsage};
 use ironhermes_core::{ChatMessage, FunctionCall, ToolCall};
 use ironhermes_tools::ToolRegistry;
-use super::filters::*;
 
 /// Build a minimal AgentResult for filter testing.
 fn mock_agent_result(messages: Vec<ChatMessage>, final_response: Option<String>) -> AgentResult {
@@ -118,15 +133,27 @@ fn registry_with(tool_name: &'static str) -> ToolRegistry {
     use ironhermes_core::ToolSchema;
     use ironhermes_tools::Tool;
 
-    struct MockTool { name: &'static str }
+    struct MockTool {
+        name: &'static str,
+    }
 
     #[async_trait]
     impl Tool for MockTool {
-        fn name(&self) -> &str { self.name }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "mock" }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "mock"
+        }
         fn schema(&self) -> ToolSchema {
-            ToolSchema::new(self.name, "mock", serde_json::json!({"type":"object","properties":{}}))
+            ToolSchema::new(
+                self.name,
+                "mock",
+                serde_json::json!({"type":"object","properties":{}}),
+            )
         }
         async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
             Ok("ok".to_string())
@@ -178,13 +205,19 @@ fn test_filter_hallucinated_tools_passes_known() {
 #[test]
 fn test_filter_no_reasoning_rejects_empty() {
     let result = mock_agent_result(vec![], None);
-    assert_eq!(filter_no_reasoning(&result), Some("no_reasoning_steps".to_string()));
+    assert_eq!(
+        filter_no_reasoning(&result),
+        Some("no_reasoning_steps".to_string())
+    );
 }
 
 #[test]
 fn test_filter_no_reasoning_rejects_empty_response() {
     let result = mock_agent_result(vec![ChatMessage::user("hi")], Some("".to_string()));
-    assert_eq!(filter_no_reasoning(&result), Some("no_reasoning_steps".to_string()));
+    assert_eq!(
+        filter_no_reasoning(&result),
+        Some("no_reasoning_steps".to_string())
+    );
 }
 
 #[test]
@@ -198,7 +231,10 @@ fn test_filter_no_reasoning_passes_with_tools() {
 fn test_filter_no_reasoning_rejects_text_only() {
     // UAT gap: text-only responses without tool calls must be rejected
     let result = mock_agent_result(vec![], Some("This is a substantive response".to_string()));
-    assert_eq!(filter_no_reasoning(&result), Some("no_reasoning_steps".to_string()));
+    assert_eq!(
+        filter_no_reasoning(&result),
+        Some("no_reasoning_steps".to_string())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +248,10 @@ fn test_filter_error_only_rejects_all_errors() {
         ChatMessage::tool_result("tc2", "Error: another failure"),
     ];
     let result = mock_agent_result(msgs, None);
-    assert_eq!(filter_error_only(&result), Some("error_only_trajectory".to_string()));
+    assert_eq!(
+        filter_error_only(&result),
+        Some("error_only_trajectory".to_string())
+    );
 }
 
 #[test]
@@ -243,7 +282,10 @@ fn test_filter_secrets_detects_api_key() {
         "Response: api_key=sk-live-abcdefghijklmnopqrstuvwxyz1234",
     )];
     let result = mock_agent_result(msgs, None);
-    assert_eq!(filter_secrets_in_output(&result), Some("secrets_in_output".to_string()));
+    assert_eq!(
+        filter_secrets_in_output(&result),
+        Some("secrets_in_output".to_string())
+    );
 }
 
 #[test]
@@ -253,7 +295,10 @@ fn test_filter_secrets_detects_bearer_jwt() {
         "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.signature",
     )];
     let result = mock_agent_result(msgs, None);
-    assert_eq!(filter_secrets_in_output(&result), Some("secrets_in_output".to_string()));
+    assert_eq!(
+        filter_secrets_in_output(&result),
+        Some("secrets_in_output".to_string())
+    );
 }
 
 #[test]
@@ -263,12 +308,18 @@ fn test_filter_secrets_detects_aws_key() {
         "Found key: AKIAIOSFODNN7EXAMPLE in config",
     )];
     let result = mock_agent_result(msgs, None);
-    assert_eq!(filter_secrets_in_output(&result), Some("secrets_in_output".to_string()));
+    assert_eq!(
+        filter_secrets_in_output(&result),
+        Some("secrets_in_output".to_string())
+    );
 }
 
 #[test]
 fn test_filter_secrets_passes_clean_output() {
-    let msgs = vec![ChatMessage::tool_result("tc1", "File contents: hello world")];
+    let msgs = vec![ChatMessage::tool_result(
+        "tc1",
+        "File contents: hello world",
+    )];
     let result = mock_agent_result(msgs, None);
     assert_eq!(filter_secrets_in_output(&result), None);
 }
@@ -283,17 +334,25 @@ fn test_run_filters_collects_all_reasons() {
     // Also inject all-error tool results to also trigger error_only.
     // But error_only requires Tool role messages, while no_reasoning checks tool_calls field.
     // Craft a result that triggers BOTH: no tool_calls on assistant msg + all Tool results error.
-    let msgs = vec![
-        ChatMessage::tool_result("tc1", "Error: failed"),
-    ];
+    let msgs = vec![ChatMessage::tool_result("tc1", "Error: failed")];
     let result = mock_agent_result(msgs, None);
     let registry = registry_with("web_read");
     let quality = run_filters(&result, &registry);
     assert!(!quality.passed);
     // Should contain no_reasoning_steps (no tool_calls, empty final_response)
     // AND error_only_trajectory (all tool results are errors)
-    assert!(quality.reasons.contains(&"no_reasoning_steps".to_string()), "expected no_reasoning_steps in {:?}", quality.reasons);
-    assert!(quality.reasons.contains(&"error_only_trajectory".to_string()), "expected error_only_trajectory in {:?}", quality.reasons);
+    assert!(
+        quality.reasons.contains(&"no_reasoning_steps".to_string()),
+        "expected no_reasoning_steps in {:?}",
+        quality.reasons
+    );
+    assert!(
+        quality
+            .reasons
+            .contains(&"error_only_trajectory".to_string()),
+        "expected error_only_trajectory in {:?}",
+        quality.reasons
+    );
 }
 
 #[test]
@@ -305,7 +364,11 @@ fn test_run_filters_passes_clean_result() {
     ];
     let result = mock_agent_result(msgs, Some("I found the information you need.".to_string()));
     let quality = run_filters(&result, &registry);
-    assert!(quality.passed, "expected passed=true, got reasons: {:?}", quality.reasons);
+    assert!(
+        quality.passed,
+        "expected passed=true, got reasons: {:?}",
+        quality.reasons
+    );
     assert!(quality.reasons.is_empty());
 }
 
@@ -370,7 +433,10 @@ fn test_run_filters_rejects_text_only_no_tools() {
         Some("I can help you with many things! Just ask me anything.".to_string()),
     );
     let quality = run_filters(&result, &registry);
-    assert!(!quality.passed, "text-only response with no tool calls should be rejected");
+    assert!(
+        !quality.passed,
+        "text-only response with no tool calls should be rejected"
+    );
     assert!(
         quality.reasons.contains(&"no_reasoning_steps".to_string()),
         "expected no_reasoning_steps in {:?}",
@@ -395,7 +461,10 @@ fn test_stale_sentinel_removed_at_startup() {
     let two_secs_ago = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(2))
         .unwrap();
-    let file = std::fs::File::options().write(true).open(&sentinel).unwrap();
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&sentinel)
+        .unwrap();
     file.set_modified(two_secs_ago).unwrap();
     drop(file);
 
@@ -403,7 +472,10 @@ fn test_stale_sentinel_removed_at_startup() {
     let run_start = std::time::SystemTime::now();
     clean_stale_sentinel(&sentinel, run_start);
 
-    assert!(!sentinel.exists(), "stale sentinel should have been removed");
+    assert!(
+        !sentinel.exists(),
+        "stale sentinel should have been removed"
+    );
 }
 
 #[test]
@@ -449,7 +521,10 @@ fn test_filter_no_reasoning_passes_long_final_response() {
     let long_response = "The process of photosynthesis is how plants convert sunlight into food. \
         Using chlorophyll in their leaves, plants absorb carbon dioxide from the air \
         and water from the soil, then use solar energy to produce glucose and oxygen.";
-    assert!(long_response.len() >= 100, "test string must be >=100 chars");
+    assert!(
+        long_response.len() >= 100,
+        "test string must be >=100 chars"
+    );
     let result = mock_agent_result(vec![], Some(long_response.to_string()));
     assert_eq!(
         filter_no_reasoning(&result),

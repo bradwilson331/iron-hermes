@@ -11,8 +11,8 @@
 //! Fixture pattern mirrors `make_ctx` (handlers.rs) and the fake trait-object
 //! pattern from `cmd_agents_and_stop.rs`.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use ironhermes_core::commands::context::{CommandContext, ProviderResolverHandle};
 use ironhermes_core::commands::handlers::dispatch;
@@ -114,11 +114,8 @@ fn make_ctx_no_resolver() -> CommandContext {
 
 /// Context with a FakeResolver wired (fast_model configurable).
 fn make_test_ctx_with_provider_resolver(fast_model: Option<&str>) -> CommandContext {
-    let resolver: Arc<dyn ProviderResolverHandle> = Arc::new(FakeResolver::new(
-        "openai",
-        "gpt-4o",
-        fast_model,
-    ));
+    let resolver: Arc<dyn ProviderResolverHandle> =
+        Arc::new(FakeResolver::new("openai", "gpt-4o", fast_model));
     CommandContext::new(
         Platform::Local,
         "test-session-provider".to_string(),

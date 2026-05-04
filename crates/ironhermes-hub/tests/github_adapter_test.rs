@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use ironhermes_core::SkillSource;
 use ironhermes_hub::{GitHubAuth, GitHubSource, GitHubTap, HubError, HubErrorKind, HubSource};
 use wiremock::{
-    matchers::{header, method, path, query_param},
     Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path, query_param},
 };
 
 fn anon_auth() -> GitHubAuth {
@@ -44,7 +44,10 @@ fn github_default_taps_contents() {
 
 #[test]
 fn github_trust_resolution() {
-    let trusted: HashSet<String> = ["anthropics/skills"].iter().map(|s| s.to_string()).collect();
+    let trusted: HashSet<String> = ["anthropics/skills"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let auth = GitHubAuth::anonymous();
     let src = GitHubSource::new(auth, trusted, vec![]);
 
@@ -100,7 +103,11 @@ async fn github_search_happy_path() {
         .await;
 
     // Mock all other repos → 404 so they don't interfere
-    for repo in &["anthropics/skills", "VoltAgent/awesome-agent-skills", "garrytan/gstack"] {
+    for repo in &[
+        "anthropics/skills",
+        "VoltAgent/awesome-agent-skills",
+        "garrytan/gstack",
+    ] {
         Mock::given(method("GET"))
             .and(path(format!("/repos/{repo}")))
             .respond_with(ResponseTemplate::new(404))
@@ -137,7 +144,11 @@ async fn github_search_rate_limited() {
         .await;
 
     // Other taps also 404
-    for repo in &["anthropics/skills", "VoltAgent/awesome-agent-skills", "garrytan/gstack"] {
+    for repo in &[
+        "anthropics/skills",
+        "VoltAgent/awesome-agent-skills",
+        "garrytan/gstack",
+    ] {
         Mock::given(method("GET"))
             .and(path(format!("/repos/{repo}")))
             .respond_with(ResponseTemplate::new(404))
@@ -146,11 +157,21 @@ async fn github_search_rate_limited() {
     }
 
     let src = source_with(&server, &[]);
-    let err = src.search("gif", 10).await.expect_err("should fail with rate-limit");
+    let err = src
+        .search("gif", 10)
+        .await
+        .expect_err("should fail with rate-limit");
 
     match err {
-        HubError::Typed { kind: HubErrorKind::RateLimited, retry_after_s, .. } => {
-            assert!(retry_after_s.is_some(), "retry_after_s should be populated from X-RateLimit-Reset");
+        HubError::Typed {
+            kind: HubErrorKind::RateLimited,
+            retry_after_s,
+            ..
+        } => {
+            assert!(
+                retry_after_s.is_some(),
+                "retry_after_s should be populated from X-RateLimit-Reset"
+            );
         }
         other => panic!("expected RateLimited, got {other:?}"),
     }
@@ -289,7 +310,11 @@ async fn github_fetch_size_cap() {
         .expect_err("oversized tarball must be rejected");
 
     match &err {
-        HubError::Typed { kind: HubErrorKind::Parse, message, .. } => {
+        HubError::Typed {
+            kind: HubErrorKind::Parse,
+            message,
+            ..
+        } => {
             assert!(
                 message.contains("MAX_EXTRACTED_BYTES"),
                 "error must mention size cap: {message}"

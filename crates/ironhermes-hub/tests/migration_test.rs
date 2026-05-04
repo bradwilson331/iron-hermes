@@ -12,7 +12,7 @@
 //! - Pre-existing new lock entries short-circuit migration (no merge of old)
 //! - Missing old manifest → NothingToMigrate
 
-use ironhermes_hub::{migrate_from_hub_manifest, MigrationOutcome, SkillLock};
+use ironhermes_hub::{MigrationOutcome, SkillLock, migrate_from_hub_manifest};
 use std::path::Path;
 use std::sync::Mutex;
 

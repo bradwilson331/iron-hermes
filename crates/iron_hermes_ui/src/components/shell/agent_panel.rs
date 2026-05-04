@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
-use crate::state::{Message, ShellSettings};
 use super::sigil::Sigil;
 use super::tool_call::ToolCall;
+use crate::state::{Message, ShellSettings};
+use dioxus::prelude::*;
 
 /// AgentPanel — right-side `.wh-side` agent panel: Sigil + HERMES title +
 /// personality pill + scrollable message list.

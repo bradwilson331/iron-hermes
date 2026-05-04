@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 /// JS injected into the page to walk the DOM, assign refs, and decorate elements.
@@ -179,8 +179,9 @@ impl Tool for BrowserSnapshotTool {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -221,7 +222,8 @@ impl Tool for BrowserSnapshotTool {
 
             if interactive && r > 0 {
                 // Register selector in ref_table so plan 06 click/type can find this element.
-                sess.ref_table.insert(r, format!("[data-ironhermes-ref=\"{r}\"]"));
+                sess.ref_table
+                    .insert(r, format!("[data-ironhermes-ref=\"{r}\"]"));
                 if name.is_empty() {
                     output.push_str(&format!("{indent}[{r}] {role}\n"));
                 } else {

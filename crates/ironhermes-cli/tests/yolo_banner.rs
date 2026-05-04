@@ -8,7 +8,11 @@ use ironhermes_cli::{maybe_print_yolo_banner, resolve_yolo};
 
 #[test]
 fn resolve_yolo_precedence_matrix() {
-    assert_eq!(resolve_yolo(false, false).0, false, "both unset -> disabled");
+    assert_eq!(
+        resolve_yolo(false, false).0,
+        false,
+        "both unset -> disabled"
+    );
     assert_eq!(resolve_yolo(false, false).1, "disabled");
     assert_eq!(resolve_yolo(false, true).0, true, "config only -> enabled");
     assert_eq!(resolve_yolo(false, true).1, "config");

@@ -20,7 +20,9 @@ pub struct ScanVerdict {
 impl ScanVerdict {
     /// True if any file was blocked by the scanner.
     pub fn has_blocks(&self) -> bool {
-        self.file_results.iter().any(|(_, r)| r.starts_with("[BLOCKED:"))
+        self.file_results
+            .iter()
+            .any(|(_, r)| r.starts_with("[BLOCKED:"))
     }
 
     /// Human-readable one-line summary for manifest `scan_verdict` field.
@@ -61,8 +63,7 @@ impl SkillScanner for CoreSkillScanner {
         let mut results = Vec::with_capacity(files.len());
         for file in files {
             let content = String::from_utf8_lossy(&file.bytes);
-            let result =
-                ironhermes_core::context_scanner::scan_skill_content(&content, &file.path);
+            let result = ironhermes_core::context_scanner::scan_skill_content(&content, &file.path);
             results.push((file.path.clone(), result));
         }
         ScanVerdict {
@@ -81,7 +82,12 @@ impl SkillScanner for AlwaysCleanScanner {
         ScanVerdict {
             file_results: files
                 .iter()
-                .map(|f| (f.path.clone(), String::from_utf8_lossy(&f.bytes).into_owned()))
+                .map(|f| {
+                    (
+                        f.path.clone(),
+                        String::from_utf8_lossy(&f.bytes).into_owned(),
+                    )
+                })
                 .collect(),
         }
     }

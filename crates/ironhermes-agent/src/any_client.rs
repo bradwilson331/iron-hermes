@@ -1,7 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use ironhermes_core::{ApiMode, ChatMessage, ChatResponse, ProviderResolver, ResolvedEndpoint, ToolSchema};
 use ironhermes_core::types::{ContentPart, ImageUrl, MessageContent, Role};
+use ironhermes_core::{
+    ApiMode, ChatMessage, ChatResponse, ProviderResolver, ResolvedEndpoint, ToolSchema,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -88,10 +90,12 @@ impl AnyClient {
     ) -> Result<ChatResponse> {
         match self {
             Self::ChatCompletions(c) => {
-                c.chat_completion(messages, tools, model, max_tokens, temperature, extra).await
+                c.chat_completion(messages, tools, model, max_tokens, temperature, extra)
+                    .await
             }
             Self::AnthropicMessages(c) => {
-                c.chat_completion(messages, tools, model, max_tokens, temperature, extra).await
+                c.chat_completion(messages, tools, model, max_tokens, temperature, extra)
+                    .await
             }
         }
     }
@@ -116,10 +120,12 @@ impl AnyClient {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         match self {
             Self::ChatCompletions(c) => {
-                c.chat_completion_stream(messages, tools, model, max_tokens, temperature, extra).await
+                c.chat_completion_stream(messages, tools, model, max_tokens, temperature, extra)
+                    .await
             }
             Self::AnthropicMessages(c) => {
-                c.chat_completion_stream(messages, tools, model, max_tokens, temperature, extra).await
+                c.chat_completion_stream(messages, tools, model, max_tokens, temperature, extra)
+                    .await
             }
         }
     }
@@ -182,11 +188,7 @@ impl AnyClientVisionHandle {
 
 #[async_trait]
 impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHandle {
-    async fn vision_call(
-        &self,
-        prompt: String,
-        image_data_url: String,
-    ) -> anyhow::Result<String> {
+    async fn vision_call(&self, prompt: String, image_data_url: String) -> anyhow::Result<String> {
         // D-07 cascade: vision role → auxiliary → main provider.
         let client = match build_role_client(&self.resolver, "vision")? {
             Some(c) => c,
@@ -384,7 +386,10 @@ mod tests {
         let result = AnyClient::from_endpoint(&endpoint);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not yet implemented"), "Error should contain 'not yet implemented': {err_msg}");
+        assert!(
+            err_msg.contains("not yet implemented"),
+            "Error should contain 'not yet implemented': {err_msg}"
+        );
     }
 
     // Test: ProviderResolver::build_client returns AnyClient for valid provider
@@ -405,7 +410,10 @@ mod tests {
         let result = build_client(&resolver, "nonexistent-provider", "gpt-4");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Unknown provider"), "Error should mention unknown provider: {err_msg}");
+        assert!(
+            err_msg.contains("Unknown provider"),
+            "Error should mention unknown provider: {err_msg}"
+        );
     }
 
     // Test: build_main_client returns AnyClient for main provider

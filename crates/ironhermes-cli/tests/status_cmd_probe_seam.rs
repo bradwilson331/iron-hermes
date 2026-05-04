@@ -70,7 +70,10 @@ async fn mcp_probe_reports_timeout_unreachable() {
         .mcp_server("mem-fs", Duration::from_millis(100))
         .await
         .unwrap();
-    assert!(!r.reachable, "S-16: timed-out MCP server -> reachable=false");
+    assert!(
+        !r.reachable,
+        "S-16: timed-out MCP server -> reachable=false"
+    );
     assert_eq!(r.tool_count, 0);
 }
 

@@ -3,7 +3,13 @@ use std::path::{Path, PathBuf};
 /// Case-sensitive priority chain for project context files.
 /// Order: .hermes.md > HERMES.md > AGENTS.md > CLAUDE.md > .cursorrules
 /// HERMES.md goes immediately after .hermes.md (both hermes-specific). Per D-18.
-pub const CONTEXT_CANDIDATES: &[&str] = &[".hermes.md", "HERMES.md", "AGENTS.md", "CLAUDE.md", ".cursorrules"];
+pub const CONTEXT_CANDIDATES: &[&str] = &[
+    ".hermes.md",
+    "HERMES.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".cursorrules",
+];
 
 /// Walk upward from `start` looking for a `.git` directory or file (supports worktrees).
 /// Stops at $HOME — does not traverse above it.

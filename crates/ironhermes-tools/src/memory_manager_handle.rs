@@ -27,9 +27,5 @@ pub trait MemoryManagerHandle: Send {
     ///
     /// Returns the JSON envelope from the primary provider unchanged —
     /// MemoryTool formats success/error shapes for the LLM.
-    async fn handle_tool_call(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> MemoryResult;
+    async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult;
 }

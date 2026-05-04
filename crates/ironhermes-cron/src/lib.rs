@@ -79,9 +79,9 @@ pub fn acquire_tick_lock_at(dir: PathBuf) -> Result<Option<LockGuard>> {
             debug!("Tick lock already held: {}", lock_path.display());
             Ok(None)
         }
-        Err(e) => Err(e).with_context(|| {
-            format!("failed to acquire tick lock: {}", lock_path.display())
-        }),
+        Err(e) => {
+            Err(e).with_context(|| format!("failed to acquire tick lock: {}", lock_path.display()))
+        }
     }
 }
 
@@ -123,7 +123,10 @@ fn try_recover_stale_lock(lock_path: &std::path::Path) -> Result<Option<LockGuar
     {
         Ok(mut f) => {
             let _ = io::Write::write_fmt(&mut f, format_args!("{}", std::process::id()));
-            debug!("Re-acquired tick lock after stale recovery: {}", lock_path.display());
+            debug!(
+                "Re-acquired tick lock after stale recovery: {}",
+                lock_path.display()
+            );
             Ok(Some(LockGuard {
                 path: lock_path.to_path_buf(),
             }))

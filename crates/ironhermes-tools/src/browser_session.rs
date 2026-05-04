@@ -74,7 +74,8 @@ impl BrowserSession {
             .build()
             .map_err(|e| anyhow::anyhow!("BrowserConfig build failed: {e}"))?;
 
-        let (browser, mut handler) = Browser::launch(cdp_cfg).await
+        let (browser, mut handler) = Browser::launch(cdp_cfg)
+            .await
             .map_err(|e| anyhow::anyhow!("chromium launch failed: {e}"))?;
 
         // CDP websocket pump — must run on a separate task so handler can drive events.
@@ -87,7 +88,9 @@ impl BrowserSession {
             }
         });
 
-        let page = browser.new_page("about:blank").await
+        let page = browser
+            .new_page("about:blank")
+            .await
             .map_err(|e| anyhow::anyhow!("chromium new_page failed: {e}"))?;
 
         Ok(BrowserSession {
@@ -166,14 +169,19 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
     }
     // 2. CHROMIUM_PATH env var (D-05 step 2: authoritative when set).
     //    Same authoritative semantics as BROWSER_PATH above.
-    if let Some(p) = std::env::var("CHROMIUM_PATH").ok().filter(|s| !s.is_empty()) {
+    if let Some(p) = std::env::var("CHROMIUM_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         let path = PathBuf::from(&p);
         return if path.is_file() { Some(path) } else { None };
     }
     // 3. config.browser.chromium_path
     if let Some(p) = config_path {
         let path = PathBuf::from(p);
-        if path.is_file() { return Some(path); }
+        if path.is_file() {
+            return Some(path);
+        }
     }
     // 4. Inline PATH search (no `which` crate per OQ-4 — zero new workspace deps).
     if let Ok(path_var) = std::env::var("PATH") {
@@ -181,11 +189,15 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
         for name in &["chromium-browser", "chromium", "google-chrome", "chrome"] {
             for dir in path_var.split(separator) {
                 let candidate = PathBuf::from(dir).join(name);
-                if candidate.is_file() { return Some(candidate); }
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
                 #[cfg(windows)]
                 {
                     let candidate_exe = PathBuf::from(dir).join(format!("{name}.exe"));
-                    if candidate_exe.is_file() { return Some(candidate_exe); }
+                    if candidate_exe.is_file() {
+                        return Some(candidate_exe);
+                    }
                 }
             }
         }
@@ -197,16 +209,22 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ] {
         let path = PathBuf::from(p);
-        if path.is_file() { return Some(path); }
+        if path.is_file() {
+            return Some(path);
+        }
     }
     // 6. Linux platform paths
     #[cfg(target_os = "linux")]
     for p in &[
-        "/usr/bin/chromium", "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome", "/snap/bin/chromium",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/snap/bin/chromium",
     ] {
         let path = PathBuf::from(p);
-        if path.is_file() { return Some(path); }
+        if path.is_file() {
+            return Some(path);
+        }
     }
     // 7. Windows platform paths
     #[cfg(target_os = "windows")]
@@ -216,7 +234,9 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
         "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     ] {
         let path = PathBuf::from(p);
-        if path.is_file() { return Some(path); }
+        if path.is_file() {
+            return Some(path);
+        }
     }
     None
 }
@@ -244,8 +264,11 @@ mod tests {
         // find_chromium_binary MUST return None rather than falling through to platform
         // paths. This holds deterministically even on dev machines with system Chrome.
         let result = find_chromium_binary(None);
-        assert!(result.is_none(),
-            "BROWSER_PATH set to absent file MUST return None (D-05 step 1 authoritative), got {:?}", result);
+        assert!(
+            result.is_none(),
+            "BROWSER_PATH set to absent file MUST return None (D-05 step 1 authoritative), got {:?}",
+            result
+        );
         unsafe {
             std::env::remove_var("BROWSER_PATH");
             std::env::remove_var("PATH");
@@ -264,8 +287,11 @@ mod tests {
         // GAP-2 regression test: BROWSER_PATH authoritative when set (D-05 step 1).
         // Must return None even on dev machines with system Chrome installed.
         let result = find_chromium_binary(None);
-        assert!(result.is_none(),
-            "BROWSER_PATH set but invalid → must return None (not fall through to system Chrome), got {:?}", result);
+        assert!(
+            result.is_none(),
+            "BROWSER_PATH set but invalid → must return None (not fall through to system Chrome), got {:?}",
+            result
+        );
         unsafe {
             std::env::remove_var("BROWSER_PATH");
             std::env::remove_var("PATH");
@@ -285,8 +311,11 @@ mod tests {
         // BROWSER_PATH is unset so falls through to CHROMIUM_PATH, which is set but invalid.
         // Must return None even on dev machines with system Chrome installed.
         let result = find_chromium_binary(None);
-        assert!(result.is_none(),
-            "CHROMIUM_PATH set but invalid → must return None (not fall through to system Chrome), got {:?}", result);
+        assert!(
+            result.is_none(),
+            "CHROMIUM_PATH set but invalid → must return None (not fall through to system Chrome), got {:?}",
+            result
+        );
         unsafe {
             std::env::remove_var("CHROMIUM_PATH");
             std::env::remove_var("PATH");
@@ -307,8 +336,11 @@ mod tests {
         #[cfg(unix)]
         {
             let result = find_chromium_binary(Some("/bin/sh"));
-            assert_eq!(result, Some(PathBuf::from("/bin/sh")),
-                "When env vars unset, config_path (/bin/sh) must be returned (fall-through preserved)");
+            assert_eq!(
+                result,
+                Some(PathBuf::from("/bin/sh")),
+                "When env vars unset, config_path (/bin/sh) must be returned (fall-through preserved)"
+            );
         }
     }
 
@@ -320,11 +352,18 @@ mod tests {
         #[cfg(unix)]
         {
             let real_file = "/bin/sh";
-            unsafe { std::env::set_var("BROWSER_PATH", real_file); }
+            unsafe {
+                std::env::set_var("BROWSER_PATH", real_file);
+            }
             let result = find_chromium_binary(None);
-            unsafe { std::env::remove_var("BROWSER_PATH"); }
-            assert_eq!(result, Some(PathBuf::from(real_file)),
-                "BROWSER_PATH pointing at a real file MUST be returned");
+            unsafe {
+                std::env::remove_var("BROWSER_PATH");
+            }
+            assert_eq!(
+                result,
+                Some(PathBuf::from(real_file)),
+                "BROWSER_PATH pointing at a real file MUST be returned"
+            );
         }
         #[cfg(not(unix))]
         {
@@ -352,6 +391,8 @@ mod tests {
     #[test]
     fn validate_navigation_url_allowlist_allows_listed_host() {
         let allow = vec!["example.com".to_string()];
-        assert!(BrowserSession::validate_navigation_url(&allow, "https://example.com/page").is_ok());
+        assert!(
+            BrowserSession::validate_navigation_url(&allow, "https://example.com/page").is_ok()
+        );
     }
 }

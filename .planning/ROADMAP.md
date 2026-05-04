@@ -105,7 +105,7 @@ Plans:
 **Goal:** Update the static-grep regression test `invariant_22_3_02_banner_called_exactly_once_before_tui_init` in `crates/ironhermes-cli/tests/invariants_22_3.rs` so it accepts the legitimate Phase 22.4 ratatui-dispatch additions (Plan 22.4-11, commit `f1aeb73`) without losing regression intent. Replaces the stale `count == 1` equality with `count >= 1`, strengthens the ordering check from "first call site before TUI init" to "every call site strictly before `TuiHandle::new_with_extensions`", anchors on the qualified `TuiHandle::new_with_extensions` string, renames the test to `invariant_22_3_02_banner_called_at_least_once_strictly_before_tui_init`, and rewrites the doc-comment + assertion messages to cite Phase 22.4 CONTEXT D-03 as the rationale for accepting more than one site. Test-only change — `crates/ironhermes-cli/src/main.rs` is untouched. CONTEXT decisions D-01..D-06 in `22.4.2.3-CONTEXT.md` serve as the requirements set (no REQ-IDs).
 **Requirements:** (none — D-01..D-06 from 22.4.2.3-CONTEXT.md serve as the requirements set)
 **Depends on:** Phase 22.4.2
-**Plans:** 1/1 plans complete
+**Plans:** 1/2 plans complete
 
 Plans:
 - [x] 22.4.2.3-01-PLAN.md — Rewrite + rename `invariant_22_3_02_banner_called_exactly_once_before_tui_init` to relaxed-count (`>= 1`) + every-position-before-`TuiHandle::new_with_extensions` form per CONTEXT D-01..D-06; test-only edit, main.rs untouched.
@@ -523,6 +523,24 @@ Plans:
 
 ---
 
+### Phase 25.6: replicate CLI web wiring (INSERTED)
+
+**Goal:** Replicate the full CLI tool-wiring sequence into the web UI's `AppState::init()`, so web UI sessions have the same tool access as CLI sessions: file tools, web search/read/extract, browser automation, memory_recall, skills, delegate_task, cronjob, execute_code, MCP, BlocklistGuardrail, and HookRegistry with JSONL + webhook listeners. Extract common initialization into a shared factory where possible to avoid duplicating ~80 lines across CLI and web UI.
+**Depends on:** Phase 25.5 (iron_hermes_ui crate structure exists), Phase 22 (CLI tool parity), Phase 25.1 (browser tools), Phase 25.2 (web extract)
+**Requirements:** (none — D-01..Dx from phase context serve as the requirement set)
+**Plans:** 3/3 plans complete
+
+Plans:
+- [x] 25.6-01-PLAN.md — Create shared in-process app runtime factory in `ironhermes-agent` (CLI-parity tool/guardrail/hook/MCP wiring contracts + parity tests)
+- [x] 25.6-02-PLAN.md — Migrate CLI + ratatui callsites to consume shared runtime factory while preserving existing behavior
+- [x] 25.6-03-PLAN.md — Migrate web AppState/WS/API to startup-scoped shared runtime and Platform::Web session parity
+
+**Wave structure:**
+- Wave 1: 25.6-01 (shared factory foundation)
+- Wave 2: 25.6-02 and 25.6-03 in parallel (both depend on 25.6-01; no file overlap)
+
+**Phase directory:** `.planning/phases/25.6-replicate-cli-web-wiring/`
+
 ### Phase 25.4: curator + learning loop (INSERTED)
 
 **Goal:** Session-to-skill Curator subsystem — heuristic gate (`tool_calls >= 3` + impactful tool + `duration >= 30s`) plus LLM educational-value scoring (>=7 promotes) via the Phase 26 cascade `"curator"` role; emits Phase 19 SKILL.md files into `<workspace>/skills/<slug>/` (or global fallback); fires automatically on `/new`, `/clear`, and gateway idle-timeout sweep, plus on-demand via `/curate` slash and `hermes curate` CLI. CURATOR_PROMPT must be authored from scratch — no Python upstream precedent (the Python `agent/curator.py` is a skill-consolidator, not a session-to-skill creator). Depends on Phase 25.3 trajectory crate (input data), Workspace newtype (skill output destination), and RESERVED_ROLE_NAMES["curator"] from 25.3 Plan 0.
@@ -633,6 +651,20 @@ Plans:
 - Wave 5: 26-05 (wizard + final D-20 test — depends on 26-03, 26-04, autonomous)
 
 **Phase directory:** `.planning/phases/26-provider-polish/`
+
+### Phase 26.1: Fix websocket error for chat (INSERTED)
+
+**Goal:** Restore reliable Dioxus chat-to-LLM streaming by fixing the WebSocket server route and connection lifecycle so `/api/ws/chat` no longer resets without a closing handshake.
+**Depends on:** Phase 26
+**Requirements:** (none — D-01..D-15 from 26.1-CONTEXT.md are the requirements set)
+**Plans:** 2/3 plans complete
+
+Plans:
+- [x] 26.1-01-PLAN.md — Refactor `/api/ws/chat` websocket lifecycle for live concurrent event forwarding and clean disconnect teardown, harden client reconnect loop in `warp_hermes.rs`, and lock invariants with `websocket_lifecycle_parity.rs` regression tests.
+- [x] 26.1-02-PLAN.md — Gap closure: isolate server-only websocket runtime symbols behind feature boundaries, switch client protocol references to `crate::protocol`, and lock build-boundary invariants so default web build (`dx serve`) succeeds.
+- [ ] 26.1-03-PLAN.md — Gap closure: resolve live browser reset-without-close loop by normalizing server disconnect teardown semantics, hardening client reconnect receive lifecycle continuity, and rerunning manual UAT checkpoint for disconnect + in-flight double-submit race.
+
+**Phase directory:** `.planning/phases/26.1-fix-websocket-error-for-chat/`
 
 ### Phase 27: Prompt Caching
 

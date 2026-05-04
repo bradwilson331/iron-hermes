@@ -105,10 +105,7 @@ impl WebhookDelivery {
                 }
                 Err(e) => {
                     if attempt < max_retries {
-                        let delay_secs = RETRY_DELAYS_SECS
-                            .get(attempt)
-                            .copied()
-                            .unwrap_or(600);
+                        let delay_secs = RETRY_DELAYS_SECS.get(attempt).copied().unwrap_or(600);
                         tracing::warn!(
                             url = %self.endpoint.url,
                             event_id = %event.id,
@@ -128,10 +125,7 @@ impl WebhookDelivery {
                             attempts: max_retries as u32,
                         };
                         if let Err(e) = self.retry_queue.enqueue(&entry) {
-                            tracing::warn!(
-                                "Failed to persist retry entry to disk: {}",
-                                e
-                            );
+                            tracing::warn!("Failed to persist retry entry to disk: {}", e);
                         }
                         tracing::warn!(
                             url = %self.endpoint.url,
@@ -161,8 +155,8 @@ fn event_kind_name(event: &HookEvent) -> &str {
 
 /// Compute HMAC-SHA256 of `body` using `secret` and return a lowercase hex string.
 fn compute_hmac_sha256(secret: &str, body: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take any key size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take any key size");
     mac.update(body);
     let result = mac.finalize();
     hex::encode(result.into_bytes())
@@ -209,7 +203,10 @@ pub async fn drain_retry_queue(
     if entries.is_empty() {
         return;
     }
-    tracing::info!("Draining {} entries from webhook retry queue", entries.len());
+    tracing::info!(
+        "Draining {} entries from webhook retry queue",
+        entries.len()
+    );
 
     for entry in entries {
         // Find the matching endpoint config by URL
@@ -256,7 +253,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("retry-queue.jsonl");
         // Keep tempdir alive by leaking it for test duration
-        let path = std::mem::ManuallyDrop::new(tmp).path().join("retry-queue.jsonl");
+        let path = std::mem::ManuallyDrop::new(tmp)
+            .path()
+            .join("retry-queue.jsonl");
         Arc::new(RetryQueue::new(path).expect("queue"))
     }
 
@@ -275,15 +274,19 @@ mod tests {
         };
         let delivery = WebhookDelivery::new(endpoint, queue);
 
-        assert!(delivery.matches_event(&make_event(HookEventKind::MessageReceived {
-            platform: "telegram".to_string(),
-            chat_id: "1".to_string(),
-            content_preview: "hi".to_string(),
-        })));
-        assert!(delivery.matches_event(&make_event(HookEventKind::ToolCalled {
-            tool_name: "bash".to_string(),
-            args_preview: "{}".to_string(),
-        })));
+        assert!(
+            delivery.matches_event(&make_event(HookEventKind::MessageReceived {
+                platform: "telegram".to_string(),
+                chat_id: "1".to_string(),
+                content_preview: "hi".to_string(),
+            }))
+        );
+        assert!(
+            delivery.matches_event(&make_event(HookEventKind::ToolCalled {
+                tool_name: "bash".to_string(),
+                args_preview: "{}".to_string(),
+            }))
+        );
     }
 
     #[test]
@@ -302,17 +305,21 @@ mod tests {
         let delivery = WebhookDelivery::new(endpoint, queue);
 
         // Should match tool_called
-        assert!(delivery.matches_event(&make_event(HookEventKind::ToolCalled {
-            tool_name: "bash".to_string(),
-            args_preview: "{}".to_string(),
-        })));
+        assert!(
+            delivery.matches_event(&make_event(HookEventKind::ToolCalled {
+                tool_name: "bash".to_string(),
+                args_preview: "{}".to_string(),
+            }))
+        );
 
         // Should NOT match message_received
-        assert!(!delivery.matches_event(&make_event(HookEventKind::MessageReceived {
-            platform: "telegram".to_string(),
-            chat_id: "1".to_string(),
-            content_preview: "hi".to_string(),
-        })));
+        assert!(
+            !delivery.matches_event(&make_event(HookEventKind::MessageReceived {
+                platform: "telegram".to_string(),
+                chat_id: "1".to_string(),
+                content_preview: "hi".to_string(),
+            }))
+        );
     }
 
     #[test]

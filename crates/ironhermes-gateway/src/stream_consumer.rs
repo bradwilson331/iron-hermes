@@ -246,12 +246,7 @@ mod tests {
             })
         }
 
-        async fn edit_message(
-            &self,
-            chat_id: &str,
-            message_id: &str,
-            content: &str,
-        ) -> Result<()> {
+        async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()> {
             self.calls.lock().unwrap().push(AdapterCall::EditMessage {
                 chat_id: chat_id.to_string(),
                 message_id: message_id.to_string(),
@@ -318,7 +313,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         match &calls[0] {
             AdapterCall::EditMessageMarkdown { content, .. } => {
-                assert!(!content.contains('\u{2588}'), "Final edit should not have cursor");
+                assert!(
+                    !content.contains('\u{2588}'),
+                    "Final edit should not have cursor"
+                );
                 assert_eq!(content, "hello");
             }
             other => panic!("Expected EditMessageMarkdown, got {:?}", other),
@@ -340,7 +338,11 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         // Only 1 edit call — second was throttled
-        assert_eq!(calls.len(), 1, "Second flush within 300ms should be throttled");
+        assert_eq!(
+            calls.len(),
+            1,
+            "Second flush within 300ms should be throttled"
+        );
     }
 
     #[tokio::test]

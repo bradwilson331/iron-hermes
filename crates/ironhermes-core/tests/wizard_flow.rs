@@ -3,9 +3,9 @@
 
 use ironhermes_core::config::Config;
 use ironhermes_core::wizard::{
-    apply_model_answer, apply_provider_answer, apply_api_key_answer,
-    apply_learning_loop_answer, apply_memory_provider_answer, apply_hermes_home_answer,
-    LEARNING_LOOP_FRAMING,
+    LEARNING_LOOP_FRAMING, apply_api_key_answer, apply_hermes_home_answer,
+    apply_learning_loop_answer, apply_memory_provider_answer, apply_model_answer,
+    apply_provider_answer,
 };
 
 // ─── Task 2: Wave 0 scaffolding tests ─────────────────────────────────────────
@@ -80,30 +80,63 @@ fn learning_loop_yes_writes_full_block() {
     let block = apply_learning_loop_answer(&mut config, "y");
     assert!(config.memory.memory_enabled);
     assert!(config.memory.user_profile_enabled);
-    assert_eq!(block[&serde_yaml::Value::String("skill_generation_enabled".into())], serde_yaml::Value::Bool(true));
-    assert_eq!(block[&serde_yaml::Value::String("periodic_nudge_interval_seconds".into())], serde_yaml::Value::Number(300u64.into()));
-    assert_eq!(block[&serde_yaml::Value::String("reflection_depth".into())], serde_yaml::Value::String("standard".into()));
-    assert_eq!(block[&serde_yaml::Value::String("skill_eval".into())], serde_yaml::Value::Bool(true));
-    assert_eq!(block[&serde_yaml::Value::String("max_skills".into())], serde_yaml::Value::Number(500u64.into()));
+    assert_eq!(
+        block[&serde_yaml::Value::String("skill_generation_enabled".into())],
+        serde_yaml::Value::Bool(true)
+    );
+    assert_eq!(
+        block[&serde_yaml::Value::String("periodic_nudge_interval_seconds".into())],
+        serde_yaml::Value::Number(300u64.into())
+    );
+    assert_eq!(
+        block[&serde_yaml::Value::String("reflection_depth".into())],
+        serde_yaml::Value::String("standard".into())
+    );
+    assert_eq!(
+        block[&serde_yaml::Value::String("skill_eval".into())],
+        serde_yaml::Value::Bool(true)
+    );
+    assert_eq!(
+        block[&serde_yaml::Value::String("max_skills".into())],
+        serde_yaml::Value::Number(500u64.into())
+    );
 }
 
 #[test]
 fn learning_loop_no_writes_explicit_false_never_absent() {
     let mut config = Config::default();
     let block = apply_learning_loop_answer(&mut config, "n");
-    assert!(!config.memory.memory_enabled, "n must write explicit false to memory_enabled");
-    assert!(!config.memory.user_profile_enabled, "n must write explicit false to user_profile_enabled");
+    assert!(
+        !config.memory.memory_enabled,
+        "n must write explicit false to memory_enabled"
+    );
+    assert!(
+        !config.memory.user_profile_enabled,
+        "n must write explicit false to user_profile_enabled"
+    );
     // skill_generation_enabled MUST be present and false (D-14 final paragraph).
     assert_eq!(
         block[&serde_yaml::Value::String("skill_generation_enabled".into())],
         serde_yaml::Value::Bool(false),
         "skill_generation_enabled must be present as explicit false, not absent"
     );
-    assert_eq!(block[&serde_yaml::Value::String("skill_eval".into())], serde_yaml::Value::Bool(false));
+    assert_eq!(
+        block[&serde_yaml::Value::String("skill_eval".into())],
+        serde_yaml::Value::Bool(false)
+    );
     // Others remain at sentinel defaults — they are not user-toggled by the Y/n switch.
-    assert_eq!(block[&serde_yaml::Value::String("periodic_nudge_interval_seconds".into())], serde_yaml::Value::Number(300u64.into()));
-    assert_eq!(block[&serde_yaml::Value::String("reflection_depth".into())], serde_yaml::Value::String("standard".into()));
-    assert_eq!(block[&serde_yaml::Value::String("max_skills".into())], serde_yaml::Value::Number(500u64.into()));
+    assert_eq!(
+        block[&serde_yaml::Value::String("periodic_nudge_interval_seconds".into())],
+        serde_yaml::Value::Number(300u64.into())
+    );
+    assert_eq!(
+        block[&serde_yaml::Value::String("reflection_depth".into())],
+        serde_yaml::Value::String("standard".into())
+    );
+    assert_eq!(
+        block[&serde_yaml::Value::String("max_skills".into())],
+        serde_yaml::Value::Number(500u64.into())
+    );
 }
 
 #[test]
@@ -111,7 +144,10 @@ fn learning_loop_empty_input_defaults_to_yes() {
     let mut config = Config::default();
     let block = apply_learning_loop_answer(&mut config, "");
     assert!(config.memory.memory_enabled, "empty = default YES per D-14");
-    assert_eq!(block[&serde_yaml::Value::String("skill_generation_enabled".into())], serde_yaml::Value::Bool(true));
+    assert_eq!(
+        block[&serde_yaml::Value::String("skill_generation_enabled".into())],
+        serde_yaml::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -119,7 +155,10 @@ fn learning_loop_case_variants_are_yes() {
     for input in &["Y", "yes", "YES"] {
         let mut config = Config::default();
         apply_learning_loop_answer(&mut config, input);
-        assert!(config.memory.memory_enabled, "'{input}' should enable memory");
+        assert!(
+            config.memory.memory_enabled,
+            "'{input}' should enable memory"
+        );
     }
 }
 
@@ -135,7 +174,10 @@ fn apply_memory_provider_accepts_valid_providers() {
     for provider in &["file", "sqlite", "grafeo", "duckdb"] {
         let mut config = Config::default();
         let result = apply_memory_provider_answer(&mut config, provider, "file");
-        assert!(result.is_ok(), "valid provider {provider} should be accepted");
+        assert!(
+            result.is_ok(),
+            "valid provider {provider} should be accepted"
+        );
         assert_eq!(config.memory.provider, *provider);
     }
 }

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-use crate::delivery::{is_silent, resolve_delivery_target, save_job_output, DeliveryTarget};
+use crate::delivery::{DeliveryTarget, is_silent, resolve_delivery_target, save_job_output};
 use crate::job::CronJob;
 use crate::store::JobStore;
-use crate::{acquire_tick_lock, LockGuard};
+use crate::{LockGuard, acquire_tick_lock};
 
 // ---------------------------------------------------------------------------
 // TickResult
@@ -56,16 +56,8 @@ pub async fn run_tick_check(
         // so writers racing with readers are still serialized by the store
         // mutex on this process and by the tick file-lock across processes.
         store_guard.reload()?;
-        let total_enabled = store_guard
-            .list_jobs()
-            .iter()
-            .filter(|j| j.enabled)
-            .count();
-        let due_jobs: Vec<CronJob> = store_guard
-            .get_due_jobs()
-            .into_iter()
-            .cloned()
-            .collect();
+        let total_enabled = store_guard.list_jobs().iter().filter(|j| j.enabled).count();
+        let due_jobs: Vec<CronJob> = store_guard.get_due_jobs().into_iter().cloned().collect();
         (due_jobs, total_enabled)
     };
 
@@ -105,11 +97,7 @@ pub async fn complete_job_run(
         let mut store_guard = store
             .lock()
             .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
-        store_guard.mark_job_run(
-            &job.id,
-            output,
-            if success { "ok" } else { "error" },
-        )?;
+        store_guard.mark_job_run(&job.id, output, if success { "ok" } else { "error" })?;
     }
 
     // [SILENT] marker suppresses platform delivery

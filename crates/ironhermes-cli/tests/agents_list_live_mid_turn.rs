@@ -19,13 +19,11 @@
 //! the main.rs select arm cannot silently disappear.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use ironhermes_agent::subagent_registry::{
-    SubagentInfo, SubagentRegistry, SubagentRegistryHandle,
-};
+use ironhermes_agent::subagent_registry::{SubagentInfo, SubagentRegistry, SubagentRegistryHandle};
 use ironhermes_core::commands::context::{CommandContext, SubagentListSnapshot};
 use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
@@ -93,8 +91,7 @@ async fn cmd_agents_list_returns_active_subagents_when_registry_populated() {
         "research LoRA training corpora",
     ));
 
-    let handle: Arc<dyn SubagentListSnapshot> =
-        Arc::new(SubagentRegistryHandle::new(reg.clone()));
+    let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);
 
     // Dispatch via the SAME dispatch function the REPL calls (plan 08
@@ -133,8 +130,7 @@ async fn cmd_agents_list_returns_active_subagents_when_registry_populated() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cmd_agents_list_returns_empty_string_when_registry_empty() {
     let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
-    let handle: Arc<dyn SubagentListSnapshot> =
-        Arc::new(SubagentRegistryHandle::new(reg.clone()));
+    let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);
 
     let cmd = find_cmd("agents");
@@ -174,17 +170,15 @@ async fn cmd_agents_kill_cancels_registered_subagent() {
     };
     reg.write().await.register(info);
 
-    let handle: Arc<dyn SubagentListSnapshot> =
-        Arc::new(SubagentRegistryHandle::new(reg.clone()));
+    let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);
 
     let cmd = find_cmd("agents");
     let r = router();
-    let res = tokio::task::spawn_blocking(move || {
-        dispatch(&cmd, &["kill", "sub_killme_1234"], &ctx, &r)
-    })
-    .await
-    .unwrap();
+    let res =
+        tokio::task::spawn_blocking(move || dispatch(&cmd, &["kill", "sub_killme_1234"], &ctx, &r))
+            .await
+            .unwrap();
 
     match res {
         CommandResult::Output(s) => assert!(

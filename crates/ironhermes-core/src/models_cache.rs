@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::constants::{get_hermes_home, OPENROUTER_MODELS_URL};
+use crate::constants::{OPENROUTER_MODELS_URL, get_hermes_home};
 use crate::model_metadata::{ModelCapabilities, ModelMetadata};
 
 /// A single cached model metadata entry with fetch timestamp.
@@ -534,10 +534,16 @@ mod tests {
 
     #[test]
     fn normalize_model_id_strips_provider_prefix() {
-        assert_eq!(normalize_model_id("anthropic/claude-sonnet-4"), "claude-sonnet-4");
+        assert_eq!(
+            normalize_model_id("anthropic/claude-sonnet-4"),
+            "claude-sonnet-4"
+        );
         assert_eq!(normalize_model_id("openai/gpt-4o"), "gpt-4o");
         assert_eq!(normalize_model_id("claude-sonnet-4"), "claude-sonnet-4"); // no prefix
-        assert_eq!(normalize_model_id("meta-llama/llama-3.1-8b"), "llama-3.1-8b");
+        assert_eq!(
+            normalize_model_id("meta-llama/llama-3.1-8b"),
+            "llama-3.1-8b"
+        );
     }
 
     #[test]
@@ -587,7 +593,10 @@ mod tests {
 
     #[test]
     fn strip_date_suffix_works() {
-        assert_eq!(strip_date_suffix("claude-sonnet-4-20250514"), Some("claude-sonnet-4"));
+        assert_eq!(
+            strip_date_suffix("claude-sonnet-4-20250514"),
+            Some("claude-sonnet-4")
+        );
         assert_eq!(strip_date_suffix("gpt-4o-2024-11-20"), None); // hyphens in date part
         assert_eq!(strip_date_suffix("claude-sonnet-4"), None); // no date suffix
         assert_eq!(strip_date_suffix("short"), None); // too short

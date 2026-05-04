@@ -151,10 +151,7 @@ fn cmd_stop(ctx: &CommandContext) -> CommandResult {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(pr.drain_and_kill());
     });
-    CommandResult::Output(format!(
-        "Stopped {} background process(es).",
-        count_before
-    ))
+    CommandResult::Output(format!("Stopped {} background process(es).", count_before))
 }
 
 /// Phase 21.7 Plan 08 (D-03 / D-09): `/agents list|kill|logs`.
@@ -201,11 +198,7 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
         Some("kill") => {
             let token = match args.get(1) {
                 Some(s) => *s,
-                None => {
-                    return CommandResult::Error(
-                        "/agents kill <id>: missing id".to_string(),
-                    )
-                }
+                None => return CommandResult::Error("/agents kill <id>: missing id".to_string()),
             };
             let entries = reg.list_summary();
             match resolve_subagent_id(token, &entries) {
@@ -215,10 +208,7 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
                     } else {
                         // Race: resolution succeeded but the subagent
                         // unregistered between list_summary() and kill().
-                        CommandResult::Output(format!(
-                            "No active subagent with id {}.",
-                            id
-                        ))
+                        CommandResult::Output(format!("No active subagent with id {}.", id))
                     }
                 }
                 Resolve::None => {
@@ -234,43 +224,32 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
         Some("logs") => {
             let token = match args.get(1) {
                 Some(s) => *s,
-                None => {
-                    return CommandResult::Error(
-                        "/agents logs <id>: missing id".to_string(),
-                    )
-                }
+                None => return CommandResult::Error("/agents logs <id>: missing id".to_string()),
             };
             let entries = reg.list_summary();
             let resolved = match resolve_subagent_id(token, &entries) {
                 Resolve::Exact(id) => id,
                 Resolve::None => {
-                    return CommandResult::Output(format!(
-                        "No active subagent with id {}.",
-                        token
-                    ))
+                    return CommandResult::Output(format!("No active subagent with id {}.", token));
                 }
                 Resolve::Ambiguous(candidates) => {
                     return CommandResult::Error(format!(
                         "Ambiguous id '{}'; matches: {}",
                         token,
                         candidates.join(", ")
-                    ))
+                    ));
                 }
             };
             let path = match reg.transcript_path(&resolved) {
                 Some(p) => p,
                 None => {
-                    return CommandResult::Output(format!(
-                        "No transcript for id {}.",
-                        resolved
-                    ))
+                    return CommandResult::Output(format!("No transcript for id {}.", resolved));
                 }
             };
             match std::fs::read_to_string(&path) {
                 Ok(body) => {
                     // Bounded tail: last 200 lines, preserved in original order.
-                    let mut tail: Vec<&str> =
-                        body.lines().rev().take(200).collect::<Vec<_>>();
+                    let mut tail: Vec<&str> = body.lines().rev().take(200).collect::<Vec<_>>();
                     tail.reverse();
                     CommandResult::Output(tail.join("\n"))
                 }
@@ -284,10 +263,7 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
             let suffix = suggest_typo(other, candidates)
                 .map(|s| format!(" {}", s))
                 .unwrap_or_default();
-            CommandResult::Error(format!(
-                "Unknown /agents subcommand: {}{}",
-                other, suffix
-            ))
+            CommandResult::Error(format!("Unknown /agents subcommand: {}{}", other, suffix))
         }
     }
 }
@@ -337,10 +313,7 @@ enum Resolve {
 /// The entries argument is the same `Vec<(id, summary, uptime)>` produced
 /// by `list_summary()` so position-aliases use the identical ordering
 /// the user sees in `/agents list`.
-fn resolve_subagent_id(
-    token: &str,
-    entries: &[(String, String, std::time::Duration)],
-) -> Resolve {
+fn resolve_subagent_id(token: &str, entries: &[(String, String, std::time::Duration)]) -> Resolve {
     let token = token.trim();
     if token.is_empty() {
         return Resolve::None;
@@ -354,9 +327,7 @@ fn resolve_subagent_id(
     }
     // 2. Position alias: `subagent-N` or bare `N`. 1-indexed against the
     //    current list order. Out-of-range → None.
-    let numeric = token
-        .strip_prefix("subagent-")
-        .unwrap_or(token);
+    let numeric = token.strip_prefix("subagent-").unwrap_or(token);
     if let Ok(n) = numeric.parse::<usize>() {
         if n >= 1 && n <= entries.len() {
             return Resolve::Exact(entries[n - 1].0.clone());
@@ -419,9 +390,7 @@ fn cmd_title(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
     let store = match &ctx.state_store {
         Some(s) => s.clone(),
-        None => return CommandResult::Output(
-            "Session storage not configured.".to_string()
-        ),
+        None => return CommandResult::Output("Session storage not configured.".to_string()),
     };
 
     // Parse --workspace flag: supports `--workspace` (use ctx workspace) or
@@ -461,10 +430,7 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
             limit_arg = Some(*a);
         }
     }
-    let limit: usize = limit_arg
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20)
-        .max(1);
+    let limit: usize = limit_arg.and_then(|s| s.parse().ok()).unwrap_or(20).max(1);
 
     // Phase 25.3-16 IN-03 close-out: normalize empty-string filter to None so a
     // misconfigured caller doesn't silently get "no sessions" from SQL NULL
@@ -491,11 +457,7 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_export_session(args: &[&str], ctx: &CommandContext) -> CommandResult {
     let store = match &ctx.state_store {
         Some(s) => s.clone(),
-        None => {
-            return CommandResult::Output(
-                "Session storage not configured.".to_string(),
-            )
-        }
+        None => return CommandResult::Output("Session storage not configured.".to_string()),
     };
     let session_id = args
         .first()
@@ -516,9 +478,7 @@ fn cmd_export_session(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_resume(args: &[&str], ctx: &CommandContext) -> CommandResult {
     let store = match &ctx.state_store {
         Some(s) => s.clone(),
-        None => return CommandResult::Output(
-            "Session storage not configured.".to_string()
-        ),
+        None => return CommandResult::Output("Session storage not configured.".to_string()),
     };
     let name_or_id = match args.first() {
         Some(s) => *s,
@@ -528,12 +488,8 @@ fn cmd_resume(args: &[&str], ctx: &CommandContext) -> CommandResult {
         }
     };
     match store.get_session_id(name_or_id) {
-        Some(session_id) => CommandResult::Output(
-            format!("Resuming session: {session_id}")
-        ),
-        None => CommandResult::Error(
-            format!("Session not found: {name_or_id}")
-        ),
+        Some(session_id) => CommandResult::Output(format!("Resuming session: {session_id}")),
+        None => CommandResult::Error(format!("Session not found: {name_or_id}")),
     }
 }
 
@@ -544,9 +500,7 @@ fn cmd_resume(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_save(args: &[&str], ctx: &CommandContext) -> CommandResult {
     let store = match &ctx.state_store {
         Some(s) => s.clone(),
-        None => return CommandResult::Output(
-            "Session storage not configured.".to_string()
-        ),
+        None => return CommandResult::Output("Session storage not configured.".to_string()),
     };
     let session_id = args.first().copied().unwrap_or(&ctx.session_id);
     CommandResult::Output(store.export_session_text(session_id))
@@ -562,9 +516,7 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
     if let Some(session_id) = args.first() {
         let store = match &ctx.state_store {
             Some(s) => s.clone(),
-            None => return CommandResult::Output(
-                "Session storage not configured.".to_string()
-            ),
+            None => return CommandResult::Output("Session storage not configured.".to_string()),
         };
         return CommandResult::Output(store.history_text(session_id));
     }
@@ -575,7 +527,8 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
         if msgs.is_empty() {
             return CommandResult::Output("No messages in history.".to_string());
         }
-        let lines: Vec<String> = msgs.iter()
+        let lines: Vec<String> = msgs
+            .iter()
             .map(|m| {
                 let role = match m.role {
                     crate::types::Role::User => "You",
@@ -583,7 +536,9 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
                     crate::types::Role::Tool => "Tool",
                     crate::types::Role::System => "System",
                 };
-                let content_str: String = m.content.as_ref()
+                let content_str: String = m
+                    .content
+                    .as_ref()
                     .and_then(|c| c.as_text())
                     .map(|s: &str| s.to_string())
                     .unwrap_or_default();
@@ -595,9 +550,11 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 format!("  [{role}] {preview}")
             })
             .collect();
-        return CommandResult::Output(
-            format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
-        );
+        return CommandResult::Output(format!(
+            "History ({} messages):\n{}",
+            msgs.len(),
+            lines.join("\n")
+        ));
     }
 
     // Fall back to StateStore current session.
@@ -868,7 +825,7 @@ fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
         None => {
             return CommandResult::Output(
                 "/toolset: toolset session handle not configured.".to_string(),
-            )
+            );
         }
     };
     match args.first().copied() {
@@ -877,9 +834,7 @@ fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
             let name = match args.get(1) {
                 Some(s) => *s,
                 None => {
-                    return CommandResult::Error(
-                        "/toolset show <name>: missing name".to_string(),
-                    )
+                    return CommandResult::Error("/toolset show <name>: missing name".to_string());
                 }
             };
             match handle.render_show(name) {
@@ -893,7 +848,7 @@ fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 None => {
                     return CommandResult::Error(
                         "/toolset enable <name>: missing name".to_string(),
-                    )
+                    );
                 }
             };
             match handle.enable_toolset(name) {
@@ -915,7 +870,7 @@ fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 None => {
                     return CommandResult::Error(
                         "/toolset disable <name>: missing name".to_string(),
-                    )
+                    );
                 }
             };
             match handle.disable_toolset(name) {
@@ -1028,9 +983,7 @@ fn cmd_models(args: &[&str], _ctx: &CommandContext) -> CommandResult {
 /// Both use #[tokio::main] multi-threaded runtime.
 fn cmd_models_refresh() -> CommandResult {
     let result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            crate::models_cache::fetch_all().await
-        })
+        tokio::runtime::Handle::current().block_on(async { crate::models_cache::fetch_all().await })
     });
     let (entries, fetch_result) = result;
 
@@ -1066,7 +1019,7 @@ fn cmd_models_refresh() -> CommandResult {
             return CommandResult::Error(format!(
                 "Fetch failed: {}. Check network and OPENROUTER_API_KEY.",
                 e
-            ))
+            ));
         }
     }
 
@@ -1094,7 +1047,11 @@ fn cmd_models_info(model: &str) -> CommandResult {
             lines.push(format!("  Tokenizer:  {}", metadata.tokenizer));
             lines.push(format!(
                 "  Vision: {}  Tool use: {}  Reasoning: {}  Streaming: {}",
-                if metadata.capabilities.vision { "yes" } else { "no" },
+                if metadata.capabilities.vision {
+                    "yes"
+                } else {
+                    "no"
+                },
                 if metadata.capabilities.tool_use {
                     "yes"
                 } else {
@@ -1178,16 +1135,23 @@ fn cmd_reload_mcp(ctx: &CommandContext) -> CommandResult {
 fn cmd_retry(_args: &[&str], ctx: &CommandContext) -> CommandResult {
     let history_lock = match &ctx.history {
         Some(h) => h.clone(),
-        None => return CommandResult::Output(
-            "History not available. Retry requires history threading.".to_string()
-        ),
+        None => {
+            return CommandResult::Output(
+                "History not available. Retry requires history threading.".to_string(),
+            );
+        }
     };
     let msgs = history_lock.read().unwrap_or_else(|e| e.into_inner());
     // Find the last User message in history.
-    let last_user = msgs.iter().rev().find(|m| m.role == crate::types::Role::User);
+    let last_user = msgs
+        .iter()
+        .rev()
+        .find(|m| m.role == crate::types::Role::User);
     match last_user {
         Some(msg) => {
-            let content = msg.content.as_ref()
+            let content = msg
+                .content
+                .as_ref()
                 .and_then(|c| c.as_text())
                 .unwrap_or("")
                 .to_string();
@@ -1198,9 +1162,7 @@ fn cmd_retry(_args: &[&str], ctx: &CommandContext) -> CommandResult {
                 CommandResult::Output(format!("Retrying: {content}"))
             }
         }
-        None => CommandResult::Output(
-            "No user messages in history to retry.".to_string()
-        ),
+        None => CommandResult::Output("No user messages in history to retry.".to_string()),
     }
 }
 
@@ -1214,21 +1176,26 @@ fn cmd_retry(_args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_undo(_args: &[&str], ctx: &CommandContext) -> CommandResult {
     let history_lock = match &ctx.history {
         Some(h) => h.clone(),
-        None => return CommandResult::Output(
-            "History not available. Undo requires history threading.".to_string()
-        ),
+        None => {
+            return CommandResult::Output(
+                "History not available. Undo requires history threading.".to_string(),
+            );
+        }
     };
     let msgs = history_lock.read().unwrap_or_else(|e| e.into_inner());
     if msgs.is_empty() {
         return CommandResult::Output("No history to undo.".to_string());
     }
     // Count how many messages will be removed (last user + last assistant pair).
-    let has_user = msgs.iter().rev().any(|m| m.role == crate::types::Role::User);
+    let has_user = msgs
+        .iter()
+        .rev()
+        .any(|m| m.role == crate::types::Role::User);
     if !has_user {
         return CommandResult::Output("No user messages in history to undo.".to_string());
     }
     CommandResult::Output(
-        "Last exchange undone. (Post-router hook will truncate history.)".to_string()
+        "Last exchange undone. (Post-router hook will truncate history.)".to_string(),
     )
 }
 
@@ -1244,11 +1211,14 @@ fn cmd_undo(_args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_rollback(args: &[&str], ctx: &CommandContext) -> CommandResult {
     let history_lock = match &ctx.history {
         Some(h) => h.clone(),
-        None => return CommandResult::Output(
-            "History not available. Rollback requires history threading.".to_string()
-        ),
+        None => {
+            return CommandResult::Output(
+                "History not available. Rollback requires history threading.".to_string(),
+            );
+        }
     };
-    let n: usize = args.first()
+    let n: usize = args
+        .first()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1)
         .max(1);
@@ -1271,12 +1241,12 @@ fn cmd_rollback(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_background(args: &[&str], ctx: &CommandContext) -> CommandResult {
     if ctx.agent_loop.is_none() {
         return CommandResult::Output(
-            "Agent loop not configured. Background tasks require agent threading.".to_string()
+            "Agent loop not configured. Background tasks require agent threading.".to_string(),
         );
     }
     if args.is_empty() {
         return CommandResult::Output(
-            "Usage: /background <message> — run a prompt as a background task.".to_string()
+            "Usage: /background <message> — run a prompt as a background task.".to_string(),
         );
     }
     let message = args.join(" ");
@@ -1295,12 +1265,12 @@ fn cmd_background(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_btw(args: &[&str], ctx: &CommandContext) -> CommandResult {
     if ctx.agent_loop.is_none() {
         return CommandResult::Output(
-            "Agent loop not configured. BTW requires agent threading.".to_string()
+            "Agent loop not configured. BTW requires agent threading.".to_string(),
         );
     }
     if args.is_empty() {
         return CommandResult::Output(
-            "Usage: /btw <message> — add an aside to the current/next agent turn.".to_string()
+            "Usage: /btw <message> — add an aside to the current/next agent turn.".to_string(),
         );
     }
     let message = args.join(" ");
@@ -1318,12 +1288,12 @@ fn cmd_btw(args: &[&str], ctx: &CommandContext) -> CommandResult {
 fn cmd_queue(args: &[&str], ctx: &CommandContext) -> CommandResult {
     if ctx.agent_loop.is_none() {
         return CommandResult::Output(
-            "Agent loop not configured. Queue requires agent threading.".to_string()
+            "Agent loop not configured. Queue requires agent threading.".to_string(),
         );
     }
     if args.is_empty() {
         return CommandResult::Output(
-            "Usage: /queue <message> — add a message to the input queue.".to_string()
+            "Usage: /queue <message> — add a message to the input queue.".to_string(),
         );
     }
     let message = args.join(" ");
@@ -1365,10 +1335,10 @@ fn todo_stub(name: &str) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::registry::build_registry;
     use crate::commands::CommandRouter;
-    use std::sync::atomic::AtomicBool;
+    use crate::commands::registry::build_registry;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn make_ctx(agent_running: bool) -> CommandContext {
         CommandContext::new(
@@ -1537,7 +1507,11 @@ mod tests {
         match result {
             CommandResult::Output(text) => {
                 assert!(text.contains("claude-sonnet-4"), "missing model name");
-                assert!(text.contains("1,000,000"), "missing context length: {}", text);
+                assert!(
+                    text.contains("1,000,000"),
+                    "missing context length: {}",
+                    text
+                );
                 assert!(text.contains("cl100k_base"), "missing tokenizer: {}", text);
             }
             _ => panic!("expected Output variant"),
@@ -1702,9 +1676,7 @@ mod tests {
     // resolve_subagent_id — post-UAT fix for /agents kill|logs ergonomics
     // =========================================================================
 
-    fn make_entries(
-        ids: &[&str],
-    ) -> Vec<(String, String, std::time::Duration)> {
+    fn make_entries(ids: &[&str]) -> Vec<(String, String, std::time::Duration)> {
         ids.iter()
             .map(|id| {
                 (
@@ -1721,11 +1693,14 @@ mod tests {
         let entries = make_entries(&["sub_abc123456789", "sub_def987654321"]);
         match resolve_subagent_id("sub_abc123456789", &entries) {
             Resolve::Exact(id) => assert_eq!(id, "sub_abc123456789"),
-            r => panic!("expected Exact, got {:?}", match r {
-                Resolve::None => "None",
-                Resolve::Ambiguous(_) => "Ambiguous",
-                _ => "?",
-            }),
+            r => panic!(
+                "expected Exact, got {:?}",
+                match r {
+                    Resolve::None => "None",
+                    Resolve::Ambiguous(_) => "Ambiguous",
+                    _ => "?",
+                }
+            ),
         }
     }
 
@@ -1836,8 +1811,8 @@ mod tests {
     // =========================================================================
 
     use crate::commands::context::ToolsetSessionHandle;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc as StdArc;
+    use std::sync::atomic::AtomicUsize;
 
     /// Fake handle that records what the slash handler did. Critically, this
     /// fake does NOT touch the filesystem — it only records calls.
@@ -1960,11 +1935,9 @@ mod tests {
 
         let result = dispatch(&cmd, &["list"], &ctx, &router);
         match result {
-            CommandResult::Output(s) => assert!(
-                s.contains("TOOLSET"),
-                "expected rendered table, got: {}",
-                s
-            ),
+            CommandResult::Output(s) => {
+                assert!(s.contains("TOOLSET"), "expected rendered table, got: {}", s)
+            }
             other => panic!("expected Output, got {:?}", other),
         }
     }
@@ -2158,12 +2131,7 @@ mod tests {
         let router = make_router();
         let cmd = find_sessions_cmd();
 
-        dispatch(
-            &cmd,
-            &["--workspace", "/explicit/path", "5"],
-            &ctx,
-            &router,
-        );
+        dispatch(&cmd, &["--workspace", "/explicit/path", "5"], &ctx, &router);
 
         let last = store.last_filtered.lock().unwrap().clone();
         assert_eq!(last, Some((5, Some("/explicit/path".to_string()))));

@@ -24,8 +24,7 @@ use ironhermes_exec::process_registry::{ProcessRegistry, SpawnSpec};
 #[tokio::test]
 async fn s01_parent_cancels_three_subagents_within_500ms() {
     let parent = CancellationToken::new();
-    let children: Vec<CancellationToken> =
-        (0..3).map(|_| parent.child_token()).collect();
+    let children: Vec<CancellationToken> = (0..3).map(|_| parent.child_token()).collect();
 
     // Pre-cancel sanity.
     assert!(
@@ -67,8 +66,7 @@ async fn s02_parent_cancels_subagents_plus_processes_no_zombies() {
 
     // Subagent stand-ins: 3 child tokens.
     let parent = CancellationToken::new();
-    let children: Vec<CancellationToken> =
-        (0..3).map(|_| parent.child_token()).collect();
+    let children: Vec<CancellationToken> = (0..3).map(|_| parent.child_token()).collect();
 
     // Real tracked processes via ProcessRegistry.
     let reg = Arc::new(RwLock::new(ProcessRegistry::new_for_session("s02")));
@@ -87,7 +85,10 @@ async fn s02_parent_cancels_subagents_plus_processes_no_zombies() {
         };
         let pid = {
             let r = reg.read().await;
-            r.poll(&id).await.and_then(|s| s.pid).expect("spawn must record a pid")
+            r.poll(&id)
+                .await
+                .and_then(|s| s.pid)
+                .expect("spawn must record a pid")
         };
         pids.push(pid);
     }
@@ -152,9 +153,7 @@ fn s03_third_ctrl_c_hard_exits() {
 #[cfg(unix)]
 #[tokio::test]
 async fn s04_on_session_end_during_subagent_leaves_cancelled_marker() {
-    use ironhermes_agent::transcript::{
-        transcript_path_for, TranscriptLine, TranscriptWriter,
-    };
+    use ironhermes_agent::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = transcript_path_for(tmp.path(), "sess-s04", "sub-1");
@@ -194,8 +193,7 @@ async fn s04_on_session_end_during_subagent_leaves_cancelled_marker() {
         if lines.len() < 3 {
             continue;
         }
-        let parsed: Result<TranscriptLine, _> =
-            serde_json::from_str(lines.last().unwrap());
+        let parsed: Result<TranscriptLine, _> = serde_json::from_str(lines.last().unwrap());
         if let Ok(l) = parsed {
             last_observed = Some(l.clone());
             if matches!(l, TranscriptLine::Cancelled { .. }) {

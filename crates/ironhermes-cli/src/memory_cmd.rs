@@ -104,10 +104,7 @@ pub async fn handle_memory_status() -> Result<()> {
             }
         } else {
             println!();
-            println!(
-                "  {}",
-                "Could not load memory store from disk".yellow()
-            );
+            println!("  {}", "Could not load memory store from disk".yellow());
         }
     } else {
         println!();
@@ -161,10 +158,7 @@ pub async fn handle_memory_off() -> Result<()> {
     println!("  Current provider:  {}", "file".cyan());
     println!();
     println!("  Built-in MEMORY.md and USER.md remain active.");
-    println!(
-        "  To re-enable, run: {}",
-        "hermes memory setup".cyan()
-    );
+    println!("  To re-enable, run: {}", "hermes memory setup".cyan());
 
     Ok(())
 }

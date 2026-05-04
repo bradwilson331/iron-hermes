@@ -44,8 +44,7 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("approve", "Approve a pending dangerous command", Session)
             .args_hint("[session|always]")
             .platform(GatewayOnly),
-        CommandDef::new("deny", "Deny a pending dangerous command", Session)
-            .platform(GatewayOnly),
+        CommandDef::new("deny", "Deny a pending dangerous command", Session).platform(GatewayOnly),
         CommandDef::new("background", "Run a prompt in the background", Session)
             .aliases(&["bg"])
             .args_hint("<prompt>")
@@ -64,8 +63,7 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[name]")
             .platform(Universal),
         CommandDef::new("start", "Start with an LLM greeting", Session).platform(GatewayOnly),
-        CommandDef::new("sessions", "List recent sessions", Session)
-            .platform(Universal),
+        CommandDef::new("sessions", "List recent sessions", Session).platform(Universal),
         // Phase 25.3 Plan 11 (D-F-1): export the current (or named) session to
         // the canonical 4-file flat-file directory layout. Universal platform
         // (CLI REPL + ratatui REPL + Telegram). Optional positional arg is the
@@ -77,31 +75,54 @@ pub fn build_registry() -> Vec<CommandDef> {
         )
         .args_hint("[session_id]")
         .platform(Universal),
-
         // -----------------------------------------------------------------------
         // CONFIGURATION
         // -----------------------------------------------------------------------
         CommandDef::new("config", "Show configuration", Configuration).platform(CliOnly),
         // Phase 26 D-14: provider management slash commands (list/show/test/enable/disable).
         // One entry per subcommand so CommandRouter can resolve "/provider list" etc. via prefix.
-        CommandDef::new("provider", "Manage providers — list/show/test/enable/disable (Phase 26, D-14)", Configuration)
-            .args_hint("[list|show|test|enable|disable] [name]")
-            .platform(Universal),
-        CommandDef::new("provider list", "List all providers with status", Configuration)
-            .args_hint("[--json]")
-            .platform(Universal),
-        CommandDef::new("provider show", "Show detail for one provider", Configuration)
-            .args_hint("<name>")
-            .platform(Universal),
-        CommandDef::new("provider test", "Live-ping a provider API endpoint (D-15: never prints key value)", Configuration)
-            .args_hint("<name>")
-            .platform(Universal),
-        CommandDef::new("provider enable", "Enable a provider (persists to config.yaml, emits cache-break banner)", Configuration)
-            .args_hint("<name>")
-            .platform(Universal),
-        CommandDef::new("provider disable", "Disable a provider (persists to config.yaml, emits cache-break banner)", Configuration)
-            .args_hint("<name>")
-            .platform(Universal),
+        CommandDef::new(
+            "provider",
+            "Manage providers — list/show/test/enable/disable (Phase 26, D-14)",
+            Configuration,
+        )
+        .args_hint("[list|show|test|enable|disable] [name]")
+        .platform(Universal),
+        CommandDef::new(
+            "provider list",
+            "List all providers with status",
+            Configuration,
+        )
+        .args_hint("[--json]")
+        .platform(Universal),
+        CommandDef::new(
+            "provider show",
+            "Show detail for one provider",
+            Configuration,
+        )
+        .args_hint("<name>")
+        .platform(Universal),
+        CommandDef::new(
+            "provider test",
+            "Live-ping a provider API endpoint (D-15: never prints key value)",
+            Configuration,
+        )
+        .args_hint("<name>")
+        .platform(Universal),
+        CommandDef::new(
+            "provider enable",
+            "Enable a provider (persists to config.yaml, emits cache-break banner)",
+            Configuration,
+        )
+        .args_hint("<name>")
+        .platform(Universal),
+        CommandDef::new(
+            "provider disable",
+            "Disable a provider (persists to config.yaml, emits cache-break banner)",
+            Configuration,
+        )
+        .args_hint("<name>")
+        .platform(Universal),
         CommandDef::new("prompt", "Set custom system prompt", Configuration)
             .args_hint("[text]")
             .platform(CliOnly),
@@ -112,8 +133,12 @@ pub fn build_registry() -> Vec<CommandDef> {
             .aliases(&["sb"])
             .platform(CliOnly),
         CommandDef::new("verbose", "Toggle verbose tool output", Configuration).platform(CliOnly),
-        CommandDef::new("yolo", "Toggle dangerous command auto-approval", Configuration)
-            .platform(Universal),
+        CommandDef::new(
+            "yolo",
+            "Toggle dangerous command auto-approval",
+            Configuration,
+        )
+        .platform(Universal),
         CommandDef::new("reasoning", "Set reasoning level", Configuration)
             .args_hint("[level|show|hide]")
             .platform(Universal),
@@ -131,7 +156,6 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("mouse", "Toggle mouse capture", Configuration)
             .args_hint("[on|off]")
             .platform(CliOnly),
-
         // -----------------------------------------------------------------------
         // TOOLS AND SKILLS
         // -----------------------------------------------------------------------
@@ -140,9 +164,13 @@ pub fn build_registry() -> Vec<CommandDef> {
             .platform(CliOnly),
         // Phase 25 Plan 04 (D-06): replaces the /toolsets stub. Singular name (matches
         // /personality vs /personalities), Universal platform (CLI REPL + gateway).
-        CommandDef::new("toolset", "Manage toolsets (list/enable/disable/show)", ToolsAndSkills)
-            .args_hint("[list|enable|disable|show] [name]")
-            .platform(Universal),
+        CommandDef::new(
+            "toolset",
+            "Manage toolsets (list/enable/disable/show)",
+            ToolsAndSkills,
+        )
+        .args_hint("[list|enable|disable|show] [name]")
+        .platform(Universal),
         CommandDef::new("skills", "List installed skills", ToolsAndSkills).platform(CliOnly),
         CommandDef::new("cron", "Manage cron jobs", ToolsAndSkills)
             .args_hint("[subcommand]")
@@ -155,11 +183,8 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[connect|disconnect|status]")
             .platform(CliOnly),
         CommandDef::new("plugins", "List installed plugins", ToolsAndSkills).platform(CliOnly),
-        CommandDef::new("mcp", "MCP server list and status", ToolsAndSkills)
-            .platform(Universal),
-        CommandDef::new("memory", "Memory provider status", ToolsAndSkills)
-            .platform(Universal),
-
+        CommandDef::new("mcp", "MCP server list and status", ToolsAndSkills).platform(Universal),
+        CommandDef::new("memory", "Memory provider status", ToolsAndSkills).platform(Universal),
         // -----------------------------------------------------------------------
         // INFO
         // -----------------------------------------------------------------------
@@ -180,9 +205,7 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("paste", "Paste clipboard image", Info).platform(CliOnly),
         CommandDef::new("update", "Check for updates", Info).platform(GatewayOnly),
         CommandDef::new("snapshot", "Save a conversation snapshot", Info).platform(Universal),
-        CommandDef::new("profile", "Show active profile and HERMES_HOME", Info)
-            .platform(Universal),
-
+        CommandDef::new("profile", "Show active profile and HERMES_HOME", Info).platform(Universal),
         // -----------------------------------------------------------------------
         // EXIT
         // -----------------------------------------------------------------------
@@ -252,4 +275,3 @@ mod tests {
         );
     }
 }
-

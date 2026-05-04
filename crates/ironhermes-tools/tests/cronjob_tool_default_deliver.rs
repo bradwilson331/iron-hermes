@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use ironhermes_cron::JobStore;
 use ironhermes_tools::cronjob_tool::CronjobTool;
 use ironhermes_tools::registry::Tool;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn env_lock() -> &'static std::sync::Mutex<()> {
@@ -54,7 +54,9 @@ async fn tg_enabled_single_chat_routes_to_origin_via_tool() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let tool = make_tool(&tmp);
     let response = tool
@@ -68,7 +70,11 @@ async fn tg_enabled_single_chat_routes_to_origin_via_tool() {
         .expect("execute returns Ok");
     let v = parse_response(&response);
 
-    assert_eq!(v["status"], "created", "expected status=created, got: {}", v);
+    assert_eq!(
+        v["status"], "created",
+        "expected status=created, got: {}",
+        v
+    );
     assert_eq!(v["job"]["deliver"], "origin", "expected deliver=origin");
     assert_eq!(v["job"]["origin"]["platform"], "telegram");
     assert_eq!(v["job"]["origin"]["chat_id"], "12345");
@@ -79,7 +85,9 @@ async fn tg_enabled_multi_chat_falls_back_to_local_via_tool() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345, 67890]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let tool = make_tool(&tmp);
     let response = tool
@@ -94,8 +102,14 @@ async fn tg_enabled_multi_chat_falls_back_to_local_via_tool() {
     let v = parse_response(&response);
 
     assert_eq!(v["status"], "created");
-    assert_eq!(v["job"]["deliver"], "local", "multi-chat must fall back to local");
-    assert!(v["job"]["origin"].is_null(), "multi-chat must not auto-set origin");
+    assert_eq!(
+        v["job"]["deliver"], "local",
+        "multi-chat must fall back to local"
+    );
+    assert!(
+        v["job"]["origin"].is_null(),
+        "multi-chat must not auto-set origin"
+    );
 }
 
 #[tokio::test]
@@ -103,7 +117,9 @@ async fn tg_disabled_falls_back_to_local_via_tool() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, false, &[12345]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let tool = make_tool(&tmp);
     let response = tool
@@ -127,7 +143,9 @@ async fn tg_section_missing_falls_back_to_local_via_tool() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("config.yaml"), "model:\n  default: test\n").unwrap();
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let tool = make_tool(&tmp);
     let response = tool
@@ -151,7 +169,9 @@ async fn explicit_deliver_arg_skips_helper_via_tool() {
     let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345]);
-    unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+    unsafe {
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
+    }
 
     let tool = make_tool(&tmp);
     let response = tool

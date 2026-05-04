@@ -60,8 +60,7 @@ fn doctor_no_pid_file_is_healthy() {
         .expect("ironhermes doctor");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Gateway PID")
-            && (stdout.contains("not running") || stdout.contains("OK")),
+        stdout.contains("Gateway PID") && (stdout.contains("not running") || stdout.contains("OK")),
         "expected absent-pid healthy branch in doctor output, got:\n{}",
         stdout
     );

@@ -38,7 +38,9 @@ mod tests {
 
     /// Count how many glyphs from the knight-rider set appear, ignoring ANSI escapes.
     fn glyph_count(s: &str) -> usize {
-        s.chars().filter(|c| ['█', '▓', '▒', '░'].contains(c)).count()
+        s.chars()
+            .filter(|c| ['█', '▓', '▒', '░'].contains(c))
+            .count()
     }
 
     #[test]
@@ -68,7 +70,11 @@ mod tests {
             positions.insert(lit);
         }
         assert!(positions.contains(&0), "lit never reaches 0");
-        assert!(positions.contains(&(TRACK_WIDTH - 1)), "lit never reaches {}", TRACK_WIDTH - 1);
+        assert!(
+            positions.contains(&(TRACK_WIDTH - 1)),
+            "lit never reaches {}",
+            TRACK_WIDTH - 1
+        );
     }
 
     #[test]

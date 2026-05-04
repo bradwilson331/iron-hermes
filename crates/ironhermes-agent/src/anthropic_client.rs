@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use ironhermes_core::{
-    ChatMessage, ChatResponse, ChatChoice, ContentPart, FunctionCall, ImageUrl,
-    MessageContent, Role, ToolCall, ToolSchema, Usage,
+    ChatChoice, ChatMessage, ChatResponse, ContentPart, FunctionCall, ImageUrl, MessageContent,
+    Role, ToolCall, ToolSchema, Usage,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
 use crate::client::StreamEvent;
@@ -58,8 +58,9 @@ impl<'de> Deserialize<'de> for AnthropicContent {
         match val {
             serde_json::Value::String(s) => Ok(AnthropicContent::Text(s)),
             serde_json::Value::Array(arr) => {
-                let blocks: Vec<ContentBlock> = serde_json::from_value(serde_json::Value::Array(arr))
-                    .map_err(serde::de::Error::custom)?;
+                let blocks: Vec<ContentBlock> =
+                    serde_json::from_value(serde_json::Value::Array(arr))
+                        .map_err(serde::de::Error::custom)?;
                 Ok(AnthropicContent::Blocks(blocks))
             }
             other => Err(serde::de::Error::custom(format!(
@@ -76,7 +77,7 @@ enum ContentBlock {
         text: String,
     },
     Image {
-        source: ImageSource,                 // Phase 25.1 OQ-2: multimodal user input
+        source: ImageSource, // Phase 25.1 OQ-2: multimodal user input
     },
     ToolUse {
         id: String,
@@ -96,13 +97,11 @@ enum ContentBlock {
 enum ImageSource {
     /// Base64-encoded inline image. browser_vision sends this for full-page screenshots.
     Base64 {
-        media_type: String,    // "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        data: String,          // base64 payload (no "data:..." prefix)
+        media_type: String, // "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        data: String,       // base64 payload (no "data:..." prefix)
     },
     /// URL-source (Anthropic supports this in newer API versions).
-    Url {
-        url: String,
-    },
+    Url { url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,8 +177,14 @@ enum AnthropicSseEvent {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SseContentBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -229,7 +234,9 @@ pub fn discover_anthropic_credential(config_api_key: Option<&str>) -> Option<Str
 
     // 3. ~/.claude/credentials.json oauth.accessToken
     let home = std::env::var("HOME").ok()?;
-    let creds_path = std::path::Path::new(&home).join(".claude").join("credentials.json");
+    let creds_path = std::path::Path::new(&home)
+        .join(".claude")
+        .join("credentials.json");
     let content = std::fs::read_to_string(&creds_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     let token = json
@@ -261,7 +268,12 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
     let system_parts: Vec<String> = messages
         .iter()
         .filter(|m| m.role == Role::System)
-        .filter_map(|m| m.content.as_ref().and_then(|c| c.as_text()).map(String::from))
+        .filter_map(|m| {
+            m.content
+                .as_ref()
+                .and_then(|c| c.as_text())
+                .map(String::from)
+        })
         .collect();
 
     let system = if system_parts.is_empty() {
@@ -282,13 +294,17 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                     Some(MessageContent::Parts(parts)) => parts
                         .iter()
                         .filter_map(|p| match p {
-                            ContentPart::Text { text } => Some(ContentBlock::Text { text: text.clone() }),
+                            ContentPart::Text { text } => {
+                                Some(ContentBlock::Text { text: text.clone() })
+                            }
                             ContentPart::ImageUrl { image_url } => {
                                 convert_image_url_to_block(&image_url.url)
                             }
                         })
                         .collect(),
-                    None => vec![ContentBlock::Text { text: String::new() }],
+                    None => vec![ContentBlock::Text {
+                        text: String::new(),
+                    }],
                 };
                 raw_messages.push(AnthropicMessage {
                     role: "user".to_string(),
@@ -301,16 +317,17 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                 // Text content first (if any)
                 if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text()) {
                     if !text.is_empty() {
-                        blocks.push(ContentBlock::Text { text: text.to_string() });
+                        blocks.push(ContentBlock::Text {
+                            text: text.to_string(),
+                        });
                     }
                 }
 
                 // Tool use blocks
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&tc.function.arguments)
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                         blocks.push(ContentBlock::ToolUse {
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -390,7 +407,9 @@ fn convert_image_url_to_block(url: &str) -> Option<ContentBlock> {
     }
     if url.starts_with("http://") || url.starts_with("https://") {
         return Some(ContentBlock::Image {
-            source: ImageSource::Url { url: url.to_string() },
+            source: ImageSource::Url {
+                url: url.to_string(),
+            },
         });
     }
     tracing::warn!(url_prefix = %&url.chars().take(32).collect::<String>(),
@@ -469,8 +488,16 @@ pub fn parse_anthropic_response(response: &AnthropicResponse) -> (ChatResponse, 
         }
     }
 
-    let content_text = if text_parts.is_empty() { None } else { Some(text_parts.join("")) };
-    let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+    let content_text = if text_parts.is_empty() {
+        None
+    } else {
+        Some(text_parts.join(""))
+    };
+    let tool_calls_opt = if tool_calls.is_empty() {
+        None
+    } else {
+        Some(tool_calls)
+    };
 
     let message = ChatMessage {
         role: Role::Assistant,
@@ -480,7 +507,10 @@ pub fn parse_anthropic_response(response: &AnthropicResponse) -> (ChatResponse, 
         name: None,
     };
 
-    let finish_reason = response.stop_reason.clone().unwrap_or_else(|| "stop".to_string());
+    let finish_reason = response
+        .stop_reason
+        .clone()
+        .unwrap_or_else(|| "stop".to_string());
 
     let chat_response = ChatResponse {
         id: response.id.clone(),
@@ -733,17 +763,24 @@ impl AnthropicClient {
                     let parsed: AnthropicSseEvent = match serde_json::from_str(&tagged) {
                         Ok(e) => e,
                         Err(e) => {
-                            debug!("Failed to parse Anthropic SSE event '{}': {} — data: {}", etype, e, data);
+                            debug!(
+                                "Failed to parse Anthropic SSE event '{}': {} — data: {}",
+                                etype, e, data
+                            );
                             continue;
                         }
                     };
 
                     match parsed {
-                        AnthropicSseEvent::ContentBlockStart { index, content_block } => {
+                        AnthropicSseEvent::ContentBlockStart {
+                            index,
+                            content_block,
+                        } => {
                             match content_block {
                                 SseContentBlock::Text { .. } => {} // no-op
                                 SseContentBlock::ToolUse { id, name, .. } => {
-                                    tool_call_index.insert(index, (Some(id.clone()), Some(name.clone())));
+                                    tool_call_index
+                                        .insert(index, (Some(id.clone()), Some(name.clone())));
                                     let _ = tx
                                         .send(StreamEvent::ToolCallDelta {
                                             index,
@@ -755,23 +792,21 @@ impl AnthropicClient {
                                 }
                             }
                         }
-                        AnthropicSseEvent::ContentBlockDelta { index, delta } => {
-                            match delta {
-                                SseDelta::TextDelta { text } => {
-                                    let _ = tx.send(StreamEvent::ContentDelta(text)).await;
-                                }
-                                SseDelta::InputJsonDelta { partial_json } => {
-                                    let _ = tx
-                                        .send(StreamEvent::ToolCallDelta {
-                                            index,
-                                            id: None,
-                                            name: None,
-                                            arguments: Some(partial_json),
-                                        })
-                                        .await;
-                                }
+                        AnthropicSseEvent::ContentBlockDelta { index, delta } => match delta {
+                            SseDelta::TextDelta { text } => {
+                                let _ = tx.send(StreamEvent::ContentDelta(text)).await;
                             }
-                        }
+                            SseDelta::InputJsonDelta { partial_json } => {
+                                let _ = tx
+                                    .send(StreamEvent::ToolCallDelta {
+                                        index,
+                                        id: None,
+                                        name: None,
+                                        arguments: Some(partial_json),
+                                    })
+                                    .await;
+                            }
+                        },
                         AnthropicSseEvent::MessageDelta { delta, usage } => {
                             if let Some(u) = usage {
                                 let output_tokens = u.output_tokens.unwrap_or(0);
@@ -1029,23 +1064,24 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "tool_abc");
         assert_eq!(tool_calls[0].function.name, "get_weather");
-        let args: serde_json::Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["city"], "Paris");
     }
 
     // Test: AnthropicClient::new constructs correctly
     #[test]
     fn test_anthropic_client_new() {
-        let client = AnthropicClient::new(
-            "https://api.anthropic.com",
-            "test-key",
-            "claude-3-5-sonnet",
-        );
+        let client =
+            AnthropicClient::new("https://api.anthropic.com", "test-key", "claude-3-5-sonnet");
         assert_eq!(client.base_url(), "https://api.anthropic.com");
         assert_eq!(client.model(), "claude-3-5-sonnet");
         // Debug should redact api_key (T-12-04)
         let debug_str = format!("{:?}", client);
-        assert!(!debug_str.contains("test-key"), "Debug should redact api_key");
+        assert!(
+            !debug_str.contains("test-key"),
+            "Debug should redact api_key"
+        );
         assert!(debug_str.contains("REDACTED"));
     }
 
@@ -1069,9 +1105,13 @@ mod tests {
         } else {
             // No env var set — set a test one, verify, clean up
             // SAFETY: test environment manipulation — checked no pre-existing value
-            unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-env-key-test"); }
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", "sk-env-key-test");
+            }
             let result = discover_anthropic_credential(None);
-            unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+            unsafe {
+                std::env::remove_var("ANTHROPIC_API_KEY");
+            }
             assert_eq!(result.as_deref(), Some("sk-env-key-test"));
         }
     }
@@ -1085,9 +1125,13 @@ mod tests {
             let result = discover_anthropic_credential(Some(""));
             assert_eq!(result.as_deref(), Some(existing.as_str()));
         } else {
-            unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-env-fallback"); }
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", "sk-env-fallback");
+            }
             let result = discover_anthropic_credential(Some(""));
-            unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+            unsafe {
+                std::env::remove_var("ANTHROPIC_API_KEY");
+            }
             assert_eq!(result.as_deref(), Some("sk-env-fallback"));
         }
     }
@@ -1129,7 +1173,9 @@ mod tests {
         let user = ChatMessage {
             role: Role::User,
             content: Some(MessageContent::Parts(vec![
-                ContentPart::Text { text: "describe".to_string() },
+                ContentPart::Text {
+                    text: "describe".to_string(),
+                },
                 ContentPart::ImageUrl {
                     image_url: ImageUrl {
                         url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
@@ -1137,15 +1183,29 @@ mod tests {
                     },
                 },
             ])),
-            tool_calls: None, tool_call_id: None, name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         };
         let (_sys, msgs) = adapt_messages(&[user]);
         assert_eq!(msgs.len(), 1);
         let json = serde_json::to_string(&msgs[0]).unwrap();
-        assert!(json.contains(r#""type":"image""#), "expected image block, got: {json}");
-        assert!(json.contains(r#""media_type":"image/png""#), "expected media_type, got: {json}");
-        assert!(json.contains(r#""data":"iVBORw0KGgo=""#), "expected base64 data, got: {json}");
-        assert!(json.contains(r#""text":"describe""#), "expected text block alongside image, got: {json}");
+        assert!(
+            json.contains(r#""type":"image""#),
+            "expected image block, got: {json}"
+        );
+        assert!(
+            json.contains(r#""media_type":"image/png""#),
+            "expected media_type, got: {json}"
+        );
+        assert!(
+            json.contains(r#""data":"iVBORw0KGgo=""#),
+            "expected base64 data, got: {json}"
+        );
+        assert!(
+            json.contains(r#""text":"describe""#),
+            "expected text block alongside image, got: {json}"
+        );
     }
 
     #[test]
@@ -1154,8 +1214,14 @@ mod tests {
         let user = ChatMessage::user("hello");
         let (_sys, msgs) = adapt_messages(&[user]);
         let json = serde_json::to_string(&msgs[0]).unwrap();
-        assert!(json.contains(r#""text":"hello""#), "regression: text-only user message must round-trip");
-        assert!(!json.contains("image"), "regression: text-only must not synthesize image block");
+        assert!(
+            json.contains(r#""text":"hello""#),
+            "regression: text-only user message must round-trip"
+        );
+        assert!(
+            !json.contains("image"),
+            "regression: text-only must not synthesize image block"
+        );
     }
 
     #[test]
@@ -1164,7 +1230,9 @@ mod tests {
         let user = ChatMessage {
             role: Role::User,
             content: Some(MessageContent::Parts(vec![
-                ContentPart::Text { text: "ok".to_string() },
+                ContentPart::Text {
+                    text: "ok".to_string(),
+                },
                 ContentPart::ImageUrl {
                     image_url: ImageUrl {
                         url: "not-a-real-url".to_string(),
@@ -1172,11 +1240,16 @@ mod tests {
                     },
                 },
             ])),
-            tool_calls: None, tool_call_id: None, name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         };
         let (_sys, msgs) = adapt_messages(&[user]);
         let json = serde_json::to_string(&msgs[0]).unwrap();
         assert!(json.contains(r#""text":"ok""#));
-        assert!(!json.contains("image"), "malformed url MUST skip image block, not crash");
+        assert!(
+            !json.contains("image"),
+            "malformed url MUST skip image block, not crash"
+        );
     }
 }

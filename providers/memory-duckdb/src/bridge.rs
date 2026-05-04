@@ -92,22 +92,34 @@ impl DuckDbBridge {
         let db_path = db_path.to_owned();
 
         let thread = std::thread::spawn(move || {
-            let conn = duckdb::Connection::open(&db_path)
-                .expect("Failed to open DuckDB database");
+            let conn = duckdb::Connection::open(&db_path).expect("Failed to open DuckDB database");
             conn.execute_batch(schema::CREATE_SCHEMA)
                 .expect("Failed to initialize DuckDB schema");
 
             for cmd in rx {
                 match cmd {
-                    DuckDbCommand::Add { target, content, respond } => {
+                    DuckDbCommand::Add {
+                        target,
+                        content,
+                        respond,
+                    } => {
                         let result = handle_add(&conn, &target, &content);
                         let _ = respond.send(result);
                     }
-                    DuckDbCommand::Replace { target, old_text, new_content, respond } => {
+                    DuckDbCommand::Replace {
+                        target,
+                        old_text,
+                        new_content,
+                        respond,
+                    } => {
                         let result = handle_replace(&conn, &target, &old_text, &new_content);
                         let _ = respond.send(result);
                     }
-                    DuckDbCommand::Remove { target, old_text, respond } => {
+                    DuckDbCommand::Remove {
+                        target,
+                        old_text,
+                        respond,
+                    } => {
                         let result = handle_remove(&conn, &target, &old_text);
                         let _ = respond.send(result);
                     }
@@ -115,7 +127,11 @@ impl DuckDbBridge {
                         let result = handle_load_all(&conn);
                         let _ = respond.send(result);
                     }
-                    DuckDbCommand::Recall { query, limit, respond } => {
+                    DuckDbCommand::Recall {
+                        query,
+                        limit,
+                        respond,
+                    } => {
                         let result = handle_recall(&conn, &query, limit);
                         let _ = respond.send(result);
                     }
@@ -174,9 +190,8 @@ impl Drop for DuckDbBridge {
 
 /// Fetch all entries for a given target label, ordered by id.
 fn fetch_entries(conn: &duckdb::Connection, target: &str) -> anyhow::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT content FROM memory_facts WHERE target = $1 ORDER BY id",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT content FROM memory_facts WHERE target = $1 ORDER BY id")?;
     let entries: Vec<String> = stmt
         .query_map(duckdb::params![target], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -202,11 +217,7 @@ fn char_count(entries: &[String]) -> usize {
 }
 
 /// Handle Add command — capacity check then INSERT.
-fn handle_add(
-    conn: &duckdb::Connection,
-    target: &str,
-    content: &str,
-) -> Result<String, String> {
+fn handle_add(conn: &duckdb::Connection, target: &str, content: &str) -> Result<String, String> {
     let existing = fetch_entries(conn, target)
         .map_err(|e| format!("{{\"error\": \"Failed to fetch entries: {}\"}}", e))?;
 
@@ -423,14 +434,16 @@ fn handle_load_all(conn: &duckdb::Connection) -> anyhow::Result<HashMap<String, 
 /// Handle Recall: search memory_facts by content ILIKE with time-based ordering (D-13).
 fn handle_recall(conn: &duckdb::Connection, query: &str, limit: u32) -> Result<String, String> {
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-    let mut stmt = conn.prepare(
-        "SELECT content, target, created_at,
+    let mut stmt = conn
+        .prepare(
+            "SELECT content, target, created_at,
                 CASE WHEN content ILIKE $1 THEN 1.0 ELSE 0.5 END as relevance_score
          FROM memory_facts
          WHERE content ILIKE $1
          ORDER BY created_at DESC
-         LIMIT $2"
-    ).map_err(|e| format!("DuckDB recall query failed: {}", e))?;
+         LIMIT $2",
+        )
+        .map_err(|e| format!("DuckDB recall query failed: {}", e))?;
 
     let results: Vec<serde_json::Value> = stmt
         .query_map(duckdb::params![pattern, limit], |row| {
@@ -468,15 +481,15 @@ fn handle_sync_turn(conn: &duckdb::Connection, _entries_json: &str) -> anyhow::R
 
 /// Handle OnPreCompress: extract facts from compressed messages (D-08, D-13).
 fn handle_on_pre_compress(conn: &duckdb::Connection, messages_json: &str) -> anyhow::Result<()> {
-    let messages: Vec<serde_json::Value> = serde_json::from_str(messages_json)
-        .unwrap_or_default();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(messages_json).unwrap_or_default();
     for msg in &messages {
         if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
             if content.len() > 10 {
                 conn.execute(
                     "INSERT INTO conversation_facts (content) VALUES ($1)",
                     duckdb::params![content],
-                ).ok();
+                )
+                .ok();
             }
         }
     }
@@ -487,12 +500,12 @@ fn handle_on_pre_compress(conn: &duckdb::Connection, messages_json: &str) -> any
 fn handle_queue_prefetch(conn: &duckdb::Connection, query: &str) -> anyhow::Result<()> {
     // D-09: Lightweight warmup query to prime DuckDB's buffer manager
     let pattern = format!("%{}%", query);
-    let _ = conn.prepare(
-        "SELECT COUNT(*) FROM memory_facts WHERE content ILIKE $1"
-    ).and_then(|mut stmt| {
-        stmt.query_map(duckdb::params![pattern], |_| Ok(()))
-            .map(|rows| { for _ in rows {} })
-    });
+    let _ = conn
+        .prepare("SELECT COUNT(*) FROM memory_facts WHERE content ILIKE $1")
+        .and_then(|mut stmt| {
+            stmt.query_map(duckdb::params![pattern], |_| Ok(()))
+                .map(|rows| for _ in rows {})
+        });
     Ok(())
 }
 

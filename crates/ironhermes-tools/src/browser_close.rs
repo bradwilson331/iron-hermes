@@ -15,7 +15,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::browser_session::{find_chromium_binary, BrowserSession};
+use crate::browser_session::{BrowserSession, find_chromium_binary};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserCloseTool {
@@ -30,8 +30,12 @@ impl BrowserCloseTool {
 
 #[async_trait]
 impl Tool for BrowserCloseTool {
-    fn name(&self) -> &str { "browser_close" }
-    fn toolset(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser_close"
+    }
+    fn toolset(&self) -> &str {
+        "browser"
+    }
     fn description(&self) -> &str {
         "Close the browser. Shuts down the chromium browser session and \
          frees its resources. Use this when the user asks to close, quit, exit, \
@@ -51,14 +55,17 @@ impl Tool for BrowserCloseTool {
         )
     }
 
-    fn is_available(&self) -> bool { find_chromium_binary(None).is_some() }
+    fn is_available(&self) -> bool {
+        find_chromium_binary(None).is_some()
+    }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
         vec![Prerequisite {
             kind: "binary_present".to_string(),
             name: "chromium-or-chrome".to_string(),
-            description: "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                .to_string(),
+            description:
+                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
+                    .to_string(),
             required: true,
         }]
     }
@@ -106,8 +113,16 @@ mod tests {
         // Phase 25.1 GAP-5: model must be able to map "close the browser" → this tool.
         // The description MUST contain both 'close' and 'browser' as substrings so the
         // LLM's tool-selection heuristic finds it for plain-language requests.
-        assert!(desc.contains("close"), "description MUST contain 'close': {:?}", t.description());
-        assert!(desc.contains("browser"), "description MUST contain 'browser': {:?}", t.description());
+        assert!(
+            desc.contains("close"),
+            "description MUST contain 'close': {:?}",
+            t.description()
+        );
+        assert!(
+            desc.contains("browser"),
+            "description MUST contain 'browser': {:?}",
+            t.description()
+        );
     }
 
     #[tokio::test]
@@ -119,6 +134,9 @@ mod tests {
         assert!(result.contains("\"was_active\":false"));
         // Verify guard is still None.
         let guard = session.lock().await;
-        assert!(guard.is_none(), "after close on None, session must remain None for next-call respawn");
+        assert!(
+            guard.is_none(),
+            "after close on None, session must remain None for next-call respawn"
+        );
     }
 }

@@ -37,9 +37,7 @@ pub const CONTENT_SELECTORS: &[&str] = &["article", "main", "[role=main]", "body
 /// Phase 25.1 (Plan 25.1-10) — the `_TEST_` infix makes the test-only intent
 /// crystal-clear and the env var is never read in production code paths.
 pub async fn validate_url_async(url: &str) -> anyhow::Result<()> {
-    if std::env::var("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK").is_ok()
-        && is_loopback_host(url)
-    {
+    if std::env::var("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK").is_ok() && is_loopback_host(url) {
         return Ok(());
     }
     let url_owned = url.to_string();
@@ -172,7 +170,10 @@ mod tests {
     fn extract_content_local_smoke() {
         let html = r#"<html><head><title>Hello</title></head><body><article><p>World</p></article></body></html>"#;
         let md = extract_content_local(html, "https://example.com/x").expect("extract ok");
-        assert!(md.contains("# Hello"), "expected Markdown header from <title>");
+        assert!(
+            md.contains("# Hello"),
+            "expected Markdown header from <title>"
+        );
         assert!(md.contains("World"), "expected body content preserved");
         assert!(
             md.contains("Source: https://example.com/x"),

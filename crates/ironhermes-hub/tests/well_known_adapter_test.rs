@@ -7,8 +7,8 @@ mod fixtures;
 use ironhermes_core::SkillSource;
 use ironhermes_hub::{HubError, HubErrorKind, HubSource, WellKnownSkillSource};
 use wiremock::{
-    matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
 };
 
 /// Build a WellKnownSkillSource restricted to a single mock host.
@@ -22,10 +22,19 @@ fn source_for(host: &str) -> WellKnownSkillSource {
 fn well_known_always_community() {
     let src = WellKnownSkillSource::new(vec![]);
     assert_eq!(src.trust_level_for("anything"), SkillSource::Community);
-    assert_eq!(src.trust_level_for("self.example.com/foo"), SkillSource::Community);
-    assert_eq!(src.trust_level_for("well-known:example.com/skill"), SkillSource::Community);
+    assert_eq!(
+        src.trust_level_for("self.example.com/foo"),
+        SkillSource::Community
+    );
+    assert_eq!(
+        src.trust_level_for("well-known:example.com/skill"),
+        SkillSource::Community
+    );
     // Even if someone passes what looks like a trusted repo
-    assert_eq!(src.trust_level_for("anthropics/skills/tenor-gif"), SkillSource::Community);
+    assert_eq!(
+        src.trust_level_for("anthropics/skills/tenor-gif"),
+        SkillSource::Community
+    );
 }
 
 // ── HTTPS-only enforcement ────────────────────────────────────────────────────
@@ -39,7 +48,11 @@ async fn well_known_https_only() {
         .await
         .expect_err("HTTP must be rejected");
     match err {
-        HubError::Typed { kind: HubErrorKind::InvalidIdentifier, message, .. } => {
+        HubError::Typed {
+            kind: HubErrorKind::InvalidIdentifier,
+            message,
+            ..
+        } => {
             assert!(
                 message.to_lowercase().contains("https"),
                 "error must mention HTTPS: {message}"
@@ -142,19 +155,37 @@ async fn well_known_fetch_happy_path() {
 async fn well_known_rejects_loopback() {
     let src = WellKnownSkillSource::new(vec![]);
 
-    let err = src.fetch("https://127.0.0.1/foo").await.expect_err("loopback must be rejected");
+    let err = src
+        .fetch("https://127.0.0.1/foo")
+        .await
+        .expect_err("loopback must be rejected");
     match &err {
-        HubError::Typed { kind: HubErrorKind::InvalidIdentifier, message, .. } => {
+        HubError::Typed {
+            kind: HubErrorKind::InvalidIdentifier,
+            message,
+            ..
+        } => {
             assert!(
-                message.contains("loopback") || message.contains("private") || message.contains("127.0.0.1"),
+                message.contains("loopback")
+                    || message.contains("private")
+                    || message.contains("127.0.0.1"),
                 "error must mention loopback/private: {message}"
             );
         }
         other => panic!("expected InvalidIdentifier (SSRF guard), got {other:?}"),
     }
 
-    let err2 = src.fetch("https://10.0.0.1/foo").await.expect_err("private IP must be rejected");
-    assert!(matches!(err2, HubError::Typed { kind: HubErrorKind::InvalidIdentifier, .. }));
+    let err2 = src
+        .fetch("https://10.0.0.1/foo")
+        .await
+        .expect_err("private IP must be rejected");
+    assert!(matches!(
+        err2,
+        HubError::Typed {
+            kind: HubErrorKind::InvalidIdentifier,
+            ..
+        }
+    ));
 }
 
 // ── Allowlist enforcement ─────────────────────────────────────────────────────
@@ -171,7 +202,11 @@ async fn well_known_origin_allowlist_respected() {
         .expect_err("non-allowlisted host must be rejected");
 
     match &err {
-        HubError::Typed { kind: HubErrorKind::NotFound, message, .. } => {
+        HubError::Typed {
+            kind: HubErrorKind::NotFound,
+            message,
+            ..
+        } => {
             assert!(
                 message.contains("allowlist") || message.contains("other.example.org"),
                 "error must mention allowlist: {message}"

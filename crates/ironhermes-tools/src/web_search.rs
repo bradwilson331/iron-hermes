@@ -72,7 +72,8 @@ impl Tool for WebSearchTool {
         vec![crate::registry::Prerequisite {
             kind: "env_var".to_string(),
             name: "FIRECRAWL_API_KEY".to_string(),
-            description: "Firecrawl API key — required for web_search to query the live web.".to_string(),
+            description: "Firecrawl API key — required for web_search to query the live web."
+                .to_string(),
             required: true,
         }]
     }
@@ -118,7 +119,9 @@ impl Tool for WebSearchTool {
         if !search_response.success {
             return Err(anyhow::anyhow!(
                 "Firecrawl search failed: {}",
-                search_response.error.unwrap_or_else(|| "unknown error".to_string())
+                search_response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string())
             ));
         }
 

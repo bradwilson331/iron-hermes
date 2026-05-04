@@ -33,9 +33,9 @@ fn read_repo(path: &str) -> String {
 /// Matches from `async fn NAME` through the first balanced `}` at indent 0.
 fn extract_fn_body(src: &str, name: &str) -> String {
     let needle = format!("async fn {}", name);
-    let start = src.find(&needle).unwrap_or_else(|| {
-        panic!("function `async fn {}` not found in main.rs", name)
-    });
+    let start = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("function `async fn {}` not found in main.rs", name));
     let bytes = src.as_bytes();
     let mut i = start;
     while i < bytes.len() && bytes[i] != b'{' {
@@ -112,20 +112,22 @@ fn inv_4_render_pairs_save_and_restore_position() {
     assert!(
         saves >= 1 && restores >= 1,
         "INV-4: tui/render.rs must use both SavePosition and RestorePosition — saves={}, restores={}",
-        saves, restores
+        saves,
+        restores
     );
     assert!(
         restores >= saves,
         "INV-4: every SavePosition should have a matching RestorePosition (saves={} restores={})",
-        saves, restores
+        saves,
+        restores
     );
 }
 
 #[test]
 fn inv_5_no_stdout_prints_in_tui_module() {
     let tui_dir = crate_root().join("src/tui");
-    let entries = fs::read_dir(&tui_dir)
-        .unwrap_or_else(|e| panic!("read_dir {:?}: {}", tui_dir, e));
+    let entries =
+        fs::read_dir(&tui_dir).unwrap_or_else(|e| panic!("read_dir {:?}: {}", tui_dir, e));
     for entry in entries {
         let entry = entry.unwrap();
         let path = entry.path();

@@ -1,4 +1,4 @@
-use ironhermes_core::{global_estimate_tokens, ChatMessage};
+use ironhermes_core::{ChatMessage, global_estimate_tokens};
 use tracing::{debug, info};
 
 /// Token estimation backed by tiktoken BPE (Phase 21.3 D-09).
@@ -138,9 +138,11 @@ impl ContextCompressor {
                     ironhermes_core::MessageContent::Parts(_) => continue,
                 };
                 if text.len() > 500 {
-                    msg.content = Some(ironhermes_core::MessageContent::Text(
-                        format!("{}... [truncated, {} chars total]", &text[..200], text.len()),
-                    ));
+                    msg.content = Some(ironhermes_core::MessageContent::Text(format!(
+                        "{}... [truncated, {} chars total]",
+                        &text[..200],
+                        text.len()
+                    )));
                 }
             }
         }
@@ -246,10 +248,16 @@ mod tests {
         // tiktoken BPE count for "hello" is 1 token (single BPE token).
         // If global estimator not initialized, falls back to heuristic: 5/4+1=2.
         let count = estimate_tokens("hello");
-        assert!(count > 0, "estimate_tokens must return nonzero for non-empty text");
+        assert!(
+            count > 0,
+            "estimate_tokens must return nonzero for non-empty text"
+        );
         // Empty string: tiktoken returns 0, heuristic returns 1. Both are valid.
         let empty_count = estimate_tokens("");
-        assert!(empty_count <= 1, "estimate_tokens for empty string must be 0 or 1");
+        assert!(
+            empty_count <= 1,
+            "estimate_tokens for empty string must be 0 or 1"
+        );
     }
 
     #[test]

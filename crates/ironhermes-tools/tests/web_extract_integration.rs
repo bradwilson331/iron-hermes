@@ -67,7 +67,7 @@ impl Drop for EnvGuard {
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -138,8 +138,7 @@ pub(crate) fn make_skill_registry_with_stub_youtube() -> (Arc<SkillRegistry>, te
     // Use load_with_paths so the search-path is exactly tmp.path() — load() would
     // also consult get_hermes_home()/skills, polluting the test registry with the
     // operator's installed skills.
-    let registry =
-        SkillRegistry::load_with_paths(&[tmp.path().to_path_buf()]);
+    let registry = SkillRegistry::load_with_paths(&[tmp.path().to_path_buf()]);
     (Arc::new(registry), tmp)
 }
 
@@ -278,8 +277,7 @@ async fn web_extract_pdf_url_routes_to_pdf_backend() {
     assert!(
         pdf_route_taken,
         "PDF route was not taken (dispatch classifier failed to route .pdf URL): error={:?}; content={:?}",
-        err,
-        results[0]["content"]
+        err, results[0]["content"]
     );
 }
 
@@ -315,7 +313,10 @@ async fn web_extract_youtube_url_dispatches_to_skill() {
 
     let entry = &results[0];
     let succeeded = entry["error"].is_null()
-        && entry["content"].as_str().unwrap_or("").contains("Test Video");
+        && entry["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Test Video");
     let graceful_error = entry["error"]
         .as_str()
         .map(|e| e.starts_with("youtube") || e.starts_with("skill"))
@@ -487,8 +488,8 @@ async fn web_extract_use_llm_processing_false_skips_all_aux_calls() {
 // real `AnyClientSummarizationHandle`.
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_summarization_role_resolves_via_phase26_cascade() {
-    use ironhermes_core::config::Config;
     use ironhermes_core::ProviderResolver;
+    use ironhermes_core::config::Config;
 
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
@@ -663,7 +664,10 @@ impl SummarizationClientHandle for Phase26CascadeHandle {
             .resolve_role("summarization")
             .unwrap_or_else(|| self.resolver.resolve_for_main().clone());
 
-        let url = format!("{}/v1/chat/completions", endpoint.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            endpoint.base_url.trim_end_matches('/')
+        );
         let body = json!({
             "model": endpoint.default_model,
             "messages": [
@@ -687,7 +691,9 @@ impl SummarizationClientHandle for Phase26CascadeHandle {
             .and_then(|c| c.get("message"))
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
-            .ok_or_else(|| anyhow::anyhow!("no message.content in summarization response: {}", text))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("no message.content in summarization response: {}", text)
+            })?
             .to_string();
         Ok(content)
     }

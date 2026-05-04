@@ -124,8 +124,8 @@ async fn cmd_config_show(hermes_home: &Path, profile_name: &str) -> Result<()> {
 
     let text = std::fs::read_to_string(&cfg_path)
         .with_context(|| format!("reading {}", cfg_path.display()))?;
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&text)
-        .unwrap_or(serde_yaml::Value::Mapping(Default::default()));
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(&text).unwrap_or(serde_yaml::Value::Mapping(Default::default()));
 
     // D-17: Learning Loop banner (Phase 23). Sits BELOW the Phase 24 Profile: line.
     let memory_enabled = config_setter::config_get(hermes_home, "memory.memory_enabled")
@@ -141,7 +141,9 @@ async fn cmd_config_show(hermes_home: &Path, profile_name: &str) -> Result<()> {
     if memory_enabled && skill_gen {
         println!("🧠 Learning Loop: enabled (memory + skill generation)");
     } else {
-        println!("⚠ Learning Loop: disabled — IronHermes is operating as a single-session agent. Run `hermes setup memory` to enable.");
+        println!(
+            "⚠ Learning Loop: disabled — IronHermes is operating as a single-session agent. Run `hermes setup memory` to enable."
+        );
     }
     println!();
 

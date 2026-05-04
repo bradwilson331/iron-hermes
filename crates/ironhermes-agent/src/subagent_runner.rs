@@ -10,16 +10,16 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use ironhermes_core::{ChatMessage, ProviderResolver};
-use ironhermes_tools::delegate_task::SubagentRunner;
 use ironhermes_tools::ToolRegistry;
+use ironhermes_tools::delegate_task::SubagentRunner;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::any_client::AnyClient;
 use crate::agent_loop::AgentLoop;
+use crate::any_client::AnyClient;
 use crate::budget::BudgetHandle;
 use crate::subagent_registry::{SubagentInfo, SubagentRegistry};
-use crate::transcript::{transcript_path_for, TranscriptLine, TranscriptWriter};
+use crate::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
 
 /// Concrete `SubagentRunner` that spawns child `AgentLoop` instances.
 ///
@@ -104,7 +104,11 @@ fn truncate_summary(goal: &str, max_chars: usize) -> String {
         end = i;
     }
     // advance past the last char
-    let last_char_len = goal[end..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+    let last_char_len = goal[end..]
+        .chars()
+        .next()
+        .map(|c| c.len_utf8())
+        .unwrap_or(0);
     goal[..end + last_char_len].to_string()
 }
 
@@ -185,20 +189,21 @@ impl SubagentRunner for AgentSubagentRunner {
 
         // Wrap the caller's tool_progress callback so every tool event also
         // appends a TranscriptLine (D-05: per-turn writes).
-        let tool_progress_wrapped: Option<ironhermes_tools::delegate_task::ChildToolProgressCallback> =
-            if let Some(writer) = transcript_writer.clone() {
-                let inner = tool_progress;
-                Some(Box::new(move |name: &str, args_preview: &str| {
-                    // fire-and-forget; never stall the agent turn
-                    writer.append(TranscriptLine::now_tool_call(name, args_preview));
-                    if let Some(ref cb) = inner {
-                        cb(name, args_preview);
-                    }
-                })
-                    as ironhermes_tools::delegate_task::ChildToolProgressCallback)
-            } else {
-                tool_progress
-            };
+        let tool_progress_wrapped: Option<
+            ironhermes_tools::delegate_task::ChildToolProgressCallback,
+        > = if let Some(writer) = transcript_writer.clone() {
+            let inner = tool_progress;
+            Some(Box::new(move |name: &str, args_preview: &str| {
+                // fire-and-forget; never stall the agent turn
+                writer.append(TranscriptLine::now_tool_call(name, args_preview));
+                if let Some(ref cb) = inner {
+                    cb(name, args_preview);
+                }
+            })
+                as ironhermes_tools::delegate_task::ChildToolProgressCallback)
+        } else {
+            tool_progress
+        };
 
         let mut agent = AgentLoop::new(child_client, registry, max_iterations);
         // D-21: Forward cancel token to child AgentLoop
@@ -238,18 +243,14 @@ impl SubagentRunner for AgentSubagentRunner {
         if let Some(writer) = transcript_writer.as_ref() {
             if cancelled_flag {
                 // D-07 audit: Cancelled is the LAST line on the cancel path.
-                writer.append(TranscriptLine::now_cancelled(
-                    "cancelled via parent token",
-                ));
+                writer.append(TranscriptLine::now_cancelled("cancelled via parent token"));
             } else if outcome.is_ok() {
                 let preview = final_response.as_deref().unwrap_or("").to_string();
                 writer.append(TranscriptLine::now_done(preview));
             } else {
                 // Error path: still write a Done with an error preview so
                 // transcripts always terminate with either Done or Cancelled.
-                writer.append(TranscriptLine::now_done(
-                    "(error: run_child returned Err)",
-                ));
+                writer.append(TranscriptLine::now_done("(error: run_child returned Err)"));
             }
         }
 
@@ -285,7 +286,11 @@ mod plan_21_7_07_helpers_tests {
     #[test]
     fn random_subagent_id_has_sub_prefix_and_12_hex() {
         let id = random_subagent_id();
-        assert!(id.starts_with("sub_"), "id must start with 'sub_'; got {}", id);
+        assert!(
+            id.starts_with("sub_"),
+            "id must start with 'sub_'; got {}",
+            id
+        );
         let hex = &id[4..];
         assert_eq!(hex.len(), 12, "hex portion must be 12 chars; got {}", hex);
         assert!(

@@ -183,9 +183,7 @@ impl ReplInputChannel {
     /// `history_path` is reserved for future history-persistence work; the
     /// current implementation only uses in-memory history (matching the
     /// pre-plan-11 rustyline behavior). Pass `None` to keep parity.
-    pub fn spawn(
-        history_path: Option<PathBuf>,
-    ) -> anyhow::Result<(Self, ExternalPrinterHandle)> {
+    pub fn spawn(history_path: Option<PathBuf>) -> anyhow::Result<(Self, ExternalPrinterHandle)> {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
         let (line_tx, line_rx) = mpsc::unbounded_channel::<ReplLine>();
 
@@ -299,8 +297,7 @@ impl ReplInputChannel {
                                 use std::io::Write as _;
                                 let mut err = std::io::stderr();
                                 if err.is_tty()
-                                    && let Ok((_cols, rows)) =
-                                        crossterm::terminal::size()
+                                    && let Ok((_cols, rows)) = crossterm::terminal::size()
                                     && let Some(bytes) =
                                         crate::tui::prompt_position_ansi(rows, reserved)
                                 {
@@ -434,7 +431,9 @@ impl ReplInputChannel {
     /// Append a line to rustyline's history. Fire-and-forget; if the worker
     /// has exited this call is a no-op.
     pub fn add_history(&self, line: &str) {
-        let _ = self.cmd_tx.send_command_only(Command::AddHistory(line.to_string()));
+        let _ = self
+            .cmd_tx
+            .send_command_only(Command::AddHistory(line.to_string()));
     }
 
     /// Shut down the worker. Consumes self and makes the shutdown explicit.
@@ -490,11 +489,7 @@ impl CmdAndReplyTx {
     /// forwarder in a single atomic step. Order is preserved because
     /// both channels are FIFO and we write both in the same thread with
     /// no intervening await.
-    fn send(
-        &self,
-        cmd: Command,
-        reply_rx: oneshot::Receiver<ReplLine>,
-    ) -> anyhow::Result<()> {
+    fn send(&self, cmd: Command, reply_rx: oneshot::Receiver<ReplLine>) -> anyhow::Result<()> {
         // Register the reply receiver FIRST so if the caller drops it
         // before the worker gets the prompt, the forwarder still has the
         // receiver and will see the oneshot sender drop cleanly.
@@ -550,10 +545,9 @@ mod tests {
         let _ = chan.cmd_tx.send_command_only(Command::Shutdown);
         // drain_buffered must return 0 without blocking — confirms the
         // line channel has not deadlocked on a pending prompt.
-        tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            async { chan.drain_buffered() },
-        )
+        tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            chan.drain_buffered()
+        })
         .await
         .expect("drain_buffered must not block");
     }
@@ -564,9 +558,7 @@ mod tests {
     async fn add_history_after_shutdown_is_noop() {
         let (mut chan, _printer) = ReplInputChannel::spawn(None).expect("spawn");
         // First — explicit: send Shutdown, then call add_history.
-        let _ = chan
-            .cmd_tx
-            .send_command_only(Command::Shutdown);
+        let _ = chan.cmd_tx.send_command_only(Command::Shutdown);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         chan.add_history("hello");
         // Also drain_buffered should safely return 0.

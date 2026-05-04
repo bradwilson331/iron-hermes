@@ -53,19 +53,19 @@ pub fn validate_bundle_rel_path(rel: &str) -> Result<String, HubError> {
                 return Err(typed(
                     HubErrorKind::Parse,
                     format!(".. component rejected: {rel}"),
-                ))
+                ));
             }
             Component::Prefix(_) => {
                 return Err(typed(
                     HubErrorKind::Parse,
                     format!("drive-letter/prefix rejected: {rel}"),
-                ))
+                ));
             }
             Component::RootDir => {
                 return Err(typed(
                     HubErrorKind::Parse,
                     format!("root component rejected: {rel}"),
-                ))
+                ));
             }
             Component::CurDir | Component::Normal(_) => {}
         }
@@ -82,7 +82,10 @@ pub fn validate_bundle_rel_path(rel: &str) -> Result<String, HubError> {
         .collect::<Vec<_>>()
         .join("/");
     if cleaned.is_empty() {
-        return Err(typed(HubErrorKind::Parse, "path reduced to empty after cleaning"));
+        return Err(typed(
+            HubErrorKind::Parse,
+            "path reduced to empty after cleaning",
+        ));
     }
     Ok(cleaned)
 }
@@ -93,7 +96,10 @@ pub fn validate_bundle_rel_path(rel: &str) -> Result<String, HubError> {
 /// Symlinks and hardlinks are skipped outright (T-19.1-02-01).
 /// Total extracted bytes are capped at [`MAX_EXTRACTED_BYTES`] (T-19.1-02-02).
 /// Entry count is capped at [`MAX_ENTRIES`] (T-19.1-02-02).
-pub fn extract_tarball_prefix(bytes: &[u8], keep_prefix: &str) -> Result<Vec<BundleFile>, HubError> {
+pub fn extract_tarball_prefix(
+    bytes: &[u8],
+    keep_prefix: &str,
+) -> Result<Vec<BundleFile>, HubError> {
     use flate2::read::GzDecoder;
     use std::io::Read as _;
     use tar::{Archive, EntryType};
@@ -109,7 +115,10 @@ pub fn extract_tarball_prefix(bytes: &[u8], keep_prefix: &str) -> Result<Vec<Bun
         let mut entry = entry?;
         count += 1;
         if count > MAX_ENTRIES {
-            return Err(typed(HubErrorKind::Parse, "tar entry count exceeds MAX_ENTRIES"));
+            return Err(typed(
+                HubErrorKind::Parse,
+                "tar entry count exceeds MAX_ENTRIES",
+            ));
         }
 
         // Skip anything that isn't a regular file (reject symlinks/hardlinks — T-19.1-02-01).
@@ -148,7 +157,10 @@ pub fn extract_tarball_prefix(bytes: &[u8], keep_prefix: &str) -> Result<Vec<Bun
 
         let mut buf = Vec::with_capacity(size as usize);
         entry.read_to_end(&mut buf)?;
-        out.push(BundleFile { path: safe, bytes: buf });
+        out.push(BundleFile {
+            path: safe,
+            bytes: buf,
+        });
     }
 
     Ok(out)
@@ -160,7 +172,10 @@ mod tests {
 
     #[test]
     fn valid_simple_path() {
-        assert_eq!(validate_bundle_rel_path("handler.py").unwrap(), "handler.py");
+        assert_eq!(
+            validate_bundle_rel_path("handler.py").unwrap(),
+            "handler.py"
+        );
     }
 
     #[test]

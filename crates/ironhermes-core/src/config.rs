@@ -1,4 +1,4 @@
-use crate::constants::{get_hermes_home, DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL};
+use crate::constants::{DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL, get_hermes_home};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,9 +19,7 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
     // match the project's policy of not instantiating Regex in hot paths.
     // The regex crate is still available for tests.
     if value.is_empty() {
-        anyhow::bail!(
-            "api_key_env '' is not a valid env var name — must match [A-Z][A-Z0-9_]*"
-        );
+        anyhow::bail!("api_key_env '' is not a valid env var name — must match [A-Z][A-Z0-9_]*");
     }
     let mut chars = value.chars();
     let first = chars.next().unwrap(); // non-empty, safe
@@ -57,8 +55,8 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "session_search",
     "skills_hub",
     "mcp_helper",
-    "summarization",   // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
-    "curator",         // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
+    "summarization", // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
+    "curator",       // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
 ];
 
 /// Validate that a role name is one of the seven reserved helper-task roles.
@@ -110,7 +108,8 @@ impl Default for ToolsConfig {
         for name in ["memory", "session", "agent", "skills"] {
             toolsets.insert(name.to_string(), ToolsetEntry { enabled: true });
         }
-        for name in ["web", "code", "browser"] {  // browser added (D-04 high-blast-radius default)
+        for name in ["web", "code", "browser"] {
+            // browser added (D-04 high-blast-radius default)
             toolsets.insert(name.to_string(), ToolsetEntry { enabled: false });
         }
         Self {
@@ -348,11 +347,21 @@ impl Default for CompressionConfig {
     }
 }
 
-fn default_agent_engine() -> String { "summarizing".to_string() }
-fn default_agent_threshold() -> f32 { 0.5 }
-fn default_gateway_engine() -> String { "local_prune".to_string() }
-fn default_gateway_threshold() -> f32 { 0.85 }
-fn default_true() -> bool { true }
+fn default_agent_engine() -> String {
+    "summarizing".to_string()
+}
+fn default_agent_threshold() -> f32 {
+    0.5
+}
+fn default_gateway_engine() -> String {
+    "local_prune".to_string()
+}
+fn default_gateway_threshold() -> f32 {
+    0.85
+}
+fn default_true() -> bool {
+    true
+}
 
 // =============================================================================
 // MemoryConfig (MEM-12)
@@ -422,7 +431,9 @@ impl Default for ModelConfig {
     }
 }
 
-fn default_agent_max_iterations() -> usize { 50 }
+fn default_agent_max_iterations() -> usize {
+    50
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -628,8 +639,12 @@ pub struct PlatformGatewayConfig {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-fn default_session_timeout_hours() -> u64 { 24 }
-fn default_max_concurrent_runs() -> usize { 8 }
+fn default_session_timeout_hours() -> u64 {
+    24
+}
+fn default_max_concurrent_runs() -> usize {
+    8
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -987,7 +1002,10 @@ mod tests {
         assert!(!bc.headed);
         assert!(!bc.no_sandbox);
         assert!(bc.allowed_domains.is_empty());
-        assert_eq!(bc.allowed_schemes, vec!["http".to_string(), "https".to_string()]);
+        assert_eq!(
+            bc.allowed_schemes,
+            vec!["http".to_string(), "https".to_string()]
+        );
         assert_eq!(bc.chromium_path, None);
         assert_eq!(bc.timeout_seconds, 30);
     }
@@ -1021,15 +1039,24 @@ browser:
         let c: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(c.browser.headed);
         assert_eq!(c.browser.timeout_seconds, 60);
-        assert!(!c.browser.no_sandbox);                    // default
-        assert_eq!(c.browser.allowed_schemes, vec!["http".to_string(), "https".to_string()]); // default
+        assert!(!c.browser.no_sandbox); // default
+        assert_eq!(
+            c.browser.allowed_schemes,
+            vec!["http".to_string(), "https".to_string()]
+        ); // default
     }
 
     #[test]
     fn tools_config_default_disables_browser_toolset() {
         let tc = ToolsConfig::default();
-        let entry = tc.toolsets.get("browser").expect("browser toolset entry must exist by default");
-        assert!(!entry.enabled, "Phase 25.1 D-04: browser toolset MUST be disabled by default (high-blast-radius)");
+        let entry = tc
+            .toolsets
+            .get("browser")
+            .expect("browser toolset entry must exist by default");
+        assert!(
+            !entry.enabled,
+            "Phase 25.1 D-04: browser toolset MUST be disabled by default (high-blast-radius)"
+        );
     }
 
     #[test]
@@ -1072,8 +1099,14 @@ skills:
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
         assert!(!config.skills.enabled);
         assert_eq!(config.skills.extra_paths.len(), 2);
-        assert_eq!(config.skills.extra_paths[0], PathBuf::from("/tmp/custom-skills"));
-        assert_eq!(config.skills.extra_paths[1], PathBuf::from("/opt/shared/skills"));
+        assert_eq!(
+            config.skills.extra_paths[0],
+            PathBuf::from("/tmp/custom-skills")
+        );
+        assert_eq!(
+            config.skills.extra_paths[1],
+            PathBuf::from("/opt/shared/skills")
+        );
     }
 
     #[test]
@@ -1138,12 +1171,22 @@ model:
         let default = SubagentConfig::default();
         assert_eq!(
             default.default_toolsets,
-            vec!["terminal".to_string(), "file".to_string(), "web".to_string()],
+            vec![
+                "terminal".to_string(),
+                "file".to_string(),
+                "web".to_string()
+            ],
             "default_toolsets should be [terminal, file, web]"
         );
         assert!(default.model.is_none(), "model should default to None");
-        assert!(default.provider.is_none(), "provider should default to None");
-        assert!(default.base_url.is_none(), "base_url should default to None");
+        assert!(
+            default.provider.is_none(),
+            "provider should default to None"
+        );
+        assert!(
+            default.base_url.is_none(),
+            "base_url should default to None"
+        );
         assert!(default.api_key.is_none(), "api_key should default to None");
     }
 
@@ -1160,7 +1203,11 @@ subagent:
         assert_eq!(config.subagent.max_iterations, 10);
         assert_eq!(
             config.subagent.default_toolsets,
-            vec!["terminal".to_string(), "file".to_string(), "web".to_string()]
+            vec![
+                "terminal".to_string(),
+                "file".to_string(),
+                "web".to_string()
+            ]
         );
         assert!(config.subagent.model.is_none());
         assert!(config.subagent.provider.is_none());
@@ -1268,15 +1315,30 @@ skills:
         assert_eq!(cfg.skills.hub.github_token_env.as_deref(), Some("MY_TOKEN"));
         assert_eq!(cfg.skills.hub.extra_taps.len(), 1);
         assert_eq!(cfg.skills.hub.extra_taps[0].repo, "owner/repo");
-        assert_eq!(cfg.skills.hub.extra_taps[0].path.as_deref(), Some("skills/"));
-        assert_eq!(cfg.skills.hub.well_known_origins, vec!["https://skills.example.com"]);
+        assert_eq!(
+            cfg.skills.hub.extra_taps[0].path.as_deref(),
+            Some("skills/")
+        );
+        assert_eq!(
+            cfg.skills.hub.well_known_origins,
+            vec!["https://skills.example.com"]
+        );
 
         let ser = serde_yaml::to_string(&cfg).expect("serialize");
         let re: Config = serde_yaml::from_str(&ser).expect("re-parse");
         assert_eq!(re.skills.hub.trusted_repos, cfg.skills.hub.trusted_repos);
-        assert_eq!(re.skills.hub.github_token_env, cfg.skills.hub.github_token_env);
-        assert_eq!(re.skills.hub.extra_taps.len(), cfg.skills.hub.extra_taps.len());
-        assert_eq!(re.skills.hub.well_known_origins, cfg.skills.hub.well_known_origins);
+        assert_eq!(
+            re.skills.hub.github_token_env,
+            cfg.skills.hub.github_token_env
+        );
+        assert_eq!(
+            re.skills.hub.extra_taps.len(),
+            cfg.skills.hub.extra_taps.len()
+        );
+        assert_eq!(
+            re.skills.hub.well_known_origins,
+            cfg.skills.hub.well_known_origins
+        );
     }
 
     #[test]
@@ -1324,9 +1386,18 @@ model:
   provider: "openrouter"
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
-        assert!(config.providers.is_empty(), "providers should default to empty map");
-        assert!(config.custom_providers.is_empty(), "custom_providers should default to empty vec");
-        assert!(config.model.roles.is_empty(), "model.roles should default to empty map");
+        assert!(
+            config.providers.is_empty(),
+            "providers should default to empty map"
+        );
+        assert!(
+            config.custom_providers.is_empty(),
+            "custom_providers should default to empty vec"
+        );
+        assert!(
+            config.model.roles.is_empty(),
+            "model.roles should default to empty map"
+        );
     }
 
     // =========================================================================
@@ -1508,7 +1579,10 @@ gateway:
       whitelist: [12345]
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(matches!(config.telegram_default_origin(), OriginDecision::None));
+        assert!(matches!(
+            config.telegram_default_origin(),
+            OriginDecision::None
+        ));
     }
 
     #[test]
@@ -1551,7 +1625,10 @@ gateway:
     #[test]
     fn test_telegram_default_origin_no_section() {
         let config = Config::default();
-        assert!(matches!(config.telegram_default_origin(), OriginDecision::None));
+        assert!(matches!(
+            config.telegram_default_origin(),
+            OriginDecision::None
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1566,13 +1643,15 @@ gateway:
         for name in &["memory", "session", "agent", "skills"] {
             assert!(
                 cfg.is_toolset_enabled(name),
-                "ToolsConfig::default() must have '{}' enabled (D-20)", name
+                "ToolsConfig::default() must have '{}' enabled (D-20)",
+                name
             );
         }
         for name in &["web", "code"] {
             assert!(
                 !cfg.is_toolset_enabled(name),
-                "ToolsConfig::default() must have '{}' disabled (D-20)", name
+                "ToolsConfig::default() must have '{}' disabled (D-20)",
+                name
             );
         }
     }
@@ -1591,9 +1670,11 @@ gateway:
     #[test]
     fn tools_config_serde_roundtrip_preserves_enabled_state() {
         let mut cfg = ToolsConfig::default();
-        cfg.toolsets.insert("web".to_string(), ToolsetEntry { enabled: true });
+        cfg.toolsets
+            .insert("web".to_string(), ToolsetEntry { enabled: true });
         let yaml = serde_yaml::to_string(&cfg).expect("serialize must succeed");
-        let roundtripped: ToolsConfig = serde_yaml::from_str(&yaml).expect("deserialize must succeed");
+        let roundtripped: ToolsConfig =
+            serde_yaml::from_str(&yaml).expect("deserialize must succeed");
         assert!(
             roundtripped.is_toolset_enabled("web"),
             "After roundtrip, 'web' must still be enabled"
@@ -1615,21 +1696,24 @@ gateway:
 model:
   provider: anthropic
 "#;
-        let config: Config = serde_yaml::from_str(yaml).expect("parse must succeed without tools block");
+        let config: Config =
+            serde_yaml::from_str(yaml).expect("parse must succeed without tools block");
         let default_cfg = ToolsConfig::default();
         // Verify D-20 defaults are present
         for name in &["memory", "session", "agent", "skills"] {
             assert_eq!(
                 config.tools.is_toolset_enabled(name),
                 default_cfg.is_toolset_enabled(name),
-                "Config loaded without tools block must have same '{}' state as ToolsConfig::default()", name
+                "Config loaded without tools block must have same '{}' state as ToolsConfig::default()",
+                name
             );
         }
         for name in &["web", "code"] {
             assert_eq!(
                 config.tools.is_toolset_enabled(name),
                 default_cfg.is_toolset_enabled(name),
-                "Config loaded without tools block must have same '{}' state as ToolsConfig::default()", name
+                "Config loaded without tools block must have same '{}' state as ToolsConfig::default()",
+                name
             );
         }
     }
@@ -1819,8 +1903,12 @@ model:
   default: "test-model"
   provider: "openrouter"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).expect("must parse without auxiliary block");
-        assert!(!config.auxiliary.is_set(), "auxiliary must be unset when block absent");
+        let config: Config =
+            serde_yaml::from_str(yaml).expect("must parse without auxiliary block");
+        assert!(
+            !config.auxiliary.is_set(),
+            "auxiliary must be unset when block absent"
+        );
     }
 
     /// D-05: AuxiliaryConfig round-trip serialization.
@@ -1937,7 +2025,10 @@ custom_providers:
     /// D-05: validate_role_name rejects unknown role names (anti-pattern: swallowing).
     #[test]
     fn validate_role_name_rejects_unknown_names() {
-        assert!(validate_role_name("").is_err(), "empty role name must be rejected");
+        assert!(
+            validate_role_name("").is_err(),
+            "empty role name must be rejected"
+        );
         assert!(
             validate_role_name("voice").is_err(),
             "unknown role 'voice' must be rejected"

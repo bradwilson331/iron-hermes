@@ -63,12 +63,12 @@ pub enum HubError {
 impl HubError {
     pub fn envelope(&self) -> serde_json::Value {
         let (kind, message, suggestion, retry_after_s) = match self {
-            HubError::Typed { kind, message, suggestion, retry_after_s } => (
-                *kind,
-                message.clone(),
-                suggestion.clone(),
-                *retry_after_s,
-            ),
+            HubError::Typed {
+                kind,
+                message,
+                suggestion,
+                retry_after_s,
+            } => (*kind, message.clone(), suggestion.clone(), *retry_after_s),
             _ => (HubErrorKind::Internal, self.to_string(), None, None),
         };
         serde_json::json!({
@@ -130,7 +130,10 @@ mod tests_21_8 {
             assert_eq!(env["error"], "hub_error");
             assert_eq!(env["message"], "test message");
             // `kind` should serialize via snake_case.
-            assert!(env["kind"].is_string(), "kind must serialize as a JSON string");
+            assert!(
+                env["kind"].is_string(),
+                "kind must serialize as a JSON string"
+            );
         }
     }
 }

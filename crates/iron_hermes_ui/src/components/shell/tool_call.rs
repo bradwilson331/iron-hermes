@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::state::ToolStatus;
+use dioxus::prelude::*;
 
 /// Tool-call card. Displays the tool name, optional args summary, and
 /// status text in a yellow-bordered card (`.wh-toolcall` styling already in

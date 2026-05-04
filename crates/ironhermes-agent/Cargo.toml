@@ -17,9 +17,13 @@ ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
+ironhermes-cron = { path = "../ironhermes-cron" }
+ironhermes-exec = { path = "../ironhermes-exec" }
+ironhermes-mcp = { path = "../ironhermes-mcp" }
 ironhermes-trajectory = { path = "../ironhermes-trajectory" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }

@@ -1,20 +1,22 @@
-use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock, Semaphore};
-use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
-use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client};
 use ironhermes_agent::budget::BudgetHandle;
+use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
-use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
-use ironhermes_exec::process_registry::ProcessRegistry;
-use ironhermes_core::{ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry};
+use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client};
+use ironhermes_core::commands::context::ToolsetSessionHandle;
+use ironhermes_core::{
+    ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry,
+};
 use ironhermes_cron::JobStore;
+use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore, mpsc};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::PlatformAdapter;
@@ -63,7 +65,11 @@ pub struct GatewayRunner {
     /// Phase 25.1 D-03/D-17: shared browser session Arc for all browser_* tools.
     /// Cloned into `build_gateway_handler` so per-request AgentLoops receive
     /// `with_browser_session(...)` and hold a reference (T-25.1-04 drop semantics).
-    browser_session: Option<std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>>,
+    browser_session: Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
+    >,
     /// Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1 close-out for
     /// Telegram): production `ToolsetSessionHandle` for the gateway's
     /// `/toolset` slash dispatch. `build_gateway_handler` clones it into
@@ -87,11 +93,16 @@ pub struct GatewayRunner {
 }
 
 impl GatewayRunner {
-    pub fn new(config: Config, resolver: ProviderResolver, tool_registry: Arc<RwLock<ToolRegistry>>) -> Self {
+    pub fn new(
+        config: Config,
+        resolver: ProviderResolver,
+        tool_registry: Arc<RwLock<ToolRegistry>>,
+    ) -> Self {
         // Per D-03: all sources share a single state.db
         // Per D-11: gateway uses its own Connection instance via StateStore::open_default()
         let state_store = Arc::new(Mutex::new(
-            ironhermes_state::StateStore::open_default().expect("failed to open state.db for gateway")
+            ironhermes_state::StateStore::open_default()
+                .expect("failed to open state.db for gateway"),
         ));
         Self {
             config,
@@ -104,11 +115,11 @@ impl GatewayRunner {
             hook_registry: None,
             skill_registry: None,
             active_skills: None,
-            mcp_manager: None, // GAP-8: wired by run_gateway before start()
-            budget_handle: None, // Plan 21.7-05: wired by run_gateway before start()
-            process_registry: None, // Plan 21.7-06: wired by run_gateway before start()
+            mcp_manager: None,       // GAP-8: wired by run_gateway before start()
+            budget_handle: None,     // Plan 21.7-05: wired by run_gateway before start()
+            process_registry: None,  // Plan 21.7-06: wired by run_gateway before start()
             subagent_registry: None, // Plan 21.7-07: wired by run_gateway before start()
-            browser_session: None, // Phase 25.1: wired by run_gateway before start()
+            browser_session: None,   // Phase 25.1: wired by run_gateway before start()
             toolset_session: None, // Phase 25.2 Plan 15 follow-up: wired by run_gateway before start()
             workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
             trajectory_root: None, // Phase 25.3-15 CR-02: wired by run_gateway before start()
@@ -253,7 +264,9 @@ impl GatewayRunner {
     /// receives `with_browser_session(...)`. Caller is `run_gateway` in main.rs.
     pub fn set_browser_session(
         &mut self,
-        session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>,
+        session: std::sync::Arc<
+            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
+        >,
     ) {
         self.browser_session = Some(session);
     }
@@ -332,13 +345,14 @@ impl GatewayRunner {
 
         // Phase 21.3: initialize global token estimator from model's encoding
         let main_ep = self.resolver.resolve_for_main();
-        let encoding_name = main_ep.model_metadata
+        let encoding_name = main_ep
+            .model_metadata
             .as_ref()
             .map(|m| m.tokenizer.as_str())
             .unwrap_or("cl100k_base");
-        ironhermes_core::init_global_estimator(
-            ironhermes_core::TiktokenEncoding::from_name(encoding_name)
-        );
+        ironhermes_core::init_global_estimator(ironhermes_core::TiktokenEncoding::from_name(
+            encoding_name,
+        ));
 
         // Phase 18 Plan 08 / UAT gap closure: construct the per-turn gateway
         // hygiene engine from config and attach it. Without this call the
@@ -719,9 +733,7 @@ impl GatewayRunner {
             let adapter_tick = adapter.clone();
 
             join_set.spawn(async move {
-                let mut interval = tokio::time::interval(
-                    tokio::time::Duration::from_secs(60)
-                );
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 // UAT gap 2 / test 13: first-tick-after-boot burst guard.
@@ -841,8 +853,7 @@ impl GatewayRunner {
         // ORDERING: AFTER self.cancel.cancel() and BEFORE drop(msg_tx) — preserves Phase 21.2
         // Plan 11 ordering invariant (MCP shutdown_all FIRST, cancel SECOND, drain THIRD, drop FOURTH).
         {
-            let abort_deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            let abort_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             let mut wjs = worker_join_set.lock().await;
             loop {
                 match tokio::time::timeout_at(abort_deadline, wjs.join_next()).await {
@@ -905,9 +916,7 @@ pub(crate) fn resolve_skill_context(
 /// fast-forwards every Scheduled+enabled job whose `next_run_at <= now` by
 /// recomputing its next run time from `now`. The fast-forwarded jobs are NOT
 /// executed on the current tick — they'll fire on their natural next cadence.
-async fn fast_forward_backlog(
-    store: &Arc<Mutex<ironhermes_cron::JobStore>>,
-) -> Result<usize> {
+async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> Result<usize> {
     use chrono::Utc;
 
     let mut guard = store
@@ -1345,35 +1354,36 @@ mod tests {
             skill_dir.join("SKILL.md"),
             "---\nname: cron-echo\ndescription: Echo a deterministic token\n---\n\n\
              When asked to respond, reply with exactly the token: SKILL-REACHED-LLM-07-3-01",
-        ).unwrap();
-        let skill_registry = Arc::new(
-            ironhermes_core::SkillRegistry::load_with_paths(&[
-                dir.path().join(".ironhermes/skills")
-            ]),
-        );
+        )
+        .unwrap();
+        let skill_registry = Arc::new(ironhermes_core::SkillRegistry::load_with_paths(&[dir
+            .path()
+            .join(".ironhermes/skills")]));
 
         // 2. Build an in-memory JobStore with one due job that attaches the skill
         let cron_dir = dir.path().join(".ironhermes/cron");
         std::fs::create_dir_all(&cron_dir).unwrap();
-        let job_store = Arc::new(Mutex::new(
-            JobStore::open(cron_dir).expect("job store"),
-        ));
+        let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir).expect("job store")));
         let job = {
             let mut guard = job_store.lock().unwrap();
-            guard.add_job(
-                "cron-skill-integration-test",
-                "Please respond now.",
-                ScheduleParsed::Interval { minutes: 1, display: "every 1 min".to_string() },
-                "every 1 min",
-                "cli",
-                vec!["cron-echo".to_string()],
-                None,
-            ).expect("add job")
+            guard
+                .add_job(
+                    "cron-skill-integration-test",
+                    "Please respond now.",
+                    ScheduleParsed::Interval {
+                        minutes: 1,
+                        display: "every 1 min".to_string(),
+                    },
+                    "every 1 min",
+                    "cli",
+                    vec!["cron-echo".to_string()],
+                    None,
+                )
+                .expect("add job")
         };
 
         // 3. Build a Config that points at a real LLM endpoint (uses env vars / config.yaml defaults)
-        let config = ironhermes_core::Config::load()
-            .expect("load config for LLM integration test");
+        let config = ironhermes_core::Config::load().expect("load config for LLM integration test");
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::default()));
 
         // 4. Call execute_cron_job directly (the helper Task 4 extracts)
@@ -1382,11 +1392,12 @@ mod tests {
             &job_store,
             &Some(skill_registry),
             &tool_registry,
-            &None,              // memory_manager
-            &None,              // hook_registry
+            &None, // memory_manager
+            &None, // hook_registry
             &config,
-            None,               // tg_client: no delivery in integration test
-        ).await;
+            None, // tg_client: no delivery in integration test
+        )
+        .await;
         assert!(result.is_ok(), "execute_cron_job failed: {:?}", result);
 
         // 5. Verify the stored last_status contains the token
@@ -1414,7 +1425,7 @@ mod tests {
         // D-04 / D-06 / D-07 / D-16: cron-triggered runs must fire MessageReceived + ResponseSent
         // to a shared HookRegistry with platform="cron" and non-empty chat_id. This test proves
         // the registry wiring protocol that execute_cron_job (Task 4) uses.
-        use ironhermes_hooks::{HookRegistry, HookEvent, HookEventKind, HooksConfig};
+        use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry, HooksConfig};
 
         // 1. Build a HookRegistry with a capture listener (pattern copied from registry.rs tests)
         let mut registry = HookRegistry::new(HooksConfig::default());
@@ -1451,20 +1462,40 @@ mod tests {
 
         // 4. Assert both events captured with cron platform + job chat_id
         let events = captured.lock().unwrap();
-        assert_eq!(events.len(), 2, "expected 2 events, got {}: {:?}", events.len(), *events);
+        assert_eq!(
+            events.len(),
+            2,
+            "expected 2 events, got {}: {:?}",
+            events.len(),
+            *events
+        );
 
         // First event should be MessageReceived with platform="cron"
         match &events[0].kind {
-            HookEventKind::MessageReceived { platform, chat_id: cid, .. } => {
-                assert_eq!(platform, "cron", "D-12: cron events must use platform=\"cron\"");
-                assert_eq!(cid, "test-job-42", "D-12: chat_id must come from Job record");
+            HookEventKind::MessageReceived {
+                platform,
+                chat_id: cid,
+                ..
+            } => {
+                assert_eq!(
+                    platform, "cron",
+                    "D-12: cron events must use platform=\"cron\""
+                );
+                assert_eq!(
+                    cid, "test-job-42",
+                    "D-12: chat_id must come from Job record"
+                );
             }
             other => panic!("expected MessageReceived, got {:?}", other),
         }
 
         // Second event should be ResponseSent with platform="cron"
         match &events[1].kind {
-            HookEventKind::ResponseSent { platform, chat_id: cid, .. } => {
+            HookEventKind::ResponseSent {
+                platform,
+                chat_id: cid,
+                ..
+            } => {
                 assert_eq!(platform, "cron");
                 assert_eq!(cid, "test-job-42");
             }
@@ -1497,15 +1528,20 @@ mod tests {
         // Seed the store with a job
         let job = {
             let mut guard = job_store.lock().unwrap();
-            guard.add_job(
-                "complete_job_run test",
-                "anything",
-                ScheduleParsed::Interval { minutes: 1, display: "every 1 min".to_string() },
-                "every 1 min",
-                "cli",
-                vec![],
-                None,
-            ).expect("insert job")
+            guard
+                .add_job(
+                    "complete_job_run test",
+                    "anything",
+                    ScheduleParsed::Interval {
+                        minutes: 1,
+                        display: "every 1 min".to_string(),
+                    },
+                    "every 1 min",
+                    "cli",
+                    vec![],
+                    None,
+                )
+                .expect("insert job")
         };
 
         // Real output — NOT the placeholder
@@ -1540,9 +1576,9 @@ mod tests {
         )
         .unwrap();
 
-        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[
-            dir.path().join(".ironhermes/skills")
-        ]);
+        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[dir
+            .path()
+            .join(".ironhermes/skills")]);
         let result = resolve_skill_context(&registry, &["test-skill".to_string()]);
         assert!(result.contains("## Skill: test-skill"), "result: {result}");
         assert!(result.contains("Do the thing."), "result: {result}");
@@ -1551,9 +1587,8 @@ mod tests {
     #[test]
     fn test_resolve_skill_context_missing_skill() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[
-            dir.path().join("no-skills-here")
-        ]);
+        let registry =
+            ironhermes_core::SkillRegistry::load_with_paths(&[dir.path().join("no-skills-here")]);
         let result = resolve_skill_context(&registry, &["nonexistent".to_string()]);
         assert!(result.is_empty(), "result should be empty: {result}");
     }
@@ -1569,9 +1604,8 @@ mod tests {
         )
         .unwrap();
 
-        let registry = ironhermes_core::SkillRegistry::load_with_paths(&[
-            dir.path().join("skills")
-        ]);
+        let registry =
+            ironhermes_core::SkillRegistry::load_with_paths(&[dir.path().join("skills")]);
         let result = resolve_skill_context(
             &registry,
             &["real-skill".to_string(), "fake-skill".to_string()],
@@ -1596,14 +1630,22 @@ mod tests {
             skill_dir.join("SKILL.md"),
             "---\nname: restricted-skill\ndescription: A restrictive skill\nallowed-tools:\n  - web_read\n---\nRestricted skill body",
         ).unwrap();
-        let skill_registry = Arc::new(
-            ironhermes_core::SkillRegistry::load_with_paths(&[dir.path().join("skills")])
-        );
+        let skill_registry = Arc::new(ironhermes_core::SkillRegistry::load_with_paths(&[dir
+            .path()
+            .join("skills")]));
 
         // 2. Verify the skill was loaded with allowed_tools
-        let record = skill_registry.find("restricted-skill").expect("skill loaded");
-        assert!(record.allowed_tools.is_some(), "allowed_tools must be parsed");
-        assert_eq!(record.allowed_tools.as_ref().unwrap(), &vec!["web_read".to_string()]);
+        let record = skill_registry
+            .find("restricted-skill")
+            .expect("skill loaded");
+        assert!(
+            record.allowed_tools.is_some(),
+            "allowed_tools must be parsed"
+        );
+        assert_eq!(
+            record.allowed_tools.as_ref().unwrap(),
+            &vec!["web_read".to_string()]
+        );
 
         // 3. Simulate pre-population logic (same as execute_cron_job does)
         let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
@@ -1682,8 +1724,14 @@ mod tests {
         let events = captured.lock().unwrap();
 
         // Count MessageReceived and ResponseSent events
-        let msg_received_count = events.iter().filter(|e| matches!(e, HookEventKind::MessageReceived { .. })).count();
-        let response_sent_count = events.iter().filter(|e| matches!(e, HookEventKind::ResponseSent { .. })).count();
+        let msg_received_count = events
+            .iter()
+            .filter(|e| matches!(e, HookEventKind::MessageReceived { .. }))
+            .count();
+        let response_sent_count = events
+            .iter()
+            .filter(|e| matches!(e, HookEventKind::ResponseSent { .. }))
+            .count();
 
         assert_eq!(
             msg_received_count, 1,
@@ -1698,14 +1746,18 @@ mod tests {
 
         // Verify platform metadata is correct (from the platform layer, not agent loop)
         match &events[0] {
-            HookEventKind::MessageReceived { platform, chat_id, .. } => {
+            HookEventKind::MessageReceived {
+                platform, chat_id, ..
+            } => {
                 assert_eq!(platform, "telegram");
                 assert_eq!(chat_id, "chat-123");
             }
             other => panic!("first event should be MessageReceived, got {:?}", other),
         }
         match &events[1] {
-            HookEventKind::ResponseSent { platform, chat_id, .. } => {
+            HookEventKind::ResponseSent {
+                platform, chat_id, ..
+            } => {
                 assert_eq!(platform, "telegram");
                 assert_eq!(chat_id, "chat-123");
             }
@@ -1722,20 +1774,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_called_not_emitted_for_blocked_tools() {
-        use ironhermes_hooks::{BlocklistGuardrail, HookEvent, HookEventKind, HookRegistry, HooksConfig};
-        use ironhermes_tools::{Tool, ToolRegistry};
-        use ironhermes_core::ToolSchema;
         use async_trait::async_trait;
+        use ironhermes_core::ToolSchema;
+        use ironhermes_hooks::{
+            BlocklistGuardrail, HookEvent, HookEventKind, HookRegistry, HooksConfig,
+        };
+        use ironhermes_tools::{Tool, ToolRegistry};
 
         // A simple echo tool that records when it actually executes
         struct EchoTool;
         #[async_trait]
         impl Tool for EchoTool {
-            fn name(&self) -> &str { "echo" }
-            fn toolset(&self) -> &str { "test" }
-            fn description(&self) -> &str { "echo tool" }
+            fn name(&self) -> &str {
+                "echo"
+            }
+            fn toolset(&self) -> &str {
+                "test"
+            }
+            fn description(&self) -> &str {
+                "echo tool"
+            }
             fn schema(&self) -> ToolSchema {
-                ToolSchema::new("echo", "echo", serde_json::json!({"type":"object","properties":{}}))
+                ToolSchema::new(
+                    "echo",
+                    "echo",
+                    serde_json::json!({"type":"object","properties":{}}),
+                )
             }
             async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
                 Ok("echo result".to_string())
@@ -1759,13 +1823,15 @@ mod tests {
         // Attempt dispatch with hook — echo is blocked, so post-guardrail hook must not fire
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let called_clone = called.clone();
-        let result = tool_registry.dispatch_with_hook(
-            "echo",
-            serde_json::Value::Null,
-            Some(move |_tool: &str, _args: &str| {
-                called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            }),
-        ).await;
+        let result = tool_registry
+            .dispatch_with_hook(
+                "echo",
+                serde_json::Value::Null,
+                Some(move |_tool: &str, _args: &str| {
+                    called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }),
+            )
+            .await;
 
         assert!(result.is_err(), "blocked tool must return Err");
         assert!(
@@ -1780,15 +1846,21 @@ mod tests {
         // Registry without guardrail
         let mut tool_registry2 = ToolRegistry::new();
         tool_registry2.register(Box::new(EchoTool));
-        let result2 = tool_registry2.dispatch_with_hook(
-            "echo",
-            serde_json::Value::Null,
-            Some(move |_tool: &str, _args: &str| {
-                called_allowed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            }),
-        ).await;
+        let result2 = tool_registry2
+            .dispatch_with_hook(
+                "echo",
+                serde_json::Value::Null,
+                Some(move |_tool: &str, _args: &str| {
+                    called_allowed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }),
+            )
+            .await;
 
-        assert!(result2.is_ok(), "allowed tool must return Ok: {:?}", result2);
+        assert!(
+            result2.is_ok(),
+            "allowed tool must return Ok: {:?}",
+            result2
+        );
         assert!(
             called_allowed.load(std::sync::atomic::Ordering::SeqCst),
             "post-guardrail hook MUST be called for allowed tools"
@@ -1860,7 +1932,10 @@ mod tests {
             api_key: Some("test-key".to_string()),
             ..Default::default()
         };
-        config.agent = AgentConfig { max_turns: 1, ..Default::default() };
+        config.agent = AgentConfig {
+            max_turns: 1,
+            ..Default::default()
+        };
 
         // 4. Call execute_cron_job — expect it to return Err (LLM unreachable),
         //    but the hook events must still fire.
@@ -1904,7 +1979,10 @@ mod tests {
         // 6. Verify cron metadata on the events
         match &events[0] {
             HookEventKind::MessageReceived { platform, .. } => {
-                assert_eq!(platform, "cron", "MessageReceived must use platform=\"cron\"");
+                assert_eq!(
+                    platform, "cron",
+                    "MessageReceived must use platform=\"cron\""
+                );
             }
             other => panic!("first event should be MessageReceived, got {:?}", other),
         }
@@ -1933,7 +2011,9 @@ mod tests {
         // Locate execute_cron_job function body — take everything after its fn declaration.
         // We find the function signature, then count fires only within that function.
         let fn_marker = "pub(crate) async fn execute_cron_job(";
-        let fn_start = src.find(fn_marker).expect("execute_cron_job not found in runner.rs");
+        let fn_start = src
+            .find(fn_marker)
+            .expect("execute_cron_job not found in runner.rs");
         // The function ends before the next pub/pub(crate) fn or the resolve_token fn.
         let after_fn = &src[fn_start..];
         let end_marker = "\nfn resolve_token";

@@ -1,4 +1,4 @@
-//! Phase 22 -- static-grep regression tests for CLI tool + hook parity.
+//! Static-grep regression tests for CLI runtime parity wiring.
 //!
 //! These tests read main.rs source text and assert that both `run_chat`
 //! and `run_single` contain the required wiring calls. They guard against
@@ -13,17 +13,16 @@ fn crate_root() -> PathBuf {
 }
 
 fn read_main_rs() -> String {
-    fs::read_to_string(crate_root().join("src/main.rs"))
-        .expect("Failed to read main.rs")
+    fs::read_to_string(crate_root().join("src/main.rs")).expect("Failed to read main.rs")
 }
 
 /// Extract the body of a top-level `async fn NAME` block from main.rs.
 /// Uses brace-balanced extraction (matching run_chat_invariants.rs style).
 fn extract_function_body(source: &str, fn_name: &str) -> String {
     let needle = format!("async fn {}", fn_name);
-    let start = source.find(&needle).unwrap_or_else(|| {
-        panic!("function `async fn {}` not found in main.rs", fn_name)
-    });
+    let start = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("function `async fn {}` not found in main.rs", fn_name));
     let bytes = source.as_bytes();
     let mut i = start;
     while i < bytes.len() && bytes[i] != b'{' {
@@ -51,64 +50,23 @@ fn extract_function_body(source: &str, fn_name: &str) -> String {
 }
 
 #[test]
-fn run_chat_and_run_single_wire_all_tools() {
+fn run_chat_and_run_single_use_shared_runtime_factory() {
     let source = read_main_rs();
 
     for fn_name in &["run_chat", "run_single"] {
         let body = extract_function_body(&source, fn_name);
 
-        // Tool registrations (per D-02)
         assert!(
-            body.contains("register_cronjob_tool"),
-            "{fn_name} must call register_cronjob_tool"
+            body.contains("build_app_runtime_bundle"),
+            "{fn_name} must build AppRuntimeBundle via build_app_runtime_bundle"
         );
         assert!(
-            body.contains("register_skills_tool"),
-            "{fn_name} must call register_skills_tool"
-        );
-        // Plan 21.7-06: the legacy `_with_active_skills` variant was replaced
-        // by `_with_process_registry` at all three CLI + gateway call sites
-        // to bundle the ProcessRegistry wiring alongside active-skills env
-        // bypass (D-29). Accept either spelling — INV-21.7-03 in
-        // invariants_21_7.rs locks the precise count.
-        assert!(
-            body.contains("register_execute_code_tool_with_active_skills")
-                || body.contains("register_execute_code_tool_with_process_registry"),
-            "{fn_name} must call register_execute_code_tool_with_{{active_skills|process_registry}}"
-        );
-
-        // Guardrails (per D-02)
-        assert!(
-            body.contains("add_guardrail"),
-            "{fn_name} must call add_guardrail"
+            body.contains("AppRuntimeFactoryInput"),
+            "{fn_name} must construct AppRuntimeFactoryInput"
         );
         assert!(
-            body.contains("set_error_detail"),
-            "{fn_name} must call set_error_detail"
-        );
-
-        // HookRegistry (per D-05)
-        assert!(
-            body.contains("HookRegistry::new"),
-            "{fn_name} must construct HookRegistry"
-        );
-
-        // JSONL listener (per D-06)
-        assert!(
-            body.contains("create_jsonl_listener"),
-            "{fn_name} must register JSONL listener"
-        );
-
-        // Webhook listener (per D-07)
-        assert!(
-            body.contains("create_webhook_listener"),
-            "{fn_name} must register webhook listener"
-        );
-
-        // Retry queue drain
-        assert!(
-            body.contains("drain_retry_queue"),
-            "{fn_name} must drain retry queue"
+            body.contains("DelegateTaskWiring"),
+            "{fn_name} must pass DelegateTaskWiring for delegate_task parity"
         );
     }
 }
@@ -144,23 +102,19 @@ fn attach_context_engine_receives_hook_registry_not_none() {
 }
 
 #[test]
-fn active_skills_shared_between_skills_and_execute_code() {
+fn run_gateway_uses_shared_runtime_active_skills() {
     let source = read_main_rs();
-
-    for fn_name in &["run_chat", "run_single"] {
-        let body = extract_function_body(&source, fn_name);
-
-        // active_skills must be created
-        assert!(
-            body.contains("let active_skills"),
-            "{fn_name} must create active_skills Arc"
-        );
-
-        // active_skills must be cloned to both register calls
-        let active_clones = body.matches("active_skills.clone()").count();
-        assert!(
-            active_clones >= 2,
-            "{fn_name} must clone active_skills at least twice (skills_tool + execute_code), found {active_clones}"
-        );
-    }
+    let body = extract_function_body(&source, "run_gateway");
+    assert!(
+        body.contains("build_app_runtime_bundle"),
+        "run_gateway must build AppRuntimeBundle"
+    );
+    assert!(
+        body.contains("runtime_bundle.active_skills"),
+        "run_gateway must use runtime_bundle.active_skills"
+    );
+    assert!(
+        body.contains("runner.set_active_skills(active_skills)"),
+        "run_gateway must forward active_skills into GatewayRunner"
+    );
 }
