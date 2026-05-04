@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
 milestone: v2.1
-milestone_name: Carry-Overs
-status: planning
-stopped_at: Phase 25.5 context gathered
-last_updated: "2026-05-03T22:45:21.241Z"
-last_activity: 2026-05-03
+milestone_name: "**Status:** Deferred"
+status: executing
+stopped_at: "Phase 25.5-05 Task 1 complete; Task 2 checkpoint:human-verify pending"
+last_updated: "2026-05-04T01:43:26.659Z"
+last_activity: 2026-05-04
 progress:
-  total_phases: 26
-  completed_phases: 16
-  total_plans: 123
-  completed_plans: 123
+  total_phases: 20
+  completed_phases: 19
+  total_plans: 103
+  completed_plans: 103
   percent: 100
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 25.3 — session-workspace-parity
+**Current focus:** Phase 25.5 — iron-hermes-ui
 
 ## Current Position
 
-Phase: 25.4
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-05-03
+Phase: 25.5 (iron-hermes-ui) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
+Last activity: 2026-05-04
 
 ## Performance Metrics
 
@@ -153,6 +153,7 @@ Last activity: 2026-05-03
 | Phase 25.2 P12 | 8 | 2 tasks tasks | 5 files files |
 | Phase 25.2 P13 | 108 | 3 tasks | 5 files |
 | Phase 25.2 P14 | 25 | 3 tasks | 5 files |
+| Phase 25.5 P05 | 2min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -370,6 +371,7 @@ Recent decisions affecting current work:
 - [Phase 25.2]: Plan 12: tokio::spawn per URL (not futures::join_all) preserves Pitfall 6 ordering by tagging tasks with idx and sorting before serializing; per-URL panics map into ExtractionResult.error
 - [Phase 25.2]: Plan 12 [Rule 1 fix]: Replaced .entered() with async-block + .instrument(span) in tiers.rs/chunked.rs — Plan 11's EnteredSpan was held across await and broke tokio::spawn Send bound
 - [Phase 25.2]: Plan 14: AnyClientSummarizationHandle is verbatim port of AnyClientVisionHandle (any_client.rs:158-238); register_web_extract_tool wired in run_chat/run_single/run_gateway with parity guard test; smoke test uses ToolSchema 2-level shape (d.function.name, not d.name)
+- [Phase 25.5]: Replaced mock STATUS_TEXT with dynamic config_summary data for /status handler — real model/provider/context displayed
 
 ### Roadmap Evolution
 
@@ -410,8 +412,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-03T22:45:21.228Z
-Stopped at: Phase 25.5 context gathered
-Resume file: .planning/phases/25.5-iron-hermes-ui/25.5-CONTEXT.md
+Last session: 2026-05-04T01:43:26.655Z
+Stopped at: Phase 25.5-05 Task 1 complete; Task 2 checkpoint:human-verify pending
+Resume file: None
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
