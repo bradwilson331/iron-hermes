@@ -8,12 +8,12 @@ use crate::components::shell::{
     AgentPanel, BlockStream, CommandPalette, InputBox, StatusBar, TitleBar,
 };
 use crate::state::{
-    demo_block_entries, demo_messages, now_time,
+    now_time,
     Block, BlockEntry, Mode, PaletteItem, PaletteState, Personality, ShellSettings,
-    Tab, TokenBudget,
+    Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus, Message,
 };
 
-/// Top-level desktop/web shell composer — Phase 4 integration.
+/// Top-level desktop/web shell composer — Phase 4 integration + Plan 04 WebSocket wiring.
 ///
 /// Per CONTEXT D-01: hybrid state model with 12 local signals declared
 /// here. Per CONTEXT D-02: ONE `use_context_provider` bundle
@@ -22,27 +22,237 @@ use crate::state::{
 /// `use_effect`, removed via `use_drop`. Per CONTEXT D-33: auto-scroll
 /// `use_effect` watching `blocks.read().len()`.
 ///
-/// Submit routing (D-13): trim → empty? return; clear input; pulse
-/// scanner; pulse token; spawn appropriate mock based on mode. Borrow-
-/// then-await discipline (D-06): every signal `.read()` / `.write()`
-/// drops at `;` before any `.await`.
+/// Plan 04: Submit sends messages over WebSocket to real AgentLoop.
+/// Streaming deltas update block stream in real-time. Tool calls
+/// update agent panel. No mock data in production path.
 #[component]
 pub fn WarpHermes() -> Element {
-    // ── 12 Phase 4 signals (D-01). ──
+    // ── 12 Phase 4 signals (D-01) — blocks and messages start empty (no demo data). ──
     let mut input          = use_signal(String::new);
-    let mut blocks         = use_signal(demo_block_entries);
-    let messages           = use_signal(demo_messages);
+    let mut blocks         = use_signal(Vec::<BlockEntry>::new);
+    let mut messages       = use_signal(Vec::<Message>::new);
     #[allow(unused_mut)] // required for mode.set via Callback closure capture
     #[allow(unused_mut)] // required for mode.set via Callback closure capture
     let mut mode               = use_signal(|| Mode::Shell);
     let mut pal_open       = use_signal(|| false);
     let mut pal_query      = use_signal(String::new);
     let mut pal_state      = use_signal(|| PaletteState::Browse);
-    let scanner_active     = use_signal(|| false);
+    let mut scanner_active = use_signal(|| false);
     let focused            = use_signal(|| false);
     let active_tab         = use_signal(|| 0_usize);
-    let tokens             = use_signal(|| TokenBudget { used: 12_300, max: 128_000 });
+    let mut tokens         = use_signal(|| TokenBudget { used: 0, max: 128_000 });
     let mut next_id        = use_signal(|| 1000_u64);
+
+    // ── Session ID signal — created once on mount via server function. ──
+    let mut session_id = use_signal(|| "pending".to_string());
+
+    // Create session on mount.
+    use_effect(move || {
+        spawn(async move {
+            match crate::server::api::create_session().await {
+                Ok(sid) => session_id.set(sid),
+                Err(e) => {
+                    // Log error to console on wasm, stderr on native.
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(
+                        &format!("Session creation failed: {e}").into(),
+                    );
+                    let _ = e;
+                }
+            }
+        });
+    });
+
+    // ── Track current streaming block id — accumulates deltas into one Block::Ai. ──
+    let mut streaming_block_id = use_signal(|| Option::<u64>::None);
+
+    // ── WebSocket connection to server for streaming chat. ──
+    let mut ws = dioxus_fullstack::use_websocket(move || {
+        crate::server::ws::ws_chat(
+            dioxus_fullstack::WebSocketOptions::new().with_automatic_reconnect(),
+        )
+    });
+
+    // ── WebSocket receiver loop — processes ChatStreamEvent from server. ──
+    // Runs in a use_future so it continuously reads from the WS.
+    // Uses recv_raw/send_raw with manual JSON serialization to avoid
+    // type inference issues with generic Websocket<In, Out> parameters.
+    use_future(move || async move {
+        // Wait for connection to open.
+        let _state = ws.connect().await;
+        if ws.is_err() {
+            return;
+        }
+
+        loop {
+            match ws.recv_raw().await {
+                Ok(raw_msg) => {
+                    // Extract text from the raw message.
+                    let msg_text = match raw_msg {
+                        dioxus_fullstack::Message::Text(t) => t,
+                        dioxus_fullstack::Message::Binary(b) => {
+                            String::from_utf8_lossy(&b).to_string()
+                        }
+                        _ => continue, // Skip ping/pong/close
+                    };
+
+                    // Parse the JSON-encoded ChatStreamEvent.
+                    let event: crate::server::ws::ChatStreamEvent =
+                        match serde_json::from_str(&msg_text) {
+                            Ok(e) => e,
+                            Err(_) => continue, // Skip malformed messages
+                        };
+
+                    match event {
+                        crate::server::ws::ChatStreamEvent::Delta { text } => {
+                            // Accumulate deltas into a single Block::Ai entry.
+                            let current_streaming_id = streaming_block_id();
+                            if let Some(sid) = current_streaming_id {
+                                // Append to existing streaming block.
+                                let mut bs = blocks.write();
+                                if let Some(entry) = bs.iter_mut().find(|e| e.id == sid) {
+                                    if let Block::Ai { ref mut markdown, .. } = entry.block {
+                                        markdown.push_str(&text);
+                                    }
+                                }
+                            } else {
+                                // First delta — create a new Block::Ai.
+                                let id = {
+                                    let cur = next_id();
+                                    next_id.set(cur + 1);
+                                    cur
+                                };
+                                streaming_block_id.set(Some(id));
+                                blocks.write().push(BlockEntry {
+                                    id,
+                                    block: Block::Ai {
+                                        author: Some("Hermes".into()),
+                                        time: Some(now_time()),
+                                        markdown: text,
+                                    },
+                                });
+                            }
+                        }
+                        crate::server::ws::ChatStreamEvent::ToolCallStart { name, args } => {
+                            // Add a Tool block to the block stream.
+                            let id = {
+                                let cur = next_id();
+                                next_id.set(cur + 1);
+                                cur
+                            };
+                            blocks.write().push(BlockEntry {
+                                id,
+                                block: Block::Tool {
+                                    call: UiToolCall {
+                                        name: name.clone(),
+                                        args_summary: args.clone(),
+                                        status: ToolStatus::Running,
+                                    },
+                                },
+                            });
+                            // Also add to messages for agent panel.
+                            messages.write().push(Message {
+                                who: "hermes".into(),
+                                time: now_time(),
+                                body: String::new(),
+                                tool: Some(UiToolCall {
+                                    name,
+                                    args_summary: args,
+                                    status: ToolStatus::Running,
+                                }),
+                            });
+                        }
+                        crate::server::ws::ChatStreamEvent::ToolCallEnd { name, success } => {
+                            // Update the last matching tool call block status.
+                            let new_status = if success {
+                                ToolStatus::Done
+                            } else {
+                                ToolStatus::Failed
+                            };
+                            {
+                                let mut bs = blocks.write();
+                                for entry in bs.iter_mut().rev() {
+                                    if let Block::Tool { ref mut call } = entry.block {
+                                        if call.name == name
+                                            && call.status == ToolStatus::Running
+                                        {
+                                            call.status = new_status.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            // Also update in messages.
+                            {
+                                let mut ms = messages.write();
+                                for msg in ms.iter_mut().rev() {
+                                    if let Some(ref mut tool) = msg.tool {
+                                        if tool.name == name
+                                            && tool.status == ToolStatus::Running
+                                        {
+                                            tool.status = new_status;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        crate::server::ws::ChatStreamEvent::Finished { total_tokens } => {
+                            // Update token budget.
+                            tokens.set(TokenBudget {
+                                used: total_tokens,
+                                max: 128_000,
+                            });
+                            scanner_active.set(false);
+                            // Reset streaming block id for next turn.
+                            streaming_block_id.set(None);
+                            // Push the accumulated AI response to messages.
+                            let ai_text: Option<String> = {
+                                let bs = blocks.read();
+                                bs.iter().rev().find_map(|e| match &e.block {
+                                    Block::Ai { markdown, .. } if !markdown.is_empty() => {
+                                        Some(markdown.clone())
+                                    }
+                                    _ => None,
+                                })
+                            };
+                            if let Some(text) = ai_text {
+                                messages.write().push(Message {
+                                    who: "hermes".into(),
+                                    time: now_time(),
+                                    body: text,
+                                    tool: None,
+                                });
+                            }
+                        }
+                        crate::server::ws::ChatStreamEvent::Error { message } => {
+                            let id = {
+                                let cur = next_id();
+                                next_id.set(cur + 1);
+                                cur
+                            };
+                            blocks.write().push(BlockEntry {
+                                id,
+                                block: Block::Err {
+                                    author: Some("hermes".into()),
+                                    time: Some(now_time()),
+                                    exit_code: 1,
+                                    message,
+                                },
+                            });
+                            scanner_active.set(false);
+                            streaming_block_id.set(None);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // WebSocket closed or error — break the loop.
+                    // The automatic_reconnect will re-establish.
+                    break;
+                }
+            }
+        }
+    });
 
     // ── Fetch real data from server functions (Plan 03 wiring). ──
 
@@ -190,16 +400,8 @@ pub fn WarpHermes() -> Element {
         });
     };
 
-    // ── pulse_token (D-26): saturating +amount per submission. ──
-    let pulse_token = move |amount: u32, mut t: Signal<TokenBudget>| {
-        // Read current values before any mutation; TokenBudget is Copy.
-        let cur = t();
-        let new_used = cur.used.saturating_add(amount).min(cur.max);
-        t.set(TokenBudget { used: new_used, max: cur.max });
-    };
-
-    // ── on_rerun handler (D-24): re-run a Cmd block by id. ──
-    let on_rerun = move |id: u64| {
+    // ── on_rerun handler (D-24): re-run a Cmd block by id via WebSocket. ──
+    let mut on_rerun = move |id: u64| {
         // Find the entry; clone tokens out before any spawn — no read borrow held across spawn body.
         let cmd_text: Option<String> = {
             let bs = blocks.read();
@@ -219,14 +421,22 @@ pub fn WarpHermes() -> Element {
         };
         if let Some(text) = cmd_text {
             pulse_scanner(2000, scanner_active);
-            pulse_token(120, tokens);
+            scanner_active.set(true);
+            streaming_block_id.set(None);
+            // Send via WebSocket.
+            let sid = session_id();
+            let req = crate::server::ws::ChatRequest {
+                session_id: sid,
+                message: text,
+            };
+            let json = serde_json::to_string(&req).unwrap_or_default();
             spawn(async move {
-                crate::mocks::run_shell(text, blocks, next_id, scanner_active).await;
+                let _ = ws.send_raw(dioxus_fullstack::Message::Text(json)).await;
             });
         }
     };
 
-    // ── submit handler (Common Op 1 + D-13). ──
+    // ── submit handler (Plan 04: sends via WebSocket to real AgentLoop). ──
     let mut submit = move || {
         // Read input clone, trim, return early if empty. No live borrow held.
         let text = {
@@ -238,20 +448,78 @@ pub fn WarpHermes() -> Element {
             t
         };
         input.set(String::new());
-        pulse_scanner(2000, scanner_active);
-        pulse_token(120, tokens);
+        scanner_active.set(true);
+        streaming_block_id.set(None);
 
-        let cur_mode = mode();
-        let cur_personality = *personality.read();
-        spawn(async move {
+        // Add user's command/message to the block stream immediately.
+        {
+            let id = {
+                let cur = next_id();
+                next_id.set(cur + 1);
+                cur
+            };
+            let cur_mode = mode();
             match cur_mode {
-                Mode::Agent => {
-                    crate::mocks::run_agent_steps(text, cur_personality, messages).await;
-                }
                 Mode::Shell => {
-                    crate::mocks::run_shell(text, blocks, next_id, scanner_active).await;
+                    // Tokenize as a shell command block.
+                    let tokens_vec: Vec<crate::state::Token> = {
+                        let mut iter = text.split_whitespace();
+                        let mut out = Vec::new();
+                        if let Some(first) = iter.next() {
+                            out.push(crate::state::Token::Bin(first.into()));
+                        }
+                        for tok in iter {
+                            if tok.starts_with('-') {
+                                out.push(crate::state::Token::Flag(tok.into()));
+                            } else {
+                                out.push(crate::state::Token::Arg(tok.into()));
+                            }
+                        }
+                        out
+                    };
+                    blocks.write().push(BlockEntry {
+                        id,
+                        block: Block::Cmd {
+                            command: crate::state::CommandLine {
+                                tokens: tokens_vec,
+                                time: Some("…".into()),
+                                cwd: None,
+                                glyph: Some("❯".into()),
+                            },
+                        },
+                    });
+                }
+                Mode::Agent => {
+                    // In agent mode, show the user message as an Out block.
+                    blocks.write().push(BlockEntry {
+                        id,
+                        block: Block::Out {
+                            author: Some("you".into()),
+                            time: Some(now_time()),
+                            text: text.clone(),
+                        },
+                    });
                 }
             }
+        }
+
+        // Add to agent panel messages.
+        messages.write().push(Message {
+            who: "user".into(),
+            time: now_time(),
+            body: text.clone(),
+            tool: None,
+        });
+
+        // Send ChatRequest over WebSocket.
+        let sid = session_id();
+        let req = crate::server::ws::ChatRequest {
+            session_id: sid,
+            message: text,
+        };
+        let json = serde_json::to_string(&req).unwrap_or_default();
+        spawn(async move {
+            let _ = ws.send_raw(dioxus_fullstack::Message::Text(json)).await;
         });
     };
 
