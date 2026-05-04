@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-05-04T09:46:26.500Z",
+  "phase": "25.6",
+  "phase_name": "replicate-cli-web-wiring",
+  "phase_dir": ".planning/phases/25.6-replicate-cli-web-wiring",
+  "plan": 3,
+  "task": 3,
+  "total_tasks": 3,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Plan 25.6-01: shared app runtime factory in ironhermes-agent",
+      "status": "done",
+      "commit": "working-tree-uncommitted"
+    },
+    {
+      "id": 2,
+      "name": "Plan 25.6-02: CLI + ratatui wiring migrated to shared runtime factory",
+      "status": "done",
+      "commit": "working-tree-uncommitted"
+    },
+    {
+      "id": 3,
+      "name": "Plan 25.6-03: web AppState/WS/API rewired to startup-scoped shared runtime",
+      "status": "done",
+      "commit": "working-tree-uncommitted"
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 1,
+      "name": "Discuss Phase 26 provider-polish scope",
+      "status": "not_started"
+    },
+    {
+      "id": 2,
+      "name": "Plan Phase 26",
+      "status": "not_started"
+    },
+    {
+      "id": 3,
+      "name": "Execute Phase 26",
+      "status": "not_started"
+    }
+  ],
+  "blockers": [],
+  "human_actions_pending": [
+    {
+      "action": "Decide how to handle the existing large dirty worktree (305 changed files) before starting the next phase",
+      "context": "Many non-handoff files are modified/untracked across crates/, node_modules/, and providers/. Resume should avoid accidental staging/commits.",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Skipped further discuss-phase updates for 25.6 and continued execution directly",
+      "rationale": "User explicitly asked to continue execute phase from the existing context",
+      "phase": "25.6"
+    },
+    {
+      "decision": "Treat Phase 25.6 as complete (3/3 plans) and move next work to Phase 26",
+      "rationale": "Execution reported all phase verifications passing and roadmap/state advanced",
+      "phase": "25.6"
+    }
+  ],
+  "uncommitted_files": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-01-PLAN.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-01-SUMMARY.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-02-PLAN.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-02-SUMMARY.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-03-PLAN.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-03-SUMMARY.md",
+    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-RESEARCH.md",
+    "crates/** (274 changed files)",
+    "node_modules/** (11 changed files)",
+    "providers/** (5 changed files)",
+    "Cargo.toml",
+    "package.json",
+    "package-lock.json",
+    ".DS_Store and crate-level .DS_Store files"
+  ],
+  "next_action": "Run /gsd-discuss-phase 26 (or /gsd-plan-phase 26 if already decided), then continue normal plan/execute flow.",
+  "context_notes": "Phase 25.6 was executed and marked complete in this session with passing verification tests. Repo is intentionally very dirty; resume should isolate handoff files from broad pre-existing modifications when staging commits."
+}
