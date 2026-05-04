@@ -56,6 +56,35 @@ fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
 }
 
 #[test]
+fn server_ws_disconnect_teardown_distinguishes_clean_recv_from_broken_send() {
+    let ws = read("src/server/ws.rs");
+
+    assert!(
+        ws.contains("websocket recv closed; exiting connection")
+            || ws.contains("websocket recv closed cleanly; exiting connection"),
+        "clean websocket recv closure should log a clean-exit warning"
+    );
+
+    assert!(
+        ws.contains("websocket recv failed; closing connection")
+            || ws.contains("websocket recv failed; aborting connection"),
+        "recv error path should remain explicitly classified"
+    );
+
+    assert!(
+        ws.contains("websocket send failed; aborting in-flight turn"),
+        "send failure path must stay classified as transport-broken and abort in-flight turn"
+    );
+
+    assert!(
+        ws.contains("session_id = %")
+            && ws.contains("reason = %")
+            && ws.contains("in_flight ="),
+        "disconnect telemetry must include session_id, reason, and in_flight fields"
+    );
+}
+
+#[test]
 fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
     let ui = read("src/components/warp_hermes.rs");
     assert!(
