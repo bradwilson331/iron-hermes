@@ -11,6 +11,15 @@ use tracing::warn;
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
+#[cfg(feature = "server")]
+fn is_clean_ws_disconnect(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("closed")
+        || lower.contains("close frame")
+        || lower.contains("connection reset by peer")
+        || lower.contains("eof")
+}
+
 #[get("/api/ws/chat")]
 pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> {
     #[cfg(feature = "server")]
@@ -37,13 +46,42 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             let msg = match msg {
                                 Ok(msg) => msg,
                                 Err(err) => {
+                                    let reason = err.to_string();
+                                    let in_flight = in_flight_turn.is_some();
                                     let session_id = in_flight_turn
                                         .as_ref()
                                         .map(|t| t.session_id.as_str())
                                         .unwrap_or("unknown");
-                                    warn!(session_id = %session_id, reason = %err, in_flight = in_flight_turn.is_some(), "websocket recv failed; aborting connection");
+
+                                    if is_clean_ws_disconnect(&reason) {
+                                        warn!(
+                                            session_id = %session_id,
+                                            reason = %reason,
+                                            in_flight,
+                                            "websocket recv closed cleanly; exiting connection"
+                                        );
+                                    } else {
+                                        warn!(
+                                            session_id = %session_id,
+                                            reason = %reason,
+                                            in_flight,
+                                            "websocket recv failed; closing connection"
+                                        );
+                                    }
+
                                     if let Some(turn) = in_flight_turn.take() {
-                                        turn.handle.abort();
+                                        if is_clean_ws_disconnect(&reason) {
+                                            if let Err(join_err) = turn.handle.await {
+                                                warn!(
+                                                    session_id = %turn.session_id,
+                                                    reason = %join_err,
+                                                    in_flight = false,
+                                                    "turn task join failed after clean websocket close"
+                                                );
+                                            }
+                                        } else {
+                                            turn.handle.abort();
+                                        }
                                     }
                                     break;
                                 }
