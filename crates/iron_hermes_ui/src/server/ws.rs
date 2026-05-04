@@ -3,7 +3,9 @@
 use dioxus::prelude::*;
 use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
-use dioxus_fullstack::{CloseCode, Message, TypedWebsocket};
+use dioxus_fullstack::{body::Bytes, CloseCode, Message, TypedWebsocket};
+#[cfg(feature = "server")]
+use std::time::Duration;
 #[cfg(feature = "server")]
 use tokio::sync::mpsc;
 #[cfg(feature = "server")]
@@ -12,6 +14,28 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
+
+/// Server-side application-level WebSocket keepalive interval.
+///
+/// HUMAN-UAT Gap 3 (follow-up): even with proper close-frame emission,
+/// live browser UAT showed `dx serve` / hyper proxy terminating idle
+/// WebSocket connections after ~9-10s with no traffic. That close arrives
+/// at the gloo-net client as `WebsocketError::ConnectionClosed`
+/// ("Connection closed"), with no teardown log on the server because the
+/// server loop never observed a recv error — it was simply idle on
+/// `socket.recv()` when the proxy dropped the socket.
+///
+/// Application-level Ping frames keep any intermediate proxy's idle
+/// timer reset and also exercise the send path so broken sockets are
+/// detected promptly (the first failed Ping is classified as a
+/// send-path failure per D-05, aborting any in-flight turn). Browsers
+/// automatically respond to Ping with Pong at the WebSocket protocol
+/// level, so the client requires no changes.
+///
+/// 5 seconds is well below the observed ~9s idle-close threshold and
+/// matches the low end of common reverse-proxy keepalive intervals.
+#[cfg(feature = "server")]
+const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "server")]
 fn is_clean_ws_disconnect(reason: &str) -> bool {
@@ -65,6 +89,21 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                 }
 
                 let mut in_flight_turn: Option<InFlightTurn> = None;
+
+                // Keepalive interval closes HUMAN-UAT Gap 3 follow-up:
+                // without periodic Pings the dev proxy (dx serve/hyper)
+                // idle-closes the socket after ~9s, surfacing at the
+                // client as `WebsocketError::ConnectionClosed`
+                // ("Connection closed") with no server-side teardown
+                // trace. See `WS_KEEPALIVE_INTERVAL` above for the full
+                // rationale.
+                let mut keepalive = tokio::time::interval(WS_KEEPALIVE_INTERVAL);
+                keepalive
+                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // First tick fires immediately; skip it so we don't
+                // emit a Ping on connect before any idle window has
+                // elapsed.
+                keepalive.tick().await;
 
                 loop {
                     tokio::select! {
@@ -263,6 +302,41 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        _ = keepalive.tick() => {
+                            // Keep intermediate proxies' idle timers
+                            // reset and detect half-broken sockets
+                            // promptly. A failed Ping is classified as
+                            // a send-path failure per D-05: abort any
+                            // in-flight turn, emit a close frame, and
+                            // exit the connection loop.
+                            if let Err(err) = socket
+                                .send_raw(Message::Ping(Bytes::new()))
+                                .await
+                            {
+                                let in_flight = in_flight_turn.is_some();
+                                let session_id = in_flight_turn
+                                    .as_ref()
+                                    .map(|t| t.session_id.as_str())
+                                    .unwrap_or("unknown");
+                                warn!(
+                                    session_id = %session_id,
+                                    reason = %err,
+                                    in_flight,
+                                    "websocket keepalive ping failed; closing connection"
+                                );
+                                if let Some(turn) = in_flight_turn.take() {
+                                    turn.handle.abort();
+                                }
+                                send_close_frame(
+                                    &mut socket,
+                                    CloseCode::Away,
+                                    "keepalive failed",
+                                )
+                                .await;
+                                break;
                             }
                         }
                     }

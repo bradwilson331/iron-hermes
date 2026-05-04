@@ -176,17 +176,71 @@ fn server_ws_emits_close_frame_on_every_teardown_branch() {
     // the invariant regression-locked without getting tripped by
     // unrelated formatting changes.
     let close_frame_calls = ws.matches("send_close_frame(").count();
-    // Definition + 3 call sites (clean recv, broken recv, broken send)
+    // Definition + 4 call sites (clean recv, broken recv, broken send,
+    // keepalive ping failure).
     assert!(
-        close_frame_calls >= 4,
+        close_frame_calls >= 5,
         "expected send_close_frame to be invoked at every teardown branch \
-         (clean recv close, broken recv, broken send); found {close_frame_calls} occurrence(s)"
+         (clean recv close, broken recv, broken send, keepalive failure); \
+         found {close_frame_calls} occurrence(s)"
     );
 
     assert!(
         ws.contains("\"recv closed cleanly\"")
             && ws.contains("\"recv failed\"")
-            && ws.contains("\"send failed\""),
+            && ws.contains("\"send failed\"")
+            && ws.contains("\"keepalive failed\""),
         "each teardown branch must carry a distinct close-frame reason string for telemetry parity"
+    );
+}
+
+#[test]
+fn server_ws_emits_application_level_keepalive_ping() {
+    // HUMAN-UAT Gap 3 follow-up regression lock: the server must emit
+    // application-level WebSocket Ping frames on a periodic interval
+    // while otherwise idle, so `dx serve` / hyper (and any other
+    // intermediate proxy) does not idle-close the connection after ~9s
+    // and surface the drop to the browser as
+    // `WebsocketError::ConnectionClosed` with no server-side teardown
+    // trace. The keepalive interval must be well under common proxy
+    // idle thresholds (10s), and Ping failure must be classified as a
+    // send-path failure per D-05 (abort in-flight turn, close frame,
+    // break).
+    let ws = read("src/server/ws.rs");
+
+    assert!(
+        ws.contains("WS_KEEPALIVE_INTERVAL"),
+        "keepalive interval must be a named constant for observability"
+    );
+
+    assert!(
+        ws.contains("Duration::from_secs(5)"),
+        "keepalive interval must default to 5 seconds (< 10s proxy idle threshold)"
+    );
+
+    assert!(
+        ws.contains("tokio::time::interval(WS_KEEPALIVE_INTERVAL)"),
+        "keepalive must drive the ping cadence via tokio::time::interval"
+    );
+
+    assert!(
+        ws.contains("MissedTickBehavior::Skip"),
+        "keepalive must skip missed ticks rather than bursting Pings after wake-up"
+    );
+
+    assert!(
+        ws.contains("keepalive.tick().await")
+            && ws.contains("_ = keepalive.tick() =>"),
+        "keepalive must participate in the tokio::select! loop and consume the first immediate tick"
+    );
+
+    assert!(
+        ws.contains("Message::Ping(Bytes::new())"),
+        "keepalive must emit a WebSocket Ping frame (browsers auto-pong at protocol level)"
+    );
+
+    assert!(
+        ws.contains("websocket keepalive ping failed; closing connection"),
+        "failed keepalive Ping must classify as a transport-broken send failure"
     );
 }
