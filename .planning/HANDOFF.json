@@ -1,9 +1,9 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-04T09:46:26.500Z",
-  "phase": "25.6",
-  "phase_name": "replicate-cli-web-wiring",
-  "phase_dir": ".planning/phases/25.6-replicate-cli-web-wiring",
+  "timestamp": "2026-05-04T15:24:28.702Z",
+  "phase": "26.1",
+  "phase_name": "fix-websocket-error-for-chat",
+  "phase_dir": ".planning/phases/26.1-fix-websocket-error-for-chat",
   "plan": 3,
   "task": 3,
   "total_tasks": 3,
@@ -11,78 +11,83 @@
   "completed_tasks": [
     {
       "id": 1,
-      "name": "Plan 25.6-01: shared app runtime factory in ironhermes-agent",
+      "name": "Normalize server disconnect teardown for live proxy stability",
       "status": "done",
-      "commit": "working-tree-uncommitted"
+      "commit": "e3c6f20,9e1fed8"
     },
     {
       "id": 2,
-      "name": "Plan 25.6-02: CLI + ratatui wiring migrated to shared runtime factory",
+      "name": "Harden client reconnect receive lifecycle against repeated reset loops",
       "status": "done",
-      "commit": "working-tree-uncommitted"
+      "commit": "017392e,7081711,e830039"
     },
     {
       "id": 3,
-      "name": "Plan 25.6-03: web AppState/WS/API rewired to startup-scoped shared runtime",
-      "status": "done",
-      "commit": "working-tree-uncommitted"
+      "name": "Validate live browser disconnect and race behavior",
+      "status": "in_progress",
+      "progress": "checkpoint reached; manual UAT rerun still reports reset-without-close-handshake loop"
     }
   ],
   "remaining_tasks": [
     {
-      "id": 1,
-      "name": "Discuss Phase 26 provider-polish scope",
-      "status": "not_started"
-    },
-    {
-      "id": 2,
-      "name": "Plan Phase 26",
-      "status": "not_started"
-    },
-    {
       "id": 3,
-      "name": "Execute Phase 26",
+      "name": "Complete human-verify checkpoint for live browser UAT",
+      "status": "not_started"
+    },
+    {
+      "id": 4,
+      "name": "If UAT still fails, create next gap plan and execute gaps-only again",
       "status": "not_started"
     }
   ],
-  "blockers": [],
+  "blockers": [
+    {
+      "description": "Live browser/proxy run still throws 'Connection reset without closing handshake' during LLM chat",
+      "type": "technical",
+      "workaround": "Continue checkpoint cycle with real UAT evidence and scoped websocket lifecycle fixes"
+    },
+    {
+      "description": "Task 3 is a blocking human-verify checkpoint",
+      "type": "human_action",
+      "workaround": "Run manual steps via dx serve and respond approved or provide logs"
+    }
+  ],
   "human_actions_pending": [
     {
-      "action": "Decide how to handle the existing large dirty worktree (305 changed files) before starting the next phase",
-      "context": "Many non-handoff files are modified/untracked across crates/, node_modules/, and providers/. Resume should avoid accidental staging/commits.",
-      "blocking": false
+      "action": "Run manual Task 3 UAT in browser using dx serve and reconnect/race scenarios",
+      "context": "Phase 26.1 cannot complete until checkpoint is approved",
+      "blocking": true
+    },
+    {
+      "action": "If failure repeats, provide fresh log snippets tied to scenario timing",
+      "context": "Required input for continuation-agent fix pass",
+      "blocking": true
     }
   ],
   "decisions": [
     {
-      "decision": "Skipped further discuss-phase updates for 25.6 and continued execution directly",
-      "rationale": "User explicitly asked to continue execute phase from the existing context",
-      "phase": "25.6"
+      "decision": "Treat websocket close frames as reconnect boundaries",
+      "rationale": "Prevents receiver loop from skipping close events and falling into reconnect churn",
+      "phase": "26.1"
     },
     {
-      "decision": "Treat Phase 25.6 as complete (3/3 plans) and move next work to Phase 26",
-      "rationale": "Execution reported all phase verifications passing and roadmap/state advanced",
-      "phase": "25.6"
+      "decision": "Deduplicate disconnect notices within a single disconnect window",
+      "rationale": "Reduce repeated reconnect noise while preserving one generic user-facing message",
+      "phase": "26.1"
+    },
+    {
+      "decision": "Keep D-01..D-15 contracts locked while iterating gaps",
+      "rationale": "Scope control: fix live reset-loop behavior without redesigning protocol or route",
+      "phase": "26.1"
     }
   ],
   "uncommitted_files": [
     ".planning/ROADMAP.md",
     ".planning/STATE.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-01-PLAN.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-01-SUMMARY.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-02-PLAN.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-02-SUMMARY.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-03-PLAN.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-03-SUMMARY.md",
-    ".planning/phases/25.6-replicate-cli-web-wiring/25.6-RESEARCH.md",
-    "crates/** (274 changed files)",
-    "node_modules/** (11 changed files)",
-    "providers/** (5 changed files)",
-    "Cargo.toml",
-    "package.json",
-    "package-lock.json",
-    ".DS_Store and crate-level .DS_Store files"
+    ".planning/phases/26.1-fix-websocket-error-for-chat/26.1-03-PLAN.md",
+    ".planning/phases/26.1-fix-websocket-error-for-chat/26.1-HUMAN-UAT.md",
+    "plus 303 additional pre-existing modified/untracked files (run git status --short for full list)"
   ],
-  "next_action": "Run /gsd-discuss-phase 26 (or /gsd-plan-phase 26 if already decided), then continue normal plan/execute flow.",
-  "context_notes": "Phase 25.6 was executed and marked complete in this session with passing verification tests. Repo is intentionally very dirty; resume should isolate handoff files from broad pre-existing modifications when staging commits."
+  "next_action": "Resume Task 3 checkpoint: run dx serve manual UAT steps, then continue /gsd-execute-phase 26.1 --gaps-only with approved or failing logs.",
+  "context_notes": "Execution is paused at a blocking human checkpoint after Task 1 and Task 2 fixes plus a close-frame follow-up. Automated checks pass, but live browser/proxy behavior still reports reset-without-close-handshake; phase completion is blocked on manual UAT evidence."
 }
