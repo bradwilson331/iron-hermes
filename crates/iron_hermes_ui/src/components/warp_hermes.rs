@@ -12,6 +12,26 @@ use crate::state::{
     ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
 };
 
+const DISCONNECT_NOTICE: &str =
+    "Connection interrupted. Please retry your message once reconnected.";
+
+fn push_disconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
+    let id = {
+        let cur = next_id();
+        next_id.set(cur + 1);
+        cur
+    };
+    blocks.write().push(BlockEntry {
+        id,
+        block: Block::Err {
+            author: Some("hermes".into()),
+            time: Some(now_time()),
+            exit_code: 1,
+            message: DISCONNECT_NOTICE.to_string(),
+        },
+    });
+}
+
 /// Top-level desktop/web shell composer — Phase 4 integration + Plan 04 WebSocket wiring.
 ///
 /// Per CONTEXT D-01: hybrid state model with 12 local signals declared
@@ -94,20 +114,7 @@ pub fn WarpHermes() -> Element {
                 streaming_block_id.set(None);
 
                 if !disconnect_notified {
-                    let id = {
-                        let cur = next_id();
-                        next_id.set(cur + 1);
-                        cur
-                    };
-                    blocks.write().push(BlockEntry {
-                        id,
-                        block: Block::Err {
-                            author: Some("hermes".into()),
-                            time: Some(now_time()),
-                            exit_code: 1,
-                            message: "Connection interrupted. Please retry your message once reconnected.".to_string(),
-                        },
-                    });
+                    push_disconnect_notice(&mut blocks, &mut next_id);
                     disconnect_notified = true;
                 }
 
@@ -288,20 +295,7 @@ pub fn WarpHermes() -> Element {
                         streaming_block_id.set(None);
 
                         if !disconnect_notified {
-                            let id = {
-                                let cur = next_id();
-                                next_id.set(cur + 1);
-                                cur
-                            };
-                            blocks.write().push(BlockEntry {
-                                id,
-                                block: Block::Err {
-                                    author: Some("hermes".into()),
-                                    time: Some(now_time()),
-                                    exit_code: 1,
-                                    message: "Connection interrupted. Please retry your message once reconnected.".to_string(),
-                                },
-                            });
+                            push_disconnect_notice(&mut blocks, &mut next_id);
                             disconnect_notified = true;
                         }
 
