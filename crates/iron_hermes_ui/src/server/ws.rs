@@ -9,29 +9,9 @@
 
 use dioxus::prelude::*;
 use dioxus_fullstack::{WebSocketOptions, Websocket};
-use serde::{Deserialize, Serialize};
 
-/// Client → server message (user input).
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ChatRequest {
-    pub session_id: String,
-    pub message: String,
-}
-
-/// Server → client streaming events.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ChatStreamEvent {
-    /// Streaming text delta from the agent.
-    Delta { text: String },
-    /// Agent started a tool call.
-    ToolCallStart { name: String, args: String },
-    /// Tool call completed.
-    ToolCallEnd { name: String, success: bool },
-    /// Agent response finished.
-    Finished { total_tokens: u32 },
-    /// Error during agent execution.
-    Error { message: String },
-}
+/// Re-export protocol types so the server module surface stays unchanged.
+pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
 /// WebSocket chat endpoint — real AgentLoop dispatch.
 ///

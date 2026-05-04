@@ -74,7 +74,8 @@ async fn browser_tools_excluded_when_chromium_missing() {
         None::<ironhermes_tools::browser_session::BrowserSession>,
     ));
     let resolver = build_resolver();
-    registry.register_browser_tools(session, resolver);
+    let config = std::sync::Arc::new(ironhermes_core::config::Config::default());
+    registry.register_browser_tools(session, resolver, config);
 
     // Enable the browser toolset — we want to confirm that the prereq gate fires
     // even when the toolset is explicitly enabled (D-04: gated by BOTH toolset enable
@@ -134,7 +135,8 @@ async fn browser_tools_excluded_when_toolset_disabled() {
         None::<ironhermes_tools::browser_session::BrowserSession>,
     ));
     let resolver = build_resolver();
-    registry.register_browser_tools(session, resolver);
+    let config = std::sync::Arc::new(ironhermes_core::config::Config::default());
+    registry.register_browser_tools(session, resolver, config);
 
     // Use the default ToolsConfig — browser toolset is disabled by default (D-04).
     let cfg = ironhermes_core::config::ToolsConfig::default();

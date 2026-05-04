@@ -1,0 +1,94 @@
+/* Shared styling for Design System preview cards.
+ * Each card is ~700×<auto>. Card fills the viewport edge-to-edge; no outer chrome.
+ */
+@import url("../colors_and_type.css");
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  overflow: hidden;
+}
+
+.card {
+  padding: 20px 24px;
+  min-height: 110px;
+  box-sizing: border-box;
+}
+
+.card.tight   { padding: 16px 20px; min-height: 100px; }
+.card.roomy   { padding: 28px 32px; }
+
+.row { display: flex; gap: 16px; align-items: center; }
+.col { display: flex; flex-direction: column; gap: 8px; }
+.wrap { flex-wrap: wrap; }
+.grow { flex: 1; }
+
+.label {
+  font-size: 11px;
+  color: var(--fg-dim);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
+
+.code-line {
+  font-size: 14px;
+  white-space: pre;
+  line-height: 1.5;
+}
+
+.swatch {
+  width: 60px;
+  height: 60px;
+  border: 1px solid var(--border-subtle);
+  position: relative;
+}
+
+.swatch-stack {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 10px;
+}
+
+.chip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.chip .sw {
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--border-subtle);
+}
+
+.chip .nm {
+  font-size: 11px;
+  color: var(--fg);
+}
+.chip .hex {
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.pill-row {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.dot-sep::before {
+  content: " · ";
+  color: var(--fg-dim);
+}
+
+.bg-black { background: var(--bg); }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }

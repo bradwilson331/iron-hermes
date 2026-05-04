@@ -1,9 +1,17 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1775087574782,
+  "lastScanned": 1777774796060,
   "projectRoot": "/Users/twilson/code/ironhermes",
   "techStack": {
     "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
       {
         "name": "Rust",
         "version": null,
@@ -33,334 +41,383 @@
   "structure": {
     "isMonorepo": false,
     "workspaces": [],
-    "mainDirectories": [],
-    "gitBranches": null
+    "mainDirectories": [
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "develop",
+      "branchingStrategy": null
+    }
   },
   "customNotes": [],
   "directoryMap": {
-    "config": {
-      "path": "config",
-      "purpose": "Configuration files",
-      "fileCount": 0,
-      "lastAccessed": 1775087574774,
-      "keyFiles": []
-    },
     "crates": {
       "path": "crates",
       "purpose": null,
-      "fileCount": 0,
-      "lastAccessed": 1775087574774,
+      "fileCount": 1,
+      "lastAccessed": 1777774796049,
+      "keyFiles": []
+    },
+    "docker": {
+      "path": "docker",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1777774796049,
+      "keyFiles": [
+        "SOUL.md",
+        "entrypoint.sh"
+      ]
+    },
+    "optional-skills": {
+      "path": "optional-skills",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1777774796051,
+      "keyFiles": [
+        "DESCRIPTION.md"
+      ]
+    },
+    "providers": {
+      "path": "providers",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1777774796051,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1777774796051,
+      "keyFiles": [
+        "ci-gates.sh"
+      ]
+    },
+    "skills": {
+      "path": "skills",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1777774796051,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1775087574774,
+      "fileCount": 4,
+      "lastAccessed": 1777774796052,
       "keyFiles": [
         "CACHEDIR.TAG"
+      ]
+    },
+    "website": {
+      "path": "website",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1777774796052,
+      "keyFiles": [
+        "IronHermes Design System-handoff.zip"
       ]
     }
   },
   "hotPaths": [
     {
-      "path": "",
-      "accessCount": 16,
-      "lastAccessed": 1775112299329,
-      "type": "directory"
-    },
-    {
-      "path": ".planning/ROADMAP.md",
-      "accessCount": 16,
-      "lastAccessed": 1775130731456,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/adapter.rs",
-      "accessCount": 12,
-      "lastAccessed": 1775131203701,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/telegram.rs",
-      "accessCount": 11,
-      "lastAccessed": 1775131208811,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/session.rs",
-      "accessCount": 11,
-      "lastAccessed": 1775131911270,
-      "type": "file"
-    },
-    {
       "path": "crates/ironhermes-cli/src/main.rs",
-      "accessCount": 10,
-      "lastAccessed": 1775111513082,
-      "type": "file"
-    },
-    {
-      "path": ".planning/REQUIREMENTS.md",
-      "accessCount": 10,
-      "lastAccessed": 1775112282383,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/agent_loop.rs",
-      "accessCount": 10,
-      "lastAccessed": 1775131961948,
-      "type": "file"
-    },
-    {
-      "path": "crates",
-      "accessCount": 9,
-      "lastAccessed": 1775088529447,
-      "type": "directory"
-    },
-    {
-      "path": ".planning/PROJECT.md",
-      "accessCount": 9,
-      "lastAccessed": 1775096346555,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/lib.rs",
-      "accessCount": 9,
-      "lastAccessed": 1775131193404,
-      "type": "file"
-    },
-    {
-      "path": ".planning/research/async-patterns.md",
-      "accessCount": 8,
-      "lastAccessed": 1775088917163,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/runner.rs",
-      "accessCount": 8,
-      "lastAccessed": 1775111489694,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/config.rs",
-      "accessCount": 8,
-      "lastAccessed": 1775111503237,
-      "type": "file"
-    },
-    {
-      "path": "Cargo.toml",
-      "accessCount": 7,
-      "lastAccessed": 1775098260836,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-tools/src/registry.rs",
-      "accessCount": 6,
-      "lastAccessed": 1775088535402,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/types.rs",
-      "accessCount": 6,
-      "lastAccessed": 1775098247959,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/constants.rs",
-      "accessCount": 5,
-      "lastAccessed": 1775090688194,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/client.rs",
-      "accessCount": 5,
-      "lastAccessed": 1775098261105,
+      "accessCount": 43,
+      "lastAccessed": 1777831967261,
       "type": "file"
     },
     {
       "path": ".planning/STATE.md",
-      "accessCount": 5,
-      "lastAccessed": 1775111480379,
+      "accessCount": 33,
+      "lastAccessed": 1777831935723,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-agent/src/lib.rs",
-      "accessCount": 5,
-      "lastAccessed": 1775131938703,
+      "path": "crates/ironhermes-core/src/config.rs",
+      "accessCount": 27,
+      "lastAccessed": 1777812196152,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-agent/src/context_compressor.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775087634526,
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-CONTEXT.md",
+      "accessCount": 24,
+      "lastAccessed": 1777805645052,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-state/src/lib.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775087636642,
+      "path": ".planning/PROJECT.md",
+      "accessCount": 19,
+      "lastAccessed": 1777840401844,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cron/src/lib.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775087637580,
+      "path": "crates/ironhermes-cli/src/tui_rata/app.rs",
+      "accessCount": 15,
+      "lastAccessed": 1777830675414,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-core/src/error.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775088508058,
+      "path": "crates/ironhermes-cli/src/tui_rata/event_loop.rs",
+      "accessCount": 15,
+      "lastAccessed": 1777832015676,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-tools/src/web_search.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775088534897,
+      "path": "crates/ironhermes-tools/src/registry.rs",
+      "accessCount": 14,
+      "lastAccessed": 1777830773882,
       "type": "file"
     },
     {
-      "path": ".planning/research/self-improvement.md",
-      "accessCount": 4,
-      "lastAccessed": 1775090682791,
+      "path": ".planning/ROADMAP.md",
+      "accessCount": 11,
+      "lastAccessed": 1777832828485,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-core/src/lib.rs",
-      "accessCount": 4,
-      "lastAccessed": 1775098242072,
+      "path": "crates/ironhermes-tools/src/web_read.rs",
+      "accessCount": 10,
+      "lastAccessed": 1777698994373,
       "type": "file"
     },
     {
-      "path": ".planning/config.json",
-      "accessCount": 4,
-      "lastAccessed": 1775098248496,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-tools/src/terminal.rs",
-      "accessCount": 3,
-      "lastAccessed": 1775087635661,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-tools/src/file_tools.rs",
-      "accessCount": 3,
-      "lastAccessed": 1775087638338,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-tools/src/lib.rs",
-      "accessCount": 3,
-      "lastAccessed": 1775087645446,
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-VALIDATION.md",
+      "accessCount": 10,
+      "lastAccessed": 1777776842562,
       "type": "file"
     },
     {
       "path": "crates/ironhermes-tools/Cargo.toml",
-      "accessCount": 3,
-      "lastAccessed": 1775088611556,
+      "accessCount": 9,
+      "lastAccessed": 1777773915387,
       "type": "file"
     },
     {
-      "path": ".planning/research/telegram-gateway.md",
-      "accessCount": 3,
-      "lastAccessed": 1775088910381,
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-02-PLAN.md",
+      "accessCount": 8,
+      "lastAccessed": 1777778502357,
       "type": "file"
     },
     {
-      "path": ".planning/research/web-scraping.md",
-      "accessCount": 3,
-      "lastAccessed": 1775088911371,
+      "path": "crates/ironhermes-core/src/provider.rs",
+      "accessCount": 7,
+      "lastAccessed": 1777713787268,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-agent/Cargo.toml",
-      "accessCount": 3,
-      "lastAccessed": 1775090749596,
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-RESEARCH.md",
+      "accessCount": 6,
+      "lastAccessed": 1777691033603,
       "type": "file"
     },
     {
-      "path": ".planning/phases/01-context-file-loading/01-01-PLAN.md",
-      "accessCount": 3,
-      "lastAccessed": 1775093492651,
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-04-PLAN.md",
+      "accessCount": 6,
+      "lastAccessed": 1777696537805,
       "type": "file"
     },
     {
-      "path": ".planning/phases/01-context-file-loading/01-02-PLAN.md",
-      "accessCount": 3,
-      "lastAccessed": 1775093492809,
+      "path": "crates/ironhermes-core/src/skills.rs",
+      "accessCount": 6,
+      "lastAccessed": 1777700785167,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-gateway/Cargo.toml",
-      "accessCount": 3,
-      "lastAccessed": 1775111503723,
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-00-PLAN.md",
+      "accessCount": 6,
+      "lastAccessed": 1777778501002,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-core/Cargo.toml",
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-03-PLAN.md",
+      "accessCount": 5,
+      "lastAccessed": 1777695217565,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-05-PLAN.md",
+      "accessCount": 5,
+      "lastAccessed": 1777696795827,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/lib.rs",
+      "accessCount": 5,
+      "lastAccessed": 1777704204113,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-01-PLAN.md",
+      "accessCount": 5,
+      "lastAccessed": 1777778501408,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-REVIEW.md",
+      "accessCount": 4,
+      "lastAccessed": 1777670821891,
+      "type": "file"
+    },
+    {
+      "path": ".planning/REQUIREMENTS.md",
+      "accessCount": 4,
+      "lastAccessed": 1777831936795,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-CONTEXT.md",
+      "accessCount": 3,
+      "lastAccessed": 1777672217906,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-PATTERNS.md",
+      "accessCount": 3,
+      "lastAccessed": 1777691040444,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/tests/browser_integration.rs",
+      "accessCount": 3,
+      "lastAccessed": 1777692688884,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/browser_vision.rs",
+      "accessCount": 3,
+      "lastAccessed": 1777695259695,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-06-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1777697449080,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-07-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1777698144020,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-08-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1777698961155,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-09-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1777699428604,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-19-SUMMARY.md",
       "accessCount": 2,
-      "lastAccessed": 1775087608053,
+      "lastAccessed": 1777670914251,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-state/Cargo.toml",
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-19-PLAN.md",
       "accessCount": 2,
-      "lastAccessed": 1775087608270,
+      "lastAccessed": 1777670914343,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cli/Cargo.toml",
+      "path": "crates/ironhermes-tools/src/web_search.rs",
       "accessCount": 2,
-      "lastAccessed": 1775087609839,
+      "lastAccessed": 1777689017890,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cron/Cargo.toml",
+      "path": "crates/ironhermes-tools/src/skills_tool.rs",
       "accessCount": 2,
-      "lastAccessed": 1775087610522,
+      "lastAccessed": 1777689041020,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-gateway/src/multimodal.rs",
+      "accessCount": 2,
+      "lastAccessed": 1777699433337,
+      "type": "file"
+    },
+    {
+      "path": "skills/media/youtube-content/SKILL.md",
+      "accessCount": 2,
+      "lastAccessed": 1777700783397,
       "type": "file"
     },
     {
       "path": ".planning/codebase/ARCH.md",
       "accessCount": 2,
-      "lastAccessed": 1775090683298,
+      "lastAccessed": 1777797220039,
       "type": "file"
     },
     {
-      "path": "README.md",
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-UAT.md",
       "accessCount": 1,
-      "lastAccessed": 1775087624546,
+      "lastAccessed": 1777670903400,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/browser_console.rs",
+      "accessCount": 1,
+      "lastAccessed": 1777671009935,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/browser_snapshot.rs",
+      "accessCount": 1,
+      "lastAccessed": 1777671010415,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-RESEARCH.md",
+      "accessCount": 1,
+      "lastAccessed": 1777671040330,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/browser_session.rs",
+      "accessCount": 1,
+      "lastAccessed": 1777671074060,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-VERIFICATION.md",
+      "accessCount": 1,
+      "lastAccessed": 1777671219361,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-HUMAN-UAT.md",
+      "accessCount": 1,
+      "lastAccessed": 1777671265338,
       "type": "file"
     },
     {
       "path": ".planning/codebase/TECH.md",
       "accessCount": 1,
-      "lastAccessed": 1775087695428,
+      "lastAccessed": 1777672226915,
       "type": "file"
     },
     {
-      "path": ".planning/codebase/QUALITY.md",
+      "path": ".planning/todos/pending/2026-04-18-hermes-agent-feature-parity-gaps.md",
       "accessCount": 1,
-      "lastAccessed": 1775087730572,
+      "lastAccessed": 1777672247419,
       "type": "file"
     },
     {
-      "path": ".planning/codebase/CONCERNS.md",
+      "path": ".planning/phases/25.2-web-extract-tools/25.2-DISCUSSION-LOG.md",
       "accessCount": 1,
-      "lastAccessed": 1775087804799,
+      "lastAccessed": 1777686573503,
       "type": "file"
     },
     {
-      "path": ".planning/research/SUMMARY.md",
+      "path": "crates/ironhermes-core/src/ssrf.rs",
       "accessCount": 1,
-      "lastAccessed": 1775088966885,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/01-context-file-loading/01-01-SUMMARY.md",
-      "accessCount": 1,
-      "lastAccessed": 1775093496265,
+      "lastAccessed": 1777688057379,
       "type": "file"
     }
   ],

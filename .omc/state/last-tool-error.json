@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"git merge worktree-agent-a5235941 --no-edit 2>&1\",\"description\":\"Merge plan 02-04 worktree\"}",
-  "error": "Exit code 1\nAuto-merging crates/ironhermes-gateway/src/handler.rs\nCONFLICT (add/add): Merge conflict in crates/ironhermes-gateway/src/handler.rs\nAuto-merging crates/ironhermes-gateway/src/lib.rs\nAuto-merging crates/ironhermes-gateway/src/session.rs\nCONFLICT (content): Merge conflict in crates/ironhermes-gateway/src/session.rs\nAutomatic merge failed; fix conflicts and then commit the result.",
-  "timestamp": "2026-04-02T12:11:29.687Z",
-  "retry_count": 1
-}

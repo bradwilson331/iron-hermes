@@ -16,7 +16,8 @@ model:
   # Override API base URL (usually not needed)
   # base_url: null
 
-  # Override API key (prefer .env file for secrets)
+  # DEPRECATED — use providers.<name>.api_key_env instead (see "Provider Overrides" below).
+  # Kept one release for backwards compat; emits a deprecation banner at startup.
   # api_key: null
 
   # Vision model for image analysis (null = use default model)
@@ -112,22 +113,27 @@ gateway:
   # compression_threshold: 0.85
 
   # Platform adapters
-  platforms:
-    telegram:
-      # Enable Telegram gateway
-      # enabled: false
-
-      # Bot token (prefer TELEGRAM_BOT_TOKEN env var for secrets)
-      # token: null
-
-      # Allowed Telegram user IDs (empty = deny all)
-      # whitelist: []
-
-      # Session inactivity timeout in hours (default: 24)
-      # session_timeout_hours: 24
-
-      # Maximum concurrent agent runs (default: 8)
-      # max_concurrent_runs: 8
+  # The `platforms:` map is empty by default. To enable Telegram, uncomment the
+  # `telegram:` block below AND provide a token (env var or `token:`).
+  # platforms:
+  #   telegram:
+  #     # Enable Telegram gateway (required to register the platform at all)
+  #     enabled: true
+  #
+  #     # Bot token. Prefer the TELEGRAM_BOT_TOKEN env var (in ~/.ironhermes/.env)
+  #     # over inlining the secret here. If both are set, env var wins.
+  #     # token: "123456:ABC-DEF..."
+  #
+  #     # Allowed Telegram chat IDs (integers). Empty list = deny all.
+  #     # Get your chat ID by messaging @userinfobot on Telegram.
+  #     whitelist: [123456789]
+  #
+  #     # Session inactivity timeout in hours (default: 24)
+  #     # session_timeout_hours: 24
+  #
+  #     # Maximum concurrent agent runs (default: 8)
+  #     # max_concurrent_runs: 8
+  platforms: {}
 
 # --- Cron ---
 cron:
@@ -228,13 +234,33 @@ security:
   # redact_secrets: true
 
 # --- Provider Overrides ---
-# Per-provider base_url, api_key, api_mode, fallback configuration.
+# Per-provider configuration. This is the canonical place to wire API keys
+# and override defaults. `api_key_env` references an env var name (validated
+# against [A-Z][A-Z0-9_]*) — the actual secret stays in ~/.ironhermes/.env.
+#
+# Recommended pattern (silences the deprecation warnings for legacy env-var
+# fallback and `model.api_key`):
+#
 # providers:
 #   openrouter:
-#     api_mode: chat_completions
-#     fallback_providers: ["anthropic"]
+#     api_key_env: OPENROUTER_API_KEY     # secret lives in .env
+#     api_mode: chat_completions          # override only if needed
+#     fallback_providers: ["anthropic"]   # try these on hard failure
+#     # base_url: null                    # override only if needed
+#     # default_model: "anthropic/claude-sonnet-4"
+#     # disabled: false                   # set true to exclude from resolver
 #   anthropic:
+#     api_key_env: ANTHROPIC_API_KEY
 #     api_mode: anthropic_messages
+#   openai:
+#     api_key_env: OPENAI_API_KEY
+#     api_mode: chat_completions
+#
+# Legacy fields (still parsed, will warn at startup):
+#   - `api_key: <literal>` under a provider — use `api_key_env` instead.
+#   - `model.api_key:` at the top level — use `providers.<main>.api_key_env`.
+#   - Bare `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env
+#     vars without a matching `providers.<name>.api_key_env` declaration.
 
 # --- Custom Providers ---
 # User-defined OpenAI-compatible endpoints.

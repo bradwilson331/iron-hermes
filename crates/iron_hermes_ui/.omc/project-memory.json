@@ -1,0 +1,399 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1777788016309,
+  "projectRoot": "/Users/twilson/code/iron_hermes_ui",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": "type-based"
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 4,
+      "lastAccessed": 1777788016302,
+      "keyFiles": [
+        "favicon.ico",
+        "header.svg",
+        "main.css",
+        "tailwind.css"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 3,
+      "lastAccessed": 1777788016302,
+      "keyFiles": [
+        "app.rs",
+        "main.rs",
+        "state.rs"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1777788016302,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "warp2ironhermes": {
+      "path": "warp2ironhermes",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1777788016302,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "src/components": {
+      "path": "src/components",
+      "purpose": "UI components",
+      "fileCount": 2,
+      "lastAccessed": 1777788016302,
+      "keyFiles": [
+        "hero.rs",
+        "mod.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": ".planning/STATE.md",
+      "accessCount": 58,
+      "lastAccessed": 1777824980422,
+      "type": "file"
+    },
+    {
+      "path": ".planning/ROADMAP.md",
+      "accessCount": 45,
+      "lastAccessed": 1777824702060,
+      "type": "file"
+    },
+    {
+      "path": ".planning/REQUIREMENTS.md",
+      "accessCount": 28,
+      "lastAccessed": 1777821058975,
+      "type": "file"
+    },
+    {
+      "path": "src/main.rs",
+      "accessCount": 21,
+      "lastAccessed": 1777824301321,
+      "type": "file"
+    },
+    {
+      "path": "src/state.rs",
+      "accessCount": 19,
+      "lastAccessed": 1777824653962,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 18,
+      "lastAccessed": 1777823459516,
+      "type": "file"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 17,
+      "lastAccessed": 1777824142328,
+      "type": "file"
+    },
+    {
+      "path": ".planning/PROJECT.md",
+      "accessCount": 14,
+      "lastAccessed": 1777824140568,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/02-design-system/02-CONTEXT.md",
+      "accessCount": 12,
+      "lastAccessed": 1777814653070,
+      "type": "file"
+    },
+    {
+      "path": "src/app.rs",
+      "accessCount": 12,
+      "lastAccessed": 1777818267359,
+      "type": "file"
+    },
+    {
+      "path": "clippy.toml",
+      "accessCount": 12,
+      "lastAccessed": 1777824153208,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-RESEARCH.md",
+      "accessCount": 11,
+      "lastAccessed": 1777777310110,
+      "type": "file"
+    },
+    {
+      "path": "Dioxus.toml",
+      "accessCount": 11,
+      "lastAccessed": 1777777840968,
+      "type": "file"
+    },
+    {
+      "path": "src/components/hero.rs",
+      "accessCount": 10,
+      "lastAccessed": 1777797331428,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-VALIDATION.md",
+      "accessCount": 8,
+      "lastAccessed": 1777774668897,
+      "type": "file"
+    },
+    {
+      "path": "assets/main.css",
+      "accessCount": 8,
+      "lastAccessed": 1777788847273,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/app/app.jsx",
+      "accessCount": 8,
+      "lastAccessed": 1777821363859,
+      "type": "file"
+    },
+    {
+      "path": "src/platform/mod.rs",
+      "accessCount": 7,
+      "lastAccessed": 1777823026927,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 7,
+      "lastAccessed": 1777824142111,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-PATTERNS.md",
+      "accessCount": 6,
+      "lastAccessed": 1777777839614,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/02-design-system/02-RESEARCH.md",
+      "accessCount": 6,
+      "lastAccessed": 1777788745724,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/app/shell.jsx",
+      "accessCount": 6,
+      "lastAccessed": 1777796942780,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/STRUCTURE.md",
+      "accessCount": 6,
+      "lastAccessed": 1777814653457,
+      "type": "file"
+    },
+    {
+      "path": ".planning/config.json",
+      "accessCount": 6,
+      "lastAccessed": 1777824141744,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-02-PLAN.md",
+      "accessCount": 5,
+      "lastAccessed": 1777773269733,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-03-PLAN.md",
+      "accessCount": 5,
+      "lastAccessed": 1777774145281,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/CONVENTIONS.md",
+      "accessCount": 5,
+      "lastAccessed": 1777790994279,
+      "type": "file"
+    },
+    {
+      "path": "src/components/mod.rs",
+      "accessCount": 5,
+      "lastAccessed": 1777797330609,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/ARCHITECTURE.md",
+      "accessCount": 5,
+      "lastAccessed": 1777814653859,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-01-PLAN.md",
+      "accessCount": 4,
+      "lastAccessed": 1777772623335,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-03-SUMMARY.md",
+      "accessCount": 4,
+      "lastAccessed": 1777774670842,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/ironhermes/colors_and_type.css",
+      "accessCount": 4,
+      "lastAccessed": 1777777312676,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 3,
+      "lastAccessed": 1777697116547,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/README.md",
+      "accessCount": 3,
+      "lastAccessed": 1777697151300,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/CONCERNS.md",
+      "accessCount": 3,
+      "lastAccessed": 1777698374196,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/STACK.md",
+      "accessCount": 3,
+      "lastAccessed": 1777768041205,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/styles/warp-ih.css",
+      "accessCount": 3,
+      "lastAccessed": 1777777313395,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/app/frames.jsx",
+      "accessCount": 2,
+      "lastAccessed": 1777696831513,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/INTEGRATIONS.md",
+      "accessCount": 2,
+      "lastAccessed": 1777697126575,
+      "type": "file"
+    },
+    {
+      "path": ".planning/codebase/TESTING.md",
+      "accessCount": 2,
+      "lastAccessed": 1777697126899,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-01-SUMMARY.md",
+      "accessCount": 2,
+      "lastAccessed": 1777774669689,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-02-SUMMARY.md",
+      "accessCount": 2,
+      "lastAccessed": 1777774670082,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-VERIFICATION.md",
+      "accessCount": 2,
+      "lastAccessed": 1777774816686,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/Warp × IronHermes.html",
+      "accessCount": 2,
+      "lastAccessed": 1777777328161,
+      "type": "file"
+    },
+    {
+      "path": "tailwind.css",
+      "accessCount": 1,
+      "lastAccessed": 1777696803590,
+      "type": "file"
+    },
+    {
+      "path": "warp2ironhermes/project/design-canvas.jsx",
+      "accessCount": 1,
+      "lastAccessed": 1777696830417,
+      "type": "file"
+    },
+    {
+      "path": "assets/tailwind.css",
+      "accessCount": 1,
+      "lastAccessed": 1777696830869,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/deferred-items.md",
+      "accessCount": 1,
+      "lastAccessed": 1777774709489,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/01-hygiene/01-REVIEW.md",
+      "accessCount": 1,
+      "lastAccessed": 1777774736342,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/02-design-system/02-DISCUSSION-LOG.md",
+      "accessCount": 1,
+      "lastAccessed": 1777777022795,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
