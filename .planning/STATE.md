@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 25.6 context gathered
-last_updated: "2026-05-04T07:54:54.511Z"
-last_activity: 2026-05-04
+stopped_at: Phase 26.1 context gathered
+last_updated: "2026-05-04T14:12:08.710Z"
+last_activity: 2026-05-04 -- Phase 26.1 planning complete
 progress:
-  total_phases: 20
-  completed_phases: 19
-  total_plans: 103
-  completed_plans: 103
-  percent: 100
+  total_phases: 28
+  completed_phases: 18
+  total_plans: 132
+  completed_plans: 131
+  percent: 99
 ---
 
 # Project State
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 25.5 — iron-hermes-ui
+**Current focus:** Phase 25.6 — replicate-cli-web-wiring
 
 ## Current Position
 
-Phase: 25.5 (iron-hermes-ui) — EXECUTING
-Plan: 2 of 5
+Phase: 26
+Plan: Not started
 Status: Ready to execute
-Last activity: 2026-05-04
+Last activity: 2026-05-04 -- Phase 26.1 planning complete
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 87
+- Total plans completed: 90
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -60,6 +60,7 @@ Last activity: 2026-05-04
 | 22.4.2.2 | 2 | - | - |
 | 22.4.2.3 | 1 | - | - |
 | 25.3 | 18 | - | - |
+| 25.6 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -396,6 +397,7 @@ Recent decisions affecting current work:
 - Phase 25.3 inserted after Phase 25: session-workspace parity (URGENT)
 - Phase 25.5 inserted after Phase 25: iron_hermes_ui (URGENT)
 - Phase 25.6 inserted after Phase 25: replicate CLI web wiring (URGENT)
+- Phase 26.1 inserted after Phase 26: Fix websocket error for chat (URGENT)
 
 ### Pending Todos
 
@@ -413,8 +415,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-04T07:54:54.507Z
-Stopped at: Phase 25.6 context gathered
-Resume file: .planning/phases/25.6-replicate-cli-web-wiring/25.6-CONTEXT.md
+Last session: 2026-05-04T14:12:08.705Z
+Stopped at: Phase 26.1 context gathered
+Resume file: .planning/phases/26.1-fix-websocket-error-for-chat/26.1-CONTEXT.md
 
 **Planned Phase:** 22.4.1 (tui_rata handler re-port) — 3 plans — 2026-04-25T09:08:56.668Z
