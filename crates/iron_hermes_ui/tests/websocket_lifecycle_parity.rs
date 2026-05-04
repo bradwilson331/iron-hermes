@@ -26,6 +26,10 @@ fn server_ws_runs_turn_in_spawned_task_and_streams_concurrently() {
 fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
     let ws = read("src/server/ws.rs");
     assert!(
+        ws.contains("#[get(\"/api/ws/chat\")]") ,
+        "ws route annotation must remain /api/ws/chat"
+    );
+    assert!(
         ws.contains("Invalid request:"),
         "ws_chat must emit protocol errors for malformed JSON"
     );
