@@ -38,3 +38,27 @@ fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
         "ws_chat must abort in-flight turn task on socket send failure"
     );
 }
+
+#[test]
+fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
+    let ui = read("src/components/warp_hermes.rs");
+    assert!(
+        ui.contains("with_automatic_reconnect()"),
+        "client websocket initialization must keep automatic reconnect enabled"
+    );
+    assert!(
+        ui.contains("loop {") && ui.contains("let _state = ws.connect().await"),
+        "client receiver must use an outer reconnect cycle"
+    );
+    assert!(
+        ui.contains("Err(_) => {")
+            && ui.contains("scanner_active.set(false);")
+            && ui.contains("streaming_block_id.set(None);")
+            && ui.contains("continue;"),
+        "disconnect/error path must reset transient streaming UI state"
+    );
+    assert!(
+        ui.contains("let _ = ws.send_raw("),
+        "submit/rerun websocket sends must remain non-panicking"
+    );
+}
