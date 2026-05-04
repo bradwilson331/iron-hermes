@@ -246,6 +246,7 @@ pub enum Platform {
     HomeAssistant,
     Webhook,
     ApiServer,
+    Web,  // Phase 25.5: Dioxus web UI sessions
 }
 
 impl std::fmt::Display for Platform {
@@ -267,6 +268,7 @@ impl std::fmt::Display for Platform {
             Platform::HomeAssistant => "homeassistant",
             Platform::Webhook => "webhook",
             Platform::ApiServer => "api_server",
+            Platform::Web => "web",
         };
         write!(f, "{}", s)
     }
