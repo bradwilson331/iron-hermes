@@ -129,14 +129,14 @@ pub fn WarpHermes() -> Element {
                         };
 
                         // Parse the JSON-encoded ChatStreamEvent.
-                        let event: crate::server::ws::ChatStreamEvent =
+                        let event: crate::protocol::ChatStreamEvent =
                             match serde_json::from_str(&msg_text) {
                                 Ok(e) => e,
                                 Err(_) => continue, // Skip malformed messages
                             };
 
                         match event {
-                            crate::server::ws::ChatStreamEvent::Delta { text } => {
+                            crate::protocol::ChatStreamEvent::Delta { text } => {
                                 // Accumulate deltas into a single Block::Ai entry.
                                 let current_streaming_id = streaming_block_id();
                                 if let Some(sid) = current_streaming_id {
@@ -168,7 +168,7 @@ pub fn WarpHermes() -> Element {
                                     });
                                 }
                             }
-                            crate::server::ws::ChatStreamEvent::ToolCallStart { name, args } => {
+                            crate::protocol::ChatStreamEvent::ToolCallStart { name, args } => {
                                 // Add a Tool block to the block stream.
                                 let id = {
                                     let cur = next_id();
@@ -197,7 +197,7 @@ pub fn WarpHermes() -> Element {
                                     }),
                                 });
                             }
-                            crate::server::ws::ChatStreamEvent::ToolCallEnd { name, success } => {
+                            crate::protocol::ChatStreamEvent::ToolCallEnd { name, success } => {
                                 // Update the last matching tool call block status.
                                 let new_status = if success {
                                     ToolStatus::Done
@@ -228,7 +228,7 @@ pub fn WarpHermes() -> Element {
                                     }
                                 }
                             }
-                            crate::server::ws::ChatStreamEvent::Finished { total_tokens } => {
+                            crate::protocol::ChatStreamEvent::Finished { total_tokens } => {
                                 // Update token budget.
                                 tokens.set(TokenBudget {
                                     used: total_tokens,
@@ -256,7 +256,7 @@ pub fn WarpHermes() -> Element {
                                     });
                                 }
                             }
-                            crate::server::ws::ChatStreamEvent::Error { message } => {
+                            crate::protocol::ChatStreamEvent::Error { message } => {
                                 let id = {
                                     let cur = next_id();
                                     next_id.set(cur + 1);
@@ -477,7 +477,7 @@ pub fn WarpHermes() -> Element {
             streaming_block_id.set(None);
             // Send via WebSocket.
             let sid = session_id();
-            let req = crate::server::ws::ChatRequest {
+            let req = crate::protocol::ChatRequest {
                 session_id: sid,
                 message: text,
             };
@@ -565,7 +565,7 @@ pub fn WarpHermes() -> Element {
 
         // Send ChatRequest over WebSocket.
         let sid = session_id();
-        let req = crate::server::ws::ChatRequest {
+        let req = crate::protocol::ChatRequest {
             session_id: sid,
             message: text,
         };

@@ -2,19 +2,27 @@
 
 use dioxus::prelude::*;
 use dioxus_fullstack::{WebSocketOptions, Websocket};
+#[cfg(feature = "server")]
 use tokio::sync::mpsc;
+#[cfg(feature = "server")]
 use tokio::task::JoinHandle;
+#[cfg(feature = "server")]
 use tracing::warn;
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
 #[get("/api/ws/chat")]
 pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> {
+    #[cfg(feature = "server")]
     let app_state = crate::server::state::global_app_state().clone();
+
     Ok(ws.on_upgrade(
         move |mut socket: dioxus_fullstack::TypedWebsocket<String, String>| {
+            #[cfg(feature = "server")]
             let app_state = app_state.clone();
             async move {
+                #[cfg(feature = "server")]
+                {
                 struct InFlightTurn {
                     session_id: String,
                     rx: mpsc::UnboundedReceiver<ChatStreamEvent>,
@@ -154,6 +162,18 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             }
                         }
                     }
+                }
+                }
+
+                #[cfg(not(feature = "server"))]
+                {
+                    let unavailable = ChatStreamEvent::Error {
+                        message: "Websocket chat route is unavailable without `server` feature"
+                            .to_string(),
+                    };
+                    let _ = socket
+                        .send(serde_json::to_string(&unavailable).unwrap_or_default())
+                        .await;
                 }
             }
         },
