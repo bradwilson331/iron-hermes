@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
+use dioxus_fullstack::{CloseCode, Message, TypedWebsocket};
+#[cfg(feature = "server")]
 use tokio::sync::mpsc;
 #[cfg(feature = "server")]
 use tokio::task::JoinHandle;
@@ -18,6 +20,30 @@ fn is_clean_ws_disconnect(reason: &str) -> bool {
         || lower.contains("close frame")
         || lower.contains("connection reset by peer")
         || lower.contains("eof")
+}
+
+/// Best-effort WebSocket close-frame emit before dropping the socket.
+///
+/// Ensures every teardown branch completes the WebSocket close handshake
+/// so upstream proxies do not observe `Connection reset without closing
+/// handshake`. Errors are intentionally swallowed: if the send fails, the
+/// transport was already broken and the handler is exiting regardless —
+/// we must not block teardown on close-frame delivery (respects D-06's
+/// intent not to hang on broken-send paths, while closing HUMAN-UAT Gap 3
+/// where the server previously dropped the socket with no close frame at
+/// all).
+#[cfg(feature = "server")]
+async fn send_close_frame(
+    socket: &mut TypedWebsocket<String, String>,
+    code: CloseCode,
+    reason: &str,
+) {
+    let _ = socket
+        .send_raw(Message::Close {
+            code,
+            reason: reason.to_string(),
+        })
+        .await;
 }
 
 #[get("/api/ws/chat")]
@@ -82,6 +108,30 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         } else {
                                             turn.handle.abort();
                                         }
+                                    }
+
+                                    // Close HUMAN-UAT Gap 3: proactively emit a
+                                    // WebSocket close frame on every recv-error
+                                    // teardown branch so upstream proxies
+                                    // observe a proper close handshake instead
+                                    // of `Connection reset without closing
+                                    // handshake`. Best-effort — swallow errors
+                                    // since the transport may already be
+                                    // half-broken.
+                                    if is_clean_ws_disconnect(&reason) {
+                                        send_close_frame(
+                                            &mut socket,
+                                            CloseCode::Normal,
+                                            "recv closed cleanly",
+                                        )
+                                        .await;
+                                    } else {
+                                        send_close_frame(
+                                            &mut socket,
+                                            CloseCode::Away,
+                                            "recv failed",
+                                        )
+                                        .await;
                                     }
                                     break;
                                 }
@@ -187,6 +237,22 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             warn!(session_id = %turn.session_id, reason = %err, in_flight = true, "websocket send failed; aborting in-flight turn");
                                             turn.handle.abort();
                                         }
+                                        // Close HUMAN-UAT Gap 3: even on
+                                        // broken-send paths, attempt a
+                                        // best-effort close frame so the proxy
+                                        // sees a close handshake instead of a
+                                        // raw transport reset. The write will
+                                        // most likely fail silently (transport
+                                        // is already broken), which is
+                                        // consistent with D-06's intent that
+                                        // teardown not block on close-frame
+                                        // delivery.
+                                        send_close_frame(
+                                            &mut socket,
+                                            CloseCode::Away,
+                                            "send failed",
+                                        )
+                                        .await;
                                         break;
                                     }
                                 }

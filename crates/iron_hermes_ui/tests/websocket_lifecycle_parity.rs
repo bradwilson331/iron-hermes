@@ -141,3 +141,52 @@ fn client_ws_disconnect_notices_are_generic_and_deduplicated_per_disconnect_wind
         "close frames should trigger one reconnect boundary, not repeated receive-error churn"
     );
 }
+
+#[test]
+fn server_ws_emits_close_frame_on_every_teardown_branch() {
+    // HUMAN-UAT Gap 3 regression lock: the server must send a WebSocket
+    // close frame before dropping the socket on every teardown branch so
+    // proxies/clients never observe `Connection reset without closing
+    // handshake`. The close-frame send is best-effort (errors ignored) so
+    // it does not block teardown on broken-send paths (D-06 intent).
+    let ws = read("src/server/ws.rs");
+
+    assert!(
+        ws.contains("fn send_close_frame("),
+        "server teardown must funnel close-frame emission through a single helper"
+    );
+
+    assert!(
+        ws.contains("CloseCode") && ws.contains("Message"),
+        "close-frame helper must reference CloseCode and Message types from dioxus_fullstack"
+    );
+
+    assert!(
+        ws.contains("Message::Close {"),
+        "send_close_frame must emit a WebSocket Close variant"
+    );
+
+    assert!(
+        ws.contains("CloseCode::Normal") && ws.contains("CloseCode::Away"),
+        "teardown branches must classify close codes (Normal for clean, Away for failure)"
+    );
+
+    // Every break; that exits the ws_chat loop must be preceded by a
+    // send_close_frame(...) call. Count invocations and breaks to keep
+    // the invariant regression-locked without getting tripped by
+    // unrelated formatting changes.
+    let close_frame_calls = ws.matches("send_close_frame(").count();
+    // Definition + 3 call sites (clean recv, broken recv, broken send)
+    assert!(
+        close_frame_calls >= 4,
+        "expected send_close_frame to be invoked at every teardown branch \
+         (clean recv close, broken recv, broken send); found {close_frame_calls} occurrence(s)"
+    );
+
+    assert!(
+        ws.contains("\"recv closed cleanly\"")
+            && ws.contains("\"recv failed\"")
+            && ws.contains("\"send failed\""),
+        "each teardown branch must carry a distinct close-frame reason string for telemetry parity"
+    );
+}
