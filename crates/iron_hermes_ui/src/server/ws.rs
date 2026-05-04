@@ -1,129 +1,161 @@
 //! WebSocket endpoint for streaming agent chat responses.
-//!
-//! Per CONTEXT D-01: WebSocket delivers streaming agent responses to
-//! the block stream. Client sends user messages as JSON; server streams
-//! back `ChatStreamEvent` variants as JSON lines.
-//!
-//! Phase 25.5 Plan 04: replaced echo handler with real AgentLoop dispatch.
-//! User message → AgentLoop with StreamCallback → ChatStreamEvent over WS.
 
 use dioxus::prelude::*;
 use dioxus_fullstack::{WebSocketOptions, Websocket};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::warn;
 
-/// Re-export protocol types so the server module surface stays unchanged.
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
-/// WebSocket chat endpoint — real AgentLoop dispatch.
-///
-/// Client connects, sends `ChatRequest` as JSON, server streams back
-/// `ChatStreamEvent` items. The WebSocket stays open for the session
-/// duration; multiple messages can be sent/received.
-///
-/// Plan 04: builds a real AgentLoop per message, wires a StreamCallback
-/// that sends deltas over a tokio mpsc channel, and forwards events
-/// from the channel to the WebSocket.
 #[get("/api/ws/chat")]
 pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> {
-    Ok(ws.on_upgrade(|mut socket: dioxus_fullstack::TypedWebsocket<String, String>| async move {
-        // Load AppState once for this connection.
-        // AppState was initialized at startup and injected via Axum Extension.
-        // Since we're inside the on_upgrade handler, we reconstruct from config
-        // (the Extension is not directly accessible here in the Dioxus WS model).
-        let app_state = match crate::server::state::AppState::init().await {
-            Ok(state) => state,
-            Err(e) => {
-                let err = ChatStreamEvent::Error {
-                    message: format!("Server initialization failed: {e}"),
-                };
-                let _ = socket
-                    .send(serde_json::to_string(&err).unwrap_or_default())
-                    .await;
-                return;
-            }
-        };
-
-        while let Ok(msg) = socket.recv().await {
-            // Parse incoming ChatRequest
-            let req: ChatRequest = match serde_json::from_str(&msg) {
-                Ok(r) => r,
-                Err(e) => {
-                    let err = ChatStreamEvent::Error {
-                        message: format!("Invalid request: {e}"),
-                    };
-                    let _ = socket
-                        .send(serde_json::to_string(&err).unwrap_or_default())
-                        .await;
-                    continue;
+    let app_state = crate::server::state::global_app_state().clone();
+    Ok(ws.on_upgrade(
+        move |mut socket: dioxus_fullstack::TypedWebsocket<String, String>| {
+            let app_state = app_state.clone();
+            async move {
+                struct InFlightTurn {
+                    session_id: String,
+                    rx: mpsc::UnboundedReceiver<ChatStreamEvent>,
+                    handle: JoinHandle<()>,
                 }
-            };
 
-            // Build an mpsc channel for streaming events back to WebSocket.
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamEvent>();
+                let mut in_flight_turn: Option<InFlightTurn> = None;
 
-            // Construct the streaming callback that sends deltas to the channel.
-            let tx_stream = tx.clone();
-            let stream_callback: ironhermes_agent::agent_loop::StreamCallback =
-                Box::new(move |delta: &str| {
-                    let _ = tx_stream.send(ChatStreamEvent::Delta {
-                        text: delta.to_string(),
-                    });
-                });
+                loop {
+                    tokio::select! {
+                        msg = socket.recv() => {
+                            let msg = match msg {
+                                Ok(msg) => msg,
+                                Err(err) => {
+                                    let session_id = in_flight_turn
+                                        .as_ref()
+                                        .map(|t| t.session_id.as_str())
+                                        .unwrap_or("unknown");
+                                    warn!(session_id = %session_id, reason = %err, in_flight = in_flight_turn.is_some(), "websocket recv failed; aborting connection");
+                                    if let Some(turn) = in_flight_turn.take() {
+                                        turn.handle.abort();
+                                    }
+                                    break;
+                                }
+                            };
 
-            // Construct tool progress callback for ToolCallStart events.
-            let tx_tool = tx.clone();
-            let tool_progress_callback: ironhermes_agent::agent_loop::ToolProgressCallback =
-                Box::new(move |name: &str, args: &str| {
-                    let _ = tx_tool.send(ChatStreamEvent::ToolCallStart {
-                        name: name.to_string(),
-                        args: args.to_string(),
-                    });
-                });
+                            let req: ChatRequest = match serde_json::from_str(&msg) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    let err = ChatStreamEvent::Error {
+                                        message: format!("Invalid request: {e}"),
+                                    };
+                                    let _ = socket
+                                        .send(serde_json::to_string(&err).unwrap_or_default())
+                                        .await;
+                                    continue;
+                                }
+                            };
 
-            // Build AgentLoop and run the agent turn in a background task.
-            let message_text = req.message.clone();
-            let state = app_state.clone();
-            let tx_fin = tx.clone();
-            tokio::spawn(async move {
-                match state.build_agent_loop(stream_callback, Some(tool_progress_callback)) {
-                    Ok(mut agent) => {
-                        // Build system message and user message
-                        let system_msg = ironhermes_core::ChatMessage::system(
-                            "You are Hermes, an AI assistant. Be helpful, concise, and precise.",
-                        );
-                        let user_msg = ironhermes_core::ChatMessage::user(&message_text);
-                        let messages = vec![system_msg, user_msg];
-
-                        match agent.run(messages).await {
-                            Ok(result) => {
-                                let _ = tx_fin.send(ChatStreamEvent::Finished {
-                                    total_tokens: result.total_usage.total_tokens as u32,
-                                });
+                            if in_flight_turn.is_some() {
+                                let busy = ChatStreamEvent::Error {
+                                    message: "Another request is already in progress".to_string(),
+                                };
+                                let _ = socket
+                                    .send(serde_json::to_string(&busy).unwrap_or_default())
+                                    .await;
+                                continue;
                             }
-                            Err(e) => {
-                                let _ = tx_fin.send(ChatStreamEvent::Error {
-                                    message: format!("Agent error: {e}"),
-                                });
+
+                            let (tx, rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+                            let app_state = app_state.clone();
+                            let session_id = req.session_id;
+                            let session_id_for_turn = session_id.clone();
+                            let message = req.message;
+                            let handle = tokio::spawn(async move {
+                                let tx_stream = tx.clone();
+                                let stream_callback: ironhermes_agent::agent_loop::StreamCallback =
+                                    Box::new(move |delta: &str| {
+                                        let _ = tx_stream.send(ChatStreamEvent::Delta {
+                                            text: delta.to_string(),
+                                        });
+                                    });
+
+                                let tx_tool = tx.clone();
+                                let tool_progress_callback: ironhermes_agent::agent_loop::ToolProgressCallback =
+                                    Box::new(move |name: &str, args: &str| {
+                                        let _ = tx_tool.send(ChatStreamEvent::ToolCallStart {
+                                            name: name.to_string(),
+                                            args: args.to_string(),
+                                        });
+                                    });
+
+                                let tx_tool_result = tx.clone();
+                                let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
+                                    Box::new(move |name: &str, success: bool| {
+                                        let _ = tx_tool_result.send(ChatStreamEvent::ToolCallEnd {
+                                            name: name.to_string(),
+                                            success,
+                                        });
+                                    });
+
+                                let result = app_state
+                                    .run_web_turn(
+                                        &session_id_for_turn,
+                                        &message,
+                                        stream_callback,
+                                        Some(tool_progress_callback),
+                                        Some(tool_result_callback),
+                                    )
+                                    .await;
+
+                                match result {
+                                    Ok(agent_result) => {
+                                        let _ = tx.send(ChatStreamEvent::Finished {
+                                            total_tokens: agent_result.total_usage.total_tokens as u32,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(ChatStreamEvent::Error {
+                                            message: format!("Agent error: {e}"),
+                                        });
+                                    }
+                                }
+                            });
+
+                            in_flight_turn = Some(InFlightTurn {
+                                session_id,
+                                rx,
+                                handle,
+                            });
+                        }
+
+                        maybe_event = async {
+                            match in_flight_turn.as_mut() {
+                                Some(turn) => turn.rx.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            match maybe_event {
+                                Some(event) => {
+                                    let json = serde_json::to_string(&event).unwrap_or_default();
+                                    if let Err(err) = socket.send(json).await {
+                                        if let Some(turn) = in_flight_turn.take() {
+                                            warn!(session_id = %turn.session_id, reason = %err, in_flight = true, "websocket send failed; aborting in-flight turn");
+                                            turn.handle.abort();
+                                        }
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    if let Some(turn) = in_flight_turn.take() {
+                                        if let Err(err) = turn.handle.await {
+                                            warn!(session_id = %turn.session_id, reason = %err, in_flight = false, "turn task join failed");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    Err(e) => {
-                        let _ = tx_fin.send(ChatStreamEvent::Error {
-                            message: format!("Failed to build agent: {e}"),
-                        });
-                    }
-                }
-                drop(tx_fin); // Signal channel closure
-            });
-
-            // Forward events from channel to WebSocket.
-            // Drop our copy of tx so only the spawned task holds it.
-            drop(tx);
-            while let Some(event) = rx.recv().await {
-                let json = serde_json::to_string(&event).unwrap_or_default();
-                if socket.send(json).await.is_err() {
-                    break;
                 }
             }
-        }
-    }))
+        },
+    ))
 }

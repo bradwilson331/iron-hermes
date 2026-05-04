@@ -17,7 +17,7 @@ fn server_ws_runs_turn_in_spawned_task_and_streams_concurrently() {
         "ws_chat must spawn the turn execution task"
     );
     assert!(
-        ws.contains("while let Some(event) = rx.recv().await"),
+        ws.contains("maybe_event = async") && ws.contains("turn.rx.recv().await"),
         "ws_chat must forward events while the turn is in flight"
     );
 }

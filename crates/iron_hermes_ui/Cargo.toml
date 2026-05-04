@@ -35,10 +35,13 @@ axum = { version = "=0.8.4", optional = true }
 # Server-only deps — behind cfg gate so WASM client never compiles them
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-agent = { path = "../ironhermes-agent" }
+ironhermes-exec = { path = "../ironhermes-exec" }
+ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
