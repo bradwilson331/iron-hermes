@@ -4,3 +4,7 @@ Cargo.lock
 .env
 *.db
 .claude/worktrees/
+.DS_Store
+**/.DS_Store
+.omc/state/
+.omc/sessions/
