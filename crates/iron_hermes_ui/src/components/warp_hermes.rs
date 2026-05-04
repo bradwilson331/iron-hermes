@@ -1,6 +1,6 @@
-use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use dioxus::core::use_drop;
+use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
@@ -8,9 +8,8 @@ use crate::components::shell::{
     AgentPanel, BlockStream, CommandPalette, InputBox, StatusBar, TitleBar,
 };
 use crate::state::{
-    now_time,
-    Block, BlockEntry, Mode, PaletteItem, PaletteState, Personality, ShellSettings,
-    Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus, Message,
+    now_time, Block, BlockEntry, Message, Mode, PaletteItem, PaletteState, Personality,
+    ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
 };
 
 /// Top-level desktop/web shell composer — Phase 4 integration + Plan 04 WebSocket wiring.
@@ -28,20 +27,23 @@ use crate::state::{
 #[component]
 pub fn WarpHermes() -> Element {
     // ── 12 Phase 4 signals (D-01) — blocks and messages start empty (no demo data). ──
-    let mut input          = use_signal(String::new);
-    let mut blocks         = use_signal(Vec::<BlockEntry>::new);
-    let mut messages       = use_signal(Vec::<Message>::new);
+    let mut input = use_signal(String::new);
+    let mut blocks = use_signal(Vec::<BlockEntry>::new);
+    let mut messages = use_signal(Vec::<Message>::new);
     #[allow(unused_mut)] // required for mode.set via Callback closure capture
     #[allow(unused_mut)] // required for mode.set via Callback closure capture
-    let mut mode               = use_signal(|| Mode::Shell);
-    let mut pal_open       = use_signal(|| false);
-    let mut pal_query      = use_signal(String::new);
-    let mut pal_state      = use_signal(|| PaletteState::Browse);
+    let mut mode = use_signal(|| Mode::Shell);
+    let mut pal_open = use_signal(|| false);
+    let mut pal_query = use_signal(String::new);
+    let mut pal_state = use_signal(|| PaletteState::Browse);
     let mut scanner_active = use_signal(|| false);
-    let focused            = use_signal(|| false);
-    let active_tab         = use_signal(|| 0_usize);
-    let mut tokens         = use_signal(|| TokenBudget { used: 0, max: 128_000 });
-    let mut next_id        = use_signal(|| 1000_u64);
+    let focused = use_signal(|| false);
+    let active_tab = use_signal(|| 0_usize);
+    let mut tokens = use_signal(|| TokenBudget {
+        used: 0,
+        max: 128_000,
+    });
+    let mut next_id = use_signal(|| 1000_u64);
 
     // ── Session ID signal — created once on mount via server function. ──
     let mut session_id = use_signal(|| "pending".to_string());
@@ -54,9 +56,7 @@ pub fn WarpHermes() -> Element {
                 Err(e) => {
                     // Log error to console on wasm, stderr on native.
                     #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(
-                        &format!("Session creation failed: {e}").into(),
-                    );
+                    web_sys::console::log_1(&format!("Session creation failed: {e}").into());
                     let _ = e;
                 }
             }
@@ -78,154 +78,216 @@ pub fn WarpHermes() -> Element {
     // Uses recv_raw/send_raw with manual JSON serialization to avoid
     // type inference issues with generic Websocket<In, Out> parameters.
     use_future(move || async move {
-        // Wait for connection to open.
-        let _state = ws.connect().await;
-        if ws.is_err() {
-            return;
-        }
+        let mut disconnect_notified = false;
 
         loop {
-            match ws.recv_raw().await {
-                Ok(raw_msg) => {
-                    // Extract text from the raw message.
-                    let msg_text = match raw_msg {
-                        dioxus_fullstack::Message::Text(t) => t,
-                        dioxus_fullstack::Message::Binary(b) => {
-                            String::from_utf8_lossy(&b).to_string()
-                        }
-                        _ => continue, // Skip ping/pong/close
-                    };
+            let state = ws.connect().await;
+            if ws.is_err() {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(
+                    &format!("WebSocket connect failed; retrying: {:?}", state).into(),
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("WebSocket connect failed; retrying: {:?}", state);
 
-                    // Parse the JSON-encoded ChatStreamEvent.
-                    let event: crate::server::ws::ChatStreamEvent =
-                        match serde_json::from_str(&msg_text) {
-                            Ok(e) => e,
-                            Err(_) => continue, // Skip malformed messages
+                scanner_active.set(false);
+                streaming_block_id.set(None);
+
+                if !disconnect_notified {
+                    let id = {
+                        let cur = next_id();
+                        next_id.set(cur + 1);
+                        cur
+                    };
+                    blocks.write().push(BlockEntry {
+                        id,
+                        block: Block::Err {
+                            author: Some("hermes".into()),
+                            time: Some(now_time()),
+                            exit_code: 1,
+                            message: "Connection interrupted. Please retry your message once reconnected.".to_string(),
+                        },
+                    });
+                    disconnect_notified = true;
+                }
+
+                continue;
+            }
+
+            loop {
+                match ws.recv_raw().await {
+                    Ok(raw_msg) => {
+                        disconnect_notified = false;
+
+                        // Extract text from the raw message.
+                        let msg_text = match raw_msg {
+                            dioxus_fullstack::Message::Text(t) => t,
+                            dioxus_fullstack::Message::Binary(b) => {
+                                String::from_utf8_lossy(&b).to_string()
+                            }
+                            _ => continue, // Skip ping/pong/close
                         };
 
-                    match event {
-                        crate::server::ws::ChatStreamEvent::Delta { text } => {
-                            // Accumulate deltas into a single Block::Ai entry.
-                            let current_streaming_id = streaming_block_id();
-                            if let Some(sid) = current_streaming_id {
-                                // Append to existing streaming block.
-                                let mut bs = blocks.write();
-                                if let Some(entry) = bs.iter_mut().find(|e| e.id == sid) {
-                                    if let Block::Ai { ref mut markdown, .. } = entry.block {
-                                        markdown.push_str(&text);
+                        // Parse the JSON-encoded ChatStreamEvent.
+                        let event: crate::server::ws::ChatStreamEvent =
+                            match serde_json::from_str(&msg_text) {
+                                Ok(e) => e,
+                                Err(_) => continue, // Skip malformed messages
+                            };
+
+                        match event {
+                            crate::server::ws::ChatStreamEvent::Delta { text } => {
+                                // Accumulate deltas into a single Block::Ai entry.
+                                let current_streaming_id = streaming_block_id();
+                                if let Some(sid) = current_streaming_id {
+                                    // Append to existing streaming block.
+                                    let mut bs = blocks.write();
+                                    if let Some(entry) = bs.iter_mut().find(|e| e.id == sid) {
+                                        if let Block::Ai {
+                                            ref mut markdown, ..
+                                        } = entry.block
+                                        {
+                                            markdown.push_str(&text);
+                                        }
                                     }
+                                } else {
+                                    // First delta — create a new Block::Ai.
+                                    let id = {
+                                        let cur = next_id();
+                                        next_id.set(cur + 1);
+                                        cur
+                                    };
+                                    streaming_block_id.set(Some(id));
+                                    blocks.write().push(BlockEntry {
+                                        id,
+                                        block: Block::Ai {
+                                            author: Some("Hermes".into()),
+                                            time: Some(now_time()),
+                                            markdown: text,
+                                        },
+                                    });
                                 }
-                            } else {
-                                // First delta — create a new Block::Ai.
+                            }
+                            crate::server::ws::ChatStreamEvent::ToolCallStart { name, args } => {
+                                // Add a Tool block to the block stream.
                                 let id = {
                                     let cur = next_id();
                                     next_id.set(cur + 1);
                                     cur
                                 };
-                                streaming_block_id.set(Some(id));
                                 blocks.write().push(BlockEntry {
                                     id,
-                                    block: Block::Ai {
-                                        author: Some("Hermes".into()),
-                                        time: Some(now_time()),
-                                        markdown: text,
+                                    block: Block::Tool {
+                                        call: UiToolCall {
+                                            name: name.clone(),
+                                            args_summary: args.clone(),
+                                            status: ToolStatus::Running,
+                                        },
                                     },
                                 });
-                            }
-                        }
-                        crate::server::ws::ChatStreamEvent::ToolCallStart { name, args } => {
-                            // Add a Tool block to the block stream.
-                            let id = {
-                                let cur = next_id();
-                                next_id.set(cur + 1);
-                                cur
-                            };
-                            blocks.write().push(BlockEntry {
-                                id,
-                                block: Block::Tool {
-                                    call: UiToolCall {
-                                        name: name.clone(),
-                                        args_summary: args.clone(),
-                                        status: ToolStatus::Running,
-                                    },
-                                },
-                            });
-                            // Also add to messages for agent panel.
-                            messages.write().push(Message {
-                                who: "hermes".into(),
-                                time: now_time(),
-                                body: String::new(),
-                                tool: Some(UiToolCall {
-                                    name,
-                                    args_summary: args,
-                                    status: ToolStatus::Running,
-                                }),
-                            });
-                        }
-                        crate::server::ws::ChatStreamEvent::ToolCallEnd { name, success } => {
-                            // Update the last matching tool call block status.
-                            let new_status = if success {
-                                ToolStatus::Done
-                            } else {
-                                ToolStatus::Failed
-                            };
-                            {
-                                let mut bs = blocks.write();
-                                for entry in bs.iter_mut().rev() {
-                                    if let Block::Tool { ref mut call } = entry.block {
-                                        if call.name == name
-                                            && call.status == ToolStatus::Running
-                                        {
-                                            call.status = new_status.clone();
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            // Also update in messages.
-                            {
-                                let mut ms = messages.write();
-                                for msg in ms.iter_mut().rev() {
-                                    if let Some(ref mut tool) = msg.tool {
-                                        if tool.name == name
-                                            && tool.status == ToolStatus::Running
-                                        {
-                                            tool.status = new_status;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        crate::server::ws::ChatStreamEvent::Finished { total_tokens } => {
-                            // Update token budget.
-                            tokens.set(TokenBudget {
-                                used: total_tokens,
-                                max: 128_000,
-                            });
-                            scanner_active.set(false);
-                            // Reset streaming block id for next turn.
-                            streaming_block_id.set(None);
-                            // Push the accumulated AI response to messages.
-                            let ai_text: Option<String> = {
-                                let bs = blocks.read();
-                                bs.iter().rev().find_map(|e| match &e.block {
-                                    Block::Ai { markdown, .. } if !markdown.is_empty() => {
-                                        Some(markdown.clone())
-                                    }
-                                    _ => None,
-                                })
-                            };
-                            if let Some(text) = ai_text {
+                                // Also add to messages for agent panel.
                                 messages.write().push(Message {
                                     who: "hermes".into(),
                                     time: now_time(),
-                                    body: text,
-                                    tool: None,
+                                    body: String::new(),
+                                    tool: Some(UiToolCall {
+                                        name,
+                                        args_summary: args,
+                                        status: ToolStatus::Running,
+                                    }),
                                 });
                             }
+                            crate::server::ws::ChatStreamEvent::ToolCallEnd { name, success } => {
+                                // Update the last matching tool call block status.
+                                let new_status = if success {
+                                    ToolStatus::Done
+                                } else {
+                                    ToolStatus::Failed
+                                };
+                                {
+                                    let mut bs = blocks.write();
+                                    for entry in bs.iter_mut().rev() {
+                                        if let Block::Tool { ref mut call } = entry.block {
+                                            if call.name == name && call.status == ToolStatus::Running {
+                                                call.status = new_status.clone();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Also update in messages.
+                                {
+                                    let mut ms = messages.write();
+                                    for msg in ms.iter_mut().rev() {
+                                        if let Some(ref mut tool) = msg.tool {
+                                            if tool.name == name && tool.status == ToolStatus::Running {
+                                                tool.status = new_status;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            crate::server::ws::ChatStreamEvent::Finished { total_tokens } => {
+                                // Update token budget.
+                                tokens.set(TokenBudget {
+                                    used: total_tokens,
+                                    max: 128_000,
+                                });
+                                scanner_active.set(false);
+                                // Reset streaming block id for next turn.
+                                streaming_block_id.set(None);
+                                // Push the accumulated AI response to messages.
+                                let ai_text: Option<String> = {
+                                    let bs = blocks.read();
+                                    bs.iter().rev().find_map(|e| match &e.block {
+                                        Block::Ai { markdown, .. } if !markdown.is_empty() => {
+                                            Some(markdown.clone())
+                                        }
+                                        _ => None,
+                                    })
+                                };
+                                if let Some(text) = ai_text {
+                                    messages.write().push(Message {
+                                        who: "hermes".into(),
+                                        time: now_time(),
+                                        body: text,
+                                        tool: None,
+                                    });
+                                }
+                            }
+                            crate::server::ws::ChatStreamEvent::Error { message } => {
+                                let id = {
+                                    let cur = next_id();
+                                    next_id.set(cur + 1);
+                                    cur
+                                };
+                                blocks.write().push(BlockEntry {
+                                    id,
+                                    block: Block::Err {
+                                        author: Some("hermes".into()),
+                                        time: Some(now_time()),
+                                        exit_code: 1,
+                                        message,
+                                    },
+                                });
+                                scanner_active.set(false);
+                                streaming_block_id.set(None);
+                            }
                         }
-                        crate::server::ws::ChatStreamEvent::Error { message } => {
+                    }
+                    Err(err) => {
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::warn_1(
+                            &format!("WebSocket receive failed; reconnecting: {err}").into(),
+                        );
+                        #[cfg(not(target_arch = "wasm32"))]
+                        eprintln!("WebSocket receive failed; reconnecting: {err}");
+
+                        scanner_active.set(false);
+                        streaming_block_id.set(None);
+
+                        if !disconnect_notified {
                             let id = {
                                 let cur = next_id();
                                 next_id.set(cur + 1);
@@ -237,18 +299,14 @@ pub fn WarpHermes() -> Element {
                                     author: Some("hermes".into()),
                                     time: Some(now_time()),
                                     exit_code: 1,
-                                    message,
+                                    message: "Connection interrupted. Please retry your message once reconnected.".to_string(),
                                 },
                             });
-                            scanner_active.set(false);
-                            streaming_block_id.set(None);
+                            disconnect_notified = true;
                         }
+
+                        break;
                     }
-                }
-                Err(_) => {
-                    // WebSocket closed or error — break the loop.
-                    // The automatic_reconnect will re-establish.
-                    break;
                 }
             }
         }
@@ -257,19 +315,13 @@ pub fn WarpHermes() -> Element {
     // ── Fetch real data from server functions (Plan 03 wiring). ──
 
     // Fetch real slash commands from CommandRouter via server function.
-    let slash_commands = use_server_future(move || {
-        crate::server::api::list_slash_commands()
-    })?;
+    let slash_commands = use_server_future(move || crate::server::api::list_slash_commands())?;
 
     // Fetch real config (model/provider/context_length) from server.
-    let config_summary = use_server_future(move || {
-        crate::server::api::get_config_summary()
-    })?;
+    let config_summary = use_server_future(move || crate::server::api::get_config_summary())?;
 
     // Fetch real sessions from StateStore via server function.
-    let sessions = use_server_future(move || {
-        crate::server::api::list_sessions()
-    })?;
+    let sessions = use_server_future(move || crate::server::api::list_sessions())?;
 
     // Convert server data to UI types — map inside component, no cross-module From impls.
     let palette_items: Vec<PaletteItem> = match slash_commands() {
@@ -293,7 +345,10 @@ pub fn WarpHermes() -> Element {
                 live: true,
             })
             .collect(),
-        _ => vec![Tab { label: "New Session".into(), live: true }],
+        _ => vec![Tab {
+            label: "New Session".into(),
+            live: true,
+        }],
     };
 
     let (model_name, provider_name) = match config_summary() {
@@ -323,7 +378,9 @@ pub fn WarpHermes() -> Element {
         > = use_signal(|| None);
 
         use_effect(move || {
-            let Some(window) = web_sys::window() else { return; };
+            let Some(window) = web_sys::window() else {
+                return;
+            };
             let cb = wasm_bindgen::closure::Closure::<dyn FnMut(WebKeyboardEvent)>::new(
                 move |ev: WebKeyboardEvent| {
                     let key = ev.key();
@@ -352,10 +409,7 @@ pub fn WarpHermes() -> Element {
                     }
                 },
             );
-            let _ = window.add_event_listener_with_callback(
-                "keydown",
-                cb.as_ref().unchecked_ref(),
-            );
+            let _ = window.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
             listener_slot.set(Some(cb));
         });
 
@@ -380,9 +434,9 @@ pub fn WarpHermes() -> Element {
             {
                 if let Some(window) = web_sys::window() {
                     if let Some(doc) = window.document() {
-                        if let Ok(Some(el)) = doc.query_selector(
-                            ".wh-stream-scroll .wh-block:last-child",
-                        ) {
+                        if let Ok(Some(el)) =
+                            doc.query_selector(".wh-stream-scroll .wh-block:last-child")
+                        {
                             el.scroll_into_view_with_bool(false);
                         }
                     }
@@ -405,19 +459,17 @@ pub fn WarpHermes() -> Element {
         // Find the entry; clone tokens out before any spawn — no read borrow held across spawn body.
         let cmd_text: Option<String> = {
             let bs = blocks.read();
-            bs.iter()
-                .find(|e| e.id == id)
-                .and_then(|e| match &e.block {
-                    Block::Cmd { command } => Some(
-                        command
-                            .tokens
-                            .iter()
-                            .map(|t| t.text().to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    ),
-                    _ => None,
-                })
+            bs.iter().find(|e| e.id == id).and_then(|e| match &e.block {
+                Block::Cmd { command } => Some(
+                    command
+                        .tokens
+                        .iter()
+                        .map(|t| t.text().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                _ => None,
+            })
         };
         if let Some(text) = cmd_text {
             pulse_scanner(2000, scanner_active);
@@ -577,7 +629,10 @@ pub fn WarpHermes() -> Element {
             "/help" => {
                 // Format slash commands from PALETTE_ITEMS (D-29).
                 let mut help_text = String::from("Available commands\n");
-                for it in palette_items_for_pick.iter().filter(|p| p.section == "slash") {
+                for it in palette_items_for_pick
+                    .iter()
+                    .filter(|p| p.section == "slash")
+                {
                     help_text.push_str(&format!("  {:<14}  {}\n", it.cmd, it.label));
                 }
                 let id = {

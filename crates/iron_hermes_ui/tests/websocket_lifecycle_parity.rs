@@ -47,11 +47,11 @@ fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
         "client websocket initialization must keep automatic reconnect enabled"
     );
     assert!(
-        ui.contains("loop {") && ui.contains("let _state = ws.connect().await"),
+        ui.contains("loop {") && ui.contains("let state = ws.connect().await"),
         "client receiver must use an outer reconnect cycle"
     );
     assert!(
-        ui.contains("Err(_) => {")
+        ui.contains("Err(err) => {")
             && ui.contains("scanner_active.set(false);")
             && ui.contains("streaming_block_id.set(None);")
             && ui.contains("continue;"),
