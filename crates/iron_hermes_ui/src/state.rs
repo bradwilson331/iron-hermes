@@ -292,6 +292,7 @@ pub fn now_time() -> String {
 ///
 /// Source-of-truth: `warp2ironhermes/project/app/app.jsx` `seedBlocks`
 /// lines 50-108 plus the four `is-tool` extension entries from CONTEXT D-18.
+#[cfg(any(test, feature = "demo"))]
 pub fn demo_block_entries() -> Vec<BlockEntry> {
     vec![
         // b1 — `ironhermes doctor`
@@ -395,6 +396,7 @@ pub fn demo_block_entries() -> Vec<BlockEntry> {
 
 /// 5-message side-panel seed (UI-SPEC lines 237-247; app.jsx `seedMessages`
 /// lines 109-118).
+#[cfg(any(test, feature = "demo"))]
 pub fn demo_messages() -> Vec<Message> {
     vec![
         Message {

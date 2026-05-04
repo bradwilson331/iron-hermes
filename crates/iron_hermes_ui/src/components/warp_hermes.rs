@@ -545,6 +545,18 @@ pub fn WarpHermes() -> Element {
                 pal_query.set(String::new());
             }
             "/status" => {
+                // Build status text from the already-fetched config summary (real data).
+                let status_text = match config_summary() {
+                    Some(Ok(ref cfg)) => format!(
+                        "IronHermes Status\n\
+                         ────────────────────────────────────────\n  \
+                         Model:    {}\n  \
+                         Provider: {}\n  \
+                         Context:  {} tokens",
+                        cfg.model, cfg.provider, cfg.context_length,
+                    ),
+                    _ => "IronHermes Status\n  Loading...".to_string(),
+                };
                 // Reserve an id; write WITHOUT holding next_id across anything else.
                 let id = {
                     let cur = next_id();
@@ -556,7 +568,7 @@ pub fn WarpHermes() -> Element {
                     block: Block::Out {
                         author: Some("ironhermes".into()),
                         time: Some(now_time()),
-                        text: crate::mocks::shell_outputs::STATUS_TEXT.into(),
+                        text: status_text,
                     },
                 });
                 pal_open.set(false);

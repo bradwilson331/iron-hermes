@@ -2,6 +2,7 @@ mod app;
 mod components;
 mod fonts;
 mod state;
+#[cfg(any(test, feature = "demo"))]
 mod mocks;
 mod platform;
 mod server;
