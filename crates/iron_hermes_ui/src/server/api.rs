@@ -87,10 +87,34 @@ pub async fn list_tools() -> Result<Vec<ToolInfo>> {
     Ok(vec![])
 }
 
-/// Create a new web UI session.
+/// Create a new web UI session with Platform::Web session key.
+///
+/// Session key format: `agent:main:web:dm:{session_uuid}`
+/// per the pattern established by CLI and gateway paths.
 #[post("/api/sessions/create")]
 pub async fn create_session() -> Result<String> {
-    // TODO: Wire to StateStore with Platform::Web session key.
-    // Plan 04 will implement full session creation.
-    Ok("web-session-placeholder".to_string())
+    let session_uuid = uuid::Uuid::new_v4().to_string();
+    let session_key = format!("agent:main:web:dm:{session_uuid}");
+
+    // Create session in StateStore with Platform::Web source.
+    let config = ironhermes_core::config::Config::load()
+        .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+    let home = ironhermes_core::constants::get_hermes_home();
+    let db_path = home.join("state.db");
+    let mut state_store = ironhermes_state::StateStore::new(&db_path)
+        .map_err(|e| ServerFnError::new(format!("StateStore init failed: {e}")))?;
+
+    let platform = ironhermes_core::types::Platform::Web;
+    state_store
+        .create_session(
+            &session_key,
+            &platform.to_string(),
+            Some(&config.model.default),
+            None, // system_prompt — built per-turn
+            None, // parent_session_id
+            None, // workspace_root — web sessions have no cwd context
+        )
+        .map_err(|e| ServerFnError::new(format!("Session creation failed: {e}")))?;
+
+    Ok(session_key)
 }
