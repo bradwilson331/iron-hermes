@@ -1,0 +1,47 @@
+[package]
+name = "ironhermes-tools-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tool registry API and implementations for IronHermes"
+
+[dependencies]
+ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-hub = { path = "../ironhermes-hub" }
+ironhermes-cron = { path = "../ironhermes-cron" }
+ironhermes-hooks = { path = "../ironhermes-hooks" }
+ironhermes-exec = { path = "../ironhermes-exec" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+dirs = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }                          # Phase 25.1 D-01 / browser_vision
+chromiumoxide = { version = "0.9", features = [] }     # Phase 25.1 D-01
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+scraper = { workspace = true }
+htmd = { workspace = true }
+pdf-extract = { workspace = true }                     # Phase 25.2 D-09 PDF local fallback (workspace pins 0.10)
+url = { workspace = true }                             # Phase 25.2 D-03 URL classifier (dispatch.rs)
+tokio-util = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+# Phase 21.7 Plan 08 Task 8-03: tracing-test with `no-env-filter` so
+# `#[traced_test]` captures logs from any target (not just the test
+# binary crate). Required because the production warn target is
+# `ironhermes_tools::delegate_task`, which would otherwise be filtered
+# out by the default `{crate}=trace` env filter.
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+wiremock = "0.6"
