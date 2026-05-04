@@ -117,3 +117,19 @@ fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
         "submit/rerun websocket sends must remain non-panicking"
     );
 }
+
+#[test]
+fn client_ws_disconnect_notices_are_generic_and_deduplicated_per_disconnect_window() {
+    let ui = read("src/components/warp_hermes.rs");
+
+    assert!(
+        ui.contains("fn push_disconnect_notice")
+            || ui.contains("push_disconnect_notice("),
+        "disconnect notice emission should be funneled through a single helper"
+    );
+
+    assert!(
+        ui.contains("Connection interrupted. Please retry your message once reconnected."),
+        "disconnect transcript copy must remain generic and user-facing"
+    );
+}
