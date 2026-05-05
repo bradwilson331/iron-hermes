@@ -59,6 +59,15 @@ impl BrowserSession {
             .chrome_executable(binary)
             .launch_timeout(Duration::from_secs(config.timeout_seconds));
 
+        // Phase 26.3: resolve persistent profile directory.
+        // Call get_hermes_home() at call time so Phase 24 profile pivot works correctly.
+        // Empty-string check is defensive — operator-set "" should fall through to default.
+        let user_data_dir: std::path::PathBuf = match config.user_data_dir.as_deref() {
+            Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+            _ => ironhermes_core::get_hermes_home().join("browser-profile"),
+        };
+        builder = builder.user_data_dir(&user_data_dir);
+
         if config.headed {
             // chromiumoxide 0.9 default IS headless; .with_head() opts INTO headed.
             builder = builder.with_head();
