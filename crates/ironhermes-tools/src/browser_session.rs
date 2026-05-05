@@ -277,30 +277,6 @@ mod tests {
     }
 
     #[test]
-    fn find_chromium_binary_returns_none_when_browser_path_points_to_absent_file() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
-        // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 Rust 2024 pattern).
-        unsafe {
-            std::env::set_var("BROWSER_PATH", "/dev/null/definitely-absent-chromium");
-            std::env::remove_var("CHROMIUM_PATH");
-            std::env::set_var("PATH", "/dev/null/empty-path");
-        }
-        // D-05 step 1 authority: when BROWSER_PATH is SET (even to an invalid path),
-        // find_chromium_binary MUST return None rather than falling through to platform
-        // paths. This holds deterministically even on dev machines with system Chrome.
-        let result = find_chromium_binary(None);
-        assert!(
-            result.is_none(),
-            "BROWSER_PATH set to absent file MUST return None (D-05 step 1 authoritative), got {:?}",
-            result
-        );
-        unsafe {
-            std::env::remove_var("BROWSER_PATH");
-            std::env::remove_var("PATH");
-        }
-    }
-
-    #[test]
     fn find_chromium_binary_returns_none_when_browser_path_set_to_absent_file_strict() {
         let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 Rust 2024 pattern).
