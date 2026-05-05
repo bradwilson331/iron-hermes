@@ -148,10 +148,8 @@ impl AppState {
         let result = agent.run(messages).await?;
 
         let mut store = self.state_store.lock().unwrap();
-        for msg in &result.messages {
-            if msg.role == Role::Assistant {
-                let _ = store.add_message(session_id, msg);
-            }
+        for msg in &result.appended {
+            let _ = store.add_message(session_id, msg);
         }
 
         Ok(result)
