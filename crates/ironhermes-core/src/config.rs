@@ -532,7 +532,9 @@ pub struct BrowserConfig {
     pub headed: bool,
     /// D-02: allow `--no-sandbox` flag (required on Docker/restricted envs). Default false.
     pub no_sandbox: bool,
-    /// D-15: domain allowlist for browser_navigate. Empty = allow all hosts. Exact-match (no wildcards in v2.1).
+    /// D-15: domain allowlist for browser_navigate. Empty = allow all hosts.
+    /// Exact hostname match — subdomains are NOT covered by the apex entry.
+    /// To allow both example.com and www.example.com, list both explicitly.
     pub allowed_domains: Vec<String>,
     /// D-16: scheme allowlist for browser_navigate. Default ["http", "https"].
     pub allowed_schemes: Vec<String>,
