@@ -657,10 +657,10 @@ Plans:
 **Goal:** Add `user_data_dir: Option<String>` to `BrowserConfig` and wire it into both copies of `BrowserSession::spawn()` (ironhermes-tools + ironagent-tools-api), defaulting to `$HERMES_HOME/browser-profile` when unset, so chromium cookies / localStorage / IndexedDB / login state persist across `browser_close` and agent turns. Without this fix the browser toolset always falls back to a chromiumoxide process-scoped temp dir and authenticated browser automation is impossible.
 **Requirements:** UDD-01, UDD-02, UDD-03, UDD-04, UDD-05
 **Depends on:** Phase 26
-**Plans:** 1 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 26.3-01-PLAN.md — Add BrowserConfig.user_data_dir + wire into spawn() (both crates) + ensure_home_dirs() scaffolding + 5 tests
+- [x] 26.3-01-PLAN.md — Add BrowserConfig.user_data_dir + wire into spawn() (both crates) + ensure_home_dirs() scaffolding + 5 tests
 
 ### Phase 26.2: Fix Dioxus ui session tabs (INSERTED)
 
