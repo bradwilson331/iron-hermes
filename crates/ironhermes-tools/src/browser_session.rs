@@ -63,7 +63,16 @@ impl BrowserSession {
         // Call get_hermes_home() at call time so Phase 24 profile pivot works correctly.
         // Empty-string check is defensive — operator-set "" should fall through to default.
         let user_data_dir: std::path::PathBuf = match config.user_data_dir.as_deref() {
-            Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+            Some(p) if !p.is_empty() => {
+                let resolved = std::path::PathBuf::from(p);
+                if resolved.is_relative() {
+                    anyhow::bail!(
+                        "browser.user_data_dir '{}' must be an absolute path",
+                        p
+                    );
+                }
+                resolved
+            }
             _ => ironhermes_core::get_hermes_home().join("browser-profile"),
         };
         builder = builder.user_data_dir(&user_data_dir);
