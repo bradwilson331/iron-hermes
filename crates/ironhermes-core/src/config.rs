@@ -540,6 +540,10 @@ pub struct BrowserConfig {
     pub chromium_path: Option<String>,
     /// D-02: per-operation timeout in seconds. Default 30.
     pub timeout_seconds: u64,
+    /// Phase 26.3: persistent browser profile directory.
+    /// None = use $HERMES_HOME/browser-profile (default — resolved at spawn time).
+    /// Set explicitly to override (e.g., "/tmp/ephemeral-profile" for stateless browsing).
+    pub user_data_dir: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -551,6 +555,7 @@ impl Default for BrowserConfig {
             allowed_schemes: vec!["http".to_string(), "https".to_string()],
             chromium_path: None,
             timeout_seconds: 30,
+            user_data_dir: None,
         }
     }
 }
@@ -1008,6 +1013,10 @@ mod tests {
         );
         assert_eq!(bc.chromium_path, None);
         assert_eq!(bc.timeout_seconds, 30);
+        assert_eq!(
+            bc.user_data_dir, None,
+            "Phase 26.3 UDD-01: user_data_dir defaults to None"
+        );
     }
 
     #[test]
@@ -1044,6 +1053,42 @@ browser:
             c.browser.allowed_schemes,
             vec!["http".to_string(), "https".to_string()]
         ); // default
+    }
+
+    // Phase 26.3 — UDD-01: BrowserConfig default has user_data_dir == None.
+    #[test]
+    fn browser_config_user_data_dir_defaults_to_none() {
+        let bc = BrowserConfig::default();
+        assert!(
+            bc.user_data_dir.is_none(),
+            "Phase 26.3 UDD-01: user_data_dir must default to None (computed from HERMES_HOME at spawn time)"
+        );
+    }
+
+    // Phase 26.3 — UDD-02: YAML round-trip preserves explicit user_data_dir.
+    #[test]
+    fn browser_config_yaml_round_trips_user_data_dir() {
+        let yaml = r#"
+browser:
+  user_data_dir: /custom/profile
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            c.browser.user_data_dir.as_deref(),
+            Some("/custom/profile"),
+            "Phase 26.3 UDD-02: explicit user_data_dir must round-trip through serde"
+        );
+    }
+
+    // Phase 26.3 — UDD-03: pre-26.3 YAML (no user_data_dir key) parses cleanly with None.
+    #[test]
+    fn browser_config_backward_compat_no_user_data_dir() {
+        let yaml = "browser:\n  headed: true\n";
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            c.browser.user_data_dir.is_none(),
+            "Phase 26.3 UDD-03: missing user_data_dir key must parse as None for backward compat"
+        );
     }
 
     #[test]
