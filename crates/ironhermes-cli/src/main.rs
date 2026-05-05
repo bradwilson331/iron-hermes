@@ -529,6 +529,7 @@ fn ensure_home_dirs() -> Result<()> {
         "skills",
         "workspace",
         "subagent-transcripts", // D-05 (Phase 21.7): JSONL transcript store for subagent runs.
+        "browser-profile", // Phase 26.3 UDD-04: persistent chromium profile (cookies, localStorage).
     ] {
         std::fs::create_dir_all(home.join(sub))
             .with_context(|| format!("Failed to create {}/{}", home.display(), sub))?;
@@ -2735,6 +2736,25 @@ mod ensure_home_dirs_tests {
             "D-05: $HERMES_HOME/subagent-transcripts must exist after first-run scaffold"
         );
         ensure_home_dirs().unwrap();
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+    }
+
+    // Phase 26.3 UDD-04: ensure_home_dirs() creates $HERMES_HOME/browser-profile.
+    #[test]
+    fn home_dirs_includes_browser_profile() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        ensure_home_dirs().unwrap();
+        assert!(
+            tmp.path().join("browser-profile").is_dir(),
+            "Phase 26.3 UDD-04: $HERMES_HOME/browser-profile must exist after first-run scaffold"
+        );
+        ensure_home_dirs().unwrap(); // idempotent
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
