@@ -652,6 +652,17 @@ Plans:
 
 **Phase directory:** `.planning/phases/26-provider-polish/`
 
+### Phase 26.2: Fix Dioxus ui session tabs (INSERTED)
+
+**Goal:** Make the Dioxus TitleBar session tab strip fully interactive (click switches active session, + creates a new session, x removes a tab, last-tab close auto-creates a replacement, streaming gates clicks); also land four code-quality fixes (WR-01 stale-AI Finished arm, WR-02 busy-gate false rejection, WR-03 over-broad parity assertions, IN-01 duplicate allow-attr) carried over from the Phase 26.1 review.
+**Depends on:** Phase 26, Phase 26.1
+**Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10/WR-01, D-11/WR-02, D-12/WR-03, D-13/IN-01
+**Plans:** 2 plans
+
+Plans:
+- [ ] 26.2-01-PLAN.md — Wave 1: apply Phase 26.1 review fixes (WR-01 Finished arm uses streaming_block_id; WR-02 ws.rs busy-gate opportunistic clear; WR-03 branch-anchored parity assertions + new busy-gate regression test; IN-01 dedup allow(unused_mut))
+- [ ] 26.2-02-PLAN.md — Wave 2: extend Tab struct with session_id; rewrite TitleBar with EventHandler<usize/()> props, stop_propagation close button, and disabled streaming-gate prop; add tabs Signal + on_tab_click/new/close closures + D-07/D-08 mount + list_sessions seeders in WarpHermes; 3 new source-text regression tests
+
 ### Phase 26.1: Fix websocket error for chat (INSERTED)
 
 **Goal:** Restore reliable Dioxus chat-to-LLM streaming by fixing the WebSocket server route and connection lifecycle so `/api/ws/chat` no longer resets without a closing handshake.
