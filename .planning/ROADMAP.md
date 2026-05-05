@@ -652,6 +652,16 @@ Plans:
 
 **Phase directory:** `.planning/phases/26-provider-polish/`
 
+### Phase 26.3: chromiumoxide user-data-dir (INSERTED)
+
+**Goal:** Add `user_data_dir: Option<String>` to `BrowserConfig` and wire it into both copies of `BrowserSession::spawn()` (ironhermes-tools + ironagent-tools-api), defaulting to `$HERMES_HOME/browser-profile` when unset, so chromium cookies / localStorage / IndexedDB / login state persist across `browser_close` and agent turns. Without this fix the browser toolset always falls back to a chromiumoxide process-scoped temp dir and authenticated browser automation is impossible.
+**Requirements:** UDD-01, UDD-02, UDD-03, UDD-04, UDD-05
+**Depends on:** Phase 26
+**Plans:** 1 plans
+
+Plans:
+- [ ] 26.3-01-PLAN.md — Add BrowserConfig.user_data_dir + wire into spawn() (both crates) + ensure_home_dirs() scaffolding + 5 tests
+
 ### Phase 26.2: Fix Dioxus ui session tabs (INSERTED)
 
 **Goal:** Make the Dioxus TitleBar session tab strip fully interactive (click switches active session, + creates a new session, x removes a tab, last-tab close auto-creates a replacement, streaming gates clicks); also land four code-quality fixes (WR-01 stale-AI Finished arm, WR-02 busy-gate false rejection, WR-03 over-broad parity assertions, IN-01 duplicate allow-attr) carried over from the Phase 26.1 review.
