@@ -165,7 +165,7 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
     // Set IRONHERMES_BROWSER_TEST_DISABLE=1 to deterministically reproduce the "no chromium"
     // condition in browser_prereq.rs tests on dev machines with system Chrome installed.
     // This var MUST NOT be set in production environments.
-    if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").is_ok() {
+    if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").as_deref() == Ok("1") {
         return None;
     }
     // 1. BROWSER_PATH env var (D-05 step 1: authoritative when set).
