@@ -51,7 +51,6 @@ pub fn WarpHermes() -> Element {
     let mut blocks = use_signal(Vec::<BlockEntry>::new);
     let mut messages = use_signal(Vec::<Message>::new);
     #[allow(unused_mut)] // required for mode.set via Callback closure capture
-    #[allow(unused_mut)] // required for mode.set via Callback closure capture
     let mut mode = use_signal(|| Mode::Shell);
     let mut pal_open = use_signal(|| false);
     let mut pal_query = use_signal(String::new);
@@ -256,31 +255,39 @@ pub fn WarpHermes() -> Element {
                                 }
                             }
                             crate::protocol::ChatStreamEvent::Finished { total_tokens } => {
-                                // Update token budget.
                                 tokens.set(TokenBudget {
                                     used: total_tokens,
                                     max: 128_000,
                                 });
                                 scanner_active.set(false);
-                                // Reset streaming block id for next turn.
+                                // WR-01: id-anchor the completed-block lookup to the active streaming id,
+                                // not a reverse-scan that may pick up stale blocks from prior turns.
+                                let completed_id = streaming_block_id();
                                 streaming_block_id.set(None);
-                                // Push the accumulated AI response to messages.
-                                let ai_text: Option<String> = {
-                                    let bs = blocks.read();
-                                    bs.iter().rev().find_map(|e| match &e.block {
-                                        Block::Ai { markdown, .. } if !markdown.is_empty() => {
-                                            Some(markdown.clone())
-                                        }
-                                        _ => None,
-                                    })
-                                };
-                                if let Some(text) = ai_text {
-                                    messages.write().push(Message {
-                                        who: "hermes".into(),
-                                        time: now_time(),
-                                        body: text,
-                                        tool: None,
-                                    });
+
+                                if let Some(id) = completed_id {
+                                    let ai_text: Option<String> = {
+                                        let bs = blocks.read();
+                                        bs.iter().find_map(|entry| {
+                                            if entry.id != id {
+                                                return None;
+                                            }
+                                            match &entry.block {
+                                                Block::Ai { markdown, .. } if !markdown.is_empty() => {
+                                                    Some(markdown.clone())
+                                                }
+                                                _ => None,
+                                            }
+                                        })
+                                    };
+                                    if let Some(text) = ai_text {
+                                        messages.write().push(Message {
+                                            who: "hermes".into(),
+                                            time: now_time(),
+                                            body: text,
+                                            tool: None,
+                                        });
+                                    }
                                 }
                             }
                             crate::protocol::ChatStreamEvent::Error { message } => {
