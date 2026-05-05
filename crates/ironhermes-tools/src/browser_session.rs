@@ -66,10 +66,7 @@ impl BrowserSession {
             Some(p) if !p.is_empty() => {
                 let resolved = std::path::PathBuf::from(p);
                 if resolved.is_relative() {
-                    anyhow::bail!(
-                        "browser.user_data_dir '{}' must be an absolute path",
-                        p
-                    );
+                    anyhow::bail!("browser.user_data_dir '{}' must be an absolute path", p);
                 }
                 resolved
             }
