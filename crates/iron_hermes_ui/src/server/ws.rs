@@ -156,6 +156,15 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 }
                             };
 
+                            // WR-02: clear finished turn handle before busy-gate check
+                            // to avoid false rejection when a frame arrives just after
+                            // the prior turn's task has completed but before its tear-down.
+                            if let Some(turn) = in_flight_turn.as_ref() {
+                                if turn.handle.is_finished() {
+                                    in_flight_turn = None;
+                                }
+                            }
+
                             if in_flight_turn.is_some() {
                                 let busy = ChatStreamEvent::Error {
                                     message: "Another request is already in progress".to_string(),
