@@ -76,6 +76,13 @@ impl BrowserSession {
             _ => ironhermes_core::get_hermes_home().join("browser-profile"),
         };
         builder = builder.user_data_dir(&user_data_dir);
+        if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
+            tracing::warn!(
+                path = %user_data_dir.display(),
+                error = %e,
+                "Phase 26.3: failed to pre-create user_data_dir; chromium launch may fail"
+            );
+        }
 
         if config.headed {
             // chromiumoxide 0.9 default IS headless; .with_head() opts INTO headed.
