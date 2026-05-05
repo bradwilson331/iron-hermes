@@ -45,13 +45,28 @@ fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
         ws.contains("Invalid request:"),
         "ws_chat must emit protocol errors for malformed JSON"
     );
+    // WR-03: anchor `continue;` to the malformed-request branch (within 500 chars
+    // after the first `Invalid request:` marker) instead of a global file match.
+    // The window is 500 bytes to accommodate the send_raw call between the error
+    // format and the continue; statement.
+    let inv_pos = ws
+        .find("Invalid request:")
+        .expect("ws_chat must emit `Invalid request:` for malformed JSON");
+    let window_end = (inv_pos + 500).min(ws.len());
     assert!(
-        ws.contains("continue;"),
-        "ws_chat malformed request branch must continue receiving frames"
+        ws[inv_pos..window_end].contains("continue;"),
+        "ws_chat malformed request branch must `continue;` within 500 chars after the `Invalid request:` error send"
+    );
+
+    // WR-03: anchor abort assertion to the verbatim call site + adjacent log
+    // message rather than any `abort()` substring elsewhere in the file.
+    assert!(
+        ws.contains("turn.handle.abort();"),
+        "ws_chat must call `turn.handle.abort();` on socket send failure"
     );
     assert!(
-        ws.contains("abort()"),
-        "ws_chat must abort in-flight turn task on socket send failure"
+        ws.contains("aborting in-flight turn"),
+        "ws_chat must log `aborting in-flight turn` near the abort call site"
     );
 }
 
@@ -242,5 +257,27 @@ fn server_ws_emits_application_level_keepalive_ping() {
     assert!(
         ws.contains("websocket keepalive ping failed; closing connection"),
         "failed keepalive Ping must classify as a transport-broken send failure"
+    );
+}
+
+#[test]
+fn busy_gate_opportunistically_clears_finished_turn() {
+    let ws = read("src/server/ws.rs");
+    let finished_pos = ws
+        .find("turn.handle.is_finished()")
+        .expect("ws_chat must check turn.handle.is_finished() to opportunistically clear finished turns (WR-02)");
+    // Use the full `if in_flight_turn.is_some() {` form to anchor to the busy-gate
+    // branch specifically (not the telemetry `let in_flight = in_flight_turn.is_some();`
+    // lines that appear earlier in the file).
+    let busy_pos = ws
+        .find("if in_flight_turn.is_some() {")
+        .expect("ws_chat must keep the `if in_flight_turn.is_some() {` busy-gate check");
+    assert!(
+        finished_pos < busy_pos,
+        "WR-02: turn.handle.is_finished() opportunistic clear must appear BEFORE the in_flight_turn.is_some() busy-gate (file offsets: finished={finished_pos}, busy={busy_pos})"
+    );
+    assert!(
+        ws.contains("in_flight_turn = None;"),
+        "WR-02: opportunistic clear must reset in_flight_turn to None when handle is finished"
     );
 }
