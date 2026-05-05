@@ -18,8 +18,20 @@ const IH_SHIELD_PNG: Asset = asset!("/assets/ih-shield.png");
 /// Port of `warp2ironhermes/project/app/shell.jsx` lines 62-91 per CONTEXT D-01.
 /// Traffic-light hex codes (`#ff5f57`/`#febc2e`/`#28c840`) are macOS system
 /// colors and are kept as literals (not tokens) per UI-SPEC line 84.
+///
+/// Phase 26.2 D-09: gains three EventHandler callbacks for interactive tabs
+/// (click to switch, close to remove, new to create) and a `disabled` prop
+/// that greys out the tab strip during streaming (D-02).
 #[component]
-pub fn TitleBar(tabs: Vec<Tab>, active_tab: usize, show_traffic_lights: bool) -> Element {
+pub fn TitleBar(
+    tabs: Vec<Tab>,
+    active_tab: usize,
+    show_traffic_lights: bool,
+    disabled: bool,
+    on_tab_click: EventHandler<usize>,
+    on_tab_close: EventHandler<usize>,
+    on_tab_new: EventHandler<()>,
+) -> Element {
     rsx! {
         div { class: "wh-titlebar",
             if show_traffic_lights {
@@ -37,24 +49,29 @@ pub fn TitleBar(tabs: Vec<Tab>, active_tab: usize, show_traffic_lights: bool) ->
                     "IronHermes"
                 }
             }
-            div { class: "wh-tabs",
+            div {
+                class: "wh-tabs",
+                style: if disabled { "pointer-events: none; opacity: 0.5;" } else { "" },
                 for (i, t) in tabs.iter().enumerate() {
                     div {
                         key: "{i}",
                         class: "wh-tab",
                         class: if i == active_tab { "is-active" },
+                        onclick: move |_| on_tab_click.call(i),
                         span {
                             class: "wh-tab-dot",
                             style: if t.live { "background: var(--success);" } else { "background: var(--fg-dim);" },
                         }
                         "{t.label}"
-                        span {
-                            style: "color: var(--fg-disabled); margin-left: 4px; font-size: 11px;",
+                        button {
+                            onclick: move |evt| { evt.stop_propagation(); on_tab_close.call(i); },
+                            style: "color: var(--fg-disabled); margin-left: 4px; font-size: 11px; background: none; border: none; cursor: pointer;",
                             "×"
                         }
                     }
                 }
                 button {
+                    onclick: move |_| on_tab_new.call(()),
                     style: "padding: 0 10px; color: var(--fg-dim); font-size: 14px; font-weight: 700; background: none; border: none; cursor: default;",
                     "+"
                 }

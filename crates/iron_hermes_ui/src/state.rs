@@ -149,6 +149,9 @@ pub struct PaletteItem {
 pub struct Tab {
     pub label: String,
     pub live: bool,
+    /// Session key used by `WarpHermes::on_tab_click` to switch the active session.
+    /// Populated from the server-returned session ID (Phase 26.2 D-09).
+    pub session_id: String,
 }
 
 /// One side-panel message (`who: "user" | "hermes"`). When `tool` is `Some`,
@@ -528,14 +531,17 @@ pub fn demo_tabs() -> Vec<Tab> {
         Tab {
             label: "ironhermes chat".into(),
             live: true,
+            session_id: "demo-0".to_string(),
         },
         Tab {
             label: "cargo watch".into(),
             live: true,
+            session_id: "demo-1".to_string(),
         },
         Tab {
             label: "agent · scratch".into(),
             live: false,
+            session_id: "demo-2".to_string(),
         },
     ]
 }

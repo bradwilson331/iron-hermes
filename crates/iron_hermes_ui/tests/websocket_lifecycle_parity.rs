@@ -15,7 +15,8 @@ fn server_ws_runs_turn_in_spawned_task_and_streams_concurrently() {
     assert!(
         ws.contains("#[cfg(feature = \"server\")]\nuse tokio::sync::mpsc;")
             && ws.contains("#[cfg(feature = \"server\")]\nuse tokio::task::JoinHandle;")
-            && ws.contains("#[cfg(feature = \"server\")]\nuse tracing::warn;"),
+            && (ws.contains("#[cfg(feature = \"server\")]\nuse tracing::warn;")
+                || ws.contains("#[cfg(feature = \"server\")]\nuse tracing::{info, warn};")),
         "server-only websocket runtime imports must remain cfg-gated"
     );
     assert!(
@@ -76,7 +77,8 @@ fn server_ws_disconnect_teardown_distinguishes_clean_recv_from_broken_send() {
 
     assert!(
         ws.contains("websocket recv closed; exiting connection")
-            || ws.contains("websocket recv closed cleanly; exiting connection"),
+            || ws.contains("websocket recv closed cleanly; exiting connection")
+            || ws.contains("websocket close frame received; exiting connection"),
         "clean websocket recv closure should log a clean-exit warning"
     );
 
@@ -279,5 +281,76 @@ fn busy_gate_opportunistically_clears_finished_turn() {
     assert!(
         ws.contains("in_flight_turn = None;"),
         "WR-02: opportunistic clear must reset in_flight_turn to None when handle is finished"
+    );
+}
+
+#[test]
+fn tab_click_clears_blocks_and_switches_session_id() {
+    let ui = read("src/components/warp_hermes.rs");
+    assert!(
+        ui.contains("let mut on_tab_click = move |idx: usize|"),
+        "WarpHermes must define on_tab_click closure with usize idx (D-09)"
+    );
+    assert!(
+        ui.contains("scanner_active()") && ui.contains("return;"),
+        "on_tab_click must guard against tab switch during streaming (D-02): expect scanner_active() check + early return"
+    );
+    assert!(
+        ui.contains("blocks.set(Vec::new())"),
+        "tab switch must clear blocks signal (D-01)"
+    );
+    assert!(
+        ui.contains("messages.write().clear()"),
+        "tab switch must clear messages signal (D-01)"
+    );
+}
+
+#[test]
+fn tab_new_calls_create_session_and_appends_tab() {
+    let ui = read("src/components/warp_hermes.rs");
+    assert!(
+        ui.contains("let on_tab_new = move |_: ()|"),
+        "WarpHermes must define on_tab_new closure (D-09)"
+    );
+    assert!(
+        ui.contains("create_session().await"),
+        "on_tab_new must call the create_session server function (D-03)"
+    );
+    assert!(
+        ui.contains("\"New Session\".to_string()"),
+        "new tab must use \"New Session\" placeholder label (D-04)"
+    );
+    assert!(
+        ui.contains("tabs.write().push"),
+        "on_tab_new must push the new Tab onto the tabs signal (D-03)"
+    );
+}
+
+#[test]
+fn tab_close_uses_stop_propagation() {
+    let tb = read("src/components/shell/title_bar.rs");
+    assert!(
+        tb.contains("evt.stop_propagation()"),
+        "close button must call evt.stop_propagation() to prevent tab click bubbling (CONTEXT Specifics + UI-SPEC Interaction Contract)"
+    );
+    assert!(
+        tb.contains("on_tab_click: EventHandler<usize>"),
+        "TitleBar must declare on_tab_click EventHandler<usize> prop (D-09)"
+    );
+    assert!(
+        tb.contains("on_tab_close: EventHandler<usize>"),
+        "TitleBar must declare on_tab_close EventHandler<usize> prop (D-09)"
+    );
+    assert!(
+        tb.contains("on_tab_new: EventHandler<()>"),
+        "TitleBar must declare on_tab_new EventHandler<()> prop (D-09)"
+    );
+    assert!(
+        tb.contains("disabled: bool"),
+        "TitleBar must accept a disabled: bool prop for D-02 streaming gate"
+    );
+    assert!(
+        tb.contains("pointer-events: none; opacity: 0.5"),
+        "disabled state must apply pointer-events: none + opacity: 0.5 to .wh-tabs (UI-SPEC Disabled State)"
     );
 }

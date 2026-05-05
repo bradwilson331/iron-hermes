@@ -57,7 +57,7 @@ pub fn WarpHermes() -> Element {
     let mut pal_state = use_signal(|| PaletteState::Browse);
     let mut scanner_active = use_signal(|| false);
     let focused = use_signal(|| false);
-    let active_tab = use_signal(|| 0_usize);
+    let mut active_tab = use_signal(|| 0_usize);
     let mut tokens = use_signal(|| TokenBudget {
         used: 0,
         max: 128_000,
@@ -66,12 +66,25 @@ pub fn WarpHermes() -> Element {
 
     // ── Session ID signal — created once on mount via server function. ──
     let mut session_id = use_signal(|| "pending".to_string());
+    let mut tabs = use_signal(Vec::<Tab>::new);
 
     // Create session on mount.
     use_effect(move || {
         spawn(async move {
             match crate::server::api::create_session().await {
-                Ok(sid) => session_id.set(sid),
+                Ok(sid) => {
+                    session_id.set(sid.clone());
+                    let already_present = { tabs.read().iter().any(|t| t.session_id == sid) };
+                    if !already_present {
+                        tabs.write().push(Tab {
+                            label: "New Session".to_string(),
+                            live: true,
+                            session_id: sid,
+                        });
+                        let new_idx = { tabs.read().len() - 1 };
+                        active_tab.set(new_idx);
+                    }
+                }
                 Err(e) => {
                     // Log error to console on wasm, stderr on native.
                     #[cfg(target_arch = "wasm32")]
@@ -344,6 +357,19 @@ pub fn WarpHermes() -> Element {
     // Fetch real sessions from StateStore via server function.
     let sessions = use_server_future(move || crate::server::api::list_sessions())?;
 
+    // ── Seed tabs from list_sessions() once when the server future resolves (D-07). ──
+    use_effect(move || {
+        if let Some(Ok(list)) = sessions() {
+            for s in list {
+                let already_present = { tabs.read().iter().any(|t| t.session_id == s.id) };
+                if !already_present {
+                    let label = s.title.clone().unwrap_or_else(|| s.id.clone());
+                    { tabs.write().push(Tab { label, live: true, session_id: s.id.clone() }); }
+                }
+            }
+        }
+    });
+
     // Convert server data to UI types — map inside component, no cross-module From impls.
     let palette_items: Vec<PaletteItem> = match slash_commands() {
         Some(Ok(cmds)) => cmds
@@ -356,20 +382,6 @@ pub fn WarpHermes() -> Element {
             })
             .collect(),
         _ => vec![], // Loading or error — empty palette until data arrives
-    };
-
-    let tabs: Vec<Tab> = match sessions() {
-        Some(Ok(sessions)) if !sessions.is_empty() => sessions
-            .into_iter()
-            .map(|s| Tab {
-                label: s.title.unwrap_or(s.id),
-                live: true,
-            })
-            .collect(),
-        _ => vec![Tab {
-            label: "New Session".into(),
-            live: true,
-        }],
     };
 
     let (model_name, provider_name) = match config_summary() {
@@ -506,6 +518,77 @@ pub fn WarpHermes() -> Element {
             spawn(async move {
                 let _ = ws.send_raw(dioxus_fullstack::Message::Text(json)).await;
             });
+        }
+    };
+
+    // ── Tab interaction callbacks (Phase 26.2 D-01..D-06, D-09). ──
+
+    // on_tab_click: switch active session; no-op during streaming (D-02).
+    let mut on_tab_click = move |idx: usize| {
+        if scanner_active() { return; }
+        let sid = { let ts = tabs.read(); ts.get(idx).map(|t| t.session_id.clone()) };
+        if let Some(sid) = sid {
+            active_tab.set(idx);
+            session_id.set(sid);
+            blocks.set(Vec::new());
+            messages.write().clear();
+        }
+    };
+
+    // on_tab_new: create a new session, append tab, switch active (D-03 + D-04).
+    let on_tab_new = move |_: ()| {
+        spawn(async move {
+            match crate::server::api::create_session().await {
+                Ok(sid) => {
+                    let new_tab = Tab { label: "New Session".to_string(), live: true, session_id: sid.clone() };
+                    tabs.write().push(new_tab);
+                    let new_idx = tabs.read().len() - 1;
+                    active_tab.set(new_idx);
+                    session_id.set(sid);
+                    blocks.set(Vec::new());
+                    messages.write().clear();
+                }
+                Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&format!("New tab session creation failed: {e}").into());
+                    let _ = e;
+                }
+            }
+        });
+    };
+
+    // on_tab_close: remove tab; auto-switch; guard last-tab case (D-05 + D-06).
+    let mut on_tab_close = move |idx: usize| {
+        tabs.write().remove(idx);
+        let now_empty = tabs.read().is_empty();
+        if now_empty {
+            spawn(async move {
+                match crate::server::api::create_session().await {
+                    Ok(sid) => {
+                        let new_tab = Tab { label: "New Session".to_string(), live: true, session_id: sid.clone() };
+                        tabs.write().push(new_tab);
+                        let new_idx = tabs.read().len() - 1;
+                        active_tab.set(new_idx);
+                        session_id.set(sid);
+                        blocks.set(Vec::new());
+                        messages.write().clear();
+                    }
+                    Err(e) => {
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&format!("New tab session creation failed: {e}").into());
+                        let _ = e;
+                    }
+                }
+            });
+        } else {
+            let cur = active_tab();
+            let len = tabs.read().len();
+            let new_idx = if idx < cur { cur - 1 } else if idx == cur { cur.saturating_sub(1).min(len - 1) } else { cur.min(len - 1) };
+            active_tab.set(new_idx);
+            let sid = { let ts = tabs.read(); ts.get(new_idx).map(|t| t.session_id.clone()) };
+            if let Some(sid) = sid { session_id.set(sid); }
+            blocks.set(Vec::new());
+            messages.write().clear();
         }
     };
 
@@ -693,7 +776,15 @@ pub fn WarpHermes() -> Element {
             "data-density": "comfy",
             "data-block": "framed",
             "data-agent": "right",
-            TitleBar { tabs: tabs, active_tab: active_tab(), show_traffic_lights: true }
+            TitleBar {
+                tabs: tabs(),
+                active_tab: active_tab(),
+                show_traffic_lights: true,
+                disabled: scanner_active(),
+                on_tab_click: on_tab_click,
+                on_tab_close: on_tab_close,
+                on_tab_new: move |_| on_tab_new(()),
+            }
             div { class: "wh-main",
                 div { class: "wh-col",
                     BlockStream {
