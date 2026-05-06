@@ -373,6 +373,83 @@
   scrollbar-width: thin;
 }
 
+/* ------- side panel tab strip + info cards (Phase 26.4) -------- */
+.wh-side-tabs {
+  display: flex;
+  height: 32px;
+  border-bottom: 1px solid var(--w-border);
+  flex-shrink: 0;
+}
+
+.wh-side-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  color: var(--fg-dim);
+  cursor: default;
+  position: relative;
+  background: transparent;
+  border: none;
+}
+.wh-side-tab:hover { background: var(--w-bg-3); color: var(--fg); }
+.wh-side-tab.is-active { color: var(--fg-strong); }
+.wh-side-tab.is-active::after {
+  content: "";
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--accent-primary);
+}
+
+.wh-side-info {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: thin;
+}
+
+.wh-side-info-card {
+  background: var(--w-bg-2);
+  border-radius: var(--w-radius-block);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wh-side-info-heading {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg-strong);
+  letter-spacing: .04em;
+  margin-bottom: 4px;
+}
+
+.wh-side-info-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.wh-side-info-row .wh-side-info-key {
+  color: var(--fg-dim);
+  flex-shrink: 0;
+  min-width: 80px;
+}
+.wh-side-info-row .wh-side-info-val {
+  color: var(--fg);
+  word-break: break-all;
+}
+
 .wh-msg {
   display: flex; flex-direction: column; gap: 4px;
 }
