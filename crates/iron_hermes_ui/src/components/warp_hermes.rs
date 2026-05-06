@@ -58,6 +58,7 @@ pub fn WarpHermes() -> Element {
     let mut scanner_active = use_signal(|| false);
     let focused = use_signal(|| false);
     let mut active_tab = use_signal(|| 0_usize);
+    let mut active_side_tab = use_signal(|| 0_usize);
     let mut tokens = use_signal(|| TokenBudget {
         used: 0,
         max: 128_000,
@@ -384,9 +385,9 @@ pub fn WarpHermes() -> Element {
         _ => vec![], // Loading or error — empty palette until data arrives
     };
 
-    let (model_name, provider_name) = match config_summary() {
-        Some(Ok(cfg)) => (cfg.model, cfg.provider),
-        _ => ("loading...".to_string(), "...".to_string()),
+    let (model_name, provider_name, context_length, memory_enabled) = match config_summary() {
+        Some(Ok(cfg)) => (cfg.model, cfg.provider, cfg.context_length, cfg.memory_enabled),
+        _ => ("loading...".to_string(), "...".to_string(), 0_u32, false),
     };
 
     // ── ShellSettings via use_context_provider (D-02 + Pattern 5). ──
@@ -590,6 +591,13 @@ pub fn WarpHermes() -> Element {
             blocks.set(Vec::new());
             messages.write().clear();
         }
+    };
+
+    // Phase 26.4 D-09: side panel tab click — single global signal,
+    // independent of the TitleBar session tab. Does NOT reset on session
+    // switches.
+    let on_side_tab_click = move |idx: usize| {
+        active_side_tab.set(idx);
     };
 
     // ── submit handler (Plan 04: sends via WebSocket to real AgentLoop). ──
@@ -806,7 +814,17 @@ pub fn WarpHermes() -> Element {
                         hint: "/help · ⌃C cancel · ⌘K palette".to_string(),
                     }
                 }
-                AgentPanel { messages: messages }
+                AgentPanel {
+                    messages: messages,
+                    active_side_tab: active_side_tab,
+                    on_side_tab_click: on_side_tab_click,
+                    session_id: session_id,
+                    token_budget: tokens,
+                    model_label: model_name.clone(),
+                    provider_label: provider_name.clone(),
+                    context_length: context_length,
+                    memory_enabled: memory_enabled,
+                }
             }
             CommandPalette {
                 items: palette_items,
