@@ -652,6 +652,25 @@ Plans:
 
 **Phase directory:** `.planning/phases/26-provider-polish/`
 
+### Phase 26.4: web ui side tabs panel (INSERTED)
+
+**Goal:** Add a two-tab navigation strip (AGENT / INFO) to the right-side `.wh-side` `AgentPanel` in the Dioxus web UI. The AGENT view preserves the existing scrollable messages + tool calls list. The new INFO view renders two styled cards: SESSION (id, message count, tokens used/max) and CONFIG (model, provider, context window, memory-enabled flag). All data flows from existing `WarpHermes` signals plus a single one-line widening of the `ConfigSummary` server function (adding `memory_enabled: bool`). New `.wh-side-tabs` / `.wh-side-tab` / `.wh-side-info*` CSS classes use the project's established design-token vocabulary; active tab indicator is a 2px `var(--accent-primary)` bottom border via `::after`. `active_side_tab: Signal<usize>` is a single global signal in `WarpHermes` that does NOT reset when the TitleBar session tab changes. Decisions D-01..D-10 in `26.4-CONTEXT.md` serve as the requirements set.
+**Requirements:** (none — D-01..D-10 from 26.4-CONTEXT.md are the requirements)
+**Depends on:** Phase 26.3
+**Plans:** 4 plans
+
+Plans:
+- [ ] 26.4-01-PLAN.md — Add `memory_enabled: bool` to `ConfigSummary` struct + populate in `get_config_summary` handler from `cfg.memory.memory_enabled` (server-only, 1 file, 2 lines added)
+- [ ] 26.4-02-PLAN.md — Insert 6 new CSS rule families (`.wh-side-tabs`, `.wh-side-tab` + `:hover` + `.is-active` + `.is-active::after`, `.wh-side-info`, `.wh-side-info-card`, `.wh-side-info-heading`, `.wh-side-info-row` + key/val) into `warp-ih.css` between `.wh-side-scroll` and `.wh-msg`; tokens-only, no raw hex, `::after` + `bottom: 0` (NOT `::before` like TitleBar tabs)
+- [ ] 26.4-03-PLAN.md — Extend `AgentPanel` from 1-prop to 9-prop signature; add `.wh-side-tabs` strip with two hardcoded buttons (AGENT/INFO) below `.wh-side-head`; wrap existing `.wh-side-scroll` in `if active_side_tab() == 0` branch; add `.wh-side-info` else-branch with two `.wh-side-info-card` sections (SESSION + CONFIG) per UI-SPEC Copywriting Contract
+- [ ] 26.4-04-PLAN.md — Wire `active_side_tab` signal + `on_side_tab_click` closure into `WarpHermes`; widen `config_summary()` destructure to 4-tuple `(model_name, provider_name, context_length, memory_enabled)`; replace 1-prop `AgentPanel { messages: messages }` call with 9-prop call site; D-09 invariant: `on_tab_click` (TitleBar session handler) must NOT touch `active_side_tab`. Closes with a `checkpoint:human-verify` UAT against UI-SPEC.
+
+**Wave structure:**
+- Wave 1 parallel (zero file overlap): 26.4-01 (server `api.rs`), 26.4-02 (CSS `warp-ih.css`), 26.4-03 (`agent_panel.rs`)
+- Wave 2: 26.4-04 (`warp_hermes.rs`) — depends on 26.4-01 (uses `cfg.memory_enabled`) and 26.4-03 (calls 9-prop AgentPanel)
+
+**Phase directory:** `.planning/phases/26.4-web-ui-side-tabs-panel/`
+
 ### Phase 26.3: chromiumoxide user-data-dir (INSERTED)
 
 **Goal:** Add `user_data_dir: Option<String>` to `BrowserConfig` and wire it into both copies of `BrowserSession::spawn()` (ironhermes-tools + ironagent-tools-api), defaulting to `$HERMES_HOME/browser-profile` when unset, so chromium cookies / localStorage / IndexedDB / login state persist across `browser_close` and agent turns. Without this fix the browser toolset always falls back to a chromiumoxide process-scoped temp dir and authenticated browser automation is impossible.
@@ -661,6 +680,16 @@ Plans:
 
 Plans:
 - [x] 26.3-01-PLAN.md — Add BrowserConfig.user_data_dir + wire into spawn() (both crates) + ensure_home_dirs() scaffolding + 5 tests
+
+### Phase 26.3.1: web ui side tabs panel (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 26.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 26.3.1 to break down)
 
 ### Phase 26.2: Fix Dioxus ui session tabs (INSERTED)
 
