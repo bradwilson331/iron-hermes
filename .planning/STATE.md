@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: ready_to_plan
-stopped_at: Phase 26.2 UI-SPEC approved
-last_updated: "2026-05-05T14:57:06.721Z"
-last_activity: 2026-05-05 -- Phase 26.3 execution started
+status: planning
+stopped_at: Phase 26.4 context gathered
+last_updated: "2026-05-06T02:14:12.912Z"
+last_activity: 2026-05-05
 progress:
-  total_phases: 30
+  total_phases: 32
   completed_phases: 21
   total_plans: 137
-  completed_plans: 136
-  percent: 70
+  completed_plans: 137
+  percent: 100
 ---
 
 # Project State
@@ -21,11 +21,11 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 26.3 — chromiumoxide-user-data-dir
+**Current focus:** Phase 26.4 — web-ui-side-tabs-panel
 
 ## Current Position
 
-Phase: 27
+Phase: 26.4
 Plan: Not started
 Status: Ready to plan
 Last activity: 2026-05-05
@@ -401,6 +401,7 @@ Recent decisions affecting current work:
 - Phase 26.1 inserted after Phase 26: Fix websocket error for chat (URGENT)
 - Phase 26.2 inserted after Phase 26: Fix Dioxus ui session tabs (URGENT)
 - Phase 26.3 inserted after Phase 26: chromiumoxide user-data-dir (URGENT)
+- Phase 26.4 inserted after Phase 26.3: web ui side tabs panel (URGENT)
 
 ### Pending Todos
 
@@ -418,6 +419,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-05T01:04:05.617Z
-Stopped at: Phase 26.2 UI-SPEC approved
-Resume file: .planning/phases/26.2-fix-dioxus-ui-session-tabs/26.2-UI-SPEC.md
+Last session: 2026-05-06T02:14:12.904Z
+Stopped at: Phase 26.4 context gathered
+Resume file: .planning/phases/26.4-web-ui-side-tabs-panel/26.4-CONTEXT.md
