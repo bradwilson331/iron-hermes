@@ -657,7 +657,7 @@ Plans:
 **Goal:** Add a two-tab navigation strip (AGENT / INFO) to the right-side `.wh-side` `AgentPanel` in the Dioxus web UI. The AGENT view preserves the existing scrollable messages + tool calls list. The new INFO view renders two styled cards: SESSION (id, message count, tokens used/max) and CONFIG (model, provider, context window, memory-enabled flag). All data flows from existing `WarpHermes` signals plus a single one-line widening of the `ConfigSummary` server function (adding `memory_enabled: bool`). New `.wh-side-tabs` / `.wh-side-tab` / `.wh-side-info*` CSS classes use the project's established design-token vocabulary; active tab indicator is a 2px `var(--accent-primary)` bottom border via `::after`. `active_side_tab: Signal<usize>` is a single global signal in `WarpHermes` that does NOT reset when the TitleBar session tab changes. Decisions D-01..D-10 in `26.4-CONTEXT.md` serve as the requirements set.
 **Requirements:** (none — D-01..D-10 from 26.4-CONTEXT.md are the requirements)
 **Depends on:** Phase 26.3
-**Plans:** 4 plans
+**Plans:** 0/4 plans executed
 
 Plans:
 - [ ] 26.4-01-PLAN.md — Add `memory_enabled: bool` to `ConfigSummary` struct + populate in `get_config_summary` handler from `cfg.memory.memory_enabled` (server-only, 1 file, 2 lines added)
