@@ -24,6 +24,7 @@ pub struct ConfigSummary {
     pub model: String,
     pub provider: String,
     pub context_length: u32,
+    pub memory_enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -83,6 +84,7 @@ pub async fn get_config_summary() -> Result<ConfigSummary> {
         model: cfg.model.default.clone(),
         provider: cfg.model.provider.clone(),
         context_length,
+        memory_enabled: cfg.memory.memory_enabled,
     })
 }
 
