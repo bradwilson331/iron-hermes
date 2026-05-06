@@ -337,6 +337,7 @@
   background: var(--w-bg-1);
   border-left: 1px solid var(--w-border);
   min-height: 0;
+  position: relative;
 }
 [data-agent="bottom"] .wh-side {
   width: auto;
@@ -584,5 +585,19 @@
 @keyframes wh-block-in {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: none; }
+}
+
+/* ─── Shield watermark ─── */
+.wh-stream::before,
+.wh-side::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url('/assets/ih-shield.png');
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-size: 260px auto;
+  opacity: 0.05;
+  pointer-events: none;
 }
 .wh-block.is-new, .wh-msg.is-new { animation: wh-block-in .18s ease-out both; }
