@@ -1,24 +1,36 @@
 use super::sigil::Sigil;
 use super::tool_call::ToolCall;
-use crate::state::{Message, ShellSettings};
+use crate::state::{Message, ShellSettings, TokenBudget};
 use dioxus::prelude::*;
 
 /// AgentPanel — right-side `.wh-side` agent panel: Sigil + HERMES title +
-/// personality pill + scrollable message list.
+/// personality pill + tab strip (Phase 26.4) + conditional content (AGENT
+/// messages list OR INFO cards).
 ///
-/// Phase 4 (per CONTEXT D-02): the `personality: String` prop is REMOVED.
-/// Personality is now read via `use_context::<ShellSettings>()` so any
-/// `/personality` palette pick (Plan 04-05) reactively re-renders this panel
-/// without parent prop-drilling (KBD-06 reactivity).
+/// Phase 26.4 (per CONTEXT D-01..D-09): two-tab navigation strip below
+/// `.wh-side-head` with AGENT (existing messages) and INFO (session +
+/// config cards) views. New props for the INFO tab data are passed from
+/// `WarpHermes`. `Signal<T>` at the call site auto-coerces to
+/// `ReadSignal<T>` per Dioxus 0.7 prop coercion (RESEARCH Pattern 1).
 ///
-/// Phase 4 (per CONTEXT D-01): `messages` is now `ReadSignal<Vec<Message>>`
-/// so writes in `mocks::run_agent_steps` (Plan 04-03) trigger re-render here.
+/// Phase 4 (per CONTEXT D-02 of phase 4): the `personality: String` prop
+/// is REMOVED. Personality is read via `use_context::<ShellSettings>()`.
 ///
-/// `aside` semantics + 360px width preserved from Phase 3. `cursor: default`
-/// on the personality pill kept (Phase 4 doesn't add a click handler;
-/// TweaksPanel in Phase 5 will).
+/// Phase 4 (per CONTEXT D-01 of phase 4): `messages` is
+/// `ReadSignal<Vec<Message>>` so writes in the WebSocket handler trigger
+/// re-render here.
 #[component]
-pub fn AgentPanel(messages: ReadSignal<Vec<Message>>) -> Element {
+pub fn AgentPanel(
+    messages: ReadSignal<Vec<Message>>,
+    active_side_tab: ReadSignal<usize>,
+    on_side_tab_click: EventHandler<usize>,
+    session_id: ReadSignal<String>,
+    token_budget: ReadSignal<TokenBudget>,
+    model_label: String,
+    provider_label: String,
+    context_length: u32,
+    memory_enabled: bool,
+) -> Element {
     let settings = use_context::<ShellSettings>();
     let personality = settings.personality.read().label();
 
@@ -33,24 +45,83 @@ pub fn AgentPanel(messages: ReadSignal<Vec<Message>>) -> Element {
                     "/{personality}"
                 }
             }
-            div { class: "wh-side-scroll",
-                for (i, m) in messages.read().iter().enumerate() {
-                    div {
-                        key: "{i}",
-                        class: "wh-msg",
-                        class: if m.who == "user" { "is-user" } else { "is-hermes" },
-                        div { class: "wh-msg-meta",
-                            b { if m.who == "user" { "You" } else { "Hermes" } }
-                            span { "{m.time}" }
-                        }
-                        if let Some(tool) = &m.tool {
-                            ToolCall {
-                                name: tool.name.clone(),
-                                args_summary: tool.args_summary.clone(),
-                                status: tool.status.clone(),
+            div { class: "wh-side-tabs",
+                button {
+                    class: "wh-side-tab",
+                    class: if 0 == active_side_tab() { "is-active" },
+                    onclick: move |_| on_side_tab_click.call(0),
+                    "AGENT"
+                }
+                button {
+                    class: "wh-side-tab",
+                    class: if 1 == active_side_tab() { "is-active" },
+                    onclick: move |_| on_side_tab_click.call(1),
+                    "INFO"
+                }
+            }
+            if active_side_tab() == 0 {
+                div { class: "wh-side-scroll",
+                    for (i, m) in messages.read().iter().enumerate() {
+                        div {
+                            key: "{i}",
+                            class: "wh-msg",
+                            class: if m.who == "user" { "is-user" } else { "is-hermes" },
+                            div { class: "wh-msg-meta",
+                                b { if m.who == "user" { "You" } else { "Hermes" } }
+                                span { "{m.time}" }
                             }
-                        } else {
-                            div { class: "wh-msg-body", "{m.body}" }
+                            if let Some(tool) = &m.tool {
+                                ToolCall {
+                                    name: tool.name.clone(),
+                                    args_summary: tool.args_summary.clone(),
+                                    status: tool.status.clone(),
+                                }
+                            } else {
+                                div { class: "wh-msg-body", "{m.body}" }
+                            }
+                        }
+                    }
+                }
+            } else {
+                div { class: "wh-side-info",
+                    div { class: "wh-side-info-card",
+                        div { class: "wh-side-info-heading", "SESSION" }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "id" }
+                            span { class: "wh-side-info-val",
+                                if session_id().is_empty() { "—" } else { "{session_id()}" }
+                            }
+                        }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "messages" }
+                            span { class: "wh-side-info-val", "{messages.read().len()}" }
+                        }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "tokens" }
+                            span { class: "wh-side-info-val",
+                                "{token_budget.read().used} / {token_budget.read().max}"
+                            }
+                        }
+                    }
+                    div { class: "wh-side-info-card",
+                        div { class: "wh-side-info-heading", "CONFIG" }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "model" }
+                            span { class: "wh-side-info-val", "{model_label}" }
+                        }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "provider" }
+                            span { class: "wh-side-info-val", "{provider_label}" }
+                        }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "context" }
+                            span { class: "wh-side-info-val", "{context_length}" }
+                        }
+                        div { class: "wh-side-info-row",
+                            span { class: "wh-side-info-key", "memory" }
+                            span { class: "wh-side-info-val",
+                                if memory_enabled { "yes" } else { "no" }
+                            }
                         }
                     }
                 }
