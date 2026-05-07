@@ -18,6 +18,34 @@ use std::path::Path;
 
 pub use ironhermes_core::wizard::WizardMode as ReExportedWizardMode;
 
+/// Phase 26.4.1 (CFG-02): allow-list of built-in provider names valid for
+/// the `auxiliary.provider` config slot. Must stay lowercase + match the
+/// keys ProviderResolver builds into its endpoints map (provider.rs).
+/// Operators who type anything else (e.g. "local") are warned and the
+/// wizard skips persisting auxiliary — preventing a downstream
+/// `ProviderResolver::build()` panic ("auxiliary.provider 'local' is not
+/// a known provider").
+const KNOWN_AUX_PROVIDERS: &[&str] = &[
+    "openrouter",
+    "anthropic",
+    "openai",
+    "google",
+    "mistral",
+    "groq",
+];
+
+/// Phase 26.4.1 (CFG-02): case-insensitive membership check against
+/// KNOWN_AUX_PROVIDERS. Empty/whitespace input returns false (caller
+/// already handles "Enter to skip" before reaching this guard).
+fn is_known_aux_provider(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    KNOWN_AUX_PROVIDERS.iter().any(|p| *p == lower.as_str())
+}
+
 /// Construct a fresh rustyline editor for wizard use.
 /// NO history persistence (Anti-Pattern #3 — wizard answers must not bleed into chat history).
 pub fn make_wizard_editor() -> Result<rustyline::DefaultEditor> {
@@ -178,8 +206,20 @@ async fn run_minimum_viable_flow(
         "",
     )?;
     if !aux_provider.trim().is_empty() {
-        let aux_model = prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
-        apply_auxiliary_answer(config, &aux_provider, &aux_model);
+        // Phase 26.4.1 CFG-02: validate against the built-in provider allow-list
+        // before saving. Persisting an unknown name (e.g. "local") would crash
+        // ProviderResolver::build() on the next launch.
+        if !is_known_aux_provider(&aux_provider) {
+            eprintln!(
+                "Unknown provider '{}' — skipping auxiliary setup. \
+                 Use 'hermes setup agent' to configure later.",
+                aux_provider.trim()
+            );
+        } else {
+            let aux_model =
+                prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
+            apply_auxiliary_answer(config, &aux_provider, &aux_model);
+        }
     }
 
     // Phase 25 D-19: opt-in optional tool prerequisites stage. Operator can decline
@@ -306,18 +346,30 @@ async fn run_agent_section(config: &mut Config, rl: &mut rustyline::DefaultEdito
             Err(e) => return Err(e),
         };
     if !aux_provider.trim().is_empty() {
-        let aux_model = match prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini") {
-            Ok(v) => v,
-            Err(e) if e.to_string().contains("EOF") || e.to_string().contains("interrupted") => {
-                "gpt-4o-mini".to_string()
-            }
-            Err(e) => return Err(e),
-        };
-        apply_auxiliary_answer(config, &aux_provider, &aux_model);
-        println!(
-            "Auxiliary routing set to {}/{}.",
-            config.auxiliary.provider, config.auxiliary.model
-        );
+        // Phase 26.4.1 CFG-02: same allow-list guard as run_minimum_viable_flow.
+        if !is_known_aux_provider(&aux_provider) {
+            eprintln!(
+                "Unknown provider '{}' — skipping auxiliary setup. \
+                 Use 'hermes setup agent' to configure later.",
+                aux_provider.trim()
+            );
+        } else {
+            let aux_model = match prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini") {
+                Ok(v) => v,
+                Err(e)
+                    if e.to_string().contains("EOF")
+                        || e.to_string().contains("interrupted") =>
+                {
+                    "gpt-4o-mini".to_string()
+                }
+                Err(e) => return Err(e),
+            };
+            apply_auxiliary_answer(config, &aux_provider, &aux_model);
+            println!(
+                "Auxiliary routing set to {}/{}.",
+                config.auxiliary.provider, config.auxiliary.model
+            );
+        }
     } else {
         println!("No change to auxiliary routing.");
     }
@@ -883,6 +935,102 @@ mod tests {
             cfg.model.api_key.is_none(),
             "model.api_key must be None after CFG-01 flow; got: {:?}",
             cfg.model.api_key
+        );
+    }
+
+    /// CFG-02 Test 1: known provider names match (case-insensitive).
+    #[test]
+    fn cfg_02_is_known_aux_provider_accepts_built_ins() {
+        for name in [
+            "openrouter",
+            "anthropic",
+            "openai",
+            "google",
+            "mistral",
+            "groq",
+        ] {
+            assert!(
+                is_known_aux_provider(name),
+                "{} must be recognised",
+                name
+            );
+        }
+        // Case-insensitive
+        assert!(is_known_aux_provider("OpenAI"));
+        assert!(is_known_aux_provider("OPENAI"));
+        assert!(is_known_aux_provider("  openrouter  "));
+    }
+
+    /// CFG-02 Test 2: unknown / freeform names are rejected.
+    #[test]
+    fn cfg_02_is_known_aux_provider_rejects_unknown() {
+        assert!(!is_known_aux_provider("local"));
+        assert!(!is_known_aux_provider(""));
+        assert!(!is_known_aux_provider("   "));
+        assert!(!is_known_aux_provider("foo"));
+        assert!(!is_known_aux_provider("openai-proxy"));
+        assert!(!is_known_aux_provider("my-llm"));
+    }
+
+    /// CFG-02 Test 3: allow-list is the locked array of six lowercase names
+    /// matching CONTEXT.md decisions and the providers ProviderResolver knows.
+    #[test]
+    fn cfg_02_known_aux_providers_const_locked() {
+        assert_eq!(
+            KNOWN_AUX_PROVIDERS,
+            &["openrouter", "anthropic", "openai", "google", "mistral", "groq"],
+            "KNOWN_AUX_PROVIDERS list is locked by Phase 26.4.1 CONTEXT D-CFG-02 — \
+             update both list and test together if a provider is added/removed."
+        );
+    }
+
+    /// CFG-02 Test 4: source-text invariant — both auxiliary call sites
+    /// guard with is_known_aux_provider before apply_auxiliary_answer.
+    #[test]
+    fn cfg_02_both_aux_call_sites_have_guard() {
+        let source = include_str!("setup.rs");
+
+        // run_minimum_viable_flow site
+        let mvf_start = source
+            .find("async fn run_minimum_viable_flow(")
+            .expect("run_minimum_viable_flow must exist");
+        let mvf_after = &source[mvf_start..];
+        let mvf_end = mvf_after
+            .find("\nasync fn ")
+            .or_else(|| mvf_after.find("\nfn "))
+            .expect("must find next fn after run_minimum_viable_flow");
+        let mvf_body = &mvf_after[..mvf_end];
+        let mvf_guard = mvf_body
+            .find("is_known_aux_provider(")
+            .expect("Phase 26.4.1 CFG-02: run_minimum_viable_flow must call is_known_aux_provider");
+        let mvf_apply = mvf_body
+            .find("apply_auxiliary_answer(")
+            .expect("Phase 26.4.1 CFG-02: run_minimum_viable_flow must still call apply_auxiliary_answer (in the else branch)");
+        assert!(
+            mvf_guard < mvf_apply,
+            "Phase 26.4.1 CFG-02: is_known_aux_provider must appear BEFORE apply_auxiliary_answer in run_minimum_viable_flow"
+        );
+
+        // run_agent_section site
+        let ras_start = source
+            .find("async fn run_agent_section(")
+            .expect("run_agent_section must exist");
+        let ras_after = &source[ras_start..];
+        let ras_end = ras_after
+            .find("\nasync fn ")
+            .or_else(|| ras_after.find("\nfn "))
+            .or_else(|| ras_after.find("\n// ---"))
+            .expect("must find end of run_agent_section");
+        let ras_body = &ras_after[..ras_end];
+        let ras_guard = ras_body
+            .find("is_known_aux_provider(")
+            .expect("Phase 26.4.1 CFG-02: run_agent_section must call is_known_aux_provider");
+        let ras_apply = ras_body
+            .find("apply_auxiliary_answer(")
+            .expect("Phase 26.4.1 CFG-02: run_agent_section must still call apply_auxiliary_answer (in the else branch)");
+        assert!(
+            ras_guard < ras_apply,
+            "Phase 26.4.1 CFG-02: is_known_aux_provider must appear BEFORE apply_auxiliary_answer in run_agent_section"
         );
     }
 
