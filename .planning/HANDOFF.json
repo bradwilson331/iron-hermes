@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-05-07T10:25:33.649Z",
+  "phase": "26.4.1",
+  "phase_name": "config-fix",
+  "phase_dir": ".planning/phases/26.4.1-config-fix",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [],
+  "remaining_tasks": [
+    {"id": "26.4.1-01", "name": "CFG-01: API key → .env + providers map entry (setup.rs)", "status": "not_started"},
+    {"id": "26.4.1-02", "name": "CFG-02: Auxiliary provider allow-list guard (setup.rs)", "status": "not_started"},
+    {"id": "26.4.1-03", "name": "CFG-03: Widen gateway preflight gate (main.rs)", "status": "not_started"}
+  ],
+  "blockers": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {"decision": "API key written to .env via write_env_var_to_dotenv + providers.{provider}.api_key_env in config.yaml", "rationale": "Canonical Phase 26 schema; eliminates deprecated model.api_key field and gateway deprecation warning", "phase": "26.4.1"},
+    {"decision": "Static KNOWN_AUX_PROVIDERS list for auxiliary provider validation", "rationale": "Simpler than live lookup; catches user typos like 'local' before they crash ProviderResolver", "phase": "26.4.1"},
+    {"decision": "run_preflight gate widens to Chat | Gateway | None only; is_interactive_repl and is_chat_or_bare stay unchanged", "rationale": "Gateway needs setup guard but is not an interactive REPL — must keep ironhermes=info log filter", "phase": "26.4.1"}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Run /gsd-execute-phase 26.4.1 — all 3 plans are ready, Wave 1 (plans 01 + 03) can run in parallel",
+  "context_notes": "Phase was inserted as placeholder with TBD goal. Goal was clarified via user bug report during this session. All 3 bugs are localized to 3 files: setup.rs (plans 01+02), main.rs (plan 03). Plan checker found 1 warning (plan 03 task 1 verify command) which was fixed directly before committing."
+}
