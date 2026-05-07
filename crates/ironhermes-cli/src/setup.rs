@@ -50,6 +50,14 @@ fn prompt_with_default(
     Ok(chosen)
 }
 
+/// Phase 26.4.1 (CFG-01): derive the canonical env-var name for a provider.
+/// Examples: "openrouter" -> "OPENROUTER_API_KEY"
+///           "open-router" -> "OPEN_ROUTER_API_KEY"
+///           "openai" -> "OPENAI_API_KEY"
+fn provider_env_var_name(provider: &str) -> String {
+    format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
+}
+
 /// Like prompt_with_default but with no inline default — used for required fields like API keys.
 fn prompt_required(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Result<String> {
     use rustyline::error::ReadlineError;
@@ -113,9 +121,19 @@ async fn run_minimum_viable_flow(
     let provider = prompt_with_default(rl, "Provider", "openrouter")?;
     apply_provider_answer(config, &provider, "openrouter");
 
-    // 2. API key
+    // 2. API key (Phase 26.4.1 CFG-01: persist to .env + providers map, not config.yaml)
     let api_key = prompt_required(rl, &format!("API key for {}", provider))?;
-    apply_api_key_answer(config, &api_key);
+    let env_var_name = provider_env_var_name(&provider);
+    write_env_var_to_dotenv(hermes_home, &env_var_name, &api_key)?;
+    config_setter::config_set(
+        hermes_home,
+        &format!("providers.{}.api_key_env", provider),
+        &env_var_name,
+    )?;
+    // NOTE: apply_api_key_answer intentionally NOT called here (CFG-01).
+    // The legacy model.api_key field is deprecated and triggers a warning on
+    // every gateway run. The canonical path is .env + providers.{provider}.api_key_env.
+    // Re-config (run_model_section) keeps the old behaviour for backward compat.
 
     // 3. Default model — required, no hardcoded default. The wizard refuses to
     // proceed with an empty model; users get a hint with a typical OpenRouter ID.
@@ -785,6 +803,111 @@ mod tests {
         }
         // Assert build_full_registry() returns a non-panicking registry.
         let _ = registry;
+    }
+
+    /// CFG-01 Test 3: provider-name → env-var derivation.
+    #[test]
+    fn provider_env_var_name_uppercases_and_replaces_hyphens() {
+        assert_eq!(provider_env_var_name("openrouter"), "OPENROUTER_API_KEY");
+        assert_eq!(provider_env_var_name("open-router"), "OPEN_ROUTER_API_KEY");
+        assert_eq!(provider_env_var_name("openai"), "OPENAI_API_KEY");
+        assert_eq!(provider_env_var_name("anthropic"), "ANTHROPIC_API_KEY");
+        assert_eq!(provider_env_var_name("a-b-c"), "A_B_C_API_KEY");
+    }
+
+    /// CFG-01 Test 1: dotenv side-effect of the new flow (driven via the helpers
+    /// directly because run_minimum_viable_flow needs rustyline). We exercise
+    /// the EXACT call sequence the flow now uses.
+    #[test]
+    #[cfg(unix)]
+    fn cfg_01_writes_api_key_to_dotenv_and_providers_map() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+        let provider = "openrouter";
+        let api_key = "sk-or-test-1234";
+
+        // Call sequence MUST mirror run_minimum_viable_flow.
+        let env_var_name = provider_env_var_name(provider);
+        write_env_var_to_dotenv(hermes_home, &env_var_name, api_key).unwrap();
+        ironhermes_core::config_setter::config_set(
+            hermes_home,
+            &format!("providers.{}.api_key_env", provider),
+            &env_var_name,
+        )
+        .unwrap();
+
+        // .env contains OPENROUTER_API_KEY=sk-or-test-1234
+        let env_contents = std::fs::read_to_string(hermes_home.join(".env")).unwrap();
+        assert!(
+            env_contents.contains("OPENROUTER_API_KEY=sk-or-test-1234"),
+            ".env must contain OPENROUTER_API_KEY=...; got: {}",
+            env_contents
+        );
+
+        // config.yaml contains providers.openrouter.api_key_env: OPENROUTER_API_KEY
+        let cfg_contents =
+            std::fs::read_to_string(hermes_home.join("config.yaml")).unwrap();
+        assert!(
+            cfg_contents.contains("openrouter")
+                && cfg_contents.contains("api_key_env")
+                && cfg_contents.contains("OPENROUTER_API_KEY"),
+            "config.yaml must contain providers.openrouter.api_key_env: OPENROUTER_API_KEY; got: {}",
+            cfg_contents
+        );
+    }
+
+    /// CFG-01 Test 2: model.api_key is NOT written by the new flow.
+    /// We start from a Config::default() (api_key = None) and verify the
+    /// helpers used by the new flow do not touch model.api_key.
+    #[test]
+    fn cfg_01_does_not_write_legacy_model_api_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Mirror the flow exactly: write to .env + providers map only.
+        let env_var_name = provider_env_var_name("openrouter");
+        write_env_var_to_dotenv(hermes_home, &env_var_name, "sk-or-test").unwrap();
+        ironhermes_core::config_setter::config_set(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+            &env_var_name,
+        )
+        .unwrap();
+
+        // Load the resulting config.yaml — model.api_key MUST be None/absent.
+        let cfg = ironhermes_core::config::Config::load_from(
+            &hermes_home.join("config.yaml"),
+        )
+        .unwrap();
+        assert!(
+            cfg.model.api_key.is_none(),
+            "model.api_key must be None after CFG-01 flow; got: {:?}",
+            cfg.model.api_key
+        );
+    }
+
+    /// CFG-01 Test 4: source-text invariant — run_minimum_viable_flow must NOT
+    /// call apply_api_key_answer(config, ...) anywhere in its body.
+    #[test]
+    fn cfg_01_run_minimum_viable_flow_does_not_call_apply_api_key_answer() {
+        let source = include_str!("setup.rs");
+        // Locate the function body.
+        let start = source
+            .find("async fn run_minimum_viable_flow(")
+            .expect("run_minimum_viable_flow must exist");
+        // Find the next top-level `async fn ` after start (end of the function body).
+        let after_start = &source[start + 1..];
+        let end_offset = after_start
+            .find("\nasync fn ")
+            .or_else(|| after_start.find("\nfn "))
+            .expect("must find next top-level fn after run_minimum_viable_flow");
+        let body = &source[start..start + 1 + end_offset];
+        assert!(
+            !body.contains("apply_api_key_answer("),
+            "Phase 26.4.1 CFG-01: run_minimum_viable_flow MUST NOT call apply_api_key_answer; \
+             that writes the deprecated model.api_key field. Body was:\n{}",
+            body
+        );
     }
 }
 
