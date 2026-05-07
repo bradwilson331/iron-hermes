@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 26.4 complete — advancing to Phase 27
-last_updated: "2026-05-06T10:40:00.000Z"
-last_activity: 2026-05-06 -- Phase 26.4 complete (all 4 plans + UAT passed)
+stopped_at: Phase 26.4 complete — Phase 27 (prompt-caching) is next
+last_updated: "2026-05-07T10:19:57.561Z"
+last_activity: 2026-05-07 -- Phase 26.4.1 planning complete
 progress:
-  total_phases: 32
+  total_phases: 33
   completed_phases: 22
-  total_plans: 141
+  total_plans: 144
   completed_plans: 141
-  percent: 97
+  percent: 98
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 27 — prompt-caching
+**Current focus:** Phase 26.4.1 — config fix (URGENT)
 
 ## Current Position
 
-Phase: 27 (prompt-caching) — READY TO PLAN
+Phase: 26.4.1 (config-fix) — READY TO PLAN
 Plan: —
-Status: Phase 26.4 complete; Phase 27 next
-Last activity: 2026-05-06 -- Phase 26.4 complete (all 4 plans + UAT passed)
+Status: Ready to execute
+Last activity: 2026-05-07 -- Phase 26.4.1 planning complete
 
 ## Performance Metrics
 
@@ -402,6 +402,7 @@ Recent decisions affecting current work:
 - Phase 26.2 inserted after Phase 26: Fix Dioxus ui session tabs (URGENT)
 - Phase 26.3 inserted after Phase 26: chromiumoxide user-data-dir (URGENT)
 - Phase 26.4 inserted after Phase 26.3: web ui side tabs panel (URGENT)
+- Phase 26.4.1 inserted after Phase 26.4: config fix (URGENT)
 
 ### Pending Todos
 

@@ -671,6 +671,18 @@ Plans:
 
 **Phase directory:** `.planning/phases/26.4-web-ui-side-tabs-panel/`
 
+### Phase 26.4.1: config fix (INSERTED)
+
+**Goal:** Fix three setup/config bugs: (1) the wizard writes the API key into `config.yaml` (`model.api_key`) instead of `.env` + `providers.{provider}.api_key_env` — which causes a deprecation warning on every gateway run and means the wizard-generated config doesn't match the canonical providers: map format that gateway expects; (2) the auxiliary provider prompt accepts any string including "local" (not a real provider), causing `ProviderResolver::build()` to crash with "auxiliary.provider 'local' is not a known provider"; (3) the setup wizard guard only runs for `chat`/bare invocation — `gateway` gets no preflight guard when config.yaml is absent or invalid.
+**Requirements**: CFG-01, CFG-02, CFG-03
+**Depends on:** Phase 26.4
+**Plans:** 3 plans
+
+Plans:
+- [ ] 26.4.1-01-PLAN.md — CFG-01: rewrite run_minimum_viable_flow API-key persistence to .env + providers.{provider}.api_key_env (drop deprecated model.api_key write)
+- [ ] 26.4.1-02-PLAN.md — CFG-02: add KNOWN_AUX_PROVIDERS allow-list + is_known_aux_provider guard at both auxiliary call sites (run_minimum_viable_flow + run_agent_section); warn-and-skip on unknown values
+- [ ] 26.4.1-03-PLAN.md — CFG-03: widen run_preflight gate in main.rs to cover Commands::Gateway (Chat | Gateway | None) while keeping is_interactive_repl / is_chat_or_bare un-widened; add invariants_26_4_1_cfg_03.rs
+
 ### Phase 26.3: chromiumoxide user-data-dir (INSERTED)
 
 **Goal:** Add `user_data_dir: Option<String>` to `BrowserConfig` and wire it into both copies of `BrowserSession::spawn()` (ironhermes-tools + ironagent-tools-api), defaulting to `$HERMES_HOME/browser-profile` when unset, so chromium cookies / localStorage / IndexedDB / login state persist across `browser_close` and agent turns. Without this fix the browser toolset always falls back to a chromiumoxide process-scoped temp dir and authenticated browser automation is impossible.
