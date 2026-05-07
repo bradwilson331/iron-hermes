@@ -289,8 +289,27 @@ async fn main() -> Result<()> {
     //
     // Phase 24 must NOT widen the gate condition. PROF-01..N (full lifecycle)
     // is deferred to v2.2 per REQUIREMENTS.md.
-    let run_preflight =
-        matches!(cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
+    //
+    // Phase 26.4.1 (CFG-03) AMENDMENT:
+    // The variant list for `run_preflight` is widened to include
+    // `Some(Commands::Gateway { .. })`. Reason: a missing or invalid
+    // config.yaml today causes `hermes gateway` to crash deep in
+    // GatewayRunner::new with an unhelpful error; the canonical
+    // operator onboarding flow is `ironhermes gateway` to start the
+    // Telegram bot, so gateway needs the same first-run/fix-mode auto-
+    // launch that chat and bare invocation already get. The Phase 23
+    // invariant ("non-interactive subcommands and -e MUST NOT trigger
+    // the wizard") is preserved: skills/mcp/cron/memory/doctor/etc. are
+    // still excluded, and `cli.execute.is_some()` still suppresses the
+    // gate. The two SIBLING gates (`is_interactive_repl`,
+    // `is_chat_or_bare`) DO NOT widen to Gateway — gateway is a long-
+    // running daemon, not an interactive REPL, and must keep the
+    // `ironhermes=info` log filter (otherwise startup diagnostics get
+    // suppressed for operators following the canonical onboarding).
+    let run_preflight = matches!(
+        cli.command,
+        Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None
+    ) && cli.execute.is_none();
     if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
