@@ -274,13 +274,13 @@ Plans:
 **Goal:** Fix the bug surfaced in Phase 21.8 post-completion UAT — `hermes skills install <path>` rejects local directory identifiers because the dispatcher routes any identifier containing `/` to GitHubSource. Add a `local:<path>` source variant + `LocalDirSource` adapter (sibling to GitHubSource / WellKnownSkillSource / SkillsShBlobSource) and a pre-dispatch hint for path-shaped non-prefixed identifiers, so `hermes skills install local:~/Downloads/my-skill/` works end-to-end and the original failing identifier `bradwilson/download/ascii-art/` produces a clear "did you mean local:..." hint instead of a confusing GitHub tarball error.
 **Requirements**: SKILL-08 (extends Phase 19.1's install/list/remove/update surface; no new REQ IDs)
 **Depends on:** Phase 21.8
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 
 Plans:
 - [x] 21.8.1-01-PLAN.md — Wave 1 pure-additive surface: HubErrorKind::LocalSourceMissing variant, recompute_trust_str "local-dir" arm, D-D1 pre-dispatch hint, lock-file forward-compat round-trip test
 - [x] 21.8.1-02-PLAN.md — Wave 2 LocalDirSource adapter: new ironhermes-hub/src/local_dir.rs implementing HubSource (walk source dir, skip symlinks/.git/node_modules/target, D-17 frontmatter check, snapshot_hash: None) + crate-root re-export
 - [x] 21.8.1-03-PLAN.md — Wave 3 CLI wiring: build_sources adds LocalDirSource; cmd_install local: arm with D-A2 canonicalization (tilde + relative + canonicalize); cmd_update generalizes via existing source_id lookup; cmd_list [local] annotation
-- [ ] 21.8.1-04-PLAN.md — Wave 4 integration tests + Nyquist closure: full pipeline integration test (no HTTP), every failure-mode from VALIDATION.md, cmd_remove source-dir-sacrosanct regression, original UAT identifier replay, VALIDATION.md per-task map populated
+- [x] 21.8.1-04-PLAN.md — Wave 4 integration tests + Nyquist closure: full pipeline integration test (no HTTP), every failure-mode from VALIDATION.md, cmd_remove source-dir-sacrosanct regression, original UAT identifier replay, VALIDATION.md per-task map populated
 
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
