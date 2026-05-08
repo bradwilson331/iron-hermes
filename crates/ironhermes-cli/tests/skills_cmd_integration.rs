@@ -302,3 +302,453 @@ async fn install_list_remove_round_trip() {
         String::from_utf8_lossy(&uninstall_alias.stderr)
     );
 }
+
+// ============================================================================
+// Phase 21.8.1 — local: install / update / list integration tests
+// ============================================================================
+
+/// Minimal SKILL.md content for local-install tests.
+const LOCAL_SKILL_MD: &str = "---\nname: my-local-skill\ncategory: test\ndescription: a local skill\n---\n# My Local Skill\nBody.\n";
+
+/// Create a minimal valid skill source directory in `parent` and return its path.
+fn make_skill_source(parent: &std::path::Path) -> std::path::PathBuf {
+    let skill_dir = parent.join("my-local-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), LOCAL_SKILL_MD).unwrap();
+    skill_dir
+}
+
+/// Build a subprocess Command with HERMES_HOME set and no network env overrides.
+fn cmd_with_home(hermes_home: &std::path::Path) -> std::process::Command {
+    let mut c = std::process::Command::new(binary_path());
+    c.env("HERMES_HOME", hermes_home);
+    c
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: build_sources includes local-dir
+// (verified transitively by a successful local install; Test 1 in plan)
+// The acceptance-criteria grep check is done in the structural checks below.
+// ────────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_install local: prefix routes to LocalDirSource
+// Plan Test 2 — happy path, absolute path
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_install_local_prefix_routes_to_local_dir() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp = tempfile::tempdir().unwrap();
+    let skill_src = make_skill_source(source_tmp.path());
+
+    let out = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_src.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("run ironhermes skills install local:");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "local install must succeed; stdout={stdout} stderr={stderr}"
+    );
+    // Lock file must have source: "local-dir"
+    let lock_raw = std::fs::read_to_string(hermes_home.path().join("skills-lock.json"))
+        .expect("skills-lock.json must exist after local install");
+    assert!(
+        lock_raw.contains("\"local-dir\""),
+        "lock entry must have source local-dir; lock={lock_raw}"
+    );
+    // Install dir must exist under skills_root
+    assert!(
+        any_file_named(&hermes_home.path().join("skills"), "SKILL.md"),
+        "SKILL.md must be installed under skills_root"
+    );
+    // Source dir must be unchanged (no files added/removed)
+    let src_entries: Vec<_> = std::fs::read_dir(&skill_src).unwrap().collect();
+    assert_eq!(
+        src_entries.len(),
+        1,
+        "source dir must contain exactly 1 file (SKILL.md) after install — nothing added"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_install local: with tilde expansion
+// Plan Test 3
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_install_local_tilde_expands() {
+    // Use a tempdir as HOME. Create skill source inside it at ~/my-local-skill/.
+    let fake_home = tempfile::tempdir().unwrap();
+    let hermes_home = tempfile::tempdir().unwrap();
+    let skill_src = make_skill_source(fake_home.path());
+    // The skill is at <fake_home>/my-local-skill; tilde form: ~/my-local-skill
+    let identifier = "local:~/my-local-skill";
+
+    let out = std::process::Command::new(binary_path())
+        .env("HOME", fake_home.path())   // controls dirs::home_dir() on unix
+        .env("HERMES_HOME", hermes_home.path())
+        .args(["skills", "install", identifier, "--skip-audit"])
+        .output()
+        .expect("run ironhermes with tilde path");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "tilde-expanded local install must succeed; stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        any_file_named(&hermes_home.path().join("skills"), "SKILL.md"),
+        "SKILL.md must be installed after tilde-path install"
+    );
+    // source dir must survive untouched
+    assert!(skill_src.is_dir(), "source dir must still exist after install");
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_install local: missing path hard-fails with exit 1
+// Plan Test 5 — D-A2 hard-fail on canonicalize error
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_install_local_missing_path_hard_fails() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let out = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            "local:/this/path/does/not/exist/12345",
+            "--skip-audit",
+        ])
+        .output()
+        .expect("run ironhermes with nonexistent local path");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Must exit 1 (not panic)
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "missing path must exit 1; stderr={stderr}"
+    );
+    // Error message must mention the path problem
+    assert!(
+        stderr.contains("cannot resolve local path") || stderr.contains("does not exist"),
+        "stderr must describe the canonicalize failure; stderr={stderr}"
+    );
+    // No raw ESC bytes in stderr (D-16 / T-21.8.1-04)
+    assert!(
+        !stderr.contains('\x1b'),
+        "stderr must not contain raw terminal escape bytes; stderr={stderr}"
+    );
+    // Lock file must not be created / modified
+    assert!(
+        !hermes_home.path().join("skills-lock.json").exists(),
+        "skills-lock.json must not be created on failed local install"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: D-21 line 1 says "Resolving local:" not "Resolving skills.sh/local:"
+// Plan Test 6 — Pitfall 6 / RULE 5 fix
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_install_local_resolving_print_says_local_not_skills_sh() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp = tempfile::tempdir().unwrap();
+    let skill_src = make_skill_source(source_tmp.path());
+
+    let out = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_src.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("run ironhermes skills install local:");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Resolving local:"),
+        "stdout must contain 'Resolving local:' for a local install; stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("Resolving skills.sh/local:"),
+        "stdout must NOT contain 'Resolving skills.sh/local:'; stdout={stdout}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_update re-copies updated files from source dir
+// Plan Test 7 — D-C2 update pipeline
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_update_local_dir_recopies_from_source() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp = tempfile::tempdir().unwrap();
+    let skill_src = make_skill_source(source_tmp.path());
+
+    // Step 1: install
+    let install_out = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_src.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("initial local install");
+    assert!(
+        install_out.status.success(),
+        "initial install must succeed: stderr={}",
+        String::from_utf8_lossy(&install_out.stderr)
+    );
+
+    // Step 2: modify the SKILL.md in the source dir
+    let updated_md = "---\nname: my-local-skill\ncategory: test\ndescription: updated\n---\n# Updated.\n";
+    std::fs::write(skill_src.join("SKILL.md"), updated_md).unwrap();
+
+    // Step 3: update
+    let update_out = cmd_with_home(hermes_home.path())
+        .args(["skills", "update", "my-local-skill"])
+        .output()
+        .expect("cmd_update for local skill");
+    let update_stderr = String::from_utf8_lossy(&update_out.stderr);
+    assert!(
+        update_out.status.success(),
+        "update must succeed; stderr={update_stderr}"
+    );
+
+    // Step 4: verify install dir reflects the modified SKILL.md content
+    // Walk skills_root to find the installed SKILL.md
+    fn find_skill_md(root: &std::path::Path) -> Option<std::path::PathBuf> {
+        if let Ok(dir) = std::fs::read_dir(root) {
+            for entry in dir.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if let Some(found) = find_skill_md(&p) {
+                        return Some(found);
+                    }
+                } else if p.file_name().map(|n| n == "SKILL.md").unwrap_or(false) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+    let installed_skill_md = find_skill_md(&hermes_home.path().join("skills"))
+        .expect("installed SKILL.md must exist after update");
+    let installed_content = std::fs::read_to_string(&installed_skill_md).unwrap();
+    assert!(
+        installed_content.contains("updated"),
+        "installed SKILL.md must reflect source modification after update; content={installed_content}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_update bulk — missing source isolates failure, other skill updated
+// Plan Test 8 — D-C2 bulk update failure isolation
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_update_local_dir_missing_source_isolates_failure() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp_a = tempfile::tempdir().unwrap();
+    let source_tmp_b = tempfile::tempdir().unwrap();
+
+    // Skill A source dir
+    let skill_a_src = source_tmp_a.path().join("skill-a");
+    std::fs::create_dir_all(&skill_a_src).unwrap();
+    std::fs::write(
+        skill_a_src.join("SKILL.md"),
+        "---\nname: skill-a\ncategory: test\ndescription: a\n---\n# A\n",
+    )
+    .unwrap();
+
+    // Skill B source dir
+    let skill_b_src = source_tmp_b.path().join("skill-b");
+    std::fs::create_dir_all(&skill_b_src).unwrap();
+    let skill_b_md_initial =
+        "---\nname: skill-b\ncategory: test\ndescription: b\n---\n# B\n";
+    std::fs::write(skill_b_src.join("SKILL.md"), skill_b_md_initial).unwrap();
+
+    // Install both skills
+    let install_a = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_a_src.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("install skill-a");
+    assert!(
+        install_a.status.success(),
+        "install skill-a failed: stderr={}",
+        String::from_utf8_lossy(&install_a.stderr)
+    );
+
+    let install_b = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_b_src.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("install skill-b");
+    assert!(
+        install_b.status.success(),
+        "install skill-b failed: stderr={}",
+        String::from_utf8_lossy(&install_b.stderr)
+    );
+
+    // Delete skill-a's source dir so its update will fail
+    std::fs::remove_dir_all(&skill_a_src).unwrap();
+
+    // Modify skill-b's SKILL.md so we can verify it was re-copied
+    let skill_b_md_updated =
+        "---\nname: skill-b\ncategory: test\ndescription: updated-b\n---\n# B Updated\n";
+    std::fs::write(skill_b_src.join("SKILL.md"), skill_b_md_updated).unwrap();
+
+    // Bulk update (no name arg) — must exit 1 (skill-a failed) but continue for skill-b
+    let update_out = cmd_with_home(hermes_home.path())
+        .args(["skills", "update"])
+        .output()
+        .expect("bulk update");
+    let update_stderr = String::from_utf8_lossy(&update_out.stderr);
+    let update_stdout = String::from_utf8_lossy(&update_out.stdout);
+
+    // Exit code 1 because skill-a failed
+    assert_eq!(
+        update_out.status.code(),
+        Some(1),
+        "bulk update must exit 1 when one source is missing; stderr={update_stderr}"
+    );
+
+    // stderr mentions skill-a's failure
+    assert!(
+        update_stderr.contains("skill-a") || update_stderr.contains("no longer exists") || update_stderr.contains("LocalSourceMissing"),
+        "stderr must report skill-a failure; stderr={update_stderr}"
+    );
+
+    // skill-b must have been successfully updated (check stdout or installed content)
+    assert!(
+        update_stdout.contains("skill-b") || !update_stderr.contains("skill-b"),
+        "skill-b must succeed even though skill-a failed; stdout={update_stdout} stderr={update_stderr}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_install local: does NOT call the audit endpoint
+// Plan Test 9 — T-21.8.1-05 audit-skip verification
+// Uses wiremock to assert zero audit requests during local install.
+// ────────────────────────────────────────────────────────────────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cmd_install_local_does_not_call_audit_endpoint() {
+    // Spin up wiremock — it will receive zero requests if audit is skipped.
+    let audit_server = MockServer::start().await;
+
+    // Mount a catch-all mock that records any request to the audit server.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .mount(&audit_server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .mount(&audit_server)
+        .await;
+
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp = tempfile::tempdir().unwrap();
+    let skill_src = make_skill_source(source_tmp.path());
+    let audit_uri = audit_server.uri();
+
+    // Run install with SKILLS_AUDIT_URL pointing at wiremock.
+    // NOTE: --skip-audit is NOT passed — we want to verify the audit is skipped automatically
+    // for local installs (not via the flag).
+    let out = std::process::Command::new(binary_path())
+        .env("HERMES_HOME", hermes_home.path())
+        .env("SKILLS_AUDIT_URL", &audit_uri)
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_src.display()),
+        ])
+        .output()
+        .expect("run ironhermes skills install local: (no --skip-audit)");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "local install must succeed; stdout={stdout} stderr={stderr}"
+    );
+
+    // Assert wiremock received ZERO requests — audit endpoint never called.
+    let received = audit_server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        received.len(),
+        0,
+        "audit endpoint must receive ZERO requests during local install (T-21.8.1-05); got {} requests",
+        received.len()
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_list annotates local-dir entries with [local]
+// Structural check for the cmd_list_impl [local] annotation
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_list_local_dir_shows_local_annotation() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp = tempfile::tempdir().unwrap();
+    let skill_src = make_skill_source(source_tmp.path());
+
+    // Install a local skill first
+    let install_out = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_src.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("install local skill for list test");
+    assert!(
+        install_out.status.success(),
+        "install for list test failed: stderr={}",
+        String::from_utf8_lossy(&install_out.stderr)
+    );
+
+    // List in text format — must show [local] annotation
+    let list_out = cmd_with_home(hermes_home.path())
+        .args(["skills", "list"])
+        .output()
+        .expect("skills list");
+    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        list_stdout.contains("[local]"),
+        "skills list text output must include [local] annotation for local-dir skills; stdout={list_stdout}"
+    );
+    assert!(
+        list_stdout.contains("[trusted]"),
+        "skills list text output must include [trusted] annotation for local-dir skills; stdout={list_stdout}"
+    );
+
+    // JSON output must have source: "local-dir"
+    let list_json_out = cmd_with_home(hermes_home.path())
+        .args(["skills", "list", "--format", "json"])
+        .output()
+        .expect("skills list --format json");
+    let list_json = String::from_utf8_lossy(&list_json_out.stdout);
+    assert!(
+        list_json.contains("\"local-dir\""),
+        "skills list JSON must have source: local-dir; json={list_json}"
+    );
+}

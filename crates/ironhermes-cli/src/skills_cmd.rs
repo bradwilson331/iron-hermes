@@ -12,7 +12,7 @@
 use clap::{Subcommand, ValueEnum};
 use ironhermes_core::Config;
 use ironhermes_hub::{
-    CoreSkillScanner, GitHubAuth, GitHubSource, GitHubTap, HubSource, SkillLock,
+    CoreSkillScanner, GitHubAuth, GitHubSource, GitHubTap, HubSource, LocalDirSource, SkillLock,
     SkillsShBlobSource, WellKnownSkillSource, install as hub_install, migrate_from_hub_manifest,
     strip_terminal_escapes, uninstall as hub_uninstall, update as hub_update,
 };
@@ -147,7 +147,12 @@ async fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
     let wk = WellKnownSkillSource::new(cfg.skills.hub.well_known_origins.clone());
     let sh = SkillsShBlobSource::new(gh.clone());
 
-    vec![Box::new(SharedGitHubSource(gh)), Box::new(wk), Box::new(sh)]
+    vec![
+        Box::new(SharedGitHubSource(gh)),
+        Box::new(wk),
+        Box::new(sh),
+        Box::new(LocalDirSource), // Phase 21.8.1: stateless unit struct, no config needed
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -254,10 +259,15 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     std::fs::create_dir_all(&skills_root)?;
 
     // D-21 line 1: Resolving.
-    println!(
-        "Resolving skills.sh/{}...",
-        strip_terminal_escapes(identifier)
-    );
+    // Phase 21.8.1 RULE 5 option (b): skip the generic pre-dispatch line for
+    // `local:` identifiers — the `local:` arm emits its own corrected line
+    // ("Resolving local:<canonical>...") to avoid "Resolving skills.sh/local:...".
+    if !identifier.starts_with("local:") {
+        println!(
+            "Resolving skills.sh/{}...",
+            strip_terminal_escapes(identifier)
+        );
+    }
 
     let sources = build_sources(cfg).await;
 
@@ -285,6 +295,11 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
         }
     }
 
+    // Phase 21.8.1: stash canonical path so hub_install receives it instead of
+    // the raw "local:<path>" identifier (RULE 3: CLI layer canonicalizes, adapter
+    // receives the canonical absolute path string).
+    let mut canonical_local_identifier: Option<String> = None;
+
     let source: &(dyn HubSource + Send + Sync) = if identifier.starts_with("well-known:") {
         // find the WellKnownSkillSource box
         sources
@@ -298,6 +313,48 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
             .find(|s| s.source_id() == "skills-sh")
             .map(|s| s.as_ref())
             .ok_or_else(|| anyhow::anyhow!("skills-sh source not available"))?
+    } else if identifier.starts_with("local:") {
+        // Phase 21.8.1 — D-A2: tilde expansion + relative resolution + canonicalize.
+        let raw_path = identifier.trim_start_matches("local:");
+        let expanded = match expand_path(raw_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {}", strip_terminal_escapes(&e.to_string()));
+                return Ok(1);
+            }
+        };
+        let canonical = match std::fs::canonicalize(&expanded) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "error: cannot resolve local path '{}': {} — does it exist?",
+                    strip_terminal_escapes(raw_path),
+                    strip_terminal_escapes(&e.to_string()),
+                );
+                return Ok(1);
+            }
+        };
+        if !canonical.is_dir() {
+            eprintln!(
+                "error: local path '{}' is not a directory",
+                strip_terminal_escapes(&canonical.display().to_string()),
+            );
+            return Ok(1);
+        }
+        // Pitfall 6 / RULE 5 option (b): emit corrected D-21 line 1 INSIDE the arm
+        // so it says "Resolving local:<canonical>..." not "Resolving skills.sh/local:...".
+        println!(
+            "Resolving local:{}...",
+            strip_terminal_escapes(&canonical.display().to_string()),
+        );
+        // Stash the canonical path string — hub_install receives it as the identifier
+        // passed to LocalDirSource::fetch (NOT the raw "local:<path>" string).
+        canonical_local_identifier = Some(canonical.to_string_lossy().into_owned());
+        sources
+            .iter()
+            .find(|s| s.source_id() == "local-dir")
+            .map(|s| s.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("local-dir source not available"))?
     } else if identifier.contains('/') {
         // GitHub: owner/repo/... format
         sources
@@ -334,7 +391,10 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     println!("Scanning for threats...");
 
     let scanner = CoreSkillScanner;
-    match hub_install(source, identifier, &scanner, &skills_root, skip_audit).await {
+    // Phase 21.8.1: for local: installs, pass the canonical absolute path as the
+    // identifier to LocalDirSource::fetch — NOT the raw "local:<path>" string.
+    let install_identifier = canonical_local_identifier.as_deref().unwrap_or(identifier);
+    match hub_install(source, install_identifier, &scanner, &skills_root, skip_audit).await {
         Ok(outcome) => {
             // D-21 line 5: final install line (trust + 12-char hash prefix).
             let name = strip_terminal_escapes(&outcome.name);
@@ -627,10 +687,17 @@ pub fn cmd_list_impl(cfg: &Config, format: Format) -> String {
                 .map(|r| {
                     let snap = r["snapshot_hash"].as_str().unwrap_or("");
                     let snap_short: &str = snap.get(..12).unwrap_or(snap);
+                    // Phase 21.8.1: local-dir entries get an extra [local] annotation
+                    // so users can distinguish local installs from remote-trusted installs.
+                    let source_tag = match r["source"].as_str().unwrap_or("") {
+                        "local-dir" => " [local]",
+                        _ => "",
+                    };
                     format!(
-                        "{} [{}] ({}) — hash: {}",
+                        "{} [{}]{} ({}) — hash: {}",
                         r["name"].as_str().unwrap_or(""),
                         r["trust_level"].as_str().unwrap_or(""),
+                        source_tag,
                         r["source"].as_str().unwrap_or(""),
                         snap_short,
                     )
@@ -691,6 +758,32 @@ pub fn cmd_trust_list_impl(cfg: &Config, format: Format) -> String {
 // ---------------------------------------------------------------------------
 // Top-level dispatch (called from main.rs)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// D-A2 tilde expansion + relative path resolution helper (Phase 21.8.1)
+// ---------------------------------------------------------------------------
+
+/// Phase 21.8.1: D-A2 — resolve a `local:<path>` raw input.
+///
+/// Tilde expanded via `dirs::home_dir()`; relative paths resolved against
+/// the process CWD; absolute paths returned as-is. Final canonicalization
+/// happens at the call site after this helper returns.
+fn expand_path(raw: &str) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand ~: home directory not available"))?;
+        Ok(home.join(rest))
+    } else if raw == "~" {
+        dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand ~: home directory not available"))
+    } else if std::path::Path::new(raw).is_relative() {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cannot resolve relative path: {e}"))?;
+        Ok(cwd.join(raw))
+    } else {
+        Ok(std::path::PathBuf::from(raw))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // D-D1 path-shape probe helper (Phase 21.8.1)
