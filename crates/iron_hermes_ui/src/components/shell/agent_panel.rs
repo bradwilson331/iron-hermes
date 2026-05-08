@@ -1,7 +1,8 @@
-use super::sigil::Sigil;
 use super::tool_call::ToolCall;
-use crate::state::{Message, ShellSettings, TokenBudget};
+use crate::state::{Message, TokenBudget};
 use dioxus::prelude::*;
+
+const IH_SHIELD_PNG: Asset = asset!("/assets/ih-shield.png");
 
 #[component]
 pub fn AgentPanel(
@@ -15,19 +16,16 @@ pub fn AgentPanel(
     context_length: u32,
     memory_enabled: bool,
 ) -> Element {
-    let settings = use_context::<ShellSettings>();
-    let personality = settings.personality.read().label();
     let sid = session_id();
     let session_display = if sid.is_empty() || sid == "pending" { "—".to_string() } else { sid };
 
     rsx! {
         aside { class: "wh-side",
             div { class: "wh-side-head",
-                Sigil { size: 20_u16 }
-                span { class: "wh-side-title", "HERMES" }
-                span {
-                    class: "wh-personality",
-                    "/{personality}"
+                img {
+                    src: IH_SHIELD_PNG,
+                    alt: "IronHermes",
+                    style: "height: 24px; width: auto; opacity: 0.85;",
                 }
             }
             div {
