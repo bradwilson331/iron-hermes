@@ -10,7 +10,6 @@
     --leading-tight: 1.25;
     --leading-snug: 1.375;
     --leading-normal: 1.5;
-    --leading-loose: 2;
     --ease-out: cubic-bezier(0, 0, 0.2, 1);
     --default-transition-duration: 150ms;
     --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
@@ -236,9 +235,6 @@
   .flex-shrink {
     flex-shrink: 1;
   }
-  .shrink {
-    flex-shrink: 1;
-  }
   .grow {
     flex-grow: 1;
   }
@@ -251,11 +247,6 @@
   .flex-row {
     flex-direction: row;
   }
-  .truncate {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .rounded {
     border-radius: 0.25rem;
   }
@@ -266,17 +257,11 @@
   .font-mono {
     font-family: var(--font-mono);
   }
-  .text-wrap {
-    text-wrap: wrap;
-  }
   .lowercase {
     text-transform: lowercase;
   }
   .uppercase {
     text-transform: uppercase;
-  }
-  .italic {
-    font-style: italic;
   }
   .tabular-nums {
     --tw-numeric-spacing: tabular-nums;
