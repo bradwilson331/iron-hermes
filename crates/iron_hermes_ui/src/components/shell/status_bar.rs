@@ -38,15 +38,15 @@ pub fn StatusBar(
 
     rsx! {
         div { class: "wh-status",
-            span { class: "wh-pill", style: "color: var(--pill-0);", "{mode}" }
+            span { class: "wh-pill pill-0", "{mode}" }
             span { class: "wh-sep", "·" }
-            span { class: "wh-pill", style: "color: var(--pill-1);", "{model}" }
+            span { class: "wh-pill pill-1", "{model}" }
             span { class: "wh-sep", "·" }
-            span { class: "wh-pill", style: "color: var(--pill-2);", "{provider}" }
+            span { class: "wh-pill pill-2", "{provider}" }
             span { class: "wh-sep", "·" }
-            span { class: "wh-pill", style: "color: var(--pill-3);", "{used_k:.1}K/{max_k}K ({pct}%)" }
+            span { class: "wh-pill pill-3", "{used_k:.1}K/{max_k}K ({pct}%)" }
             span { class: "wh-sep", "·" }
-            span { class: "wh-pill", style: "color: var(--pill-4);", "/{pers_label}" }
+            span { class: "wh-pill pill-4", "/{pers_label}" }
             span { class: "wh-sep", "·" }
             Scanner { active: scanner_active() }
             span { class: "wh-hint", "{hint}" }

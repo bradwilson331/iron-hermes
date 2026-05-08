@@ -64,7 +64,7 @@
   /* === Text === */
   --fg:                   var(--ansi-white);
   --fg-strong:            var(--ansi-bright-white);
-  --fg-dim:               #6e7681;                  /* the canonical `dimmed` */
+  --fg-dim:               #818b98;                  /* dimmed: raised to ~5.4:1 on --bg (WCAG AA) */
   --fg-disabled:          #484f58;
 
   /* === Semantic accents (from actual codebase usage) === */

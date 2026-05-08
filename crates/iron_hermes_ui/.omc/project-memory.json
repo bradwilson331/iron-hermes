@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1777788016309,
-  "projectRoot": "/Users/twilson/code/iron_hermes_ui",
+  "lastScanned": 1778242254448,
+  "projectRoot": "/Users/twilson/code/ironhermes/crates/iron_hermes_ui",
   "techStack": {
     "languages": [
       {
@@ -13,7 +13,13 @@
         ]
       }
     ],
-    "frameworks": [],
+    "frameworks": [
+      {
+        "name": "axum",
+        "version": null,
+        "category": "backend"
+      }
+    ],
     "packageManager": "cargo",
     "runtime": null
   },
@@ -35,32 +41,39 @@
     "workspaces": [],
     "mainDirectories": [
       "assets",
-      "src"
+      "src",
+      "tests"
     ],
-    "gitBranches": null
+    "gitBranches": {
+      "defaultBranch": "develop",
+      "branchingStrategy": null
+    }
   },
   "customNotes": [],
   "directoryMap": {
     "assets": {
       "path": "assets",
       "purpose": "Static assets",
-      "fileCount": 4,
-      "lastAccessed": 1777788016302,
+      "fileCount": 9,
+      "lastAccessed": 1778242254439,
       "keyFiles": [
+        "design-tokens.css",
         "favicon.ico",
-        "header.svg",
+        "ih-shield.png",
         "main.css",
-        "tailwind.css"
+        "scanner-anim.css"
       ]
     },
     "src": {
       "path": "src",
       "purpose": "Source code",
-      "fileCount": 3,
-      "lastAccessed": 1777788016302,
+      "fileCount": 5,
+      "lastAccessed": 1778242254440,
       "keyFiles": [
         "app.rs",
+        "fonts.rs",
         "main.rs",
+        "protocol.rs",
         "state.rs"
       ]
     },
@@ -68,16 +81,26 @@
       "path": "target",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777788016302,
+      "lastAccessed": 1778242254440,
       "keyFiles": [
         "CACHEDIR.TAG"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 2,
+      "lastAccessed": 1778242254440,
+      "keyFiles": [
+        "server_runtime_parity.rs",
+        "websocket_lifecycle_parity.rs"
       ]
     },
     "warp2ironhermes": {
       "path": "warp2ironhermes",
       "purpose": null,
-      "fileCount": 1,
-      "lastAccessed": 1777788016302,
+      "fileCount": 2,
+      "lastAccessed": 1778242254440,
       "keyFiles": [
         "README.md"
       ]
@@ -86,10 +109,21 @@
       "path": "src/components",
       "purpose": "UI components",
       "fileCount": 2,
-      "lastAccessed": 1777788016302,
+      "lastAccessed": 1778242254440,
       "keyFiles": [
-        "hero.rs",
-        "mod.rs"
+        "mod.rs",
+        "warp_hermes.rs"
+      ]
+    },
+    "src/mocks": {
+      "path": "src/mocks",
+      "purpose": "Mock data",
+      "fileCount": 4,
+      "lastAccessed": 1778242254441,
+      "keyFiles": [
+        "agent_steps.rs",
+        "mod.rs",
+        "personalities.rs"
       ]
     }
   },
@@ -120,8 +154,8 @@
     },
     {
       "path": "src/state.rs",
-      "accessCount": 19,
-      "lastAccessed": 1777824653962,
+      "accessCount": 20,
+      "lastAccessed": 1778216202206,
       "type": "file"
     },
     {
@@ -179,15 +213,15 @@
       "type": "file"
     },
     {
-      "path": ".planning/phases/01-hygiene/01-VALIDATION.md",
-      "accessCount": 8,
-      "lastAccessed": 1777774668897,
+      "path": "assets/main.css",
+      "accessCount": 10,
+      "lastAccessed": 1778216447083,
       "type": "file"
     },
     {
-      "path": "assets/main.css",
+      "path": ".planning/phases/01-hygiene/01-VALIDATION.md",
       "accessCount": 8,
-      "lastAccessed": 1777788847273,
+      "lastAccessed": 1777774668897,
       "type": "file"
     },
     {

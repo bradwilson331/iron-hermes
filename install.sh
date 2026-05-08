@@ -2,7 +2,7 @@
 # =============================================================================
 # IronHermes Installer
 # =============================================================================
-# Usage: curl -fsSL https://raw.githubusercontent.com/nousresearch/ironhermes/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
 #
 # Installs IronHermes by:
 # 1. Detecting OS and architecture
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # --- Constants ---
-REPO_OWNER="nousresearch"
+REPO_OWNER="bradwilson331"
 REPO_NAME="ironhermes"
 INSTALL_DIR="$HOME/.local/bin"
 IRONHERMES_HOME="${IRONHERMES_HOME:-$HOME/.ironhermes}"

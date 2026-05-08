@@ -12,6 +12,7 @@ const _IH_SHIELD: Asset = asset!("/assets/ih-shield.png");
 #[component]
 pub fn App() -> Element {
     rsx! {
+        document::Meta { name: "viewport", content: "width=device-width, initial-scale=1" }
         document::Link { rel: "icon", href: FAVICON }
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { rel: "stylesheet", href: MAIN_CSS }

@@ -29,3 +29,12 @@
 .wh-scanner.is-active span:nth-child(8)  { animation-delay: -700ms; }
 .wh-scanner.is-active span:nth-child(9)  { animation-delay: -800ms; }
 .wh-scanner.is-active span:nth-child(10) { animation-delay: -900ms; }
+
+@media (prefers-reduced-motion: reduce) {
+    .wh-scanner.is-active span {
+        animation: none;
+    }
+    .wh-scanner.is-active span.lit {
+        color: var(--accent-primary);
+    }
+}

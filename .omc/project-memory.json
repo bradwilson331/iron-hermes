@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1777910940396,
+  "lastScanned": 1778239008434,
   "projectRoot": "/Users/twilson/code/ironhermes",
   "techStack": {
     "languages": [
@@ -56,21 +56,21 @@
       "path": "assets",
       "purpose": "Static assets",
       "fileCount": 0,
-      "lastAccessed": 1777910940382,
+      "lastAccessed": 1778239008422,
       "keyFiles": []
     },
     "crates": {
       "path": "crates",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777910940382,
+      "lastAccessed": 1778239008424,
       "keyFiles": []
     },
     "docker": {
       "path": "docker",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777910940385,
+      "lastAccessed": 1778239008424,
       "keyFiles": [
         "SOUL.md",
         "entrypoint.sh"
@@ -80,7 +80,7 @@
       "path": "optional-skills",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777910940386,
+      "lastAccessed": 1778239008424,
       "keyFiles": [
         "DESCRIPTION.md"
       ]
@@ -89,14 +89,14 @@
       "path": "providers",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777910940386,
+      "lastAccessed": 1778239008425,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1777910940386,
+      "lastAccessed": 1778239008425,
       "keyFiles": [
         "ci-gates.sh"
       ]
@@ -105,14 +105,14 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777910940387,
+      "lastAccessed": 1778239008425,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777910940387,
+      "lastAccessed": 1778239008425,
       "keyFiles": [
         "CACHEDIR.TAG"
       ]
@@ -121,7 +121,7 @@
       "path": "tmp",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1777910940387,
+      "lastAccessed": 1778239008425,
       "keyFiles": [
         "ComfyUI_LoRA_Guide.md",
         "ComfyUI_LoRA_Workflow_Examples.json",
@@ -134,7 +134,7 @@
       "path": "website",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1777910940387,
+      "lastAccessed": 1778239008425,
       "keyFiles": [
         "IronHermes Design System-handoff.zip"
       ]
@@ -142,21 +142,27 @@
   },
   "hotPaths": [
     {
-      "path": "crates/ironhermes-cli/src/main.rs",
-      "accessCount": 43,
-      "lastAccessed": 1777831967261,
+      "path": ".planning/STATE.md",
+      "accessCount": 68,
+      "lastAccessed": 1778148653847,
       "type": "file"
     },
     {
-      "path": ".planning/STATE.md",
-      "accessCount": 38,
-      "lastAccessed": 1777926631445,
+      "path": "crates/ironhermes-cli/src/main.rs",
+      "accessCount": 56,
+      "lastAccessed": 1778166534122,
+      "type": "file"
+    },
+    {
+      "path": ".planning/ROADMAP.md",
+      "accessCount": 37,
+      "lastAccessed": 1778149085381,
       "type": "file"
     },
     {
       "path": "crates/ironhermes-core/src/config.rs",
-      "accessCount": 27,
-      "lastAccessed": 1777812196152,
+      "accessCount": 32,
+      "lastAccessed": 1778000770798,
       "type": "file"
     },
     {
@@ -167,8 +173,8 @@
     },
     {
       "path": ".planning/PROJECT.md",
-      "accessCount": 19,
-      "lastAccessed": 1777840401844,
+      "accessCount": 24,
+      "lastAccessed": 1778062088214,
       "type": "file"
     },
     {
@@ -190,9 +196,9 @@
       "type": "file"
     },
     {
-      "path": ".planning/ROADMAP.md",
-      "accessCount": 11,
-      "lastAccessed": 1777832828485,
+      "path": ".planning/REQUIREMENTS.md",
+      "accessCount": 13,
+      "lastAccessed": 1778166506711,
       "type": "file"
     },
     {
@@ -223,6 +229,12 @@
       "path": "crates/ironhermes-core/src/provider.rs",
       "accessCount": 7,
       "lastAccessed": 1777713787268,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/browser_session.rs",
+      "accessCount": 7,
+      "lastAccessed": 1778000769471,
       "type": "file"
     },
     {
@@ -280,9 +292,9 @@
       "type": "file"
     },
     {
-      "path": ".planning/REQUIREMENTS.md",
+      "path": "crates/ironhermes-tools/tests/browser_integration.rs",
       "accessCount": 4,
-      "lastAccessed": 1777831936795,
+      "lastAccessed": 1777986037392,
       "type": "file"
     },
     {
@@ -295,12 +307,6 @@
       "path": ".planning/phases/25.2-web-extract-tools/25.2-PATTERNS.md",
       "accessCount": 3,
       "lastAccessed": 1777691040444,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-tools/tests/browser_integration.rs",
-      "accessCount": 3,
-      "lastAccessed": 1777692688884,
       "type": "file"
     },
     {
@@ -376,6 +382,12 @@
       "type": "file"
     },
     {
+      "path": ".planning/codebase/TECH.md",
+      "accessCount": 2,
+      "lastAccessed": 1778030257371,
+      "type": "file"
+    },
+    {
       "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-UAT.md",
       "accessCount": 1,
       "lastAccessed": 1777670903400,
@@ -400,12 +412,6 @@
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-tools/src/browser_session.rs",
-      "accessCount": 1,
-      "lastAccessed": 1777671074060,
-      "type": "file"
-    },
-    {
       "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-VERIFICATION.md",
       "accessCount": 1,
       "lastAccessed": 1777671219361,
@@ -415,12 +421,6 @@
       "path": ".planning/phases/25.1-built-in-browser-tools-11-tools-for-browser-automation-brows/25.1-HUMAN-UAT.md",
       "accessCount": 1,
       "lastAccessed": 1777671265338,
-      "type": "file"
-    },
-    {
-      "path": ".planning/codebase/TECH.md",
-      "accessCount": 1,
-      "lastAccessed": 1777672226915,
       "type": "file"
     },
     {

@@ -10,3 +10,4 @@ Cargo.lock
 .omc/sessions/
 node_modules/
 package-lock.json
+install-gitea.sh
