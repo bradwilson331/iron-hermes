@@ -598,25 +598,54 @@ impl AgentLoop {
         advisory_text(tier)
     }
 
+    /// Extract an HTTP status code from an error string.
+    ///
+    /// Recognises both production formats:
+    ///   - "(400 Bad Request)"  — `bail!("… ({status}): …")` in client.rs / anthropic_client.rs
+    ///   - "status: 429 …"      — synthetic test format kept for regression coverage
+    fn extract_http_status(err_str: &str) -> Option<u16> {
+        if let Some(open) = err_str.find('(') {
+            let rest = &err_str[open + 1..];
+            if rest.len() >= 4 {
+                let (digits, tail) = rest.split_at(3);
+                if tail.starts_with(' ') {
+                    if let Ok(code) = digits.parse::<u16>() {
+                        return Some(code);
+                    }
+                }
+            }
+        }
+        if let Some(idx) = err_str.find("status: ") {
+            let rest = &err_str[idx + "status: ".len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+        None
+    }
+
     /// Classify an error for fallback decision-making.
     /// Returns (should_retry, should_fallback).
     fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
-        let err_str = err.to_string();
-        if err_str.contains("status: 429")
-            || err_str.contains("status: 500")
-            || err_str.contains("status: 502")
-            || err_str.contains("status: 503")
-            || err_str.contains("status: 504")
-        {
-            return (true, true);
+        // Alternate Display walks the full anyhow context chain joined with ": ".
+        // Plain Display only shows the outermost context — production errors are
+        // wrapped at agent_loop.rs:1030 with `.context("Streaming LLM call failed")`,
+        // hiding the underlying `(400 Bad Request)` from the substring scan.
+        let err_str = format!("{err:#}");
+        let Some(code) = Self::extract_http_status(&err_str) else {
+            return (true, false);
+        };
+        match code {
+            // Transient — retry first, then fall back if all retries fail.
+            429 | 500 | 502 | 503 | 504 => (true, true),
+            // Permanent client errors — retrying the same call against the
+            // same provider won't help. Skip retry; fall back. 400 is
+            // included because OpenRouter returns 400 for invalid model IDs,
+            // which a sibling provider (e.g. local ollama) may accept.
+            400 | 401 | 403 | 404 => (false, true),
+            _ => (true, false),
         }
-        if err_str.contains("status: 401")
-            || err_str.contains("status: 403")
-            || err_str.contains("status: 404")
-        {
-            return (false, true);
-        }
-        (true, false)
     }
 
     /// Phase 18 Plan 06: pre-chat compression + transient-drain block.
@@ -2313,6 +2342,55 @@ mod fallback_tests {
             !should_fallback,
             "generic errors should not trigger fallback"
         );
+    }
+
+    /// Regression: production errors are wrapped via
+    /// `.context("Streaming LLM call failed")` in agent_loop.rs:1030. Plain
+    /// `err.to_string()` returns only the outermost context — hiding the
+    /// inner `(400 Bad Request)` — so the classifier must use alternate
+    /// Display (`{err:#}`) to walk the full chain. This test exercises that
+    /// exact wrap-and-extract path.
+    #[test]
+    fn test_classify_walks_anyhow_context_chain() {
+        use anyhow::Context;
+        let inner: anyhow::Error =
+            anyhow!("Streaming chat completion failed (400 Bad Request): {{}}");
+        let wrapped = Err::<(), _>(inner)
+            .context("Streaming LLM call failed")
+            .unwrap_err();
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&wrapped);
+        assert!(
+            !should_retry && should_fallback,
+            "wrapped 400 must trigger fallback (no retry); plain to_string() would lose the inner (400 …) frame"
+        );
+    }
+
+    /// Regression: production errors use the `(NNN Reason)` format from
+    /// `bail!("Streaming chat completion failed ({status}): {body}")` in
+    /// client.rs:170. Earlier versions of `classify_llm_error` only matched
+    /// the synthetic `"status: NNN"` format, so the fallback path silently
+    /// never fired in production. This test locks the production format.
+    #[test]
+    fn test_classify_production_error_format() {
+        let err = anyhow!(
+            "Streaming chat completion failed (400 Bad Request): \
+             {{\"error\":{{\"message\":\"openai/sgpt-4o-mini is not a valid model ID\"}}}}"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(!should_retry, "400 should skip retry");
+        assert!(should_fallback, "400 should trigger fallback");
+
+        let err_404 = anyhow!("Streaming chat completion failed (404 Not Found): {{}}");
+        let (_, fb_404) = AgentLoop::classify_llm_error(&err_404);
+        assert!(fb_404, "404 in production format should trigger fallback");
+
+        let err_429 = anyhow!("Streaming chat completion failed (429 Too Many Requests): {{}}");
+        let (retry_429, fb_429) = AgentLoop::classify_llm_error(&err_429);
+        assert!(retry_429 && fb_429, "429 should retry AND fall back");
+
+        let err_500 = anyhow!("Streaming chat completion failed (500 Internal Server Error): {{}}");
+        let (retry_500, fb_500) = AgentLoop::classify_llm_error(&err_500);
+        assert!(retry_500 && fb_500, "500 should retry AND fall back");
     }
 
     #[test]

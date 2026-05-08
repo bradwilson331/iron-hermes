@@ -669,13 +669,16 @@ impl GatewayMessageHandler {
             agent = agent.with_budget(handle.clone());
         }
 
-        // Wire fallback for main agent path
+        // Wire fallback for main agent path — use the fallback provider's own
+        // default_model so the local/secondary endpoint serves a model it has.
         let main_endpoint = self.resolver.resolve_for_main();
         if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-            if let Ok(fb_client) =
-                build_provider_client(&self.resolver, fb_name, &main_endpoint.default_model)
-            {
-                agent = agent.with_fallback(fb_client);
+            if let Some(fb_endpoint) = self.resolver.resolve(fb_name) {
+                if let Ok(fb_client) =
+                    build_provider_client(&self.resolver, fb_name, &fb_endpoint.default_model)
+                {
+                    agent = agent.with_fallback(fb_client);
+                }
             }
         }
 

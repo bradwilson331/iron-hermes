@@ -175,12 +175,16 @@ impl AppState {
             agent = agent.with_tool_progress(cb);
         }
 
+        // Use the fallback provider's own default_model so the local/secondary
+        // endpoint serves a model it actually has.
         let main_endpoint = self.resolver.resolve_for_main();
         if let Some(fallback_name) = main_endpoint.fallback_providers.first() {
-            if let Ok(fallback_client) =
-                build_provider_client(&self.resolver, fallback_name, &main_endpoint.default_model)
-            {
-                agent = agent.with_fallback(fallback_client);
+            if let Some(fb_endpoint) = self.resolver.resolve(fallback_name) {
+                if let Ok(fallback_client) =
+                    build_provider_client(&self.resolver, fallback_name, &fb_endpoint.default_model)
+                {
+                    agent = agent.with_fallback(fallback_client);
+                }
             }
         }
 

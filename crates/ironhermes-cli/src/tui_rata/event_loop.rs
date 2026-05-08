@@ -195,7 +195,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
             .fallback_providers
             .first()
             .and_then(|fb_name| {
-                build_provider_client(&resolver, fb_name, &main_endpoint.default_model).ok()
+                let fb_endpoint = resolver.resolve(fb_name)?;
+                build_provider_client(&resolver, fb_name, &fb_endpoint.default_model).ok()
             })
     };
 

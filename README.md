@@ -52,6 +52,28 @@ mkdir -p ~/.ironhermes
 echo "OPENROUTER_API_KEY=your-key-here" > ~/.ironhermes/.env
 ```
 
+### Provider fallback
+
+Set `fallback_providers` on a provider to swap to another provider on hard
+failure (HTTP 401, 403, 404, 429, or 5xx). The swap is one-shot per session
+and the fallback uses the **fallback provider's own `default_model`** — the
+primary's model string is not carried over, so a local model server doesn't
+need to know the primary's model name.
+
+```yaml
+providers:
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY
+    fallback_providers: ["local-llama"]
+
+custom_providers:
+  - name: local-llama
+    base_url: http://localhost:11434/v1
+    api_key: ollama
+    api_mode: chat_completions
+    default_model: llama3.2:latest
+```
+
 ## Tools
 
 Built-in tools available to the agent:
