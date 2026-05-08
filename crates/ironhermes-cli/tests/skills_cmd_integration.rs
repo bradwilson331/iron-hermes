@@ -752,3 +752,268 @@ fn cmd_list_local_dir_shows_local_annotation() {
         "skills list JSON must have source: local-dir; json={list_json}"
     );
 }
+
+// ============================================================================
+// Phase 21.8.1 Plan 04 — cmd_remove sacrosanctness + UAT replay tests
+// ============================================================================
+
+// ────────────────────────────────────────────────────────────────────────────
+// Helper: snapshot_dir
+//
+// Returns a sorted Vec<(rel_path, sha256_hex)> for every file under `dir`.
+// Used by cmd_remove_does_not_touch_source_dir to prove byte-equality
+// before and after remove (RULE 6).
+// No walkdir dep (hand-rolled per plan RULE 1).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn snapshot_dir(dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    walk_for_snapshot(dir, dir, &mut out).expect("snapshot_dir walk failed");
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn walk_for_snapshot(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<(String, String)>,
+) -> std::io::Result<()> {
+    use sha2::{Digest, Sha256};
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            walk_for_snapshot(base, &path, out)?;
+        } else if ft.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+            let content = std::fs::read(&path)?;
+            let hash = hex::encode(Sha256::digest(&content));
+            out.push((rel, hash));
+        }
+        // symlinks skipped — mirror source walk behavior
+    }
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: cmd_remove does NOT touch the source directory (T-21.8.1-07, RULE 6)
+//
+// RULE 6: snapshot the source dir BEFORE remove and compare AFTER remove.
+// A test that only asserts "source dir still exists" is too weak — cmd_remove
+// could truncate files in-place and pass. This test proves byte-equality.
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn cmd_remove_does_not_touch_source_dir() {
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_tmp = tempfile::tempdir().unwrap();
+
+    // Create a multi-file skill source
+    let skill_dir = source_tmp.path().join("remove-test-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: remove-test-skill\ncategory: test\ndescription: test\n---\n# Remove Test\n",
+    )
+    .unwrap();
+    std::fs::create_dir(skill_dir.join("helpers")).unwrap();
+    std::fs::write(
+        skill_dir.join("helpers").join("script.sh"),
+        b"#!/bin/sh\necho ok\n",
+    )
+    .unwrap();
+    std::fs::create_dir(skill_dir.join("references")).unwrap();
+    std::fs::write(
+        skill_dir.join("references").join("note.md"),
+        b"# Notes\n",
+    )
+    .unwrap();
+
+    // Snapshot the source dir BEFORE install
+    let before_install = snapshot_dir(&skill_dir);
+
+    // Install
+    let install_out = cmd_with_home(hermes_home.path())
+        .args([
+            "skills",
+            "install",
+            &format!("local:{}", skill_dir.display()),
+            "--skip-audit",
+        ])
+        .output()
+        .expect("run ironhermes skills install");
+    assert!(
+        install_out.status.success(),
+        "install must succeed; stderr={}",
+        String::from_utf8_lossy(&install_out.stderr)
+    );
+
+    // Snapshot source dir AFTER install (must be unchanged — install copies, not moves)
+    let after_install = snapshot_dir(&skill_dir);
+    assert_eq!(
+        before_install, after_install,
+        "install must not modify source dir (copy semantics)"
+    );
+
+    // Remove the installed skill
+    let remove_out = cmd_with_home(hermes_home.path())
+        .args(["skills", "remove", "remove-test-skill"])
+        .output()
+        .expect("run ironhermes skills remove");
+    assert!(
+        remove_out.status.success(),
+        "remove must succeed; stderr={}",
+        String::from_utf8_lossy(&remove_out.stderr)
+    );
+
+    // Snapshot source dir AFTER remove — must be BYTE-IDENTICAL to before_install
+    let after_remove = snapshot_dir(&skill_dir);
+    assert_eq!(
+        before_install, after_remove,
+        "T-21.8.1-07: cmd_remove must not touch the source directory under any circumstances. \
+         before_install snapshot differs from after_remove snapshot."
+    );
+
+    // Verify install dir under skills_root is gone
+    assert!(
+        !any_file_named(&hermes_home.path().join("skills"), "SKILL.md"),
+        "install dir must be cleaned up after remove"
+    );
+
+    // Lock file must not contain the removed skill
+    if hermes_home.path().join("skills-lock.json").exists() {
+        let lock_raw =
+            std::fs::read_to_string(hermes_home.path().join("skills-lock.json")).unwrap();
+        assert!(
+            !lock_raw.contains("remove-test-skill"),
+            "lock must not contain removed entry; lock={lock_raw}"
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: UAT replay — bradwilson/download/ascii-art WITH local: prefix
+//
+// This is the headline-fix regression test for Phase 21.8.1.
+// The original failing UAT identifier was `bradwilson/download/ascii-art/`.
+// With the `local:` prefix it MUST install successfully.
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn uat_replay_bradwilson_download_ascii_art_with_local_prefix() {
+    // Original failing UAT identifier: bradwilson/download/ascii-art/
+    // After Phase 21.8.1, the same identifier with `local:` prefix MUST work.
+    let hermes_home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    // Set up the directory tree mirroring the user's filesystem at UAT time
+    let skill_dir = workspace.path().join("bradwilson").join("download").join("ascii-art");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: ascii-art\ncategory: art\ndescription: ASCII art skill\n---\n\n# ASCII Art\n",
+    )
+    .unwrap();
+
+    let identifier = format!("local:{}", skill_dir.display());
+
+    let out = cmd_with_home(hermes_home.path())
+        .args(["skills", "install", &identifier, "--skip-audit"])
+        .output()
+        .expect("run ironhermes skills install bradwilson/download/ascii-art with local: prefix");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the original failing UAT identifier MUST work with local: prefix; \
+         stdout={stdout} stderr={stderr}"
+    );
+
+    // Verify lock entry
+    let lock_raw = std::fs::read_to_string(hermes_home.path().join("skills-lock.json"))
+        .expect("skills-lock.json must exist after install");
+    assert!(
+        lock_raw.contains("ascii-art"),
+        "lock must contain ascii-art entry; lock={lock_raw}"
+    );
+    assert!(
+        lock_raw.contains("\"local-dir\""),
+        "lock entry must have source local-dir; lock={lock_raw}"
+    );
+
+    // Verify SKILL.md was installed
+    assert!(
+        any_file_named(&hermes_home.path().join("skills"), "SKILL.md"),
+        "SKILL.md must be installed under skills_root"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: UAT replay — bradwilson/download/ascii-art WITHOUT prefix emits hint
+//
+// When the user types the bare path identifier (no `local:` prefix), the
+// pre-dispatch hint (D-D1) must fire with exit 1 and suggest the corrected form.
+// The hint is the headline UX deliverable of Phase 21.8.1.
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn uat_replay_bradwilson_download_ascii_art_without_prefix_emits_hint() {
+    let hermes_home = tempfile::tempdir().unwrap();
+
+    // Set up a workspace containing bradwilson/ directory — this makes
+    // fs::metadata("bradwilson/download/ascii-art/").is_dir() return true
+    // which triggers the D-D1 pre-dispatch hint.
+    let workspace = tempfile::tempdir().unwrap();
+    let skill_dir = workspace
+        .path()
+        .join("bradwilson")
+        .join("download")
+        .join("ascii-art");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: ascii-art\n---\n# ASCII Art\n",
+    )
+    .unwrap();
+
+    // Run with CWD set to the workspace so the relative path resolves correctly.
+    // The identifier is the bare path (no local: prefix) — exactly the original failing input.
+    let out = std::process::Command::new(binary_path())
+        .current_dir(workspace.path())
+        .env("HERMES_HOME", hermes_home.path())
+        .args(["skills", "install", "bradwilson/download/ascii-art/"])
+        .output()
+        .expect("run ironhermes skills install bradwilson/download/ascii-art/ (no prefix)");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Must exit 1 (hint path, no install attempted)
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "without local: prefix the hint must fire and exit 1; \
+         stdout={stdout} stderr={stderr}"
+    );
+
+    // Hint must fire: stderr must contain the "looks like a local path" message
+    assert!(
+        stderr.contains("looks like a local path"),
+        "headline UX deliverable: hint must fire on the original failing identifier; \
+         stderr={stderr}"
+    );
+
+    // Hint must suggest the corrected `local:` invocation
+    assert!(
+        stderr.contains("local:bradwilson/download/ascii-art/"),
+        "hint must suggest the corrected invocation with local: prefix; stderr={stderr}"
+    );
+
+    // No install must have occurred — lock file must not exist
+    assert!(
+        !hermes_home.path().join("skills-lock.json").exists(),
+        "no install must occur when hint fires; skills-lock.json must not be created"
+    );
+}
