@@ -4,13 +4,13 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: context exhaustion at 76% (2026-05-08)
-last_updated: "2026-05-08T12:09:00.776Z"
+last_updated: "2026-05-08T16:19:22.215Z"
 last_activity: 2026-05-07 -- Phase 26.4.1 execution started
 progress:
-  total_phases: 20
-  completed_phases: 19
-  total_plans: 103
-  completed_plans: 103
+  total_phases: 33
+  completed_phases: 23
+  total_plans: 144
+  completed_plans: 144
   percent: 100
 ---
 
@@ -403,6 +403,7 @@ Recent decisions affecting current work:
 - Phase 26.3 inserted after Phase 26: chromiumoxide user-data-dir (URGENT)
 - Phase 26.4 inserted after Phase 26.3: web ui side tabs panel (URGENT)
 - Phase 26.4.1 inserted after Phase 26.4: config fix (URGENT)
+- Phase 25.7 inserted after Phase 25: registering all skills in .ironhermes/skills and .ironhermes/optional-skills on install or commandline skills --scan <PATH> option (URGENT)
 
 ### Pending Todos
 
