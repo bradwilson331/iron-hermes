@@ -264,6 +264,24 @@ mod tests {
     }
 
     #[test]
+    fn lock_entry_with_local_dir_source_round_trips() {
+        let json = r#"{"name":"my-skill","source":"local-dir",
+            "identifier":"/home/user/my-skill","repoPath":"SKILL.md",
+            "snapshotHash":"","computedHash":"abc123",
+            "installedAt":"2026-05-08T00:00:00Z"}"#;
+        let e: SkillLockEntry = serde_json::from_str(json)
+            .expect("local-dir source must deserialize without error");
+        assert_eq!(e.source, "local-dir");
+        assert_eq!(e.snapshot_hash, "");
+        assert_eq!(e.identifier, "/home/user/my-skill");
+        assert_eq!(e.repo_path, "SKILL.md");
+        assert_eq!(e.computed_hash, "abc123");
+        let back = serde_json::to_string(&e).unwrap();
+        assert!(back.contains(r#""source":"local-dir""#));
+        assert!(back.contains(r#""snapshotHash":"""#));
+    }
+
+    #[test]
     fn add_or_replace_replaces_by_name() {
         let mut lock = SkillLock::default();
         lock.add_or_replace(mk_entry("n", "old"));

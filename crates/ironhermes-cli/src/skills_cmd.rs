@@ -223,6 +223,8 @@ fn recompute_trust_str(
         }
     } else if source == "well-known" || source == "skills-sh" {
         "community"
+    } else if source == "local-dir" {
+        "trusted" // D-B2: local installs are always Trusted
     } else {
         "builtin"
     }
@@ -258,6 +260,31 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     );
 
     let sources = build_sources(cfg).await;
+
+    // D-D1 (Phase 21.8.1): pre-dispatch path-shape probe.
+    // Fire ONLY when no recognized prefix matched. The hint never re-routes to
+    // a source — it surfaces the user-facing fix and exits 1. False positive
+    // for owner/repo identifiers that happen to also exist as a directory in
+    // the user's CWD is accepted per CONTEXT.md D-D1.
+    let has_known_prefix = identifier.starts_with("well-known:")
+        || identifier.starts_with("skills-sh:")
+        || identifier.starts_with("local:");
+    if !has_known_prefix {
+        let looks_like_path = looks_like_local_path_with_probe(identifier, |id| {
+            std::fs::metadata(id).map(|m| m.is_dir()).unwrap_or(false)
+        });
+        if looks_like_path {
+            // D-16 carry-forward: even our own strings traverse the print boundary
+            // through strip_terminal_escapes so the contract is structural.
+            eprintln!(
+                "error: {} looks like a local path — did you mean 'hermes skills install local:{}'?",
+                strip_terminal_escapes(identifier),
+                strip_terminal_escapes(identifier),
+            );
+            return Ok(1);
+        }
+    }
+
     let source: &(dyn HubSource + Send + Sync) = if identifier.starts_with("well-known:") {
         // find the WellKnownSkillSource box
         sources
@@ -665,6 +692,29 @@ pub fn cmd_trust_list_impl(cfg: &Config, format: Format) -> String {
 // Top-level dispatch (called from main.rs)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// D-D1 path-shape probe helper (Phase 21.8.1)
+// ---------------------------------------------------------------------------
+
+/// Determine whether an identifier looks like a local filesystem path.
+///
+/// Uses a `dir_probe` closure instead of calling `fs::metadata` directly so
+/// the function is pure-testable without env mutation. The production call
+/// site in `cmd_install` passes `|id| fs::metadata(id).map(|m| m.is_dir()).unwrap_or(false)`.
+///
+/// The five D-D1 trigger shapes are: leading `/`, `./`, `../`, `~/`, or
+/// the identifier resolving to an existing directory on disk (the metadata probe).
+fn looks_like_local_path_with_probe<F>(identifier: &str, dir_probe: F) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    identifier.starts_with('/')
+        || identifier.starts_with("./")
+        || identifier.starts_with("../")
+        || identifier.starts_with("~/")
+        || dir_probe(identifier)
+}
+
 pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> anyhow::Result<i32> {
     let mut cfg = load_config(config_path)?;
     match action {
@@ -701,5 +751,84 @@ pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> an
                 Ok(0)
             }
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (Phase 21.8.1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test 7 from plan: recompute_trust_str returns "trusted" for "local-dir"
+    // and does not regress the "github" → "community" arm.
+    #[test]
+    fn recompute_trust_str_returns_trusted_for_local_dir() {
+        let empty_trusted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert_eq!(
+            recompute_trust_str("local-dir", "/some/path", &empty_trusted),
+            "trusted",
+            "local-dir source must map to trusted (D-B2)"
+        );
+        // Regression guard: existing github arm still returns "community" for untrusted repos.
+        assert_eq!(
+            recompute_trust_str("github", "owner/repo", &empty_trusted),
+            "community",
+            "github arm regression: untrusted repo must still return community"
+        );
+    }
+
+    // D-D1 path-shape tests using the pure helper (no env mutation).
+
+    #[test]
+    fn local_dir_hint_absolute_path() {
+        assert!(
+            looks_like_local_path_with_probe("/tmp/foo", |_| false),
+            "absolute path starting with / must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_relative_dot_slash() {
+        assert!(
+            looks_like_local_path_with_probe("./skill", |_| false),
+            "./ relative path must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_dotdot() {
+        assert!(
+            looks_like_local_path_with_probe("../skill", |_| false),
+            "../ relative path must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_tilde() {
+        assert!(
+            looks_like_local_path_with_probe("~/skill", |_| false),
+            "~/ tilde path must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_existing_dir_via_probe() {
+        // Simulate the metadata probe returning true (as if a dir with that name exists in CWD).
+        assert!(
+            looks_like_local_path_with_probe("bradwilson/download/ascii-art/", |_| true),
+            "metadata probe returning true must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_no_false_positive_github_id() {
+        // When the dir does NOT exist in CWD, a bare owner/repo identifier must NOT trigger.
+        assert!(
+            !looks_like_local_path_with_probe("anthropic-ai/something-not-a-dir", |_| false),
+            "non-path owner/repo with no matching dir must NOT trigger hint"
+        );
     }
 }
