@@ -19,7 +19,7 @@ pub fn CommandLine(
     cwd: Option<String>,
     glyph: Option<String>,
 ) -> Element {
-    let cwd_text = cwd.unwrap_or_else(|| "~/projects/ironhermes".to_string());
+    let cwd_text = cwd.unwrap_or_else(|| "~".to_string());
     let glyph_char = glyph.unwrap_or_else(|| "❯".to_string());
     rsx! {
         div { class: "wh-cmdline",

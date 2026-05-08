@@ -28,9 +28,9 @@ pub fn InputBox(
     let pill_label = if is_agent { "Agent" } else { "Shell" };
     let prompt_glyph = if is_agent { "✦" } else { "❯" };
     let placeholder = if is_agent {
-        "Ask IronHermes anything…"
+        "message hermes…"
     } else {
-        "Type a command, or `/` for commands"
+        "shell command…"
     };
     rsx! {
         div {
@@ -42,7 +42,7 @@ pub fn InputBox(
                     class: if is_agent { "is-agent" },
                     "{pill_label}"
                 }
-                span { "⌥+M to switch" }
+                span { "⌥M mode" }
                 span { style: "margin-left: auto;", "↵ run · ⇧↵ newline · ⌃C cancel" }
             }
             div { class: "wh-input-row",

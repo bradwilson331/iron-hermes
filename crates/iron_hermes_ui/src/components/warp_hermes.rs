@@ -12,8 +12,7 @@ use crate::state::{
     ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
 };
 
-const DISCONNECT_NOTICE: &str =
-    "Connection interrupted. Please retry your message once reconnected.";
+const DISCONNECT_NOTICE: &str = "Connection lost. Message not delivered.";
 
 fn push_disconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
     let id = {
@@ -28,6 +27,38 @@ fn push_disconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Si
             time: Some(now_time()),
             exit_code: 1,
             message: DISCONNECT_NOTICE.to_string(),
+        },
+    });
+}
+
+fn push_welcome_block(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
+    let id = {
+        let cur = next_id();
+        next_id.set(cur + 1);
+        cur
+    };
+    blocks.write().push(BlockEntry {
+        id,
+        block: Block::Out {
+            author: Some("hermes".into()),
+            time: Some(now_time()),
+            text: "IronHermes ready. ⌘K commands · ⌥M mode.".into(),
+        },
+    });
+}
+
+fn push_reconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
+    let id = {
+        let cur = next_id();
+        next_id.set(cur + 1);
+        cur
+    };
+    blocks.write().push(BlockEntry {
+        id,
+        block: Block::Out {
+            author: Some("hermes".into()),
+            time: Some(now_time()),
+            text: "Reconnected.".into(),
         },
     });
 }
@@ -84,6 +115,7 @@ pub fn WarpHermes() -> Element {
                         });
                         let new_idx = { tabs.read().len() - 1 };
                         active_tab.set(new_idx);
+                        push_welcome_block(&mut blocks, &mut next_id);
                     }
                 }
                 Err(e) => {
@@ -140,11 +172,17 @@ pub fn WarpHermes() -> Element {
                         // Extract text from the raw message.
                         let msg_text = match raw_msg {
                             dioxus_fullstack::Message::Text(t) => {
-                                disconnect_notified = false;
+                                if disconnect_notified {
+                                    push_reconnect_notice(&mut blocks, &mut next_id);
+                                    disconnect_notified = false;
+                                }
                                 t
                             }
                             dioxus_fullstack::Message::Binary(b) => {
-                                disconnect_notified = false;
+                                if disconnect_notified {
+                                    push_reconnect_notice(&mut blocks, &mut next_id);
+                                    disconnect_notified = false;
+                                }
                                 String::from_utf8_lossy(&b).to_string()
                             }
                             dioxus_fullstack::Message::Close { .. } => {
@@ -548,6 +586,7 @@ pub fn WarpHermes() -> Element {
                     session_id.set(sid);
                     blocks.set(Vec::new());
                     messages.write().clear();
+                    push_welcome_block(&mut blocks, &mut next_id);
                 }
                 Err(e) => {
                     #[cfg(target_arch = "wasm32")]
@@ -573,6 +612,7 @@ pub fn WarpHermes() -> Element {
                         session_id.set(sid);
                         blocks.set(Vec::new());
                         messages.write().clear();
+                        push_welcome_block(&mut blocks, &mut next_id);
                     }
                     Err(e) => {
                         #[cfg(target_arch = "wasm32")]
@@ -712,14 +752,14 @@ pub fn WarpHermes() -> Element {
                 // Build status text from the already-fetched config summary (real data).
                 let status_text = match config_summary() {
                     Some(Ok(ref cfg)) => format!(
-                        "IronHermes Status\n\
+                        "status\n\
                          ────────────────────────────────────────\n  \
-                         Model:    {}\n  \
-                         Provider: {}\n  \
-                         Context:  {} tokens",
+                         model:    {}\n  \
+                         provider: {}\n  \
+                         context:  {} tokens",
                         cfg.model, cfg.provider, cfg.context_length,
                     ),
-                    _ => "IronHermes Status\n  Loading...".to_string(),
+                    _ => "status\n  loading\u{2026}".to_string(),
                 };
                 // Reserve an id; write WITHOUT holding next_id across anything else.
                 let id = {
@@ -740,7 +780,7 @@ pub fn WarpHermes() -> Element {
             }
             "/help" => {
                 // Format slash commands from PALETTE_ITEMS (D-29).
-                let mut help_text = String::from("Available commands\n");
+                let mut help_text = String::from("commands\n");
                 for it in palette_items_for_pick
                     .iter()
                     .filter(|p| p.section == "slash")
@@ -806,7 +846,7 @@ pub fn WarpHermes() -> Element {
                         on_submit: move |_| submit(),
                     }
                     StatusBar {
-                        mode: "Chat".to_string(),
+                        mode: (if matches!(mode(), Mode::Agent) { "agent" } else { "shell" }).to_string(),
                         model: model_name.clone(),
                         provider: provider_name.clone(),
                         tokens: tokens,

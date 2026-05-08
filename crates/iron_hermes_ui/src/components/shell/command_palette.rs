@@ -103,8 +103,8 @@ pub fn CommandPalette(
         .collect();
 
     let section_label = match cur_state {
-        PaletteState::Browse => "Slash commands",
-        PaletteState::PersonalityPick => "Personalities",
+        PaletteState::Browse => "commands",
+        PaletteState::PersonalityPick => "personalities",
     };
 
     rsx! {
@@ -118,7 +118,7 @@ pub fn CommandPalette(
                         "⌘K"
                     }
                     input {
-                        placeholder: "Search commands, files, recent…",
+                        placeholder: "search commands…",
                         value: "{query}",
                         oninput: move |e| query.set(e.value()),
                         autofocus: true,
@@ -165,6 +165,9 @@ pub fn CommandPalette(
                             }
                         }
                     }
+                }
+                div { class: "wh-pal-footer",
+                    "↑↓ navigate · ↵ select · esc close"
                 }
             }
         }
