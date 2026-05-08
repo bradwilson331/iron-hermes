@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: context exhaustion at 76% (2026-05-08)
-last_updated: "2026-05-08T16:19:22.215Z"
+stopped_at: Phase 21.8.1 context gathered
+last_updated: "2026-05-08T20:08:39.373Z"
 last_activity: 2026-05-07 -- Phase 26.4.1 execution started
 progress:
-  total_phases: 33
+  total_phases: 34
   completed_phases: 23
   total_plans: 144
   completed_plans: 144
@@ -404,6 +404,7 @@ Recent decisions affecting current work:
 - Phase 26.4 inserted after Phase 26.3: web ui side tabs panel (URGENT)
 - Phase 26.4.1 inserted after Phase 26.4: config fix (URGENT)
 - Phase 25.7 inserted after Phase 25: registering all skills in .ironhermes/skills and .ironhermes/optional-skills on install or commandline skills --scan <PATH> option (URGENT)
+- Phase 21.8.1 inserted after Phase 21.8: local-dir-install bug — installer rejects dir path identifiers (USERNAME/download/<skill>/) and requires a tarball; bug surfaced in 21.8 post-completion UAT (URGENT)
 
 ### Pending Todos
 
@@ -421,6 +422,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-08T12:09:00.772Z
-Stopped at: context exhaustion at 76% (2026-05-08)
-Resume file: None
+Last session: 2026-05-08T20:08:39.368Z
+Stopped at: Phase 21.8.1 context gathered
+Resume file: .planning/phases/21.8.1-local-dir-install-bug/21.8.1-CONTEXT.md
