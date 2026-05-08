@@ -241,14 +241,19 @@ security:
 # Recommended pattern (silences the deprecation warnings for legacy env-var
 # fallback and `model.api_key`):
 #
-# providers:
-#   openrouter:
-#     api_key_env: OPENROUTER_API_KEY     # secret lives in .env
-#     api_mode: chat_completions          # override only if needed
-#     fallback_providers: ["anthropic"]   # try these on hard failure
-#     # base_url: null                    # override only if needed
-#     # default_model: "anthropic/claude-sonnet-4"
-#     # disabled: false                   # set true to exclude from resolver
+# IMPORTANT: At least one provider entry with api_key_env matching model.provider
+# is REQUIRED for validation to pass. Without it the setup wizard re-launches
+# on every start. The actual secret stays in ~/.ironhermes/.env.
+#
+# Example (openrouter as default):
+providers:
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY     # secret lives in .env
+    # api_mode: chat_completions          # override only if needed
+    # fallback_providers: ["anthropic"]   # try these on hard failure
+    # base_url: null                      # override only if needed
+    # default_model: "anthropic/claude-sonnet-4"
+    # disabled: false                     # set true to exclude from resolver
 #   anthropic:
 #     api_key_env: ANTHROPIC_API_KEY
 #     api_mode: anthropic_messages
