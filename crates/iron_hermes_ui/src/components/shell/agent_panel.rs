@@ -3,22 +3,6 @@ use super::tool_call::ToolCall;
 use crate::state::{Message, ShellSettings, TokenBudget};
 use dioxus::prelude::*;
 
-/// AgentPanel — right-side `.wh-side` agent panel: Sigil + HERMES title +
-/// personality pill + tab strip (Phase 26.4) + conditional content (AGENT
-/// messages list OR INFO cards).
-///
-/// Phase 26.4 (per CONTEXT D-01..D-09): two-tab navigation strip below
-/// `.wh-side-head` with AGENT (existing messages) and INFO (session +
-/// config cards) views. New props for the INFO tab data are passed from
-/// `WarpHermes`. `Signal<T>` at the call site auto-coerces to
-/// `ReadSignal<T>` per Dioxus 0.7 prop coercion (RESEARCH Pattern 1).
-///
-/// Phase 4 (per CONTEXT D-02 of phase 4): the `personality: String` prop
-/// is REMOVED. Personality is read via `use_context::<ShellSettings>()`.
-///
-/// Phase 4 (per CONTEXT D-01 of phase 4): `messages` is
-/// `ReadSignal<Vec<Message>>` so writes in the WebSocket handler trigger
-/// re-render here.
 #[component]
 pub fn AgentPanel(
     messages: ReadSignal<Vec<Message>>,
@@ -33,6 +17,8 @@ pub fn AgentPanel(
 ) -> Element {
     let settings = use_context::<ShellSettings>();
     let personality = settings.personality.read().label();
+    let sid = session_id();
+    let session_display = if sid.is_empty() || sid == "pending" { "—".to_string() } else { sid };
 
     rsx! {
         aside { class: "wh-side",
@@ -48,13 +34,13 @@ pub fn AgentPanel(
             div { class: "wh-side-tabs",
                 button {
                     class: "wh-side-tab",
-                    class: if 0 == active_side_tab() { "is-active" },
+                    class: if active_side_tab() == 0 { "is-active" },
                     onclick: move |_| on_side_tab_click.call(0),
                     "AGENT"
                 }
                 button {
                     class: "wh-side-tab",
-                    class: if 1 == active_side_tab() { "is-active" },
+                    class: if active_side_tab() == 1 { "is-active" },
                     onclick: move |_| on_side_tab_click.call(1),
                     "INFO"
                 }
@@ -88,9 +74,7 @@ pub fn AgentPanel(
                         div { class: "wh-side-info-heading", "SESSION" }
                         div { class: "wh-side-info-row",
                             span { class: "wh-side-info-key", "id" }
-                            span { class: "wh-side-info-val",
-                                if session_id().is_empty() || session_id() == "pending" { "—" } else { "{session_id()}" }
-                            }
+                            span { class: "wh-side-info-val", "{session_display}" }
                         }
                         div { class: "wh-side-info-row",
                             span { class: "wh-side-info-key", "messages" }
