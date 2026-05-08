@@ -269,6 +269,20 @@ Plans:
 
 **Phase directory:** `.planning/phases/21.8-skill-remote-download-and-install-from-skills-sh/`
 
+### Phase 21.8.1: local-dir-install bug (INSERTED)
+
+**Goal:** Fix the bug surfaced in Phase 21.8 post-completion UAT — `hermes skills install <path>` rejects local directory identifiers because the dispatcher routes any identifier containing `/` to GitHubSource. Add a `local:<path>` source variant + `LocalDirSource` adapter (sibling to GitHubSource / WellKnownSkillSource / SkillsShBlobSource) and a pre-dispatch hint for path-shaped non-prefixed identifiers, so `hermes skills install local:~/Downloads/my-skill/` works end-to-end and the original failing identifier `bradwilson/download/ascii-art/` produces a clear "did you mean local:..." hint instead of a confusing GitHub tarball error.
+**Requirements**: SKILL-08 (extends Phase 19.1's install/list/remove/update surface; no new REQ IDs)
+**Depends on:** Phase 21.8
+**Plans:** 4 plans
+
+Plans:
+- [ ] 21.8.1-01-PLAN.md — Wave 1 pure-additive surface: HubErrorKind::LocalSourceMissing variant, recompute_trust_str "local-dir" arm, D-D1 pre-dispatch hint, lock-file forward-compat round-trip test
+- [ ] 21.8.1-02-PLAN.md — Wave 2 LocalDirSource adapter: new ironhermes-hub/src/local_dir.rs implementing HubSource (walk source dir, skip symlinks/.git/node_modules/target, D-17 frontmatter check, snapshot_hash: None) + crate-root re-export
+- [ ] 21.8.1-03-PLAN.md — Wave 3 CLI wiring: build_sources adds LocalDirSource; cmd_install local: arm with D-A2 canonicalization (tilde + relative + canonicalize); cmd_update generalizes via existing source_id lookup; cmd_list [local] annotation
+- [ ] 21.8.1-04-PLAN.md — Wave 4 integration tests + Nyquist closure: full pipeline integration test (no HTTP), every failure-mode from VALIDATION.md, cmd_remove source-dir-sacrosanct regression, original UAT identifier replay, VALIDATION.md per-task map populated
+
+
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
 **Goal:** Close four v2.0 hermes-agent parity gaps scoped to "minimum viable parity": (a) surface the existing `delegate_task` subagent system with `/agents`, status-line pill, persistent JSONL transcripts, cascade cancellation, wall-clock timeout, concurrency surface, and parent/child iteration-budget inheritance; (b) add `--yolo` non-interactive mode that bypasses dangerous-command approvals while the iteration budget, ctrl-c cascade, and fatal-error halt remain unskippable; (c) add `hermes status [--all] [--deep] [--json]` component diagnostics; (d) add an in-memory session-scoped `ProcessRegistry` for `terminal(background=true)` / `execute_code` with spawn/poll/wait/kill, 200KB rolling output buffer, `/stop` slash, watch patterns with rate-limited notifications, and cleanup on session end. Explicit exclusions (deferred to own phases): worktree-parallel mode, toolsets grouping, terminal backends, full gateway session mirror, plugin discovery sources, full approval queue. 29 locked CONTEXT decisions (D-01..D-29), 12 eval dimensions (E-01..E-12), 18 scenario fixtures (S-01..S-18), 10 online guardrails (G-01..G-10) — 5 of which remain unskippable under `--yolo` per the Replit-July-2025 anti-pattern anchor.
