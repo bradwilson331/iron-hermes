@@ -17,9 +17,13 @@ use dioxus::prelude::*;
 /// forwards the entry id up to WarpHermes which dispatches `run_shell`.
 #[component]
 pub fn BlockStream(blocks: ReadSignal<Vec<BlockEntry>>, on_rerun: EventHandler<u64>) -> Element {
+    let empty = blocks.read().is_empty();
     rsx! {
         div { class: "wh-stream",
             div { class: "wh-stream-scroll",
+                if empty {
+                    div { class: "wh-stream-empty", "connecting…" }
+                }
                 for entry in blocks.read().iter().cloned() {
                     Block {
                         key: "{entry.id}",

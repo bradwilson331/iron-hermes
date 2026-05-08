@@ -27,7 +27,11 @@ pub fn StatusBar(
     let t = tokens();
     let used_k = t.used as f32 / 1000.0;
     let max_k = t.max / 1000;
-    let pct = ((t.used as f32 / t.max as f32) * 100.0).round() as u32;
+    let pct = if t.max > 0 {
+        ((t.used as f32 / t.max as f32) * 100.0).round() as u32
+    } else {
+        0
+    };
 
     let settings = use_context::<ShellSettings>();
     let pers_label = settings.personality.read().label();

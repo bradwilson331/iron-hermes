@@ -25,7 +25,7 @@ pub fn CommandLine(
         div { class: "wh-cmdline",
             span { style: "color: var(--fg-dim); font-size: 11px;", "{cwd_text}" }
             span { class: "wh-prompt-glyph", "{glyph_char}" }
-            span { style: "flex: 1;",
+            span { class: "wh-cmd-tokens", style: "flex: 1;",
                 for (i, t) in tokens.iter().enumerate() {
                     span {
                         key: "{i}",

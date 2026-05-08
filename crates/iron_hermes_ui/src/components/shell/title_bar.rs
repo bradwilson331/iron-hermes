@@ -57,15 +57,18 @@ pub fn TitleBar(
                         key: "{i}",
                         class: "wh-tab",
                         class: if i == active_tab { "is-active" },
+                        title: "{t.label}",
                         onclick: move |_| on_tab_click.call(i),
                         span {
                             class: "wh-tab-dot",
                             style: if t.live { "background: var(--success);" } else { "background: var(--fg-dim);" },
                         }
-                        "{t.label}"
+                        span { class: "wh-tab-label", "{t.label}" }
                         button {
                             onclick: move |evt| { evt.stop_propagation(); on_tab_close.call(i); },
                             style: "color: var(--fg-disabled); margin-left: 4px; font-size: 11px; background: none; border: none; cursor: pointer;",
+                            title: "close tab",
+                            "aria-label": "close tab",
                             "×"
                         }
                     }
@@ -73,6 +76,8 @@ pub fn TitleBar(
                 button {
                     onclick: move |_| on_tab_new.call(()),
                     style: "padding: 0 10px; color: var(--fg-dim); font-size: 14px; font-weight: 700; background: none; border: none; cursor: default;",
+                    title: "new session",
+                    "aria-label": "new session",
                     "+"
                 }
             }

@@ -38,7 +38,7 @@ pub fn ToolCall(name: String, args_summary: String, status: ToolStatus) -> Eleme
             }
             if !args_summary.is_empty() {
                 pre {
-                    style: "margin: 4px 0 0; color: var(--fg-dim); font-size: 11px; white-space: pre-wrap;",
+                    style: "margin: 4px 0 0; color: var(--fg-dim); font-size: 11px; white-space: pre-wrap; overflow-wrap: break-word;",
                     "{args_summary}"
                 }
             }

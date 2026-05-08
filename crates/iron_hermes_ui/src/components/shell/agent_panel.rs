@@ -89,7 +89,7 @@ pub fn AgentPanel(
                         div { class: "wh-side-info-row",
                             span { class: "wh-side-info-key", "id" }
                             span { class: "wh-side-info-val",
-                                if session_id().is_empty() { "—" } else { "{session_id()}" }
+                                if session_id().is_empty() || session_id() == "pending" { "—" } else { "{session_id()}" }
                             }
                         }
                         div { class: "wh-side-info-row",

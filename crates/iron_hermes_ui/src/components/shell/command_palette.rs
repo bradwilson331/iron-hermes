@@ -127,6 +127,12 @@ pub fn CommandPalette(
                 }
                 div { class: "wh-pal-list",
                     div { class: "wh-pal-section", "{section_label}" }
+                    if slash_items.is_empty() && workflow_items.is_empty() {
+                        div {
+                            style: "padding: 8px 10px; color: var(--fg-dim); font-size: 12px;",
+                            if !query().is_empty() { "no results" } else { "loading…" }
+                        }
+                    }
                     for (i, it) in slash_items.iter().enumerate() {
                         div {
                             key: "{it.cmd}",

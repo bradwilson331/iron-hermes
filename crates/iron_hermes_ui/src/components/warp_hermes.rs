@@ -599,6 +599,7 @@ pub fn WarpHermes() -> Element {
 
     // on_tab_close: remove tab; auto-switch; guard last-tab case (D-05 + D-06).
     let mut on_tab_close = move |idx: usize| {
+        if idx >= tabs.read().len() { return; }
         tabs.write().remove(idx);
         let now_empty = tabs.read().is_empty();
         if now_empty {
