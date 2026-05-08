@@ -113,10 +113,7 @@ pub fn CommandPalette(
             onkeydown: on_keydown,
             div { class: "wh-pal",
                 div { class: "wh-pal-search",
-                    span {
-                        style: "color: var(--accent-primary); font-weight: 700;",
-                        "⌘K"
-                    }
+                    span { class: "wh-pal-icon", "⌘K" }
                     input {
                         placeholder: "search commands…",
                         value: "{query}",
@@ -125,8 +122,11 @@ pub fn CommandPalette(
                     }
                     span { class: "wh-kbd", "esc" }
                 }
-                div { class: "wh-pal-list",
-                    div { class: "wh-pal-section", "{section_label}" }
+                div {
+                    class: "wh-pal-list",
+                    role: "listbox",
+                    "aria-label": "Command options",
+                    div { class: "wh-pal-section", "aria-hidden": "true", "{section_label}" }
                     if slash_items.is_empty() && workflow_items.is_empty() {
                         div {
                             style: "padding: 8px 10px; color: var(--fg-dim); font-size: 12px;",
@@ -138,13 +138,15 @@ pub fn CommandPalette(
                             key: "{it.cmd}",
                             class: "wh-pal-row",
                             class: if i == selected() { "is-active" },
+                            role: "option",
+                            "aria-selected": if i == selected() { "true" } else { "false" },
                             onclick: {
                                 let item = it.clone();
                                 move |_| on_pick.call(item.clone())
                             },
                             span { class: "wh-pal-glyph", "/" }
-                            span { style: "color: var(--fg-strong);", "{it.cmd}" }
-                            span { style: "color: var(--fg-dim);", "— {it.label}" }
+                            span { class: "wh-pal-cmd", "{it.cmd}" }
+                            span { class: "wh-pal-desc", "— {it.label}" }
                             span { class: "wh-pal-hint",
                                 span { class: "wh-pal-kbd",
                                     for (j, k) in it.kbd.iter().enumerate() {
@@ -161,13 +163,15 @@ pub fn CommandPalette(
                                 key: "{it.cmd}",
                                 class: "wh-pal-row",
                                 class: if (slash_items.len() + i) == selected() { "is-active" },
+                                role: "option",
+                                "aria-selected": if (slash_items.len() + i) == selected() { "true" } else { "false" },
                                 onclick: {
                                     let item = it.clone();
                                     move |_| on_pick.call(item.clone())
                                 },
                                 span { class: "wh-pal-glyph", "▸" }
-                                span { style: "color: var(--fg-strong);", "{it.label}" }
-                                span { style: "color: var(--fg-dim);", "{it.cmd}" }
+                                span { class: "wh-pal-cmd", "{it.label}" }
+                                span { class: "wh-pal-desc", "{it.cmd}" }
                             }
                         }
                     }

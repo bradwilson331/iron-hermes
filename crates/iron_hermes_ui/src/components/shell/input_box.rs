@@ -51,6 +51,7 @@ pub fn InputBox(
                     class: "wh-textarea",
                     rows: "1",
                     placeholder: "{placeholder}",
+                    "aria-label": if is_agent { "Message Hermes" } else { "Shell command" },
                     value: "{value}",
                     oninput: move |e| value.set(e.value()),
                     onkeydown: move |e| {
@@ -66,13 +67,13 @@ pub fn InputBox(
                     button {
                         class: "wh-icon-btn",
                         title: "attach",
-                        onclick: move |_| { /* attach unwired in Phase 4 (file-picker is v2). */ },
+                        onclick: move |_| {},
                         "@"
                     }
                     button {
                         class: "wh-icon-btn",
                         title: "voice",
-                        onclick: move |_| { /* voice unwired in Phase 4 (audio capture is v2). */ },
+                        onclick: move |_| {},
                         "●"
                     }
                     button {

@@ -120,6 +120,10 @@
   position: absolute; top: 0; left: 0; right: 0; height: 2px;
   background: var(--accent-primary);
 }
+.wh-tab:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+}
 .wh-tab .wh-tab-dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--success);
@@ -222,9 +226,11 @@
   position: absolute; top: 6px; right: 6px;
   display: flex; gap: 2px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity .12s;
 }
-.wh-block:hover .wh-block-actions { opacity: 1; }
+.wh-block:hover .wh-block-actions,
+.wh-block:focus-within .wh-block-actions { opacity: 1; pointer-events: auto; }
 .wh-icon-btn {
   width: 24px; height: 24px;
   background: transparent; border: 0;
@@ -320,6 +326,11 @@
 }
 .wh-status .wh-pill { white-space: nowrap; }
 .wh-status .wh-sep { color: var(--fg-dim); padding: 0 6px; }
+/* Group-break seps: 2× padding marks cluster boundaries.
+   Child 6 = context (mode·model·provider) → state boundary.
+   Child 10 = state (tokens·personality) → activity boundary. */
+.wh-status .wh-sep:nth-child(6),
+.wh-status .wh-sep:nth-child(10) { padding: 0 12px; }
 .wh-status .wh-hint { margin-left: auto; color: var(--fg-dim); white-space: nowrap; }
 
 /* scanner cells */
@@ -365,6 +376,7 @@
   background: var(--w-bg-3);
   letter-spacing: .04em;
   text-transform: lowercase;
+  cursor: default;
 }
 .wh-side-scroll {
   flex: 1; min-height: 0;
@@ -468,12 +480,12 @@
 
 /* tool call card inside agent panel */
 .wh-toolcall {
-  background: var(--w-bg-2);
+  background: color-mix(in oklab, var(--warn) 8%, var(--w-bg-2));
+  border: 1px solid color-mix(in oklab, var(--warn) 22%, transparent);
   border-radius: var(--w-radius-block);
   padding: 8px 10px;
   font-size: 12px;
   color: var(--fg-dim);
-  border-left: 2px solid var(--warn);
 }
 .wh-toolcall b { color: var(--warn); font-weight: 700; }
 
@@ -588,8 +600,7 @@
 }
 
 /* ─── Shield watermark ─── */
-.wh-stream::before,
-.wh-side::before {
+.wh-stream::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -601,3 +612,88 @@
   pointer-events: none;
 }
 .wh-block.is-new, .wh-msg.is-new { animation: wh-block-in .18s ease-out both; }
+
+/* ─── Responsive: hide side panel on narrow viewports ─── */
+@media (width < 768px) {
+  .wh-side { display: none; }
+}
+
+/* ─── Touch: expand hit targets on coarse-pointer devices ─── */
+@media (pointer: coarse) {
+  .wh-icon-btn { width: 36px; height: 36px; }
+  .wh-status { height: 36px; font-size: 12px; }
+  .wh-titlebar { height: 44px; }
+}
+
+/* ─── Phase 26: implementation layout + chrome classes ─── */
+
+/* Terminal column: flex column wrapper for stream + input + status */
+.wh-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Title bar: traffic-light cluster */
+.wh-traffic-lights {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-right: 8px;
+}
+
+/* Title bar: brand block (sigil + wordmark) */
+.wh-brand-block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 12px;
+  border-right: 1px solid var(--w-border);
+  height: 100%;
+  flex-shrink: 0;
+}
+
+/* Title bar: IronHermes wordmark text */
+.wh-brand-name {
+  color: var(--accent-primary);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+/* Title bar: close-tab button */
+.wh-tab-close {
+  color: var(--fg-dim);
+  margin-left: 4px;
+  font-size: 11px;
+  background: none;
+  border: none;
+  cursor: default;
+  padding: 0 2px;
+  line-height: 1;
+}
+.wh-tab-close:hover { color: var(--danger); }
+
+/* Title bar: new-session button */
+.wh-tab-new {
+  padding: 0 10px;
+  color: var(--fg-dim);
+  font-size: 14px;
+  font-weight: 700;
+  background: none;
+  border: none;
+  cursor: default;
+  flex-shrink: 0;
+}
+.wh-tab-new:hover { color: var(--fg-strong); }
+
+/* Block head: ok badge, error badge, timestamp */
+.wh-block-ok   { color: var(--success); font-size: 10px; }
+.wh-block-err  { color: var(--danger);  font-size: 10px; }
+.wh-block-time { margin-left: auto; font-size: 11px; color: var(--fg-dim); }
+
+/* Command palette: search icon, command text, description text */
+.wh-pal-icon { color: var(--accent-primary); font-weight: 700; }
+.wh-pal-cmd  { color: var(--fg-strong); }
+.wh-pal-desc { color: var(--fg-dim); }

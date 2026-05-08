@@ -43,14 +43,14 @@ pub fn Block(entry: BlockEntry, on_copy: EventHandler<()>, on_rerun: EventHandle
         div { class: "wh-block {kind_class}",
             div { class: "wh-block-head",
                 if let Some(author) = author { span { class: "wh-author", "{author}" } }
-                if is_ok  { span { style: "color: var(--success); font-size: 10px;", "[OK]" } }
+                if is_ok  { span { class: "wh-block-ok", "[OK]" } }
                 if is_err {
                     span {
-                        style: "color: var(--danger); font-size: 10px;",
+                        class: "wh-block-err",
                         if let Some(code) = exit_code { "exit {code}" } else { "exit 1" }
                     }
                 }
-                if let Some(t) = time { span { style: "margin-left: auto; font-size: 11px; color: var(--fg-dim);", "{t}" } }
+                if let Some(t) = time { span { class: "wh-block-time", "{t}" } }
             }
             // Variant-dispatched body
             match data.clone() {
@@ -94,7 +94,7 @@ pub fn Block(entry: BlockEntry, on_copy: EventHandler<()>, on_rerun: EventHandle
                     button {
                         class: "wh-icon-btn",
                         title: "share",
-                        onclick: move |_| { /* D-25: share unwired in Phase 4; v2 needs real share-link backend. */ },
+                        onclick: move |_| {},
                         "↗"
                     }
                 }

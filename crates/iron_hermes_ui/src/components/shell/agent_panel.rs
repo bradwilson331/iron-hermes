@@ -27,26 +27,37 @@ pub fn AgentPanel(
                 span { class: "wh-side-title", "HERMES" }
                 span {
                     class: "wh-personality",
-                    style: "cursor: default;",
                     "/{personality}"
                 }
             }
-            div { class: "wh-side-tabs",
+            div {
+                class: "wh-side-tabs",
+                role: "tablist",
+                "aria-label": "Agent panel views",
                 button {
                     class: "wh-side-tab",
                     class: if active_side_tab() == 0 { "is-active" },
+                    role: "tab",
+                    "aria-selected": if active_side_tab() == 0 { "true" } else { "false" },
+                    "aria-controls": "side-panel-agent",
                     onclick: move |_| on_side_tab_click.call(0),
                     "AGENT"
                 }
                 button {
                     class: "wh-side-tab",
                     class: if active_side_tab() == 1 { "is-active" },
+                    role: "tab",
+                    "aria-selected": if active_side_tab() == 1 { "true" } else { "false" },
+                    "aria-controls": "side-panel-info",
                     onclick: move |_| on_side_tab_click.call(1),
                     "INFO"
                 }
             }
             if active_side_tab() == 0 {
-                div { class: "wh-side-scroll",
+                div {
+                    class: "wh-side-scroll",
+                    role: "tabpanel",
+                    id: "side-panel-agent",
                     for (i, m) in messages.read().iter().enumerate() {
                         div {
                             key: "{i}",
@@ -69,7 +80,10 @@ pub fn AgentPanel(
                     }
                 }
             } else {
-                div { class: "wh-side-info",
+                div {
+                    class: "wh-side-info",
+                    role: "tabpanel",
+                    id: "side-panel-info",
                     div { class: "wh-side-info-card",
                         div { class: "wh-side-info-heading", "SESSION" }
                         div { class: "wh-side-info-row",

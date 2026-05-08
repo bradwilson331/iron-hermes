@@ -563,7 +563,7 @@ pub fn WarpHermes() -> Element {
     // ── Tab interaction callbacks (Phase 26.2 D-01..D-06, D-09). ──
 
     // on_tab_click: switch active session; no-op during streaming (D-02).
-    let mut on_tab_click = move |idx: usize| {
+    let on_tab_click = move |idx: usize| {
         if scanner_active() { return; }
         let sid = { let ts = tabs.read(); ts.get(idx).map(|t| t.session_id.clone()) };
         if let Some(sid) = sid {
@@ -598,7 +598,7 @@ pub fn WarpHermes() -> Element {
     };
 
     // on_tab_close: remove tab; auto-switch; guard last-tab case (D-05 + D-06).
-    let mut on_tab_close = move |idx: usize| {
+    let on_tab_close = move |idx: usize| {
         if idx >= tabs.read().len() { return; }
         tabs.write().remove(idx);
         let now_empty = tabs.read().is_empty();

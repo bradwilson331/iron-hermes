@@ -35,38 +35,48 @@ pub fn TitleBar(
     rsx! {
         div { class: "wh-titlebar",
             if show_traffic_lights {
-                div { style: "display: flex; gap: 8px; align-items: center; padding-right: 8px;",
+                div {
+                    class: "wh-traffic-lights",
+                    "aria-hidden": "true",
                     span { style: "width: 12px; height: 12px; border-radius: 50%; background: #ff5f57;" }
                     span { style: "width: 12px; height: 12px; border-radius: 50%; background: #febc2e;" }
                     span { style: "width: 12px; height: 12px; border-radius: 50%; background: #28c840;" }
                 }
             }
             div {
-                style: "display: flex; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--w-border); height: 100%;",
+                class: "wh-brand-block",
                 Sigil { size: 18_u16 }
-                span {
-                    style: "color: var(--accent-primary); font-weight: 700; font-size: 12px;",
-                    "IronHermes"
-                }
+                span { class: "wh-brand-name", "IronHermes" }
             }
             div {
                 class: "wh-tabs",
+                role: "tablist",
+                "aria-label": "Sessions",
                 style: if disabled { "pointer-events: none; opacity: 0.5;" } else { "" },
                 for (i, t) in tabs.iter().enumerate() {
                     div {
                         key: "{i}",
                         class: "wh-tab",
                         class: if i == active_tab { "is-active" },
+                        role: "tab",
+                        "aria-selected": if i == active_tab { "true" } else { "false" },
+                        tabindex: "0",
                         title: "{t.label}",
                         onclick: move |_| on_tab_click.call(i),
+                        onkeydown: move |e| {
+                            if e.key() == Key::Enter {
+                                e.prevent_default();
+                                on_tab_click.call(i);
+                            }
+                        },
                         span {
                             class: "wh-tab-dot",
                             style: if t.live { "background: var(--success);" } else { "background: var(--fg-dim);" },
                         }
                         span { class: "wh-tab-label", "{t.label}" }
                         button {
+                            class: "wh-tab-close",
                             onclick: move |evt| { evt.stop_propagation(); on_tab_close.call(i); },
-                            style: "color: var(--fg-disabled); margin-left: 4px; font-size: 11px; background: none; border: none; cursor: pointer;",
                             title: "close tab",
                             "aria-label": "close tab",
                             "×"
@@ -74,8 +84,8 @@ pub fn TitleBar(
                     }
                 }
                 button {
+                    class: "wh-tab-new",
                     onclick: move |_| on_tab_new.call(()),
-                    style: "padding: 0 10px; color: var(--fg-dim); font-size: 14px; font-weight: 700; background: none; border: none; cursor: default;",
                     title: "new session",
                     "aria-label": "new session",
                     "+"
