@@ -10,6 +10,7 @@ pub mod blob;
 pub mod error;
 pub mod github;
 pub mod installer;
+pub mod local_dir;
 pub mod lock;
 pub mod manifest;
 pub mod paths;
@@ -30,6 +31,7 @@ pub use installer::{
     InstallOutcome, UninstallOutcome, UpdateOutcome, bundle_content_hash, install, uninstall,
     update,
 };
+pub use local_dir::LocalDirSource;
 pub use lock::{
     MigrationOutcome, SkillLock, SkillLockEntry, compute_folder_hash, migrate_from_hub_manifest,
 };
