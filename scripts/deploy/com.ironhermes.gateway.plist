@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  IronHermes Gateway — macOS LaunchAgent template.
+  install.sh substitutes __HOME__ at install time and copies into
+  ~/Library/LaunchAgents/com.ironhermes.gateway.plist.
+
+  Notes:
+    * KeepAlive.SuccessfulExit=false — restart on crash, but not after a clean
+      `ironhermes gateway` exit (e.g. user-initiated shutdown).
+    * ThrottleInterval=30 — caps restart rate if the binary keeps crashing.
+    * launchd stop sends SIGTERM; the gateway currently only handles SIGINT,
+      so on `launchctl bootout` it is hard-killed after ExitTimeOut. The pid
+      file is written atomically, so this is safe.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ironhermes.gateway</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.ironhermes/scripts/gateway-run.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>15</integer>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.ironhermes/logs/gateway.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.ironhermes/logs/gateway.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

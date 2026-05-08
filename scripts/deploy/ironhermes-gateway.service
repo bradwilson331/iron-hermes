@@ -1,0 +1,27 @@
+# IronHermes Gateway — systemd --user unit.
+# Install location: ~/.config/systemd/user/ironhermes-gateway.service
+# Enable: systemctl --user daemon-reload && systemctl --user enable --now ironhermes-gateway
+# Logs:   journalctl --user -u ironhermes-gateway -f
+# Headless servers (no graphical login): loginctl enable-linger $USER
+
+[Unit]
+Description=IronHermes Telegram Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.ironhermes/scripts/gateway-run.sh
+WorkingDirectory=%h
+EnvironmentFile=-%h/.ironhermes/.env
+Restart=always
+RestartSec=5
+# Cap restart storms: 5 starts in 60s window
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# Gateway only catches SIGINT today; deliver it on stop.
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

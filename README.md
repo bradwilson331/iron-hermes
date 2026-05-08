@@ -131,6 +131,79 @@ dx bundle --platform web -p iron_hermes_ui --release
 ./target/dx/iron_hermes_ui/release/web/iron_hermes_ui
 ```
 
+## Gateway deployment (launchd / systemd / cron)
+
+Run the Telegram gateway as a long-lived background service. Templates and an
+OS-detecting installer live in `scripts/deploy/`:
+
+```
+scripts/deploy/
+├── install.sh                    OS-detecting installer
+├── uninstall.sh                  symmetric removal
+├── gateway-run.sh                shared launcher (loads ~/.ironhermes/.env, exec's the binary)
+├── gateway-watchdog.sh           cron fallback — relaunches if the pid is dead
+├── com.ironhermes.gateway.plist  macOS LaunchAgent template
+└── ironhermes-gateway.service    Linux systemd --user unit
+```
+
+Preflight: build the release binary (`cargo build --release`) and put a
+`TELEGRAM_BOT_TOKEN` in `~/.ironhermes/.env`. The installer runs
+`ironhermes doctor` before doing anything.
+
+### macOS (launchd)
+
+```bash
+scripts/deploy/install.sh
+# verify
+launchctl print gui/$UID/com.ironhermes.gateway | grep -E 'state|pid'
+tail -f ~/.ironhermes/logs/gateway.out.log
+# restart / stop
+launchctl kickstart -k gui/$UID/com.ironhermes.gateway
+launchctl bootout    gui/$UID/com.ironhermes.gateway
+```
+
+The plist uses `KeepAlive={Crashed:true, SuccessfulExit:false}` (restart on
+crash, not after a clean exit) and `ThrottleInterval=30` to cap restart storms.
+
+### Linux (systemd --user)
+
+```bash
+scripts/deploy/install.sh
+# verify
+systemctl --user status ironhermes-gateway
+journalctl --user -u ironhermes-gateway -f
+# headless servers (no graphical login) — run once:
+loginctl enable-linger $USER
+```
+
+### Cron watchdog (fallback)
+
+For hosts without launchd/systemd, a 1-minute cron entry runs
+`gateway-watchdog.sh`, which parses `~/.ironhermes/gateway.pid` and relaunches
+the gateway via `gateway-run.sh` if the process is dead:
+
+```bash
+scripts/deploy/install.sh --cron
+crontab -l | grep ironhermes
+tail -f ~/.ironhermes/logs/gateway.log
+```
+
+### Uninstall
+
+```bash
+scripts/deploy/uninstall.sh         # native service for this OS
+scripts/deploy/uninstall.sh --cron  # remove watchdog crontab entry
+scripts/deploy/uninstall.sh --all   # both, plus staged scripts in ~/.ironhermes/scripts/
+```
+
+Logs in `~/.ironhermes/logs/` are kept on uninstall.
+
+### Profiles
+
+Set `IRONHERMES_PROFILE` in the environment (or in the systemd unit /
+`EnvironmentVariables` block of the plist) and `gateway-run.sh` will pass
+`--profile $IRONHERMES_PROFILE` to the binary.
+
 ## License
 
 MIT
