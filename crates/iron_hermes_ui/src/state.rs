@@ -171,6 +171,24 @@ pub struct TokenBudget {
     pub max: u32,
 }
 
+/// Compact per-session summary rendered as a memory card in the side panel.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct SessionMemory {
+    pub session_id: String,
+    pub label: String,
+    pub is_live: bool,
+    pub first_time: String,
+    pub last_time: String,
+    /// Number of user turns in this session.
+    pub exchange_count: u32,
+    /// Last known token usage.
+    pub token_count: u32,
+    /// Personality slug active in this session.
+    pub personality: String,
+    /// Last user message, truncated to ≤160 chars.
+    pub last_input: String,
+}
+
 // ---------------------------------------------------------------------------
 // Phase 4 type vocabulary (D-03, D-07, D-20, D-02, D-34)
 // ---------------------------------------------------------------------------

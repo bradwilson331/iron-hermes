@@ -9,7 +9,7 @@ use crate::components::shell::{
 };
 use crate::state::{
     now_time, Block, BlockEntry, Message, Mode, PaletteItem, PaletteState, Personality,
-    ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
+    SessionMemory, ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
 };
 
 const DISCONNECT_NOTICE: &str = "Connection lost. Message not delivered.";
@@ -431,6 +431,59 @@ pub fn WarpHermes() -> Element {
     // ── ShellSettings via use_context_provider (D-02 + Pattern 5). ──
     let mut personality = use_signal(|| Personality::Default);
     use_context_provider(|| ShellSettings { personality });
+
+    // ── Derive session memory summaries for the side panel MEMORY tab. ──
+    let sessions_memory = use_memo(move || -> Vec<SessionMemory> {
+        let tabs_list = tabs();
+        let msgs = messages.read().clone();
+        let tok = tokens();
+        let cur_sid = session_id();
+        let active_personality = personality();
+
+        tabs_list
+            .into_iter()
+            .map(|tab| {
+                if tab.session_id == cur_sid {
+                    let exchange_count =
+                        msgs.iter().filter(|m| m.who == "user").count() as u32;
+                    let last_input = msgs
+                        .iter()
+                        .rev()
+                        .find(|m| m.who == "user" && !m.body.is_empty())
+                        .map(|m| {
+                            let s = m.body.as_str();
+                            if s.chars().count() > 160 {
+                                s.chars().take(157).collect::<String>() + "\u{2026}"
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let first_time =
+                        msgs.first().map(|m| m.time.clone()).unwrap_or_default();
+                    let last_time =
+                        msgs.last().map(|m| m.time.clone()).unwrap_or_default();
+                    SessionMemory {
+                        session_id: tab.session_id,
+                        label: tab.label,
+                        is_live: tab.live,
+                        first_time,
+                        last_time,
+                        exchange_count,
+                        token_count: tok.used,
+                        personality: active_personality.label().to_string(),
+                        last_input,
+                    }
+                } else {
+                    SessionMemory {
+                        session_id: tab.session_id,
+                        label: tab.label,
+                        ..Default::default()
+                    }
+                }
+            })
+            .collect()
+    });
 
     // ── Global keydown listener (D-17 + Pattern 3). ──
     // Closure stored in Signal<Option<Closure<_>>> so it outlives use_effect
@@ -856,7 +909,7 @@ pub fn WarpHermes() -> Element {
                     }
                 }
                 AgentPanel {
-                    messages: messages,
+                    sessions: sessions_memory,
                     active_side_tab: active_side_tab,
                     on_side_tab_click: on_side_tab_click,
                     session_id: session_id,
