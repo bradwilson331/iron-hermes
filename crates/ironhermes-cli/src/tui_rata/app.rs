@@ -1358,4 +1358,148 @@ mod scroll_tests {
             "SkillActivated arm must continue to buffer (name, body) into pending_skill_overlays",
         );
     }
+
+    // — Phase 21.8.3 RED tests — line-count parity, snap-on-Finished, submit helper, End key ──
+
+    #[test]
+    fn transcript_line_count_accounts_for_role_prefix() {
+        // D-06: "You: " prefix (5 chars) on line 0 reduces effective width.
+        // With width=80 and a body of 80 'x' chars:
+        //   current (buggy): effective_width=80 → ceil(80/80)=1
+        //   fixed:           effective_width=80-5=75 → ceil(80/75)=2
+        let body: &'static str = Box::leak("x".repeat(80).into_boxed_str());
+        let app = App::new_test_with_messages(vec![("user", body)]);
+        assert_eq!(
+            app.transcript_line_count(80),
+            2,
+            "80-char user message at width=80 must count 2 wrapped rows (prefix reduces effective width to 75)"
+        );
+    }
+
+    #[test]
+    fn system_message_counted_in_line_count() {
+        // D-07: System messages are NOW rendered (role_style returns Some(DarkGray)
+        // post-22.4-17). transcript_line_count must include them with "System: "
+        // prefix (8 chars). With width=80 and body of 80 'y' chars:
+        //   current (buggy): counts without prefix → ceil(80/80)=1
+        //   fixed:           effective_width=80-8=72 → ceil(80/72)=2
+        let body: &'static str = Box::leak("y".repeat(80).into_boxed_str());
+        let app = App::new_test_with_messages(vec![("system", body)]);
+        assert_eq!(
+            app.transcript_line_count(80),
+            2,
+            "80-char system message at width=80 must count 2 wrapped rows (System: prefix reduces effective width to 72)"
+        );
+    }
+
+    #[test]
+    fn stream_finished_snaps_to_bottom() {
+        // D-08: StreamEvent::Finished must call scroll_to_bottom() when auto_follow is true.
+        // Pre-fix: Finished arm only commits buffer and clears pending_rx;
+        //          transcript_scroll stays at whatever it was → test fails.
+        let mut app = App::new_test_empty();
+        app.auto_follow = false;
+        app.transcript_scroll = 5;
+        app.handle_stream_event(StreamEvent::Started);
+        app.handle_stream_event(StreamEvent::Delta("some text".to_string()));
+        // Simulate user re-engaging auto_follow before stream finishes
+        app.auto_follow = true;
+        app.handle_stream_event(StreamEvent::Finished);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "Finished with auto_follow=true must call scroll_to_bottom() which zeros transcript_scroll"
+        );
+        assert!(
+            app.auto_follow,
+            "auto_follow must remain true after Finished snap"
+        );
+    }
+
+    #[test]
+    fn submit_calls_scroll_to_bottom() {
+        // D-09: submit() must call scroll_to_bottom() instead of bare auto_follow=true.
+        // Pre-fix: submit() only sets auto_follow=true at line 742;
+        //          transcript_scroll stays at 7 → test fails.
+        let mut app = App::new_test_empty();
+        app.transcript_scroll = 7;
+        app.auto_follow = false;
+        app.textarea.insert_str("hello world");
+        app.submit();
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "submit() must call scroll_to_bottom() which zeros transcript_scroll"
+        );
+        assert!(
+            app.auto_follow,
+            "submit() must re-engage auto_follow via scroll_to_bottom()"
+        );
+    }
+
+    #[test]
+    fn end_key_calls_scroll_to_bottom() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        // D-10: End key (plain) must call scroll_to_bottom().
+        // Pre-fix: End falls through to textarea catch-all → transcript_scroll stays at 9.
+        let mut app = App::new_test_empty();
+        app.transcript_scroll = 9;
+        app.auto_follow = false;
+        let end_key = KeyEvent {
+            code: KeyCode::End,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(end_key);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "End key must call scroll_to_bottom() which zeros transcript_scroll"
+        );
+        assert!(
+            app.auto_follow,
+            "End key must re-engage auto_follow via scroll_to_bottom()"
+        );
+
+        // Also verify Ctrl+End (same arm via wildcard modifiers)
+        app.transcript_scroll = 9;
+        app.auto_follow = false;
+        let ctrl_end = KeyEvent {
+            code: KeyCode::End,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(ctrl_end);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "Ctrl+End must also call scroll_to_bottom()"
+        );
+        assert!(
+            app.auto_follow,
+            "Ctrl+End must re-engage auto_follow via scroll_to_bottom()"
+        );
+    }
+
+    #[test]
+    fn auto_follow_tracks_buffer_growth() {
+        // D-13c: With auto_follow=true, reconcile_scroll must snap transcript_scroll
+        // to the actual rendered bottom when assistant_buffer has grown.
+        // Pre-fix: transcript_line_count under-counts (ignores prefix) so max < real
+        //          total → reconcile_scroll clamps short of the actual bottom.
+        let mut app = App::new_test_empty();
+        let a = area(80, 24);
+        // Empty history: reconcile_scroll → transcript_scroll == 0
+        app.reconcile_scroll(a);
+        assert_eq!(app.transcript_scroll, 0);
+
+        // Push a large assistant_buffer (200 lines)
+        app.assistant_buffer = Some("x\n".repeat(200));
+        app.auto_follow = true;
+        app.reconcile_scroll(a);
+
+        let max = app.transcript_max_scroll(a);
+        assert_eq!(
+            app.transcript_scroll, max,
+            "reconcile_scroll with auto_follow=true must snap transcript_scroll to transcript_max_scroll (post-fix the max is correct)"
+        );
+    }
 }
