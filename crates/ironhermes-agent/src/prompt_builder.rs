@@ -1550,4 +1550,51 @@ mod tests {
             "Workspace line should specifically be in Identity slot per CONTEXT.md Discretion + RESEARCH.md recommendation"
         );
     }
+
+    // ====================================================================
+    // Phase 21.8.2 Plan 03 D-07: activate_skill / clear_skill_overlays tests
+    // ====================================================================
+
+    #[test]
+    fn activate_skill_appends_to_overlays() {
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.activate_skill("ascii-art", "Skill body text");
+        let msg = pb.build_system_message();
+        let serialized = format!("{:?}", msg);
+        assert!(
+            serialized.contains("Skill body text"),
+            "activate_skill body must appear in build_system_message; got: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn activate_skill_multiple_concatenate() {
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.activate_skill("first-skill", "First body");
+        pb.activate_skill("second-skill", "Second body");
+        let serialized = format!("{:?}", pb.build_system_message());
+        assert!(serialized.contains("First body"));
+        assert!(serialized.contains("Second body"));
+        // Activation order preserved.
+        assert!(
+            serialized.find("First body").unwrap() < serialized.find("Second body").unwrap()
+        );
+    }
+
+    #[test]
+    fn clear_skill_overlays_removes_bodies() {
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.activate_skill("foo", "Foo body");
+        pb.clear_skill_overlays();
+        let serialized = format!("{:?}", pb.build_system_message());
+        assert!(!serialized.contains("Foo body"));
+    }
+
+    #[test]
+    fn no_overlays_no_skill_section_added() {
+        let pb = PromptBuilder::new("test-model", "cli");
+        let serialized = format!("{:?}", pb.build_system_message());
+        assert!(!serialized.contains("Activated Skill"));
+    }
 }
