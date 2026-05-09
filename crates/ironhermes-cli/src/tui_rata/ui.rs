@@ -114,4 +114,37 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui(f, &app)).unwrap();
     }
+
+    #[test]
+    fn scrollbar_renders_in_right_column_when_content_overflows() {
+        // Seed enough short lines to overflow a 24-row viewport.
+        // Each line <= 7 chars; "Hermes: " prefix uses 8 cols; remaining ~65 cols are spaces.
+        // Column 78 is therefore a space PRE-fix (no Scrollbar yet) and a thumb char POST-fix.
+        let body = (1..=25)
+            .map(|i| format!("ln{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let app = App::new_test_with_messages(vec![("assistant", Box::leak(body.into_boxed_str()))]);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // The Scrollbar (D-01..D-05) renders at column 78 — area.inner(Margin{vertical:1, horizontal:0})
+        // strips top/bottom border rows but keeps full width. Right border lives at col 79.
+        // Track occupies column 78 across rows 1..=22 (margin trims rows 0 and 23).
+        // Column 78 rows 1..17 are the transcript CONTENT rows (well inside the block,
+        // away from any border chars that appear at rows 17+ from adjacent blocks).
+        // Pre-fix: all spaces. Post-fix: Scrollbar track/thumb chars appear here.
+        let has_scrollbar = (1u16..17).any(|row| {
+            buf.cell((78, row))
+                .map(|c| c.symbol() != " ")
+                .unwrap_or(false)
+        });
+        assert!(
+            has_scrollbar,
+            "expected scrollbar thumb in column 78 rows 1..17 (transcript content area) when \
+             content overflows; got all-space. Buffer dump for col 78 rows 1..17: {:?}",
+            (1u16..17).map(|r| buf.cell((78, r)).map(|c| c.symbol().to_string())).collect::<Vec<_>>()
+        );
+    }
 }
