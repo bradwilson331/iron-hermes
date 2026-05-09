@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: completed
-stopped_at: Phase 21.8.1 context gathered
-last_updated: "2026-05-09T15:29:43.873Z"
-last_activity: 2026-05-09 -- Phase 21.8.1 marked complete
+status: planning
+stopped_at: Phase 21.8.2 context gathered
+last_updated: "2026-05-09T16:34:19.470Z"
+last_activity: 2026-05-09 -- Phase 21.8.2 inserted after 21.8.1
 progress:
-  total_phases: 21
-  completed_phases: 20
-  total_plans: 108
-  completed_plans: 108
+  total_phases: 35
+  completed_phases: 24
+  total_plans: 149
+  completed_plans: 149
   percent: 100
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.8.1 — local-dir-install-bug
+**Current focus:** Phase 21.8.2 — skills-hot-reload-command
 
 ## Current Position
 
-Phase: 21.8.1 — COMPLETE
-Plan: 1 of 5
-Status: Phase 21.8.1 complete
-Last activity: 2026-05-09 -- Phase 21.8.1 marked complete
+Phase: 21.8.2 — Not planned yet
+Plan: 0 of 0
+Status: Phase 21.8.2 inserted — ready to plan
+Last activity: 2026-05-09 -- Phase 21.8.2 inserted after 21.8.1
 
 ## Performance Metrics
 
@@ -405,6 +405,7 @@ Recent decisions affecting current work:
 - Phase 26.4.1 inserted after Phase 26.4: config fix (URGENT)
 - Phase 25.7 inserted after Phase 25: registering all skills in .ironhermes/skills and .ironhermes/optional-skills on install or commandline skills --scan <PATH> option (URGENT)
 - Phase 21.8.1 inserted after Phase 21.8: local-dir-install bug — installer rejects dir path identifiers (USERNAME/download/<skill>/) and requires a tarball; bug surfaced in 21.8 post-completion UAT (URGENT)
+- Phase 21.8.2 inserted after Phase 21.8.1: skills hot reload command (URGENT)
 
 ### Pending Todos
 
@@ -422,6 +423,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-08T20:08:39.368Z
-Stopped at: Phase 21.8.1 context gathered
-Resume file: .planning/phases/21.8.1-local-dir-install-bug/21.8.1-CONTEXT.md
+Last session: 2026-05-09T16:34:19.463Z
+Stopped at: Phase 21.8.2 context gathered
+Resume file: .planning/phases/21.8.2-skills-hot-reload-command/21.8.2-CONTEXT.md
