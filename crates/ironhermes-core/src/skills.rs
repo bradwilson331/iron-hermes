@@ -211,6 +211,24 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
     // Parse the YAML
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_block).ok()?;
 
+    // Phase 21.8.2 D-10/D-11/Pitfall 4: normalize Title Case / spaces to kebab-case
+    // BEFORE validation. In-memory only — the on-disk directory is never renamed.
+    // Consecutive hyphens (from multiple spaces) are collapsed so `validate_skill_name`'s
+    // `contains("--")` check does not reject e.g. "Code  Review" → "code--review".
+    let normalized_name = frontmatter
+        .name
+        .to_lowercase()
+        .replace(' ', "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut frontmatter = frontmatter;
+    frontmatter.name = normalized_name;
+    // D-12 warn (with path) is emitted from try_register_skill_from_dir where the
+    // path is in scope — see Task 2 of this plan. parse_skill_md keeps
+    // its `(content: &str)` signature unchanged.
+
     // SKILL-07 name validation (07.2 D-13, D-14, D-15): strict reject on name violations.
     if let Err(reason) = validate_skill_name(&frontmatter.name) {
         warn!(
@@ -1669,23 +1687,29 @@ mod tests {
 
     #[test]
     fn test_parse_skill_md_rejects_invalid_name() {
-        // Uppercase name must be strict-rejected (returns None).
+        // Phase 21.8.2 D-10: "Invalid Name" normalizes to "invalid-name" and LOADS.
+        // The old hard-reject behavior is superseded by D-10 normalization.
         let content = "---\nname: Invalid Name\ndescription: desc\n---\nBody";
         let result = parse_skill_md(content);
         assert!(
-            result.is_none(),
-            "Expected None for invalid name but got Some"
+            result.is_some(),
+            "D-10 normalization: 'Invalid Name' must normalize to 'invalid-name' and load"
         );
+        assert_eq!(result.unwrap().0.name, "invalid-name");
     }
 
     #[test]
     fn test_parse_skill_md_rejects_consecutive_hyphens() {
+        // Phase 21.8.2 D-10/Pitfall-4: "foo--bar" normalizes to "foo-bar" (split/filter/join
+        // collapses consecutive hyphens) and LOADS. The old hard-reject for `--` in the
+        // ORIGINAL name is superseded; only post-normalization consecutive hyphens reject.
         let content = "---\nname: foo--bar\ndescription: desc\n---\nBody";
         let result = parse_skill_md(content);
         assert!(
-            result.is_none(),
-            "Expected None for consecutive-hyphen name but got Some"
+            result.is_some(),
+            "D-10/Pitfall-4: 'foo--bar' must normalize to 'foo-bar' and load"
         );
+        assert_eq!(result.unwrap().0.name, "foo-bar");
     }
 
     #[test]
@@ -1772,7 +1796,8 @@ mod tests {
 
     #[test]
     fn test_registry_load_skips_invalid_name_skill() {
-        // Frontmatter name "Skill-Caps" has uppercase — strict-rejected by parse_skill_md.
+        // Phase 21.8.2 D-10: "Skill-Caps" normalizes to "skill-caps" and LOADS.
+        // The old hard-reject for uppercase is superseded by D-10 normalization.
         let dir = tempdir().unwrap();
         let skills_dir = dir.path().join("skills");
         let skill_dir = skills_dir.join("Skill-Caps");
@@ -1784,10 +1809,12 @@ mod tests {
         .unwrap();
 
         let registry = SkillRegistry::load_with_paths(&[skills_dir]);
-        assert!(
-            registry.list().is_empty(),
-            "Expected empty registry for skill with invalid uppercase name"
+        assert_eq!(
+            registry.list().len(),
+            1,
+            "D-10 normalization: 'Skill-Caps' must normalize to 'skill-caps' and load"
         );
+        assert!(registry.find("skill-caps").is_some());
     }
 
     #[test]
