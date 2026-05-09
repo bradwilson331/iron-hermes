@@ -283,6 +283,19 @@ Plans:
 - [x] 21.8.1-04-PLAN.md — Wave 4 integration tests + Nyquist closure: full pipeline integration test (no HTTP), every failure-mode from VALIDATION.md, cmd_remove source-dir-sacrosanct regression, original UAT identifier replay, VALIDATION.md per-task map populated
 - [x] 21.8.1-05-PLAN.md — Gap-closure (gap-01 chat tool-registry visibility): SkillRegistry::load_with_paths two-level scan so installed skills at <skills_root>/<category>/<name>/SKILL.md surface in chat /skills, gateway-driven Telegram prompts, and iron_hermes_ui webserver — all share the same Arc<SkillRegistry> via build_app_runtime_bundle. 9 unit tests + 3 CLI integration tests + 2 gateway integration tests; .hub/dotfile-dir skip; depth-bounded at 2; first-path-wins dedup preserved
 
+### Phase 21.8.2: skills hot reload command (INSERTED)
+
+**Goal:** Add three connected capabilities to the IronHermes skills system: (a) a /skills reload (and hermes skills reload CLI subcommand) hot-reload command that re-scans all configured skill search paths and atomically swaps the SkillRegistry mid-session — overriding Phase 21.8 D-23 deferred behavior so installed skills are usable without restart (D-01..D-05); (b) a SKILL-13 dynamic CommandRouter fallback that, after the existing 3-stage resolution (exact/alias/prefix) returns NotFound, looks up the command token in the SkillRegistry and, on hit, returns CommandResult::SkillActivated{name,body} so the REPL/gateway/TUI can prepend the SKILL.md body to the next system prompt — registered commands always win (D-06..D-09); (c) a Title Case / spaces normalization fix in parse_skill_md that auto-rewrites SKILL.md frontmatter names to kebab-case in-memory before validate_skill_name runs, with a tracing::warn emitted from try_register_skill_from_dir (path in scope) and consecutive hyphens collapsed to avoid double-hyphen rejection — unblocks 8 oh-my-claudecode skills currently being hard-rejected in live sessions (D-10..D-12). Closes the pre-existing wiring gap where ctx.skill_registry was None at all four CommandContext construction sites (run_chat, run_single, run_gateway via handler.rs, tui_rata build_command_context).
+
+**Depends on:** Phase 21.8.1
+
+**Plans:** 3 plans
+
+Plans:
+- [ ] 21.8.2-01-PLAN.md — Title Case / spaces normalization in parse_skill_md (D-10/D-11/D-12) + 9 unit/integration tests; standalone live-regression fix (Wave 1, no deps)
+- [ ] 21.8.2-02-PLAN.md — Foundation layer: CommandResult::SkillsReload + SkillActivated variants; cmd_skills(args, ctx) signature + reload arm; with_skill_registry wired at all 4 CommandContext sites; tui_rata App.skill_registry field; 11 unit + static-grep tests (Wave 1, parallel with 01)
+- [ ] 21.8.2-03-PLAN.md — Integration layer: REPL/gateway/TUI SkillsReload + SkillActivated arms; SKILL-13 NotFound fallback at 3 dispatch sites; hermes skills reload CLI subcommand; prompt_builder.activate_skill helper; 14+ tests including 2 subprocess end-to-end tests (Wave 2, depends on 02)
+
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
