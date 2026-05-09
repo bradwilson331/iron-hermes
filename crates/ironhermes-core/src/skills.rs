@@ -495,6 +495,30 @@ pub(crate) fn build_skill_search_paths(cwd: &Path, config: &SkillsConfig) -> Vec
 /// duplicate name. Mutates `seen_names` and `skills` on successful load.
 ///
 /// Phase 21.8.1 gap-closure: extracted from the inline `load_with_paths` loop
+/// Extract the raw `name:` value from a SKILL.md YAML frontmatter block.
+/// Used by `try_register_skill_from_dir` to detect whether `parse_skill_md`'s
+/// post-D-10 normalization changed the name. Returns the trimmed RHS of the
+/// first `name:` line inside the `---`-delimited frontmatter block, or None
+/// if the block is malformed.
+fn extract_raw_name_from_yaml(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    // Expect first non-empty line to be `---`.
+    let first = lines.next()?;
+    if first.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return None; // hit closing fence without finding `name:`
+        }
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    None
+}
+
 /// body so the same per-skill-dir processing can run at both nesting levels
 /// (`<root>/<dir>/SKILL.md` legacy + `<root>/<dir>/<sub>/SKILL.md` Phase 21.8
 /// installer layout). Behavior MUST be byte-for-byte identical to the
@@ -524,6 +548,19 @@ fn try_register_skill_from_dir(
             return;
         }
     };
+
+    // Phase 21.8.2 D-12: warn when parse_skill_md's D-10 normalization changed
+    // the name. The path is in scope here (`skill_md_path`) but NOT in
+    // parse_skill_md's signature, so the warn lives at this call site
+    // (RESEARCH Pitfall 2 / Option B).
+    if let Some(raw_name) = extract_raw_name_from_yaml(&content) {
+        if raw_name != frontmatter.name {
+            warn!(
+                "SkillRegistry: normalized skill name {:?} -> {:?} at path {:?}",
+                raw_name, frontmatter.name, skill_md_path
+            );
+        }
+    }
 
     // Phase 19 Plan 05 (D-13/D-14/D-15/D-16): scan skill at registry-load.
     // Scan scope = raw frontmatter text + body per D-14.
