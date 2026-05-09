@@ -1017,3 +1017,149 @@ fn uat_replay_bradwilson_download_ascii_art_without_prefix_emits_hint() {
         "no install must occur when hint fires; skills-lock.json must not be created"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 21.8.1-05 gap-01 closure: Task 2 integration tests
+//
+// These tests prove that skills installed via `ironhermes skills install`
+// (any source) are visible via SkillRegistry::load_with_paths — the same
+// function that backs every chat /skills, gateway, and Telegram surface.
+// ────────────────────────────────────────────────────────────────────────────
+
+const GAP01_SKILL_MD: &str = "---\n\
+name: catalog-visibility-skill\n\
+description: Phase 21.8.1-05 gap-01 fix - proves install->load loop\n\
+metadata:\n  hermes:\n    category: gap-closure-test\n\
+---\n\
+Body content for catalog visibility test.\n";
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: installed_local_dir_skill_appears_in_skill_registry_catalog
+//
+// Subprocess install via `local:` followed by SkillRegistry::load_with_paths
+// proves the install->load loop works end-to-end (gap-01 fix).
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn installed_local_dir_skill_appears_in_skill_registry_catalog() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let hermes_home = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+
+    // Write the skill source
+    std::fs::write(source_dir.path().join("SKILL.md"), GAP01_SKILL_MD).unwrap();
+
+    // Subprocess install
+    let exe = env!("CARGO_BIN_EXE_ironhermes");
+    let output = std::process::Command::new(exe)
+        .arg("skills")
+        .arg("install")
+        .arg(format!("local:{}", source_dir.path().display()))
+        .env("HERMES_HOME", hermes_home.path())
+        .env("HOME", hermes_home.path())
+        .output()
+        .expect("subprocess spawn");
+    assert!(
+        output.status.success(),
+        "install must succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify on-disk: skill landed at <HERMES_HOME>/skills/<category>/<name>/SKILL.md
+    let skills_root = hermes_home.path().join("skills");
+    assert!(
+        any_file_named(&skills_root, "SKILL.md"),
+        "gap-01 installer pre-condition: SKILL.md must exist under skills_root after install"
+    );
+
+    // Construct a fresh registry — bypass cwd resolution; hermetic single-path test
+    let registry = ironhermes_core::SkillRegistry::load_with_paths(&[skills_root.clone()]);
+
+    // Gap-01 closure proof: the skill must be visible to the registry
+    assert!(
+        registry.find("catalog-visibility-skill").is_some(),
+        "gap-01: skill at {:?} not visible to SkillRegistry::load_with_paths",
+        skills_root
+    );
+    let catalog = registry.catalog_text();
+    assert!(
+        catalog.contains("catalog-visibility-skill"),
+        "gap-01: catalog does not contain skill name: {}",
+        catalog
+    );
+    assert!(
+        catalog.contains("Phase 21.8.1-05 gap-01 fix - proves install->load loop"),
+        "gap-01: catalog does not contain skill description: {}",
+        catalog
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: installed_skills_sh_style_two_level_layout_appears_in_registry
+//
+// Hand-constructs the two-level layout (no subprocess) to prove the loader
+// sees the same layout regardless of source. Guards against future regression
+// where the install pipeline writes one place but the loader reads another.
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn installed_skills_sh_style_two_level_layout_appears_in_registry() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Hand-construct: <root>/skills-sh-category/test-skill/SKILL.md
+    let skill_dir = dir.path().join("skills-sh-category").join("test-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: test-skill\ndescription: skills-sh style two-level fixture\nmetadata:\n  hermes:\n    category: skills-sh-category\n---\nTest body.\n",
+    )
+    .unwrap();
+
+    let registry = ironhermes_core::SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]);
+    assert!(
+        registry.find("test-skill").is_some(),
+        "two-level layout <root>/<category>/<name>/SKILL.md must be visible regardless of source"
+    );
+    assert!(
+        registry.catalog_text().contains("test-skill"),
+        "catalog must include skills-sh-style two-level skill"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test: legacy_one_level_skill_still_loads_alongside_new_two_level_skills
+//
+// Backward-compat lock at the integration tier: one-level AND two-level skills
+// must both be discoverable from the same skills root.
+// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn legacy_one_level_skill_still_loads_alongside_new_two_level_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    // One-level legacy: <root>/legacy-skill/SKILL.md
+    let legacy_dir = root.join("legacy-skill");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(
+        legacy_dir.join("SKILL.md"),
+        "---\nname: legacy-skill\ndescription: Legacy one-level fixture\n---\nLegacy body.\n",
+    )
+    .unwrap();
+
+    // Two-level new: <root>/cat/new-skill/SKILL.md
+    let new_skill_dir = root.join("cat").join("new-skill");
+    std::fs::create_dir_all(&new_skill_dir).unwrap();
+    std::fs::write(
+        new_skill_dir.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: New two-level fixture\nmetadata:\n  hermes:\n    category: cat\n---\nNew body.\n",
+    )
+    .unwrap();
+
+    let registry = ironhermes_core::SkillRegistry::load_with_paths(&[root]);
+    assert_eq!(
+        registry.list().len(),
+        2,
+        "backward-compat: both one-level and two-level skills must load; found: {:?}",
+        registry.list().iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    assert!(registry.find("legacy-skill").is_some(), "one-level legacy skill must be findable");
+    assert!(registry.find("new-skill").is_some(), "two-level new skill must be findable");
+}

@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 21.8.1 context gathered
-last_updated: "2026-05-08T20:57:35.097Z"
-last_activity: 2026-05-08 -- Phase 21.8.1 execution started
+last_updated: "2026-05-09T12:37:43.288Z"
+last_activity: 2026-05-09 -- Phase 21.8.1 execution started
 progress:
   total_phases: 34
   completed_phases: 23
-  total_plans: 148
-  completed_plans: 144
-  percent: 97
+  total_plans: 149
+  completed_plans: 148
+  percent: 99
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 21.8.1 (local-dir-install-bug) — EXECUTING
-Plan: 1 of 4
+Plan: 1 of 5
 Status: Executing Phase 21.8.1
-Last activity: 2026-05-08 -- Phase 21.8.1 execution started
+Last activity: 2026-05-09 -- Phase 21.8.1 execution started
 
 ## Performance Metrics
 
