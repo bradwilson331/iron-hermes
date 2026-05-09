@@ -2147,4 +2147,95 @@ mod tests {
              mcp_manager: Option<Arc<McpManager>> field"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 21.8.1-05: Gateway-surface gap-01 closure tests
+    //
+    // Proves that a category-nested skill (`<skills_root>/<category>/<name>/SKILL.md`)
+    // flows through SkillRegistry::load_with_paths -> PromptBuilder::set_skill_registry
+    // -> PromptBuilder::build_split -> durable system-prompt text.
+    //
+    // This is the same code path the gateway runner uses for every Telegram and
+    // CLI gateway turn (runner.rs:1093: prompt_builder.set_skill_registry(...)).
+    // -------------------------------------------------------------------------
+
+    /// Phase 21.8.1-05 gap-01: a skill at the two-level category-nested layout
+    /// `<skills_root>/<category>/<name>/SKILL.md` must appear in the durable
+    /// system-prompt produced by PromptBuilder::build_split after
+    /// set_skill_registry is called — the same code path used by the gateway.
+    #[test]
+    fn installed_category_nested_skill_visible_to_gateway_prompt_builder() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested_skill_dir = dir
+            .path()
+            .join("skills")
+            .join("gap-test-cat")
+            .join("gateway-visibility-skill");
+        std::fs::create_dir_all(&nested_skill_dir).unwrap();
+        std::fs::write(
+            nested_skill_dir.join("SKILL.md"),
+            "---\nname: gateway-visibility-skill\ndescription: Phase 21.8.1-05 gateway-surface gap-01 fix\nmetadata:\n  hermes:\n    category: gap-test-cat\n---\nGateway surface integration test body.\n",
+        )
+        .unwrap();
+
+        let skill_registry = Arc::new(ironhermes_core::SkillRegistry::load_with_paths(&[dir
+            .path()
+            .join("skills")]));
+
+        // Sanity: skill must be discoverable (would fail before Task 1 landed)
+        assert!(
+            skill_registry.find("gateway-visibility-skill").is_some(),
+            "gap-01 gateway: skill at category-nested path must be discoverable by SkillRegistry::load_with_paths"
+        );
+
+        // Wire skill registry into a real PromptBuilder (same code path as gateway runner)
+        let mut prompt_builder = ironhermes_agent::PromptBuilder::new("test-model", "gateway");
+        prompt_builder.set_skill_registry(skill_registry.clone());
+        let (durable, _ephemeral) = prompt_builder.build_split();
+
+        // Prove the full chain: SkillRegistry -> PromptBuilder -> system-prompt text
+        assert!(
+            durable.contains("Available Skills"),
+            "gap-01 gateway: prompt must contain 'Available Skills' section: {}",
+            durable
+        );
+        assert!(
+            durable.contains("gateway-visibility-skill"),
+            "gap-01 gateway: prompt must contain the skill name: {}",
+            durable
+        );
+        assert!(
+            durable.contains("Phase 21.8.1-05 gateway-surface gap-01 fix"),
+            "gap-01 gateway: prompt must contain the skill description"
+        );
+    }
+
+    /// Phase 21.8.1-05: empty-registry path regression guard.
+    /// No skills section must be injected when the registry is empty,
+    /// preserving the existing prompt-shape contract.
+    #[test]
+    fn gateway_path_loads_zero_skills_for_empty_skills_root_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pass a path that doesn't exist — guaranteed empty registry
+        let skill_registry = Arc::new(ironhermes_core::SkillRegistry::load_with_paths(&[dir
+            .path()
+            .join("skills")]));
+
+        assert!(
+            skill_registry.list().is_empty(),
+            "empty skills root must produce an empty registry"
+        );
+
+        let mut prompt_builder = ironhermes_agent::PromptBuilder::new("test-model", "gateway");
+        prompt_builder.set_skill_registry(skill_registry.clone());
+        let (durable, _ephemeral) = prompt_builder.build_split();
+
+        // No skills section injected when registry is empty
+        // (the existing `if !registry.list().is_empty()` guard in build_split fires)
+        assert!(
+            !durable.contains("Available Skills"),
+            "no 'Available Skills' section must be injected for an empty registry: {}",
+            durable
+        );
+    }
 }
