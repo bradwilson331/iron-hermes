@@ -2974,4 +2974,57 @@ Body.
         assert!(registry.find("cat-as-skill").is_some(), "one-level scan must still find category-as-skill");
         assert!(registry.find("ascii-art").is_some(), "two-level scan must find nested skill");
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 21.8.2 D-10/D-11/D-12: Name normalization tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn normalize_title_case_to_kebab() {
+        let content = "---\nname: Command Development\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some(), "parse_skill_md must accept Title Case names after normalization");
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "command-development");
+    }
+
+    #[test]
+    fn normalize_spaces_to_hyphens() {
+        let content = "---\nname: my skill name\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "my-skill-name");
+    }
+
+    #[test]
+    fn normalize_no_double_hyphen() {
+        // Two consecutive spaces would naively become "code--review" which
+        // validate_skill_name rejects via contains("--"). Pitfall 4 fix:
+        // collapse consecutive hyphens during normalization.
+        let content = "---\nname: Code  Review\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some(), "Pitfall 4: consecutive spaces must not produce double hyphens");
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "code-review");
+        assert!(!fm.name.contains("--"));
+    }
+
+    #[test]
+    fn normalize_no_op_for_valid_names() {
+        let content = "---\nname: ascii-art\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "ascii-art");
+    }
+
+    #[test]
+    fn normalize_preserves_pre_existing_hyphen_with_titlecase() {
+        let content = "---\nname: MCP-Integration\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "mcp-integration");
+    }
 }
