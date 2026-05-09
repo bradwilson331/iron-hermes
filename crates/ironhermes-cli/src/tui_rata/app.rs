@@ -379,6 +379,21 @@ impl App {
         self.transcript_scroll = 0;
     }
 
+    /// Re-engage auto-follow so the viewport snaps to the newest line on
+    /// the next render tick. Symmetric counterpart of `scroll_to_top`.
+    ///
+    /// Used by `apply_slash_outcome` so System-role messages produced by
+    /// slash commands (notably `/skills reload` and SKILL-13 fallback) are
+    /// visible on the same render tick. Mirrors the agent-turn reference
+    /// behavior in `submit()` (sets `auto_follow = true`); also resets
+    /// `transcript_scroll` to 0 for symmetry with `scroll_to_top`.
+    /// `reconcile_scroll` (called next render from `ui.rs`) will clamp
+    /// `transcript_scroll` to `max` because `auto_follow == true`.
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_follow = true;
+        self.transcript_scroll = 0;
+    }
+
     /// Human-readable scroll indicator for the border title.
     pub fn scroll_indicator(&self, area: Rect) -> String {
         if self.auto_follow {
@@ -556,6 +571,7 @@ impl App {
                 let mut msg = ChatMessage::user(&text);
                 msg.role = Role::System;
                 self.history.push(msg);
+                self.scroll_to_bottom();
             }
             SlashOutcome::Silent => {}
             SlashOutcome::Quit => {
@@ -567,6 +583,7 @@ impl App {
                 let mut system = ChatMessage::user(&msg);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::SkillActivated { name, body } => {
                 self.pending_skill_overlays.push((name.clone(), body));
@@ -574,6 +591,7 @@ impl App {
                 let mut system = ChatMessage::user(&msg);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::ClearSession(text) => {
                 self.history.clear();
@@ -581,12 +599,14 @@ impl App {
                 let mut system = ChatMessage::user(&text);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::Unknown { input: _, hint } => {
                 let mut system = ChatMessage::user(&hint);
                 system.role = Role::System;
                 self.history.push(system);
                 self.status.hint = hint;
+                self.scroll_to_bottom();
             }
             SlashOutcome::Error(err) => {
                 let body = format!("error: {err}");
@@ -594,6 +614,7 @@ impl App {
                 system.role = Role::System;
                 self.history.push(system);
                 self.status.hint = format!("error: {err}");
+                self.scroll_to_bottom();
             }
         }
     }
