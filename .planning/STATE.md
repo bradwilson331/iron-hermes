@@ -4,10 +4,10 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 21.8.2 context gathered
-last_updated: "2026-05-09T20:26:47.088Z"
+last_updated: "2026-05-09T21:20:45.927Z"
 last_activity: 2026-05-09
 progress:
-  total_phases: 35
+  total_phases: 36
   completed_phases: 25
   total_plans: 153
   completed_plans: 153
@@ -406,6 +406,7 @@ Recent decisions affecting current work:
 - Phase 25.7 inserted after Phase 25: registering all skills in .ironhermes/skills and .ironhermes/optional-skills on install or commandline skills --scan <PATH> option (URGENT)
 - Phase 21.8.1 inserted after Phase 21.8: local-dir-install bug — installer rejects dir path identifiers (USERNAME/download/<skill>/) and requires a tarball; bug surfaced in 21.8 post-completion UAT (URGENT)
 - Phase 21.8.2 inserted after Phase 21.8.1: skills hot reload command (URGENT)
+- Phase 21.8.3 inserted after Phase 21.8.2: tui-streaming-scroll-fix-and-scrollbar (URGENT)
 
 ### Pending Todos
 

@@ -296,6 +296,16 @@ Plans:
 - [x] 21.8.2-02-PLAN.md — Foundation layer: CommandResult::SkillsReload + SkillActivated variants; cmd_skills(args, ctx) signature + reload arm; with_skill_registry wired at all 4 CommandContext sites; tui_rata App.skill_registry field; 11 unit + static-grep tests (Wave 1, parallel with 01)
 - [x] 21.8.2-03-PLAN.md — Integration layer: REPL/gateway/TUI SkillsReload + SkillActivated arms; SKILL-13 NotFound fallback at 3 dispatch sites; hermes skills reload CLI subcommand; prompt_builder.activate_skill helper; 14+ tests including 2 subprocess end-to-end tests (Wave 2, depends on 02)
 
+### Phase 21.8.3: tui-streaming-scroll-fix-and-scrollbar (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 21.8.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 21.8.3 to break down)
+
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
