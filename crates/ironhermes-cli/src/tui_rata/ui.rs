@@ -13,8 +13,8 @@
 use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position, Rect},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    layout::{Constraint, Direction, Layout, Margin, Position, Rect},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use crate::tui_rata::app::App;
@@ -60,6 +60,20 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((app.transcript_scroll, 0));
     frame.render_widget(paragraph, area);
+
+    // D-01..D-05: Scrollbar always visible, inside border, right edge, default style.
+    // ScrollbarState built per-render from authoritative App fields — no cached state.
+    // area.inner(Margin{vertical:1, horizontal:1}) trims all four border cells so the
+    // track renders at column width-2 (inside the right border) not on the border char.
+    let total = app.transcript_line_count(area.width as usize);
+    let mut scrollbar_state = ScrollbarState::new(total)
+        .position(app.transcript_scroll as usize);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+    frame.render_stateful_widget(
+        scrollbar,
+        area.inner(Margin { vertical: 1, horizontal: 1 }),
+        &mut scrollbar_state,
+    );
 }
 
 fn render_knight_rider(frame: &mut Frame, app: &App, area: Rect) {
@@ -113,5 +127,38 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn scrollbar_renders_in_right_column_when_content_overflows() {
+        // Seed enough short lines to overflow a 24-row viewport.
+        // Each line <= 7 chars; "Hermes: " prefix uses 8 cols; remaining ~65 cols are spaces.
+        // Column 78 is therefore a space PRE-fix (no Scrollbar yet) and a thumb char POST-fix.
+        let body = (1..=25)
+            .map(|i| format!("ln{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let app = App::new_test_with_messages(vec![("assistant", Box::leak(body.into_boxed_str()))]);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // The Scrollbar (D-01..D-05) renders at column 78 — area.inner(Margin{vertical:1, horizontal:1})
+        // trims all four border rows/cols. Right border at col 79; inner right edge = col 78.
+        // Track occupies column 78 in the content rows (rows 1..17 are safe, away from border noise).
+        // Column 78 rows 1..17 are the transcript CONTENT rows (well inside the block,
+        // away from any border chars that appear at rows 17+ from adjacent blocks).
+        // Pre-fix: all spaces. Post-fix: Scrollbar track/thumb chars appear here.
+        let has_scrollbar = (1u16..17).any(|row| {
+            buf.cell((78, row))
+                .map(|c| c.symbol() != " ")
+                .unwrap_or(false)
+        });
+        assert!(
+            has_scrollbar,
+            "expected scrollbar thumb in column 78 rows 1..17 (transcript content area) when \
+             content overflows; got all-space. Buffer dump for col 78 rows 1..17: {:?}",
+            (1u16..17).map(|r| buf.cell((78, r)).map(|c| c.symbol().to_string())).collect::<Vec<_>>()
+        );
     }
 }
