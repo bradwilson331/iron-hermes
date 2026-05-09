@@ -2475,7 +2475,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
 
     info!("Starting IronHermes Telegram Gateway");
-    let mut runner = GatewayRunner::new(config, resolver, registry);
+    let mut runner = GatewayRunner::new(config.clone(), resolver, registry);
     // Plan 21.7-05: thread the same BudgetHandle constructed above into the
     // runner so each per-request AgentLoop shares the counter with the
     // registered AgentSubagentRunner (PROV-10 parent/child shared).
@@ -2496,6 +2496,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
     runner.set_job_store(job_store);
     runner.set_skill_registry(skill_registry);
+    // Phase 21.8.2 D-02: wire SkillsConfig so the gateway SkillsReload arm can reload.
+    runner.set_skills_config(config.skills.clone());
     runner.set_hook_registry(hook_registry);
     runner.set_active_skills(active_skills);
     // Phase 25.1 D-17: wire shared browser session Arc into the runner so per-request

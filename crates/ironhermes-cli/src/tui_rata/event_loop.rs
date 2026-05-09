@@ -565,6 +565,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         system_message,
         // Phase 21.8.2: forward skill registry to App.
         skill_registry: Some(skill_registry.clone()),
+        // Phase 21.8.2 Plan 03: SkillsConfig for hot-reload arm + pending overlays buffer.
+        skills_config: config.skills.clone(),
+        pending_skill_overlays: Vec::new(),
     })
 }
 

@@ -282,6 +282,10 @@ pub enum SlashOutcome {
     McpReload,
     /// Session cleared; string is the "session cleared" confirmation message.
     ClearSession(String),
+    /// Skills registry reloaded; string is the diff/summary message.
+    SkillsReload(String),
+    /// A skill was activated via SKILL-13 fallback; inject into next turn.
+    SkillActivated { name: String, body: String },
     /// Input started with `/` but matched no command. `hint` may contain a
     /// "Did you mean `/X`?" suggestion from `suggest_typo`.
     Unknown { input: String, hint: String },
@@ -360,15 +364,26 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
             }
         }
         ResolveResult::NotFound => {
-            // D-18 item 8 — typo suggester integration point.
-            let known = collect_known_command_names(&app.command_router);
-            let stripped = input
+            // SKILL-13 fallback: check skill registry before typo-hint.
+            let cmd_token = input
                 .trim_start_matches('/')
                 .split_whitespace()
                 .next()
                 .unwrap_or("");
+            if let Some(registry) = &app.skill_registry {
+                if let Some(record) = registry.find(cmd_token) {
+                    if let Some(body) = registry.read_content(&record.name) {
+                        return SlashOutcome::SkillActivated {
+                            name: record.name.clone(),
+                            body,
+                        };
+                    }
+                }
+            }
+            // D-18 item 8 — typo suggester integration point.
+            let known = collect_known_command_names(&app.command_router);
             let known_refs: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
-            let hint = match suggest_typo(stripped, &known_refs) {
+            let hint = match suggest_typo(cmd_token, &known_refs) {
                 Some(candidate) => format!("Did you mean `/{candidate}`?"),
                 None => "Type /help for the list of commands.".to_string(),
             };
@@ -1052,13 +1067,9 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
             hint: "Unknown command. Type /help for the list.".to_string(),
         },
         CommandResult::McpReload => SlashOutcome::McpReload,
-        CommandResult::SkillsReload => SlashOutcome::Unknown {
-            input: String::new(),
-            hint: "Phase 21.8.2 Plan 03 lands TUI skill reload integration.".to_string(),
-        },
-        CommandResult::SkillActivated { .. } => SlashOutcome::Unknown {
-            input: String::new(),
-            hint: "Phase 21.8.2 Plan 03 lands TUI skill activation integration.".to_string(),
-        },
+        CommandResult::SkillsReload => SlashOutcome::SkillsReload(
+            "Skills reloaded.".to_string(),
+        ),
+        CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
     }
 }
