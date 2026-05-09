@@ -92,10 +92,17 @@ pub fn dispatch_command(
             ))
         }
         ResolveResult::NotFound => {
-            // Check skill registry for /<skill-name> catch-all (D-06)
+            // Phase 21.8.2 D-06/D-08: SKILL-13 dynamic fallback. Registered commands
+            // win because the 3-stage resolution ran first; we only reach NotFound when
+            // no registered command matched. cmd is already the bare token (no leading /).
             if let Some(registry) = &ctx.skill_registry {
-                if registry.find(cmd).is_some() {
-                    return CommandResult::Handled(format!("Activating skill: {}", cmd));
+                if let Some(record) = registry.find(cmd) {
+                    if let Some(body) = registry.read_content(&record.name) {
+                        return CommandResult::SkillActivated {
+                            name: record.name.clone(),
+                            body,
+                        };
+                    }
                 }
             }
             // Phase 22.3 D-10 / UI-SPEC TYPO-4: append Levenshtein-2 suggestion

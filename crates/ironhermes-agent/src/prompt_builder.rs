@@ -81,6 +81,10 @@ pub struct PromptBuilder {
     /// optional mirror and owns the hook-ordering contract.
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     skill_registry: Option<Arc<SkillRegistry>>,
+    /// Phase 21.8.2 D-07: skill overlays activated mid-session via the SKILL-13
+    /// CommandRouter fallback. Each (name, body) pair is prepended to the system
+    /// slot of `build_system_message`. Cleared on /clear via clear_skill_overlays().
+    skill_overlays: Vec<(String, String)>,
     /// Snapshot of active toolsets used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
     /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
     active_toolsets: HashSet<String>,
@@ -106,6 +110,7 @@ impl PromptBuilder {
             slots: BTreeMap::new(),
             memory_manager: None,
             skill_registry: None,
+            skill_overlays: Vec::new(),
             active_toolsets: HashSet::new(),
             active_tools: HashSet::new(),
             user_profile_enabled: true,
@@ -184,6 +189,20 @@ impl PromptBuilder {
     /// Set the skill registry for catalog injection into the system prompt.
     pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
         self.skill_registry = Some(registry);
+    }
+
+    /// Phase 21.8.2 D-07: activate a skill by appending its body to the active
+    /// overlays. The next call to `build_system_message` prepends every
+    /// (name, body) pair to the system slot. Called by the SKILL-13 fallback in
+    /// the REPL loop / gateway / TUI when a slash command resolves to a skill
+    /// rather than a registered command.
+    pub fn activate_skill(&mut self, name: &str, body: &str) {
+        self.skill_overlays.push((name.to_string(), body.to_string()));
+    }
+
+    /// Phase 21.8.2: clear all activated-skill overlays.
+    pub fn clear_skill_overlays(&mut self) {
+        self.skill_overlays.clear();
     }
 
     /// Phase 25.3 D-W-2: append `[Workspace: <root>]` to the Identity slot for
@@ -572,6 +591,13 @@ impl PromptBuilder {
 
         let mut durable = Vec::new();
         let mut ephemeral = Vec::new();
+
+        // Phase 21.8.2 D-07: prepend activated skill overlays as ephemeral content.
+        // Each overlay is injected before the main slot assembly so the model sees
+        // all activated skill bodies regardless of skip_context_files mode.
+        for (name, body) in &self.skill_overlays {
+            ephemeral.push(format!("# Activated Skill: {}\n\n{}", name, body));
+        }
 
         for (slot, content) in &slots {
             if *slot == PromptSlot::UserMessage {
