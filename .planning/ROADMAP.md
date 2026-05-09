@@ -289,12 +289,12 @@ Plans:
 
 **Depends on:** Phase 21.8.1
 
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
-- [ ] 21.8.2-01-PLAN.md — Title Case / spaces normalization in parse_skill_md (D-10/D-11/D-12) + 9 unit/integration tests; standalone live-regression fix (Wave 1, no deps)
-- [ ] 21.8.2-02-PLAN.md — Foundation layer: CommandResult::SkillsReload + SkillActivated variants; cmd_skills(args, ctx) signature + reload arm; with_skill_registry wired at all 4 CommandContext sites; tui_rata App.skill_registry field; 11 unit + static-grep tests (Wave 1, parallel with 01)
-- [ ] 21.8.2-03-PLAN.md — Integration layer: REPL/gateway/TUI SkillsReload + SkillActivated arms; SKILL-13 NotFound fallback at 3 dispatch sites; hermes skills reload CLI subcommand; prompt_builder.activate_skill helper; 14+ tests including 2 subprocess end-to-end tests (Wave 2, depends on 02)
+- [x] 21.8.2-01-PLAN.md — Title Case / spaces normalization in parse_skill_md (D-10/D-11/D-12) + 9 unit/integration tests; standalone live-regression fix (Wave 1, no deps)
+- [x] 21.8.2-02-PLAN.md — Foundation layer: CommandResult::SkillsReload + SkillActivated variants; cmd_skills(args, ctx) signature + reload arm; with_skill_registry wired at all 4 CommandContext sites; tui_rata App.skill_registry field; 11 unit + static-grep tests (Wave 1, parallel with 01)
+- [x] 21.8.2-03-PLAN.md — Integration layer: REPL/gateway/TUI SkillsReload + SkillActivated arms; SKILL-13 NotFound fallback at 3 dispatch sites; hermes skills reload CLI subcommand; prompt_builder.activate_skill helper; 14+ tests including 2 subprocess end-to-end tests (Wave 2, depends on 02)
 
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
