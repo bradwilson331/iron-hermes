@@ -301,11 +301,11 @@ Plans:
 **Goal:** Fix the rata-TUI's agent-turn streaming-scroll bug surfaced post-21.8.2 UAT and add a visible Scrollbar widget for transcript navigation feedback. Root cause locked in CONTEXT.md: `transcript_line_count()` (app.rs:425-440) under-counts wrapped rows by ignoring the `"You: "`/`"Hermes: "` role prefix prepended in `transcript_text()` AND counts System messages that `transcript_text()` skips, so `transcript_max_scroll()` returns the wrong value and `auto_follow=true` clamps short of the true bottom on long streaming responses (Atlanta-weather screenshot is the canonical reproduction). Phase fixes both line-count divergences narrowly, adds a `StreamEvent::Finished` snap-to-bottom safety net, unifies `submit()` with the `scroll_to_bottom()` helper plan 21.8.2-04 introduced, adds End/Ctrl+End jump-to-bottom binding, adds a "paused (N new lines below)" indicator, and renders a ratatui `Scrollbar` widget on the right edge of the transcript pane (always visible, default style, paired with the existing `scroll N/M` title indicator).
 **Requirements**: TBD (no REQ IDs — narrow gap-closure scoped from CONTEXT.md decisions D-01..D-16)
 **Depends on:** Phase 21.8.2
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 21.8.3-01-PLAN.md — Streaming-scroll fix in app.rs: transcript_line_count parity (D-06/D-07), Finished snap (D-08), submit() helper unification (D-09), End/Ctrl+End binding (D-10), paused indicator (D-11) + 6 RED→GREEN unit tests (Wave 1, no deps)
-- [ ] 21.8.3-02-PLAN.md — Scrollbar widget render in ui.rs: VerticalRight orientation inside border (D-01..D-05), default style, ScrollbarState built per-render from app.transcript_line_count + transcript_scroll, TestBackend snapshot test (D-14) (Wave 2, depends on 21.8.3-01 for parity-fixed line count)
+- [x] 21.8.3-02-PLAN.md — Scrollbar widget render in ui.rs: VerticalRight orientation inside border (D-01..D-05), default style, ScrollbarState built per-render from app.transcript_line_count + transcript_scroll, TestBackend snapshot test (D-14) (Wave 2, depends on 21.8.3-01 for parity-fixed line count)
 
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
