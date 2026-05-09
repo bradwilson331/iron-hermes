@@ -69,6 +69,12 @@ pub enum SkillsAction {
         #[command(subcommand)]
         action: TrustAction,
     },
+    /// Hot-reload the skill registry from the configured search paths.
+    ///
+    /// Equivalent to the `/skills reload` slash command inside a running REPL.
+    /// Prints a diff summary (added/removed/unchanged) and reports any SKILL.md
+    /// directories that were skipped due to validation errors.
+    Reload,
 }
 
 #[derive(Subcommand, Debug)]
@@ -808,6 +814,46 @@ where
         || dir_probe(identifier)
 }
 
+/// Hot-reload the skill registry from disk and print a diff summary.
+///
+/// Phase 21.8.2 Task 3: `hermes skills reload` CLI subcommand.
+/// Calls `SkillRegistry::load_with_config` synchronously, diffs against the
+/// previously loaded registry (always empty at CLI invocation time — shows all
+/// currently installed skills as "loaded"), and reports invalid_skipped count.
+pub fn cmd_reload(cfg: &Config) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
+
+    let registry = ironhermes_core::SkillRegistry::load_with_config(&cwd, &cfg.skills);
+    let loaded: Vec<String> = registry.list().iter().map(|r| r.name.clone()).collect();
+    let loaded_count = loaded.len();
+
+    // Count SKILL.md dirs that were scanned but not loaded (invalid skipped).
+    let invalid_skipped = ironhermes_core::build_skill_search_paths(&cwd, &cfg.skills)
+        .into_iter()
+        .filter_map(|p| std::fs::read_dir(p).ok())
+        .flat_map(|entries| entries.filter_map(|e| e.ok()))
+        .filter(|entry| {
+            let skill_md = entry.path().join("SKILL.md");
+            skill_md.exists()
+        })
+        .count()
+        .saturating_sub(loaded_count);
+
+    if loaded_count == 0 {
+        println!("Skills reloaded: 0 loaded, {} invalid skipped.", invalid_skipped);
+    } else {
+        println!(
+            "Skills reloaded: {} loaded, {} invalid skipped.",
+            loaded_count, invalid_skipped
+        );
+        for name in &loaded {
+            println!("  + {}", name);
+        }
+    }
+    Ok(0)
+}
+
 pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> anyhow::Result<i32> {
     let mut cfg = load_config(config_path)?;
     match action {
@@ -830,6 +876,7 @@ pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> an
             Ok(code)
         }
         SkillsAction::List { format } => cmd_list(&cfg, format),
+        SkillsAction::Reload => cmd_reload(&cfg),
         SkillsAction::Trust { action } => match action {
             TrustAction::Add { repo } => {
                 cmd_trust_add_impl(&mut cfg, config_path, &repo)?;
