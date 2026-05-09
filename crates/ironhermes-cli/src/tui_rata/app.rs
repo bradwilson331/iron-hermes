@@ -379,6 +379,21 @@ impl App {
         self.transcript_scroll = 0;
     }
 
+    /// Re-engage auto-follow so the viewport snaps to the newest line on
+    /// the next render tick. Symmetric counterpart of `scroll_to_top`.
+    ///
+    /// Used by `apply_slash_outcome` so System-role messages produced by
+    /// slash commands (notably `/skills reload` and SKILL-13 fallback) are
+    /// visible on the same render tick. Mirrors the agent-turn reference
+    /// behavior in `submit()` (sets `auto_follow = true`); also resets
+    /// `transcript_scroll` to 0 for symmetry with `scroll_to_top`.
+    /// `reconcile_scroll` (called next render from `ui.rs`) will clamp
+    /// `transcript_scroll` to `max` because `auto_follow == true`.
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_follow = true;
+        self.transcript_scroll = 0;
+    }
+
     /// Human-readable scroll indicator for the border title.
     pub fn scroll_indicator(&self, area: Rect) -> String {
         if self.auto_follow {
@@ -546,13 +561,17 @@ impl App {
     ///
     /// System messages are pushed with `Role::System` — slash output NEVER
     /// appears as `Role::User` (T-22.4-05-10).
-    fn apply_slash_outcome(&mut self, outcome: crate::tui_rata::commands::SlashOutcome) {
+    ///
+    /// Visibility widened to `pub(super)` for unit-test access from
+    /// `mod scroll_tests` — Phase 21.8.2 G-01 closure. Still crate-private.
+    pub(super) fn apply_slash_outcome(&mut self, outcome: crate::tui_rata::commands::SlashOutcome) {
         use crate::tui_rata::commands::SlashOutcome;
         match outcome {
             SlashOutcome::Handled(text) => {
                 let mut msg = ChatMessage::user(&text);
                 msg.role = Role::System;
                 self.history.push(msg);
+                self.scroll_to_bottom();
             }
             SlashOutcome::Silent => {}
             SlashOutcome::Quit => {
@@ -564,6 +583,7 @@ impl App {
                 let mut system = ChatMessage::user(&msg);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::SkillActivated { name, body } => {
                 self.pending_skill_overlays.push((name.clone(), body));
@@ -571,6 +591,7 @@ impl App {
                 let mut system = ChatMessage::user(&msg);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::ClearSession(text) => {
                 self.history.clear();
@@ -578,12 +599,14 @@ impl App {
                 let mut system = ChatMessage::user(&text);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::Unknown { input: _, hint } => {
                 let mut system = ChatMessage::user(&hint);
                 system.role = Role::System;
                 self.history.push(system);
                 self.status.hint = hint;
+                self.scroll_to_bottom();
             }
             SlashOutcome::Error(err) => {
                 let body = format!("error: {err}");
@@ -591,6 +614,7 @@ impl App {
                 system.role = Role::System;
                 self.history.push(system);
                 self.status.hint = format!("error: {err}");
+                self.scroll_to_bottom();
             }
         }
     }
@@ -1248,5 +1272,90 @@ mod scroll_tests {
         assert_eq!(app.knight_rider_tick, 1);
         app.on_tick();
         assert_eq!(app.knight_rider_tick, 2);
+    }
+
+    // — apply_slash_outcome scroll re-engagement (Phase 21.8.2 Plan 04, G-01) ──
+
+    #[test]
+    fn apply_slash_outcome_skills_reload_re_engages_auto_follow() {
+        // Phase 21.8.2 Plan 04 G-01 closure (RED):
+        // SkillsReload must call scroll_to_bottom() so the diff line is
+        // visible on the same render tick. Reference: submit() at app.rs:718.
+        let mut app = App::new_test_empty();
+        // Simulate user having scrolled up before issuing /skills reload.
+        app.scroll_up(5);
+        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        let prev_len = app.history.len();
+
+        let outcome = crate::tui_rata::commands::SlashOutcome::SkillsReload(
+            "Skills reloaded: 1 added (test-skill), 0 removed. Total: 5 skills.".to_string(),
+        );
+        app.apply_slash_outcome(outcome);
+
+        // Bug fix assertion: auto_follow must be re-engaged so the next
+        // render tick clamps transcript_scroll to bottom (via reconcile_scroll).
+        assert!(
+            app.auto_follow,
+            "SkillsReload arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
+        );
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "SkillsReload arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
+        );
+        // Sanity: the diff line was actually appended as a System message.
+        assert_eq!(
+            app.history.len(),
+            prev_len + 1,
+            "SkillsReload arm must push exactly one message",
+        );
+        assert_eq!(
+            app.history.last().expect("last history entry").role,
+            Role::System,
+            "SkillsReload arm must push the diff as a Role::System message",
+        );
+    }
+
+    #[test]
+    fn apply_slash_outcome_skill_activated_re_engages_auto_follow() {
+        // Phase 21.8.2 Plan 04 G-01 closure (RED):
+        // SkillActivated must call scroll_to_bottom() so the
+        // "Skill '<name>' activated for this turn." line is visible on
+        // the same render tick. Reference: submit() at app.rs:718.
+        let mut app = App::new_test_empty();
+        app.scroll_up(5);
+        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        let prev_len = app.history.len();
+
+        let outcome = crate::tui_rata::commands::SlashOutcome::SkillActivated {
+            name: "test-skill".to_string(),
+            body: "test body".to_string(),
+        };
+        app.apply_slash_outcome(outcome);
+
+        assert!(
+            app.auto_follow,
+            "SkillActivated arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
+        );
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "SkillActivated arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
+        );
+        // Sanity: the activation confirmation was appended as a System message.
+        assert_eq!(
+            app.history.len(),
+            prev_len + 1,
+            "SkillActivated arm must push exactly one message",
+        );
+        assert_eq!(
+            app.history.last().expect("last history entry").role,
+            Role::System,
+            "SkillActivated arm must push the activation confirmation as a Role::System message",
+        );
+        // Sanity: the body was buffered for the next turn.
+        assert_eq!(
+            app.pending_skill_overlays.len(),
+            1,
+            "SkillActivated arm must continue to buffer (name, body) into pending_skill_overlays",
+        );
     }
 }
