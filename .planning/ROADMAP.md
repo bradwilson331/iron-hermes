@@ -298,8 +298,8 @@ Plans:
 
 ### Phase 21.8.3: tui-streaming-scroll-fix-and-scrollbar (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Fix the rata-TUI's agent-turn streaming-scroll bug surfaced post-21.8.2 UAT and add a visible Scrollbar widget for transcript navigation feedback. Root cause locked in CONTEXT.md: `transcript_line_count()` (app.rs:425-440) under-counts wrapped rows by ignoring the `"You: "`/`"Hermes: "` role prefix prepended in `transcript_text()` AND counts System messages that `transcript_text()` skips, so `transcript_max_scroll()` returns the wrong value and `auto_follow=true` clamps short of the true bottom on long streaming responses (Atlanta-weather screenshot is the canonical reproduction). Phase fixes both line-count divergences narrowly, adds a `StreamEvent::Finished` snap-to-bottom safety net, unifies `submit()` with the `scroll_to_bottom()` helper plan 21.8.2-04 introduced, adds End/Ctrl+End jump-to-bottom binding, adds a "paused (N new lines below)" indicator, and renders a ratatui `Scrollbar` widget on the right edge of the transcript pane (always visible, default style, paired with the existing `scroll N/M` title indicator).
+**Requirements**: TBD (no REQ IDs — narrow gap-closure scoped from CONTEXT.md decisions D-01..D-16)
 **Depends on:** Phase 21.8.2
 **Plans:** 0 plans
 
