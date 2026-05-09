@@ -145,6 +145,16 @@ pub struct AppDeps {
 
     /// Phase 21.8.2: skill registry for `/skills` slash command + SKILL-13 fallback.
     pub skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
+
+    /// Phase 21.8.2 Plan 03 D-02 / D-Plan03-06: SkillsConfig used by the
+    /// SkillsReload event-loop arm to call `SkillRegistry::load_with_config`.
+    /// Populated by `build_app_deps` from `config.skills.clone()`.
+    pub skills_config: ironhermes_core::config::SkillsConfig,
+
+    /// Phase 21.8.2 Plan 03 D-07 (TUI delivery): pending activated-skill
+    /// overlays. The SkillActivated event-loop arm pushes (name, body) here;
+    /// the next turn's per-turn prompt_builder assembly reads + drains them.
+    pub pending_skill_overlays: Vec<(String, String)>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -256,6 +266,12 @@ pub struct App {
     /// Phase 21.8.2: skill registry for `/skills` slash command + SKILL-13 fallback.
     /// Wired into CommandContext via `build_command_context` in tui_rata/commands.rs.
     pub skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
+
+    /// Phase 21.8.2 Plan 03 D-02 / D-Plan03-06: see AppDeps doc above.
+    pub skills_config: ironhermes_core::config::SkillsConfig,
+
+    /// Phase 21.8.2 Plan 03 D-07 (TUI delivery): see AppDeps doc above.
+    pub pending_skill_overlays: Vec<(String, String)>,
 }
 
 impl App {
@@ -338,6 +354,9 @@ impl App {
             trajectory_writer: deps.trajectory_writer,
             // Phase 21.8.2: forward skill_registry from deps.
             skill_registry: deps.skill_registry,
+            // Phase 21.8.2 Plan 03: forward new fields.
+            skills_config: deps.skills_config,
+            pending_skill_overlays: Vec::new(),
         }
     }
 
@@ -541,6 +560,18 @@ impl App {
             }
             SlashOutcome::ResetTerminal => {}
             SlashOutcome::McpReload => {}
+            SlashOutcome::SkillsReload(msg) => {
+                let mut system = ChatMessage::user(&msg);
+                system.role = Role::System;
+                self.history.push(system);
+            }
+            SlashOutcome::SkillActivated { name, body } => {
+                self.pending_skill_overlays.push((name.clone(), body));
+                let msg = format!("Skill '{}' activated for this turn.", name);
+                let mut system = ChatMessage::user(&msg);
+                system.role = Role::System;
+                self.history.push(system);
+            }
             SlashOutcome::ClearSession(text) => {
                 self.history.clear();
                 self.assistant_buffer = None;
@@ -928,6 +959,11 @@ fn test_deps() -> AppDeps {
         trajectory_writer: None,
         // Phase 25.3-13 CR-04: tests don't exercise the seeded system message
         system_message: None,
+        // Phase 21.8.2: no skill registry in tests
+        skill_registry: None,
+        // Phase 21.8.2 Plan 03: default skills config + empty overlays buffer
+        skills_config: ironhermes_core::config::SkillsConfig::default(),
+        pending_skill_overlays: Vec::new(),
     }
 }
 

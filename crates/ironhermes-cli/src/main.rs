@@ -1013,6 +1013,49 @@ fn build_cmd_ctx(
     }
 }
 
+/// Phase 21.8.2 D-05 / D-Plan03-06: count SKILL.md files in the configured
+/// search paths that were SCANNED but failed to load (i.e. parse errors logged
+/// via `tracing::warn` from inside `load_with_config`). Returns
+/// `files_scanned - loaded_count`. Used by `/skills reload` arms to surface
+/// "(W invalid skipped — see logs)" in the diff output.
+///
+/// Re-walks `build_skill_search_paths(cwd, cfg)` and counts subdirectories
+/// that contain a `SKILL.md` file. Hidden directories (leading `.`) are
+/// skipped to match `load_with_config` internal behavior.
+fn count_invalid_skipped(
+    cwd: &std::path::Path,
+    cfg: &ironhermes_core::config::SkillsConfig,
+    loaded_count: usize,
+) -> usize {
+    let search_paths = ironhermes_core::build_skill_search_paths(cwd, cfg);
+    let mut files_scanned: usize = 0;
+    for root in &search_paths {
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip hidden directories starting with '.' (matches load_with_paths behavior).
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if path.join("SKILL.md").is_file() {
+                files_scanned += 1;
+            }
+        }
+    }
+    files_scanned.saturating_sub(loaded_count)
+}
+
 /// Run interactive chat mode.
 async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: bool) -> Result<()> {
     print_banner();
@@ -1601,12 +1644,87 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                             // (else: mcp_reloader is None, cmd_reload_mcp returned Output already)
                             continue;
                         }
-                        // Phase 21.8.2 Plan 02: variant exists; Plan 03 lands the real reload arm.
+                        // Phase 21.8.2 D-01..D-05: synchronous skill registry hot-reload.
                         CommandResult::SkillsReload => {
-                            unreachable!("Phase 21.8.2 Plan 03 lands the SkillsReload arm; Plan 02 only adds the variant");
+                            use std::collections::HashSet;
+                            let cwd = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                            let new_registry = std::sync::Arc::new(
+                                ironhermes_core::SkillRegistry::load_with_config(
+                                    &cwd,
+                                    &config.skills,
+                                ),
+                            );
+                            let old_names: HashSet<String> = skill_registry
+                                .list()
+                                .iter()
+                                .map(|s| s.name.clone())
+                                .collect();
+                            let new_names: HashSet<String> = new_registry
+                                .list()
+                                .iter()
+                                .map(|s| s.name.clone())
+                                .collect();
+                            let mut added: Vec<&String> =
+                                new_names.difference(&old_names).collect();
+                            let mut removed: Vec<&String> =
+                                old_names.difference(&new_names).collect();
+                            added.sort();
+                            removed.sort();
+                            let added_str = if added.is_empty() {
+                                "0 added".to_string()
+                            } else {
+                                format!(
+                                    "{} added ({})",
+                                    added.len(),
+                                    added
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            };
+                            let removed_str = if removed.is_empty() {
+                                "0 removed".to_string()
+                            } else {
+                                format!(
+                                    "{} removed ({})",
+                                    removed.len(),
+                                    removed
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            };
+                            // Phase 21.8.2 D-05 / D-Plan03-06: WARN-BUT-LOAD reporting.
+                            let invalid_skipped = count_invalid_skipped(
+                                &cwd,
+                                &config.skills,
+                                new_registry.list().len(),
+                            );
+                            let invalid_clause = if invalid_skipped > 0 {
+                                format!(" ({} invalid skipped — see logs)", invalid_skipped)
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "Skills reloaded: {}. {}. Total: {} skills.{}",
+                                added_str,
+                                removed_str,
+                                new_registry.list().len(),
+                                invalid_clause
+                            );
+                            // D-03: atomic swap. skill_registry is `let mut` (Plan 02 Edit 1b).
+                            skill_registry = new_registry.clone();
+                            prompt_builder.set_skill_registry(new_registry);
+                            continue;
                         }
-                        CommandResult::SkillActivated { .. } => {
-                            unreachable!("Phase 21.8.2 Plan 03 lands the SkillActivated arm; Plan 02 only adds the variant");
+                        // Phase 21.8.2 D-07: SKILL-13 dynamic skill activation.
+                        CommandResult::SkillActivated { name, body } => {
+                            prompt_builder.activate_skill(&name, &body);
+                            println!("Skill '{}' activated for this turn.", name);
+                            continue;
                         }
                     }
                 }
@@ -2357,7 +2475,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
 
     info!("Starting IronHermes Telegram Gateway");
-    let mut runner = GatewayRunner::new(config, resolver, registry);
+    let mut runner = GatewayRunner::new(config.clone(), resolver, registry);
     // Plan 21.7-05: thread the same BudgetHandle constructed above into the
     // runner so each per-request AgentLoop shares the counter with the
     // registered AgentSubagentRunner (PROV-10 parent/child shared).
@@ -2378,6 +2496,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
     runner.set_job_store(job_store);
     runner.set_skill_registry(skill_registry);
+    // Phase 21.8.2 D-02: wire SkillsConfig so the gateway SkillsReload arm can reload.
+    runner.set_skills_config(config.skills.clone());
     runner.set_hook_registry(hook_registry);
     runner.set_active_skills(active_skills);
     // Phase 25.1 D-17: wire shared browser session Arc into the runner so per-request

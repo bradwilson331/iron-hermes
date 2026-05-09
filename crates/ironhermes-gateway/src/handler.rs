@@ -67,7 +67,27 @@ pub struct GatewayMessageHandler {
     tool_registry: Arc<RwLock<ToolRegistry>>,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
-    skill_registry: Option<Arc<SkillRegistry>>,
+    /// Phase 21.8.2 D-03 / D-Plan03-01 UPDATED: interior-mutable Arc-of-Arc so
+    /// the `/skills reload` arm can atomically swap the inner Arc without
+    /// requiring &mut self. Outer Arc: shared ownership across handler clones.
+    /// Mutex: synchronous lock for the brief swap window (load_with_config is
+    /// sync; lock held only for the swap, not for the load). Inner Arc: the
+    /// actual `SkillRegistry` snapshot used by build_command_context calls.
+    skill_registry: Arc<std::sync::Mutex<Option<Arc<SkillRegistry>>>>,
+
+    /// Phase 21.8.2 D-Plan03-05 / D-07 (gateway delivery): per-session activated
+    /// skill overlays. The SkillActivated arm and the SKILL-13 fallback push
+    /// (name, body) for the current session key. The AgentLoop call site reads
+    /// the overlay vector for the session and prepends each body to the system
+    /// prompt before the agent runs (same semantics as hermes-agent's
+    /// per-session skill injection). Cleared on session-end / `/clear` (out of
+    /// scope for this phase — matches /personality overlay semantics).
+    skill_overlays: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, Vec<(String, String)>>>>,
+
+    /// Phase 21.8.2 D-02 / D-05: SkillsConfig used by the SkillsReload arm to
+    /// re-invoke load_with_config. Set via `set_skills_config` after construction.
+    skills_config: Option<ironhermes_core::config::SkillsConfig>,
+
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
     rate_limiter: PerUserRateLimiter,
     /// Phase 18 Plan 06: per-turn hygiene compression engine (runs at
@@ -148,7 +168,9 @@ impl GatewayMessageHandler {
             tool_registry,
             memory_manager: None,
             hook_registry: None,
-            skill_registry: None,
+            skill_registry: Arc::new(std::sync::Mutex::new(None)),
+            skill_overlays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            skills_config: None,
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             rate_limiter,
             gateway_engine: None,
@@ -284,8 +306,19 @@ impl GatewayMessageHandler {
     }
 
     /// Set the skill registry for catalog injection into the system prompt.
+    /// Phase 21.8.2 D-03: stores inside the interior-mutable Mutex so
+    /// `/skills reload` can atomically swap without &mut self.
     pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
-        self.skill_registry = Some(registry);
+        if let Ok(mut guard) = self.skill_registry.lock() {
+            *guard = Some(registry);
+        }
+    }
+
+    /// Phase 21.8.2 D-02: store the SkillsConfig so the SkillsReload arm can
+    /// call `load_with_config` on demand. Called from runner.build_gateway_handler
+    /// after `set_skill_registry`.
+    pub fn set_skills_config(&mut self, cfg: ironhermes_core::config::SkillsConfig) {
+        self.skills_config = Some(cfg);
     }
 
     /// Set the shared active skills tracker. Must be the same Arc given to SkillsTool
@@ -336,10 +369,15 @@ impl GatewayMessageHandler {
             ctx
         };
         // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in gateway.
-        let ctx = if let Some(sr) = &self.skill_registry {
-            ctx.with_skill_registry(sr.clone())
-        } else {
-            ctx
+        // D-03: read via lock so we always see the latest atomic swap.
+        let ctx = {
+            let snapshot: Option<Arc<SkillRegistry>> =
+                self.skill_registry.lock().ok().and_then(|g| g.clone());
+            if let Some(sr) = snapshot {
+                ctx.with_skill_registry(sr)
+            } else {
+                ctx
+            }
         };
         // Phase 25.3-15 CR-02 close-out: slash-dispatch CommandContext no longer
         // attaches a trajectory writer. The previous implementation attached a
@@ -454,20 +492,123 @@ impl GatewayMessageHandler {
                         // gateway (no TTY). Ignore silently. Added for exhaustiveness.
                     }
                     ironhermes_core::commands::CommandResult::SkillsReload => {
-                        // Phase 21.8.2 Plan 03 lands the gateway-side reload arm.
+                        // Phase 21.8.2 D-01..D-05: synchronous reload + D-03 atomic inner-Arc swap.
+                        use std::collections::HashSet;
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        let cfg = match &self.skills_config {
+                            Some(c) => c.clone(),
+                            None => {
+                                let _ = with_rate_limit_retry(|| adapter.send_message(
+                                    &event.chat_id,
+                                    "Skills reload unavailable: skills_config not set on gateway handler.",
+                                    None,
+                                )).await;
+                                return Ok(());
+                            }
+                        };
+                        // Acquire current snapshot for diff computation.
+                        let old_snapshot: Option<Arc<SkillRegistry>> =
+                            self.skill_registry.lock().ok().and_then(|g| g.clone());
+                        let new_inner = Arc::new(
+                            SkillRegistry::load_with_config(&cwd, &cfg),
+                        );
+                        let old_names: HashSet<String> = old_snapshot
+                            .as_ref()
+                            .map(|r| r.list().iter().map(|s| s.name.clone()).collect())
+                            .unwrap_or_default();
+                        let new_names: HashSet<String> = new_inner
+                            .list()
+                            .iter()
+                            .map(|s| s.name.clone())
+                            .collect();
+                        let mut added: Vec<&String> = new_names.difference(&old_names).collect();
+                        let mut removed: Vec<&String> = old_names.difference(&new_names).collect();
+                        added.sort();
+                        removed.sort();
+                        let added_str = if added.is_empty() {
+                            "0 added".to_string()
+                        } else {
+                            format!(
+                                "{} added ({})",
+                                added.len(),
+                                added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                            )
+                        };
+                        let removed_str = if removed.is_empty() {
+                            "0 removed".to_string()
+                        } else {
+                            format!(
+                                "{} removed ({})",
+                                removed.len(),
+                                removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                            )
+                        };
+                        // Phase 21.8.2 D-05: count parse-failures (files scanned vs loaded).
+                        let invalid_skipped = {
+                            let search_paths =
+                                ironhermes_core::build_skill_search_paths(&cwd, &cfg);
+                            let mut files_scanned: usize = 0;
+                            for root in &search_paths {
+                                if let Ok(entries) = std::fs::read_dir(root) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if !path.is_dir() {
+                                            continue;
+                                        }
+                                        if path
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .map(|n| n.starts_with('.'))
+                                            .unwrap_or(false)
+                                        {
+                                            continue;
+                                        }
+                                        if path.join("SKILL.md").is_file() {
+                                            files_scanned += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            files_scanned.saturating_sub(new_inner.list().len())
+                        };
+                        let invalid_clause = if invalid_skipped > 0 {
+                            format!(" ({} invalid skipped — see logs)", invalid_skipped)
+                        } else {
+                            String::new()
+                        };
+                        let diff_text = format!(
+                            "Skills reloaded: {}. {}. Total: {} skills.{}",
+                            added_str,
+                            removed_str,
+                            new_inner.list().len(),
+                            invalid_clause
+                        );
+                        // D-03 / D-Plan03-01 UPDATED: atomic swap of the inner Arc.
+                        if let Ok(mut guard) = self.skill_registry.lock() {
+                            *guard = Some(new_inner);
+                        }
                         let _ = with_rate_limit_retry(|| adapter.send_message(
-                            &event.chat_id,
-                            "Skills reload not yet wired to gateway adapter; see Phase 21.8.2 Plan 03.",
-                            None,
+                            &event.chat_id, &diff_text, None,
                         )).await;
+                        return Ok(());
                     }
-                    ironhermes_core::commands::CommandResult::SkillActivated { .. } => {
-                        // Phase 21.8.2 Plan 03 lands the gateway-side skill activation arm.
+                    ironhermes_core::commands::CommandResult::SkillActivated { name, body } => {
+                        // Phase 21.8.2 D-Plan03-05 / D-07: store in per-session overlay so
+                        // the next AgentLoop call site reads + prepends body to system prompt.
+                        if let Ok(mut overlays) = self.skill_overlays.lock() {
+                            overlays
+                                .entry(session_key.clone())
+                                .or_insert_with(Vec::new)
+                                .push((name.clone(), body));
+                        }
+                        let activation_msg = format!("Skill '{}' activated for this turn.", name);
                         let _ = with_rate_limit_retry(|| adapter.send_message(
                             &event.chat_id,
-                            "Skill activation not yet wired to gateway adapter; see Phase 21.8.2 Plan 03.",
+                            &activation_msg,
                             None,
                         )).await;
+                        return Ok(());
                     }
                 }
             }
@@ -485,6 +626,41 @@ impl GatewayMessageHandler {
                 with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None)).await?;
             }
             ResolveResult::NotFound => {
+                // Phase 21.8.2 D-06/D-08: SKILL-13 dynamic fallback before agent passthrough.
+                // Registered commands win because 3-stage resolution ran first.
+                let cmd_token = command_input
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !cmd_token.is_empty() {
+                    let snapshot: Option<Arc<SkillRegistry>> =
+                        self.skill_registry.lock().ok().and_then(|g| g.clone());
+                    if let Some(registry) = snapshot {
+                        if let Some(record) = registry.find(cmd_token) {
+                            if let Some(body) = registry.read_content(&record.name) {
+                                // D-Plan03-05 / D-07: store in per-session overlay so
+                                // the NEXT agent turn picks it up via the run_agent
+                                // skill_overlays read site.
+                                if let Ok(mut overlays) = self.skill_overlays.lock() {
+                                    overlays
+                                        .entry(session_key.clone())
+                                        .or_insert_with(Vec::new)
+                                        .push((record.name.clone(), body));
+                                }
+                                let skill13_msg = format!(
+                                    "Skill '{}' activated for this turn.", record.name
+                                );
+                                let _ = with_rate_limit_retry(|| adapter.send_message(
+                                    &event.chat_id,
+                                    &skill13_msg,
+                                    None,
+                                )).await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 // D-08: Unknown commands pass through to agent as normal message, preserving attachments
                 return self.run_agent(event, adapter, cancel, processed).await;
             }
@@ -593,11 +769,23 @@ impl GatewayMessageHandler {
         if let Some(ref mgr) = self.memory_manager {
             prompt_builder.set_memory_manager(mgr.clone());
         }
-        if let Some(ref registry) = self.skill_registry {
-            prompt_builder.set_skill_registry(registry.clone());
+        // Phase 21.8.2 D-03: read via lock to always see the latest atomic swap.
+        let registry_snapshot: Option<Arc<SkillRegistry>> =
+            self.skill_registry.lock().ok().and_then(|g| g.clone());
+        if let Some(registry) = registry_snapshot {
+            prompt_builder.set_skill_registry(registry);
         }
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
+        // Phase 21.8.2 D-Plan03-05 / D-07 (gateway delivery): read activated overlays
+        // for this session and inject before the agent turn so the model sees the skill body.
+        if let Ok(overlays) = self.skill_overlays.lock() {
+            if let Some(session_overlays) = overlays.get(&key) {
+                for (name, body) in session_overlays {
+                    prompt_builder.activate_skill(name, body);
+                }
+            }
+        }
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message
         let mut messages = vec![system_msg];

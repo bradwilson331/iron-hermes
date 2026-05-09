@@ -89,6 +89,10 @@ pub struct GatewayRunner {
     /// canonical SQLite session UUID. `set_trajectory_root` propagates this
     /// path into the inner `SessionStore` via `try_write`.
     trajectory_root: Option<std::path::PathBuf>,
+    /// Phase 21.8.2 D-02: SkillsConfig for the gateway SkillsReload arm.
+    /// Populated by `set_skills_config` (called from run_gateway after `set_skill_registry`).
+    /// `build_gateway_handler` passes it to the handler via `set_skills_config`.
+    skills_config: Option<ironhermes_core::config::SkillsConfig>,
     cancel: CancellationToken,
 }
 
@@ -123,6 +127,7 @@ impl GatewayRunner {
             toolset_session: None, // Phase 25.2 Plan 15 follow-up: wired by run_gateway before start()
             workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
             trajectory_root: None, // Phase 25.3-15 CR-02: wired by run_gateway before start()
+            skills_config: None,   // Phase 21.8.2 D-02: wired by run_gateway before start()
             cancel: CancellationToken::new(),
         }
     }
@@ -241,6 +246,13 @@ impl GatewayRunner {
         self.skill_registry = Some(registry);
     }
 
+    /// Phase 21.8.2 D-02: store the SkillsConfig so the SkillsReload arm can
+    /// call `load_with_config` on demand. Called from main.rs:run_gateway
+    /// immediately after `set_skill_registry`.
+    pub fn set_skills_config(&mut self, cfg: ironhermes_core::config::SkillsConfig) {
+        self.skills_config = Some(cfg);
+    }
+
     /// Set the shared active skills tracker. Passed to GatewayMessageHandler in start().
     pub fn set_active_skills(&mut self, skills: Arc<std::sync::Mutex<Vec<SkillRecord>>>) {
         self.active_skills = Some(skills);
@@ -297,6 +309,10 @@ impl GatewayRunner {
         }
         if let Some(ref registry) = self.skill_registry {
             handler.set_skill_registry(registry.clone());
+        }
+        // Phase 21.8.2 D-02: pass SkillsConfig so gateway SkillsReload arm can reload.
+        if let Some(ref cfg) = self.skills_config {
+            handler.set_skills_config(cfg.clone());
         }
         if let Some(ref skills) = self.active_skills {
             handler.set_active_skills(skills.clone());

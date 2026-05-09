@@ -45,6 +45,8 @@ pub use skills::{
     CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,
     SkillSource,
 };
+/// Phase 21.8.2 D-05: expose path-scan helper for D-05 WARN-BUT-LOAD invalid_skipped reporting.
+pub use skills::build_skill_search_paths;
 pub use ssrf::is_safe_url;
 pub use token_estimator::{
     TiktokenEncoding, TokenEstimator, global_estimate_tokens, init_global_estimator,

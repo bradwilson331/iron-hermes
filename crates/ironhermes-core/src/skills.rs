@@ -474,8 +474,9 @@ fn resolve_source(
 /// Build the ordered list of skill search paths for a given cwd and SkillsConfig.
 ///
 /// Defaults first (priority order), extras appended after (D-19).
-/// Exposed as `pub(crate)` so tests can pin the path construction logic.
-pub(crate) fn build_skill_search_paths(cwd: &Path, config: &SkillsConfig) -> Vec<PathBuf> {
+/// Exposed as `pub` so callers (e.g. CLI reload arm, gateway handler) can
+/// count scanned-vs-loaded for D-05 WARN-BUT-LOAD reporting.
+pub fn build_skill_search_paths(cwd: &Path, config: &SkillsConfig) -> Vec<PathBuf> {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
