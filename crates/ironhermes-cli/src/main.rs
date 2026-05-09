@@ -963,6 +963,8 @@ fn build_cmd_ctx(
     // built by run_chat / run_single / run_gateway via this single helper.
     workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    // Phase 21.8.2: skill_registry so /skills list shows catalog and /skills reload works.
+    skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
 ) -> CommandContext {
     let base = CommandContext::new(Platform::Local, session_id.to_string(), agent_running);
     let base = if let Some(mgr) = mcp_manager {
@@ -997,8 +999,15 @@ fn build_cmd_ctx(
     };
     // Phase 25.3 D-T-3: attach the per-session TrajectoryWriter handle so
     // slash dispatch sees the same writer that AgentLoop (Plan 9) consumes.
-    if let Some(handle) = trajectory_writer {
+    let ctx = if let Some(handle) = trajectory_writer {
         ctx.with_trajectory_writer(handle)
+    } else {
+        ctx
+    };
+    // Phase 21.8.2: wire skill_registry so /skills list shows catalog and
+    // /skills reload returns SkillsReload for the REPL loop to process.
+    if let Some(sr) = skill_registry {
+        ctx.with_skill_registry(sr)
     } else {
         ctx
     }
@@ -1287,7 +1296,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     let registry = runtime_bundle.registry.clone();
     let hook_registry = runtime_bundle.hook_registry.clone();
     let mcp_manager = runtime_bundle.mcp_manager.clone();
-    let skill_registry = runtime_bundle.skill_registry.clone();
+    let mut skill_registry = runtime_bundle.skill_registry.clone();
     let browser_session = runtime_bundle.browser_session.clone();
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
@@ -1312,7 +1321,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     if let Some(ref ws) = workspace {
         prompt_builder = prompt_builder.with_workspace_root(&ws.root);
     }
-    prompt_builder.set_skill_registry(skill_registry);
+    prompt_builder.set_skill_registry(skill_registry.clone());
     // Plan 20-03 Fix 2 / GAP-4: inject manager (when Some) before load_memory.
     if let Some(ref mgr) = memory_manager {
         prompt_builder.set_memory_manager(mgr.clone());
@@ -1490,6 +1499,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     // identical registry handle identity across dispatch
                     // sites (INV-21.7-08 / D-03 / D-04). Phase 25.3 Plan 8
                     // appends workspace + trajectory_writer for D-W-2 / D-T-3.
+                    // Phase 21.8.2: skill_registry threaded through so /skills works.
                     let cmd_ctx = build_cmd_ctx(
                         &session_id,
                         agent_running.clone(),
@@ -1502,6 +1512,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         Some(toolset_session.clone()),
                         workspace.clone(),
                         trajectory_writer.clone(),
+                        Some(skill_registry.clone()),
                     );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -1589,6 +1600,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                             }
                             // (else: mcp_reloader is None, cmd_reload_mcp returned Output already)
                             continue;
+                        }
+                        // Phase 21.8.2 Plan 02: variant exists; Plan 03 lands the real reload arm.
+                        CommandResult::SkillsReload => {
+                            unreachable!("Phase 21.8.2 Plan 03 lands the SkillsReload arm; Plan 02 only adds the variant");
+                        }
+                        CommandResult::SkillActivated { .. } => {
+                            unreachable!("Phase 21.8.2 Plan 03 lands the SkillActivated arm; Plan 02 only adds the variant");
                         }
                     }
                 }
@@ -1804,6 +1822,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                     let args = &parts[1..];
                                     // Phase 25.3 Plan 8: workspace + trajectory_writer threaded
                                     // through the mid-turn slash dispatch site (D-W-2 / D-T-3).
+                                    // Phase 21.8.2: skill_registry threaded through so /skills works.
                                     let cmd_ctx = build_cmd_ctx(
                                         &session_id,
                                         agent_running.clone(),
@@ -1816,6 +1835,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                         Some(toolset_session.clone()),
                                         workspace.clone(),
                                         trajectory_writer.clone(),
+                                        Some(skill_registry.clone()),
                                     );
                                     match dispatch_command(
                                         tui.extensions(),
@@ -1880,6 +1900,22 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                                 "{}",
                                                 "/clear ignored mid-turn — use after the turn ends"
                                                     .dimmed()
+                                            );
+                                        }
+                                        CommandResult::SkillsReload => {
+                                            // Mid-turn skills reload is deferred — too disruptive while the agent
+                                            // is mid-call. Mirrors the mid-turn McpReload + ClearSession pattern.
+                                            println!(
+                                                "{}",
+                                                "/skills reload ignored mid-turn — retry after the turn ends".dimmed()
+                                            );
+                                        }
+                                        CommandResult::SkillActivated { .. } => {
+                                            // Mid-turn skill activation is deferred — body injection mid-stream
+                                            // would race the in-flight agent's system-prompt assembly.
+                                            println!(
+                                                "{}",
+                                                "/<skill> activation ignored mid-turn — retry after the turn ends".dimmed()
                                             );
                                         }
                                     }

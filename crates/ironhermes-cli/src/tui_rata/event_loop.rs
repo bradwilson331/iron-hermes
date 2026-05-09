@@ -563,6 +563,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         // [Workspace: <root>] Identity-slot line. Seeded into App.history at
         // App::new so the per-turn AgentLoop sees it via messages_snapshot.
         system_message,
+        // Phase 21.8.2: forward skill registry to App.
+        skill_registry: Some(skill_registry.clone()),
     })
 }
 

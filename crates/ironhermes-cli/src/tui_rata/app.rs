@@ -142,6 +142,9 @@ pub struct AppDeps {
     /// Without this seed, the LLM sees no system prompt and [Workspace: <root>]
     /// is invisible on the default `hermes chat` surface.
     pub system_message: Option<ChatMessage>,
+
+    /// Phase 21.8.2: skill registry for `/skills` slash command + SKILL-13 fallback.
+    pub skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -249,6 +252,10 @@ pub struct App {
     /// Phase 25.3 D-T-3: TrajectoryWriter handle — see `AppDeps.trajectory_writer` doc.
     pub trajectory_writer:
         Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+
+    /// Phase 21.8.2: skill registry for `/skills` slash command + SKILL-13 fallback.
+    /// Wired into CommandContext via `build_command_context` in tui_rata/commands.rs.
+    pub skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
 }
 
 impl App {
@@ -329,6 +336,8 @@ impl App {
             // Phase 25.3 D-W-2 / D-T-3: Workspace + TrajectoryWriter for slash dispatch
             workspace: deps.workspace,
             trajectory_writer: deps.trajectory_writer,
+            // Phase 21.8.2: forward skill_registry from deps.
+            skill_registry: deps.skill_registry,
         }
     }
 

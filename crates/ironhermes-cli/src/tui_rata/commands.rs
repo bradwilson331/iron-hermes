@@ -597,6 +597,10 @@ fn build_command_context(app: &App) -> CommandContext {
     if let Some(tw) = &app.trajectory_writer {
         ctx = ctx.with_trajectory_writer(tw.clone());
     }
+    // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in TUI.
+    if let Some(sr) = &app.skill_registry {
+        ctx = ctx.with_skill_registry(sr.clone());
+    }
     ctx
 }
 
@@ -1048,5 +1052,13 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
             hint: "Unknown command. Type /help for the list.".to_string(),
         },
         CommandResult::McpReload => SlashOutcome::McpReload,
+        CommandResult::SkillsReload => SlashOutcome::Unknown {
+            input: String::new(),
+            hint: "Phase 21.8.2 Plan 03 lands TUI skill reload integration.".to_string(),
+        },
+        CommandResult::SkillActivated { .. } => SlashOutcome::Unknown {
+            input: String::new(),
+            hint: "Phase 21.8.2 Plan 03 lands TUI skill activation integration.".to_string(),
+        },
     }
 }

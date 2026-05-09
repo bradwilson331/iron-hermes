@@ -137,6 +137,9 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         CoreCommandResult::ResetTerminal => CommandResult::ResetTerminal,
         // Phase 21.2 Plan 04: MCP reload — pass through to REPL loop for async dispatch.
         CoreCommandResult::McpReload => CommandResult::McpReload,
+        // Phase 21.8.2 Plan 02: pass through to REPL loop — Plan 03 lands real integration arms.
+        CoreCommandResult::SkillsReload => CommandResult::SkillsReload,
+        CoreCommandResult::SkillActivated { name, body } => CommandResult::SkillActivated { name, body },
     }
 }
 

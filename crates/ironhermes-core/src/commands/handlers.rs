@@ -66,7 +66,7 @@ pub fn dispatch(
         "models" => cmd_models(args, ctx),
         "help" => cmd_help(ctx, router),
         "commands" => cmd_commands(args, ctx, router),
-        "skills" => cmd_skills(ctx),
+        "skills" => cmd_skills(args, ctx),
         "cron" => cmd_cron(args, ctx),
 
         // -------------------------------------------------------------------
@@ -729,10 +729,23 @@ fn cmd_reasoning(args: &[&str], _ctx: &CommandContext) -> CommandResult {
     CommandResult::Output(format!("Reasoning: {}", level))
 }
 
-fn cmd_skills(ctx: &CommandContext) -> CommandResult {
-    match &ctx.skill_registry {
-        Some(registry) => CommandResult::Output(registry.catalog_text()),
-        None => CommandResult::Output("No skills loaded.".to_string()),
+fn cmd_skills(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    match args.first().copied() {
+        // Phase 21.8.2 D-01: `/skills reload` returns the SkillsReload signal so
+        // the REPL loop / gateway handler performs the synchronous reload + diff.
+        Some("reload") => {
+            if ctx.skill_registry.is_some() {
+                CommandResult::SkillsReload
+            } else {
+                CommandResult::Output("Skills not configured.".to_string())
+            }
+        }
+        // No args, "list", or any other token preserves the existing list-catalog
+        // behavior. Future subcommands (e.g. `/skills status`) can branch here.
+        None | Some("list") | Some(_) => match &ctx.skill_registry {
+            Some(registry) => CommandResult::Output(registry.catalog_text()),
+            None => CommandResult::Output("No skills loaded.".to_string()),
+        },
     }
 }
 
@@ -2292,5 +2305,57 @@ mod tests {
             "expected /export-session Exact match, got: {:?}",
             result
         );
+    }
+}
+
+// =============================================================================
+// Phase 21.8.2: cmd_skills reload tests
+// =============================================================================
+
+#[cfg(test)]
+mod skills_reload_tests {
+    use super::*;
+    use crate::commands::context::CommandContext;
+    use crate::commands::Platform;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn empty_ctx() -> CommandContext {
+        CommandContext::new(
+            Platform::Local,
+            "test-session".to_string(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn cmd_skills_no_args_returns_no_skills_loaded_when_registry_none() {
+        let ctx = empty_ctx();
+        let result = cmd_skills(&[], &ctx);
+        assert_eq!(result, CommandResult::Output("No skills loaded.".to_string()));
+    }
+
+    #[test]
+    fn cmd_skills_reload_arg_returns_skills_not_configured_when_registry_none() {
+        let ctx = empty_ctx();
+        let result = cmd_skills(&["reload"], &ctx);
+        assert_eq!(result, CommandResult::Output("Skills not configured.".to_string()));
+    }
+
+    #[test]
+    fn cmd_skills_reload_arg_returns_skillsreload_when_registry_set() {
+        // Empty SkillRegistry — `is_some()` guard does not require non-empty.
+        let registry = Arc::new(crate::SkillRegistry::load_with_paths(&[]));
+        let ctx = empty_ctx().with_skill_registry(registry);
+        let result = cmd_skills(&["reload"], &ctx);
+        assert_eq!(result, CommandResult::SkillsReload);
+    }
+
+    #[test]
+    fn cmd_skills_no_args_returns_output_when_registry_set() {
+        let registry = Arc::new(crate::SkillRegistry::load_with_paths(&[]));
+        let ctx = empty_ctx().with_skill_registry(registry);
+        let result = cmd_skills(&[], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)));
     }
 }
