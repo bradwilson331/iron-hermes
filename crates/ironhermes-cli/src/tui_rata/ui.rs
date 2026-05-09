@@ -13,8 +13,8 @@
 use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position, Rect},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    layout::{Constraint, Direction, Layout, Margin, Position, Rect},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use crate::tui_rata::app::App;
@@ -60,6 +60,20 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((app.transcript_scroll, 0));
     frame.render_widget(paragraph, area);
+
+    // D-01..D-05: Scrollbar always visible, inside border, right edge, default style.
+    // ScrollbarState built per-render from authoritative App fields — no cached state.
+    // area.inner(Margin{vertical:1, horizontal:1}) trims all four border cells so the
+    // track renders at column width-2 (inside the right border) not on the border char.
+    let total = app.transcript_line_count(area.width as usize);
+    let mut scrollbar_state = ScrollbarState::new(total)
+        .position(app.transcript_scroll as usize);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+    frame.render_stateful_widget(
+        scrollbar,
+        area.inner(Margin { vertical: 1, horizontal: 1 }),
+        &mut scrollbar_state,
+    );
 }
 
 fn render_knight_rider(frame: &mut Frame, app: &App, area: Rect) {
@@ -129,9 +143,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
-        // The Scrollbar (D-01..D-05) renders at column 78 — area.inner(Margin{vertical:1, horizontal:0})
-        // strips top/bottom border rows but keeps full width. Right border lives at col 79.
-        // Track occupies column 78 across rows 1..=22 (margin trims rows 0 and 23).
+        // The Scrollbar (D-01..D-05) renders at column 78 — area.inner(Margin{vertical:1, horizontal:1})
+        // trims all four border rows/cols. Right border at col 79; inner right edge = col 78.
+        // Track occupies column 78 in the content rows (rows 1..17 are safe, away from border noise).
         // Column 78 rows 1..17 are the transcript CONTENT rows (well inside the block,
         // away from any border chars that appear at rows 17+ from adjacent blocks).
         // Pre-fix: all spaces. Post-fix: Scrollbar track/thumb chars appear here.
