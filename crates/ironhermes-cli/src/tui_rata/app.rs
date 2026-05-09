@@ -546,7 +546,10 @@ impl App {
     ///
     /// System messages are pushed with `Role::System` — slash output NEVER
     /// appears as `Role::User` (T-22.4-05-10).
-    fn apply_slash_outcome(&mut self, outcome: crate::tui_rata::commands::SlashOutcome) {
+    ///
+    /// Visibility widened to `pub(super)` for unit-test access from
+    /// `mod scroll_tests` — Phase 21.8.2 G-01 closure. Still crate-private.
+    pub(super) fn apply_slash_outcome(&mut self, outcome: crate::tui_rata::commands::SlashOutcome) {
         use crate::tui_rata::commands::SlashOutcome;
         match outcome {
             SlashOutcome::Handled(text) => {
@@ -1248,5 +1251,90 @@ mod scroll_tests {
         assert_eq!(app.knight_rider_tick, 1);
         app.on_tick();
         assert_eq!(app.knight_rider_tick, 2);
+    }
+
+    // — apply_slash_outcome scroll re-engagement (Phase 21.8.2 Plan 04, G-01) ──
+
+    #[test]
+    fn apply_slash_outcome_skills_reload_re_engages_auto_follow() {
+        // Phase 21.8.2 Plan 04 G-01 closure (RED):
+        // SkillsReload must call scroll_to_bottom() so the diff line is
+        // visible on the same render tick. Reference: submit() at app.rs:718.
+        let mut app = App::new_test_empty();
+        // Simulate user having scrolled up before issuing /skills reload.
+        app.scroll_up(5);
+        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        let prev_len = app.history.len();
+
+        let outcome = crate::tui_rata::commands::SlashOutcome::SkillsReload(
+            "Skills reloaded: 1 added (test-skill), 0 removed. Total: 5 skills.".to_string(),
+        );
+        app.apply_slash_outcome(outcome);
+
+        // Bug fix assertion: auto_follow must be re-engaged so the next
+        // render tick clamps transcript_scroll to bottom (via reconcile_scroll).
+        assert!(
+            app.auto_follow,
+            "SkillsReload arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
+        );
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "SkillsReload arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
+        );
+        // Sanity: the diff line was actually appended as a System message.
+        assert_eq!(
+            app.history.len(),
+            prev_len + 1,
+            "SkillsReload arm must push exactly one message",
+        );
+        assert_eq!(
+            app.history.last().expect("last history entry").role,
+            Role::System,
+            "SkillsReload arm must push the diff as a Role::System message",
+        );
+    }
+
+    #[test]
+    fn apply_slash_outcome_skill_activated_re_engages_auto_follow() {
+        // Phase 21.8.2 Plan 04 G-01 closure (RED):
+        // SkillActivated must call scroll_to_bottom() so the
+        // "Skill '<name>' activated for this turn." line is visible on
+        // the same render tick. Reference: submit() at app.rs:718.
+        let mut app = App::new_test_empty();
+        app.scroll_up(5);
+        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        let prev_len = app.history.len();
+
+        let outcome = crate::tui_rata::commands::SlashOutcome::SkillActivated {
+            name: "test-skill".to_string(),
+            body: "test body".to_string(),
+        };
+        app.apply_slash_outcome(outcome);
+
+        assert!(
+            app.auto_follow,
+            "SkillActivated arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
+        );
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "SkillActivated arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
+        );
+        // Sanity: the activation confirmation was appended as a System message.
+        assert_eq!(
+            app.history.len(),
+            prev_len + 1,
+            "SkillActivated arm must push exactly one message",
+        );
+        assert_eq!(
+            app.history.last().expect("last history entry").role,
+            Role::System,
+            "SkillActivated arm must push the activation confirmation as a Role::System message",
+        );
+        // Sanity: the body was buffered for the next turn.
+        assert_eq!(
+            app.pending_skill_overlays.len(),
+            1,
+            "SkillActivated arm must continue to buffer (name, body) into pending_skill_overlays",
+        );
     }
 }
