@@ -396,10 +396,16 @@ impl App {
 
     /// Human-readable scroll indicator for the border title.
     pub fn scroll_indicator(&self, area: Rect) -> String {
+        let max = self.transcript_max_scroll(area);
         if self.auto_follow {
             "live".to_string()
+        } else if self.pending_rx.is_some() || self.assistant_buffer.is_some() {
+            // D-11: paused indicator — derived from existing state (Option B per RESEARCH §Pattern 5).
+            // n = unseen scroll units below current viewport. Resets on resize because max changes
+            // with area height, which is acceptable per Claude's discretion.
+            let n = max.saturating_sub(self.transcript_scroll);
+            format!("paused ({n} new lines below)")
         } else {
-            let max = self.transcript_max_scroll(area);
             format!("scroll {}/{}", self.transcript_scroll, max)
         }
     }
@@ -423,17 +429,40 @@ impl App {
     }
 
     /// Total wrapped-line count across all history entries + streaming buffer.
+    ///
+    /// Mirrors `transcript_text()` semantics exactly — uses `role_style()` to
+    /// decide which messages to count, and subtracts the role-prefix length on
+    /// line `i == 0` so the model matches the renderer. See D-06/D-07 in
+    /// `.planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-CONTEXT.md`.
     pub fn transcript_line_count(&self, width: usize) -> usize {
         let mut total = 0usize;
         for msg in &self.history {
+            let (role_label, color) = role_style(msg);
+            // Mirror transcript_text() (line 785) — skip messages whose role_style returns None.
+            // No role currently returns None post-22.4-17; this is a structural guard for future
+            // Role variants. See .planning/phases/21.8.3.../21.8.3-RESEARCH.md Pitfall 1.
+            let Some(_color) = color else { continue };
+            let prefix_len = role_label.len() + 2; // ": " separator
             let body = render_message_body(msg);
-            for line in body.lines() {
-                total = total.saturating_add(wrapped_line_count(line, width));
+            for (i, line) in body.lines().enumerate() {
+                let effective_width = if i == 0 {
+                    width.saturating_sub(prefix_len).max(1)
+                } else {
+                    width
+                };
+                total = total.saturating_add(wrapped_line_count(line, effective_width));
             }
         }
         if let Some(buf) = &self.assistant_buffer {
-            for line in buf.lines() {
-                total = total.saturating_add(wrapped_line_count(line, width));
+            // assistant_buffer renders with "Hermes: " prefix on line 0 (transcript_text:807-819)
+            let prefix_len = "Hermes".len() + 2; // 8
+            for (i, line) in buf.lines().enumerate() {
+                let effective_width = if i == 0 {
+                    width.saturating_sub(prefix_len).max(1)
+                } else {
+                    width
+                };
+                total = total.saturating_add(wrapped_line_count(line, effective_width));
             }
         }
         total
@@ -492,6 +521,9 @@ impl App {
             // Scroll (D-05 / tmon parity)
             (KeyCode::PageUp, _) => self.scroll_up(10),
             (KeyCode::PageDown, _) => self.scroll_down(10),
+
+            // Jump to bottom (D-10) — single arm catches plain End and Ctrl+End via wildcard modifiers.
+            (KeyCode::End, _) => self.scroll_to_bottom(),
 
             // Esc — clear textarea
             (KeyCode::Esc, _) => self.clear_textarea(),
@@ -676,6 +708,11 @@ impl App {
             }
             StreamEvent::Finished => {
                 self.commit_assistant_buffer();
+                // D-08: snap-to-bottom safety net — defense-in-depth against future
+                // line-count drift. Cheap because reconcile_scroll runs every render tick anyway.
+                if self.auto_follow {
+                    self.scroll_to_bottom();
+                }
                 self.pending_rx = None;
                 self.cancel_child = None;
                 self.status.hint = String::new();
@@ -739,7 +776,7 @@ impl App {
         self.pending_rx = Some(rx);
         self.pending_tx = Some(tx);
         self.cancel_child = Some(self.cancel_parent.child_token());
-        self.auto_follow = true;
+        self.scroll_to_bottom();
         self.assistant_buffer = None;
     }
 
