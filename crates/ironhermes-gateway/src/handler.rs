@@ -335,6 +335,12 @@ impl GatewayMessageHandler {
         } else {
             ctx
         };
+        // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in gateway.
+        let ctx = if let Some(sr) = &self.skill_registry {
+            ctx.with_skill_registry(sr.clone())
+        } else {
+            ctx
+        };
         // Phase 25.3-15 CR-02 close-out: slash-dispatch CommandContext no longer
         // attaches a trajectory writer. The previous implementation attached a
         // process-wide handle that was unreachable from `hermes session export`.
@@ -446,6 +452,22 @@ impl GatewayMessageHandler {
                     CoreCommandResult::ResetTerminal => {
                         // Phase 22.3 D-06: TTY visual reset — not meaningful on the
                         // gateway (no TTY). Ignore silently. Added for exhaustiveness.
+                    }
+                    ironhermes_core::commands::CommandResult::SkillsReload => {
+                        // Phase 21.8.2 Plan 03 lands the gateway-side reload arm.
+                        let _ = with_rate_limit_retry(|| adapter.send_message(
+                            &event.chat_id,
+                            "Skills reload not yet wired to gateway adapter; see Phase 21.8.2 Plan 03.",
+                            None,
+                        )).await;
+                    }
+                    ironhermes_core::commands::CommandResult::SkillActivated { .. } => {
+                        // Phase 21.8.2 Plan 03 lands the gateway-side skill activation arm.
+                        let _ = with_rate_limit_retry(|| adapter.send_message(
+                            &event.chat_id,
+                            "Skill activation not yet wired to gateway adapter; see Phase 21.8.2 Plan 03.",
+                            None,
+                        )).await;
                     }
                 }
             }
