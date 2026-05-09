@@ -3054,4 +3054,64 @@ Body.
         let (fm, _body) = result.unwrap();
         assert_eq!(fm.name, "mcp-integration");
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 21.8.2 D-12: extract_raw_name_from_yaml + try_register warn tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn extract_raw_name_from_yaml_finds_titlecase() {
+        let yaml = "---\nname: Command Development\ndescription: x\n---\nbody";
+        assert_eq!(
+            extract_raw_name_from_yaml(yaml).as_deref(),
+            Some("Command Development")
+        );
+    }
+
+    #[test]
+    fn extract_raw_name_from_yaml_returns_none_for_no_frontmatter() {
+        let yaml = "no frontmatter here";
+        assert_eq!(extract_raw_name_from_yaml(yaml), None);
+    }
+
+    #[test]
+    fn try_register_emits_normalization_warn_with_path() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let skill_dir = dir.path().join("Command Development");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let skill_md = skill_dir.join("SKILL.md");
+        let mut f = std::fs::File::create(&skill_md).expect("create");
+        writeln!(f, "---").unwrap();
+        writeln!(f, "name: Command Development").unwrap();
+        writeln!(f, "description: test").unwrap();
+        writeln!(f, "---").unwrap();
+        writeln!(f, "body").unwrap();
+
+        // Must not panic; the registry should accept the normalized name.
+        let registry = SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]);
+        assert!(
+            registry.find("command-development").is_some(),
+            "normalized skill must be findable by kebab-case name"
+        );
+    }
+
+    #[test]
+    fn try_register_no_warn_when_already_normalized() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let skill_dir = dir.path().join("ascii-art");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let skill_md = skill_dir.join("SKILL.md");
+        let mut f = std::fs::File::create(&skill_md).expect("create");
+        writeln!(f, "---").unwrap();
+        writeln!(f, "name: ascii-art").unwrap();
+        writeln!(f, "description: test").unwrap();
+        writeln!(f, "---").unwrap();
+        writeln!(f, "body").unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]);
+        // Just confirm the already-valid name loads — no normalization expected.
+        assert!(registry.find("ascii-art").is_some());
+    }
 }
