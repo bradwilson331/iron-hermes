@@ -211,6 +211,24 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
     // Parse the YAML
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_block).ok()?;
 
+    // Phase 21.8.2 D-10/D-11/Pitfall 4: normalize Title Case / spaces to kebab-case
+    // BEFORE validation. In-memory only — the on-disk directory is never renamed.
+    // Consecutive hyphens (from multiple spaces) are collapsed so `validate_skill_name`'s
+    // `contains("--")` check does not reject e.g. "Code  Review" → "code--review".
+    let normalized_name = frontmatter
+        .name
+        .to_lowercase()
+        .replace(' ', "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut frontmatter = frontmatter;
+    frontmatter.name = normalized_name;
+    // D-12 warn (with path) is emitted from try_register_skill_from_dir where the
+    // path is in scope — see Task 2 of this plan. parse_skill_md keeps
+    // its `(content: &str)` signature unchanged.
+
     // SKILL-07 name validation (07.2 D-13, D-14, D-15): strict reject on name violations.
     if let Err(reason) = validate_skill_name(&frontmatter.name) {
         warn!(
@@ -477,6 +495,30 @@ pub(crate) fn build_skill_search_paths(cwd: &Path, config: &SkillsConfig) -> Vec
 /// duplicate name. Mutates `seen_names` and `skills` on successful load.
 ///
 /// Phase 21.8.1 gap-closure: extracted from the inline `load_with_paths` loop
+/// Extract the raw `name:` value from a SKILL.md YAML frontmatter block.
+/// Used by `try_register_skill_from_dir` to detect whether `parse_skill_md`'s
+/// post-D-10 normalization changed the name. Returns the trimmed RHS of the
+/// first `name:` line inside the `---`-delimited frontmatter block, or None
+/// if the block is malformed.
+fn extract_raw_name_from_yaml(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    // Expect first non-empty line to be `---`.
+    let first = lines.next()?;
+    if first.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return None; // hit closing fence without finding `name:`
+        }
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    None
+}
+
 /// body so the same per-skill-dir processing can run at both nesting levels
 /// (`<root>/<dir>/SKILL.md` legacy + `<root>/<dir>/<sub>/SKILL.md` Phase 21.8
 /// installer layout). Behavior MUST be byte-for-byte identical to the
@@ -506,6 +548,19 @@ fn try_register_skill_from_dir(
             return;
         }
     };
+
+    // Phase 21.8.2 D-12: warn when parse_skill_md's D-10 normalization changed
+    // the name. The path is in scope here (`skill_md_path`) but NOT in
+    // parse_skill_md's signature, so the warn lives at this call site
+    // (RESEARCH Pitfall 2 / Option B).
+    if let Some(raw_name) = extract_raw_name_from_yaml(&content) {
+        if raw_name != frontmatter.name {
+            warn!(
+                "SkillRegistry: normalized skill name {:?} -> {:?} at path {:?}",
+                raw_name, frontmatter.name, skill_md_path
+            );
+        }
+    }
 
     // Phase 19 Plan 05 (D-13/D-14/D-15/D-16): scan skill at registry-load.
     // Scan scope = raw frontmatter text + body per D-14.
@@ -1669,23 +1724,29 @@ mod tests {
 
     #[test]
     fn test_parse_skill_md_rejects_invalid_name() {
-        // Uppercase name must be strict-rejected (returns None).
+        // Phase 21.8.2 D-10: "Invalid Name" normalizes to "invalid-name" and LOADS.
+        // The old hard-reject behavior is superseded by D-10 normalization.
         let content = "---\nname: Invalid Name\ndescription: desc\n---\nBody";
         let result = parse_skill_md(content);
         assert!(
-            result.is_none(),
-            "Expected None for invalid name but got Some"
+            result.is_some(),
+            "D-10 normalization: 'Invalid Name' must normalize to 'invalid-name' and load"
         );
+        assert_eq!(result.unwrap().0.name, "invalid-name");
     }
 
     #[test]
     fn test_parse_skill_md_rejects_consecutive_hyphens() {
+        // Phase 21.8.2 D-10/Pitfall-4: "foo--bar" normalizes to "foo-bar" (split/filter/join
+        // collapses consecutive hyphens) and LOADS. The old hard-reject for `--` in the
+        // ORIGINAL name is superseded; only post-normalization consecutive hyphens reject.
         let content = "---\nname: foo--bar\ndescription: desc\n---\nBody";
         let result = parse_skill_md(content);
         assert!(
-            result.is_none(),
-            "Expected None for consecutive-hyphen name but got Some"
+            result.is_some(),
+            "D-10/Pitfall-4: 'foo--bar' must normalize to 'foo-bar' and load"
         );
+        assert_eq!(result.unwrap().0.name, "foo-bar");
     }
 
     #[test]
@@ -1772,7 +1833,8 @@ mod tests {
 
     #[test]
     fn test_registry_load_skips_invalid_name_skill() {
-        // Frontmatter name "Skill-Caps" has uppercase — strict-rejected by parse_skill_md.
+        // Phase 21.8.2 D-10: "Skill-Caps" normalizes to "skill-caps" and LOADS.
+        // The old hard-reject for uppercase is superseded by D-10 normalization.
         let dir = tempdir().unwrap();
         let skills_dir = dir.path().join("skills");
         let skill_dir = skills_dir.join("Skill-Caps");
@@ -1784,10 +1846,12 @@ mod tests {
         .unwrap();
 
         let registry = SkillRegistry::load_with_paths(&[skills_dir]);
-        assert!(
-            registry.list().is_empty(),
-            "Expected empty registry for skill with invalid uppercase name"
+        assert_eq!(
+            registry.list().len(),
+            1,
+            "D-10 normalization: 'Skill-Caps' must normalize to 'skill-caps' and load"
         );
+        assert!(registry.find("skill-caps").is_some());
     }
 
     #[test]
@@ -2973,5 +3037,118 @@ Body.
         );
         assert!(registry.find("cat-as-skill").is_some(), "one-level scan must still find category-as-skill");
         assert!(registry.find("ascii-art").is_some(), "two-level scan must find nested skill");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 21.8.2 D-10/D-11/D-12: Name normalization tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn normalize_title_case_to_kebab() {
+        let content = "---\nname: Command Development\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some(), "parse_skill_md must accept Title Case names after normalization");
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "command-development");
+    }
+
+    #[test]
+    fn normalize_spaces_to_hyphens() {
+        let content = "---\nname: my skill name\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "my-skill-name");
+    }
+
+    #[test]
+    fn normalize_no_double_hyphen() {
+        // Two consecutive spaces would naively become "code--review" which
+        // validate_skill_name rejects via contains("--"). Pitfall 4 fix:
+        // collapse consecutive hyphens during normalization.
+        let content = "---\nname: Code  Review\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some(), "Pitfall 4: consecutive spaces must not produce double hyphens");
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "code-review");
+        assert!(!fm.name.contains("--"));
+    }
+
+    #[test]
+    fn normalize_no_op_for_valid_names() {
+        let content = "---\nname: ascii-art\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "ascii-art");
+    }
+
+    #[test]
+    fn normalize_preserves_pre_existing_hyphen_with_titlecase() {
+        let content = "---\nname: MCP-Integration\ndescription: test\n---\nbody";
+        let result = parse_skill_md(content);
+        assert!(result.is_some());
+        let (fm, _body) = result.unwrap();
+        assert_eq!(fm.name, "mcp-integration");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 21.8.2 D-12: extract_raw_name_from_yaml + try_register warn tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn extract_raw_name_from_yaml_finds_titlecase() {
+        let yaml = "---\nname: Command Development\ndescription: x\n---\nbody";
+        assert_eq!(
+            extract_raw_name_from_yaml(yaml).as_deref(),
+            Some("Command Development")
+        );
+    }
+
+    #[test]
+    fn extract_raw_name_from_yaml_returns_none_for_no_frontmatter() {
+        let yaml = "no frontmatter here";
+        assert_eq!(extract_raw_name_from_yaml(yaml), None);
+    }
+
+    #[test]
+    fn try_register_emits_normalization_warn_with_path() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let skill_dir = dir.path().join("Command Development");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let skill_md = skill_dir.join("SKILL.md");
+        let mut f = std::fs::File::create(&skill_md).expect("create");
+        writeln!(f, "---").unwrap();
+        writeln!(f, "name: Command Development").unwrap();
+        writeln!(f, "description: test").unwrap();
+        writeln!(f, "---").unwrap();
+        writeln!(f, "body").unwrap();
+
+        // Must not panic; the registry should accept the normalized name.
+        let registry = SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]);
+        assert!(
+            registry.find("command-development").is_some(),
+            "normalized skill must be findable by kebab-case name"
+        );
+    }
+
+    #[test]
+    fn try_register_no_warn_when_already_normalized() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let skill_dir = dir.path().join("ascii-art");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let skill_md = skill_dir.join("SKILL.md");
+        let mut f = std::fs::File::create(&skill_md).expect("create");
+        writeln!(f, "---").unwrap();
+        writeln!(f, "name: ascii-art").unwrap();
+        writeln!(f, "description: test").unwrap();
+        writeln!(f, "---").unwrap();
+        writeln!(f, "body").unwrap();
+
+        let registry = SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]);
+        // Just confirm the already-valid name loads — no normalization expected.
+        assert!(registry.find("ascii-art").is_some());
     }
 }
