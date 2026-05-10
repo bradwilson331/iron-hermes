@@ -799,13 +799,65 @@ Plans:
 
 ### Phase 27.1: Import Free_Hexapod gsd planning (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Import GSD planning artifacts from `~/code/Freenove_Big_Hexapod_Robot_Kit_for_Raspberry_Pi/.planning/` into IronHermes' canonical `.planning/` so the IronHermes × Hexapod Robot Integration work can be planned and executed under this project's GSD tracking. Delivers: (1) 16 HXP-prefixed requirements in REQUIREMENTS.md under a new `### Hexapod Integration` section, (2) three sub-phase ROADMAP entries (27.1.1/.2/.3), (3) verbatim copy of the locked Phase 1 CONTEXT.md to `phases/27.1.1-safe-foundation/27.1.1-CONTEXT.md` with HXP- ID rewrites applied, (4) FROZEN.md redirect in the source repo. Meta-phase only — no code written.
+**Requirements:** (none — D-01..D-04 from 27.1-CONTEXT.md are the requirements set)
 **Depends on:** Phase 27
-**Plans:** 0 plans
+**Plans:** TBD
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 27.1 to break down)
+
+**Phase directory:** `.planning/phases/27.1-import-free-hexapod-gsd-planning/`
+
+### Phase 27.1.1: Safe Foundation (INSERTED)
+
+**Goal:** Agent can issue walk, stop, read_battery, read_distance, and relax_servos commands to the Freenove hexapod robot over TCP — with every unsafe command blocked before any bytes reach the hardware.
+**Requirements:** HXP-TOOL-01, HXP-TOOL-02, HXP-TOOL-03, HXP-TOOL-04, HXP-TOOL-05, HXP-TOOL-06, HXP-LOCO-01, HXP-LOCO-02, HXP-LOCO-03, HXP-LOCO-04, HXP-LOCO-05
+**Depends on:** Phase 27.1
+**Success Criteria** (what must be TRUE):
+  1. Hexapod physically walks forward, backward, left, right on command
+  2. Agent can halt the robot and return it to neutral stance
+  3. Battery voltage string returned (e.g., "Battery: 7.2V / 8.1V (OK)")
+  4. Ultrasonic distance value returned in centimeters
+  5. Robot automatically halts and relaxes servos on IronHermes session end
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27.1.1 to break down)
+
+**Phase directory:** `.planning/phases/27.1.1-safe-foundation/`
+
+### Phase 27.1.2: Navigation (INSERTED)
+
+**Goal:** Agent can rotate in place, aim the head, and turn the buzzer on/off.
+**Requirements:** HXP-NAV-01, HXP-NAV-03, HXP-NAV-04
+**Depends on:** Phase 27.1.1
+**Success Criteria** (what must be TRUE):
+  1. Robot rotates clockwise and counterclockwise by specified degrees
+  2. Head pan and tilt move independently within safe servo ranges
+  3. Buzzer turns on and off on command (audible confirmation)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27.1.2 to break down)
+
+**Phase directory:** `.planning/phases/27.1.2-navigation/`
+
+### Phase 27.1.3: Expression + Skill Doc (INSERTED)
+
+**Goal:** Agent can set LED colors for visual signaling; complete skill doc gives the agent full protocol knowledge without extra instructions.
+**Requirements:** HXP-NAV-02, HXP-DOC-01
+**Depends on:** Phase 27.1.2
+**Success Criteria** (what must be TRUE):
+  1. All LEDs change to specified RGB color on command; turn off on command
+  2. `skills/hexapod/DESCRIPTION.md` is present and contains all CMD_* wire formats, action list, and blocked commands
+  3. Agent can invoke any Phase 1–3 protocol action using the skill doc alone (no inline prompt guidance needed)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27.1.3 to break down)
+
+**Phase directory:** `.planning/phases/27.1.3-expression-skill-doc/`
 
 ### Phase 28: Skills Trust Tiers
 
