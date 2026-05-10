@@ -65,9 +65,16 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     // ScrollbarState built per-render from authoritative App fields — no cached state.
     // area.inner(Margin{vertical:1, horizontal:1}) trims all four border cells so the
     // track renders at column width-2 (inside the right border) not on the border char.
-    let total = app.transcript_line_count(area.width as usize);
+    //
+    // Use inner_width (border excluded) so the line count matches what ratatui's
+    // Paragraph actually wraps at. viewport_content_length makes the thumb reach
+    // the bottom of the track when the view is at the bottom of the content.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let total = app.transcript_line_count(inner_width);
     let mut scrollbar_state = ScrollbarState::new(total)
-        .position(app.transcript_scroll as usize);
+        .position(app.transcript_scroll as usize)
+        .viewport_content_length(visible_rows);
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
     frame.render_stateful_widget(
         scrollbar,

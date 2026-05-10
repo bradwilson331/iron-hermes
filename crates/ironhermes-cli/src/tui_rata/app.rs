@@ -423,17 +423,27 @@ impl App {
 
     /// Maximum scroll offset for the given viewport.
     pub fn transcript_max_scroll(&self, area: Rect) -> u16 {
-        let total = self.transcript_line_count(area.width as usize) as u32;
+        // Pass the inner width (excluding the 1-char border on each side) so that
+        // transcript_line_count wraps at the same column ratatui's Paragraph does.
+        let inner_width = (area.width as usize).saturating_sub(2);
+        let total = self.transcript_line_count(inner_width) as u32;
         let visible = area.height.saturating_sub(2) as u32;
         total.saturating_sub(visible).min(u16::MAX as u32) as u16
     }
 
     /// Total wrapped-line count across all history entries + streaming buffer.
     ///
-    /// Mirrors `transcript_text()` semantics exactly — uses `role_style()` to
-    /// decide which messages to count, and subtracts the role-prefix length on
-    /// line `i == 0` so the model matches the renderer. See D-06/D-07 in
-    /// `.planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-CONTEXT.md`.
+    /// `width` must be the **inner** render width (border excluded, i.e.
+    /// `area.width - 2`) so the count matches what ratatui's Paragraph widget
+    /// actually wraps at. Callers that pass the outer area width will get a
+    /// count that is slightly too low, causing auto-follow to stop short of the
+    /// true visual bottom.
+    ///
+    /// For line `i == 0` of each message the role prefix ("You: " / "Hermes: "
+    /// etc.) shares the first row, so the row count is
+    /// `ceil((prefix_len + body_chars) / width)` — not `ceil(body / (width -
+    /// prefix))`. The two formulas diverge at certain line lengths. See D-06/D-07
+    /// in `.planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/`.
     pub fn transcript_line_count(&self, width: usize) -> usize {
         let mut total = 0usize;
         for msg in &self.history {
@@ -445,24 +455,30 @@ impl App {
             let prefix_len = role_label.len() + 2; // ": " separator
             let body = render_message_body(msg);
             for (i, line) in body.lines().enumerate() {
-                let effective_width = if i == 0 {
-                    width.saturating_sub(prefix_len).max(1)
+                let rows = if i == 0 {
+                    // First row: prefix + body share the same terminal row.
+                    // ceil((prefix + body) / width), minimum 1.
+                    let body_chars = line.chars().count();
+                    let total_chars = prefix_len + body_chars;
+                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
                 } else {
-                    width
+                    wrapped_line_count(line, width)
                 };
-                total = total.saturating_add(wrapped_line_count(line, effective_width));
+                total = total.saturating_add(rows);
             }
         }
         if let Some(buf) = &self.assistant_buffer {
             // assistant_buffer renders with "Hermes: " prefix on line 0 (transcript_text:807-819)
             let prefix_len = "Hermes".len() + 2; // 8
             for (i, line) in buf.lines().enumerate() {
-                let effective_width = if i == 0 {
-                    width.saturating_sub(prefix_len).max(1)
+                let rows = if i == 0 {
+                    let body_chars = line.chars().count();
+                    let total_chars = prefix_len + body_chars;
+                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
                 } else {
-                    width
+                    wrapped_line_count(line, width)
                 };
-                total = total.saturating_add(wrapped_line_count(line, effective_width));
+                total = total.saturating_add(rows);
             }
         }
         total
