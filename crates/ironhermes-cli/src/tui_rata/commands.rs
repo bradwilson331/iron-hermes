@@ -1022,25 +1022,33 @@ async fn handle_subsystem_mutator(
             }
         }
         "personality" => {
-            // Core returned Output(overlay_text) for a named preset; apply to next turn.
-            // For list mode or "not configured" case, pass through.
-            match core_result {
-                CommandResult::Output(text)
-                    if !text.starts_with("Available")
-                        && !text.starts_with("Personality registry")
-                        && !text.starts_with("No personalities") =>
-                {
-                    // Apply overlay as system-prompt injection for next turn.
-                    // App.next_turn_personality_overlay: Option<String> stores pending injection.
-                    app.next_turn_personality_overlay = Some(text.clone());
-                    SlashOutcome::Handled(format!(
-                        "Personality applied ({} chars). Active next turn.",
-                        text.len()
-                    ))
+                // Phase 21.8.3.1 D-05: "clear" is intercepted before any registry/output
+                // matching. Sets active_personality_overlay = None and returns immediately.
+                // Core handler has no "clear" case — without this pre-check, "clear" would
+                // be looked up as a preset name and return Error("Unknown personality: clear").
+                if args.first().map(|s| *s) == Some("clear") {
+                    app.active_personality_overlay = None;
+                    return SlashOutcome::Handled("Personality cleared.".to_string());
                 }
-                _ => map_core_to_slash_outcome(core_result.clone()),
+                // Core returned Output(overlay_text) for a named preset; apply persistently.
+                // For list mode or "not configured" case, pass through.
+                match core_result {
+                    CommandResult::Output(text)
+                        if !text.starts_with("Available")
+                            && !text.starts_with("Personality registry")
+                            && !text.starts_with("No personalities") =>
+                    {
+                        // Phase 21.8.3.1 D-02/D-04: active_personality_overlay is session-persistent
+                        // (never cleared by spawn_turn); persists across all turns until changed or cleared.
+                        app.active_personality_overlay = Some(text.clone());
+                        SlashOutcome::Handled(format!(
+                            "Personality applied ({} chars). Active next turn.",
+                            text.len()
+                        ))
+                    }
+                    _ => map_core_to_slash_outcome(core_result.clone()),
+                }
             }
-        }
         "compress" => {
             // Core returned informational text per Task 1 deferral note.
             // Future: trigger actual compression hook here on demand.
