@@ -159,4 +159,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-03 — Phase 25.3 (session-workspace-parity) complete. Workspace newtype + per-tool-call trajectory ledger + workspace_root persistence + canonical session UUID landed across CLI/REPL/Telegram surfaces. 28/28 must-haves verified. Phase 25.4 Curator unblocked.*
+*Last updated: 2026-05-10 — Phase 21.8.3.1 (personality-overlay bug fix) complete. Fixed dead-write bug where `/personality <name>` set the overlay field but spawn_turn never read it. TUI now injects overlay into per-turn messages_snapshot[0].content via MessageContent::Text pattern match; gateway wires per-session Arc<Mutex<HashMap>> overlay with pre-dispatch clear intercept and per-turn set_overlay() call. 10/10 must-haves verified.*
