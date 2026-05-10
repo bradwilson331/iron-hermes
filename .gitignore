@@ -6,8 +6,8 @@ Cargo.lock
 .claude/worktrees/
 .DS_Store
 **/.DS_Store
-.omc/state/
-.omc/sessions/
+**/.omc/state/
+**/.omc/sessions/
 node_modules/
 package-lock.json
 install-gitea.sh
