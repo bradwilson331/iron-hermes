@@ -146,6 +146,12 @@ pub struct GatewayMessageHandler {
     // (and lazily opened) by `SessionStore`, keyed by the canonical SQLite
     // session UUID. `run_agent` reaches them via
     // `self.session_store.write().await.get_or_create_trajectory_writer(...)`.
+    /// Phase 21.8.3.1 D-07: active personality overlay for this session.
+    /// Set by command dispatch when /personality <name> succeeds (D-08).
+    /// Cleared by /personality clear (CONTEXT D-05 gateway analog, pre-dispatch).
+    /// Re-applied to PromptBuilder slot 8 every turn (D-09).
+    /// None = default identity (no overlay injected).
+    active_personality_overlay: Option<String>,
 }
 
 impl GatewayMessageHandler {
@@ -184,6 +190,8 @@ impl GatewayMessageHandler {
             workspace: None, // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
                              // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
                              // writers live in SessionStore, looked up by canonical session UUID.
+            // Phase 21.8.3.1 D-07: no personality active until /personality <name> sets it.
+            active_personality_overlay: None,
         }
     }
 
