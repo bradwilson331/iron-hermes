@@ -21,6 +21,8 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+use ironhermes_core::types::MessageContent;
+
 use crate::tui_rata::app::{App, AppDeps};
 use crate::tui_rata::status_line::StatusLineState;
 use crate::tui_rata::stream_events::StreamEvent;
@@ -735,8 +737,10 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     // every turn, never cleared by spawn_turn.
     if let Some(overlay_text) = &app.active_personality_overlay {
         if !messages_snapshot.is_empty() {
-            messages_snapshot[0].content.push_str("\n\n");
-            messages_snapshot[0].content.push_str(overlay_text);
+            if let Some(MessageContent::Text(ref mut s)) = messages_snapshot[0].content {
+                s.push_str("\n\n");
+                s.push_str(overlay_text);
+            }
         }
     }
     let session_id = app.session_id.clone();
