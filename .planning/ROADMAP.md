@@ -802,7 +802,7 @@ Plans:
 **Goal:** Import GSD planning artifacts from `~/code/Freenove_Big_Hexapod_Robot_Kit_for_Raspberry_Pi/.planning/` into IronHermes' canonical `.planning/` so the IronHermes × Hexapod Robot Integration work can be planned and executed under this project's GSD tracking. Delivers: (1) 16 HXP-prefixed requirements in REQUIREMENTS.md under a new `### Hexapod Integration` section, (2) three sub-phase ROADMAP entries (27.1.1/.2/.3), (3) verbatim copy of the locked Phase 1 CONTEXT.md to `phases/27.1.1-safe-foundation/27.1.1-CONTEXT.md` with HXP- ID rewrites applied, (4) FROZEN.md redirect in the source repo. Meta-phase only — no code written.
 **Requirements:** (none — D-01..D-04 from 27.1-CONTEXT.md are the requirements set)
 **Depends on:** Phase 27
-**Plans:** TBD
+**Plans:** 1/4 plans executed
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 27.1 to break down)

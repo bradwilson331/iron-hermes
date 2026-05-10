@@ -4,13 +4,13 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 27.1 context gathered
-last_updated: "2026-05-10T21:01:37.690Z"
+last_updated: "2026-05-10T21:10:47.587Z"
 last_activity: 2026-05-10 -- Phase 27.1 planning complete
 progress:
-  total_phases: 38
+  total_phases: 41
   completed_phases: 27
   total_plans: 161
-  completed_plans: 157
+  completed_plans: 158
   percent: 98
 ---
 
@@ -410,6 +410,9 @@ Recent decisions affecting current work:
 - Phase 21.8.3 inserted after Phase 21.8.2: tui-streaming-scroll-fix-and-scrollbar (URGENT)
 - Phase 21.8.3.1 inserted after Phase 21.8.3: personality applied doesn't chage the llm responses (URGENT)
 - Phase 27.1 inserted after Phase 27: Import Free_Hexapod gsd planning (URGENT)
+- Phase 27.1.1 inserted after Phase 27.1: Safe Foundation — hexapod walk/stop/sensors (INSERTED)
+- Phase 27.1.2 inserted after Phase 27.1.1: Navigation — rotate/head/buzzer (INSERTED)
+- Phase 27.1.3 inserted after Phase 27.1.2: Expression + Skill Doc — LEDs + protocol reference (INSERTED)
 
 ### Pending Todos
 
@@ -427,6 +430,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-10T20:26:09.151Z
-Stopped at: Phase 27.1 context gathered
-Resume file: .planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-CONTEXT.md
+Last session: 2026-05-10T21:09:44Z
+Stopped at: Completed 27.1-01-PLAN.md
+Resume file: None
