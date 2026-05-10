@@ -308,6 +308,20 @@ Plans:
 - [x] 21.8.3-02-PLAN.md — Scrollbar widget render in ui.rs: VerticalRight orientation inside border (D-01..D-05), default style, ScrollbarState built per-render from app.transcript_line_count + transcript_scroll, TestBackend snapshot test (D-14) (Wave 2, depends on 21.8.3-01 for parity-fixed line count)
 
 
+### Phase 21.8.3.1: personality applied doesn't chage the llm responses (INSERTED)
+
+**Goal:** Fix the dead-write bug in `App.next_turn_personality_overlay` (TUI) and add the missing personality-overlay field/wiring to the Telegram gateway so `/personality <name>` actually changes LLM responses on both real agent surfaces. Rename the TUI field to `active_personality_overlay` to reflect its session-persistent semantics, inject it into the per-turn `messages_snapshot[0].content` clone in `spawn_turn`, add `/personality clear` as the canonical revert mechanic in both surfaces, and call `prompt_builder.set_overlay(text.clone())` between `load_skills()` and `build_system_message()` in the gateway's per-turn PromptBuilder setup. Out of scope: web UI (mock-only, no LLM backend), persistence across sessions, status-bar personality name display.
+
+**Requirements**: N/A — narrow bug fix scoped from CONTEXT.md decisions D-01..D-09 (no requirement IDs).
+
+**Depends on:** Phase 21.8.3
+
+**Plans:** 2 plans
+
+Plans:
+- [ ] 21.8.3.1-01-PLAN.md — TUI fix: rename `next_turn_personality_overlay` -> `active_personality_overlay` (D-02) + inject overlay into `messages_snapshot[0].content` in `spawn_turn` (D-03/D-04/D-06) + add `/personality clear` pre-check in `handle_subsystem_mutator` (D-05). Three modified files in `crates/ironhermes-cli/src/tui_rata/`.
+- [ ] 21.8.3.1-02-PLAN.md — Gateway fix: add `active_personality_overlay: Option<String>` to `GatewayMessageHandler` (D-07), detect personality apply in `CoreCommandResult::Output` arm (D-08), pre-dispatch clear short-circuit (D-05 gateway analog, RESEARCH Option B), per-turn `prompt_builder.set_overlay(text.clone())` (D-09). Plus core regression test locking the "clear is surface-only" contract.
+
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
 **Goal:** Close four v2.0 hermes-agent parity gaps scoped to "minimum viable parity": (a) surface the existing `delegate_task` subagent system with `/agents`, status-line pill, persistent JSONL transcripts, cascade cancellation, wall-clock timeout, concurrency surface, and parent/child iteration-budget inheritance; (b) add `--yolo` non-interactive mode that bypasses dangerous-command approvals while the iteration budget, ctrl-c cascade, and fatal-error halt remain unskippable; (c) add `hermes status [--all] [--deep] [--json]` component diagnostics; (d) add an in-memory session-scoped `ProcessRegistry` for `terminal(background=true)` / `execute_code` with spawn/poll/wait/kill, 200KB rolling output buffer, `/stop` slash, watch patterns with rate-limited notifications, and cleanup on session end. Explicit exclusions (deferred to own phases): worktree-parallel mode, toolsets grouping, terminal backends, full gateway session mirror, plugin discovery sources, full approval queue. 29 locked CONTEXT decisions (D-01..D-29), 12 eval dimensions (E-01..E-12), 18 scenario fixtures (S-01..S-18), 10 online guardrails (G-01..G-10) — 5 of which remain unskippable under `--yolo` per the Replit-July-2025 anti-pattern anchor.
