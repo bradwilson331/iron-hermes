@@ -4,13 +4,13 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Completed 27.1-01-PLAN.md
-last_updated: "2026-05-10T21:14:51.861Z"
+last_updated: "2026-05-10T21:17:36.278Z"
 last_activity: 2026-05-10 -- Phase 27.1 planning complete
 progress:
   total_phases: 41
   completed_phases: 27
   total_plans: 161
-  completed_plans: 159
+  completed_plans: 160
   percent: 99
 ---
 
@@ -157,6 +157,7 @@ Last activity: 2026-05-10 -- Phase 27.1 planning complete
 | Phase 25.2 P13 | 108 | 3 tasks | 5 files |
 | Phase 25.2 P14 | 25 | 3 tasks | 5 files |
 | Phase 25.5 P05 | 2min | 1 tasks | 3 files |
+| Phase 27.1 P03 | 1 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -375,6 +376,7 @@ Recent decisions affecting current work:
 - [Phase 25.2]: Plan 12 [Rule 1 fix]: Replaced .entered() with async-block + .instrument(span) in tiers.rs/chunked.rs — Plan 11's EnteredSpan was held across await and broke tokio::spawn Send bound
 - [Phase 25.2]: Plan 14: AnyClientSummarizationHandle is verbatim port of AnyClientVisionHandle (any_client.rs:158-238); register_web_extract_tool wired in run_chat/run_single/run_gateway with parity guard test; smoke test uses ToolSchema 2-level shape (d.function.name, not d.name)
 - [Phase 25.5]: Replaced mock STATUS_TEXT with dynamic config_summary data for /status handler — real model/provider/context displayed
+- [Phase ?]: FROZEN.md committed in source Hexapod repo at 7ba53c1 — freeze is git-recorded per Claude's Discretion bullet 2
 
 ### Roadmap Evolution
 
@@ -430,6 +432,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-10T21:14:51.855Z
+Last session: 2026-05-10T21:17:27.711Z
 Stopped at: Completed 27.1-01-PLAN.md
 Resume file: None
