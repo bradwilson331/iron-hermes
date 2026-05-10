@@ -243,10 +243,10 @@ pub struct App {
     pub context_compressor: Option<Arc<dyn ContextEngine>>,
     /// PersonalityRegistry for `/personality` (Phase 15 PRMT-06/PRMT-07).
     pub personality_overlay: Arc<PersonalityRegistry>,
-    /// Pending personality overlay text to inject as system-prompt on next spawn_turn.
-    /// Set by tui_rata post-router hook `handle_subsystem_mutator` on `/personality <name>`.
-    /// Consumed (and cleared) by spawn_turn bootstrap (Plan 03 scope: set only; consume deferred).
-    pub next_turn_personality_overlay: Option<String>,
+    /// Active personality overlay text. Injected into per-turn messages_snapshot[0].content
+    /// by spawn_turn. Persists across turns; None = default identity.
+    /// Set by handle_subsystem_mutator on /personality <name>; cleared by /personality clear.
+    pub active_personality_overlay: Option<String>,
 
     // ── Phase 22.4.2.1 Plan 01: CronJobReader wiring ────────────────────────
     /// JobStore handle for `/cron` slash UI. None by default (deferred runtime
@@ -343,8 +343,8 @@ impl App {
             resolver: deps.resolver,
             context_compressor: deps.context_compressor,
             personality_overlay: deps.personality_overlay,
-            // Phase 22.4.2 Plan 03: pending personality overlay for next spawn_turn
-            next_turn_personality_overlay: None,
+            // Phase 21.8.3.1 D-02: renamed to active_personality_overlay (session-persistent)
+            active_personality_overlay: None,
             // Phase 22.4.2.1 Plan 01: cron store — None by default (gateway is primary cron host)
             cron_store: None,
             // Phase 25.2 Plan 15 follow-up: toolset session handle for /toolset slash UI
