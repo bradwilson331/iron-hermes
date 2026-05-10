@@ -797,6 +797,16 @@ Plans:
 
 **Phase directory:** `.planning/phases/27-prompt-caching/`
 
+### Phase 27.1: Import Free_Hexapod gsd planning (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 27
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27.1 to break down)
+
 ### Phase 28: Skills Trust Tiers
 
 **Goal:** Installed skills carry a trust level (builtin / official / trusted / community) that drives security enforcement — community skills face stricter scanning gates than builtin skills.
