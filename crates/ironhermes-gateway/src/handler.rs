@@ -146,12 +146,14 @@ pub struct GatewayMessageHandler {
     // (and lazily opened) by `SessionStore`, keyed by the canonical SQLite
     // session UUID. `run_agent` reaches them via
     // `self.session_store.write().await.get_or_create_trajectory_writer(...)`.
-    /// Phase 21.8.3.1 D-07: active personality overlay for this session.
+    /// Phase 21.8.3.1 D-07: active personality overlay per session.
     /// Set by command dispatch when /personality <name> succeeds (D-08).
     /// Cleared by /personality clear (CONTEXT D-05 gateway analog, pre-dispatch).
     /// Re-applied to PromptBuilder slot 8 every turn (D-09).
-    /// None = default identity (no overlay injected).
-    active_personality_overlay: Option<String>,
+    /// Uses interior mutability (Arc<Mutex<HashMap<SessionKey, String>>>) mirroring
+    /// skill_overlays — handle_slash_command takes &self, not &mut self (deviation from
+    /// plan assumption; auto-fixed Rule 1). Per-session keying prevents cross-user bleed.
+    active_personality_overlay: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, String>>>,
 }
 
 impl GatewayMessageHandler {
@@ -191,7 +193,8 @@ impl GatewayMessageHandler {
                              // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
                              // writers live in SessionStore, looked up by canonical session UUID.
             // Phase 21.8.3.1 D-07: no personality active until /personality <name> sets it.
-            active_personality_overlay: None,
+            // Arc<Mutex<HashMap>> mirrors skill_overlays — &self constraint requires interior mutability.
+            active_personality_overlay: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -405,6 +408,20 @@ impl GatewayMessageHandler {
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                // Phase 21.8.3.1 D-05 gateway analog (RESEARCH Open Question 1, Option B):
+                // Intercept /personality clear BEFORE core dispatch. Core's cmd_personality
+                // has no "clear" case — it would return Error("Unknown personality: clear")
+                // and we'd send that confusing error to the user. Mirrors TUI handle_subsystem_mutator.
+                if def.name == "personality" && args.first() == Some(&"clear") {
+                    if let Ok(mut overlays) = self.active_personality_overlay.lock() {
+                        overlays.remove(&session_key);
+                    }
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, "Personality cleared.", None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
                 let core_result = ironhermes_core::commands::handlers::dispatch(
                     def,
                     &args,
@@ -413,8 +430,33 @@ impl GatewayMessageHandler {
                 );
                 match core_result {
                     CoreCommandResult::Output(text) => {
-                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &text, None))
+                        // Phase 21.8.3.1 D-08: detect personality apply (same heuristic as
+                        // TUI handle_subsystem_mutator). Heuristic: command name is "personality"
+                        // AND the Output text is NOT one of the three list/no-config prefixes.
+                        // On match, store the overlay text and send a confirmation (don't echo the raw overlay).
+                        let is_personality_apply = def.name == "personality"
+                            && !text.starts_with("Available")
+                            && !text.starts_with("Personality registry")
+                            && !text.starts_with("No personalities");
+
+                        if is_personality_apply {
+                            if let Ok(mut overlays) = self.active_personality_overlay.lock() {
+                                overlays.insert(session_key.clone(), text.clone());
+                            }
+                            let confirm = format!(
+                                "Personality applied ({} chars). Active for this session.",
+                                text.len()
+                            );
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(&event.chat_id, &confirm, None)
+                            })
                             .await?;
+                        } else {
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(&event.chat_id, &text, None)
+                            })
+                            .await?;
+                        }
                     }
                     CoreCommandResult::NewSession { .. } => {
                         // /start special handling: reset session then LLM greeting.
@@ -792,6 +834,15 @@ impl GatewayMessageHandler {
                 for (name, body) in session_overlays {
                     prompt_builder.activate_skill(name, body);
                 }
+            }
+        }
+        // Phase 21.8.3.1 D-09: inject active personality overlay into PromptBuilder slot 8
+        // (SessionOverlay, ephemeral). Re-applied every turn from self.active_personality_overlay;
+        // never explicitly cleared between turns (entry absent when no personality is active).
+        // Order: AFTER load_skills + skill_overlays loop, BEFORE build_system_message.
+        if let Ok(overlays) = self.active_personality_overlay.lock() {
+            if let Some(overlay_text) = overlays.get(&key) {
+                prompt_builder.set_overlay(overlay_text.clone());
             }
         }
         let system_msg = prompt_builder.build_system_message();
