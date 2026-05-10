@@ -429,34 +429,24 @@ impl GatewayMessageHandler {
                     &self.command_router,
                 );
                 match core_result {
-                    CoreCommandResult::Output(text) => {
-                        // Phase 21.8.3.1 D-08: detect personality apply (same heuristic as
-                        // TUI handle_subsystem_mutator). Heuristic: command name is "personality"
-                        // AND the Output text is NOT one of the three list/no-config prefixes.
-                        // On match, store the overlay text and send a confirmation (don't echo the raw overlay).
-                        let is_personality_apply = def.name == "personality"
-                            && !text.starts_with("Available")
-                            && !text.starts_with("Personality registry")
-                            && !text.starts_with("No personalities");
-
-                        if is_personality_apply {
-                            if let Ok(mut overlays) = self.active_personality_overlay.lock() {
-                                overlays.insert(session_key.clone(), text.clone());
-                            }
-                            let confirm = format!(
-                                "Personality applied ({} chars). Active for this session.",
-                                text.len()
-                            );
-                            with_rate_limit_retry(|| {
-                                adapter.send_message(&event.chat_id, &confirm, None)
-                            })
-                            .await?;
-                        } else {
-                            with_rate_limit_retry(|| {
-                                adapter.send_message(&event.chat_id, &text, None)
-                            })
-                            .await?;
+                    CoreCommandResult::PersonalityApplied(text) => {
+                        if let Ok(mut overlays) = self.active_personality_overlay.lock() {
+                            overlays.insert(session_key.clone(), text.clone());
                         }
+                        let confirm = format!(
+                            "Personality applied ({} chars). Active for this session.",
+                            text.len()
+                        );
+                        with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &confirm, None)
+                        })
+                        .await?;
+                    }
+                    CoreCommandResult::Output(text) => {
+                        with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &text, None)
+                        })
+                        .await?;
                     }
                     CoreCommandResult::NewSession { .. } => {
                         // /start special handling: reset session then LLM greeting.

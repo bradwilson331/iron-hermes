@@ -147,6 +147,7 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         // Phase 21.8.2 Plan 02: pass through to REPL loop — Plan 03 lands real integration arms.
         CoreCommandResult::SkillsReload => CommandResult::SkillsReload,
         CoreCommandResult::SkillActivated { name, body } => CommandResult::SkillActivated { name, body },
+        CoreCommandResult::PersonalityApplied(text) => CommandResult::Handled(text),
     }
 }
 

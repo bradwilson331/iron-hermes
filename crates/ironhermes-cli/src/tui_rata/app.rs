@@ -643,6 +643,7 @@ impl App {
             }
             SlashOutcome::ClearSession(text) => {
                 self.history.clear();
+                self.active_personality_overlay = None;
                 self.assistant_buffer = None;
                 let mut system = ChatMessage::user(&text);
                 system.role = Role::System;

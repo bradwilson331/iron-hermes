@@ -110,14 +110,14 @@ fn personality_apply_known_preset_returns_overlay_text() {
         .unwrap();
     let result = dispatch(def, &["concise"], &ctx, &router);
     match result {
-        CommandResult::Output(text) => {
+        CommandResult::PersonalityApplied(text) => {
             assert!(!text.is_empty(), "overlay text must not be empty");
             assert!(
                 text.contains("brief") || text.contains("point"),
                 "overlay text must be the preset content, got: {text}"
             );
         }
-        other => panic!("expected Output for known preset, got {other:?}"),
+        other => panic!("expected PersonalityApplied for known preset, got {other:?}"),
     }
 }
 

@@ -130,6 +130,10 @@ pub enum ResolveResult<'a> {
 pub enum CommandResult {
     /// Display this text to the user
     Output(String),
+    /// Personality preset successfully applied — carries the overlay text.
+    /// Surface handlers (TUI, gateway) store this in their active_personality_overlay;
+    /// generic Output paths never receive personality overlay text (WR-04).
+    PersonalityApplied(String),
     /// Command handled silently (no output needed)
     Handled,
     /// Error message to display

@@ -604,7 +604,7 @@ fn cmd_personality(args: &[&str], ctx: &CommandContext) -> CommandResult {
         // Apply mode — return overlay text; tui_rata post-router hook applies as system-prompt injection.
         let name = args[0];
         match registry.get_preset(name) {
-            Some(text) => CommandResult::Output(text),
+            Some(text) => CommandResult::PersonalityApplied(text),
             None => CommandResult::Error(format!("Unknown personality: {name}")),
         }
     }

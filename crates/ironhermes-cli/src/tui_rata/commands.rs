@@ -1030,16 +1030,8 @@ async fn handle_subsystem_mutator(
                     app.active_personality_overlay = None;
                     return SlashOutcome::Handled("Personality cleared.".to_string());
                 }
-                // Core returned Output(overlay_text) for a named preset; apply persistently.
-                // For list mode or "not configured" case, pass through.
                 match core_result {
-                    CommandResult::Output(text)
-                        if !text.starts_with("Available")
-                            && !text.starts_with("Personality registry")
-                            && !text.starts_with("No personalities") =>
-                    {
-                        // Phase 21.8.3.1 D-02/D-04: active_personality_overlay is session-persistent
-                        // (never cleared by spawn_turn); persists across all turns until changed or cleared.
+                    CommandResult::PersonalityApplied(text) => {
                         app.active_personality_overlay = Some(text.clone());
                         SlashOutcome::Handled(format!(
                             "Personality applied ({} chars). Active next turn.",
@@ -1079,5 +1071,6 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
             "Skills reloaded.".to_string(),
         ),
         CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
+        CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
     }
 }
