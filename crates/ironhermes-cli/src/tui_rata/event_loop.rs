@@ -727,7 +727,18 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let browser_session = app.browser_session.clone(); // Phase 25.1 GAP-8 (plan 25.1-19)
     let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
-    let messages_snapshot = app.history.clone();
+    let mut messages_snapshot = app.history.clone();
+
+    // Phase 21.8.3.1 D-03 / D-04 / D-06: inject active personality overlay
+    // into the per-turn system message clone. Mutates messages_snapshot only;
+    // app.history[0] is never touched. Field is session-persistent — re-read
+    // every turn, never cleared by spawn_turn.
+    if let Some(overlay_text) = &app.active_personality_overlay {
+        if !messages_snapshot.is_empty() {
+            messages_snapshot[0].content.push_str("\n\n");
+            messages_snapshot[0].content.push_str(overlay_text);
+        }
+    }
     let session_id = app.session_id.clone();
     let _ = app.agent_loop.clone(); // keep Arc alive for future method-call integrations
 
