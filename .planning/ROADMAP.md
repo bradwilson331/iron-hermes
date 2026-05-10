@@ -820,10 +820,14 @@ Plans:
   3. Battery voltage string returned (e.g., "Battery: 7.2V / 8.1V (OK)")
   4. Ultrasonic distance value returned in centimeters
   5. Robot automatically halts and relaxes servos on IronHermes session end
-**Plans:** TBD
+**Plans:** 5 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 27.1.1 to break down)
+- [ ] 27.1.1-01-PLAN.md — Tool trait extension: on_session_end default + ToolRegistry::call_session_end_hooks
+- [ ] 27.1.1-02-PLAN.md — hexapod_tcp.rs core: HexapodTcpTool with allowlist, wire translation, sensor parsing, session-end halt, inline tests
+- [ ] 27.1.1-03-PLAN.md — Wire call_session_end_hooks into run_single, run_chat, and ratatui shutdown paths
+- [ ] 27.1.1-04-PLAN.md — Register HexapodTcpTool in lib.rs + ToolRegistry::register_defaults
+- [ ] 27.1.1-05-PLAN.md — Manual UAT on a powered hexapod (non-autonomous)
 
 **Phase directory:** `.planning/phases/27.1.1-safe-foundation/`
 
