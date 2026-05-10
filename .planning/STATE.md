@@ -4,8 +4,8 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 21.8.3.1 context gathered
-last_updated: "2026-05-10T13:01:49.270Z"
-last_activity: 2026-05-10 -- Phase 21.8.3.1 planning complete
+last_updated: "2026-05-10T13:11:38.974Z"
+last_activity: 2026-05-10 -- Phase 21.8.3.1 execution started
 progress:
   total_phases: 37
   completed_phases: 26
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 21.8.3 — tui-streaming-scroll-fix-and-scrollbar
+**Current focus:** Phase 21.8.3.1 — personality-applied-doesn-t-chage-the-llm-responses
 
 ## Current Position
 
-Phase: 21.8.3 (tui-streaming-scroll-fix-and-scrollbar) — EXECUTING
+Phase: 21.8.3.1 (personality-applied-doesn-t-chage-the-llm-responses) — EXECUTING
 Plan: 1 of 2
-Status: Ready to execute
-Last activity: 2026-05-10 -- Phase 21.8.3.1 planning complete
+Status: Executing Phase 21.8.3.1
+Last activity: 2026-05-10 -- Phase 21.8.3.1 execution started
 
 ## Performance Metrics
 

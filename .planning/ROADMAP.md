@@ -316,11 +316,11 @@ Plans:
 
 **Depends on:** Phase 21.8.3
 
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] 21.8.3.1-01-PLAN.md — TUI fix: rename `next_turn_personality_overlay` -> `active_personality_overlay` (D-02) + inject overlay into `messages_snapshot[0].content` in `spawn_turn` (D-03/D-04/D-06) + add `/personality clear` pre-check in `handle_subsystem_mutator` (D-05). Three modified files in `crates/ironhermes-cli/src/tui_rata/`.
-- [ ] 21.8.3.1-02-PLAN.md — Gateway fix: add `active_personality_overlay: Option<String>` to `GatewayMessageHandler` (D-07), detect personality apply in `CoreCommandResult::Output` arm (D-08), pre-dispatch clear short-circuit (D-05 gateway analog, RESEARCH Option B), per-turn `prompt_builder.set_overlay(text.clone())` (D-09). Plus core regression test locking the "clear is surface-only" contract.
+- [x] 21.8.3.1-01-PLAN.md — TUI fix: rename `next_turn_personality_overlay` -> `active_personality_overlay` (D-02) + inject overlay into `messages_snapshot[0].content` in `spawn_turn` (D-03/D-04/D-06) + add `/personality clear` pre-check in `handle_subsystem_mutator` (D-05). Three modified files in `crates/ironhermes-cli/src/tui_rata/`.
+- [x] 21.8.3.1-02-PLAN.md — Gateway fix: add `active_personality_overlay: Option<String>` to `GatewayMessageHandler` (D-07), detect personality apply in `CoreCommandResult::Output` arm (D-08), pre-dispatch clear short-circuit (D-05 gateway analog, RESEARCH Option B), per-turn `prompt_builder.set_overlay(text.clone())` (D-09). Plus core regression test locking the "clear is surface-only" contract.
 
 ### Phase 21.7: Multi-agent and autonomous agents and sandbox status (INSERTED)
 
