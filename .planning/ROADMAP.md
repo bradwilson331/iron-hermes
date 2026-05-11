@@ -831,7 +831,7 @@ Plans:
 
 **Follow-ups:**
 - 27.1.1-gap-01-PLAN.md ✅ DONE (2026-05-11) — canonical `ToolRegistry::register_defaults_except` entry point; all production paths (CLI REPL/batch, ratatui TUI, iron_hermes_ui, gateway) delegate to it; dead-code builders deleted; `build_rpc_registry` kept restricted with a SAFETY rationale; 3 regression tests added.
-- 27.1.1-gap-02-PLAN.md ⏳ PLANNED — wire `set_toolset_config` at startup so `config.yaml`'s `tools.toolsets` section is actually enforced (currently inert until a `/toolset` command runs); back-compat-preserving merge helper (`ToolsConfig::with_default_toolsets_merged`); populate `PromptBuilder.active_toolsets` at all construction sites (closes the "Phase 20 wires real toolset state" TODO). Run via `/gsd-execute-phase 27.1.1 --gaps-only`.
+- 27.1.1-gap-02-PLAN.md ✅ DONE (2026-05-11) — `set_toolset_config` now wired at startup via `build_app_runtime_bundle` so `config.yaml`'s `tools.toolsets` section is enforced at session start; back-compat-preserving merge helper (`ToolsConfig::with_default_toolsets_merged` — absent toolsets default enabled, DEFAULT_TOOLSETS members added-if-absent, explicit `enabled: false` respected); `PromptBuilder.active_toolsets` populated at all 4 production construction sites (closes the "Phase 20 wires real toolset state" TODO); subagent/RPC sub-registries confirmed isolated; 12 regression tests added.
 
 **Phase directory:** `.planning/phases/27.1.1-safe-foundation/`
 
