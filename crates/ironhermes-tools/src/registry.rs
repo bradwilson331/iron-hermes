@@ -497,22 +497,57 @@ impl ToolRegistry {
         }
     }
 
+    /// MUST be the single source of truth for default tool registration.
+    ///
+    /// Do NOT hand-roll duplicate tool lists in production paths — add new tools
+    /// here and they will automatically appear in every IronHermes entry point
+    /// (CLI REPL, CLI batch, ratatui TUI, iron_hermes_ui, gateway).
+    ///
+    /// To substitute a custom terminal (e.g., one wired to a ProcessRegistry),
+    /// call `register_defaults_except(&["terminal"])` then register your custom
+    /// terminal variant afterwards.
+    ///
+    /// Current default tool set (Phase 27.1.1):
+    ///   terminal, read_file, write_file, patch_file, search_files,
+    ///   web_search, web_read, hexapod_tcp
     pub fn register_defaults(&mut self) {
+        self.register_defaults_except(&[]);
+    }
+
+    /// Register all default tools except those whose `name()` is in `skip`.
+    ///
+    /// MUST be the single source of truth for default tool registration.
+    /// Do NOT hand-roll duplicate tool lists in production paths.
+    ///
+    /// Production paths that need a process-registry-wired terminal call:
+    /// ```rust,ignore
+    /// registry.register_defaults_except(&["terminal"]);
+    /// registry.register_terminal_tool_with_process_registry(process_registry);
+    /// ```
+    pub fn register_defaults_except(&mut self, skip: &[&str]) {
         use crate::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
         use crate::hexapod_tcp::HexapodTcpTool;
         use crate::terminal::TerminalTool;
         use crate::web_read::WebReadTool;
         use crate::web_search::WebSearchTool;
 
-        self.register(Box::new(TerminalTool::new()));
-        self.register(Box::new(ReadFileTool));
-        self.register(Box::new(WriteFileTool));
-        self.register(Box::new(PatchFileTool));
-        self.register(Box::new(SearchFilesTool));
-        self.register(Box::new(WebSearchTool));
-        self.register(Box::new(WebReadTool));
+        macro_rules! register_unless_skipped {
+            ($tool:expr, $name:expr) => {
+                if !skip.contains(&$name) {
+                    self.register($tool);
+                }
+            };
+        }
+
+        register_unless_skipped!(Box::new(TerminalTool::new()), "terminal");
+        register_unless_skipped!(Box::new(ReadFileTool), "read_file");
+        register_unless_skipped!(Box::new(WriteFileTool), "write_file");
+        register_unless_skipped!(Box::new(PatchFileTool), "patch"); // PatchFileTool::name() returns "patch"
+        register_unless_skipped!(Box::new(SearchFilesTool), "search_files");
+        register_unless_skipped!(Box::new(WebSearchTool), "web_search");
+        register_unless_skipped!(Box::new(WebReadTool), "web_read");
         // HXP-TOOL-01 (Phase 27.1.1): hexapod TCP tool — is_available() hides this when HEXAPOD_IP is unset.
-        self.register(Box::new(HexapodTcpTool));
+        register_unless_skipped!(Box::new(HexapodTcpTool), "hexapod_tcp");
     }
 
     /// Register the memory tool with a shared `MemoryManager` handle (Plan 20-02).
@@ -2414,6 +2449,97 @@ mod tests {
             navigate.toolset(),
             navigate.is_available(),
             navigate.prerequisites().len()
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 27.1.1 gap-01: canonical entry-point regression tests
+    //
+    // These tests are the structural guard against tool-registration drift.
+    // If a new tool is added to register_defaults_except() but bypassed by a
+    // production entry point, the cross-check tests below catch it at CI time.
+    // ---------------------------------------------------------------------------
+
+    /// Regression test for HXP-TOOL-01 (Phase 27.1.1 UAT failure root cause).
+    ///
+    /// register_defaults() MUST include hexapod_tcp. The first UAT attempt failed
+    /// because production paths bypassed register_defaults() and hand-rolled their
+    /// own lists without hexapod_tcp. This test ensures the canonical entry point
+    /// always includes it, so any path that delegates to register_defaults[_except]
+    /// inherits hexapod_tcp automatically.
+    #[test]
+    fn test_register_defaults_includes_hexapod_tcp() {
+        // HEXAPOD_IP may not be set in CI — we check tool registration, not availability.
+        // get_definitions(None) returns ALL registered tools regardless of is_available().
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        let names = registry.list_tools();
+        assert!(
+            names.contains(&"hexapod_tcp"),
+            "register_defaults() MUST register hexapod_tcp; \
+             missing = tool-registration drift that caused Phase 27.1.1 UAT failure. \
+             All tools registered: {:?}",
+            names
+        );
+    }
+
+    /// register_defaults_except(&["terminal"]) MUST skip terminal and register everything else.
+    ///
+    /// This is the canonical call pattern for production paths that supply their own
+    /// process-registry-wired terminal (app_runtime_factory, event_loop).
+    #[test]
+    fn test_register_defaults_except_terminal_skips_terminal_only() {
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults_except(&["terminal"]);
+        let names = registry.list_tools();
+
+        assert!(
+            !names.contains(&"terminal"),
+            "register_defaults_except(&[\"terminal\"]) must NOT register the plain terminal; \
+             got tools: {:?}",
+            names
+        );
+
+        // All other defaults must still be present.
+        // Note: PatchFileTool::name() returns "patch" (not "patch_file").
+        for expected in &[
+            "read_file",
+            "write_file",
+            "patch",
+            "search_files",
+            "web_search",
+            "web_read",
+            "hexapod_tcp",
+        ] {
+            assert!(
+                names.contains(expected),
+                "register_defaults_except(&[\"terminal\"]) must still register '{}'; \
+                 got tools: {:?}",
+                expected,
+                names
+            );
+        }
+    }
+
+    /// register_defaults() and register_defaults_except(&[]) must produce the same tool set.
+    ///
+    /// Cross-check: if these diverge, one or more tool registrations in
+    /// register_defaults_except are gated incorrectly.
+    #[test]
+    fn test_register_defaults_and_except_empty_produce_same_set() {
+        let mut reg_a = ToolRegistry::new();
+        reg_a.register_defaults();
+        let mut names_a = reg_a.list_tools();
+        names_a.sort();
+
+        let mut reg_b = ToolRegistry::new();
+        reg_b.register_defaults_except(&[]);
+        let mut names_b = reg_b.list_tools();
+        names_b.sort();
+
+        assert_eq!(
+            names_a, names_b,
+            "register_defaults() and register_defaults_except(&[]) must register identical tool sets"
         );
     }
 }
