@@ -15,6 +15,7 @@ pub mod cronjob_tool;
 pub mod delegate_task;
 pub mod execute_code;
 pub mod file_tools;
+pub mod hexapod_tcp; // Phase 27.1.1 — registration in Plan 04 register_defaults
 pub mod memory_manager_handle;
 pub mod memory_tool;
 pub mod registry;
