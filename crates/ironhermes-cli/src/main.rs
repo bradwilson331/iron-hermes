@@ -912,6 +912,13 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         }
     }
 
+    // D-15 (Phase 27.1.1): fire on_session_end on every registered tool so
+    // tools that override it (e.g., HexapodTcpTool, which sends stop + relax
+    // per D-14) get a chance to clean up. Best-effort, log-and-continue --
+    // matches the surrounding memory_manager.on_session_end pattern.
+    // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
+    registry.read().await.call_session_end_hooks();
+
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
         if msg.role == ironhermes_core::Role::Assistant {
@@ -2169,6 +2176,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             tracing::debug!(error = %e, "on_session_end failed in run_chat (best-effort)");
         }
     }
+
+    // D-15 (Phase 27.1.1): fire on_session_end on every registered tool so
+    // tools that override it (e.g., HexapodTcpTool, which sends stop + relax
+    // per D-14) get a chance to clean up. Best-effort, log-and-continue --
+    // matches the surrounding memory_manager.on_session_end pattern.
+    // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
+    registry.read().await.call_session_end_hooks();
 
     state_store
         .lock()
