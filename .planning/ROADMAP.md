@@ -820,7 +820,7 @@ Plans:
   3. ✅ Battery voltage string returned (e.g., "Battery: 7.2V / 8.1V (OK)")
   4. ✅ Ultrasonic distance value returned in centimeters
   5. ✅ Robot automatically halts and relaxes servos on IronHermes session end
-**Plans:** 5 plans — all complete; live UAT signed off 2026-05-11 (see 27.1.1-UAT.md)
+**Plans:** 7/7 plans complete
 
 Plans:
 - [x] 27.1.1-01-PLAN.md — Tool trait extension: on_session_end default + ToolRegistry::call_session_end_hooks
