@@ -38,6 +38,22 @@ pub const PROFILES_SUBDIR: &str = "profiles";
 /// web and code are disabled by default (require API keys / high blast radius).
 pub const DEFAULT_TOOLSETS: &[&str] = &["memory", "session", "agent", "skills", "robotics"];
 
+/// D-20 (Phase 27.1.1-gap-02): canonical exhaustive list of all known toolset names.
+///
+/// This is the single source of truth for the full toolset name set. Both
+/// `toolset_cmd.rs::KNOWN_TOOLSETS` (CLI display/validation) and
+/// `toolset_session.rs::members_map()` (slash dispatch) should agree with this list.
+/// `with_default_toolsets_merged()` in `ToolsConfig` uses this to ensure every known
+/// toolset has an entry after merging — absent entries default to `enabled: true`
+/// (backward-compat: upgrading users don't silently lose access to new toolsets).
+///
+/// "browser" is disabled by default (high blast radius / requires chromium prereq);
+/// "web" and "code" require external API keys. All other toolsets are enabled by default
+/// as they have no external prerequisites.
+pub const ALL_TOOLSETS: &[&str] = &[
+    "memory", "session", "agent", "skills", "robotics", "web", "code", "browser",
+];
+
 /// Get the IronHermes home directory (default: ~/.ironhermes).
 pub fn get_hermes_home() -> PathBuf {
     match std::env::var("IRONHERMES_HOME") {

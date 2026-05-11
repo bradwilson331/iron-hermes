@@ -126,6 +126,46 @@ impl ToolsConfig {
     pub fn is_toolset_enabled(&self, name: &str) -> bool {
         self.toolsets.get(name).map(|e| e.enabled).unwrap_or(false)
     }
+
+    /// Phase 27.1.1-gap-02: merge all known toolsets into `self.toolsets` with
+    /// back-compat semantics:
+    ///   - If a name is ABSENT from the map → insert `enabled: true`
+    ///     (preserves current all-enabled-by-accident behavior for old configs that
+    ///     predate a toolset; upgrades never silently lose tools).
+    ///   - If a name is PRESENT (enabled or disabled) → leave it untouched.
+    ///     An explicit `web: { enabled: false }` stays false.
+    ///
+    /// Uses `crate::constants::ALL_TOOLSETS` as the single source of truth for the
+    /// full set of known toolset names (D-20). `DEFAULT_TOOLSETS` members are a subset
+    /// and receive the same absent→enabled treatment.
+    ///
+    /// This method is idempotent: calling it twice produces the same result as once.
+    pub fn with_default_toolsets_merged(mut self) -> Self {
+        for &name in crate::constants::ALL_TOOLSETS {
+            self.toolsets
+                .entry(name.to_string())
+                .or_insert(ToolsetEntry { enabled: true });
+        }
+        self
+    }
+
+    /// Phase 27.1.1-gap-02: return the set of toolset names where `enabled == true`.
+    ///
+    /// Used by production `PromptBuilder` construction sites to populate
+    /// `active_toolsets` so the system-prompt tool catalog text reflects the same
+    /// enabled set as the API tool schemas.
+    pub fn enabled_toolset_names(&self) -> std::collections::HashSet<String> {
+        self.toolsets
+            .iter()
+            .filter_map(|(name, entry)| {
+                if entry.enabled {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -1765,7 +1805,9 @@ model:
         }
     }
 
-    /// Test: DEFAULT_TOOLSETS constant matches D-20 (memory/session/agent/skills).
+    /// Test: DEFAULT_TOOLSETS constant matches D-20 (memory/session/agent/skills/robotics).
+    /// Phase 27.1.1-gap-01 added "robotics" to DEFAULT_TOOLSETS (5th entry) so HexapodTcpTool
+    /// reaches `is_available()` even on fresh configs — the HEXAPOD_IP env var is the final gate.
     #[test]
     fn default_toolsets_constant_matches_d20() {
         use crate::constants::DEFAULT_TOOLSETS;
@@ -1785,10 +1827,14 @@ model:
             DEFAULT_TOOLSETS.contains(&"skills"),
             "DEFAULT_TOOLSETS must contain 'skills'"
         );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"robotics"),
+            "Phase 27.1.1-gap-01: DEFAULT_TOOLSETS must contain 'robotics'"
+        );
         assert_eq!(
             DEFAULT_TOOLSETS.len(),
-            4,
-            "DEFAULT_TOOLSETS must contain exactly 4 entries (memory, session, agent, skills)"
+            5,
+            "DEFAULT_TOOLSETS must contain exactly 5 entries (memory, session, agent, skills, robotics)"
         );
     }
 
@@ -2161,5 +2207,119 @@ custom_providers:
             RESERVED_ROLE_NAMES.contains(&"summarization"),
             "Phase 25.2 D-13 requires `summarization` in RESERVED_ROLE_NAMES"
         );
+    }
+
+    // =========================================================================
+    // Phase 27.1.1-gap-02: ToolsConfig merge helper tests
+    // =========================================================================
+
+    #[test]
+    fn test_merge_adds_absent_default_toolsets() {
+        use crate::constants::ALL_TOOLSETS;
+        // Start with a completely empty toolsets map.
+        let cfg = ToolsConfig {
+            toolsets: std::collections::HashMap::new(),
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let merged = cfg.with_default_toolsets_merged();
+        // Every name in ALL_TOOLSETS must be present and enabled.
+        for &name in ALL_TOOLSETS {
+            let entry = merged.toolsets.get(name);
+            assert!(
+                entry.is_some(),
+                "ALL_TOOLSETS entry '{}' must be present after merge",
+                name
+            );
+            assert!(
+                entry.unwrap().enabled,
+                "absent entry '{}' must default to enabled=true after merge",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_preserves_explicit_disabled() {
+        // web is explicitly disabled; robotics is absent.
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: false });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let merged = cfg.with_default_toolsets_merged();
+        // web stays disabled.
+        assert!(
+            !merged.toolsets["web"].enabled,
+            "explicit web: disabled must be preserved after merge"
+        );
+        // robotics (absent) is enabled.
+        assert!(
+            merged.toolsets.get("robotics").map(|e| e.enabled).unwrap_or(false),
+            "absent robotics entry must default to enabled=true after merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_explicit_enabled() {
+        // web is explicitly enabled (non-default to check preservation).
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: true });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let merged = cfg.with_default_toolsets_merged();
+        assert!(
+            merged.toolsets["web"].enabled,
+            "explicit web: enabled must be preserved after merge"
+        );
+    }
+
+    #[test]
+    fn test_enabled_toolset_names() {
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: true });
+        toolsets.insert("code".to_string(), ToolsetEntry { enabled: false });
+        toolsets.insert("memory".to_string(), ToolsetEntry { enabled: true });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let names = cfg.enabled_toolset_names();
+        assert!(names.contains("web"), "web must be in enabled set");
+        assert!(names.contains("memory"), "memory must be in enabled set");
+        assert!(!names.contains("code"), "code (disabled) must NOT be in enabled set");
+        assert_eq!(names.len(), 2, "enabled set must have exactly 2 entries");
+    }
+
+    #[test]
+    fn test_idempotent_merge() {
+        use crate::constants::ALL_TOOLSETS;
+        // Start with partial explicit config.
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: false });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        // Apply merge twice.
+        let once = cfg.clone().with_default_toolsets_merged();
+        let twice = cfg.with_default_toolsets_merged().with_default_toolsets_merged();
+        // Both must agree on every ALL_TOOLSETS entry.
+        for &name in ALL_TOOLSETS {
+            let once_val = once.toolsets.get(name).map(|e| e.enabled);
+            let twice_val = twice.toolsets.get(name).map(|e| e.enabled);
+            assert_eq!(
+                once_val, twice_val,
+                "merge must be idempotent: '{}' differs between one and two applications",
+                name
+            );
+        }
     }
 }
