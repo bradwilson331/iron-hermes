@@ -106,12 +106,19 @@ pub(crate) fn build_rotate_wire(degrees: i64) -> String {
 /// Parse a `CMD_POWER#<v1>#<v2>\n` response into a human-readable battery string (D-09).
 ///
 /// Low thresholds per adc.py: v1 (load/channel 0) < 5.5 V OR v2 (Pi/channel 4) < 6.0 V.
+/// Returns an error string if the response is malformed (missing voltage fields),
+/// preventing a silent 0V/0V (LOW) report that could cause incorrect LLM follow-up actions.
 pub(crate) fn parse_battery_response(raw: &str) -> String {
     let parts: Vec<&str> = raw.trim().split('#').collect();
-    let v1: f32 = parts.get(1).unwrap_or(&"0").parse().unwrap_or(0.0);
-    let v2: f32 = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0.0);
-    let status = if v1 < BATTERY_LOW_V1 || v2 < BATTERY_LOW_V2 { "LOW" } else { "OK" };
-    format!("Battery: {v1}V / {v2}V ({status})")
+    match (parts.get(1), parts.get(2)) {
+        (Some(s1), Some(s2)) => {
+            let v1: f32 = s1.parse().unwrap_or(0.0);
+            let v2: f32 = s2.parse().unwrap_or(0.0);
+            let status = if v1 < BATTERY_LOW_V1 || v2 < BATTERY_LOW_V2 { "LOW" } else { "OK" };
+            format!("Battery: {v1}V / {v2}V ({status})")
+        }
+        _ => format!("Error: unexpected battery response from robot: {:?}", raw.trim()),
+    }
 }
 
 /// Parse a `CMD_SONIC#<dist>\n` response into a human-readable distance string (D-10).
