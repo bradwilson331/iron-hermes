@@ -139,28 +139,35 @@ pub async fn build_app_runtime_bundle(
     })
 }
 
+/// Build the main tool registry for all production entry points (CLI REPL, CLI batch,
+/// ratatui TUI, iron_hermes_ui, gateway). Delegates to the canonical entry point
+/// `ToolRegistry::register_defaults_except` — adding a new tool to that method
+/// makes it visible here automatically with zero additional edits.
 fn build_registry_with_process_registry(
     process_registry: Arc<RwLock<ProcessRegistry>>,
 ) -> ToolRegistry {
-    use ironhermes_tools::file_tools::{
-        PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
-    };
-    use ironhermes_tools::hexapod_tcp::HexapodTcpTool;
-    use ironhermes_tools::web_read::WebReadTool;
-    use ironhermes_tools::web_search::WebSearchTool;
-
     let mut registry = ToolRegistry::new();
+    // Skip the plain TerminalTool; add the process-registry-wired variant below
+    // so background terminal spawns flow through drain_and_kill_session.
+    registry.register_defaults_except(&["terminal"]);
     registry.register_terminal_tool_with_process_registry(process_registry);
-    registry.register(Box::new(ReadFileTool));
-    registry.register(Box::new(WriteFileTool));
-    registry.register(Box::new(PatchFileTool));
-    registry.register(Box::new(SearchFilesTool));
-    registry.register(Box::new(WebSearchTool));
-    registry.register(Box::new(WebReadTool));
-    registry.register(Box::new(HexapodTcpTool));
     registry
 }
 
+/// Build the RPC sub-registry handed to execute_code's nested calls.
+///
+/// SAFETY: this sub-registry intentionally does NOT inherit from register_defaults().
+/// execute_code runs agent-generated code in a sandboxed context and must NOT gain
+/// new capabilities silently when tools are added to the default set. In particular:
+///   - terminal: excluded — nested shell execution from within execute_code is not permitted.
+///   - execute_code: excluded — recursive execute_code is not permitted.
+///   - hexapod_tcp: excluded — hexapod hardware control must not be accessible from
+///     within the execute_code sandbox. Hardware commands require explicit top-level
+///     tool calls so the user sees them in the trajectory.
+///
+/// When a new default tool is added and you believe it belongs in the RPC sandbox,
+/// add it here explicitly with a rationale comment. Do not switch this to delegating
+/// register_defaults_except() without a security review.
 fn build_rpc_registry(memory_manager: Option<SharedMemoryManager>) -> Arc<ToolRegistry> {
     use ironhermes_tools::file_tools::{
         PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
