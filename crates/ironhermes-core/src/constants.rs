@@ -30,9 +30,13 @@ pub const MEMORIES_DIR: &str = "memories";
 pub const PROFILES_SUBDIR: &str = "profiles";
 
 /// D-20 (Phase 25): toolsets enabled on a fresh install.
-/// These four "internal" toolsets have no external prerequisites.
+/// "memory", "session", "agent", "skills" are internal toolsets with no external prereqs.
+/// "robotics" (Phase 27.1.1): toolset is enabled by default so HexapodTcpTool reaches
+/// `is_available()`, which then gates on HEXAPOD_IP per Phase 27.1.1 D-13. Without this
+/// entry, even a perfectly-configured robot would have its tool filtered out before
+/// the prerequisite check runs.
 /// web and code are disabled by default (require API keys / high blast radius).
-pub const DEFAULT_TOOLSETS: &[&str] = &["memory", "session", "agent", "skills"];
+pub const DEFAULT_TOOLSETS: &[&str] = &["memory", "session", "agent", "skills", "robotics"];
 
 /// Get the IronHermes home directory (default: ~/.ironhermes).
 pub fn get_hermes_home() -> PathBuf {
