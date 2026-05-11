@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: phase_complete
-stopped_at: Completed 27.1.1 — Safe Foundation (live UAT passed 2026-05-11)
-last_updated: "2026-05-11T01:35:00.000Z"
-last_activity: 2026-05-11 -- Phase 27.1.1 complete; live-robot UAT signed off
+status: executing
+stopped_at: Completed 27.1-01-PLAN.md
+last_updated: "2026-05-11T06:39:36.761Z"
+last_activity: 2026-05-11 -- Phase 27.1.1 execution started
 progress:
   total_phases: 41
-  completed_phases: 29
-  total_plans: 167
-  completed_plans: 166
+  completed_phases: 28
+  total_plans: 168
+  completed_plans: 167
   percent: 99
 ---
 
@@ -21,14 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 27.1.1 complete — next: 27.1.2 (Navigation), or 27.1.1-gap-01 (registration refactor) via `/gsd-execute-phase 27.1.1 --gaps-only`
+**Current focus:** Phase 27.1.1 — safe-foundation
 
 ## Current Position
 
-Phase: 27.1.1 (safe-foundation) — COMPLETE ✅ (gap-01 done; gap-02 planned, not executed)
+Phase: 27.1.1 (safe-foundation) — EXECUTING
+Plan: 1 of 7
 Plans: 5 of 5 done; live-robot UAT passed 2026-05-11; gap-01 (registration refactor) done 2026-05-11; gap-02 (set_toolset_config startup wiring) planned 2026-05-11
-Status: Phase fully closed. hexapod_tcp registered via canonical entry point across all production paths. gap-02 ready to execute via `/gsd-execute-phase 27.1.1 --gaps-only` (config.yaml tools.toolsets enforcement + PromptBuilder.active_toolsets wiring).
-Last activity: 2026-05-11 -- created 27.1.1-gap-02-PLAN.md (toolset_config startup enforcement); gap-01 already complete
+Status: Executing Phase 27.1.1
+Last activity: 2026-05-11 -- Phase 27.1.1 execution started
 
 ## Performance Metrics
 

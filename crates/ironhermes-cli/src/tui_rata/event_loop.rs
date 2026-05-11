@@ -256,7 +256,11 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
             .with_transcript_scope(hermes_home.clone(), session_id.clone()),
     );
 
-    let _runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+    // Phase 27.1.1-gap-02: capture the bundle (not _ prefix) so we can read
+    // merged_tools — the merged ToolsConfig with ALL_TOOLSETS defaults filled in.
+    // The TUI builds its own registry below (historical divergence from main.rs),
+    // but we still want the same toolset filter applied.
+    let initial_runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
         config: Arc::new(config.clone()),
         resolver: Arc::new(resolver.clone()),
         cwd: cwd.clone(),
@@ -275,6 +279,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         emit_mcp_startup_logs: true,
     })
     .await?;
+    let merged_tools = initial_runtime_bundle.merged_tools.clone();
 
     registry.register_delegate_task_tool(
         subagent_runner,
@@ -331,6 +336,11 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     }
     registry.set_error_detail(hooks_config.error_detail.clone());
 
+    // Phase 27.1.1-gap-02: push the merged toolset config into the local TUI registry
+    // so get_definitions() filters tools per config.yaml at session start (same
+    // semantics as build_app_runtime_bundle does for the non-TUI entry points).
+    registry.set_toolset_config(Some(merged_tools.clone()));
+
     let registry = Arc::new(RwLock::new(registry));
 
     // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): construct the
@@ -341,10 +351,12 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // returns "/toolset: toolset session handle not configured" because
     // `build_command_context` in tui_rata/commands.rs never attaches the
     // handle to CommandContext.
+    // Phase 27.1.1-gap-02: use merged_tools (not raw config.tools) so
+    // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            config.tools.clone(),
+            merged_tools.clone(),
         ));
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
@@ -510,6 +522,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
             prompt_builder.set_memory_manager(mgr.clone());
         }
         prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+        // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
+        // catalog text reflects the same enabled set as the API tool schemas.
+        prompt_builder.set_active_toolsets(merged_tools.enabled_toolset_names());
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
         Some(prompt_builder.build_system_message())
