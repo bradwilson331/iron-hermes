@@ -93,10 +93,13 @@ pub(crate) fn build_walk_wire(direction: &str, speed: i64) -> String {
     }
 }
 
-/// Build the CMD_MOVE wire string for rotate-in-place (D-03).
-/// angle=+10 clockwise, angle=-10 counterclockwise. x=0, y=0 → in-place. Speed fixed at 5 per D-02.
+/// Converts a signed degree count to a CMD_MOVE in-place rotation wire string.
+/// Positive degrees → wire angle field +10 (clockwise); negative → -10 (counterclockwise).
+/// Precondition: degrees != 0 (execute() guards this; zero would emit the positive branch spuriously).
+/// Speed is fixed at 5 (D-02); caller is responsible for sleeping the appropriate duration
+/// before sending STOP.
 pub(crate) fn build_rotate_wire(degrees: i64) -> String {
-    let angle = if degrees >= 0 { 10i64 } else { -10i64 };
+    let angle = if degrees > 0 { 10i64 } else { -10i64 };
     format!("CMD_MOVE#1#0#0#5#{angle}\n")
 }
 
@@ -222,6 +225,8 @@ impl Tool for HexapodTcpTool {
                     },
                     "degrees": {
                         "type": "integer",
+                        "minimum": -3600,
+                        "maximum": 3600,
                         "description": "Rotation in degrees. Positive=clockwise (right), negative=counterclockwise (left). Used only for the rotate action."
                     },
                     "angle": {
@@ -330,13 +335,28 @@ impl Tool for HexapodTcpTool {
 
                     "rotate" => {
                         let degrees = args["degrees"].as_i64().unwrap_or(0);
+                        if degrees == 0 {
+                            return Ok("OK".to_string()); // no-op: avoid spurious motion command
+                        }
                         let wire = build_rotate_wire(degrees);
-                        let duration = Duration::from_millis(degrees.unsigned_abs() * ROTATE_MS_PER_DEGREE);
+                        // Cap absolute degrees to prevent u64 overflow and runaway rotation.
+                        const MAX_DEGREES: u64 = 3600; // 10 full rotations max
+                        let abs_degrees = degrees.unsigned_abs().min(MAX_DEGREES);
+                        let duration = Duration::from_millis(
+                            abs_degrees.saturating_mul(ROTATE_MS_PER_DEGREE)
+                        );
                         match send_fire_and_forget(&addr, &wire).await {
                             Ok(_) => {
                                 tokio::time::sleep(duration).await;
-                                let _ = send_fire_and_forget(&addr, STOP_CMD).await;
-                                Ok("OK".to_string())
+                                match send_fire_and_forget(&addr, STOP_CMD).await {
+                                    Ok(_) => Ok("OK".to_string()),
+                                    Err(e) => {
+                                        tracing::warn!("hexapod_tcp: rotate stop command failed: {e}");
+                                        Ok(format!(
+                                            "Warning: rotate completed but stop command failed at {addr} — robot may still be moving"
+                                        ))
+                                    }
+                                }
                             }
                             Err(_) => Ok(format!(
                                 "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
@@ -665,11 +685,24 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 16: Zero degrees is non-negative → angle=+10 (boundary: positive branch)
+    // Test 16: rotate(0) via execute() is a no-op — returns OK without sending any wire command.
+    // degrees=0 must short-circuit before build_rotate_wire() is called (CR-03).
     // -----------------------------------------------------------------------
-    #[test]
-    fn test_rotate_wire_zero_degrees() {
-        assert_eq!(build_rotate_wire(0), "CMD_MOVE#1#0#0#5#10\n");
+    #[tokio::test]
+    async fn test_rotate_zero_degrees_is_noop() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // With HEXAPOD_IP unset, a real TCP attempt would return an error.
+        // execute() must return Ok("OK") for degrees=0 before reading the env var.
+        // But execute() reads HEXAPOD_IP before the inner match, so set it to a
+        // non-routable address. The key assertion is that result == "OK" (no motion).
+        unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
+        let tool = HexapodTcpTool;
+        let result = tool
+            .execute(json!({"action": "rotate", "degrees": 0}))
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("HEXAPOD_IP") };
+        assert_eq!(result, "OK", "rotate(0) must be a no-op; got: {result}");
     }
 
     // -----------------------------------------------------------------------
