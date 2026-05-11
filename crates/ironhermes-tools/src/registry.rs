@@ -499,6 +499,7 @@ impl ToolRegistry {
 
     pub fn register_defaults(&mut self) {
         use crate::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+        use crate::hexapod_tcp::HexapodTcpTool;
         use crate::terminal::TerminalTool;
         use crate::web_read::WebReadTool;
         use crate::web_search::WebSearchTool;
@@ -510,6 +511,8 @@ impl ToolRegistry {
         self.register(Box::new(SearchFilesTool));
         self.register(Box::new(WebSearchTool));
         self.register(Box::new(WebReadTool));
+        // HXP-TOOL-01 (Phase 27.1.1): hexapod TCP tool — is_available() hides this when HEXAPOD_IP is unset.
+        self.register(Box::new(HexapodTcpTool));
     }
 
     /// Register the memory tool with a shared `MemoryManager` handle (Plan 20-02).
