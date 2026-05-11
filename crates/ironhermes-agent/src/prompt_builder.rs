@@ -86,10 +86,12 @@ pub struct PromptBuilder {
     /// slot of `build_system_message`. Cleared on /clear via clear_skill_overlays().
     skill_overlays: Vec<(String, String)>,
     /// Snapshot of active toolsets used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
-    /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
+    /// Captured at session-freeze time. Phase 27.1.1-gap-02: populated from
+    /// config.tools.with_default_toolsets_merged() at construction in main.rs
+    /// (run_chat/run_single), event_loop.rs (TUI), and iron_hermes_ui state.rs.
     active_toolsets: HashSet<String>,
     /// Snapshot of active tools used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
-    /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
+    /// Captured at session-freeze time. Phase 27.1.1-gap-02: populated from merged toolset config.
     active_tools: HashSet<String>,
     /// GAP-4 / D-08: when false, load_memory skips the USER.md block.
     /// Mirrors config.memory.user_profile_enabled. Default: true.
@@ -119,14 +121,15 @@ impl PromptBuilder {
 
     /// Set the active toolset snapshot for the catalog-render filter (Phase 19 Plan 02).
     /// Called at session-freeze time so slot 4 (Skills) reflects the live toolset state.
-    /// Phase 19 ships with empty snapshots; Phase 20 wires real toolset state.
+    /// Phase 27.1.1-gap-02: wired at all production construction sites (run_chat, run_single,
+    /// TUI event_loop, iron_hermes_ui state.rs) via merged_tools.enabled_toolset_names().
     pub fn set_active_toolsets(&mut self, toolsets: HashSet<String>) {
         self.active_toolsets = toolsets;
     }
 
     /// Set the active tool snapshot for the catalog-render filter (Phase 19 Plan 02).
     /// Called at session-freeze time so slot 4 (Skills) reflects the live tool state.
-    /// Phase 19 ships with empty snapshots; Phase 20 wires real toolset state.
+    /// Phase 27.1.1-gap-02: populated from merged toolset config enabled set.
     pub fn set_active_tools(&mut self, tools: HashSet<String>) {
         self.active_tools = tools;
     }
@@ -1466,6 +1469,70 @@ mod tests {
         assert!(
             !output.contains("filtered-skill"),
             "filtered-skill (requires nonexistent toolset) must be hidden: {output}"
+        );
+    }
+
+    // ====================================================================
+    // Phase 27.1.1-gap-02: active_toolsets from merged config test
+    // ====================================================================
+
+    /// Test that set_active_toolsets with a realistic merged-config set (robotics
+    /// enabled, web disabled) causes skill catalog text to show a skill requiring
+    /// "robotics" but hide a skill requiring "web".
+    ///
+    /// This mirrors the production wiring added in gap-02: the PromptBuilder
+    /// receives merged_tools.enabled_toolset_names() at construction time so the
+    /// Skills slot (catalog text in the system prompt) reflects the same enabled set
+    /// as the API tool schemas.
+    #[test]
+    fn test_active_toolsets_from_merged_config() {
+        use ironhermes_core::SkillRegistry;
+        use std::fs;
+        use std::sync::Arc;
+
+        let dir = make_temp_dir();
+
+        // Skill requiring "robotics" toolset → must appear when robotics is active.
+        let robotics_dir = dir.path().join("hexapod-skill");
+        fs::create_dir_all(&robotics_dir).unwrap();
+        fs::write(
+            robotics_dir.join("SKILL.md"),
+            "---\nname: hexapod-skill\ndescription: Robot control\nmetadata:\n  hermes:\n    requires_toolsets:\n      - robotics\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // Skill requiring "web" toolset → must be hidden when web is inactive.
+        let web_dir = dir.path().join("web-skill");
+        fs::create_dir_all(&web_dir).unwrap();
+        fs::write(
+            web_dir.join("SKILL.md"),
+            "---\nname: web-skill\ndescription: Web search helper\nmetadata:\n  hermes:\n    requires_toolsets:\n      - web\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let registry = Arc::new(SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]));
+        assert_eq!(registry.list().len(), 2, "both skills should load");
+
+        // Simulate merged config: robotics enabled, web disabled.
+        let mut active: HashSet<String> = HashSet::new();
+        active.insert("robotics".to_string());
+        // "web" intentionally omitted (disabled in config).
+
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_skill_registry(registry);
+        // Phase 27.1.1-gap-02 wiring: set active toolsets from merged config enabled set.
+        builder.set_active_toolsets(active);
+        builder.set_active_tools(HashSet::new());
+
+        let output = builder.build();
+
+        assert!(
+            output.contains("hexapod-skill"),
+            "hexapod-skill (requires robotics which is active) must appear in catalog text: {output}"
+        );
+        assert!(
+            !output.contains("web-skill"),
+            "web-skill (requires web which is inactive) must be hidden in catalog text: {output}"
         );
     }
 

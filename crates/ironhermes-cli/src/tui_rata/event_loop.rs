@@ -522,6 +522,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
             prompt_builder.set_memory_manager(mgr.clone());
         }
         prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+        // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
+        // catalog text reflects the same enabled set as the API tool schemas.
+        prompt_builder.set_active_toolsets(merged_tools.enabled_toolset_names());
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
         Some(prompt_builder.build_system_message())

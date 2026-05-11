@@ -796,6 +796,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         prompt_builder.set_memory_manager(mgr.clone());
     }
     prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+    // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
+    // catalog text reflects the same enabled set as the API tool schemas.
+    prompt_builder.set_active_toolsets(runtime_bundle.merged_tools.enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -1379,6 +1382,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         prompt_builder.set_memory_manager(mgr.clone());
     }
     prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+    // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
+    // catalog text reflects the same enabled set as the API tool schemas.
+    prompt_builder.set_active_toolsets(runtime_bundle.merged_tools.enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
