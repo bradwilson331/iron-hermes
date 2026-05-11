@@ -809,25 +809,27 @@ Plans:
 
 **Phase directory:** `.planning/phases/27.1-import-free-hexapod-gsd-planning/`
 
-### Phase 27.1.1: Safe Foundation (INSERTED)
+### Phase 27.1.1: Safe Foundation (INSERTED) ✅ COMPLETE (2026-05-11)
 
 **Goal:** Agent can issue walk, stop, read_battery, read_distance, and relax_servos commands to the Freenove hexapod robot over TCP — with every unsafe command blocked before any bytes reach the hardware.
 **Requirements:** HXP-TOOL-01, HXP-TOOL-02, HXP-TOOL-03, HXP-TOOL-04, HXP-TOOL-05, HXP-TOOL-06, HXP-LOCO-01, HXP-LOCO-02, HXP-LOCO-03, HXP-LOCO-04, HXP-LOCO-05
 **Depends on:** Phase 27.1
 **Success Criteria** (what must be TRUE):
-  1. Hexapod physically walks forward, backward, left, right on command
-  2. Agent can halt the robot and return it to neutral stance
-  3. Battery voltage string returned (e.g., "Battery: 7.2V / 8.1V (OK)")
-  4. Ultrasonic distance value returned in centimeters
-  5. Robot automatically halts and relaxes servos on IronHermes session end
-**Plans:** 5 plans
+  1. ✅ Hexapod physically walks forward, backward, left, right on command
+  2. ✅ Agent can halt the robot and return it to neutral stance
+  3. ✅ Battery voltage string returned (e.g., "Battery: 7.2V / 8.1V (OK)")
+  4. ✅ Ultrasonic distance value returned in centimeters
+  5. ✅ Robot automatically halts and relaxes servos on IronHermes session end
+**Plans:** 5 plans — all complete; live UAT signed off 2026-05-11 (see 27.1.1-UAT.md)
 
 Plans:
-- [ ] 27.1.1-01-PLAN.md — Tool trait extension: on_session_end default + ToolRegistry::call_session_end_hooks
-- [ ] 27.1.1-02-PLAN.md — hexapod_tcp.rs core: HexapodTcpTool with allowlist, wire translation, sensor parsing, session-end halt, inline tests
-- [ ] 27.1.1-03-PLAN.md — Wire call_session_end_hooks into run_single, run_chat, and ratatui shutdown paths
-- [ ] 27.1.1-04-PLAN.md — Register HexapodTcpTool in lib.rs + ToolRegistry::register_defaults
-- [ ] 27.1.1-05-PLAN.md — Manual UAT on a powered hexapod (non-autonomous)
+- [x] 27.1.1-01-PLAN.md — Tool trait extension: on_session_end default + ToolRegistry::call_session_end_hooks
+- [x] 27.1.1-02-PLAN.md — hexapod_tcp.rs core: HexapodTcpTool with allowlist, wire translation, sensor parsing, session-end halt, inline tests
+- [x] 27.1.1-03-PLAN.md — Wire call_session_end_hooks into run_single, run_chat, and ratatui shutdown paths
+- [x] 27.1.1-04-PLAN.md — Register HexapodTcpTool in lib.rs + ToolRegistry::register_defaults
+- [x] 27.1.1-05-PLAN.md — Manual UAT on a powered hexapod (non-autonomous) — PASSED
+
+**Follow-up (non-blocking):** 27.1.1-gap-01-PLAN.md — collapse the 7 hand-rolled tool-registration sites into one canonical entry point (gateway entry still bypasses registration; `set_toolset_config` never called at startup). Run via `/gsd-execute-phase 27.1.1 --gaps-only`.
 
 **Phase directory:** `.planning/phases/27.1.1-safe-foundation/`
 

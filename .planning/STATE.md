@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: executing
-stopped_at: Completed 27.1-01-PLAN.md
-last_updated: "2026-05-11T01:27:58.250Z"
-last_activity: 2026-05-11 -- Phase 27.1.1 execution started
+status: phase_complete
+stopped_at: Completed 27.1.1 — Safe Foundation (live UAT passed 2026-05-11)
+last_updated: "2026-05-11T01:35:00.000Z"
+last_activity: 2026-05-11 -- Phase 27.1.1 complete; live-robot UAT signed off
 progress:
   total_phases: 41
-  completed_phases: 28
-  total_plans: 166
-  completed_plans: 161
-  percent: 97
+  completed_phases: 29
+  total_plans: 167
+  completed_plans: 166
+  percent: 99
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 27.1.1 — safe-foundation
+**Current focus:** Phase 27.1.1 complete — next: 27.1.2 (Navigation), or 27.1.1-gap-01 (registration refactor) via `/gsd-execute-phase 27.1.1 --gaps-only`
 
 ## Current Position
 
-Phase: 27.1.1 (safe-foundation) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 27.1.1
-Last activity: 2026-05-11 -- Phase 27.1.1 execution started
+Phase: 27.1.1 (safe-foundation) — COMPLETE ✅
+Plans: 5 of 5 done; live-robot UAT passed and signed off 2026-05-11
+Status: Phase complete. Follow-up gap-01 (tool-registration drift) outstanding — non-blocking.
+Last activity: 2026-05-11 -- Phase 27.1.1 complete; hexapod_tcp tool live (walk/stop/battery/distance/relax + session-end auto-halt verified on a powered Freenove hexapod)
 
 ## Performance Metrics
 
