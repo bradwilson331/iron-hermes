@@ -1355,10 +1355,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // DOES NOT introduce a second Arc layer. INV-21.7-08 lock-step: the
     // same Arc<dyn ToolsetSessionHandle> is passed through build_cmd_ctx
     // at BOTH the prompt-time dispatch site AND the mid-turn dispatch arm.
+    // Phase 27.1.1-gap-02: use bundle.merged_tools (not raw config.tools) so
+    // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            config.tools.clone(),
+            runtime_bundle.merged_tools.clone(),
         ));
 
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
@@ -2471,10 +2473,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
     // run_gateway (Telegram). Reuses the existing Arc<RwLock<ToolRegistry>>
     // — DOES NOT introduce a second Arc layer.
+    // Phase 27.1.1-gap-02: use bundle.merged_tools (not raw config.tools) so
+    // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            config.tools.clone(),
+            runtime_bundle.merged_tools.clone(),
         ));
 
     // Override token if provided via --token flag
