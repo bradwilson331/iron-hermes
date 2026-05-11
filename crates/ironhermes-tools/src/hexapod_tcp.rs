@@ -282,7 +282,15 @@ impl Tool for HexapodTcpTool {
 
                 match action {
                     "walk" => {
-                        let direction = args["direction"].as_str().unwrap_or("forward");
+                        let direction = match args["direction"].as_str() {
+                            Some(d @ ("forward" | "backward" | "left" | "right")) => d,
+                            Some(other) => return Ok(format!(
+                                "Error: invalid direction '{other}' — must be one of: forward, backward, left, right"
+                            )),
+                            None => return Ok(
+                                "Error: 'direction' parameter is required for the walk action".to_string()
+                            ),
+                        };
                         let speed = args["speed"].as_i64().unwrap_or(5);
                         let wire = build_walk_wire(direction, speed);
                         match send_fire_and_forget(&addr, &wire).await {
