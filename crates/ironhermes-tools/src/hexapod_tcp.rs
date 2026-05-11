@@ -464,7 +464,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_missing_env_var_returns_ok_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -485,7 +485,7 @@ mod tests {
         // Blocked actions fire BEFORE the env var read (D-20), so HEXAPOD_IP
         // value does not matter — but we set it to a non-routable IP to make
         // the intent clear and guard against accidental TCP in the catch-all.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -505,7 +505,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_calibration_action_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -525,7 +525,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_servo_power_action_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -628,7 +628,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_on_session_end_no_panic() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         // Must not panic — the spawned future short-circuits on the env-var miss
@@ -749,7 +749,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_new_actions_not_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         for action_name in ["rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off"] {
