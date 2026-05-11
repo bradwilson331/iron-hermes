@@ -647,4 +647,80 @@ mod tests {
         let out3 = map_read_outcome(ok_result, "127.0.0.255:5002").unwrap();
         assert_eq!(out3, "CMD_SONIC#30");
     }
+
+    // -----------------------------------------------------------------------
+    // Test 14: Positive degrees → angle=+10 in wire (D-03, clockwise)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rotate_wire_positive_degrees() {
+        assert_eq!(build_rotate_wire(90), "CMD_MOVE#1#0#0#5#10\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: Negative degrees → angle=-10 in wire (D-03, counterclockwise)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rotate_wire_negative_degrees() {
+        assert_eq!(build_rotate_wire(-45), "CMD_MOVE#1#0#0#5#-10\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: Zero degrees is non-negative → angle=+10 (boundary: positive branch)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rotate_wire_zero_degrees() {
+        assert_eq!(build_rotate_wire(0), "CMD_MOVE#1#0#0#5#10\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17: head_pan angle=180 clamped to HEAD_PAN_MAX=90 before wire format (D-06, D-08)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_head_pan_clamps_high() {
+        let clamped = 180i64.clamp(-HEAD_PAN_MAX, HEAD_PAN_MAX);
+        assert_eq!(clamped, 90);
+        let wire = format!("CMD_HEAD#0#{clamped}\n");
+        assert_eq!(wire, "CMD_HEAD#0#90\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18: head_tilt angle=-180 clamped to -HEAD_TILT_MAX=-90 before wire format (D-07, D-08)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_head_tilt_clamps_low() {
+        let clamped = (-180i64).clamp(-HEAD_TILT_MAX, HEAD_TILT_MAX);
+        assert_eq!(clamped, -90);
+        let wire = format!("CMD_HEAD#1#{clamped}\n");
+        assert_eq!(wire, "CMD_HEAD#1#-90\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 19: Buzzer wire constant strings match protocol §5 (D-10, D-11)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_buzzer_wire_strings() {
+        assert_eq!(BUZZER_ON_CMD, "CMD_BUZZER#1\n");
+        assert_eq!(BUZZER_OFF_CMD, "CMD_BUZZER#0\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 20: New Phase 2 actions pass outer allowlist (D-20) — return env-var error, not blocked string
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_new_actions_not_blocked() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("HEXAPOD_IP") };
+        let tool = HexapodTcpTool;
+        for action_name in ["rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off"] {
+            let result = tool
+                .execute(json!({"action": action_name, "degrees": 0, "angle": 0}))
+                .await
+                .unwrap();
+            assert!(
+                !result.starts_with("Action '"),
+                "action '{}' was blocked but should pass allowlist; got: {result}",
+                action_name
+            );
+        }
+    }
 }
