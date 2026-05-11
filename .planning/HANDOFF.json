@@ -1,27 +1,48 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-07T10:25:33.649Z",
-  "phase": "26.4.1",
-  "phase_name": "config-fix",
-  "phase_dir": ".planning/phases/26.4.1-config-fix",
+  "timestamp": "2026-05-11T07:27:58.561Z",
+  "phase": "27.1.2",
+  "phase_name": "navigation",
+  "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
-  "status": "paused",
+  "status": "ready_to_plan",
+  "note": "Phase 27.1.1 (safe-foundation) is COMPLETE and committed on develop. No in-progress phase work. This handoff marks the boundary between 27.1.1 (done) and 27.1.2 (not started — no CONTEXT.md yet).",
+  "just_completed": {
+    "phase": "27.1.1",
+    "phase_name": "safe-foundation",
+    "plans": "7/7",
+    "this_session": "Executed 27.1.1-gap-02 (Wave 5) via /gsd-execute-phase 27.1.1 --gaps-only: wired set_toolset_config at session start so config.yaml tools.toolsets is enforced; back-compat merge helper ToolsConfig::with_default_toolsets_merged (absent toolsets default enabled, DEFAULT_TOOLSETS members added-if-absent, explicit enabled:false respected); PromptBuilder.active_toolsets populated at all 4 production sites (closes 'Phase 20 wires real toolset state' TODO); subagent/RPC sub-registries confirmed isolated; 12 tests; fixed pre-existing default_toolsets_constant_matches_d20. Then: post-merge build (pass), post-merge test (only pre-existing failures, user authorized continue), code review 27.1.1-REVIEW.md (3 critical / 4 warning / 2 info, advisory), verification 27.1.1-VERIFICATION.md (11/11 must-haves, human_needed for 2 housekeeping items, user approved), phase.complete (ROADMAP/STATE/REQUIREMENTS updated), 27.1.1-HUMAN-UAT.md persisted (status: partial), PROJECT.md footer evolved, ROADMAP gap-02 line marked done.",
+    "key_commits": ["2c53b747", "a5dfa567", "f8c52491", "a79784ad", "34287321", "4ce90aed", "324cc02d", "83d12eed", "ff3b0695", "3ad8ea4e", "a49dee88"]
+  },
   "completed_tasks": [],
   "remaining_tasks": [
-    {"id": "26.4.1-01", "name": "CFG-01: API key → .env + providers map entry (setup.rs)", "status": "not_started"},
-    {"id": "26.4.1-02", "name": "CFG-02: Auxiliary provider allow-list guard (setup.rs)", "status": "not_started"},
-    {"id": "26.4.1-03", "name": "CFG-03: Widen gateway preflight gate (main.rs)", "status": "not_started"}
+    {"id": 1, "name": "Optional: /gsd-verify-work 27.1.1 — close out 27.1.1-HUMAN-UAT.md (status: partial; 2 housekeeping items, both effectively evidenced)", "status": "not_started"},
+    {"id": 2, "name": "Optional: /gsd-secure-phase 27.1.1 — security_enforcement=true, no SECURITY.md, hexapod_tcp controls physical hardware over TCP", "status": "not_started"},
+    {"id": 3, "name": "Optional: /gsd-code-review 27.1.1 --fix — address advisory findings in 27.1.1-REVIEW.md (CR-01..03, WR-01..04)", "status": "not_started"},
+    {"id": 4, "name": "/gsd-discuss-phase 27.1.2 — start the Navigation phase (no CONTEXT.md yet)", "status": "not_started"}
   ],
   "blockers": [],
-  "human_actions_pending": [],
-  "decisions": [
-    {"decision": "API key written to .env via write_env_var_to_dotenv + providers.{provider}.api_key_env in config.yaml", "rationale": "Canonical Phase 26 schema; eliminates deprecated model.api_key field and gateway deprecation warning", "phase": "26.4.1"},
-    {"decision": "Static KNOWN_AUX_PROVIDERS list for auxiliary provider validation", "rationale": "Simpler than live lookup; catches user typos like 'local' before they crash ProviderResolver", "phase": "26.4.1"},
-    {"decision": "run_preflight gate widens to Chat | Gateway | None only; is_interactive_repl and is_chat_or_bare stay unchanged", "rationale": "Gateway needs setup guard but is not an interactive REPL — must keep ironhermes=info log filter", "phase": "26.4.1"}
+  "human_actions_pending": [
+    {"action": "Run /gsd-verify-work 27.1.1 if you want HUMAN-UAT.md closed (otherwise it stays 'partial' and surfaces in /gsd-progress and /gsd-audit-uat)", "context": "Verifier returned human_needed for: (1) confirm full-workspace test count — already evidenced as zero new failures; (2) REQUIREMENTS.md HXP rows — already flipped to Complete by phase.complete", "blocking": false},
+    {"action": "Run /gsd-secure-phase 27.1.1 before doing more hexapod hardware work", "context": "security_enforcement=true and no 27.1.1-SECURITY.md exists; hexapod_tcp issues physical-motion commands over TCP", "blocking": false},
+    {"action": "Decide whether to /gsd-code-review 27.1.1 --fix the advisory findings", "context": "CR-01 ToolsConfig::default() omits 'robotics'; CR-02 iron_hermes_ui AppState has no call_session_end_hooks() teardown (safety halt doesn't cover web-UI); CR-03 leftover duplicate create_dir_all loop in event_loop.rs; WR-01..04 (relax toggle semantics, mutex unwrap in async, tokio::spawn runtime guard, merge helper enables all ALL_TOOLSETS members)", "blocking": false}
   ],
-  "uncommitted_files": [],
-  "next_action": "Run /gsd-execute-phase 26.4.1 — all 3 plans are ready, Wave 1 (plans 01 + 03) can run in parallel",
-  "context_notes": "Phase was inserted as placeholder with TBD goal. Goal was clarified via user bug report during this session. All 3 bugs are localized to 3 files: setup.rs (plans 01+02), main.rs (plan 03). Plan checker found 1 warning (plan 03 task 1 verify command) which was fixed directly before committing."
+  "decisions": [
+    {"decision": "Treated the 2 post-merge cargo test --workspace failures (ironhermes-tools-api::browser_integration compile error; iron_hermes_ui::websocket_lifecycle_parity x2) as pre-existing rot and continued", "rationale": "Verified the relevant strings/deps are also broken on base commit 202919f5; gap-02 touched none of those crates; cargo build --workspace passes and every crate gap-02 touched has green tests. User confirmed 'Continue — mark gap-02 complete'.", "phase": "27.1.1"},
+    {"decision": "Approved phase completion despite verifier status human_needed", "rationale": "11/11 must-haves verified against the codebase, zero technical gaps; both human items were housekeeping (test count already evidenced; REQUIREMENTS rows updated). User chose 'Approved — complete the phase + update REQUIREMENTS.md'.", "phase": "27.1.1"},
+    {"decision": "Used status 'Complete' (not 'Satisfied') for the 11 HXP-TOOL/LOCO rows in REQUIREMENTS.md traceability table", "rationale": "phase.complete writes 'Complete' and it matches the term used elsewhere in that table (e.g. CFG-04 | Phase 24 | Complete).", "phase": "27.1.1"},
+    {"decision": "Left the merged worktree branch's worktree directory in place when 'git worktree remove --force' failed on the harness lock", "rationale": "Lock holder is the live Claude Code process (pid); the harness GCs agent worktrees on session exit; the SUMMARY.md and all commits were already merged to develop, so nothing is at risk. Did not fight the harness lock.", "phase": "27.1.1"}
+  ],
+  "uncommitted_files": [
+    ".claude/scheduled_tasks.lock",
+    ".omc/project-memory.json",
+    ".omc/state/mission-state.json",
+    ".planning/.DS_Store",
+    ".planning/phases/.DS_Store",
+    "optional-skills/.DS_Store"
+  ],
+  "next_action": "Run /gsd-discuss-phase 27.1.2 to start the Navigation phase. (Or, if you want loose ends closed first: /gsd-secure-phase 27.1.1, then /gsd-verify-work 27.1.1, then /gsd-code-review 27.1.1 --fix.)",
+  "context_notes": "Phase 27.1.1 is a hexapod TCP integration side-track imported from another repo (phase 27.1 was the import meta-phase). It is NOT part of the v2.1 milestone's tracked requirement set in PROJECT.md, so PROJECT.md's Active/Validated lists were not touched (only the footer was evolved). Repo state is clean except for .DS_Store / .omc / scheduled_tasks.lock noise — do not commit those. The execute-phase code-review and post-merge-test gates are advisory and were exercised in full; nothing was suppressed. STATE.md minor drift: 'Current focus' line still says Phase 27.1.1 while 'Current Position' correctly says Phase 27.1.2 — harmless, next workflow reconciles."
 }
