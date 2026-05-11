@@ -226,7 +226,16 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let credential_dir = ironhermes_tools::skills_tool::default_credential_dir(&config.skills);
 
+    // Phase 27.1.1 gap-01: use the canonical entry point so every default tool
+    // (including hexapod_tcp) is automatically present without hand-rolling the list.
+    // Skip the plain TerminalTool; wire the process-registry variant below so
+    // background terminal spawns flow through drain_and_kill_session.
     let mut registry = ironhermes_tools::ToolRegistry::new();
+    registry.register_defaults_except(&["terminal"]);
+    registry.register_terminal_tool_with_process_registry(process_registry.clone());
+
+    // Runtime-handle tools — registered separately because they need instances
+    // that cannot be constructed inside the registry crate itself.
     registry.register_cronjob_tool(job_store.clone());
     registry.register_skills_tool(
         skill_registry.clone(),
@@ -239,15 +248,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         registry.register_memory_tool(mgr.clone());
     }
 
-    // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — full classic parity per user-locked
-    // decision. Three additions to the MAIN registry:
-    //   (a) delegate_task — subagent dispatch tool (classic main.rs:500 + :978)
-    //   (b) WebSearchTool on main — top-level web search visible to the LLM
-    //   (c) WebReadTool on main — top-level URL fetch visible to the LLM
-    // The (b)/(c) duplicates on the rpc_registry below are intentional —
-    // execute_code's safe subset still needs them.
-
-    // (a) delegate_task — D-18 item 5 / AGENT-01..05 (lift from main.rs:487-507)
+    // delegate_task — D-18 item 5 / AGENT-01..05 (lift from main.rs:487-507)
     let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
     let subagent_runner = Arc::new(
         AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
@@ -285,16 +286,6 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         Some(cancel_parent.clone()),
         None, // no progress callback in Phase 22.4 (status-pill integration is follow-up)
     );
-
-    // (b) + (c) — Web tools on the MAIN registry so the LLM sees them as
-    // top-level callable tools (not just inside execute_code's safe subset).
-    registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
-    registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
-    // Phase 27.1.1 (gap-01): hexapod_tcp must be registered here too — the rata TUI
-    // builds its OWN registry and discards build_app_runtime_bundle's result, so the
-    // app_runtime_factory registration does not reach this path. is_available() hides
-    // it unless HEXAPOD_IP is set.
-    registry.register(Box::new(ironhermes_tools::hexapod_tcp::HexapodTcpTool));
 
     // RPC sub-registry (safe subset — no terminal, no execute_code)
     let mut rpc_registry = ironhermes_tools::ToolRegistry::new();

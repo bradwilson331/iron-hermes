@@ -2571,37 +2571,6 @@ fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
     Ok((client, config, resolver))
 }
 
-fn build_registry() -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-    registry.register_defaults();
-    registry
-}
-
-/// Plan 21.7-06 (D-29): build a ToolRegistry with a TerminalTool that is
-/// wired to the session-scoped ProcessRegistry so `terminal background=true`
-/// spawns flow through `drain_and_kill_session` at on_session_end. All other
-/// default tools register identically to `build_registry`.
-fn build_registry_with_process_registry(
-    process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
-) -> ToolRegistry {
-    use ironhermes_tools::file_tools::{
-        PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
-    };
-    use ironhermes_tools::web_read::WebReadTool;
-    use ironhermes_tools::web_search::WebSearchTool;
-    let mut registry = ToolRegistry::new();
-    // Terminal with ProcessRegistry wiring.
-    registry.register_terminal_tool_with_process_registry(process_registry.clone());
-    // Other defaults mirror `register_defaults()` sans the plain TerminalTool.
-    registry.register(Box::new(ReadFileTool));
-    registry.register(Box::new(WriteFileTool));
-    registry.register(Box::new(PatchFileTool));
-    registry.register(Box::new(SearchFilesTool));
-    registry.register(Box::new(WebSearchTool));
-    registry.register(Box::new(WebReadTool));
-    registry
-}
-
 /// Phase 21.2: Build and start an McpManager if the config has any MCP servers.
 ///
 /// Returns `Some(Arc<McpManager>)` when at least one enabled server is configured.

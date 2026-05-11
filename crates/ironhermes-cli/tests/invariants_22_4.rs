@@ -455,31 +455,45 @@ fn invariant_22_4_27_tool_variants_constructed() {
 ///   (c) register_delegate_task_tool called on the MAIN registry (subagents)
 ///   (d) AgentLoop::with_fallback chained in spawn_turn (PROV-07 parity)
 /// See 22.4-UAT.md Gap 2 root_cause + missing list.
+///
+/// Phase 27.1.1 gap-01 update: (a) and (b) now assert the CANONICAL registration
+/// pattern (`register_defaults_except`) rather than individual tool strings.
+/// WebSearchTool and WebReadTool are part of `register_defaults_except`, so they
+/// ARE present on the main registry; the old per-tool string checks are replaced
+/// with a check for the canonical entry-point call. The rpc_registry still has
+/// explicit registrations (safe-subset by design), so the rpc_registry side of the
+/// old check is covered by the explicit string in the rpc_registry block below.
 #[test]
 fn invariant_22_4_28_tool_registry_parity() {
-    // (a) + (b) — Web tools on the MAIN registry. The string
-    // `registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool))`
-    // appears TWICE in event_loop.rs after Plan 22.4-15: once on the main
-    // `registry` and once on the `rpc_registry` sub-tree. Either count >= 2
-    // is acceptable; we assert >= 2 explicitly so the main-registry
-    // registration cannot silently regress.
-    let web_search_count = TUI_RATA_EVLOOP
-        .matches("registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool))")
-        .count();
+    // (a) + (b) — Web tools on the MAIN registry via the canonical entry point.
+    // Phase 27.1.1 gap-01: the explicit per-tool register() calls were replaced with
+    // `registry.register_defaults_except(&["terminal"])` which includes web_search
+    // and web_read. Assert the canonical call is present (the intent of the original
+    // invariant — web tools are visible at the top level — is structurally enforced
+    // by register_defaults_except, not by per-tool strings).
     assert!(
-        web_search_count >= 2,
-        "INV-22.4-28 (a): tui_rata/event_loop.rs must register WebSearchTool \
-         on BOTH the main `registry` AND the `rpc_registry` (>= 2 sites). \
-         Found {web_search_count}. See 22.4-UAT.md Gap 2 (a)."
+        TUI_RATA_EVLOOP.contains("register_defaults_except"),
+        "INV-22.4-28 (a)/(b): tui_rata/event_loop.rs must call register_defaults_except \
+         (the canonical entry point that includes web_search + web_read on the main registry). \
+         Phase 27.1.1 gap-01 replaced per-tool explicit registrations with this canonical call \
+         to prevent tool-registration drift. See 22.4-UAT.md Gap 2 (a) and 27.1.1-gap-01-PLAN.md."
     );
-    let web_read_count = TUI_RATA_EVLOOP
-        .matches("registry.register(Box::new(ironhermes_tools::web_read::WebReadTool))")
+    // rpc_registry still has explicit web search/read registrations (safe-subset by design).
+    let rpc_web_search_count = TUI_RATA_EVLOOP
+        .matches("rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool))")
         .count();
     assert!(
-        web_read_count >= 2,
-        "INV-22.4-28 (b): tui_rata/event_loop.rs must register WebReadTool \
-         on BOTH the main `registry` AND the `rpc_registry` (>= 2 sites). \
-         Found {web_read_count}. See 22.4-UAT.md Gap 2 (a)."
+        rpc_web_search_count >= 1,
+        "INV-22.4-28 (a): tui_rata/event_loop.rs rpc_registry must still explicitly register \
+         WebSearchTool (safe-subset — execute_code sandbox). Found {rpc_web_search_count}."
+    );
+    let rpc_web_read_count = TUI_RATA_EVLOOP
+        .matches("rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool))")
+        .count();
+    assert!(
+        rpc_web_read_count >= 1,
+        "INV-22.4-28 (b): tui_rata/event_loop.rs rpc_registry must still explicitly register \
+         WebReadTool (safe-subset — execute_code sandbox). Found {rpc_web_read_count}."
     );
 
     // (c) — register_delegate_task_tool called on the MAIN registry.
