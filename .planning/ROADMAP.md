@@ -829,7 +829,7 @@ Plans:
 - [x] 27.1.1-04-PLAN.md — Register HexapodTcpTool in lib.rs + ToolRegistry::register_defaults
 - [x] 27.1.1-05-PLAN.md — Manual UAT on a powered hexapod (non-autonomous) — PASSED
 
-**Follow-up (non-blocking):** 27.1.1-gap-01-PLAN.md — collapse the 7 hand-rolled tool-registration sites into one canonical entry point (gateway entry still bypasses registration; `set_toolset_config` never called at startup). Run via `/gsd-execute-phase 27.1.1 --gaps-only`.
+**Follow-up:** 27.1.1-gap-01-PLAN.md ✅ DONE (2026-05-11) — canonical `ToolRegistry::register_defaults_except` entry point; all production paths (CLI REPL/batch, ratatui TUI, iron_hermes_ui, gateway) delegate to it; dead-code builders deleted; `build_rpc_registry` kept restricted with a SAFETY rationale; 3 regression tests added. Remaining: `set_toolset_config` never called at startup (config.yaml `tools.toolsets` inert at session start) — deferred to gap-02 if needed.
 
 **Phase directory:** `.planning/phases/27.1.1-safe-foundation/`
 

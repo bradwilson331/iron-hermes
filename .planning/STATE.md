@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 27.1.1 (safe-foundation) — COMPLETE ✅
-Plans: 5 of 5 done; live-robot UAT passed and signed off 2026-05-11
-Status: Phase complete. Follow-up gap-01 (tool-registration drift) outstanding — non-blocking.
-Last activity: 2026-05-11 -- Phase 27.1.1 complete; hexapod_tcp tool live (walk/stop/battery/distance/relax + session-end auto-halt verified on a powered Freenove hexapod)
+Phase: 27.1.1 (safe-foundation) — COMPLETE ✅ (+ gap-01 done)
+Plans: 5 of 5 done; live-robot UAT passed 2026-05-11; gap-01 (registration refactor) done 2026-05-11
+Status: Phase fully closed. hexapod_tcp registered via canonical entry point across all production paths. Optional gap-02 (set_toolset_config startup wiring) not yet planned.
+Last activity: 2026-05-11 -- Phase 27.1.1 + gap-01 complete; ToolRegistry::register_defaults_except is now the single source of truth for default tool registration
 
 ## Performance Metrics
 
