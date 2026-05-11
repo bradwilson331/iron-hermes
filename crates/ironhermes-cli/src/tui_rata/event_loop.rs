@@ -98,7 +98,17 @@ async fn run_with_deps(
         app.submit();
     }
 
-    run_app_inner(terminal, &mut app).await
+    // Capture the Arc before run_app_inner consumes &mut app so the borrow
+    // checker is satisfied even if app is moved or dropped during cleanup.
+    let registry = app.registry.clone();
+    let result = run_app_inner(terminal, &mut app).await;
+    // D-15 (Phase 27.1.1): fire on_session_end on every registered tool --
+    // HexapodTcpTool overrides this to send stop + relax (D-14). The ratatui
+    // path had no shutdown hook before Phase 27.1.1; this closes the gap.
+    // Best-effort; do not propagate any panic out of the hook.
+    // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
+    registry.read().await.call_session_end_hooks();
+    result
 }
 
 // ── D-18 parity wiring — 14 items ────────────────────────────────────────────
