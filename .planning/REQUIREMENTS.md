@@ -182,17 +182,17 @@ The Learning Loop is the unifying philosophy of v2.1 — Skills + Memory + Sessi
 
 ### Hexapod Integration
 
-- [ ] **HXP-TOOL-01**: `hexapod_tcp` tool registered in IronHermes ToolRegistry that sends commands to the robot and returns a result
-- [ ] **HXP-TOOL-02**: Allowlist + per-command argument bounds validation (compile-time exhaustive match; blocked commands return Ok("Action '...' is blocked"))
-- [ ] **HXP-TOOL-03**: Fresh TCP connection to `HEXAPOD_IP:5002` per call (stateless; no persistent socket)
-- [ ] **HXP-TOOL-04**: Semantic JSON schema → wire protocol translation in Rust (action enum → CMD_* strings with correct field layout)
-- [ ] **HXP-TOOL-05**: Parsed human-readable response for sensor commands (CMD_POWER, CMD_SONIC) with 3s read timeout
-- [ ] **HXP-TOOL-06**: Send stop + relax on IronHermes session end via `on_session_end` Tool trait hook
-- [ ] **HXP-LOCO-01**: Walk forward/backward/left/right at configurable speed 2–10
-- [ ] **HXP-LOCO-02**: Stop and return to neutral stance (CMD_MOVE mode=0)
-- [ ] **HXP-LOCO-03**: Read battery voltage with low-battery alert (< 5.5V or < 6.0V threshold)
-- [ ] **HXP-LOCO-04**: Read ultrasonic distance in centimeters
-- [ ] **HXP-LOCO-05**: Relax servos for safe idle (CMD_RELAX)
+- [x] **HXP-TOOL-01**: `hexapod_tcp` tool registered in IronHermes ToolRegistry that sends commands to the robot and returns a result
+- [x] **HXP-TOOL-02**: Allowlist + per-command argument bounds validation (compile-time exhaustive match; blocked commands return Ok("Action '...' is blocked"))
+- [x] **HXP-TOOL-03**: Fresh TCP connection to `HEXAPOD_IP:5002` per call (stateless; no persistent socket)
+- [x] **HXP-TOOL-04**: Semantic JSON schema → wire protocol translation in Rust (action enum → CMD_* strings with correct field layout)
+- [x] **HXP-TOOL-05**: Parsed human-readable response for sensor commands (CMD_POWER, CMD_SONIC) with 3s read timeout
+- [x] **HXP-TOOL-06**: Send stop + relax on IronHermes session end via `on_session_end` Tool trait hook
+- [x] **HXP-LOCO-01**: Walk forward/backward/left/right at configurable speed 2–10
+- [x] **HXP-LOCO-02**: Stop and return to neutral stance (CMD_MOVE mode=0)
+- [x] **HXP-LOCO-03**: Read battery voltage with low-battery alert (< 5.5V or < 6.0V threshold)
+- [x] **HXP-LOCO-04**: Read ultrasonic distance in centimeters
+- [x] **HXP-LOCO-05**: Relax servos for safe idle (CMD_RELAX)
 - [ ] **HXP-NAV-01**: Rotate in place by degrees (positive = right, negative = left)
 - [ ] **HXP-NAV-02**: Set all LEDs to RGB color (0–255 per channel) or turn off
 - [ ] **HXP-NAV-03**: Control head pan (50–180°) and tilt (0–180°) independently
@@ -379,17 +379,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LEARN-03 | Phase 33 | Pending |
 | LEARN-04 | Phase 33 | Pending |
 | LEARN-05 | Phase 33 | Pending |
-| HXP-TOOL-01 | Phase 27.1.1 | Pending |
-| HXP-TOOL-02 | Phase 27.1.1 | Pending |
-| HXP-TOOL-03 | Phase 27.1.1 | Pending |
-| HXP-TOOL-04 | Phase 27.1.1 | Pending |
-| HXP-TOOL-05 | Phase 27.1.1 | Pending |
-| HXP-TOOL-06 | Phase 27.1.1 | Pending |
-| HXP-LOCO-01 | Phase 27.1.1 | Pending |
-| HXP-LOCO-02 | Phase 27.1.1 | Pending |
-| HXP-LOCO-03 | Phase 27.1.1 | Pending |
-| HXP-LOCO-04 | Phase 27.1.1 | Pending |
-| HXP-LOCO-05 | Phase 27.1.1 | Pending |
+| HXP-TOOL-01 | Phase 27.1.1 | Complete |
+| HXP-TOOL-02 | Phase 27.1.1 | Complete |
+| HXP-TOOL-03 | Phase 27.1.1 | Complete |
+| HXP-TOOL-04 | Phase 27.1.1 | Complete |
+| HXP-TOOL-05 | Phase 27.1.1 | Complete |
+| HXP-TOOL-06 | Phase 27.1.1 | Complete |
+| HXP-LOCO-01 | Phase 27.1.1 | Complete |
+| HXP-LOCO-02 | Phase 27.1.1 | Complete |
+| HXP-LOCO-03 | Phase 27.1.1 | Complete |
+| HXP-LOCO-04 | Phase 27.1.1 | Complete |
+| HXP-LOCO-05 | Phase 27.1.1 | Complete |
 | HXP-NAV-01 | Phase 27.1.2 | Pending |
 | HXP-NAV-02 | Phase 27.1.3 | Pending |
 | HXP-NAV-03 | Phase 27.1.2 | Pending |
