@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1778357799049,
+  "lastScanned": 1778444871528,
   "projectRoot": "/Users/twilson/code/ironhermes",
   "techStack": {
     "languages": [
@@ -56,14 +56,14 @@
       "path": "crates",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1778357799039,
+      "lastAccessed": 1778444871518,
       "keyFiles": []
     },
     "docker": {
       "path": "docker",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778357799040,
+      "lastAccessed": 1778444871520,
       "keyFiles": [
         "SOUL.md",
         "entrypoint.sh"
@@ -73,7 +73,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 1,
-      "lastAccessed": 1778357799041,
+      "lastAccessed": 1778444871520,
       "keyFiles": [
         "skills-cli.md"
       ]
@@ -82,7 +82,7 @@
       "path": "optional-skills",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778357799041,
+      "lastAccessed": 1778444871520,
       "keyFiles": [
         "DESCRIPTION.md"
       ]
@@ -91,14 +91,14 @@
       "path": "providers",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1778357799041,
+      "lastAccessed": 1778444871520,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1778357799042,
+      "lastAccessed": 1778444871520,
       "keyFiles": [
         "ci-gates.sh"
       ]
@@ -107,14 +107,14 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1778357799042,
+      "lastAccessed": 1778444871520,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778357799042,
+      "lastAccessed": 1778444871520,
       "keyFiles": [
         "CACHEDIR.TAG"
       ]
@@ -123,7 +123,7 @@
       "path": "tmp",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1778357799042,
+      "lastAccessed": 1778444871521,
       "keyFiles": [
         "ComfyUI_LoRA_Guide.md",
         "ComfyUI_LoRA_Workflow_Examples.json",
@@ -136,7 +136,7 @@
       "path": "website",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778357799042,
+      "lastAccessed": 1778444871521,
       "keyFiles": [
         "IronHermes Design System-handoff.zip"
       ]
@@ -144,249 +144,273 @@
   },
   "hotPaths": [
     {
-      "path": "crates/ironhermes-cli/src/tui_rata/app.rs",
-      "accessCount": 49,
-      "lastAccessed": 1778424169968,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-cli/src/tui_rata/event_loop.rs",
-      "accessCount": 19,
-      "lastAccessed": 1778419846969,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-gateway/src/handler.rs",
-      "accessCount": 16,
-      "lastAccessed": 1778424174416,
-      "type": "file"
-    },
-    {
       "path": ".planning/ROADMAP.md",
-      "accessCount": 13,
-      "lastAccessed": 1778443243455,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-cli/src/tui_rata/commands.rs",
-      "accessCount": 10,
-      "lastAccessed": 1778424180854,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-02-PLAN.md",
-      "accessCount": 8,
-      "lastAccessed": 1778419780746,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-CONTEXT.md",
-      "accessCount": 7,
-      "lastAccessed": 1778419780883,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-01-PLAN.md",
-      "accessCount": 6,
-      "lastAccessed": 1778419779795,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/tests/handlers_personality.rs",
-      "accessCount": 6,
-      "lastAccessed": 1778424392827,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-cli/src/tui_rata/ui.rs",
-      "accessCount": 5,
-      "lastAccessed": 1778391464872,
+      "accessCount": 18,
+      "lastAccessed": 1778481341078,
       "type": "file"
     },
     {
       "path": ".planning/STATE.md",
-      "accessCount": 5,
-      "lastAccessed": 1778417351309,
+      "accessCount": 18,
+      "lastAccessed": 1778481346856,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-CONTEXT.md",
-      "accessCount": 4,
-      "lastAccessed": 1778367080241,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-RESEARCH.md",
-      "accessCount": 4,
-      "lastAccessed": 1778417955540,
-      "type": "file"
-    },
-    {
-      "path": "CLAUDE.md",
-      "accessCount": 4,
-      "lastAccessed": 1778419386753,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/commands/handlers.rs",
-      "accessCount": 4,
-      "lastAccessed": 1778423493427,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.2-skills-hot-reload-command/21.8.2-VERIFICATION.md",
-      "accessCount": 3,
-      "lastAccessed": 1778358642782,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.2-skills-hot-reload-command/21.8.2-04-PLAN.md",
-      "accessCount": 3,
-      "lastAccessed": 1778365105942,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-RESEARCH.md",
-      "accessCount": 3,
-      "lastAccessed": 1778367080419,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-VALIDATION.md",
-      "accessCount": 3,
-      "lastAccessed": 1778367081491,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-VALIDATION.md",
-      "accessCount": 3,
-      "lastAccessed": 1778417968483,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-PATTERNS.md",
-      "accessCount": 3,
-      "lastAccessed": 1778417969209,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/types.rs",
-      "accessCount": 3,
-      "lastAccessed": 1778419654681,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-cli/src/tui/commands.rs",
-      "accessCount": 3,
-      "lastAccessed": 1778424277755,
-      "type": "file"
-    },
-    {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-PATTERNS.md",
-      "accessCount": 2,
-      "lastAccessed": 1778367080915,
-      "type": "file"
-    },
-    {
-      "path": "crates/iron_hermes_ui/src/components/warp_hermes.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778395609866,
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-02-PLAN.md",
+      "accessCount": 17,
+      "lastAccessed": 1778462840465,
       "type": "file"
     },
     {
       "path": ".planning/REQUIREMENTS.md",
-      "accessCount": 2,
-      "lastAccessed": 1778416771663,
+      "accessCount": 14,
+      "lastAccessed": 1778449399688,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-agent/src/personality.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778416785333,
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-CONTEXT.md",
+      "accessCount": 11,
+      "lastAccessed": 1778447779547,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-core/src/commands/context.rs",
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-VALIDATION.md",
+      "accessCount": 10,
+      "lastAccessed": 1778447999805,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/registry.rs",
+      "accessCount": 9,
+      "lastAccessed": 1778448417964,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-RESEARCH.md",
+      "accessCount": 8,
+      "lastAccessed": 1778447782777,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-04-PLAN.md",
+      "accessCount": 7,
+      "lastAccessed": 1778447779495,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/validate-import.sh",
+      "accessCount": 7,
+      "lastAccessed": 1778447941074,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-RESEARCH.md",
+      "accessCount": 7,
+      "lastAccessed": 1778449428135,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-CONTEXT.md",
+      "accessCount": 7,
+      "lastAccessed": 1778462827133,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-01-PLAN.md",
+      "accessCount": 6,
+      "lastAccessed": 1778447155721,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-02-PLAN.md",
+      "accessCount": 6,
+      "lastAccessed": 1778447520252,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-03-PLAN.md",
+      "accessCount": 6,
+      "lastAccessed": 1778447748384,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-PATTERNS.md",
+      "accessCount": 6,
+      "lastAccessed": 1778447751903,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cli/src/main.rs",
+      "accessCount": 6,
+      "lastAccessed": 1778448405905,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cli/src/tui_rata/event_loop.rs",
+      "accessCount": 6,
+      "lastAccessed": 1778476750564,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-gap-01-PLAN.md",
+      "accessCount": 6,
+      "lastAccessed": 1778476826488,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/cronjob_tool.rs",
+      "accessCount": 4,
+      "lastAccessed": 1778448379459,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-03-PLAN.md",
+      "accessCount": 4,
+      "lastAccessed": 1778462862525,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/agent_loop.rs",
+      "accessCount": 4,
+      "lastAccessed": 1778476735756,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-PATTERNS.md",
+      "accessCount": 3,
+      "lastAccessed": 1778449428720,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-01-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1778462826954,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-05-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1778462840865,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-04-PLAN.md",
+      "accessCount": 3,
+      "lastAccessed": 1778462863054,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/app_runtime_factory.rs",
+      "accessCount": 3,
+      "lastAccessed": 1778474600080,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-01-SUMMARY.md",
       "accessCount": 2,
-      "lastAccessed": 1778416792353,
+      "lastAccessed": 1778447785595,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-02-SUMMARY.md",
+      "accessCount": 2,
+      "lastAccessed": 1778447785806,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/terminal.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778448344368,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/lib.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778448349835,
       "type": "file"
     },
     {
       "path": ".planning/PROJECT.md",
       "accessCount": 2,
-      "lastAccessed": 1778420217383,
+      "lastAccessed": 1778448797113,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-core/src/commands/mod.rs",
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-VALIDATION.md",
       "accessCount": 2,
-      "lastAccessed": 1778423489951,
+      "lastAccessed": 1778449411264,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.2-skills-hot-reload-command/21.8.2-CONTEXT.md",
-      "accessCount": 1,
-      "lastAccessed": 1778358437875,
+      "path": "crates/ironhermes-core/src/constants.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778473045240,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.2-skills-hot-reload-command/21.8.2-UAT.md",
-      "accessCount": 1,
-      "lastAccessed": 1778358438254,
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-UAT.md",
+      "accessCount": 2,
+      "lastAccessed": 1778479411597,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.2-skills-hot-reload-command/21.8.2-04-SUMMARY.md",
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-DISCUSSION-LOG.md",
       "accessCount": 1,
-      "lastAccessed": 1778358440112,
+      "lastAccessed": 1778444898937,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-DISCUSSION-LOG.md",
+      "path": ".planning/phases/26.4.1-config-fix/26.4.1-CONTEXT.md",
       "accessCount": 1,
-      "lastAccessed": 1778364875276,
+      "lastAccessed": 1778445398442,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-01-PLAN.md",
+      "path": "CLAUDE.md",
       "accessCount": 1,
-      "lastAccessed": 1778367267322,
+      "lastAccessed": 1778446356268,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-02-PLAN.md",
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-03-SUMMARY.md",
       "accessCount": 1,
-      "lastAccessed": 1778367392172,
+      "lastAccessed": 1778447830727,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/21.8.3-REVIEW.md",
+      "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-04-SUMMARY.md",
       "accessCount": 1,
-      "lastAccessed": 1778368820688,
+      "lastAccessed": 1778448076659,
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cli/src/main.rs",
+      "path": "crates/ironhermes-tools/src/web_search.rs",
       "accessCount": 1,
-      "lastAccessed": 1778395024973,
+      "lastAccessed": 1778448360927,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-DISCUSSION-LOG.md",
+      "path": "crates/ironhermes-tools/src/skills_tool.rs",
       "accessCount": 1,
-      "lastAccessed": 1778396010492,
+      "lastAccessed": 1778448362283,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21-REVIEW.md",
+      "path": "crates/ironhermes-tools/src/file_tools.rs",
       "accessCount": 1,
-      "lastAccessed": 1778419572297,
+      "lastAccessed": 1778448368392,
       "type": "file"
     },
     {
-      "path": ".planning/phases/21.8.3.1-personality-applied-doesn-t-chage-the-llm-responses/21.8.3.1-VERIFICATION.md",
+      "path": "crates/ironhermes-tools/src/web_read.rs",
       "accessCount": 1,
-      "lastAccessed": 1778419945681,
+      "lastAccessed": 1778448412376,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-gap-02-PLAN.md",
+      "accessCount": 1,
+      "lastAccessed": 1778481332140,
       "type": "file"
     }
   ],
