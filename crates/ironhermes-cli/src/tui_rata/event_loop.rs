@@ -290,6 +290,11 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // top-level callable tools (not just inside execute_code's safe subset).
     registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
     registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
+    // Phase 27.1.1 (gap-01): hexapod_tcp must be registered here too — the rata TUI
+    // builds its OWN registry and discards build_app_runtime_bundle's result, so the
+    // app_runtime_factory registration does not reach this path. is_available() hides
+    // it unless HEXAPOD_IP is set.
+    registry.register(Box::new(ironhermes_tools::hexapod_tcp::HexapodTcpTool));
 
     // RPC sub-registry (safe subset — no terminal, no execute_code)
     let mut rpc_registry = ironhermes_tools::ToolRegistry::new();
