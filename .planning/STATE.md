@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 27.1.1 (safe-foundation) — COMPLETE ✅ (+ gap-01 done)
-Plans: 5 of 5 done; live-robot UAT passed 2026-05-11; gap-01 (registration refactor) done 2026-05-11
-Status: Phase fully closed. hexapod_tcp registered via canonical entry point across all production paths. Optional gap-02 (set_toolset_config startup wiring) not yet planned.
-Last activity: 2026-05-11 -- Phase 27.1.1 + gap-01 complete; ToolRegistry::register_defaults_except is now the single source of truth for default tool registration
+Phase: 27.1.1 (safe-foundation) — COMPLETE ✅ (gap-01 done; gap-02 planned, not executed)
+Plans: 5 of 5 done; live-robot UAT passed 2026-05-11; gap-01 (registration refactor) done 2026-05-11; gap-02 (set_toolset_config startup wiring) planned 2026-05-11
+Status: Phase fully closed. hexapod_tcp registered via canonical entry point across all production paths. gap-02 ready to execute via `/gsd-execute-phase 27.1.1 --gaps-only` (config.yaml tools.toolsets enforcement + PromptBuilder.active_toolsets wiring).
+Last activity: 2026-05-11 -- created 27.1.1-gap-02-PLAN.md (toolset_config startup enforcement); gap-01 already complete
 
 ## Performance Metrics
 

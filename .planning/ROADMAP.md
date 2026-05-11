@@ -829,7 +829,9 @@ Plans:
 - [x] 27.1.1-04-PLAN.md — Register HexapodTcpTool in lib.rs + ToolRegistry::register_defaults
 - [x] 27.1.1-05-PLAN.md — Manual UAT on a powered hexapod (non-autonomous) — PASSED
 
-**Follow-up:** 27.1.1-gap-01-PLAN.md ✅ DONE (2026-05-11) — canonical `ToolRegistry::register_defaults_except` entry point; all production paths (CLI REPL/batch, ratatui TUI, iron_hermes_ui, gateway) delegate to it; dead-code builders deleted; `build_rpc_registry` kept restricted with a SAFETY rationale; 3 regression tests added. Remaining: `set_toolset_config` never called at startup (config.yaml `tools.toolsets` inert at session start) — deferred to gap-02 if needed.
+**Follow-ups:**
+- 27.1.1-gap-01-PLAN.md ✅ DONE (2026-05-11) — canonical `ToolRegistry::register_defaults_except` entry point; all production paths (CLI REPL/batch, ratatui TUI, iron_hermes_ui, gateway) delegate to it; dead-code builders deleted; `build_rpc_registry` kept restricted with a SAFETY rationale; 3 regression tests added.
+- 27.1.1-gap-02-PLAN.md ⏳ PLANNED — wire `set_toolset_config` at startup so `config.yaml`'s `tools.toolsets` section is actually enforced (currently inert until a `/toolset` command runs); back-compat-preserving merge helper (`ToolsConfig::with_default_toolsets_merged`); populate `PromptBuilder.active_toolsets` at all construction sites (closes the "Phase 20 wires real toolset state" TODO). Run via `/gsd-execute-phase 27.1.1 --gaps-only`.
 
 **Phase directory:** `.planning/phases/27.1.1-safe-foundation/`
 
