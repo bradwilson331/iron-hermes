@@ -67,6 +67,15 @@ pub trait Tool: Send + Sync {
         raw.clone()
     }
 
+    /// D-13 (Phase 27.1.1): called on REPL/CLI/TUI session end so tools
+    /// can fire a final cleanup. Default is a synchronous no-op — all
+    /// 25 existing `impl Tool` blocks get this for free (zero breaking
+    /// changes). Override to run fire-and-forget cleanup; per D-14 the
+    /// override uses `tokio::spawn(async move { ... })` internally so
+    /// the trait method itself stays `fn` (not `async fn`) and the
+    /// trait remains object-safe for `Box<dyn Tool>`.
+    fn on_session_end(&self) {}
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
 }
 
@@ -472,6 +481,20 @@ impl ToolRegistry {
         let mut names: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
         names.sort();
         names
+    }
+
+    /// D-15 (Phase 27.1.1): call `on_session_end` on every registered tool.
+    /// Sync method — returns immediately. Fire-and-forget overrides (e.g.,
+    /// `HexapodTcpTool::on_session_end` per D-14) internally `tokio::spawn`
+    /// an async task; this method does not await those tasks.
+    ///
+    /// Call site contract: invoke AFTER any registry write lock is dropped
+    /// (use `registry.read().await.call_session_end_hooks()`) — see Pitfall 6
+    /// in 27.1.1-RESEARCH.md. CLI/TUI shutdown paths wire this in Plan 04.
+    pub fn call_session_end_hooks(&self) {
+        for tool in self.tools.values() {
+            tool.on_session_end();
+        }
     }
 
     pub fn register_defaults(&mut self) {
