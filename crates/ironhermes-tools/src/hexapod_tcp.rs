@@ -454,9 +454,10 @@ mod tests {
 
     use super::*;
 
-    /// Serialise all env-var-mutating tests in this module so that parallel
-    /// test threads cannot race on HEXAPOD_IP. Tests that DO NOT call
-    /// set_var/remove_var are exempt and can run concurrently as normal.
+    /// Serialize env-var-mutating tests within this module.
+    /// NOTE: This mutex only protects against races within this module.
+    /// Run the full test binary with RUST_TEST_THREADS=1 to avoid races
+    /// with other modules that may also read HEXAPOD_IP.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // -----------------------------------------------------------------------
