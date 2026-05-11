@@ -844,10 +844,10 @@ Plans:
   1. Robot rotates clockwise and counterclockwise by specified degrees
   2. Head pan and tilt move independently within safe servo ranges
   3. Buzzer turns on and off on command (audible confirmation)
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 27.1.2-01-PLAN.md — Extend hexapod_tcp.rs with 5 new actions (rotate, head_pan, head_tilt, buzzer_on, buzzer_off), 5 constants, build_rotate_wire helper, updated schema, and 7 new unit tests (tests 14–20)
+- [x] 27.1.2-01-PLAN.md — Extend hexapod_tcp.rs with 5 new actions (rotate, head_pan, head_tilt, buzzer_on, buzzer_off), 5 constants, build_rotate_wire helper, updated schema, and 7 new unit tests (tests 14–20)
 
 **Phase directory:** `.planning/phases/27.1.2-navigation-inserted/`
 
