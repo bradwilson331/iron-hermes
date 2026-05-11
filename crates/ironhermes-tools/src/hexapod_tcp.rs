@@ -34,13 +34,32 @@ pub(crate) const DISTANCE_CMD: &str = "CMD_SONIC\n";
 pub(crate) const BATTERY_LOW_V1: f32 = 5.5;
 pub(crate) const BATTERY_LOW_V2: f32 = 6.0;
 
+/// Calibration placeholder — tune on real robot after live testing. Per D-04.
+pub(crate) const ROTATE_MS_PER_DEGREE: u64 = 20;
+
+/// Protocol maximum for head pan servo (§6 of Freenove protocol). Per D-08.
+pub(crate) const HEAD_PAN_MAX: i64 = 90;
+
+/// Protocol maximum for head tilt servo (§6 of Freenove protocol). Per D-08.
+pub(crate) const HEAD_TILT_MAX: i64 = 90;
+
+/// Buzzer on command. Per D-10.
+pub(crate) const BUZZER_ON_CMD: &str = "CMD_BUZZER#1\n";
+
+/// Buzzer off command. Per D-11.
+pub(crate) const BUZZER_OFF_CMD: &str = "CMD_BUZZER#0\n";
+
 // ---------------------------------------------------------------------------
 // Tool description (for LLM — includes blocked-command guidance, D-16)
 // ---------------------------------------------------------------------------
 
 const DESCRIPTION: &str = "Control the Freenove hexapod robot over TCP. \
-    Phase 1 actions: walk (with direction and speed), stop, read_battery, \
-    read_distance, relax_servos. \
+    Actions: walk (with direction and speed), stop, read_battery, \
+    read_distance, relax_servos, rotate (with degrees: positive=clockwise, negative=counterclockwise), \
+    head_pan (with angle: -90 to 90), head_tilt (with angle: -90 to 90), \
+    buzzer_on, buzzer_off. \
+    The degrees parameter is used only for the rotate action. \
+    The angle parameter is used only for the head_pan and head_tilt actions. \
     BLOCKED (do not attempt): calibration, servo_power, led_mode 2-5 — \
     these return a block error and are never permitted via this tool.";
 
@@ -72,6 +91,13 @@ pub(crate) fn build_walk_wire(direction: &str, speed: i64) -> String {
         "right"    => format!("CMD_MOVE#1#25#0#{s}#0\n"),
         _          => format!("CMD_MOVE#1#0#25#{s}#0\n"), // safe default: forward
     }
+}
+
+/// Build the CMD_MOVE wire string for rotate-in-place (D-03).
+/// angle=+10 clockwise, angle=-10 counterclockwise. x=0, y=0 → in-place. Speed fixed at 5 per D-02.
+pub(crate) fn build_rotate_wire(degrees: i64) -> String {
+    let angle = if degrees >= 0 { 10i64 } else { -10i64 };
+    format!("CMD_MOVE#1#0#0#5#{angle}\n")
 }
 
 /// Parse a `CMD_POWER#<v1>#<v2>\n` response into a human-readable battery string (D-09).
@@ -179,7 +205,8 @@ impl Tool for HexapodTcpTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["walk", "stop", "read_battery", "read_distance", "relax_servos"],
+                        "enum": ["walk", "stop", "read_battery", "read_distance", "relax_servos",
+                                 "rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off"],
                         "description": "Action to perform on the hexapod robot."
                     },
                     "direction": {
@@ -192,6 +219,16 @@ impl Tool for HexapodTcpTool {
                         "description": "Walk speed 2–10 (clamped). Required only for the walk action.",
                         "minimum": 2,
                         "maximum": 10
+                    },
+                    "degrees": {
+                        "type": "integer",
+                        "description": "Rotation in degrees. Positive=clockwise (right), negative=counterclockwise (left). Used only for the rotate action."
+                    },
+                    "angle": {
+                        "type": "integer",
+                        "minimum": -90,
+                        "maximum": 90,
+                        "description": "Head servo angle in degrees (-90 to 90). Used only for head_pan and head_tilt actions."
                     }
                 },
                 "required": ["action"]
@@ -223,7 +260,8 @@ impl Tool for HexapodTcpTool {
         // The catch-all fires without attempting any I/O (test 2 requirement).
         // HEXAPOD_IP is only read for the five permitted actions.
         match action {
-            "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos" => {
+            "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos"
+            | "rotate" | "head_pan" | "head_tilt" | "buzzer_on" | "buzzer_off" => {
                 // D-12: read HEXAPOD_IP only for permitted actions
                 let ip = match env::var("HEXAPOD_IP") {
                     Ok(v) => v,
@@ -290,8 +328,66 @@ impl Tool for HexapodTcpTool {
                         }
                     }
 
-                    // Unreachable: outer arm already enumerates exactly these 5 values
-                    _ => unreachable!("outer match guarantees only the 5 allowed actions reach here"),
+                    "rotate" => {
+                        let degrees = args["degrees"].as_i64().unwrap_or(0);
+                        let wire = build_rotate_wire(degrees);
+                        let duration = Duration::from_millis(degrees.unsigned_abs() * ROTATE_MS_PER_DEGREE);
+                        match send_fire_and_forget(&addr, &wire).await {
+                            Ok(_) => {
+                                tokio::time::sleep(duration).await;
+                                let _ = send_fire_and_forget(&addr, STOP_CMD).await;
+                                Ok("OK".to_string())
+                            }
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "head_pan" => {
+                        let raw = args["angle"].as_i64().unwrap_or(0);
+                        let angle = raw.clamp(-HEAD_PAN_MAX, HEAD_PAN_MAX);
+                        let wire = format!("CMD_HEAD#0#{angle}\n");
+                        match send_fire_and_forget(&addr, &wire).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "head_tilt" => {
+                        let raw = args["angle"].as_i64().unwrap_or(0);
+                        let angle = raw.clamp(-HEAD_TILT_MAX, HEAD_TILT_MAX);
+                        let wire = format!("CMD_HEAD#1#{angle}\n");
+                        match send_fire_and_forget(&addr, &wire).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "buzzer_on" => {
+                        match send_fire_and_forget(&addr, BUZZER_ON_CMD).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "buzzer_off" => {
+                        match send_fire_and_forget(&addr, BUZZER_OFF_CMD).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    // Unreachable: outer arm already enumerates exactly these 10 allowed actions
+                    _ => unreachable!("outer match guarantees only the 10 allowed actions reach here"),
                 }
             }
 
@@ -550,5 +646,81 @@ mod tests {
             Ok(Ok("CMD_SONIC#30".to_string()));
         let out3 = map_read_outcome(ok_result, "127.0.0.255:5002").unwrap();
         assert_eq!(out3, "CMD_SONIC#30");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: Positive degrees → angle=+10 in wire (D-03, clockwise)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rotate_wire_positive_degrees() {
+        assert_eq!(build_rotate_wire(90), "CMD_MOVE#1#0#0#5#10\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: Negative degrees → angle=-10 in wire (D-03, counterclockwise)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rotate_wire_negative_degrees() {
+        assert_eq!(build_rotate_wire(-45), "CMD_MOVE#1#0#0#5#-10\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: Zero degrees is non-negative → angle=+10 (boundary: positive branch)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_rotate_wire_zero_degrees() {
+        assert_eq!(build_rotate_wire(0), "CMD_MOVE#1#0#0#5#10\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17: head_pan angle=180 clamped to HEAD_PAN_MAX=90 before wire format (D-06, D-08)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_head_pan_clamps_high() {
+        let clamped = 180i64.clamp(-HEAD_PAN_MAX, HEAD_PAN_MAX);
+        assert_eq!(clamped, 90);
+        let wire = format!("CMD_HEAD#0#{clamped}\n");
+        assert_eq!(wire, "CMD_HEAD#0#90\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18: head_tilt angle=-180 clamped to -HEAD_TILT_MAX=-90 before wire format (D-07, D-08)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_head_tilt_clamps_low() {
+        let clamped = (-180i64).clamp(-HEAD_TILT_MAX, HEAD_TILT_MAX);
+        assert_eq!(clamped, -90);
+        let wire = format!("CMD_HEAD#1#{clamped}\n");
+        assert_eq!(wire, "CMD_HEAD#1#-90\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 19: Buzzer wire constant strings match protocol §5 (D-10, D-11)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_buzzer_wire_strings() {
+        assert_eq!(BUZZER_ON_CMD, "CMD_BUZZER#1\n");
+        assert_eq!(BUZZER_OFF_CMD, "CMD_BUZZER#0\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 20: New Phase 2 actions pass outer allowlist (D-20) — return env-var error, not blocked string
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_new_actions_not_blocked() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("HEXAPOD_IP") };
+        let tool = HexapodTcpTool;
+        for action_name in ["rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off"] {
+            let result = tool
+                .execute(json!({"action": action_name, "degrees": 0, "angle": 0}))
+                .await
+                .unwrap();
+            assert!(
+                !result.starts_with("Action '"),
+                "action '{}' was blocked but should pass allowlist; got: {result}",
+                action_name
+            );
+        }
     }
 }
