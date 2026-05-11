@@ -145,6 +145,7 @@ fn build_registry_with_process_registry(
     use ironhermes_tools::file_tools::{
         PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
     };
+    use ironhermes_tools::hexapod_tcp::HexapodTcpTool;
     use ironhermes_tools::web_read::WebReadTool;
     use ironhermes_tools::web_search::WebSearchTool;
 
@@ -156,6 +157,7 @@ fn build_registry_with_process_registry(
     registry.register(Box::new(SearchFilesTool));
     registry.register(Box::new(WebSearchTool));
     registry.register(Box::new(WebReadTool));
+    registry.register(Box::new(HexapodTcpTool));
     registry
 }
 
