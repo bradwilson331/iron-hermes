@@ -907,10 +907,10 @@ Plans:
 **Requirements**: PROV-07 (coverage extension — transport-level failures, complementing the HTTP-status path validated in Phase 12 and the AgentLoop wiring closed in Phase 27.1.4.1)
 **Scope:** `crates/ironhermes-agent/src/agent_loop.rs` (`classify_llm_error` + a transport-failure detection helper + unit tests); a new `invariants_27_1_4_1_1.rs`-style static-invariant test.
 **Depends on:** Phase 27.1.4.1
-**Plans:** 0 plans
+**Plans:** 1 plan
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 27.1.4.1.1 to break down)
+- [ ] 27.1.4.1.1-01-PLAN.md — Add transport-failure detection helper to classify_llm_error, repurpose + add transport unit tests, new static-invariant grep file
 
 ### Phase 28: Skills Trust Tiers
 
