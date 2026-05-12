@@ -159,4 +159,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-11 — Phase 27.1.2 (Navigation Wire Protocol) complete. Extended `hexapod_tcp` with 5 new actions: rotate (timed CMD_MOVE with best-effort stop), head_pan/head_tilt (clamped ±90°), buzzer_on/buzzer_off (CMD_BUZZER). Requirements HXP-NAV-01, HXP-NAV-03, HXP-NAV-04 satisfied; 9/9 must-haves verified; all 20 hexapod_tcp unit tests pass. Navigation wire protocol is now complete — UI can send directional, orientation, and audio feedback commands to the robot.*
+*Last updated: 2026-05-12 — Phase 27.1.3 (Expression + Skill Doc) complete. Added LED control to `hexapod_tcp` (led/led_off, CMD_LED/CMD_LED_OFF, RGB clamped 0–255, 26 unit tests pass). Created `skills/hexapod/SKILL.md` — protocol-complete reference for all 12 actions, auto-activates with `requires_toolsets: [robotics]`. Requirements HXP-NAV-02, HXP-DOC-01 satisfied; 10/10 must-haves verified. Hexapod tool is now feature-complete (12 actions, full protocol documentation).*
