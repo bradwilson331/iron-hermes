@@ -74,6 +74,41 @@ custom_providers:
     default_model: llama3.2:latest
 ```
 
+#### Quick setup via CLI
+
+```bash
+hermes config set providers.openrouter.fallback_providers[0] local-ollama
+```
+
+#### Cloud-primary + local Ollama fallback (canonical example)
+
+Use OpenRouter as the primary and a local Ollama server as the fallback. If OpenRouter
+returns 429 (rate limit), 5xx (server error), or 401 (auth failure), IronHermes
+retries the request using the fallback provider. The fallback request uses the
+**fallback provider's own `default_model`** — not the primary's model name — so the
+local Ollama server only needs to have `gemma4:latest` loaded.
+
+```yaml
+custom_providers:
+  local-ollama:
+    base_url: "http://localhost:11434/v1"
+    api_key_env: ""          # Ollama requires no API key
+    default_model: "gemma4:latest"
+    api_mode: chat_completions
+
+model:
+  default: "anthropic/claude-sonnet-4"
+
+providers:
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY    # secret lives in ~/.ironhermes/.env
+    fallback_providers:
+      - local-ollama
+```
+
+The `fallback_providers` list is tried in order. The swap is one-shot per session;
+if the fallback also fails the error is returned to the caller.
+
 ## Tools
 
 Built-in tools available to the agent:
