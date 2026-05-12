@@ -57,6 +57,21 @@ pub(crate) const CMD_LED: &str     = "CMD_LED";
 /// dedicated off path. Do NOT use CMD_LED#0#0#0\n (that sets color, not mode).
 pub(crate) const CMD_LED_OFF: &str = "CMD_LED#0\n";
 
+/// Camera gimbal pan range (server-enforced: server.py restrict_value(50, 180)). Per D-15.
+pub(crate) const CAMERA_PAN_MIN: i64  = 50;
+pub(crate) const CAMERA_PAN_MAX: i64  = 180;
+
+/// Camera gimbal tilt range (server-enforced: server.py restrict_value(0, 180)). Per D-15.
+pub(crate) const CAMERA_TILT_MIN: i64 = 0;
+pub(crate) const CAMERA_TILT_MAX: i64 = 180;
+
+/// Midpoint defaults for the unused axis when calling CMD_CAMERA with one axis. Per D-14 + Discretion.
+pub(crate) const CAMERA_PAN_DEFAULT: i64  = 115; // midpoint of 50–180; used as x-default in camera_tilt
+pub(crate) const CAMERA_TILT_DEFAULT: i64 = 90;  // midpoint of 0–180; used as y-default in camera_pan
+
+/// Maximum samples for stream_distance polling loop. Per D-09.
+pub(crate) const STREAM_DISTANCE_MAX_SAMPLES: i64 = 20;
+
 // ---------------------------------------------------------------------------
 // Tool description (for LLM — includes blocked-command guidance, D-16)
 // ---------------------------------------------------------------------------
@@ -65,10 +80,17 @@ const DESCRIPTION: &str = "Control the Freenove hexapod robot over TCP. \
     Actions: walk (with direction and speed), stop, read_battery, \
     read_distance, relax_servos, rotate (with degrees: positive=clockwise, negative=counterclockwise), \
     head_pan (with angle: -90 to 90), head_tilt (with angle: -90 to 90), \
-    buzzer_on, buzzer_off, led (with r/g/b: 0-255 per channel), led_off. \
+    buzzer_on, buzzer_off, led (with r/g/b: 0-255 per channel), led_off, \
+    stream_distance (with samples: integer 1-20, clamped), \
+    camera_pan (with x: integer 50-180, clamped), camera_tilt (with y: integer 0-180, clamped). \
     The degrees parameter is used only for the rotate action. \
     The angle parameter is used only for the head_pan and head_tilt actions. \
     The r, g, b parameters are used only for the led action (integers 0-255, clamped). \
+    The samples parameter is used only for stream_distance (clamped to [1, 20]). \
+    The x parameter is used only for camera_pan (clamped to [50, 180]). \
+    The y parameter is used only for camera_tilt (clamped to [0, 180]). \
+    CMD_CAMERA sets both pan and tilt in one wire command; the unused axis defaults to its midpoint \
+    (x defaults to 115, y defaults to 90). \
     BLOCKED (do not attempt): calibration, servo_power, CMD_LED_MOD modes 2-5 (chase/blink/breathing/rainbow) — \
     these return a block error and are never permitted via this tool.";
 
@@ -226,7 +248,8 @@ impl Tool for HexapodTcpTool {
                         "type": "string",
                         "enum": ["walk", "stop", "read_battery", "read_distance", "relax_servos",
                                  "rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off",
-                                 "led", "led_off"],
+                                 "led", "led_off",
+                                 "stream_distance", "camera_pan", "camera_tilt"],
                         "description": "Action to perform on the hexapod robot."
                     },
                     "direction": {
@@ -269,6 +292,24 @@ impl Tool for HexapodTcpTool {
                         "minimum": 0,
                         "maximum": 255,
                         "description": "Blue channel 0-255. Used only for the led action."
+                    },
+                    "samples": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Number of distance readings. Used only for stream_distance. Clamped to [1, 20]."
+                    },
+                    "x": {
+                        "type": "integer",
+                        "minimum": 50,
+                        "maximum": 180,
+                        "description": "Camera pan angle 50–180. Used only for camera_pan. Clamped silently."
+                    },
+                    "y": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 180,
+                        "description": "Camera tilt angle 0–180. Used only for camera_tilt. Clamped silently."
                     }
                 },
                 "required": ["action"]
@@ -302,7 +343,8 @@ impl Tool for HexapodTcpTool {
         match action {
             "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos"
             | "rotate" | "head_pan" | "head_tilt" | "buzzer_on" | "buzzer_off"
-            | "led" | "led_off" => {
+            | "led" | "led_off"
+            | "stream_distance" | "camera_pan" | "camera_tilt" => {
                 // D-12: read HEXAPOD_IP only for permitted actions
                 let ip = match env::var("HEXAPOD_IP") {
                     Ok(v) => v,
@@ -472,8 +514,67 @@ impl Tool for HexapodTcpTool {
                         }
                     }
 
-                    // Unreachable: outer arm already enumerates exactly these 12 allowed actions
-                    _ => unreachable!("outer match guarantees only the 12 allowed actions reach here"),
+                    "camera_pan" => {
+                        let x = args["x"].as_i64().unwrap_or(CAMERA_PAN_DEFAULT)
+                            .clamp(CAMERA_PAN_MIN, CAMERA_PAN_MAX);
+                        let wire = format!("CMD_CAMERA#{x}#{CAMERA_TILT_DEFAULT}\n");
+                        match send_fire_and_forget(&addr, &wire).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "camera_tilt" => {
+                        let y = args["y"].as_i64().unwrap_or(CAMERA_TILT_DEFAULT)
+                            .clamp(CAMERA_TILT_MIN, CAMERA_TILT_MAX);
+                        let wire = format!("CMD_CAMERA#{CAMERA_PAN_DEFAULT}#{y}\n");
+                        match send_fire_and_forget(&addr, &wire).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "stream_distance" => {
+                        let samples = args["samples"].as_i64().unwrap_or(5)
+                            .clamp(1, STREAM_DISTANCE_MAX_SAMPLES) as usize;
+                        let mut readings: Vec<i64> = Vec::with_capacity(samples);
+
+                        for i in 0..samples {
+                            let read_fut = send_and_read_line(&addr, DISTANCE_CMD);
+                            let outcome = timeout(Duration::from_secs(3), read_fut).await;
+                            let raw = map_read_outcome(outcome, &addr)?;
+                            if raw.starts_with("Error:") {
+                                return Ok(raw);
+                            }
+                            // Parse numeric value directly from CMD_SONIC#<dist>\n
+                            // Do NOT call parse_distance_response — it returns "Distance: N cm" (RESEARCH Pitfall 6)
+                            let parts: Vec<&str> = raw.trim().split('#').collect();
+                            let dist = parts.get(1)
+                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .unwrap_or(0);
+                            readings.push(dist);
+                            if i + 1 < samples {
+                                tokio::time::sleep(Duration::from_millis(200)).await; // D-10 / D-20
+                            }
+                        }
+
+                        let min = readings.iter().copied().min().unwrap_or(0);
+                        let max = readings.iter().copied().max().unwrap_or(0);
+                        let avg = readings.iter().copied().sum::<i64>() as f64
+                            / readings.len() as f64;
+                        let list: Vec<String> = readings.iter().map(|d| d.to_string()).collect();
+                        Ok(format!(
+                            "Distances: [{}] cm | min={} max={} avg={:.1}",
+                            list.join(", "), min, max, avg
+                        ))
+                    }
+
+                    // Unreachable: outer arm already enumerates exactly these 15 allowed actions
+                    _ => unreachable!("outer match guarantees only the 15 allowed actions reach here"),
                 }
             }
 
@@ -886,5 +987,71 @@ mod tests {
             led_off_result.starts_with("Error: HEXAPOD_IP env var not set"),
             "led_off should pass allowlist and hit env-var check; got: {led_off_result}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 27: stream_distance + camera_pan + camera_tilt pass outer allowlist — D-08, D-14
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_new_actions_not_blocked_27_1_4() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("HEXAPOD_IP") };
+        let tool = HexapodTcpTool;
+        for action_name in ["stream_distance", "camera_pan", "camera_tilt"] {
+            let result = tool
+                .execute(json!({"action": action_name, "samples": 1, "x": 115, "y": 90}))
+                .await
+                .unwrap();
+            assert!(
+                !result.starts_with("Action '"),
+                "action '{}' was blocked but should pass allowlist; got: {result}",
+                action_name
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 28: samples clamped to [1, 20] — D-09
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_stream_distance_samples_clamp() {
+        let clamped_high = 99i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
+        let clamped_low  = 0i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
+        assert_eq!(clamped_high, 20);
+        assert_eq!(clamped_low, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 29: stream_distance return format matches D-11 spec
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_stream_distance_format() {
+        let readings: Vec<i64> = vec![42, 43, 41, 44, 42];
+        let min = readings.iter().copied().min().unwrap_or(0);
+        let max = readings.iter().copied().max().unwrap_or(0);
+        let avg = readings.iter().copied().sum::<i64>() as f64 / readings.len() as f64;
+        let list: Vec<String> = readings.iter().map(|d| d.to_string()).collect();
+        let result = format!("Distances: [{}] cm | min={} max={} avg={:.1}", list.join(", "), min, max, avg);
+        assert_eq!(result, "Distances: [42, 43, 41, 44, 42] cm | min=41 max=44 avg=42.4");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 25: camera_pan wire format — x clamped to [50, 180]; y=CAMERA_TILT_DEFAULT — D-12
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_camera_pan_wire() {
+        let x = 200i64.clamp(CAMERA_PAN_MIN, CAMERA_PAN_MAX); // 200 → 180
+        let wire = format!("CMD_CAMERA#{x}#{CAMERA_TILT_DEFAULT}\n");
+        assert_eq!(wire, "CMD_CAMERA#180#90\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 26: camera_tilt wire format — y clamped to [0, 180]; x=CAMERA_PAN_DEFAULT — D-13
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_camera_tilt_wire() {
+        let y = (-5i64).clamp(CAMERA_TILT_MIN, CAMERA_TILT_MAX); // -5 → 0
+        let wire = format!("CMD_CAMERA#{CAMERA_PAN_DEFAULT}#{y}\n");
+        assert_eq!(wire, "CMD_CAMERA#115#0\n");
     }
 }

@@ -4,8 +4,8 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 27.1.4 context gathered
-last_updated: "2026-05-12T10:05:05.436Z"
-last_activity: 2026-05-12 -- Phase 27.1.4 planning complete
+last_updated: "2026-05-12T10:06:56.563Z"
+last_activity: 2026-05-12 -- Phase 27.1.4 execution started
 progress:
   total_phases: 42
   completed_phases: 31
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 27.1.3 — expression-skill-doc-inserted
+**Current focus:** Phase 27.1.4 — hexapod-video-and-sonic-stream-capture-for-navigation
 
 ## Current Position
 
-Phase: 28
-Plan: Not started
+Phase: 27.1.4 (hexapod-video-and-sonic-stream-capture-for-navigation) — EXECUTING
+Plan: 1 of 3
 Plans: 1 plan in 1 wave — ready to execute
-Status: Ready to execute
-Last activity: 2026-05-12 -- Phase 27.1.4 planning complete
+Status: Executing Phase 27.1.4
+Last activity: 2026-05-12 -- Phase 27.1.4 execution started
 
 ## Performance Metrics
 
