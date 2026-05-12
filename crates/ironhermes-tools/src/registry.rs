@@ -507,9 +507,9 @@ impl ToolRegistry {
     /// call `register_defaults_except(&["terminal"])` then register your custom
     /// terminal variant afterwards.
     ///
-    /// Current default tool set (Phase 27.1.1):
+    /// Current default tool set (Phase 27.1.4):
     ///   terminal, read_file, write_file, patch_file, search_files,
-    ///   web_search, web_read, hexapod_tcp
+    ///   web_search, web_read, hexapod_tcp, hexapod_video
     pub fn register_defaults(&mut self) {
         self.register_defaults_except(&[]);
     }
@@ -527,6 +527,7 @@ impl ToolRegistry {
     pub fn register_defaults_except(&mut self, skip: &[&str]) {
         use crate::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
         use crate::hexapod_tcp::HexapodTcpTool;
+        use crate::hexapod_video::HexapodVideoTool; // Phase 27.1.4
         use crate::terminal::TerminalTool;
         use crate::web_read::WebReadTool;
         use crate::web_search::WebSearchTool;
@@ -548,6 +549,8 @@ impl ToolRegistry {
         register_unless_skipped!(Box::new(WebReadTool), "web_read");
         // HXP-TOOL-01 (Phase 27.1.1): hexapod TCP tool — is_available() hides this when HEXAPOD_IP is unset.
         register_unless_skipped!(Box::new(HexapodTcpTool), "hexapod_tcp");
+        // Phase 27.1.4: hexapod video tool — is_available() hides this when HEXAPOD_IP is unset.
+        register_unless_skipped!(Box::new(HexapodVideoTool), "hexapod_video");
     }
 
     /// Register the memory tool with a shared `MemoryManager` handle (Plan 20-02).
@@ -2483,6 +2486,22 @@ mod tests {
         );
     }
 
+    /// register_defaults() MUST include hexapod_video (Phase 27.1.4).
+    #[test]
+    fn test_register_defaults_includes_hexapod_video() {
+        // HEXAPOD_IP may not be set in CI — we check tool registration, not availability.
+        // list_tools() returns ALL registered tools regardless of is_available().
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        let names = registry.list_tools();
+        assert!(
+            names.contains(&"hexapod_video"),
+            "register_defaults() MUST register hexapod_video; \
+             all tools registered: {:?}",
+            names
+        );
+    }
+
     /// register_defaults_except(&["terminal"]) MUST skip terminal and register everything else.
     ///
     /// This is the canonical call pattern for production paths that supply their own
@@ -2510,6 +2529,7 @@ mod tests {
             "web_search",
             "web_read",
             "hexapod_tcp",
+            "hexapod_video",
         ] {
             assert!(
                 names.contains(expected),
