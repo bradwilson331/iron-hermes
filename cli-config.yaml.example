@@ -284,6 +284,41 @@ providers:
 #     api_mode: chat_completions
 #     default_model: "llama3.2:latest"
 
+# --- Learning Loop ---
+# These keys are written by the setup wizard (`apply_learning_loop_answer` in
+# `ironhermes-core/src/wizard.rs`) via a raw-YAML splice. They are NOT part of
+# the typed `Config` struct (serde ignores them) and survive only through the
+# raw-YAML load-mutate-save path. When the learning loop is disabled,
+# `skill_generation_enabled` and `skill_eval` become `false`; the other three
+# keys keep the same values shown below.
+# learning:
+#   skill_generation_enabled: true
+#   periodic_nudge_interval_seconds: 300
+#   reflection_depth: "standard"
+#   skill_eval: true
+#   max_skills: 500
+
+# --- Tools ---
+# Mirrors `ToolsConfig::default()` in `ironhermes-core/src/config.rs`.
+# Each key under `toolsets:` is a toolset name; `enabled: false` keeps all
+# of that toolset's tools out of the LLM tool list entirely.
+# tools:
+#   toolsets:
+#     memory:
+#       enabled: true
+#     session:
+#       enabled: true
+#     agent:
+#       enabled: true
+#     skills:
+#       enabled: true
+#     web:
+#       enabled: false
+#     code:
+#       enabled: false
+#     browser:
+#       enabled: false
+
 # --- Hooks ---
 # hooks:
 #   jsonl_log: true
