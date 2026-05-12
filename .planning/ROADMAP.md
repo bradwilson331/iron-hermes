@@ -870,13 +870,22 @@ Plans:
 
 ### Phase 27.1.4: hexapod video and sonic stream capture for navigation (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** The agent has sensor awareness for navigation — it can capture a still camera frame for Gemma 4 vision analysis, poll the ultrasonic sensor for an approach trend, and point the camera gimbal before capturing.
+**Requirements:** D-01..D-15 (phase decisions in 27.1.4-CONTEXT.md — no formal HXP-* IDs assigned; the CONTEXT decisions are the contract)
 **Depends on:** Phase 27.1.3
-**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+  1. `hexapod_video/capture_frame` returns a `data:image/jpeg;base64,<...>` string from the robot's video port (8002); missing HEXAPOD_IP and port-busy each return a specific error string with no hang
+  2. `hexapod_tcp/stream_distance(samples=N)` returns `"Distances: [...] cm | min=N max=N avg=N.N"` with N clamped to [1, 20]
+  3. `hexapod_tcp/camera_pan(x)` and `camera_tilt(y)` send `CMD_CAMERA#x#y\n` (unused axis at its midpoint) and return `"OK"`; all three new actions pass the compile-time allowlist
+  4. `skills/hexapod/SKILL.md` documents all 15 hexapod_tcp actions plus the hexapod_video tool — the agent can invoke any of them from the skill doc alone
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 27.1.4 to break down)
+- [ ] 27.1.4-01-PLAN.md — Extend hexapod_tcp.rs with stream_distance / camera_pan / camera_tilt actions, 7 new constants, updated schema + DESCRIPTION, and 5 new unit tests
+- [ ] 27.1.4-02-PLAN.md — Create hexapod_video.rs (HexapodVideoTool, capture_frame action — port 8002, 4-byte LE length prefix, base64 data URI) and wire it into lib.rs + registry.rs with tests
+- [ ] 27.1.4-03-PLAN.md — Update skills/hexapod/SKILL.md with the three new hexapod_tcp action rows, the camera joint-axis explanation, the new parameter ranges, and a new hexapod_video tool section
+
+**Phase directory:** `.planning/phases/27.1.4-hexapod-video-and-sonic-stream-capture-for-navigation/`
 
 ### Phase 28: Skills Trust Tiers
 
