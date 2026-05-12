@@ -1,3 +1,4 @@
+pub mod browser_profile;
 pub mod commands;
 pub mod config;
 pub mod config_schema;
@@ -47,6 +48,7 @@ pub use skills::{
 };
 /// Phase 21.8.2 D-05: expose path-scan helper for D-05 WARN-BUT-LOAD invalid_skipped reporting.
 pub use skills::build_skill_search_paths;
+pub use browser_profile::{SingletonOutcome, reconcile_singleton_lock};
 pub use ssrf::is_safe_url;
 pub use token_estimator::{
     TiktokenEncoding, TokenEstimator, global_estimate_tokens, init_global_estimator,
