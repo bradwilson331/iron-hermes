@@ -901,6 +901,17 @@ Plans:
 **Phase directory:** `.planning/phases/27.1.4.1-gateway-fallback-gap/`
 
 
+### Phase 27.1.4.1.1: fallback on transport errors not just HTTP status (INSERTED)
+
+**Goal:** `AgentLoop` provider fallback fires on transport-level failures (provider unreachable / request never delivered / no response), not just on extractable HTTP status codes. `AgentLoop::classify_llm_error` currently scrapes an HTTP status from the error string and returns `should_fallback=true` only for 429/5xx/4xx; a `Connection refused`, connect timeout, DNS failure, connection reset, or reqwest `error sending request for url` has no HTTP status, so it returns `(should_retry=true, should_fallback=false)` — the configured `fallback_providers` chain is wired onto the `AgentLoop` but never activates. Real-world repro: local-Ollama primary + OpenRouter fallback with Ollama not running → the gateway retries the dead `localhost:11434` endpoint `MAX_RETRIES` (3) times and then errors instead of switching to OpenRouter. Fix: in `classify_llm_error`, when `extract_http_status` returns `None`, detect transport-failure markers and return `should_fallback=true` so the loop resets `retry_count` and switches to the fallback client; behavior unchanged when no fallback is configured. Add unit tests for connect-refused / connect-timeout / DNS / connection-reset error strings + a static-invariant grep test; do not regress the existing `classify_*_error` tests.
+**Requirements**: PROV-07 (coverage extension — transport-level failures, complementing the HTTP-status path validated in Phase 12 and the AgentLoop wiring closed in Phase 27.1.4.1)
+**Scope:** `crates/ironhermes-agent/src/agent_loop.rs` (`classify_llm_error` + a transport-failure detection helper + unit tests); a new `invariants_27_1_4_1_1.rs`-style static-invariant test.
+**Depends on:** Phase 27.1.4.1
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27.1.4.1.1 to break down)
+
 ### Phase 28: Skills Trust Tiers
 
 **Goal:** Installed skills carry a trust level (builtin / official / trusted / community) that drives security enforcement — community skills face stricter scanning gates than builtin skills.

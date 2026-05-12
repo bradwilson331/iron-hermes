@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: ready_to_plan
+status: planning
 stopped_at: Phase 27.1.4.1 context gathered
-last_updated: "2026-05-12T12:15:04.476Z"
-last_activity: 2026-05-12 -- Phase 27.1.4.1 execution started
+last_updated: "2026-05-12T14:13:00.687Z"
+last_activity: 2026-05-12
 progress:
-  total_phases: 43
+  total_phases: 44
   completed_phases: 33
   total_plans: 176
-  completed_plans: 174
-  percent: 77
+  completed_plans: 176
+  percent: 100
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 28
+Phase: 27.1.4.1.1 (fallback-on-transport-errors-not-just-http-status) — not yet planned
 Plan: Not started
-Plans: 1 plan in 1 wave — ready to execute
+Plans: 0 plans — not yet planned
 Status: Ready to plan
 Last activity: 2026-05-12
 
@@ -422,6 +422,7 @@ Recent decisions affecting current work:
 - Phase 27.1.3 inserted after Phase 27.1.2: Expression + Skill Doc — LEDs + protocol reference (INSERTED)
 - Phase 27.1.4 inserted after Phase 27.1.3: hexapod video and sonic stream capture for navigation (URGENT)
 - Phase 27.1.4.1 inserted after Phase 27.1.4: gateway fallback gap (URGENT)
+- Phase 27.1.4.1.1 inserted after Phase 27.1.4.1: fallback on transport errors not just HTTP status — classify_llm_error only falls back on HTTP-status errors, not Connection refused / connect timeout / DNS (URGENT)
 
 ### Pending Todos
 
