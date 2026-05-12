@@ -860,12 +860,13 @@ Plans:
   1. All LEDs change to specified RGB color on command; turn off on command
   2. `skills/hexapod/DESCRIPTION.md` is present and contains all CMD_* wire formats, action list, and blocked commands
   3. Agent can invoke any Phase 1–3 protocol action using the skill doc alone (no inline prompt guidance needed)
-**Plans:** TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 27.1.3 to break down)
+- [ ] 27.1.3-01-PLAN.md — Extend hexapod_tcp.rs with led/led_off actions, CMD_LED/CMD_LED_OFF constants, r/g/b schema properties, DESCRIPTION update, and 4 new unit tests (tests 21–24)
+- [ ] 27.1.3-02-PLAN.md — Create skills/hexapod/SKILL.md with protocol-complete content (all 12 actions, wire formats, blocked commands, parameter ranges) and verify DESCRIPTION const
 
-**Phase directory:** `.planning/phases/27.1.3-expression-skill-doc/`
+**Phase directory:** `.planning/phases/27.1.3-expression-skill-doc-inserted/`
 
 ### Phase 28: Skills Trust Tiers
 
