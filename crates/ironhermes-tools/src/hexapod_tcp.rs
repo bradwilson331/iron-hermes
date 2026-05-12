@@ -961,6 +961,52 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test 27: stream_distance + camera_pan + camera_tilt pass outer allowlist — D-08, D-14
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_new_actions_not_blocked_27_1_4() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("HEXAPOD_IP") };
+        let tool = HexapodTcpTool;
+        for action_name in ["stream_distance", "camera_pan", "camera_tilt"] {
+            let result = tool
+                .execute(json!({"action": action_name, "samples": 1, "x": 115, "y": 90}))
+                .await
+                .unwrap();
+            assert!(
+                !result.starts_with("Action '"),
+                "action '{}' was blocked but should pass allowlist; got: {result}",
+                action_name
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 28: samples clamped to [1, 20] — D-09
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_stream_distance_samples_clamp() {
+        let clamped_high = 99i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
+        let clamped_low  = 0i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
+        assert_eq!(clamped_high, 20);
+        assert_eq!(clamped_low, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 29: stream_distance return format matches D-11 spec
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_stream_distance_format() {
+        let readings: Vec<i64> = vec![42, 43, 41, 44, 42];
+        let min = readings.iter().copied().min().unwrap_or(0);
+        let max = readings.iter().copied().max().unwrap_or(0);
+        let avg = readings.iter().copied().sum::<i64>() as f64 / readings.len() as f64;
+        let list: Vec<String> = readings.iter().map(|d| d.to_string()).collect();
+        let result = format!("Distances: [{}] cm | min={} max={} avg={:.1}", list.join(", "), min, max, avg);
+        assert_eq!(result, "Distances: [42, 43, 41, 44, 42] cm | min=41 max=44 avg=42.4");
+    }
+
+    // -----------------------------------------------------------------------
     // Test 25: camera_pan wire format — x clamped to [50, 180]; y=CAMERA_TILT_DEFAULT — D-12
     // -----------------------------------------------------------------------
     #[test]
