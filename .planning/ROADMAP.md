@@ -892,11 +892,11 @@ Plans:
 **Goal:** Provider fallback wired at every AgentLoop construction site (gateway cron, agent subagent, CLI batch) via one shared `wire_fallback_if_configured` helper that emits `tracing::warn!` on misconfiguration; the two existing inline-if-let fallback sites refactored onto the same helper; config/docs consistent — `cli-config.yaml.example` gains the `learning:` and `tools:` sections, README documents `fallback_providers`.
 **Requirements:** PROV-07
 **Depends on:** Phase 27.1.4
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] 27.1.4.1-01-PLAN.md — Shared wire_fallback_if_configured helper + lib.rs re-export + wire 5 AgentLoop sites + 3 PROV-07 invariant test files
-- [ ] 27.1.4.1-02-PLAN.md — Add learning: and tools: sections to cli-config.yaml.example; extend README Provider fallback section; finalize ROADMAP entry
+- [x] 27.1.4.1-01-PLAN.md — Shared wire_fallback_if_configured helper + lib.rs re-export + wire 5 AgentLoop sites + 3 PROV-07 invariant test files
+- [x] 27.1.4.1-02-PLAN.md — Add learning: and tools: sections to cli-config.yaml.example; extend README Provider fallback section; finalize ROADMAP entry
 
 **Phase directory:** `.planning/phases/27.1.4.1-gateway-fallback-gap/`
 
