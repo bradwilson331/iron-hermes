@@ -11,8 +11,7 @@ use ironhermes_agent::context_compressor::estimate_messages_tokens;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::{
-    AgentLoop, MemoryManager, PromptBuilder, build_client as build_provider_client,
-    build_main_client,
+    AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured,
 };
 use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
 use ironhermes_core::commands::{
@@ -928,18 +927,8 @@ impl GatewayMessageHandler {
             agent = agent.with_budget(handle.clone());
         }
 
-        // Wire fallback for main agent path — use the fallback provider's own
-        // default_model so the local/secondary endpoint serves a model it has.
-        let main_endpoint = self.resolver.resolve_for_main();
-        if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-            if let Some(fb_endpoint) = self.resolver.resolve(fb_name) {
-                if let Ok(fb_client) =
-                    build_provider_client(&self.resolver, fb_name, &fb_endpoint.default_model)
-                {
-                    agent = agent.with_fallback(fb_client);
-                }
-            }
-        }
+        // Wire fallback via shared helper (adds warn! on misconfiguration — PROV-07 / phase 27.1.4.1)
+        agent = wire_fallback_if_configured(agent, &self.resolver);
 
         if let Some(ref registry) = self.hook_registry {
             agent = agent.with_hook_registry(registry.clone());

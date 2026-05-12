@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::Colorize;
-use ironhermes_agent::{AgentLoop, build_main_client};
+use ironhermes_agent::{AgentLoop, build_main_client, wire_fallback_if_configured};
 use ironhermes_core::{ChatMessage, Config, ProviderResolver};
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
@@ -243,6 +243,7 @@ pub async fn cmd_run(
         }));
         let hash_clone = hash.clone();
         let model_for_traj = model_name.clone();
+        let resolver_clone = resolver.clone();
 
         join_set.spawn(async move {
             let _permit = permit; // dropped when task ends
@@ -254,6 +255,7 @@ pub async fn cmd_run(
             messages.push(ChatMessage::user(&entry.prompt));
 
             let mut agent = AgentLoop::new(client, registry.clone(), max_turns);
+            agent = wire_fallback_if_configured(agent, &resolver_clone); // chains .with_fallback() via the shared helper — PROV-07
             match agent.run(messages).await {
                 Ok(result) => {
                     // Run quality filters (D-12, D-13)

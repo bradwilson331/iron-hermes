@@ -4,7 +4,7 @@ use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
-use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client};
+use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured};
 use ironhermes_core::commands::context::ToolsetSessionHandle;
 use ironhermes_core::{
     ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry,
@@ -1136,11 +1136,14 @@ pub(crate) async fn execute_cron_job(
         }
     }
 
-    // Construct client via ProviderResolver — D-12: cron uses fixed provider, NO fallback
+    // Construct client via ProviderResolver — wire fallback via shared helper (same as handler.rs main path)
     let client = build_main_client(&resolver)?;
     let mut agent = AgentLoop::new(client, tool_registry.clone(), max_turns);
 
-    // D-11 / D-12: wire active_skills so cron runs get the same enforcement as conversation mode
+    // Wire fallback so cron jobs retry on primary model failure (PROV-07 / phase 27.1.4.1)
+    agent = wire_fallback_if_configured(agent, &resolver); // chains .with_fallback() via the shared helper — PROV-07
+
+    // Wire active_skills so cron runs get the same enforcement as conversation mode
     agent = agent.with_active_skills(active_skills);
 
     // D-06 / D-08: conditional hook registry wiring (Option<Arc<...>>, None is valid)

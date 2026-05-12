@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback, ToolResultCallback};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::{
-    attach_context_engine, build_app_runtime_bundle, build_client as build_provider_client,
-    build_main_client, AgentLoop, AgentSubagentRunner, AppRuntimeBundle, AppRuntimeFactoryInput,
+    attach_context_engine, build_app_runtime_bundle, build_main_client, wire_fallback_if_configured,
+    AgentLoop, AgentSubagentRunner, AppRuntimeBundle, AppRuntimeFactoryInput,
     DelegateTaskWiring, MemoryManager, PressureTracker, PromptBuilder,
 };
 use ironhermes_core::commands::registry::build_registry as build_command_registry;
@@ -175,18 +175,8 @@ impl AppState {
             agent = agent.with_tool_progress(cb);
         }
 
-        // Use the fallback provider's own default_model so the local/secondary
-        // endpoint serves a model it actually has.
-        let main_endpoint = self.resolver.resolve_for_main();
-        if let Some(fallback_name) = main_endpoint.fallback_providers.first() {
-            if let Some(fb_endpoint) = self.resolver.resolve(fallback_name) {
-                if let Ok(fallback_client) =
-                    build_provider_client(&self.resolver, fallback_name, &fb_endpoint.default_model)
-                {
-                    agent = agent.with_fallback(fallback_client);
-                }
-            }
-        }
+        // Wire fallback via shared helper (adds warn! on misconfiguration — PROV-07 / phase 27.1.4.1)
+        agent = wire_fallback_if_configured(agent, &self.resolver);
 
         Ok(attach_context_engine(
             agent,
