@@ -49,6 +49,14 @@ pub(crate) const BUZZER_ON_CMD: &str = "CMD_BUZZER#1\n";
 /// Buzzer off command. Per D-11.
 pub(crate) const BUZZER_OFF_CMD: &str = "CMD_BUZZER#0\n";
 
+/// LED color command prefix (D-02). Full wire is CMD_LED#{R}#{G}#{B}\n built at call time.
+/// The Freenove server defaults led_mode='1' (solid color) so no mode-set preamble is needed.
+pub(crate) const CMD_LED: &str     = "CMD_LED";
+
+/// LED off command (D-03). Sets led_mode=0 which triggers color_wipe([0,0,0]) — the server's
+/// dedicated off path. Do NOT use CMD_LED#0#0#0\n (that sets color, not mode).
+pub(crate) const CMD_LED_OFF: &str = "CMD_LED#0\n";
+
 // ---------------------------------------------------------------------------
 // Tool description (for LLM — includes blocked-command guidance, D-16)
 // ---------------------------------------------------------------------------
@@ -57,10 +65,11 @@ const DESCRIPTION: &str = "Control the Freenove hexapod robot over TCP. \
     Actions: walk (with direction and speed), stop, read_battery, \
     read_distance, relax_servos, rotate (with degrees: positive=clockwise, negative=counterclockwise), \
     head_pan (with angle: -90 to 90), head_tilt (with angle: -90 to 90), \
-    buzzer_on, buzzer_off. \
+    buzzer_on, buzzer_off, led (with r/g/b: 0-255 per channel), led_off. \
     The degrees parameter is used only for the rotate action. \
     The angle parameter is used only for the head_pan and head_tilt actions. \
-    BLOCKED (do not attempt): calibration, servo_power, led_mode 2-5 — \
+    The r, g, b parameters are used only for the led action (integers 0-255, clamped). \
+    BLOCKED (do not attempt): calibration, servo_power, CMD_LED_MOD modes 2-5 (chase/blink/breathing/rainbow) — \
     these return a block error and are never permitted via this tool.";
 
 // ---------------------------------------------------------------------------
@@ -216,7 +225,8 @@ impl Tool for HexapodTcpTool {
                     "action": {
                         "type": "string",
                         "enum": ["walk", "stop", "read_battery", "read_distance", "relax_servos",
-                                 "rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off"],
+                                 "rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off",
+                                 "led", "led_off"],
                         "description": "Action to perform on the hexapod robot."
                     },
                     "direction": {
@@ -241,6 +251,24 @@ impl Tool for HexapodTcpTool {
                         "minimum": -90,
                         "maximum": 90,
                         "description": "Head servo angle in degrees (-90 to 90). Used only for head_pan and head_tilt actions."
+                    },
+                    "r": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255,
+                        "description": "Red channel 0-255. Used only for the led action."
+                    },
+                    "g": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255,
+                        "description": "Green channel 0-255. Used only for the led action."
+                    },
+                    "b": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255,
+                        "description": "Blue channel 0-255. Used only for the led action."
                     }
                 },
                 "required": ["action"]
@@ -273,7 +301,8 @@ impl Tool for HexapodTcpTool {
         // HEXAPOD_IP is only read for the five permitted actions.
         match action {
             "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos"
-            | "rotate" | "head_pan" | "head_tilt" | "buzzer_on" | "buzzer_off" => {
+            | "rotate" | "head_pan" | "head_tilt" | "buzzer_on" | "buzzer_off"
+            | "led" | "led_off" => {
                 // D-12: read HEXAPOD_IP only for permitted actions
                 let ip = match env::var("HEXAPOD_IP") {
                     Ok(v) => v,
@@ -421,8 +450,30 @@ impl Tool for HexapodTcpTool {
                         }
                     }
 
-                    // Unreachable: outer arm already enumerates exactly these 10 allowed actions
-                    _ => unreachable!("outer match guarantees only the 10 allowed actions reach here"),
+                    "led" => {
+                        let r = args["r"].as_i64().unwrap_or(0).clamp(0, 255);
+                        let g = args["g"].as_i64().unwrap_or(0).clamp(0, 255);
+                        let b = args["b"].as_i64().unwrap_or(0).clamp(0, 255);
+                        let wire = format!("{CMD_LED}#{r}#{g}#{b}\n");
+                        match send_fire_and_forget(&addr, &wire).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    "led_off" => {
+                        match send_fire_and_forget(&addr, CMD_LED_OFF).await {
+                            Ok(_) => Ok("OK".to_string()),
+                            Err(_) => Ok(format!(
+                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                            )),
+                        }
+                    }
+
+                    // Unreachable: outer arm already enumerates exactly these 12 allowed actions
+                    _ => unreachable!("outer match guarantees only the 12 allowed actions reach here"),
                 }
             }
 
@@ -771,5 +822,69 @@ mod tests {
                 action_name
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 21: CMD_LED constant equals "CMD_LED" (prefix only — wire is CMD_LED#{R}#{G}#{B}\n)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_cmd_led_constant_value() {
+        assert_eq!(CMD_LED, "CMD_LED");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 22: CMD_LED_OFF constant equals "CMD_LED#0\n" — NOT "CMD_LED#0#0#0\n"
+    // The server's mode-0 off path is CMD_LED#0\n; CMD_LED#0#0#0\n would attempt
+    // to set color (0,0,0) instead of activating the dedicated off path (D-03).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_cmd_led_off_constant_value() {
+        // The correct wire is CMD_LED#0\n (mode 0 = server off path per D-03)
+        assert_eq!(CMD_LED_OFF, "CMD_LED#0\n");
+        // Explicitly confirm it is NOT the naive color-zero form
+        assert_ne!(CMD_LED_OFF, "CMD_LED#0#0#0\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 23: r/g/b values clamp independently to 0–255
+    // r=300 → 255, g=-10 → 0, b=128 unchanged (D-04, T-27.1.3-01)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_led_rgb_clamping() {
+        let r_clamped = 300i64.clamp(0, 255);
+        let g_clamped = (-10i64).clamp(0, 255);
+        let b_clamped = 128i64.clamp(0, 255);
+        assert_eq!(r_clamped, 255, "r=300 must clamp to 255");
+        assert_eq!(g_clamped, 0, "g=-10 must clamp to 0");
+        assert_eq!(b_clamped, 128, "b=128 must remain unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 24: led and led_off pass the outer allowlist — with HEXAPOD_IP unset,
+    // execute returns the env-var error string, not the "Action '...' is blocked" string
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_led_actions_pass_allowlist() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("HEXAPOD_IP") };
+        let tool = HexapodTcpTool;
+
+        let led_result = tool
+            .execute(json!({"action": "led", "r": 255, "g": 128, "b": 0}))
+            .await
+            .unwrap();
+        assert!(
+            led_result.starts_with("Error: HEXAPOD_IP env var not set"),
+            "led should pass allowlist and hit env-var check; got: {led_result}"
+        );
+
+        let led_off_result = tool
+            .execute(json!({"action": "led_off"}))
+            .await
+            .unwrap();
+        assert!(
+            led_off_result.starts_with("Error: HEXAPOD_IP env var not set"),
+            "led_off should pass allowlist and hit env-var check; got: {led_off_result}"
+        );
     }
 }
