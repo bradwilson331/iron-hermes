@@ -72,7 +72,17 @@ impl BrowserSession {
             }
             _ => ironhermes_core::get_hermes_home().join("browser-profile"),
         };
-        builder = builder.user_data_dir(&user_data_dir);
+        // Phase 26.3.2: SingletonLock resilience — check before binding to persistent profile.
+        match ironhermes_core::browser_profile::reconcile_singleton_lock(&user_data_dir) {
+            ironhermes_core::browser_profile::SingletonOutcome::UseProfile => {
+                builder = builder.user_data_dir(&user_data_dir);
+            }
+            ironhermes_core::browser_profile::SingletonOutcome::UseEphemeral => {
+                // Lock held by a live process — do NOT set user_data_dir.
+                // chromiumoxide defaults to its own temp dir (pre-26.3 ephemeral behavior).
+                // warn! was already emitted inside reconcile_singleton_lock (D-05).
+            }
+        }
         if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
             tracing::warn!(
                 path = %user_data_dir.display(),

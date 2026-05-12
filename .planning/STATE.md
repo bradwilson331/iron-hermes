@@ -4,8 +4,8 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 27.1.4.1.1 context gathered
-last_updated: "2026-05-12T17:15:11.708Z"
-last_activity: 2026-05-12 -- Phase 26.3.2 planning complete
+last_updated: "2026-05-12T17:20:45.064Z"
+last_activity: 2026-05-12 -- Phase 26.3.2 execution started
 progress:
   total_phases: 45
   completed_phases: 34
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 27.1.4.1.1 — fallback-on-transport-errors-not-just-http-status
+**Current focus:** Phase 26.3.2 — chrome-singleton-user-browser-profile
 
 ## Current Position
 
-Phase: 28
-Plan: Not started
+Phase: 26.3.2 (chrome-singleton-user-browser-profile) — EXECUTING
+Plan: 1 of 1
 Plans: 0 plans — not yet planned
-Status: Ready to execute
-Last activity: 2026-05-12 -- Phase 26.3.2 planning complete
+Status: Executing Phase 26.3.2
+Last activity: 2026-05-12 -- Phase 26.3.2 execution started
 
 ## Performance Metrics
 
