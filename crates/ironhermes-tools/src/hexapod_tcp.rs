@@ -538,10 +538,39 @@ impl Tool for HexapodTcpTool {
                         }
                     }
 
-                    // stream_distance arm added in Task 2 (Phase 27.1.4-01)
                     "stream_distance" => {
-                        // Placeholder — body implemented in Task 2
-                        Ok("stream_distance: not yet implemented".to_string())
+                        let samples = args["samples"].as_i64().unwrap_or(5)
+                            .clamp(1, STREAM_DISTANCE_MAX_SAMPLES) as usize;
+                        let mut readings: Vec<i64> = Vec::with_capacity(samples);
+
+                        for i in 0..samples {
+                            let read_fut = send_and_read_line(&addr, DISTANCE_CMD);
+                            let outcome = timeout(Duration::from_secs(3), read_fut).await;
+                            let raw = map_read_outcome(outcome, &addr)?;
+                            if raw.starts_with("Error:") {
+                                return Ok(raw);
+                            }
+                            // Parse numeric value directly from CMD_SONIC#<dist>\n
+                            // Do NOT call parse_distance_response — it returns "Distance: N cm" (RESEARCH Pitfall 6)
+                            let parts: Vec<&str> = raw.trim().split('#').collect();
+                            let dist = parts.get(1)
+                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .unwrap_or(0);
+                            readings.push(dist);
+                            if i + 1 < samples {
+                                tokio::time::sleep(Duration::from_millis(200)).await; // D-10 / D-20
+                            }
+                        }
+
+                        let min = readings.iter().copied().min().unwrap_or(0);
+                        let max = readings.iter().copied().max().unwrap_or(0);
+                        let avg = readings.iter().copied().sum::<i64>() as f64
+                            / readings.len() as f64;
+                        let list: Vec<String> = readings.iter().map(|d| d.to_string()).collect();
+                        Ok(format!(
+                            "Distances: [{}] cm | min={} max={} avg={:.1}",
+                            list.join(", "), min, max, avg
+                        ))
                     }
 
                     // Unreachable: outer arm already enumerates exactly these 15 allowed actions
