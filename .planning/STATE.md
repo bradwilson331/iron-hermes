@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: ready_to_plan
+status: planning
 stopped_at: Phase 27.1.3 context gathered
-last_updated: "2026-05-12T02:20:35.457Z"
-last_activity: 2026-05-12 -- Phase 27.1.3 execution started
+last_updated: "2026-05-12T02:56:28.506Z"
+last_activity: 2026-05-12
 progress:
-  total_phases: 41
+  total_phases: 42
   completed_phases: 31
   total_plans: 171
-  completed_plans: 169
-  percent: 76
+  completed_plans: 171
+  percent: 100
 ---
 
 # Project State
@@ -419,6 +419,7 @@ Recent decisions affecting current work:
 - Phase 27.1.1 inserted after Phase 27.1: Safe Foundation — hexapod walk/stop/sensors (INSERTED)
 - Phase 27.1.2 inserted after Phase 27.1.1: Navigation — rotate/head/buzzer (INSERTED)
 - Phase 27.1.3 inserted after Phase 27.1.2: Expression + Skill Doc — LEDs + protocol reference (INSERTED)
+- Phase 27.1.4 inserted after Phase 27.1.3: hexapod video and sonic stream capture for navigation (URGENT)
 
 ### Pending Todos
 
