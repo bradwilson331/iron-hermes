@@ -878,12 +878,12 @@ Plans:
   2. `hexapod_tcp/stream_distance(samples=N)` returns `"Distances: [...] cm | min=N max=N avg=N.N"` with N clamped to [1, 20]
   3. `hexapod_tcp/camera_pan(x)` and `camera_tilt(y)` send `CMD_CAMERA#x#y\n` (unused axis at its midpoint) and return `"OK"`; all three new actions pass the compile-time allowlist
   4. `skills/hexapod/SKILL.md` documents all 15 hexapod_tcp actions plus the hexapod_video tool — the agent can invoke any of them from the skill doc alone
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 27.1.4-01-PLAN.md — Extend hexapod_tcp.rs with stream_distance / camera_pan / camera_tilt actions, 7 new constants, updated schema + DESCRIPTION, and 5 new unit tests
 - [x] 27.1.4-02-PLAN.md — Create hexapod_video.rs (HexapodVideoTool, capture_frame action — port 8002, 4-byte LE length prefix, base64 data URI) and wire it into lib.rs + registry.rs with tests
-- [ ] 27.1.4-03-PLAN.md — Update skills/hexapod/SKILL.md with the three new hexapod_tcp action rows, the camera joint-axis explanation, the new parameter ranges, and a new hexapod_video tool section
+- [x] 27.1.4-03-PLAN.md — Update skills/hexapod/SKILL.md with the three new hexapod_tcp action rows, the camera joint-axis explanation, the new parameter ranges, and a new hexapod_video tool section
 
 **Phase directory:** `.planning/phases/27.1.4-hexapod-video-and-sonic-stream-capture-for-navigation/`
 
