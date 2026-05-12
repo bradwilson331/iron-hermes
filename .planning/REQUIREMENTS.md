@@ -194,10 +194,10 @@ The Learning Loop is the unifying philosophy of v2.1 — Skills + Memory + Sessi
 - [x] **HXP-LOCO-04**: Read ultrasonic distance in centimeters
 - [x] **HXP-LOCO-05**: Relax servos for safe idle (CMD_RELAX)
 - [x] **HXP-NAV-01**: Rotate in place by degrees (positive = right, negative = left)
-- [ ] **HXP-NAV-02**: Set all LEDs to RGB color (0–255 per channel) or turn off
+- [x] **HXP-NAV-02**: Set all LEDs to RGB color (0–255 per channel) or turn off
 - [x] **HXP-NAV-03**: Control head pan (50–180°) and tilt (0–180°) independently
 - [x] **HXP-NAV-04**: Buzzer on/off
-- [ ] **HXP-DOC-01**: Skill doc at `skills/hexapod/DESCRIPTION.md` with full protocol reference (all CMD_* strings, wire format, action list, blocked commands)
+- [x] **HXP-DOC-01**: Skill doc at `skills/hexapod/DESCRIPTION.md` with full protocol reference (all CMD_* strings, wire format, action list, blocked commands)
 
 ## Future Requirements
 
@@ -391,10 +391,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HXP-LOCO-04 | Phase 27.1.1 | Complete |
 | HXP-LOCO-05 | Phase 27.1.1 | Complete |
 | HXP-NAV-01 | Phase 27.1.2 | Complete |
-| HXP-NAV-02 | Phase 27.1.3 | Pending |
+| HXP-NAV-02 | Phase 27.1.3 | Complete |
 | HXP-NAV-03 | Phase 27.1.2 | Complete |
 | HXP-NAV-04 | Phase 27.1.2 | Complete |
-| HXP-DOC-01 | Phase 27.1.3 | Pending |
+| HXP-DOC-01 | Phase 27.1.3 | Complete |
 
 **Coverage:**
 - v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)
