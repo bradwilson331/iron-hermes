@@ -749,12 +749,12 @@ Plans:
 ### Phase 26.3.2: Chrome singleton user browser-profile (INSERTED)
 
 **Goal:** Phase 26.3 made `BrowserSession::spawn()` launch chromiumoxide against a persistent `$HERMES_HOME/browser-profile` directory. Chromium writes singleton sentinel files (`SingletonLock` — a POSIX symlink → `hostname-pid` — plus `SingletonSocket` and `SingletonCookie`) into that profile and removes them only on a clean exit. After a crash, `kill -9`, or an overlapping browser session, a stale `SingletonLock` is left behind and **every** subsequent `browser_*` tool call aborts with `Failed to create .../browser-profile/SingletonLock: File exists (17)` → `Failed to create a ProcessSingleton for your profile directory. Aborting now to avoid profile corruption.` — authenticated browser automation is permanently broken until the file is hand-deleted. Make browser launch resilient: before launching chromiumoxide, detect whether the `SingletonLock` is **stale** (no live process owns the pid on this host) and, if so, clear `SingletonLock` + `SingletonSocket` + `SingletonCookie`; if the lock is held by a **live** process, fall back to a process-scoped ephemeral profile (the pre-26.3 behavior — browser still works, just without persistence for that session) and emit a clear `warn!` instead of aborting. Apply the fix to both copies of `spawn()` (`crates/ironhermes-tools/src/browser_session.rs` + `crates/ironagent-tools-api/src/browser_session.rs`) via a shared helper. Decisions D-01..D-NN in `26.3.2-CONTEXT.md` are the requirements set.
-**Requirements**: (none — D-01..D-NN from 26.3.2-CONTEXT.md are the requirements)
+**Requirements**: (none in REQUIREMENTS.md — D-01..D-10 from 26.3.2-CONTEXT.md are the requirements set)
 **Depends on:** Phase 26.3
-**Plans:** 0 plans
+**Plans:** 1 plan
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 26.3.2 to break down)
+- [ ] 26.3.2-01-PLAN.md — Add ironhermes-core::browser_profile::reconcile_singleton_lock (stale-lock detection + sentinel cleanup + live-lock ephemeral fallback, dep-free) with 7 unit tests; wire it into both browser_session.rs spawn() call sites
 
 ### Phase 26.3.1: web ui side tabs panel (INSERTED)
 
