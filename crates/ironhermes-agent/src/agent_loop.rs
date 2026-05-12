@@ -625,6 +625,31 @@ impl AgentLoop {
         None
     }
 
+    /// Detect transport-level failures in a formatted error chain.
+    ///
+    /// Called only when `extract_http_status` returns `None` (i.e. no HTTP status
+    /// code was found in the error string). Matches a conservative case-insensitive
+    /// allowlist of reqwest / hyper-util / OS transport-error substrings. Returns
+    /// `true` when the error chain indicates the provider was unreachable or the
+    /// request was never delivered — the caller should then return `(true, true)` to
+    /// activate the fallback chain. Unrecognised errors continue to return `(true, false)`.
+    ///
+    /// Needles are verified against pinned source (reqwest 0.12.28, hyper-util 0.1.20,
+    /// anyhow 1.0.100). See phase 27.1.4.1.1 RESEARCH.md — Validated Allowlist (D-01 / D-01a).
+    fn is_transport_failure(err_str: &str) -> bool {
+        const TRANSPORT_MARKERS: &[&str] = &[
+            "error sending request for url",
+            "connection refused",
+            "dns error",
+            "failed to lookup address",
+            "connection reset",
+            "operation timed out",
+            "tcp connect error",
+        ];
+        let lower = err_str.to_lowercase();
+        TRANSPORT_MARKERS.iter().any(|m| lower.contains(m))
+    }
+
     /// Classify an error for fallback decision-making.
     /// Returns (should_retry, should_fallback).
     fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
@@ -634,7 +659,7 @@ impl AgentLoop {
         // hiding the underlying `(400 Bad Request)` from the substring scan.
         let err_str = format!("{err:#}");
         let Some(code) = Self::extract_http_status(&err_str) else {
-            return (true, false);
+            return (true, Self::is_transport_failure(&err_str));
         };
         match code {
             // Transient — retry first, then fall back if all retries fail.
@@ -2335,12 +2360,103 @@ mod fallback_tests {
 
     #[test]
     fn test_classify_other_error() {
-        let err = anyhow!("Connection refused: failed to connect to LLM");
+        let err = anyhow!("unexpected end of JSON input");
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "generic errors should be retryable");
         assert!(
             !should_fallback,
             "generic errors should not trigger fallback"
+        );
+    }
+
+    /// Marquee transport case: Ollama not running, full reqwest/hyper-util chain.
+    /// `{err:#}` contains `"error sending request for url"` (reqwest Kind::Request)
+    /// + `"tcp connect error"` (hyper-util) + `"Connection refused"` (OS errno).
+    /// All three needles match; each is independently sufficient.
+    #[test]
+    fn test_classify_transport_request_send_marker() {
+        let err = anyhow!(
+            "Streaming LLM call failed: Failed to send streaming request: \
+             error sending request for url (http://localhost:11434/v1/chat/completions): \
+             tcp connect error: Connection refused (os error 61)"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "reqwest Kind::Request error should trigger fallback"
+        );
+    }
+
+    /// TCP connection refused without the outer reqwest wrapper — independently
+    /// exercises the `"connection refused"` and `"tcp connect error"` needles.
+    #[test]
+    fn test_classify_transport_connection_refused() {
+        let err = anyhow!("tcp connect error: Connection refused (os error 61)");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "connection refused should trigger fallback"
+        );
+    }
+
+    /// Connect-phase timeout: exercises `"tcp connect error"` and `"operation timed out"`.
+    #[test]
+    fn test_classify_transport_connect_timeout() {
+        let err = anyhow!(
+            "error sending request for url (http://localhost:11434/...): \
+             tcp connect error: Operation timed out (os error 60)"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "connect timeout should trigger fallback"
+        );
+    }
+
+    /// DNS resolution failure: exercises `"dns error"` and `"failed to lookup address"`.
+    #[test]
+    fn test_classify_transport_dns_failure() {
+        let err = anyhow!(
+            "error sending request for url (http://nope.invalid/...): \
+             dns error: failed to lookup address information: \
+             nodename nor servname provided, or not known"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "DNS failure should trigger fallback"
+        );
+    }
+
+    /// Connection reset by peer — fed alone (no `"error sending request for url"`)
+    /// because mid-stream resets may surface via reqwest `Kind::Body`, not `Kind::Request`.
+    /// Exercises the `"connection reset"` needle in isolation.
+    #[test]
+    fn test_classify_transport_connection_reset() {
+        let err = anyhow!("Connection reset by peer (os error 54)");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "connection reset should trigger fallback"
+        );
+    }
+
+    /// Regression guard against Pitfall 1: SSE stream read timeout is NOT a transport
+    /// failure — the server was reachable and responded. Bare `"timed out"` is NOT in
+    /// the allowlist; only the scoped `"operation timed out"` marker is present.
+    #[test]
+    fn test_classify_sse_read_timeout_not_transport() {
+        let err = anyhow!("SSE stream read timed out after 60s");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "SSE read timeout should be retryable");
+        assert!(
+            !should_fallback,
+            "SSE stream read timeout should not trigger fallback (Pitfall 1 guard)"
         );
     }
 
