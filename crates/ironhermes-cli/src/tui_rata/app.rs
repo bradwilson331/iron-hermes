@@ -1062,11 +1062,25 @@ mod inv_tests {
             .collect::<Vec<_>>()
             .join("\n");
         // The field MUST appear in BOTH AppDeps and App (2 struct definitions).
-        let count = non_comment.matches("browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>").count();
+        // rustfmt may wrap the full type signature across several lines, so match
+        // on the stable `pub browser_session:` field-declaration prefix instead of
+        // the single-line type string (which only the AppDeps/App struct fields
+        // carry — App::new's forwarding line and the test helper's `Arc::new(...)`
+        // initializer are not `pub` and won't match).
+        let field_decls = non_comment.matches("pub browser_session:").count();
         assert!(
-            count >= 2,
-            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST carry the browser_session field; got {} occurrences in non-comment source",
-            count
+            field_decls >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST declare the browser_session field; got {} declaration(s) in non-comment source",
+            field_decls
+        );
+        // ...and the verified BrowserSession type must back those declarations.
+        let type_refs = non_comment
+            .matches("ironhermes_tools::browser_session::BrowserSession")
+            .count();
+        assert!(
+            type_refs >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): browser_session field MUST use the ironhermes_tools::browser_session::BrowserSession type in both structs; got {} reference(s)",
+            type_refs
         );
         // App::new MUST forward the field from deps.
         assert!(
