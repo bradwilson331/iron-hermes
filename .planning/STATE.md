@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: executing
+status: ready_to_plan
 stopped_at: Phase 27.1.4.1.1 context gathered
 last_updated: "2026-05-12T15:13:28.642Z"
 last_activity: 2026-05-12 -- Phase 27.1.4.1.1 execution started
 progress:
   total_phases: 44
-  completed_phases: 33
+  completed_phases: 34
   total_plans: 177
   completed_plans: 176
-  percent: 99
+  percent: 77
 ---
 
 # Project State
@@ -25,17 +25,17 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 27.1.4.1.1 (fallback-on-transport-errors-not-just-http-status) — EXECUTING
-Plan: 1 of 1
+Phase: 28
+Plan: Not started
 Plans: 0 plans — not yet planned
-Status: Executing Phase 27.1.4.1.1
-Last activity: 2026-05-12 -- Phase 27.1.4.1.1 execution started
+Status: Ready to plan
+Last activity: 2026-05-12
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 105
+- Total plans completed: 106
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -68,6 +68,7 @@ Last activity: 2026-05-12 -- Phase 27.1.4.1.1 execution started
 | 27.1.2 | 1 | - | - |
 | 27.1.3 | 2 | - | - |
 | 27.1.4.1 | 2 | - | - |
+| 27.1.4.1.1 | 1 | - | - |
 
 **Recent Trend:**
 
