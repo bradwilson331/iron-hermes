@@ -16,6 +16,12 @@ members = [
     "providers/memory-grafeo",
     "providers/memory-duckdb",
     "crates/iron_hermes_ui",
+]
+# crates/ironagent-tools-api is a stale byte-for-byte duplicate of
+# crates/ironhermes-tools (its test files import the sibling `ironhermes_tools`
+# crate, which it does not depend on, so `cargo test --workspace` cannot compile
+# them). Nothing in the workspace depends on it. Excluded pending removal.
+exclude = [
     "crates/ironagent-tools-api",
 ]
 default-members = [
