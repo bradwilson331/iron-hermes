@@ -16,6 +16,7 @@ pub mod delegate_task;
 pub mod execute_code;
 pub mod file_tools;
 pub mod hexapod_tcp; // Phase 27.1.1 — registration in Plan 04 register_defaults
+pub mod hexapod_video; // Phase 27.1.4 — stateless single-frame JPEG capture via port 8002
 pub mod memory_manager_handle;
 pub mod memory_tool;
 pub mod registry;
