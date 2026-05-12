@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::AgentLoop;
-use crate::any_client::AnyClient;
+use crate::any_client::{AnyClient, wire_fallback_if_configured};
 use crate::budget::BudgetHandle;
 use crate::subagent_registry::{SubagentInfo, SubagentRegistry};
 use crate::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
@@ -206,6 +206,8 @@ impl SubagentRunner for AgentSubagentRunner {
         };
 
         let mut agent = AgentLoop::new(child_client, registry, max_iterations);
+        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1)
+        agent = wire_fallback_if_configured(agent, &self.resolver); // chains .with_fallback() via the shared helper — PROV-07
         // D-21: Forward cancel token to child AgentLoop
         if let Some(ref token) = cancel_token {
             agent = agent.with_cancellation_token(token.clone());

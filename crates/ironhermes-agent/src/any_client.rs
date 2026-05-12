@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::agent_loop::AgentLoop;
 use crate::anthropic_client::AnthropicClient;
 use crate::client::{LlmClient, StreamEvent};
 
@@ -159,6 +160,43 @@ pub fn build_role_client(resolver: &ProviderResolver, role: &str) -> Result<Opti
         Some(endpoint) => Ok(Some(AnyClient::from_endpoint(&endpoint)?)),
         None => Ok(None),
     }
+}
+
+/// Wire a fallback provider client onto an AgentLoop, if one is configured.
+///
+/// Reads `resolver.resolve_for_main().fallback_providers.first()` and, if present,
+/// attempts to build a client for that provider. On success chains `.with_fallback()`;
+/// on any failure (provider name not found OR client build error) emits a
+/// `tracing::warn!` and returns the agent unchanged.
+///
+/// Used at every AgentLoop construction site to close PROV-07 gaps.
+pub fn wire_fallback_if_configured(
+    mut agent: AgentLoop,
+    resolver: &ProviderResolver,
+) -> AgentLoop {
+    let main_endpoint = resolver.resolve_for_main();
+    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
+        if let Some(fb_endpoint) = resolver.resolve(fb_name) {
+            match build_client(resolver, fb_name, &fb_endpoint.default_model) {
+                Ok(fb_client) => {
+                    agent = agent.with_fallback(fb_client);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "fallback provider '{}' client build failed — running without fallback",
+                        fb_name
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "fallback provider '{}' not found in resolver — running without fallback",
+                fb_name
+            );
+        }
+    }
+    agent
 }
 
 // =============================================================================

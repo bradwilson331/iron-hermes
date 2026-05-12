@@ -27,7 +27,7 @@ pub use agent_wiring::attach_context_engine;
 pub use anthropic_client::AnthropicClient;
 pub use any_client::{
     AnyClient, AnyClientSummarizationHandle, AnyClientVisionHandle, build_client,
-    build_main_client, build_role_client,
+    build_main_client, build_role_client, wire_fallback_if_configured,
 };
 pub use app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,
