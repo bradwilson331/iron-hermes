@@ -787,6 +787,16 @@ Plans:
 - [x] 26.2-01-PLAN.md — Wave 1: apply Phase 26.1 review fixes (WR-01 Finished arm uses streaming_block_id; WR-02 ws.rs busy-gate opportunistic clear; WR-03 branch-anchored parity assertions + new busy-gate regression test; IN-01 dedup allow(unused_mut))
 - [x] 26.2-02-PLAN.md — Wave 2: extend Tab struct with session_id; rewrite TitleBar with EventHandler<usize/()> props, stop_propagation close button, and disabled streaming-gate prop; add tabs Signal + on_tab_click/new/close closures + D-07/D-08 mount + list_sessions seeders in WarpHermes; 3 new source-text regression tests
 
+### Phase 26.2.1: new web ui with wheel menu (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 26.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 26.2.1 to break down)
+
 ### Phase 26.1: Fix websocket error for chat (INSERTED)
 
 **Goal:** Restore reliable Dioxus chat-to-LLM streaming by fixing the WebSocket server route and connection lifecycle so `/api/ws/chat` no longer resets without a closing handshake.

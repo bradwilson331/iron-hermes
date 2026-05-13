@@ -4,7 +4,7 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: planning
 stopped_at: Phase 27.1.4.1.1 context gathered
-last_updated: "2026-05-13T02:04:56.336Z"
+last_updated: "2026-05-13T05:27:38.034Z"
 last_activity: 2026-05-12
 progress:
   total_phases: 47
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 26.4
+Phase: 26.2.1
 Plan: Not started
 Plans: 0 plans — not yet planned
 Status: Ready to plan
@@ -428,6 +428,7 @@ Recent decisions affecting current work:
 - Phase 26.3.2 inserted after Phase 26.3: Chrome singleton user browser-profile (URGENT)
 - Phase 26.5 inserted after Phase 26: tui_rata overlay layer + theming — modal-overlay primitive, Skin model (3 built-ins) + /skin wiring, session picker + model picker overlays; ports Ink-TUI UX into the in-process ratatui REPL (URGENT)
 - Phase 26.6 inserted after Phase 26: tui_rata thinking panel + Skills Hub + rich prompts — togglable expanded thinking panel (knight-rider = collapsed view), browse-only Skills Hub overlay, rich approval/secret/sudo overlays; depends on 26.5 (URGENT)
+- Phase 26.2.1 inserted after Phase 26.2: new web ui with wheel menu (URGENT)
 
 ### Pending Todos
 
