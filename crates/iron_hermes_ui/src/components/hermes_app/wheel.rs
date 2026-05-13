@@ -59,10 +59,17 @@ pub const N: usize = 10;
 /// Per-wedge angular step — `360 / N`.
 pub const STEP: f64 = 360.0 / N as f64;
 /// Minimum allowed wheel size in CSS px (wheel-v2.js line 426 + Pitfall 4).
+///
+/// Only consumed inside the `#[cfg(target_arch = "wasm32")]` pointer-handler
+/// block (drag-resize clamp) and inside `#[cfg(test)]` geometry assertions;
+/// `#[allow(dead_code)]` suppresses the host-build dead-code warning.
+#[allow(dead_code)]
 pub const MIN_SIZE: f64 = 240.0;
 /// Maximum allowed wheel size in CSS px (wheel-v2.js line 427).
+#[allow(dead_code)]
 pub const MAX_SIZE: f64 = 640.0;
 /// Drag clamp margin — conservative `12 + RING_GAP + 7` per RESEARCH Pitfall 3.
+#[allow(dead_code)]
 pub const DRAG_MARGIN: f64 = 33.0;
 
 // ---------------------------------------------------------------------------
@@ -95,14 +102,18 @@ pub fn wedge_path(ang_a: f64, ang_b: f64, r_inner: f64, r_outer: f64) -> String 
 // ---------------------------------------------------------------------------
 
 /// Drag-rim gesture state — captured on pointerdown, mutated on pointermove.
+///
+/// Fields are only read inside the `#[cfg(target_arch = "wasm32")]` block
+/// (window-level pointermove handler); `#[allow(dead_code)]` on the struct
+/// suppresses host-build dead-code warnings.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 struct DragState {
     /// Client-space pointer coordinates at gesture start.
     start_client: (f64, f64),
     /// Wheel position at gesture start (so deltas apply atop the original).
     start_pos: (f64, f64),
     /// Pointer ID — preserved for future setPointerCapture wiring.
-    #[allow(dead_code)]
     pointer_id: i32,
     /// Max travel distance — used to suppress click after a drag.
     dist: f64,
@@ -110,13 +121,13 @@ struct DragState {
 
 /// Drag-resize-ring gesture state — captured on pointerdown.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 struct ResizeState {
     /// Client-space pointer coordinates at gesture start.
     start_client: (f64, f64),
     /// Wheel size at gesture start.
     start_size: f64,
     /// Pointer ID — preserved for future setPointerCapture wiring.
-    #[allow(dead_code)]
     pointer_id: i32,
 }
 
@@ -168,9 +179,12 @@ pub fn Wheel() -> Element {
         use wasm_bindgen::JsCast;
         use web_sys::PointerEvent as WebPointerEvent;
 
-        let mut move_slot: Signal<Option<Closure<dyn FnMut(WebPointerEvent)>>> =
-            use_signal(|| None);
-        let mut up_slot: Signal<Option<Closure<dyn FnMut(WebPointerEvent)>>> = use_signal(|| None);
+        // Type alias to keep the Signal<Option<Closure<dyn FnMut(...)>>>
+        // shape out of inline annotations (clippy::type_complexity).
+        type PointerListener = Closure<dyn FnMut(WebPointerEvent)>;
+
+        let mut move_slot: Signal<Option<PointerListener>> = use_signal(|| None);
+        let mut up_slot: Signal<Option<PointerListener>> = use_signal(|| None);
 
         use_effect(move || {
             let Some(window) = web_sys::window() else {
