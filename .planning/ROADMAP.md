@@ -797,6 +797,9 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 26.2.1 to break down)
 
+**Cross-cutting constraints:**
+- src/server/ws.rs, src/server/api.rs, src/server/state.rs, src/protocol.rs are byte-for-byte unchanged (D-02)
+
 ### Phase 26.1: Fix websocket error for chat (INSERTED)
 
 **Goal:** Restore reliable Dioxus chat-to-LLM streaming by fixing the WebSocket server route and connection lifecycle so `/api/ws/chat` no longer resets without a closing handshake.
