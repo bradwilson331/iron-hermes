@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IronHermes — Dioxus site + iOS companion</title>
+<meta name="viewport" content="width=1440">
+<link rel="stylesheet" href="shell.css">
+<style>
+  /* Page-level overrides that live here (vs. shell.css) so they're easy to find. */
+  body { font-family: "Ioskeley Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="Scanner.jsx"></script>
+<script type="text/babel" src="Site.jsx"></script>
+<script type="text/babel" src="IOSApp.jsx"></script>
+
+<script type="text/babel">
+/* ──────────────────────────────────────────────────────────
+ * Tweakable defaults — persisted via __edit_mode_set_keys.
+ * ────────────────────────────────────────────────────────── */
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accent": "orange",
+  "variant": "docs-first",
+  "font": "ioskeley",
+  "scanlines": true
+}/*EDITMODE-END*/;
+
+const ACCENTS = {
+  orange: { brand: "#f0883e", hi: "#ff9e54" },     // canonical
+  amber:  { brand: "#d29922", hi: "#e3b341" },     // ANSI yellow
+  cyan:   { brand: "#4ec9b0", hi: "#6fd8c2" },     // ANSI cyan
+  green:  { brand: "#3fb950", hi: "#56d364" },     // ANSI green
+  mag:    { brand: "#c678dd", hi: "#d7a0ea" },     // ANSI magenta
+};
+
+function applyTweaks(t) {
+  const a = ACCENTS[t.accent] || ACCENTS.orange;
+  document.documentElement.style.setProperty("--brand", a.brand);
+  document.documentElement.style.setProperty("--brand-hi", a.hi);
+
+  const fontStack = t.font === "jetbrains"
+    ? `"JetBrains Mono", "Ioskeley Mono", ui-monospace, Menlo, monospace`
+    : t.font === "system"
+    ? `ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace`
+    : `"Ioskeley Mono", ui-monospace, "SFMono-Regular", Menlo, monospace`;
+  document.documentElement.style.setProperty("--font-mono", fontStack);
+
+  document.body.classList.toggle("scanlines-on", !!t.scanlines);
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Tweaks panel (CLI-styled, bottom-right)
+ * ────────────────────────────────────────────────────────── */
+function TweaksPanel({ tweaks, setTweaks, onClose }) {
+  const set = (k, v) => setTweaks({ ...tweaks, [k]: v });
+  return (
+    <div className="tweaks">
+      <div className="t-hdr">
+        <span>// Tweaks</span>
+        <button className="x" onClick={onClose} aria-label="close">[x]</button>
+      </div>
+      <div className="row">
+        <span className="lbl">accent</span>
+        <div className="swatch-row">
+          {Object.entries(ACCENTS).map(([k, v]) => (
+            <button
+              key={k}
+              className="sw"
+              aria-pressed={tweaks.accent === k}
+              style={{background: v.brand}}
+              onClick={() => set("accent", k)}
+              title={k}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="row">
+        <span className="lbl">variant</span>
+        <select value={tweaks.variant} onChange={e => set("variant", e.target.value)}>
+          <option value="docs-first">docs-first</option>
+          <option value="install-first">install-first</option>
+          <option value="terminal-only">terminal-only</option>
+        </select>
+      </div>
+      <div className="row">
+        <span className="lbl">font</span>
+        <select value={tweaks.font} onChange={e => set("font", e.target.value)}>
+          <option value="ioskeley">Ioskeley Mono</option>
+          <option value="jetbrains">JetBrains Mono</option>
+          <option value="system">system mono</option>
+        </select>
+      </div>
+      <div className="row">
+        <span className="lbl">scanlines</span>
+        <input
+          type="checkbox"
+          checked={tweaks.scanlines}
+          onChange={e => set("scanlines", e.target.checked)}
+        />
+      </div>
+      <div className="group" style={{color:"var(--fg-dim)", fontSize: 11, lineHeight: 1.5}}>
+        changes apply live · edit `TWEAK_DEFAULTS` in the<br/>HTML to persist.
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Variant routing — different landing arrangements
+ * ────────────────────────────────────────────────────────── */
+function VariantSite({ variant }) {
+  if (variant === "install-first") {
+    return (
+      <div className="site">
+        <Masthead/>
+        <InstallBlock/>
+        <Features/>
+        <div style={{marginTop: 32}}><DocsPreview/></div>
+        <SiteFooter/>
+      </div>
+    );
+  }
+  if (variant === "terminal-only") {
+    // Minimal: masthead + install + footer. No feature grid, no docs preview.
+    return (
+      <div className="site">
+        <Masthead/>
+        <InstallBlock/>
+        <div style={{marginTop: 32, color:"var(--fg-dim)", fontSize: 13, lineHeight: 1.6}}>
+          <span style={{color:"var(--brand)", fontWeight: 700}}>// minimal variant</span> — the terminal
+          is the entire marketing surface. Install, type <code style={{color:"var(--fg)"}}>ironhermes</code>,{" "}
+          read <code style={{color:"var(--fg)"}}>man ironhermes</code>. That is the product.
+        </div>
+        <SiteFooter/>
+      </div>
+    );
+  }
+  // default: docs-first
+  return (
+    <div className="site">
+      <Masthead/>
+      <div style={{marginTop: 32}}><DocsPreview/></div>
+      <InstallBlock/>
+      <Features/>
+      <SiteFooter/>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Root
+ * ────────────────────────────────────────────────────────── */
+function App() {
+  const [screen, setScreen] = React.useState(() => {
+    return localStorage.getItem("ih-screen") || "landing";
+  });
+  const [iosScreen, setIosScreen] = React.useState(() => {
+    return localStorage.getItem("ih-ios") || "chat";
+  });
+  const [tweaks, setTweaks] = React.useState(TWEAK_DEFAULTS);
+  const [tweaksOpen, setTweaksOpen] = React.useState(false);
+
+  React.useEffect(() => { applyTweaks(tweaks); }, [tweaks]);
+  React.useEffect(() => { localStorage.setItem("ih-screen", screen); }, [screen]);
+  React.useEffect(() => { localStorage.setItem("ih-ios", iosScreen); }, [iosScreen]);
+
+  // Wire Tweaks toolbar toggle
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data || {};
+      if (d.type === "__activate_edit_mode") setTweaksOpen(true);
+      if (d.type === "__deactivate_edit_mode") setTweaksOpen(false);
+    };
+    window.addEventListener("message", onMsg);
+    window.parent.postMessage({ type: "__edit_mode_available" }, "*");
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+
+  // Persist tweaks to the source file on change
+  const updateTweaks = (next) => {
+    setTweaks(next);
+    window.parent.postMessage({ type: "__edit_mode_set_keys", edits: next }, "*");
+  };
+
+  return (
+    <div className="app">
+      <header className="app-bar">
+        <span className="brand-mark">ironhermes</span>
+        <span className="path">
+          <span className="seg">~/</span>
+          <span className="seg">code/</span>
+          <span className="seg">ironhermes/</span>
+          <span className="cur">{screen === "landing" ? "site/index.html" : "ios/App.rs"}</span>
+        </span>
+        <div className="right">
+          <div className="switch" role="tablist" aria-label="screen">
+            <button
+              role="tab"
+              aria-pressed={screen === "landing"}
+              onClick={() => setScreen("landing")}
+            >[ dioxus site ]</button>
+            <button
+              role="tab"
+              aria-pressed={screen === "ios"}
+              onClick={() => setScreen("ios")}
+            >[ ios companion ]</button>
+          </div>
+        </div>
+      </header>
+
+      <main className="canvas">
+        <section className={"screen" + (screen === "landing" ? " active" : "")}>
+          <VariantSite variant={tweaks.variant}/>
+        </section>
+        <section className={"screen" + (screen === "ios" ? " active" : "")}>
+          <IOSScreen screen={iosScreen} onScreen={setIosScreen}/>
+        </section>
+      </main>
+
+      {tweaksOpen && (
+        <TweaksPanel
+          tweaks={tweaks}
+          setTweaks={updateTweaks}
+          onClose={() => {
+            setTweaksOpen(false);
+            window.parent.postMessage({ type: "__deactivate_edit_mode" }, "*");
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

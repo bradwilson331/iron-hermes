@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IronHermes — Bridge (Refined)</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="site.css" />
+  <link rel="stylesheet" href="wheel.css" />
+
+  <style>
+    /* ──────────────── HERO LAYOUT ──────────────── */
+    .stage {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      z-index: 3;
+    }
+
+    /* Outer rotating crosshair behind the hero — decorative */
+    .deep-target {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 90vmin; height: 90vmin;
+      border-radius: 50%;
+      border: 1px solid rgba(57, 197, 207, 0.06);
+      z-index: 2;
+      pointer-events: none;
+      animation: deep-spin 90s linear infinite;
+    }
+    .deep-target::before, .deep-target::after {
+      content: '';
+      position: absolute;
+      background: rgba(57, 197, 207, 0.07);
+    }
+    .deep-target::before { width: 100%; height: 1px; top: 50%; left: 0; }
+    .deep-target::after  { width: 1px; height: 100%; left: 50%; top: 0; }
+    .deep-target-inner {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 56vmin; height: 56vmin;
+      border-radius: 50%;
+      border: 1px dashed rgba(57, 197, 207, 0.08);
+    }
+    .deep-target-mini {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 22vmin; height: 22vmin;
+      border-radius: 50%;
+      border: 1px solid rgba(57, 197, 207, 0.10);
+    }
+    @keyframes deep-spin {
+      from { transform: translate(-50%, -50%) rotate(0deg); }
+      to   { transform: translate(-50%, -50%) rotate(360deg); }
+    }
+
+    /* ──────────────── HERO COPY ──────────────── */
+    .hero {
+      position: absolute;
+      left: 6vw;
+      top: 50%;
+      transform: translateY(-50%);
+      max-width: 620px;
+      z-index: 10;
+    }
+
+    .hero-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 10px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: var(--teal);
+      padding: 4px 12px;
+      border: 1px solid var(--teal-faint);
+      background: rgba(57, 197, 207, 0.04);
+      margin-bottom: 28px;
+      font-weight: 700;
+    }
+    .hero-eyebrow .pulse {
+      width: 6px; height: 6px;
+      background: var(--teal);
+      box-shadow: 0 0 8px var(--teal);
+      animation: blink 2.2s ease-in-out infinite;
+    }
+
+    .hero-mark {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 14px;
+    }
+    .hero-shield {
+      width: 64px;
+      height: auto;
+      filter: drop-shadow(0 0 12px rgba(57,197,207,0.45));
+      animation: shield-pulse 4s ease-in-out infinite;
+    }
+    @keyframes shield-pulse {
+      0%, 100% { filter: drop-shadow(0 0 8px rgba(57,197,207,0.30)); }
+      50%      { filter: drop-shadow(0 0 18px rgba(57,197,207,0.65)); }
+    }
+
+    .hero-title {
+      font-family: var(--font);
+      font-weight: 700;
+      font-size: 72px;
+      line-height: 0.95;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .hero-title .accent {
+      color: var(--teal);
+      text-shadow: 0 0 18px rgba(57,197,207,0.4);
+    }
+
+    .hero-sub {
+      margin-top: 18px;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text-dim);
+      max-width: 520px;
+    }
+    .hero-sub strong { color: var(--text); font-weight: 700; }
+
+    .hero-meta {
+      margin-top: 26px;
+      display: grid;
+      grid-template-columns: repeat(3, max-content);
+      gap: 28px;
+    }
+    .hero-meta-cell {
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .hero-meta-key {
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--gray-faint);
+    }
+    .hero-meta-val {
+      font-family: var(--font);
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--teal);
+      letter-spacing: 0.02em;
+    }
+
+    .hero-cta {
+      margin-top: 36px;
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    /* Side ticker */
+    .telemetry {
+      position: fixed;
+      right: 60px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      z-index: 5;
+      min-width: 260px;
+      max-width: 280px;
+    }
+    .tel-card {
+      border: 1px solid var(--border-faint);
+      background: rgba(13, 17, 23, 0.55);
+      backdrop-filter: blur(8px);
+      padding: 12px 14px;
+      position: relative;
+    }
+    .tel-card::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 8px; bottom: 8px;
+      width: 2px;
+      background: var(--teal-dim);
+    }
+    .tel-card.danger::before { background: var(--red); }
+    .tel-card.warn::before   { background: var(--amber); }
+    .tel-card.ok::before     { background: var(--green); }
+
+    .tel-tag {
+      font-size: 9px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--gray);
+      margin-bottom: 4px;
+    }
+    .tel-tag .v { color: var(--teal); }
+    .tel-msg {
+      font-size: 11px;
+      line-height: 1.55;
+      color: var(--text);
+    }
+    .tel-msg .mono { color: var(--teal-bright); }
+
+    /* Footer ticker */
+    .footer {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      height: 36px;
+      border-top: 1px solid var(--border-faint);
+      background: rgba(13, 17, 23, 0.78);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      padding: 0 28px;
+      gap: 24px;
+      z-index: 30;
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--gray);
+      overflow: hidden;
+    }
+    .footer .marquee {
+      flex: 1;
+      overflow: hidden;
+      mask-image: linear-gradient(90deg, transparent, black 8%, black 92%, transparent);
+    }
+    .footer .marquee-inner {
+      display: inline-flex;
+      gap: 36px;
+      white-space: nowrap;
+      animation: marquee 60s linear infinite;
+      padding-left: 100%;
+    }
+    .footer .marquee-inner .v { color: var(--teal); font-weight: 700; }
+    @keyframes marquee {
+      from { transform: translateX(0%); }
+      to   { transform: translateX(-100%); }
+    }
+
+    .footer-clock {
+      font-family: var(--font);
+      font-weight: 700;
+      color: var(--teal);
+    }
+
+    /* ──────────────── FLOATING WHEEL (position override; base styles in wheel.css) ──────────────── */
+    .wheel-shell {
+      right: 6vw;
+      bottom: 16vh;
+    }
+
+    /* ──────────────── STUB OVERLAY ──────────────── */
+    .stub-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(7, 10, 14, 0.86);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .stub-card {
+      width: min(540px, 92vw);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--teal);
+      padding: 24px 28px;
+      position: relative;
+      box-shadow: 0 0 40px rgba(57,197,207,0.15);
+    }
+    .stub-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 14px;
+    }
+    .stub-tag {
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--teal);
+    }
+    .stub-close {
+      background: none; border: 1px solid var(--border);
+      color: var(--gray); font-size: 16px;
+      width: 26px; height: 26px;
+      cursor: pointer;
+      font-family: var(--font);
+      transition: color 0.18s, border-color 0.18s;
+    }
+    .stub-close:hover { color: var(--teal); border-color: var(--teal); }
+
+    .stub-title {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      margin-bottom: 2px;
+    }
+    .stub-sub {
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--gray);
+      margin-bottom: 20px;
+    }
+    .stub-body {
+      border: 1px solid var(--border-faint);
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    .stub-row {
+      display: flex; justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px dashed var(--border-faint);
+      font-size: 11px;
+    }
+    .stub-row:last-child { border-bottom: none; }
+    .stub-row span:first-child {
+      color: var(--gray);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 9px;
+    }
+    .stub-row span:last-child { color: var(--text); font-weight: 500; }
+    .stub-row .ok { color: var(--green); }
+
+    .stub-note {
+      font-size: 11px; line-height: 1.6;
+      color: var(--text-dim);
+      margin-bottom: 18px;
+    }
+    .ih-mono { color: var(--teal); }
+    .stub-actions {
+      display: flex; gap: 10px;
+    }
+
+    /* ─────────── Small screens ─────────── */
+    @media (max-width: 1200px) {
+      .telemetry { display: none; }
+    }
+    @media (max-width: 920px) {
+      .hero-title { font-size: 52px; }
+      .wheel-shell { right: 4vw; bottom: 12vh; }
+    }
+
+    /* Refined hero CTA — drop the duplicate Enter button since hub is now the launcher */
+    .hero-cta .btn--primary-cta { display: none; }
+  </style>
+</head>
+<body>
+
+  <!-- HUD chrome -->
+  <div class="hud-grid"></div>
+  <div class="hud-vignette"></div>
+  <div class="scan-bar"></div>
+  <div class="scanlines"></div>
+
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+
+  <!-- Top status bar -->
+  <div class="statbar">
+    <div class="chip"><span class="dot"></span>SYSTEM ACTIVE</div>
+    <div class="sep"></div>
+    <div class="chip">NODE <span class="v">HERMES-7</span></div>
+    <div class="sep"></div>
+    <div class="chip">BUILD <span class="v">v2.4.1</span></div>
+    <div class="sep"></div>
+    <div class="chip">SIGNALS <span class="v">4.2B / DAY</span></div>
+    <div class="sep"></div>
+    <div class="chip">UPTIME <span class="v">99.97%</span></div>
+  </div>
+
+  <!-- Side HUD readouts -->
+  <div class="readout" style="top: 70px; left: 28px;">
+    <span class="k">LAT</span> <span class="v" id="ro-lat">37.7749°N</span><br/>
+    <span class="k">LON</span> <span class="v" id="ro-lon">122.4194°W</span><br/>
+    <span class="k">ALT</span> <span class="v">012 M</span>
+  </div>
+  <div class="readout" style="top: 70px; right: 28px; text-align: right;">
+    <span class="k">SESSION</span> <span class="v">#0014</span><br/>
+    <span class="k">OPERATOR</span> <span class="v">ALPHA-7</span><br/>
+    <span class="k">CLEARANCE</span> <span class="v">L4</span>
+  </div>
+
+  <!-- Deep background target -->
+  <div class="deep-target">
+    <div class="deep-target-inner"></div>
+    <div class="deep-target-mini"></div>
+  </div>
+
+  <!-- Main stage -->
+  <div class="stage">
+
+    <!-- HERO COPY -->
+    <div class="hero">
+      <div class="hero-eyebrow">
+        <span class="pulse"></span>
+        BRIDGE · INTELLIGENCE CONSOLE
+      </div>
+
+      <div class="hero-mark">
+        <img src="assets/ih-shield-caduceus-transparent-256.png"
+             alt="IronHermes Shield"
+             class="hero-shield" />
+        <div>
+          <div class="hero-title">
+            Iron<span class="accent">Hermes</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hero-sub">
+        A modular intelligence shell that runs <strong>language models, agents, tools,
+        memories and skills</strong> on a single secure node — local-first, gateway-bridged,
+        operator-aware. Spin up the bridge, route signals, deploy autonomous workers.
+      </div>
+
+      <div class="hero-meta">
+        <div class="hero-meta-cell">
+          <div class="hero-meta-key">Response</div>
+          <div class="hero-meta-val">&lt;800ms</div>
+        </div>
+        <div class="hero-meta-cell">
+          <div class="hero-meta-key">Modules</div>
+          <div class="hero-meta-val">18 / 18</div>
+        </div>
+        <div class="hero-meta-cell">
+          <div class="hero-meta-key">Mesh</div>
+          <div class="hero-meta-val">ENCRYPTED</div>
+        </div>
+      </div>
+
+      <div class="hero-cta">
+        <a href="chat.html" class="btn">▓ ENTER CONSOLE</a>
+        <a href="screens/Welcome.tsx" class="btn btn--ghost" target="_blank">VIEW SOURCE</a>
+      </div>
+    </div>
+
+    <!-- TELEMETRY -->
+    <div class="telemetry">
+      <div class="tel-card ok">
+        <div class="tel-tag">// TELEMETRY · <span class="v">CORE</span></div>
+        <div class="tel-msg">Hermes core <span class="mono">v2.4.1</span> initialized — all 18 subsystems nominal.</div>
+      </div>
+      <div class="tel-card">
+        <div class="tel-tag">// MESH · <span class="v">GATEWAY</span></div>
+        <div class="tel-msg">Tunnel <span class="mono">SSH/AES-256</span> active to node <span class="mono">hermes-edge-02</span>.</div>
+      </div>
+      <div class="tel-card warn">
+        <div class="tel-tag">// QUEUE · <span class="v">AGENTS</span></div>
+        <div class="tel-msg">3 agents idle · 1 standby · <span class="mono">RECON-7</span> awaiting authorization.</div>
+      </div>
+      <div class="tel-card">
+        <div class="tel-tag">// INFER · <span class="v">MODELS</span></div>
+        <div class="tel-msg">HERMES-7 loaded · 4.2B signals/day · context window <span class="mono">128k</span>.</div>
+      </div>
+    </div>
+
+    <!-- FLOATING MENU WHEEL -->
+    <div id="wheel-root"></div>
+
+  </div>
+
+  <!-- FOOTER MARQUEE -->
+  <div class="footer">
+    <span class="footer-clock" id="footer-clock">--:--:-- UTC</span>
+    <div class="sep" style="width:1px;height:14px;background:var(--border);"></div>
+    <div class="marquee">
+      <div class="marquee-inner">
+        <span>SIGNAL ▓▓▓▓░ <span class="v">94%</span></span>
+        <span>THROUGHPUT <span class="v">4.2B / DAY</span></span>
+        <span>AGENTS <span class="v">12 ACTIVE</span></span>
+        <span>SKILLS <span class="v">142 LOADED</span></span>
+        <span>MEMORY <span class="v">2.4 TB INDEXED</span></span>
+        <span>NODES <span class="v">7 MESH · 3 EDGE</span></span>
+        <span>LATENCY <span class="v">P50 218MS · P99 794MS</span></span>
+        <span>UPTIME <span class="v">99.97%</span></span>
+        <span>BUILD <span class="v">v2.4.1 / a91f3c</span></span>
+        <span>HERMES IS LISTENING ░▒▓█▓▒░</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="wheel-v2.js"></script>
+  <script>
+    // Live clock
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function tick() {
+      const d = new Date();
+      const t = pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + ' UTC';
+      const el = document.getElementById('footer-clock');
+      if (el) el.textContent = t;
+    }
+    tick(); setInterval(tick, 1000);
+
+    // Subtle live jitter on lat/lon
+    const baseLat = 37.7749, baseLon = -122.4194;
+    setInterval(() => {
+      const lat = (baseLat + (Math.random() - 0.5) * 0.002).toFixed(4);
+      const lon = Math.abs(baseLon + (Math.random() - 0.5) * 0.002).toFixed(4);
+      document.getElementById('ro-lat').textContent = lat + '°N';
+      document.getElementById('ro-lon').textContent = lon + '°W';
+    }, 1800);
+  </script>
+</body>
+</html>

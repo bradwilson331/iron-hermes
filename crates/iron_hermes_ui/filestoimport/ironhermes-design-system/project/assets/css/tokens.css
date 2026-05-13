@@ -1,0 +1,444 @@
+/* ============================================================
+   IronHermes Design System — Tokens
+   ============================================================
+   Aesthetic themes:
+     [data-aesthetic="slate"]   — modern dev-tool (Zed/Linear-like); default
+     [data-aesthetic="iron"]    — molten iron; orange hot-metal accents
+     [data-aesthetic="phos"]    — phosphor terminal; green-on-black, ASCII feel
+
+   Color modes:
+     [data-mode="dark"]   — default
+     [data-mode="light"]
+   ============================================================ */
+
+@font-face {
+  font-family: "Iosekey Mono";
+  src: url("../fonts/IoskeleyMono-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  src: url("../fonts/IoskeleyMono-Italic.woff2") format("woff2");
+  font-weight: 400; font-style: italic; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  src: url("../fonts/IoskeleyMono-Medium.woff2") format("woff2");
+  font-weight: 500; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  src: url("../fonts/IoskeleyMono-SemiBold.woff2") format("woff2");
+  font-weight: 600; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  src: url("../fonts/IoskeleyMono-Bold.woff2") format("woff2");
+  font-weight: 700; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  src: url("../fonts/IoskeleyMono-Light.woff2") format("woff2");
+  font-weight: 300; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono Condensed";
+  src: url("../fonts/IoskeleyMono-CondensedBold.woff2") format("woff2");
+  font-weight: 700; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "Iosekey Mono Condensed";
+  src: url("../fonts/IoskeleyMono-CondensedSemiBold.woff2") format("woff2");
+  font-weight: 600; font-style: normal; font-display: block;
+}
+
+/* ------------------------------------------------------------
+   Base (shared across themes)
+   ------------------------------------------------------------ */
+:root {
+  --font-mono: "Iosekey Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono-cond: "Iosekey Mono Condensed", "Iosekey Mono", ui-monospace, monospace;
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+
+  /* Type scale — tight, dev-tool density */
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-22: 22px;
+  --fs-28: 28px;
+  --fs-36: 36px;
+  --fs-48: 48px;
+  --fs-64: 64px;
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.35;
+  --lh-body: 1.55;
+
+  /* Spacing scale */
+  --sp-0: 0px;
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+  --sp-9: 32px;
+  --sp-10: 40px;
+  --sp-12: 56px;
+  --sp-16: 80px;
+
+  /* Radii — dev-tools keep these small */
+  --r-0: 0px;
+  --r-1: 2px;
+  --r-2: 4px;
+  --r-3: 6px;
+  --r-4: 8px;
+  --r-5: 10px;
+  --r-6: 12px;
+  --r-pill: 999px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 320ms;
+
+  /* Focus ring base */
+  --focus-width: 2px;
+}
+
+/* ============================================================
+   THEME: slate (modern dev-tool) — DARK
+   ============================================================ */
+[data-aesthetic="slate"][data-mode="dark"],
+[data-aesthetic="slate"]:not([data-mode]) {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg-canvas: oklch(0.17 0.012 255);      /* deepest — outer app chrome */
+  --bg-surface: oklch(0.205 0.012 255);    /* main content bg */
+  --bg-elevated: oklch(0.235 0.012 255);   /* cards, blocks */
+  --bg-raised: oklch(0.27 0.012 255);      /* popovers, tooltips */
+  --bg-overlay: oklch(0.17 0.012 255 / 0.72);
+
+  --bg-input: oklch(0.195 0.012 255);
+  --bg-input-focus: oklch(0.22 0.014 255);
+  --bg-selected: oklch(0.32 0.04 245);
+  --bg-hover: oklch(0.245 0.012 255);
+
+  /* Borders — hairlines */
+  --border-subtle: oklch(0.28 0.012 255);
+  --border: oklch(0.33 0.013 255);
+  --border-strong: oklch(0.45 0.015 255);
+
+  /* Text */
+  --fg: oklch(0.96 0.005 255);
+  --fg-muted: oklch(0.78 0.008 255);
+  --fg-dim: oklch(0.6 0.01 255);
+  --fg-faint: oklch(0.45 0.012 255);
+  --fg-on-accent: oklch(0.16 0.012 255);
+
+  /* Accents — one primary, semantic set */
+  --accent: oklch(0.78 0.14 210);          /* cyan — primary action */
+  --accent-soft: oklch(0.78 0.14 210 / 0.14);
+  --accent-fg: oklch(0.16 0.012 255);
+
+  --success: oklch(0.78 0.16 150);
+  --warning: oklch(0.82 0.14 80);
+  --danger:  oklch(0.72 0.17 25);
+  --info:    oklch(0.78 0.14 265);
+
+  --success-soft: oklch(0.78 0.16 150 / 0.15);
+  --warning-soft: oklch(0.82 0.14 80  / 0.15);
+  --danger-soft:  oklch(0.72 0.17 25  / 0.15);
+  --info-soft:    oklch(0.78 0.14 265 / 0.15);
+
+  /* Syntax — for tool call args, code blocks */
+  --syn-key:     oklch(0.82 0.14 80);
+  --syn-string:  oklch(0.82 0.13 150);
+  --syn-number:  oklch(0.78 0.14 265);
+  --syn-comment: oklch(0.5 0.01 255);
+  --syn-punct:   oklch(0.65 0.01 255);
+  --syn-fn:      oklch(0.78 0.14 210);
+
+  /* Shadows — soft, dev-tool restraint */
+  --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.4);
+  --shadow-2: 0 4px 12px -2px oklch(0 0 0 / 0.35), 0 1px 2px oklch(0 0 0 / 0.3);
+  --shadow-3: 0 12px 32px -8px oklch(0 0 0 / 0.5), 0 2px 6px oklch(0 0 0 / 0.3);
+  --ring: 0 0 0 var(--focus-width) oklch(0.78 0.14 210 / 0.55);
+}
+
+/* ============================================================
+   THEME: slate — LIGHT
+   ============================================================ */
+[data-aesthetic="slate"][data-mode="light"] {
+  color-scheme: light;
+
+  --bg-canvas: oklch(0.975 0.003 255);
+  --bg-surface: oklch(0.995 0.002 255);
+  --bg-elevated: oklch(1 0 0);
+  --bg-raised: oklch(1 0 0);
+  --bg-overlay: oklch(0.975 0.003 255 / 0.75);
+
+  --bg-input: oklch(0.985 0.003 255);
+  --bg-input-focus: oklch(1 0 0);
+  --bg-selected: oklch(0.93 0.04 245);
+  --bg-hover: oklch(0.96 0.004 255);
+
+  --border-subtle: oklch(0.93 0.005 255);
+  --border: oklch(0.88 0.006 255);
+  --border-strong: oklch(0.78 0.008 255);
+
+  --fg: oklch(0.2 0.012 255);
+  --fg-muted: oklch(0.4 0.012 255);
+  --fg-dim: oklch(0.55 0.012 255);
+  --fg-faint: oklch(0.7 0.01 255);
+  --fg-on-accent: oklch(1 0 0);
+
+  --accent: oklch(0.58 0.15 220);
+  --accent-soft: oklch(0.58 0.15 220 / 0.12);
+  --accent-fg: oklch(1 0 0);
+
+  --success: oklch(0.52 0.17 150);
+  --warning: oklch(0.62 0.17 70);
+  --danger:  oklch(0.55 0.2 25);
+  --info:    oklch(0.55 0.17 265);
+
+  --success-soft: oklch(0.52 0.17 150 / 0.12);
+  --warning-soft: oklch(0.62 0.17 70  / 0.12);
+  --danger-soft:  oklch(0.55 0.2  25  / 0.1);
+  --info-soft:    oklch(0.55 0.17 265 / 0.1);
+
+  --syn-key:     oklch(0.55 0.17 30);
+  --syn-string:  oklch(0.5 0.16 150);
+  --syn-number:  oklch(0.52 0.17 260);
+  --syn-comment: oklch(0.65 0.01 255);
+  --syn-punct:   oklch(0.45 0.012 255);
+  --syn-fn:      oklch(0.55 0.17 220);
+
+  --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.04);
+  --shadow-2: 0 4px 12px -2px oklch(0 0 0 / 0.08), 0 1px 2px oklch(0 0 0 / 0.06);
+  --shadow-3: 0 12px 32px -8px oklch(0 0 0 / 0.14), 0 2px 6px oklch(0 0 0 / 0.06);
+  --ring: 0 0 0 var(--focus-width) oklch(0.58 0.15 220 / 0.45);
+}
+
+/* ============================================================
+   THEME: iron (molten) — DARK
+   ============================================================ */
+[data-aesthetic="iron"][data-mode="dark"],
+[data-aesthetic="iron"]:not([data-mode]) {
+  color-scheme: dark;
+
+  --bg-canvas: oklch(0.14 0.008 40);
+  --bg-surface: oklch(0.175 0.009 40);
+  --bg-elevated: oklch(0.21 0.01 40);
+  --bg-raised: oklch(0.255 0.012 40);
+  --bg-overlay: oklch(0.14 0.008 40 / 0.72);
+
+  --bg-input: oklch(0.175 0.009 40);
+  --bg-input-focus: oklch(0.2 0.011 40);
+  --bg-selected: oklch(0.32 0.08 40);
+  --bg-hover: oklch(0.22 0.01 40);
+
+  --border-subtle: oklch(0.27 0.012 40);
+  --border: oklch(0.33 0.015 40);
+  --border-strong: oklch(0.45 0.02 40);
+
+  --fg: oklch(0.97 0.008 60);
+  --fg-muted: oklch(0.78 0.012 50);
+  --fg-dim: oklch(0.6 0.014 45);
+  --fg-faint: oklch(0.45 0.014 45);
+  --fg-on-accent: oklch(0.14 0.008 40);
+
+  --accent: oklch(0.72 0.18 45);
+  --accent-soft: oklch(0.72 0.18 45 / 0.16);
+  --accent-fg: oklch(0.14 0.008 40);
+
+  --success: oklch(0.76 0.15 130);
+  --warning: oklch(0.82 0.16 85);
+  --danger:  oklch(0.7 0.18 20);
+  --info:    oklch(0.76 0.12 230);
+
+  --success-soft: oklch(0.76 0.15 130 / 0.14);
+  --warning-soft: oklch(0.82 0.16 85  / 0.14);
+  --danger-soft:  oklch(0.7  0.18 20  / 0.14);
+  --info-soft:    oklch(0.76 0.12 230 / 0.14);
+
+  --syn-key:     oklch(0.82 0.16 85);
+  --syn-string:  oklch(0.78 0.15 130);
+  --syn-number:  oklch(0.76 0.14 290);
+  --syn-comment: oklch(0.5 0.012 40);
+  --syn-punct:   oklch(0.65 0.012 40);
+  --syn-fn:      oklch(0.78 0.17 45);
+
+  --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.5);
+  --shadow-2: 0 4px 12px -2px oklch(0 0 0 / 0.4), 0 1px 2px oklch(0 0 0 / 0.35);
+  --shadow-3: 0 14px 36px -8px oklch(0 0 0 / 0.55), 0 2px 6px oklch(0 0 0 / 0.35);
+  --ring: 0 0 0 var(--focus-width) oklch(0.72 0.18 45 / 0.55);
+}
+
+[data-aesthetic="iron"][data-mode="light"] {
+  color-scheme: light;
+
+  --bg-canvas: oklch(0.965 0.008 60);
+  --bg-surface: oklch(0.99 0.005 60);
+  --bg-elevated: oklch(1 0 0);
+  --bg-raised: oklch(1 0 0);
+  --bg-overlay: oklch(0.965 0.008 60 / 0.75);
+
+  --bg-input: oklch(0.98 0.006 60);
+  --bg-input-focus: oklch(1 0 0);
+  --bg-selected: oklch(0.93 0.06 50);
+  --bg-hover: oklch(0.955 0.008 60);
+
+  --border-subtle: oklch(0.92 0.008 60);
+  --border: oklch(0.85 0.01 55);
+  --border-strong: oklch(0.75 0.012 55);
+
+  --fg: oklch(0.22 0.012 40);
+  --fg-muted: oklch(0.4 0.013 40);
+  --fg-dim: oklch(0.55 0.013 45);
+  --fg-faint: oklch(0.7 0.01 50);
+  --fg-on-accent: oklch(1 0 0);
+
+  --accent: oklch(0.58 0.2 40);
+  --accent-soft: oklch(0.58 0.2 40 / 0.13);
+  --accent-fg: oklch(1 0 0);
+
+  --success: oklch(0.5 0.17 140);
+  --warning: oklch(0.62 0.18 75);
+  --danger:  oklch(0.55 0.2 22);
+  --info:    oklch(0.52 0.17 230);
+
+  --success-soft: oklch(0.5 0.17 140 / 0.1);
+  --warning-soft: oklch(0.62 0.18 75 / 0.12);
+  --danger-soft:  oklch(0.55 0.2 22 / 0.1);
+  --info-soft:    oklch(0.52 0.17 230 / 0.1);
+
+  --syn-key:     oklch(0.55 0.17 30);
+  --syn-string:  oklch(0.5 0.16 140);
+  --syn-number:  oklch(0.52 0.17 280);
+  --syn-comment: oklch(0.65 0.012 40);
+  --syn-punct:   oklch(0.45 0.012 40);
+  --syn-fn:      oklch(0.55 0.2 40);
+
+  --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.05);
+  --shadow-2: 0 4px 12px -2px oklch(0 0 0 / 0.08), 0 1px 2px oklch(0 0 0 / 0.06);
+  --shadow-3: 0 12px 32px -8px oklch(0 0 0 / 0.15), 0 2px 6px oklch(0 0 0 / 0.07);
+  --ring: 0 0 0 var(--focus-width) oklch(0.58 0.2 40 / 0.4);
+}
+
+/* ============================================================
+   THEME: phos (phosphor terminal)
+   Has a dark mode only that's a deep black with green glow;
+   light mode is a "paper terminal" off-white w/ ink green.
+   ============================================================ */
+[data-aesthetic="phos"][data-mode="dark"],
+[data-aesthetic="phos"]:not([data-mode]) {
+  color-scheme: dark;
+
+  --bg-canvas: oklch(0.12 0.015 155);
+  --bg-surface: oklch(0.15 0.018 155);
+  --bg-elevated: oklch(0.18 0.022 155);
+  --bg-raised: oklch(0.22 0.025 155);
+  --bg-overlay: oklch(0.12 0.015 155 / 0.78);
+
+  --bg-input: oklch(0.16 0.02 155);
+  --bg-input-focus: oklch(0.2 0.025 155);
+  --bg-selected: oklch(0.3 0.08 150);
+  --bg-hover: oklch(0.2 0.023 155);
+
+  --border-subtle: oklch(0.28 0.04 150);
+  --border: oklch(0.38 0.06 150);
+  --border-strong: oklch(0.55 0.1 150);
+
+  --fg: oklch(0.92 0.15 150);
+  --fg-muted: oklch(0.75 0.13 150);
+  --fg-dim: oklch(0.58 0.1 150);
+  --fg-faint: oklch(0.42 0.08 150);
+  --fg-on-accent: oklch(0.12 0.015 155);
+
+  --accent: oklch(0.88 0.18 150);
+  --accent-soft: oklch(0.88 0.18 150 / 0.15);
+  --accent-fg: oklch(0.12 0.015 155);
+
+  --success: oklch(0.88 0.18 150);
+  --warning: oklch(0.85 0.17 85);
+  --danger:  oklch(0.72 0.2 25);
+  --info:    oklch(0.82 0.14 200);
+
+  --success-soft: oklch(0.88 0.18 150 / 0.14);
+  --warning-soft: oklch(0.85 0.17 85 / 0.14);
+  --danger-soft:  oklch(0.72 0.2 25 / 0.14);
+  --info-soft:    oklch(0.82 0.14 200 / 0.14);
+
+  --syn-key:     oklch(0.85 0.17 85);
+  --syn-string:  oklch(0.9 0.16 150);
+  --syn-number:  oklch(0.82 0.14 200);
+  --syn-comment: oklch(0.5 0.08 150);
+  --syn-punct:   oklch(0.68 0.1 150);
+  --syn-fn:      oklch(0.88 0.18 150);
+
+  --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.5);
+  --shadow-2: 0 4px 12px -2px oklch(0 0 0 / 0.4), 0 1px 2px oklch(0 0 0 / 0.35);
+  --shadow-3: 0 14px 36px -8px oklch(0 0 0 / 0.55), 0 0 24px oklch(0.88 0.18 150 / 0.06);
+  --ring: 0 0 0 var(--focus-width) oklch(0.88 0.18 150 / 0.55);
+}
+
+[data-aesthetic="phos"][data-mode="light"] {
+  color-scheme: light;
+
+  --bg-canvas: oklch(0.96 0.015 120);
+  --bg-surface: oklch(0.985 0.01 120);
+  --bg-elevated: oklch(1 0 0);
+  --bg-raised: oklch(1 0 0);
+  --bg-overlay: oklch(0.96 0.015 120 / 0.78);
+
+  --bg-input: oklch(0.98 0.01 120);
+  --bg-input-focus: oklch(1 0 0);
+  --bg-selected: oklch(0.88 0.12 150);
+  --bg-hover: oklch(0.94 0.012 120);
+
+  --border-subtle: oklch(0.9 0.015 120);
+  --border: oklch(0.8 0.025 130);
+  --border-strong: oklch(0.55 0.1 150);
+
+  --fg: oklch(0.28 0.1 150);
+  --fg-muted: oklch(0.42 0.09 150);
+  --fg-dim: oklch(0.55 0.08 150);
+  --fg-faint: oklch(0.68 0.05 130);
+  --fg-on-accent: oklch(0.99 0.01 120);
+
+  --accent: oklch(0.45 0.15 150);
+  --accent-soft: oklch(0.45 0.15 150 / 0.12);
+  --accent-fg: oklch(0.99 0.01 120);
+
+  --success: oklch(0.45 0.15 150);
+  --warning: oklch(0.6 0.17 75);
+  --danger:  oklch(0.55 0.2 22);
+  --info:    oklch(0.5 0.15 215);
+
+  --success-soft: oklch(0.45 0.15 150 / 0.12);
+  --warning-soft: oklch(0.6 0.17 75 / 0.12);
+  --danger-soft:  oklch(0.55 0.2 22 / 0.1);
+  --info-soft:    oklch(0.5 0.15 215 / 0.1);
+
+  --syn-key:     oklch(0.55 0.17 30);
+  --syn-string:  oklch(0.45 0.15 150);
+  --syn-number:  oklch(0.5 0.17 275);
+  --syn-comment: oklch(0.65 0.04 130);
+  --syn-punct:   oklch(0.45 0.08 150);
+  --syn-fn:      oklch(0.45 0.15 150);
+
+  --shadow-1: 0 1px 0 0 oklch(0 0 0 / 0.05);
+  --shadow-2: 0 4px 12px -2px oklch(0 0 0 / 0.08), 0 1px 2px oklch(0 0 0 / 0.06);
+  --shadow-3: 0 12px 32px -8px oklch(0 0 0 / 0.14), 0 2px 6px oklch(0 0 0 / 0.07);
+  --ring: 0 0 0 var(--focus-width) oklch(0.45 0.15 150 / 0.4);
+}

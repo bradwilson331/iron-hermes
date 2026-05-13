@@ -1,0 +1,1900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IronHermes — Application Mockups</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="site.css" />
+  <link rel="stylesheet" href="wheel.css" />
+  <link rel="stylesheet" href="screens.css" />
+
+  <!-- Tweakable defaults (edited via Tweaks panel, persisted by host) -->
+  <script>
+    window.APP_TWEAKS = /*EDITMODE-BEGIN*/{
+      "accent": "teal",
+      "wheelSize": 250,
+      "scanlines": true,
+      "showBreadcrumb": true,
+      "showFooter": true,
+      "density": "comfy",
+      "showRail": true
+    }/*EDITMODE-END*/;
+  </script>
+
+  <style>
+    /* ─── Wheel placement: upper-left corner (initial only — JS may move it) ─── */
+    .wheel-shell {
+      --wheel-size: 220px;
+      position: fixed !important;
+      top: 24px;
+      left: 24px;
+      right: auto;
+      bottom: auto;
+      z-index: 80;
+    }
+
+    /* Screen-label chip in the top bar */
+    .breadcrumb {
+      position: fixed;
+      top: 22px;
+      left: 360px;   /* sits to the right of the wheel */
+      z-index: 70;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--gray);
+      pointer-events: none;
+    }
+    .breadcrumb .dot { width: 5px; height: 5px; background: var(--teal); box-shadow: 0 0 6px var(--teal); animation: blink 2.2s ease-in-out infinite; }
+    .breadcrumb .v { color: var(--teal); font-weight: 700; }
+    .breadcrumb .sep { color: var(--border); }
+
+    /* Top-right system meta */
+    .sys-meta {
+      position: fixed;
+      top: 22px;
+      right: 28px;
+      z-index: 70;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 9.5px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--gray);
+      pointer-events: none;
+    }
+    .sys-meta .v { color: var(--teal); font-weight: 700; }
+
+    /* Footer status (lighter than index.html ticker) */
+    .app-footer {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      height: 30px;
+      border-top: 1px solid var(--border-faint);
+      background: rgba(13, 17, 23, 0.85);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      padding: 0 28px;
+      gap: 22px;
+      z-index: 50;
+      font-size: 9.5px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--gray);
+    }
+    .app-footer .v { color: var(--teal); font-weight: 700; }
+    .app-footer .sep { width: 1px; height: 12px; background: var(--border); }
+    .app-footer-right { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+
+    /* Hide HUD scanlines slightly so screen content stays legible */
+    .scanlines { opacity: 0.35; }
+    .hud-grid { opacity: 0.35; }
+    body.no-scanlines .scanlines { display: none; }
+    body.no-breadcrumb .breadcrumb,
+    body.no-breadcrumb .sys-meta { display: none; }
+    body.no-footer .app-footer { display: none; }
+    body.has-rail   #wheel-rail { display: flex !important; }
+    body:not(.has-rail) #wheel-rail,
+    body:not(.on-chat)  #wheel-rail { display: none !important; }
+    body.density-dense .screen { padding-top: 70px; gap: 16px; }
+    body.density-dense .screen-title { font-size: 28px; }
+    body.density-dense .card { padding: 12px 14px; }
+    body.density-dense .panel { padding: 14px 16px; }
+
+    /* Tweaks panel */
+    .tweaks {
+      position: fixed;
+      right: 18px;
+      bottom: 56px;
+      width: 260px;
+      background: rgba(13, 17, 23, 0.96);
+      border: 1px solid var(--teal-dim);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.55), 0 0 24px rgba(57,197,207,0.18);
+      z-index: 9000;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 11px;
+      display: none;
+      flex-direction: column;
+      animation: tweaks-in 0.22s ease;
+    }
+    .tweaks.is-open { display: flex; }
+    @keyframes tweaks-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .tweaks-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-faint);
+      cursor: move;
+      user-select: none;
+    }
+    .tweaks-title {
+      font-size: 10px;
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: var(--teal);
+      font-weight: 700;
+    }
+    .tweaks-x {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--gray);
+      width: 22px; height: 22px;
+      font-size: 12px;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: color 0.18s, border-color 0.18s;
+    }
+    .tweaks-x:hover { color: var(--teal); border-color: var(--teal); }
+    .tweaks-body {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    .tweaks-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .tweaks-label {
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--gray);
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .tweaks-label .val { color: var(--teal); letter-spacing: 0.04em; }
+    .tweaks-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px;
+    }
+    .tweaks-row .lbl { font-size: 11px; color: var(--text); }
+    .tweaks-row input[type="range"] {
+      width: 100%;
+      accent-color: var(--teal);
+    }
+    .seg {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 1fr;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .seg button {
+      background: transparent;
+      border: none;
+      padding: 6px 8px;
+      font-family: var(--font);
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--gray);
+      cursor: pointer;
+      transition: background 0.18s, color 0.18s;
+      border-right: 1px solid var(--border);
+    }
+    .seg button:last-child { border-right: none; }
+    .seg button:hover { color: var(--text); }
+    .seg button.is-on {
+      background: rgba(57, 197, 207, 0.14);
+      color: var(--teal);
+    }
+    .swatches { display: flex; gap: 6px; }
+    .swatch {
+      width: 30px; height: 30px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      position: relative;
+      transition: border-color 0.18s, transform 0.12s;
+    }
+    .swatch:hover { transform: scale(1.08); }
+    .swatch.is-on { border-color: var(--text); box-shadow: inset 0 0 0 2px rgba(13,17,23,0.6); }
+
+    /* Tweaks toggle FAB */
+    .tweaks-fab {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      width: 36px; height: 36px;
+      background: rgba(13, 17, 23, 0.92);
+      border: 1px solid var(--teal-dim);
+      color: var(--teal);
+      cursor: pointer;
+      z-index: 9001;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      transition: color 0.18s, border-color 0.18s, transform 0.18s;
+    }
+    .tweaks-fab:hover {
+      color: var(--teal-bright);
+      border-color: var(--teal);
+      transform: rotate(45deg);
+    }
+
+    /* Chat screen: spans full canvas by default (rail OFF). */
+    #screen-chat {
+      padding-left: 56px;
+      padding-right: 24px;
+      padding-top: 110px;
+      padding-bottom: 50px;
+      overflow: hidden;          /* outer screen never scrolls; chat-stream scrolls */
+      height: 100vh;
+    }
+    #screen-chat .screen-header { padding-left: 280px; padding-right: 0; flex-shrink: 0; }
+
+    /* Chat container + stream fill remaining height/width */
+    #screen-chat .chat-mini {
+      flex: 1;
+      width: 100%;
+      min-height: 0;
+      height: auto !important;   /* override the legacy inline 'calc(100vh - 280px)' */
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #screen-chat .chat-main {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #screen-chat .chat-stream {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;          /* THE actual scroll surface */
+      overscroll-behavior: contain;
+      padding-right: 4px;
+    }
+    #screen-chat .chat-input-pill {
+      flex-shrink: 0;
+      width: 100%;
+      margin-top: 14px;
+    }
+    #screen-chat .chat-msg.assistant { width: 100%; max-width: 100%; }
+    #screen-chat .chat-msg.assistant .chat-bubble-wrap { flex: 1; min-width: 0; }
+    #screen-chat .chat-msg.assistant .chat-bubble { width: 100%; }
+    #screen-chat .chat-msg.user { max-width: 100%; }
+    #screen-chat .chat-msg.user .chat-bubble { max-width: 70%; }
+    /* Bubble text is comfortable, not tiny */
+    #screen-chat .chat-bubble { font-size: 14px; line-height: 1.7; padding: 16px 22px; }
+    #screen-chat .chat-input-pill textarea {
+      min-height: 56px;
+      padding: 16px 22px;
+      font-size: 14px;
+    }
+    #screen-chat .chat-input-pill button {
+      padding: 0 32px;
+      font-size: 11px;
+    }
+
+    /* When rail toggled ON, push chat right to clear it */
+    body.has-rail.on-chat #screen-chat { padding-left: 360px; }
+    body.has-rail.on-chat #screen-chat .screen-header { padding-left: 0; }
+
+    @media (max-width: 1100px) {
+      #screen-chat { padding-left: 36px; padding-right: 20px; }
+      body.has-rail.on-chat #screen-chat { padding-left: 300px; }
+    }
+  </style>
+</head>
+<body style="font-family: &quot;JetBrains Mono&quot;">
+
+  <!-- HUD chrome (shared) -->
+  <div class="hud-grid"></div>
+  <div class="hud-vignette"></div>
+  <div class="scan-bar"></div>
+  <div class="scanlines"></div>
+
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+
+  <!-- Top breadcrumb -->
+  <div class="breadcrumb">
+    <span class="dot"></span>
+    <span>NODE <span class="v">HERMES-7</span></span>
+    <span class="sep">›</span>
+    <span>BRIDGE</span>
+    <span class="sep">›</span>
+    <span class="v" id="bc-screen">CHAT</span>
+  </div>
+
+  <!-- Top-right system meta -->
+  <div class="sys-meta">
+    <span>BUILD <span class="v">v2.4.1</span></span>
+    <span>·</span>
+    <span>UPTIME <span class="v">99.97%</span></span>
+    <span>·</span>
+    <span>OP <span class="v">ALPHA-7</span></span>
+  </div>
+
+  <!-- ╔═══════════════════════════════════════════════════════╗
+       ║              SCREEN PANELS  (12 total)              ║
+       ╚═══════════════════════════════════════════════════════╝ -->
+  <div class="app" id="app">
+
+    <!-- ───────── 1. CHAT ───────── -->
+    <section class="screen is-active" id="screen-chat" data-screen-label="01 Chat">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 01</div>
+          <h1 class="screen-title">Chat</h1>
+          <p class="screen-sub">Streaming conversation with slash commands, live tool progress, and per-message token accounting.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">⌘ NEW</button>
+          <button class="btn btn--sm">↗ SHARE</button>
+        </div>
+      </div>
+
+      <div class="chat-mini" style="height: calc(100vh - 280px);">
+        <div class="chat-main">
+          <div class="chat-stream">
+            <div class="chat-msg assistant">
+              <div class="avatar shield"><img src="assets/ih-shield-caduceus-transparent-256.png" alt=""></div>
+              <div class="chat-bubble-wrap">
+                <div class="chat-bubble">
+                  Hermes online. Active profile <code style="color:var(--teal)">default</code> · model <code style="color:var(--teal)">nemotron-3-nano-30b-a3b:free</code>. 57 skills loaded. What's the operation today?
+                </div>
+              </div>
+            </div>
+            <div class="chat-msg user">
+              <div class="avatar amber">OP</div>
+              <div class="chat-bubble">
+                /research "subsonic detection arrays" — last 90 days. Pull primary sources, score each by independence, summarize.
+              </div>
+            </div>
+            <div class="chat-msg assistant">
+              <div class="avatar shield"><img src="assets/ih-shield-caduceus-transparent-256.png" alt=""></div>
+              <div class="chat-bubble-wrap">
+                <div class="chat-bubble">
+                  Running <strong>/research</strong> skill — three tools chained.
+                  <div class="chat-progress">
+                    <div class="chat-progress-row"><span class="icon done">●</span><span>web_search · 14 results across 9 domains</span></div>
+                    <div class="chat-progress-row"><span class="icon done">●</span><span>fetch_url ·  ×14 (avg 412ms)</span></div>
+                    <div class="chat-progress-row"><span class="icon spin">◐</span><span>summarize · scoring independence…</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chat-input-pill">
+            <textarea rows="1" placeholder="/ slash, or just message…"></textarea>
+            <button>▓ SEND</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 2. SESSIONS ───────── -->
+    <section class="screen" id="screen-sessions" data-screen-label="02 Sessions">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 02</div>
+          <h1 class="screen-title">Sessions</h1>
+          <p class="screen-sub">Browse, search, and resume any past conversation. 1,284 transcripts indexed across 4 profiles.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">⊞ FILTER</button>
+          <button class="btn btn--sm">+ NEW SESSION</button>
+        </div>
+      </div>
+
+      <div class="search">
+        <span class="search-glyph">⌕</span>
+        <input placeholder='Search transcripts… try: model:nemotron "exfiltration" after:2026-04-01' />
+        <span class="pill teal">SEMANTIC ON</span>
+      </div>
+
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <span class="pill teal">ALL · 1,284</span>
+        <span class="pill">DEFAULT · 612</span>
+        <span class="pill">FINANCIAL · 198</span>
+        <span class="pill">MARKETING · 314</span>
+        <span class="pill">SOCIAL · 160</span>
+      </div>
+
+      <div class="section-label">Today <span class="count">· 7</span></div>
+      <div class="row-list" style="grid-template-columns: 1fr;">
+        <div class="row is-active" style="grid-template-columns: 1fr auto auto;">
+          <div class="row-main">
+            <span class="row-title">Subnet 10.14.0.0/24 Anomaly</span>
+            <span class="row-sub">DEFAULT · nemotron-3-nano-30b · 12 msgs · 12,847 tok</span>
+          </div>
+          <span class="pill green">ACTIVE</span>
+          <span class="row-sub">03:24 UTC</span>
+        </div>
+        <div class="row" style="grid-template-columns: 1fr auto auto;">
+          <div class="row-main">
+            <span class="row-title">Pricing model rewrite — tier mapping</span>
+            <span class="row-sub">FINANCIAL · gpt-5 · 28 msgs · 41,210 tok</span>
+          </div>
+          <span class="pill amber">PINNED</span>
+          <span class="row-sub">01:08 UTC</span>
+        </div>
+        <div class="row" style="grid-template-columns: 1fr auto auto;">
+          <div class="row-main">
+            <span class="row-title">Q3 launch copy — variant set B</span>
+            <span class="row-sub">MARKETING · claude-sonnet-4 · 9 msgs · 6,408 tok</span>
+          </div>
+          <span class="pill">—</span>
+          <span class="row-sub">00:42 UTC</span>
+        </div>
+      </div>
+
+      <div class="section-label">Yesterday <span class="count">· 14</span></div>
+      <div class="row-list">
+        <div class="row" style="grid-template-columns: 1fr auto auto;">
+          <div class="row-main">
+            <span class="row-title">APT-29 IOC Correlation</span>
+            <span class="row-sub">DEFAULT · nemotron · 41 msgs · 88,902 tok</span>
+          </div>
+          <span class="pill">—</span>
+          <span class="row-sub">22:41 UTC</span>
+        </div>
+        <div class="row" style="grid-template-columns: 1fr auto auto;">
+          <div class="row-main">
+            <span class="row-title">Cron job — daily competitor digest</span>
+            <span class="row-sub">SOCIAL · llama-3.1-8b-instant · 6 msgs · 4,118 tok</span>
+          </div>
+          <span class="pill teal">AUTOMATION</span>
+          <span class="row-sub">14:30 UTC</span>
+        </div>
+        <div class="row" style="grid-template-columns: 1fr auto auto;">
+          <div class="row-main">
+            <span class="row-title">Soul revision — financial_analyst</span>
+            <span class="row-sub">FINANCIAL · gpt-5 · 18 msgs · 24,400 tok</span>
+          </div>
+          <span class="pill">—</span>
+          <span class="row-sub">11:18 UTC</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 3. AGENTS ───────── -->
+    <section class="screen" id="screen-agents" data-screen-label="03 Agents">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 03</div>
+          <h1 class="screen-title">Agents</h1>
+          <p class="screen-sub">Each profile is an isolated Hermes workspace with its own config, memory, skill set, and persona.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--sm">+ NEW AGENT</button>
+        </div>
+      </div>
+
+      <div class="grid wide">
+        <div class="card is-active">
+          <div class="card-head">
+            <div class="avatar shield"><img src="assets/ih-shield-caduceus-transparent-256.png" alt=""></div>
+            <div style="flex:1">
+              <div class="card-title">default</div>
+              <div class="card-meta">Openrouter · nemotron-3-nano-30b-a3b:free</div>
+            </div>
+            <span class="pill teal">ACTIVE</span>
+          </div>
+          <div class="card-body">General-purpose operator — broad skills, persistent memory, no platform integrations.</div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span><span style="color:var(--teal);font-weight:700">57</span> SKILLS</span>
+              <span><span style="color:var(--teal);font-weight:700">128k</span> CTX</span>
+              <span>GATEWAY <span style="color:var(--gray)">OFF</span></span>
+            </div>
+            <button class="btn btn--sm">▓ CHAT</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="avatar amber">F</div>
+            <div style="flex:1">
+              <div class="card-title">financial_analyst</div>
+              <div class="card-meta">Openrouter · nemotron-3-nano-30b-a3b:free</div>
+            </div>
+          </div>
+          <div class="card-body">Quant-focused — bound to ledger memory store and Bloomberg gateway.</div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span><span style="color:var(--teal);font-weight:700">51</span> SKILLS</span>
+              <span><span style="color:var(--teal);font-weight:700">128k</span> CTX</span>
+              <span>GATEWAY <span style="color:var(--gray)">OFF</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">▓ CHAT</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="avatar green">M</div>
+            <div style="flex:1">
+              <div class="card-title">marketing_manager</div>
+              <div class="card-meta">Local · gemma-3-4b</div>
+            </div>
+          </div>
+          <div class="card-body">Copy & campaign lead — Slack + Discord gateways for content review threads.</div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span><span style="color:var(--teal);font-weight:700">51</span> SKILLS</span>
+              <span><span style="color:var(--teal);font-weight:700">8k</span> CTX</span>
+              <span>GATEWAY <span style="color:var(--green)">ON</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">▓ CHAT</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="avatar purple">S</div>
+            <div style="flex:1">
+              <div class="card-title">social_media_manager</div>
+              <div class="card-meta">Local · llama-3.1-8b-instant</div>
+            </div>
+          </div>
+          <div class="card-body">Scheduled posting — cron-driven digest delivery via Telegram.</div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span><span style="color:var(--teal);font-weight:700">51</span> SKILLS</span>
+              <span><span style="color:var(--teal);font-weight:700">8k</span> CTX</span>
+              <span>GATEWAY <span style="color:var(--green)">ON</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">▓ CHAT</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 4. SKILLS ───────── -->
+    <section class="screen" id="screen-skills" data-screen-label="04 Skills">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 04</div>
+          <h1 class="screen-title">Skills</h1>
+          <p class="screen-sub">Composable capabilities the active agent can invoke. 142 loaded · 57 enabled for <code style="color:var(--teal)">default</code>.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">⇣ IMPORT</button>
+          <button class="btn btn--sm">+ NEW SKILL</button>
+        </div>
+      </div>
+
+      <div class="search">
+        <span class="search-glyph">⌕</span>
+        <input placeholder="Search skills, tags, capabilities…" />
+      </div>
+
+      <div class="tabs">
+        <button class="tab is-active">ALL · 142</button>
+        <button class="tab">BUNDLED · 87</button>
+        <button class="tab">INSTALLED · 55</button>
+        <button class="tab">ENABLED · 57</button>
+        <button class="tab">UPDATES · 3</button>
+      </div>
+
+      <div class="grid">
+        <div class="card is-active">
+          <div class="card-head">
+            <div class="card-icon">⊕</div>
+            <div style="flex:1">
+              <div class="card-title">/research</div>
+              <div class="card-meta">v3.2 · bundled · 5 tools</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="card-body">Multi-source web research with independence scoring and citation extraction.</div>
+        </div>
+        <div class="card is-active">
+          <div class="card-head">
+            <div class="card-icon">∑</div>
+            <div style="flex:1">
+              <div class="card-title">/summarize</div>
+              <div class="card-meta">v2.1 · bundled · 1 tool</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="card-body">Compress long threads or documents with configurable detail level.</div>
+        </div>
+        <div class="card is-active">
+          <div class="card-head">
+            <div class="card-icon">⌬</div>
+            <div style="flex:1">
+              <div class="card-title">/code</div>
+              <div class="card-meta">v4.0 · bundled · 3 tools</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="card-body">Edit, lint, and run Python/JS snippets in an isolated sandbox.</div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon gray">◷</div>
+            <div style="flex:1">
+              <div class="card-title">/recall</div>
+              <div class="card-meta">v1.4 · bundled · memory</div>
+            </div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="card-body">Semantic search across this agent's memory store.</div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon gray">◇</div>
+            <div style="flex:1">
+              <div class="card-title">/cite</div>
+              <div class="card-meta">v1.0 · installed · 2 tools</div>
+            </div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="card-body">Inline source attribution for any factual claim.</div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon gray">◈</div>
+            <div style="flex:1">
+              <div class="card-title">/translate</div>
+              <div class="card-meta">v2.0 · installed · 1 tool</div>
+            </div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="card-body">Translate between 47 languages with idiom preservation.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 5. MODELS ───────── -->
+    <section class="screen" id="screen-models" data-screen-label="05 Models">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 05</div>
+          <h1 class="screen-title">Models</h1>
+          <p class="screen-sub">Saved language-model configurations grouped by provider. Each agent binds to one model at a time.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--sm">+ NEW CONFIG</button>
+        </div>
+      </div>
+
+      <div class="section-label">Openrouter <span class="count">· 3 configs</span></div>
+      <div class="grid wide">
+        <div class="card is-active">
+          <div class="card-head">
+            <div class="card-icon">◉</div>
+            <div style="flex:1">
+              <div class="card-title">nemotron-3-nano-30b-a3b:free</div>
+              <div class="card-meta">Free tier · 128k context · 30B params</div>
+            </div>
+            <span class="pill teal">DEFAULT</span>
+          </div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span>$0.00 / 1M IN</span>
+              <span>$0.00 / 1M OUT</span>
+              <span>P50 <span style="color:var(--teal);font-weight:700">218ms</span></span>
+            </div>
+            <div style="display:flex;gap:6px;"><button class="btn btn--ghost btn--sm">EDIT</button></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon">◉</div>
+            <div style="flex:1">
+              <div class="card-title">gpt-5</div>
+              <div class="card-meta">Paid · 128k context · proprietary</div>
+            </div>
+          </div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span>$2.50 / 1M IN</span>
+              <span>$10.00 / 1M OUT</span>
+              <span>P50 <span style="color:var(--teal);font-weight:700">412ms</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">EDIT</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon">◉</div>
+            <div style="flex:1">
+              <div class="card-title">claude-sonnet-4</div>
+              <div class="card-meta">Paid · 200k context · proprietary</div>
+            </div>
+          </div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span>$3.00 / 1M IN</span>
+              <span>$15.00 / 1M OUT</span>
+              <span>P50 <span style="color:var(--teal);font-weight:700">388ms</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">EDIT</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-label">Local (llama.cpp) <span class="count">· 2 configs</span></div>
+      <div class="grid wide">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon">⬡</div>
+            <div style="flex:1">
+              <div class="card-title">gemma-3-4b</div>
+              <div class="card-meta">Local · 8k context · 4B params · Q4_K_M</div>
+            </div>
+          </div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span>RAM <span style="color:var(--teal);font-weight:700">3.2 GB</span></span>
+              <span>P50 <span style="color:var(--teal);font-weight:700">52ms/tok</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">EDIT</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-icon">⬡</div>
+            <div style="flex:1">
+              <div class="card-title">llama-3.1-8b-instant</div>
+              <div class="card-meta">Local · 8k context · 8B params · Q5_K_M</div>
+            </div>
+          </div>
+          <div class="card-footer">
+            <div style="display:flex;gap:14px;font-size:10px;color:var(--gray);letter-spacing:0.06em;">
+              <span>RAM <span style="color:var(--teal);font-weight:700">5.8 GB</span></span>
+              <span>P50 <span style="color:var(--teal);font-weight:700">74ms/tok</span></span>
+            </div>
+            <button class="btn btn--ghost btn--sm">EDIT</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 6. MEMORY ───────── -->
+    <section class="screen" id="screen-memory" data-screen-label="06 Memory">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 06</div>
+          <h1 class="screen-title">Memory</h1>
+          <p class="screen-sub">Persistent context the active agent recalls across sessions — entries, user profile, and embedding-store provider.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">EXPORT</button>
+          <button class="btn btn--sm">+ ENTRY</button>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="panel-title">Entries <span class="count" style="color:var(--teal)">· 412</span></div>
+            <div class="search" style="width: 220px; padding: 5px 12px;">
+              <span class="search-glyph">⌕</span><input placeholder="Filter…" />
+            </div>
+          </div>
+          <div class="row-list" style="gap: 0;">
+            <div class="mem-entry">
+              <div class="mem-ts">2026-05-12<br/>14:08 UTC</div>
+              <div class="mem-body">
+                Operator prefers <strong>monospace</strong> output for code blocks, no syntax highlighting unless explicitly requested.
+                <span class="mem-tag">PREFERENCE</span>
+              </div>
+            </div>
+            <div class="mem-entry">
+              <div class="mem-ts">2026-05-11<br/>09:33 UTC</div>
+              <div class="mem-body">
+                Production database is <strong>postgres 16</strong> on <code style="color:var(--teal)">db-prod-01.internal</code>. Migrations under <code style="color:var(--teal)">/srv/hermes/migrations</code>.
+                <span class="mem-tag">FACT</span>
+              </div>
+            </div>
+            <div class="mem-entry">
+              <div class="mem-ts">2026-05-10<br/>22:41 UTC</div>
+              <div class="mem-body">
+                Currently investigating <strong>APT-29 IOCs</strong>. Cross-referencing destination <code style="color:var(--teal)">185.220.101.47</code> with internal subnet 10.14.0.0/24.
+                <span class="mem-tag">CONTEXT</span>
+              </div>
+            </div>
+            <div class="mem-entry">
+              <div class="mem-ts">2026-05-09<br/>11:18 UTC</div>
+              <div class="mem-body">
+                Reports must be <strong>under 500 words</strong> and lead with the recommendation, not the evidence chain.
+                <span class="mem-tag">PREFERENCE</span>
+              </div>
+            </div>
+            <div class="mem-entry">
+              <div class="mem-ts">2026-05-08<br/>03:17 UTC</div>
+              <div class="mem-body">
+                Team uses <strong>Linear</strong> for tracking, <strong>Slack</strong> for comms, <strong>1Password</strong> for credentials.
+                <span class="mem-tag">FACT</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <div class="panel">
+            <div class="panel-title">User Profile</div>
+            <div class="kv">
+              <dt>Operator</dt><dd>ALPHA-7</dd>
+              <dt>Locale</dt><dd>en-US · America/Los_Angeles</dd>
+              <dt>Role</dt><dd>Intelligence Analyst</dd>
+              <dt>Clearance</dt><dd style="color:var(--teal)">L4</dd>
+            </div>
+            <button class="btn btn--ghost btn--sm" style="width:100%;justify-content:center;">EDIT PROFILE</button>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">Provider</div>
+            <div class="kv">
+              <dt>Store</dt><dd>Qdrant (local)</dd>
+              <dt>Embed Model</dt><dd>all-mpnet-base-v2</dd>
+              <dt>Dimensions</dt><dd>768</dd>
+              <dt>Entries</dt><dd>412 · 14.2 MB</dd>
+              <dt>Retention</dt><dd>infinite</dd>
+            </div>
+            <button class="btn btn--ghost btn--sm" style="width:100%;justify-content:center;">RECONFIGURE</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 7. SOUL ───────── -->
+    <section class="screen" id="screen-soul" data-screen-label="07 Soul">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 07</div>
+          <h1 class="screen-title">Soul</h1>
+          <p class="screen-sub">The persona for the active profile — <code style="color:var(--teal)">SOUL.md</code> for <code style="color:var(--teal)">default</code>. Edits apply on next message.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">REVERT</button>
+          <button class="btn btn--sm">▓ SAVE</button>
+        </div>
+      </div>
+
+      <div class="soul-grid">
+        <div class="soul-editor">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="panel-title">SOUL.md</div>
+            <div style="display:flex;gap:8px;font-size:10px;color:var(--gray);letter-spacing:0.12em;">
+              <span>312 LINES</span><span>·</span><span>8.4 KB</span><span>·</span><span style="color:var(--green)">SAVED</span>
+            </div>
+          </div>
+          <textarea spellcheck="false"># Hermes — default profile
+
+## Identity
+You are Hermes, an operator-aligned intelligence shell. Calm, direct, technically literate.
+Speak in short paragraphs. Lead with the recommendation, then the evidence.
+
+## Voice
+- No hedging without justification.
+- No filler ("As an AI…", "Certainly!", "Let me help you with that…").
+- Cite when claims are non-obvious.
+- When uncertain, say so in one sentence and proceed.
+
+## Behavior
+- Always run tools when the question is empirical.
+- Always show progress when a tool chain takes more than ~2 seconds.
+- Refuse only when continuing would violate operator policy — and say which clause.
+
+## Style
+- Monospace for code, paths, identifiers, IPs.
+- ISO-8601 timestamps. SI units. UTC.
+- Tables for ≥3 comparable rows.</textarea>
+        </div>
+
+        <div class="soul-preview">
+          <div class="panel-title">Live Preview</div>
+          <div class="soul-preview-body">
+            <h2>Hermes — default profile</h2>
+            <h2>Identity</h2>
+            <p>You are Hermes, an operator-aligned intelligence shell. Calm, direct, technically literate. Speak in short paragraphs. Lead with the recommendation, then the evidence.</p>
+            <h2>Voice</h2>
+            <ul>
+              <li>No hedging without justification.</li>
+              <li>No filler ("As an AI…", "Certainly!", "Let me help you with that…").</li>
+              <li>Cite when claims are non-obvious.</li>
+              <li>When uncertain, say so in one sentence and proceed.</li>
+            </ul>
+            <h2>Behavior</h2>
+            <ul>
+              <li>Always run tools when the question is empirical.</li>
+              <li>Always show progress when a tool chain takes more than ~2 seconds.</li>
+              <li>Refuse only when continuing would violate operator policy — and say which clause.</li>
+            </ul>
+            <h2>Style</h2>
+            <ul>
+              <li>Monospace for code, paths, identifiers, IPs.</li>
+              <li>ISO-8601 timestamps. SI units. UTC.</li>
+              <li>Tables for ≥3 comparable rows.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 8. TOOLS ───────── -->
+    <section class="screen" id="screen-tools" data-screen-label="08 Tools">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 08</div>
+          <h1 class="screen-title">Tools</h1>
+          <p class="screen-sub">Enable or disable individual toolsets available to the agent during conversations.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">ENABLE ALL</button>
+          <button class="btn btn--ghost btn--sm">DISABLE ALL</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="tool-card on">
+          <div class="tool-top">
+            <div class="tool-icon">⊕</div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="tool-name">Web Search</div>
+          <div class="tool-desc">Search the web and extract content from URLs.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">⊞</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Browser</div>
+          <div class="tool-desc">Navigate, click, type, and interact with web pages.</div>
+        </div>
+        <div class="tool-card on">
+          <div class="tool-top">
+            <div class="tool-icon">⌘</div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="tool-name">Terminal</div>
+          <div class="tool-desc">Execute shell commands and scripts.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">≡</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">File Operations</div>
+          <div class="tool-desc">Read, write, search, and manage files.</div>
+        </div>
+        <div class="tool-card on">
+          <div class="tool-top">
+            <div class="tool-icon">⌬</div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="tool-name">Code Execution</div>
+          <div class="tool-desc">Execute Python and shell code directly.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">◉</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Vision</div>
+          <div class="tool-desc">Analyze images and visual content.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">◇</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Image Generation</div>
+          <div class="tool-desc">Generate images with DALL-E and other models.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">♪</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Text-to-Speech</div>
+          <div class="tool-desc">Convert text to spoken audio.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">✦</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Skills</div>
+          <div class="tool-desc">Create, manage, and execute reusable skills.</div>
+        </div>
+        <div class="tool-card on">
+          <div class="tool-top">
+            <div class="tool-icon">⬢</div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="tool-name">Memory</div>
+          <div class="tool-desc">Store and recall persistent knowledge.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">⌕</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Session Search</div>
+          <div class="tool-desc">Search across past conversations.</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-top">
+            <div class="tool-icon">?</div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="tool-name">Clarifying Questions</div>
+          <div class="tool-desc">Ask the user for clarification when needed.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 9. SCHEDULES ───────── -->
+    <section class="screen" id="screen-schedules" data-screen-label="09 Schedules">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 09</div>
+          <h1 class="screen-title">Schedules</h1>
+          <p class="screen-sub">Cron-driven jobs with delivery targets. Hermes runs the prompt, formats the output, and sends it where you choose.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">⏵ HISTORY</button>
+          <button class="btn btn--sm">+ NEW JOB</button>
+        </div>
+      </div>
+
+      <div class="row-list">
+        <div class="sched-row head">
+          <span></span><span>JOB</span><span>SCHEDULE</span><span>DELIVERY</span><span>NEXT RUN</span><span style="text-align:right;">STATE</span>
+        </div>
+        <div class="sched-row">
+          <span style="color:var(--green);">●</span>
+          <div class="row-main">
+            <span class="row-title">Daily competitor digest</span>
+            <span class="row-sub">social_media_manager · /research + /summarize</span>
+          </div>
+          <span class="sched-cron">0 9 * * 1-5</span>
+          <span class="row-sub">Telegram → @social_ops</span>
+          <span class="row-sub">May 13 · 09:00 UTC</span>
+          <span class="pill green" style="justify-self:end;">ACTIVE</span>
+        </div>
+        <div class="sched-row">
+          <span style="color:var(--green);">●</span>
+          <div class="row-main">
+            <span class="row-title">Weekly market brief</span>
+            <span class="row-sub">financial_analyst · /research markets</span>
+          </div>
+          <span class="sched-cron">0 7 * * 1</span>
+          <span class="row-sub">Email → ops@stark.io</span>
+          <span class="row-sub">May 18 · 07:00 UTC</span>
+          <span class="pill green" style="justify-self:end;">ACTIVE</span>
+        </div>
+        <div class="sched-row">
+          <span style="color:var(--green);">●</span>
+          <div class="row-main">
+            <span class="row-title">Threat intel sweep</span>
+            <span class="row-sub">default · /research SANDSTORM-4</span>
+          </div>
+          <span class="sched-cron">*/30 * * * *</span>
+          <span class="row-sub">Slack → #sec-feed</span>
+          <span class="row-sub">May 13 · 03:30 UTC</span>
+          <span class="pill green" style="justify-self:end;">ACTIVE</span>
+        </div>
+        <div class="sched-row">
+          <span style="color:var(--amber);">●</span>
+          <div class="row-main">
+            <span class="row-title">Quarterly persona retune</span>
+            <span class="row-sub">all profiles · /soul review</span>
+          </div>
+          <span class="sched-cron">0 0 1 */3 *</span>
+          <span class="row-sub">Email → operator@stark.io</span>
+          <span class="row-sub">Jul 1 · 00:00 UTC</span>
+          <span class="pill amber" style="justify-self:end;">PAUSED</span>
+        </div>
+        <div class="sched-row">
+          <span style="color:var(--gray);">●</span>
+          <div class="row-main">
+            <span class="row-title">Memory garbage collect</span>
+            <span class="row-sub">default · gc memory store</span>
+          </div>
+          <span class="sched-cron">0 4 * * 0</span>
+          <span class="row-sub">— (silent)</span>
+          <span class="row-sub">May 19 · 04:00 UTC</span>
+          <span class="pill" style="justify-self:end;">DISABLED</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 10. GATEWAY ───────── -->
+    <section class="screen" id="screen-gateway" data-screen-label="10 Gateway">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 10</div>
+          <h1 class="screen-title">Gateway</h1>
+          <p class="screen-sub">Bridge Hermes to messaging platforms. Each integration runs as its own listener with credentials scoped per agent.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">↻ RESTART ALL</button>
+          <button class="btn btn--sm">+ ADD PLATFORM</button>
+        </div>
+      </div>
+
+      <div class="grid wide">
+        <div class="plat-card connected">
+          <div class="plat-head">
+            <div class="plat-glyph">▦</div>
+            <div style="flex:1">
+              <div class="plat-name">Slack</div>
+              <div class="plat-state">CONNECTED · 3 channels</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="kv">
+            <dt>Workspace</dt><dd>stark-industries</dd>
+            <dt>Agent</dt><dd>marketing_manager</dd>
+            <dt>Channels</dt><dd>#campaigns · #review · #social</dd>
+            <dt>Last event</dt><dd>2m ago</dd>
+          </div>
+        </div>
+
+        <div class="plat-card connected">
+          <div class="plat-head">
+            <div class="plat-glyph">◢</div>
+            <div style="flex:1">
+              <div class="plat-name">Discord</div>
+              <div class="plat-state">CONNECTED · 1 server</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="kv">
+            <dt>Server</dt><dd>Stark Ops</dd>
+            <dt>Agent</dt><dd>marketing_manager</dd>
+            <dt>Channels</dt><dd>#hermes-bridge</dd>
+            <dt>Last event</dt><dd>9m ago</dd>
+          </div>
+        </div>
+
+        <div class="plat-card connected">
+          <div class="plat-head">
+            <div class="plat-glyph">⌖</div>
+            <div style="flex:1">
+              <div class="plat-name">Telegram</div>
+              <div class="plat-state">CONNECTED · 2 chats</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="kv">
+            <dt>Bot</dt><dd>@hermes_ops_bot</dd>
+            <dt>Agent</dt><dd>social_media_manager</dd>
+            <dt>Allowed</dt><dd>operator, social</dd>
+            <dt>Last event</dt><dd>3m ago</dd>
+          </div>
+        </div>
+
+        <div class="plat-card">
+          <div class="plat-head">
+            <div class="plat-glyph">✉</div>
+            <div style="flex:1">
+              <div class="plat-name">Email (SMTP/IMAP)</div>
+              <div class="plat-state">DISCONNECTED</div>
+            </div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="kv">
+            <dt>Host</dt><dd>—</dd>
+            <dt>Agent</dt><dd>—</dd>
+          </div>
+          <button class="btn btn--ghost btn--sm" style="align-self:flex-start;">CONFIGURE →</button>
+        </div>
+
+        <div class="plat-card">
+          <div class="plat-head">
+            <div class="plat-glyph">⌗</div>
+            <div style="flex:1">
+              <div class="plat-name">SMS (Twilio)</div>
+              <div class="plat-state">DISCONNECTED</div>
+            </div>
+            <div class="tgl" data-tgl></div>
+          </div>
+          <div class="kv">
+            <dt>Account</dt><dd>—</dd>
+            <dt>Number</dt><dd>—</dd>
+          </div>
+          <button class="btn btn--ghost btn--sm" style="align-self:flex-start;">CONFIGURE →</button>
+        </div>
+
+        <div class="plat-card connected">
+          <div class="plat-head">
+            <div class="plat-glyph">⤴</div>
+            <div style="flex:1">
+              <div class="plat-name">Webhook</div>
+              <div class="plat-state">CONNECTED · inbound</div>
+            </div>
+            <div class="tgl on" data-tgl></div>
+          </div>
+          <div class="kv">
+            <dt>URL</dt><dd style="font-size:10px;">/hooks/in/a91f3c…</dd>
+            <dt>Auth</dt><dd>HMAC-SHA256</dd>
+            <dt>Last event</dt><dd>34s ago</dd>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 11. OFFICE ───────── -->
+    <section class="screen" id="screen-office" data-screen-label="11 Office">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 11</div>
+          <h1 class="screen-title">Office</h1>
+          <p class="screen-sub">Claw3d spatial interface — physical desk overlay. Calibrate cameras, manage device meshes, mirror Hermes panels onto the surface.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">⌖ CALIBRATE</button>
+          <button class="btn btn--sm">▓ ENGAGE</button>
+        </div>
+      </div>
+
+      <div class="split left-wider">
+        <div class="claw-stage">
+          <div class="claw-grid-bg"></div>
+          <div class="claw-readout">
+            <span class="k">RIG</span> <span style="color:var(--teal);font-weight:700">CLAW3D-02</span><br/>
+            <span class="k">CAM</span> <span style="color:var(--teal);font-weight:700">4 / 4 LOCKED</span><br/>
+            <span class="k">FPS</span> <span style="color:var(--teal);font-weight:700">144</span>
+          </div>
+          <!-- Surface markers -->
+          <svg style="position:absolute;inset:0;width:100%;height:100%;" viewBox="0 0 800 360" preserveAspectRatio="xMidYMid meet">
+            <!-- Outer rect = desk perimeter -->
+            <rect x="80" y="40" width="640" height="280" fill="none" stroke="rgba(57,197,207,0.45)" stroke-width="1.5" stroke-dasharray="4 4"/>
+            <!-- Hot zones -->
+            <rect x="120" y="80" width="180" height="100" fill="rgba(57,197,207,0.06)" stroke="rgba(57,197,207,0.55)" stroke-width="1"/>
+            <text x="210" y="135" text-anchor="middle" font-family="JetBrains Mono" font-size="11" fill="var(--teal)" letter-spacing="3">PANEL A</text>
+            <rect x="340" y="80" width="180" height="160" fill="rgba(57,197,207,0.06)" stroke="rgba(57,197,207,0.55)" stroke-width="1"/>
+            <text x="430" y="165" text-anchor="middle" font-family="JetBrains Mono" font-size="11" fill="var(--teal)" letter-spacing="3">CHAT MIRROR</text>
+            <rect x="560" y="80" width="140" height="220" fill="rgba(57,197,207,0.06)" stroke="rgba(57,197,207,0.55)" stroke-width="1"/>
+            <text x="630" y="195" text-anchor="middle" font-family="JetBrains Mono" font-size="11" fill="var(--teal)" letter-spacing="3">TELEMETRY</text>
+            <!-- Camera markers -->
+            <circle cx="80"  cy="40"  r="6" fill="#39c5cf"/><text x="92" y="44" font-family="JetBrains Mono" font-size="9" fill="var(--gray)">CAM-1</text>
+            <circle cx="720" cy="40"  r="6" fill="#39c5cf"/><text x="690" y="44" font-family="JetBrains Mono" font-size="9" fill="var(--gray)">CAM-2</text>
+            <circle cx="80"  cy="320" r="6" fill="#39c5cf"/><text x="92" y="316" font-family="JetBrains Mono" font-size="9" fill="var(--gray)">CAM-3</text>
+            <circle cx="720" cy="320" r="6" fill="#39c5cf"/><text x="690" y="316" font-family="JetBrains Mono" font-size="9" fill="var(--gray)">CAM-4</text>
+          </svg>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="panel">
+            <div class="panel-title">Devices <span class="count" style="color:var(--teal)">· 4</span></div>
+            <div class="row-list">
+              <div class="row" style="grid-template-columns: 1fr auto; padding: 8px 10px;">
+                <div class="row-main">
+                  <span class="row-title">Projector — UST-01</span>
+                  <span class="row-sub">10.0.4.21 · 4K · 144Hz</span>
+                </div>
+                <span class="pill green">LIVE</span>
+              </div>
+              <div class="row" style="grid-template-columns: 1fr auto; padding: 8px 10px;">
+                <div class="row-main">
+                  <span class="row-title">IR Camera Array</span>
+                  <span class="row-sub">×4 · synced 144fps</span>
+                </div>
+                <span class="pill green">LOCKED</span>
+              </div>
+              <div class="row" style="grid-template-columns: 1fr auto; padding: 8px 10px;">
+                <div class="row-main">
+                  <span class="row-title">Surface Mic Pair</span>
+                  <span class="row-sub">XLR · gain −18 dB</span>
+                </div>
+                <span class="pill green">LIVE</span>
+              </div>
+              <div class="row" style="grid-template-columns: 1fr auto; padding: 8px 10px;">
+                <div class="row-main">
+                  <span class="row-title">Haptic Floor Pad</span>
+                  <span class="row-sub">USB-C · low-freq</span>
+                </div>
+                <span class="pill">IDLE</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">Calibration</div>
+            <div class="kv">
+              <dt>Rig</dt><dd>CLAW3D-02</dd>
+              <dt>Last calib</dt><dd>2026-05-12 · 22:18 UTC</dd>
+              <dt>Drift</dt><dd style="color:var(--green)">0.04 px / hr</dd>
+              <dt>Surface</dt><dd>matte 36"×24"</dd>
+            </div>
+            <button class="btn btn--ghost btn--sm" style="width:100%;justify-content:center;">RE-CALIBRATE</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── 12. SETTINGS ───────── -->
+    <section class="screen" id="screen-settings" data-screen-label="12 Settings">
+      <div class="screen-header">
+        <div class="screen-header-left">
+          <div class="screen-tag">// MODULE 12</div>
+          <h1 class="screen-title">Settings</h1>
+          <p class="screen-sub">Providers, credentials, backups, logs, network, and appearance. System-wide and per-agent settings.</p>
+        </div>
+        <div class="screen-actions">
+          <button class="btn btn--ghost btn--sm">⇣ EXPORT</button>
+          <button class="btn btn--sm">▓ SAVE</button>
+        </div>
+      </div>
+
+      <div class="tabs" id="settings-tabs">
+        <button class="tab is-active" data-tab="providers">PROVIDERS</button>
+        <button class="tab" data-tab="credentials">CREDENTIALS</button>
+        <button class="tab" data-tab="backup">BACKUP</button>
+        <button class="tab" data-tab="logs">LOGS</button>
+        <button class="tab" data-tab="network">NETWORK</button>
+        <button class="tab" data-tab="theme">THEME</button>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <div class="panel-title">Provider Configuration <span style="color:var(--gray);font-weight:400;letter-spacing:0.04em;font-size:10px;">// active tab: providers</span></div>
+
+          <div class="field-row">
+            <div class="field-label">
+              Default provider
+              <span class="help">Used when an agent's binding is unspecified.</span>
+            </div>
+            <select class="field-input">
+              <option>Openrouter</option><option>OpenAI</option><option>Anthropic</option><option>Local (llama.cpp)</option>
+            </select>
+            <button class="btn btn--ghost btn--sm">TEST</button>
+          </div>
+          <div class="field-row">
+            <div class="field-label">
+              Openrouter API base
+              <span class="help">Override only if using a self-hosted gateway.</span>
+            </div>
+            <input class="field-input" value="https://openrouter.ai/api/v1"/>
+            <span class="pill green">REACHABLE</span>
+          </div>
+          <div class="field-row">
+            <div class="field-label">
+              Local server
+              <span class="help">llama-server / Ollama / vLLM endpoint.</span>
+            </div>
+            <input class="field-input" value="http://127.0.0.1:8642/v1"/>
+            <span class="pill green">REACHABLE</span>
+          </div>
+          <div class="field-row">
+            <div class="field-label">
+              Request timeout
+              <span class="help">Per-request soft cap.</span>
+            </div>
+            <input class="field-input" value="120s"/>
+            <span></span>
+          </div>
+          <div class="field-row">
+            <div class="field-label">
+              Retry policy
+              <span class="help">Exponential backoff on 5xx, rate-limit aware.</span>
+            </div>
+            <select class="field-input">
+              <option>Auto (recommended)</option><option>Strict — fail fast</option><option>Aggressive — retry 5×</option>
+            </select>
+            <span></span>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <div class="stat-card">
+            <div class="stat-key">Calls today</div>
+            <div class="stat-val">14,820</div>
+            <div class="stat-sub">+ 12% vs yesterday</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-key">Error rate</div>
+            <div class="stat-val" style="color: var(--green);">0.04%</div>
+            <div class="stat-sub">6 errors in last 24h</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-key">Spend</div>
+            <div class="stat-val">$2.41</div>
+            <div class="stat-sub">budget cap $50.00 / mo</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Wheel side rail (only visible on Chat screen) — sits under the menu wheel -->
+  <aside class="wheel-rail" id="wheel-rail">
+    <div class="panel">
+      <div class="panel-title">Token Budget</div>
+      <div class="token-meter">
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--gray);">
+          <span>This session</span><span><span style="color:var(--teal);font-weight:700">12,847</span> / 128,000</span>
+        </div>
+        <div class="token-bar"><div class="token-fill" style="width:10%"></div></div>
+      </div>
+      <div class="kv">
+        <dt>Prompt</dt><dd>9,210</dd>
+        <dt>Completion</dt><dd>3,637</dd>
+        <dt>Cached</dt><dd style="color:var(--green)">6,140 hit</dd>
+        <dt>Cost</dt><dd>$0.0214</dd>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Slash Commands</div>
+      <div class="slash-list">
+        <div class="slash-item"><span class="slash-cmd">/research</span><span class="slash-desc">Multi-source brief</span></div>
+        <div class="slash-item"><span class="slash-cmd">/summarize</span><span class="slash-desc">Compress thread</span></div>
+        <div class="slash-item"><span class="slash-cmd">/code</span><span class="slash-desc">Edit & run snippet</span></div>
+        <div class="slash-item"><span class="slash-cmd">/recall</span><span class="slash-desc">Search memory</span></div>
+        <div class="slash-item"><span class="slash-cmd">/agent</span><span class="slash-desc">Switch profile</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Tweaks toggle (visible whenever tweaks aren't open) -->
+  <button class="tweaks-fab" id="tweaks-fab" title="Tweaks" aria-label="Tweaks">⚙</button>
+
+  <!-- Tweaks panel -->
+  <div class="tweaks" id="tweaks">
+    <div class="tweaks-head" id="tweaks-head">
+      <span class="tweaks-title">── Tweaks</span>
+      <button class="tweaks-x" id="tweaks-x" aria-label="Close">×</button>
+    </div>
+    <div class="tweaks-body">
+      <div class="tweaks-section">
+        <div class="tweaks-label">Accent</div>
+        <div class="swatches" id="tw-accent">
+          <div class="swatch" data-val="teal"   style="background:#39c5cf" title="Teal"></div>
+          <div class="swatch" data-val="orange" style="background:#f0883e" title="Orange"></div>
+          <div class="swatch" data-val="green"  style="background:#3fb950" title="Green"></div>
+          <div class="swatch" data-val="violet" style="background:#a370f7" title="Violet"></div>
+          <div class="swatch" data-val="amber"  style="background:#d29922" title="Amber"></div>
+        </div>
+      </div>
+
+      <div class="tweaks-section">
+        <div class="tweaks-label">Wheel size <span class="val" id="tw-wheel-val">220</span></div>
+        <input type="range" id="tw-wheel" min="160" max="420" step="10" />
+      </div>
+
+      <div class="tweaks-section">
+        <div class="tweaks-label">Density</div>
+        <div class="seg" id="tw-density">
+          <button data-val="comfy">Comfy</button>
+          <button data-val="dense">Dense</button>
+        </div>
+      </div>
+
+      <div class="tweaks-section">
+        <div class="tweaks-label">Chrome</div>
+        <div class="tweaks-row"><span class="lbl">Scanlines</span><div class="seg" id="tw-scanlines" style="width:90px;"><button data-val="on">On</button><button data-val="off">Off</button></div></div>
+        <div class="tweaks-row"><span class="lbl">Breadcrumb</span><div class="seg" id="tw-breadcrumb" style="width:90px;"><button data-val="on">On</button><button data-val="off">Off</button></div></div>
+        <div class="tweaks-row"><span class="lbl">Footer ticker</span><div class="seg" id="tw-footer" style="width:90px;"><button data-val="on">On</button><button data-val="off">Off</button></div></div>
+        <div class="tweaks-row"><span class="lbl">Chat rail</span><div class="seg" id="tw-rail" style="width:90px;"><button data-val="on">On</button><button data-val="off">Off</button></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App footer -->
+  <div class="app-footer">
+    <span>NODE <span class="v">HERMES-7</span></span>
+    <span class="sep"></span>
+    <span>SCREEN <span class="v" id="ft-screen">CHAT</span></span>
+    <span class="sep"></span>
+    <span>AGENT <span class="v">DEFAULT</span></span>
+    <div class="app-footer-right">
+      <span>MEM <span class="v">412 / ∞</span></span>
+      <span class="sep"></span>
+      <span>SKILLS <span class="v">57 / 142</span></span>
+      <span class="sep"></span>
+      <span>P50 <span class="v">218 MS</span></span>
+      <span class="sep"></span>
+      <span id="ft-clock" class="v">--:--:-- UTC</span>
+    </div>
+  </div>
+
+  <!-- ╔═══════════════════════════════════════════════════════╗
+       ║                  WHEEL HOST + LOGIC                   ║
+       ╚═══════════════════════════════════════════════════════╝ -->
+  <div id="wheel-root"></div>
+
+  <script>
+    /* Configure the wheel: 12 screens, SPA navigation. */
+    window.WHEEL_SECTIONS = [
+      { id: 'chat',      label: 'CHAT',      sub: 'STREAMING CONSOLE',        href: '#chat',      glyph: '▓' },
+      { id: 'sessions',  label: 'SESSIONS',  sub: 'PAST TRANSCRIPTS',         href: '#sessions',  glyph: '▣' },
+      { id: 'agents',    label: 'AGENTS',    sub: 'HERMES PROFILES',          href: '#agents',    glyph: '◆' },
+      { id: 'skills',    label: 'SKILLS',    sub: 'CAPABILITY LATTICE',       href: '#skills',    glyph: '✦' },
+      { id: 'models',    label: 'MODELS',    sub: 'LANGUAGE CORES',           href: '#models',    glyph: '◉' },
+      { id: 'memory',    label: 'MEMORY',    sub: 'PERSISTENT CONTEXT',       href: '#memory',    glyph: '⬢' },
+      { id: 'soul',      label: 'SOUL',      sub: 'ACTIVE PERSONA',           href: '#soul',      glyph: '✷' },
+      { id: 'tools',     label: 'TOOLS',     sub: 'INSTRUMENT BAY',           href: '#tools',     glyph: '◈' },
+      { id: 'schedules', label: 'SCHED',     sub: 'CRON & DELIVERY',          href: '#schedules', glyph: '◷' },
+      { id: 'gateway',   label: 'GATEWAY',   sub: 'PLATFORM BRIDGE',          href: '#gateway',   glyph: '⌬' },
+      { id: 'office',    label: 'OFFICE',    sub: 'CLAW3D SPATIAL UI',        href: '#office',    glyph: '⌖' },
+      { id: 'settings',  label: 'SYSTEM',    sub: 'CONFIGURATION',            href: '#settings',  glyph: '⚙' }
+    ];
+
+    window.WHEEL_ON_LAUNCH = function (section, idx) {
+      showScreen(section.id);
+    };
+
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(el => {
+        el.classList.toggle('is-active', el.id === 'screen-' + id);
+      });
+      // Body class drives rail visibility + chat padding (in CSS)
+      document.body.classList.toggle('on-chat', id === 'chat');
+      // Update breadcrumb + footer labels
+      const s = (window.WHEEL_SECTIONS || []).find(x => x.id === id);
+      if (s) {
+        const bc = document.getElementById('bc-screen');
+        const ft = document.getElementById('ft-screen');
+        if (bc) bc.textContent = s.label;
+        if (ft) ft.textContent = s.label;
+        // Reflect into hash for deep-linking
+        if (location.hash !== '#' + id) history.replaceState(null, '', '#' + id);
+      }
+    }
+
+    // Honor hash on load
+    document.addEventListener('DOMContentLoaded', () => {
+      const initial = (location.hash || '#chat').slice(1);
+      if (document.getElementById('screen-' + initial)) {
+        showScreen(initial);
+        // Position the rail just under the wheel on load
+        positionWheelRail();
+        // Also point the wheel at it
+        if (window.IH_Wheel) {
+          const idx = (window.WHEEL_SECTIONS || []).findIndex(x => x.id === initial);
+          if (idx >= 0) window.IH_Wheel.activate(idx);
+        }
+      }
+    });
+
+    // Simple toggle behavior for all `.tgl[data-tgl]` switches
+    document.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-tgl]');
+      if (!t) return;
+      t.classList.toggle('on');
+      // If inside a .tool-card, sync card state
+      const tc = t.closest('.tool-card');
+      if (tc) tc.classList.toggle('on', t.classList.contains('on'));
+      const card = t.closest('.card');
+      if (card) card.classList.toggle('is-active', t.classList.contains('on'));
+      const plat = t.closest('.plat-card');
+      if (plat) plat.classList.toggle('connected', t.classList.contains('on'));
+    });
+
+    // Tabs (Settings)
+    document.addEventListener('click', (e) => {
+      const t = e.target.closest('.tab');
+      if (!t) return;
+      const group = t.closest('.tabs');
+      if (!group) return;
+      group.querySelectorAll('.tab').forEach(x => x.classList.remove('is-active'));
+      t.classList.add('is-active');
+    });
+
+    // Position wheel-rail directly under the menu wheel (so it follows resize/drag).
+    // wheel-v2.js mounts the wheel AFTER this inline script runs, so wait for it.
+    function positionWheelRail() {
+      const rail  = document.getElementById('wheel-rail');
+      const shell = document.querySelector('.wheel-shell');
+      if (!rail || !shell) return;
+      const r = shell.getBoundingClientRect();
+      rail.style.left  = (r.left) + 'px';
+      rail.style.top   = (r.bottom + 18) + 'px';
+      rail.style.width = Math.max(r.width, 280) + 'px';
+    }
+    function attachWheelObservers() {
+      const shell = document.querySelector('.wheel-shell');
+      if (!shell) { setTimeout(attachWheelObservers, 50); return; }
+      try {
+        new ResizeObserver(positionWheelRail).observe(shell);
+        new MutationObserver(positionWheelRail).observe(shell, {
+          attributes: true, attributeFilter: ['style']
+        });
+      } catch (e) { /* ignore */ }
+      positionWheelRail();
+    }
+    attachWheelObservers();
+    window.addEventListener('resize', positionWheelRail);
+
+    // Footer clock
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function tickClock() {
+      const d = new Date();
+      const t = pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + ' UTC';
+      const el = document.getElementById('ft-clock');
+      if (el) el.textContent = t;
+    }
+    tickClock();
+    setInterval(tickClock, 1000);
+
+    /* ═══════════════════════ CHAT SEND ═══════════════════════ */
+    (function setupChat() {
+      const pill   = document.querySelector('#screen-chat .chat-input-pill');
+      if (!pill) return;
+      const input  = pill.querySelector('textarea');
+      const send   = pill.querySelector('button');
+      const stream = document.querySelector('#screen-chat .chat-stream');
+      if (!input || !send || !stream) return;
+
+      const ASSISTANT_REPLIES = [
+        "Acknowledged. Spinning up the relevant tools — I'll stream results as they land.",
+        "Got it. Routing through the active skill set now.",
+        "Working on it. Token budget is well within limits.",
+        "Confirmed. I'll prioritize primary sources for that query.",
+        "Understood. Running this through the threat-intel lattice."
+      ];
+
+      function nowUTC() {
+        const d = new Date();
+        return String(d.getUTCHours()).padStart(2,'0') + ':' +
+               String(d.getUTCMinutes()).padStart(2,'0') + ' UTC';
+      }
+
+      function autoResize() {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+      }
+
+      function scrollToBottom() {
+        // Defer to next frame so newly-inserted nodes are laid out first
+        requestAnimationFrame(() => {
+          stream.scrollTop = stream.scrollHeight;
+        });
+      }
+
+      function appendUser(text) {
+        const row = document.createElement('div');
+        row.className = 'chat-msg user';
+        row.innerHTML = `
+          <div class="avatar amber">OP</div>
+          <div class="chat-bubble"></div>
+        `;
+        row.querySelector('.chat-bubble').textContent = text;
+        stream.appendChild(row);
+        scrollToBottom();
+      }
+
+      function appendAssistant(text, { typing = false } = {}) {
+        const row = document.createElement('div');
+        row.className = 'chat-msg assistant';
+        row.innerHTML = `
+          <div class="avatar shield"><img src="assets/ih-shield-caduceus-transparent-256.png" alt=""></div>
+          <div class="chat-bubble-wrap">
+            <div class="chat-bubble"></div>
+          </div>
+        `;
+        const bubble = row.querySelector('.chat-bubble');
+        if (typing) {
+          bubble.innerHTML = '<span style="color:var(--teal);">▓▒░ thinking…</span>';
+        } else {
+          bubble.textContent = text;
+        }
+        stream.appendChild(row);
+        scrollToBottom();
+        return row;
+      }
+
+      function transmit() {
+        const text = input.value.trim();
+        if (!text) return;
+        appendUser(text);
+        input.value = '';
+        autoResize();
+        input.focus();
+
+        // Simulated assistant response
+        const typingRow = appendAssistant('', { typing: true });
+        const reply = ASSISTANT_REPLIES[Math.floor(Math.random() * ASSISTANT_REPLIES.length)];
+        setTimeout(() => {
+          typingRow.remove();
+          appendAssistant(reply);
+        }, 900 + Math.random() * 800);
+      }
+
+      input.addEventListener('input', autoResize);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          transmit();
+        }
+      });
+      send.addEventListener('click', transmit);
+
+      // Slash commands click → prefill input
+      document.addEventListener('click', (e) => {
+        const cmd = e.target.closest('#wheel-rail .slash-item');
+        if (!cmd) return;
+        const lbl = cmd.querySelector('.slash-cmd');
+        if (!lbl) return;
+        input.value = lbl.textContent + ' ';
+        input.focus();
+        autoResize();
+      });
+
+      scrollToBottom();
+    })();
+
+    /* ═══════════════════════ TWEAKS ═══════════════════════ */
+    (function setupTweaks() {
+      const T = Object.assign(
+        { accent:'teal', wheelSize:220, scanlines:true, showBreadcrumb:true,
+          showFooter:true, density:'comfy', showRail:true },
+        window.APP_TWEAKS || {}
+      );
+
+      const ACCENTS = {
+        teal:   { teal:'#39c5cf', bright:'#56d4dd', dim:'rgba(57,197,207,0.55)', faint:'rgba(57,197,207,0.15)', glow:'rgba(57,197,207,0.32)' },
+        orange: { teal:'#f0883e', bright:'#ffa657', dim:'rgba(240,136,62,0.60)', faint:'rgba(240,136,62,0.16)', glow:'rgba(240,136,62,0.35)' },
+        green:  { teal:'#3fb950', bright:'#56d364', dim:'rgba(63,185,80,0.60)',  faint:'rgba(63,185,80,0.16)',  glow:'rgba(63,185,80,0.32)' },
+        violet: { teal:'#a370f7', bright:'#bf8bff', dim:'rgba(163,112,247,0.60)',faint:'rgba(163,112,247,0.16)',glow:'rgba(163,112,247,0.32)' },
+        amber:  { teal:'#d29922', bright:'#e3b341', dim:'rgba(210,153,34,0.60)', faint:'rgba(210,153,34,0.16)', glow:'rgba(210,153,34,0.35)' }
+      };
+
+      function applyAccent(name) {
+        const c = ACCENTS[name] || ACCENTS.teal;
+        const r = document.documentElement.style;
+        r.setProperty('--teal', c.teal);
+        r.setProperty('--teal-bright', c.bright);
+        r.setProperty('--teal-dim', c.dim);
+        r.setProperty('--teal-faint', c.faint);
+        r.setProperty('--teal-glow', c.glow);
+      }
+
+      function apply() {
+        applyAccent(T.accent);
+        document.body.classList.toggle('no-scanlines', !T.scanlines);
+        document.body.classList.toggle('no-breadcrumb', !T.showBreadcrumb);
+        document.body.classList.toggle('no-footer', !T.showFooter);
+        document.body.classList.toggle('has-rail', !!T.showRail);
+        document.body.classList.toggle('density-dense', T.density === 'dense');
+        const shell = document.querySelector('.wheel-shell');
+        if (shell) shell.style.setProperty('--wheel-size', T.wheelSize + 'px');
+        // Reflect into UI
+        document.querySelectorAll('#tw-accent .swatch').forEach(el =>
+          el.classList.toggle('is-on', el.dataset.val === T.accent));
+        function setSeg(id, on) {
+          document.querySelectorAll('#'+id+' button').forEach(b =>
+            b.classList.toggle('is-on', b.dataset.val === (on ? 'on':'off')));
+        }
+        setSeg('tw-scanlines',  T.scanlines);
+        setSeg('tw-breadcrumb', T.showBreadcrumb);
+        setSeg('tw-footer',     T.showFooter);
+        setSeg('tw-rail',       T.showRail);
+        document.querySelectorAll('#tw-density button').forEach(b =>
+          b.classList.toggle('is-on', b.dataset.val === T.density));
+        const ws = document.getElementById('tw-wheel');
+        const wsv = document.getElementById('tw-wheel-val');
+        if (ws) ws.value = T.wheelSize;
+        if (wsv) wsv.textContent = T.wheelSize;
+      }
+
+      function persist(partial) {
+        Object.assign(T, partial);
+        apply();
+        try { window.parent.postMessage({ type: '__edit_mode_set_keys', edits: partial }, '*'); } catch(_) {}
+      }
+
+      // Wire controls
+      document.getElementById('tw-accent').addEventListener('click', (e) => {
+        const sw = e.target.closest('.swatch');
+        if (sw) persist({ accent: sw.dataset.val });
+      });
+      document.getElementById('tw-density').addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-val]');
+        if (b) persist({ density: b.dataset.val });
+      });
+      function wireToggle(id, key) {
+        document.getElementById(id).addEventListener('click', (e) => {
+          const b = e.target.closest('button[data-val]');
+          if (b) persist({ [key]: b.dataset.val === 'on' });
+        });
+      }
+      wireToggle('tw-scanlines',  'scanlines');
+      wireToggle('tw-breadcrumb', 'showBreadcrumb');
+      wireToggle('tw-footer',     'showFooter');
+      wireToggle('tw-rail',       'showRail');
+      const ws = document.getElementById('tw-wheel');
+      ws.addEventListener('input', () => {
+        document.getElementById('tw-wheel-val').textContent = ws.value;
+        persist({ wheelSize: +ws.value });
+      });
+
+      // Panel open/close + host protocol
+      const panel = document.getElementById('tweaks');
+      const fab   = document.getElementById('tweaks-fab');
+      const closeBtn = document.getElementById('tweaks-x');
+
+      function open()  { panel.classList.add('is-open');  fab.style.display = 'none'; }
+      function close() { panel.classList.remove('is-open'); fab.style.display = 'flex';
+        try { window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*'); } catch(_) {} }
+
+      fab.addEventListener('click', open);
+      closeBtn.addEventListener('click', close);
+
+      // Host integration — listen FIRST, then announce
+      window.addEventListener('message', (e) => {
+        if (!e.data || typeof e.data !== 'object') return;
+        if (e.data.type === '__activate_edit_mode')   open();
+        if (e.data.type === '__deactivate_edit_mode') close();
+      });
+      try { window.parent.postMessage({ type: '__edit_mode_available' }, '*'); } catch(_) {}
+
+      // Drag the panel by its header
+      let dragging = false, dragStart = null;
+      const head = document.getElementById('tweaks-head');
+      head.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('button')) return;
+        dragging = true;
+        const r = panel.getBoundingClientRect();
+        dragStart = { x: e.clientX, y: e.clientY, l: r.left, t: r.top };
+        head.setPointerCapture(e.pointerId);
+      });
+      head.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const x = Math.max(8, Math.min(window.innerWidth  - panel.offsetWidth  - 8, dragStart.l + (e.clientX - dragStart.x)));
+        const y = Math.max(8, Math.min(window.innerHeight - panel.offsetHeight - 8, dragStart.t + (e.clientY - dragStart.y)));
+        panel.style.left = x + 'px';
+        panel.style.top  = y + 'px';
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+      });
+      head.addEventListener('pointerup', () => { dragging = false; });
+
+      apply();
+    })();
+  </script>
+  <script src="wheel-v2.js"></script>
+
+</body>
+</html>
