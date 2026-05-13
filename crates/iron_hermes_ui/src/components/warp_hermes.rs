@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
-use crate::components::shell::{
+use crate::components::shell_legacy::{
     AgentPanel, BlockStream, CommandPalette, InputBox, StatusBar, TitleBar,
 };
 use crate::state::{

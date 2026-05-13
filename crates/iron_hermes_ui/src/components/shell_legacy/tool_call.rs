@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 /// Port of `warp2ironhermes/project/app/shell.jsx` lines 132-147 per CONTEXT D-01.
 ///
 /// Note on naming: `crate::state::ToolCall` is the data struct;
-/// `crate::components::shell::ToolCall` is this component function.
+/// `crate::components::shell_legacy::ToolCall` is this component function.
 /// We import only `ToolStatus` here so the names don't collide.
 ///
 /// `match &status { ... }` borrows the enum without requiring `Copy` — keeps
