@@ -22,6 +22,7 @@ pub mod screen_router;
 pub mod screens;
 pub mod sys_meta;
 pub mod theme_effects;
+pub mod tweaks_panel;
 pub mod wheel;
 pub mod wheel_rail;
 
@@ -110,7 +111,7 @@ pub fn HermesApp() -> Element {
         app_footer::AppFooter {}
         wheel_rail::WheelRail {}
         wheel::Wheel {}
-
-        // Plan 05 inserts: tweaks_panel::TweaksPanel {}
+        theme_effects::ThemeEffects {}
+        tweaks_panel::TweaksPanel {}
     }
 }
