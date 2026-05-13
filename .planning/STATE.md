@@ -4,14 +4,14 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 26.2.1 UI-SPEC approved
-last_updated: "2026-05-13T12:15:24.929Z"
-last_activity: 2026-05-13 -- Phase 26.2.1 planning complete
+last_updated: "2026-05-13T21:17:54.572Z"
+last_activity: 2026-05-13 -- Phase 26.2.1 execution started
 progress:
   total_phases: 47
   completed_phases: 35
   total_plans: 187
-  completed_plans: 178
-  percent: 95
+  completed_plans: 180
+  percent: 96
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 26.3.2 — chrome-singleton-user-browser-profile
+**Current focus:** Phase 26.2.1 — new-web-ui-with-wheel-menu
 
 ## Current Position
 
-Phase: 26.2.1
-Plan: Not started
+Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING
+Plan: 1 of 9
 Plans: 0 plans — not yet planned
-Status: Ready to execute
-Last activity: 2026-05-13 -- Phase 26.2.1 planning complete
+Status: Executing Phase 26.2.1
+Last activity: 2026-05-13 -- Phase 26.2.1 execution started
 
 ## Performance Metrics
 
