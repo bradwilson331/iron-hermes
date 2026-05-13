@@ -563,3 +563,162 @@ pub fn demo_tabs() -> Vec<Tab> {
         },
     ]
 }
+
+// ===========================================================================
+// Phase 26.2.1 — Wheel-menu UI primitives (Plan 02)
+// ===========================================================================
+//
+// Canonical 10-wedge order from wheel-v2.js DEFAULT_SECTIONS lines 11-22
+// (CONTEXT D-10): chat, agents, models, tools, skills, memory, sessions,
+// providers, gateway, settings. Soul / Schedules / Office are Screen
+// variants but NOT wheel wedges — they are reachable via Settings sub-nav
+// (Plan 07's SettingsScreenLink).
+//
+// All types except the newtypes derive Serialize / Deserialize so they
+// round-trip through `serde_json` into localStorage (RESEARCH Pattern 5).
+// Per D-26 these types are shared across both shells — no
+// `#[cfg(feature = "legacy-shell")]` gating.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_default_is_chat() {
+        assert_eq!(Screen::default(), Screen::Chat);
+    }
+
+    #[test]
+    fn wheel_wedge_default_is_chat() {
+        assert_eq!(WheelWedge::default(), WheelWedge::Chat);
+        assert_eq!(WheelWedge::Chat.index(), 0);
+    }
+
+    #[test]
+    fn wheel_wedge_from_index_round_trips_all_indices() {
+        for i in 0..10 {
+            assert_eq!(WheelWedge::from_index(i).index(), i, "wedge {} mismatch", i);
+        }
+    }
+
+    #[test]
+    fn wheel_wedge_from_index_wraps_modulo_ten() {
+        assert_eq!(WheelWedge::from_index(10), WheelWedge::Chat);
+        assert_eq!(WheelWedge::from_index(11), WheelWedge::Agents);
+        assert_eq!(WheelWedge::from_index(19), WheelWedge::Settings);
+        assert_eq!(WheelWedge::from_index(20), WheelWedge::Chat);
+    }
+
+    #[test]
+    fn wheel_wedge_from_index_handles_extreme_value() {
+        // Should not panic; result is a valid variant.
+        let w = WheelWedge::from_index(usize::MAX);
+        // Round-trip via index() must be ≤ 9.
+        assert!(w.index() < 10);
+    }
+
+    #[test]
+    fn wheel_wedge_labels_match_wheel_v2_js() {
+        assert_eq!(WheelWedge::Chat.label(), "CHAT");
+        assert_eq!(WheelWedge::Agents.label(), "AGENTS");
+        assert_eq!(WheelWedge::Models.label(), "MODELS");
+        assert_eq!(WheelWedge::Tools.label(), "TOOLS");
+        assert_eq!(WheelWedge::Skills.label(), "SKILLS");
+        assert_eq!(WheelWedge::Memory.label(), "MEMORY");
+        assert_eq!(WheelWedge::Sessions.label(), "SESSIONS");
+        assert_eq!(WheelWedge::Providers.label(), "PROVIDER");
+        assert_eq!(WheelWedge::Gateway.label(), "GATEWAY");
+        assert_eq!(WheelWedge::Settings.label(), "SYSTEM");
+    }
+
+    #[test]
+    fn wheel_wedge_subs_match_wheel_v2_js() {
+        assert_eq!(WheelWedge::Chat.sub(), "INTELLIGENCE CONSOLE");
+        assert_eq!(WheelWedge::Agents.sub(), "AUTONOMOUS WORKERS");
+        assert_eq!(WheelWedge::Models.sub(), "LANGUAGE CORES");
+        assert_eq!(WheelWedge::Tools.sub(), "INSTRUMENT BAY");
+        assert_eq!(WheelWedge::Skills.sub(), "CAPABILITY LATTICE");
+        assert_eq!(WheelWedge::Memory.sub(), "PERSISTENT CONTEXT");
+        assert_eq!(WheelWedge::Sessions.sub(), "ACTIVE TRANSCRIPTS");
+        assert_eq!(WheelWedge::Providers.sub(), "INFERENCE GATEWAYS");
+        assert_eq!(WheelWedge::Gateway.sub(), "NETWORK BRIDGE");
+        assert_eq!(WheelWedge::Settings.sub(), "CONFIGURATION");
+    }
+
+    #[test]
+    fn wheel_wedge_glyphs_match_wheel_v2_js() {
+        assert_eq!(WheelWedge::Chat.glyph(), "▓");
+        assert_eq!(WheelWedge::Agents.glyph(), "◆");
+        assert_eq!(WheelWedge::Models.glyph(), "◇");
+        assert_eq!(WheelWedge::Tools.glyph(), "◈");
+        assert_eq!(WheelWedge::Skills.glyph(), "✦");
+        assert_eq!(WheelWedge::Memory.glyph(), "⬢");
+        assert_eq!(WheelWedge::Sessions.glyph(), "▣");
+        assert_eq!(WheelWedge::Providers.glyph(), "◉");
+        assert_eq!(WheelWedge::Gateway.glyph(), "⌬");
+        assert_eq!(WheelWedge::Settings.glyph(), "⚙");
+    }
+
+    #[test]
+    fn wheel_wedge_to_screen_one_to_one() {
+        assert_eq!(WheelWedge::Chat.to_screen(), Screen::Chat);
+        assert_eq!(WheelWedge::Agents.to_screen(), Screen::Agents);
+        assert_eq!(WheelWedge::Models.to_screen(), Screen::Models);
+        assert_eq!(WheelWedge::Tools.to_screen(), Screen::Tools);
+        assert_eq!(WheelWedge::Skills.to_screen(), Screen::Skills);
+        assert_eq!(WheelWedge::Memory.to_screen(), Screen::Memory);
+        assert_eq!(WheelWedge::Sessions.to_screen(), Screen::Sessions);
+        assert_eq!(WheelWedge::Providers.to_screen(), Screen::Providers);
+        assert_eq!(WheelWedge::Gateway.to_screen(), Screen::Gateway);
+        assert_eq!(WheelWedge::Settings.to_screen(), Screen::Settings);
+    }
+
+    #[test]
+    fn wheel_state_default_uses_research_pitfall4_geometry() {
+        let w = WheelState::default();
+        assert_eq!(w.position, (24.0, 24.0));
+        assert_eq!(w.size, 240.0);
+        assert_eq!(w.active_wedge, WheelWedge::Chat);
+    }
+
+    #[test]
+    fn wheel_state_round_trips_through_json() {
+        let original = WheelState::default();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: WheelState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn wheel_wedge_round_trips_through_json() {
+        for i in 0..10 {
+            let w = WheelWedge::from_index(i);
+            let json = serde_json::to_string(&w).expect("serialize");
+            let parsed: WheelWedge = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, w);
+        }
+    }
+
+    #[test]
+    fn screen_round_trips_through_json() {
+        for s in [
+            Screen::Chat,
+            Screen::Sessions,
+            Screen::Agents,
+            Screen::Skills,
+            Screen::Models,
+            Screen::Memory,
+            Screen::Soul,
+            Screen::Tools,
+            Screen::Schedules,
+            Screen::Gateway,
+            Screen::Office,
+            Screen::Settings,
+            Screen::Providers,
+        ] {
+            let json = serde_json::to_string(&s).expect("serialize");
+            let parsed: Screen = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, s);
+        }
+    }
+}
