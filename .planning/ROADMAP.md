@@ -705,6 +705,26 @@ Plans:
 
 **Phase directory:** `.planning/phases/26-provider-polish/`
 
+### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
+
+**Goal:** Build on Phase 26.5's overlay primitive to add the remaining Ink-TUI UX to the in-process ratatui REPL (`crates/ironhermes-cli/src/tui_rata/`): (a) a `tui_rata/thinking_panel.rs` expanded "thinking" widget — tool trail rendered as a `├─`/`└─` tree, per-tool elapsed time, a hand-rolled braille spinner, optional 1-line chain-of-thought preview — fed from the existing stream-event arms, **togglable**, with the current single-row `knight_rider.rs` scanner serving as the collapsed view; (b) a browse-only `Overlay::SkillsHub` (categories → skills → SKILL.md info pane, sourced from `SkillRegistry`; in-TUI *install* is deferred since the install path is the interactive `hermes skills install`); (c) rich `Overlay::Approval` / `Overlay::Secret` / `Overlay::Sudo` prompts — centered overlays replacing the current transcript-line dangerous-command approval, with masked input for secrets — reusing tui_rata's existing `io_gate.rs`/`yolo.rs` plumbing. Telegram/gateway approval UX is explicitly out of scope (own later phase). No new workspace crates; spinners use a small built-in braille table (no `unicode-animations` equivalent dep). Closes with a `checkpoint:human-verify` UAT walking the expanded/collapsed thinking views, the Skills Hub, and each prompt overlay against the hermes-agent Ink reference (`ui-tui/src/components/thinking.tsx`, `skillsHub.tsx`, `prompts.tsx`, `maskedPrompt.tsx`).
+**Requirements**: (none — D-01..D-NN from 26.6-CONTEXT.md are the requirements set)
+**Depends on:** Phase 26.5
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-discuss-phase 26.6 then /gsd-plan-phase 26.6 to break down — est. 2–3 plans: thinking panel + toggle; Skills Hub overlay; rich approval/secret/sudo overlays + UAT)
+
+### Phase 26.5: tui_rata overlay layer and theming (INSERTED)
+
+**Goal:** Add a modal-overlay layer and real theming to the in-process ratatui REPL (`crates/ironhermes-cli/src/tui_rata/`), porting UX concepts from hermes-agent's Ink TUI (`ui-tui/`) without a Node toolchain or a second TUI stack. Deliverables: (a) `tui_rata/overlay.rs` — an `Overlay` enum + `OverlayState` on `App`, a centered float-box render helper in `ui.rs` (`Clear` + bordered `Block` over `frame.area()`), and event-loop routing so an open overlay captures key events and `Esc` closes it; (b) `tui_rata/skin.rs` — a `Skin { color, brand }` model with **3 built-in skins**, widening `App.skin` from `Arc<RwLock<String>>` to resolve to a `Skin` that `status_line.rs` and `ui.rs` (borders / selection bg / ok-warn-error colors) consult, with `/skin` listing, validating, and setting; (c) `Overlay::SessionPicker` — recent sessions from `StateStore.list_sessions` (id / title / age / msg-count, arrow + page nav), `Enter` dispatches the existing `/resume <id>` path, bound to a key (e.g. Ctrl+R) and opened by `/sessions`; (d) `Overlay::ModelPicker` — two-stage provider→model from `ProviderResolver`, a "persist globally" toggle, `Enter` dispatches the existing `/model` path, opened by bare `/model`. Invariants: overlays are read+dispatch only — they call the same `CommandRouter` / handler paths the slash commands use, never mutating agent state directly; one overlay at a time (opening a new one replaces); the agent keeps running underneath. No new workspace crates; classic `tui/` module untouched (still side-by-side per 22.4 D-02). A `config.yaml` default-skin key is deferred to a later phase.
+**Requirements**: (none — D-01..D-NN from 26.5-CONTEXT.md are the requirements set)
+**Depends on:** Phase 22.4.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-discuss-phase 26.5 then /gsd-plan-phase 26.5 to break down — est. 4 plans, 2 waves: W1 = overlay primitive, skin model + `/skin` wiring; W2 = session picker overlay, model picker overlay)
+
 ### Phase 26.4: web ui side tabs panel (INSERTED)
 
 **Goal:** Add a two-tab navigation strip (AGENT / INFO) to the right-side `.wh-side` `AgentPanel` in the Dioxus web UI. The AGENT view preserves the existing scrollable messages + tool calls list. The new INFO view renders two styled cards: SESSION (id, message count, tokens used/max) and CONFIG (model, provider, context window, memory-enabled flag). All data flows from existing `WarpHermes` signals plus a single one-line widening of the `ConfigSummary` server function (adding `memory_enabled: bool`). New `.wh-side-tabs` / `.wh-side-tab` / `.wh-side-info*` CSS classes use the project's established design-token vocabulary; active tab indicator is a 2px `var(--accent-primary)` bottom border via `::after`. `active_side_tab: Signal<usize>` is a single global signal in `WarpHermes` that does NOT reset when the TitleBar session tab changes. Decisions D-01..D-10 in `26.4-CONTEXT.md` serve as the requirements set.

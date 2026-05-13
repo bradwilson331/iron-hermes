@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: ready_to_plan
+status: planning
 stopped_at: Phase 27.1.4.1.1 context gathered
-last_updated: "2026-05-12T17:20:45.064Z"
-last_activity: 2026-05-12 -- Phase 26.3.2 execution started
+last_updated: "2026-05-13T02:04:56.336Z"
+last_activity: 2026-05-12
 progress:
-  total_phases: 45
+  total_phases: 47
   completed_phases: 35
   total_plans: 178
-  completed_plans: 177
-  percent: 78
+  completed_plans: 178
+  percent: 100
 ---
 
 # Project State
@@ -426,6 +426,8 @@ Recent decisions affecting current work:
 - Phase 27.1.4.1 inserted after Phase 27.1.4: gateway fallback gap (URGENT)
 - Phase 27.1.4.1.1 inserted after Phase 27.1.4.1: fallback on transport errors not just HTTP status — classify_llm_error only falls back on HTTP-status errors, not Connection refused / connect timeout / DNS (URGENT)
 - Phase 26.3.2 inserted after Phase 26.3: Chrome singleton user browser-profile (URGENT)
+- Phase 26.5 inserted after Phase 26: tui_rata overlay layer + theming — modal-overlay primitive, Skin model (3 built-ins) + /skin wiring, session picker + model picker overlays; ports Ink-TUI UX into the in-process ratatui REPL (URGENT)
+- Phase 26.6 inserted after Phase 26: tui_rata thinking panel + Skills Hub + rich prompts — togglable expanded thinking panel (knight-rider = collapsed view), browse-only Skills Hub overlay, rich approval/secret/sudo overlays; depends on 26.5 (URGENT)
 
 ### Pending Todos
 
