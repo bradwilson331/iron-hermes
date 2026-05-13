@@ -21,6 +21,7 @@ pub mod hud_chrome;
 pub mod screen_router;
 pub mod screens;
 pub mod sys_meta;
+pub mod theme_effects;
 pub mod wheel;
 pub mod wheel_rail;
 
