@@ -22,6 +22,7 @@ pub mod hud_chrome;
 pub mod screen_router;
 pub mod screens;
 pub mod sys_meta;
+pub mod wheel;
 
 /// Root component of the Phase 26.2.1 wheel-driven shell.
 ///
