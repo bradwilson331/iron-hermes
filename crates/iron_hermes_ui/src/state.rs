@@ -579,6 +579,212 @@ pub fn demo_tabs() -> Vec<Tab> {
 // Per D-26 these types are shared across both shells — no
 // `#[cfg(feature = "legacy-shell")]` gating.
 
+use serde::{Deserialize, Serialize};
+
+/// Top-level screens addressable by the wheel + Settings sub-nav.
+///
+/// 13 variants. The 10 wedge-reachable screens correspond 1-to-1 with
+/// `WheelWedge`; `Soul`, `Schedules`, `Office` are reachable via the
+/// Settings screen's "Other Screens" sub-nav (Plan 07's
+/// `SettingsScreenLink`) — they are not wheel wedges per CONTEXT D-10.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Screen {
+    #[default]
+    Chat,
+    Sessions,
+    Agents,
+    Skills,
+    Models,
+    Memory,
+    Soul,
+    Tools,
+    Schedules,
+    Gateway,
+    Office,
+    Settings,
+    Providers,
+}
+
+/// The 10 wheel wedges in CONTEXT D-10 canonical order:
+/// `chat, agents, models, tools, skills, memory, sessions, providers,
+/// gateway, settings` — sourced verbatim from `wheel-v2.js`
+/// `DEFAULT_SECTIONS` lines 11-22.
+///
+/// Note: this is **not** the app.html visual ordering — the JS file is
+/// the wheel's source of truth (per D-10), and the `WheelWedge::label`
+/// / `sub` / `glyph` helpers below emit the exact strings from those
+/// 12 JS lines so the wheel SVG matches the prototype byte-for-byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum WheelWedge {
+    #[default]
+    Chat,
+    Agents,
+    Models,
+    Tools,
+    Skills,
+    Memory,
+    Sessions,
+    Providers,
+    Gateway,
+    Settings,
+}
+
+impl WheelWedge {
+    /// Wedge index in CONTEXT D-10 order (0..=9).
+    pub fn index(self) -> usize {
+        match self {
+            WheelWedge::Chat => 0,
+            WheelWedge::Agents => 1,
+            WheelWedge::Models => 2,
+            WheelWedge::Tools => 3,
+            WheelWedge::Skills => 4,
+            WheelWedge::Memory => 5,
+            WheelWedge::Sessions => 6,
+            WheelWedge::Providers => 7,
+            WheelWedge::Gateway => 8,
+            WheelWedge::Settings => 9,
+        }
+    }
+
+    /// Wrap `i` modulo 10 and return the matching wedge. Used by the wheel
+    /// rim hit-test (Plan 04) and by keyboard nav. Never panics — wraps
+    /// safely via `rem_euclid` on the signed-cast value so even
+    /// `usize::MAX` yields a valid variant.
+    pub fn from_index(i: usize) -> Self {
+        let n = ((i as i64).rem_euclid(10)) as usize;
+        match n {
+            0 => WheelWedge::Chat,
+            1 => WheelWedge::Agents,
+            2 => WheelWedge::Models,
+            3 => WheelWedge::Tools,
+            4 => WheelWedge::Skills,
+            5 => WheelWedge::Memory,
+            6 => WheelWedge::Sessions,
+            7 => WheelWedge::Providers,
+            8 => WheelWedge::Gateway,
+            9 => WheelWedge::Settings,
+            _ => WheelWedge::Settings,
+        }
+    }
+
+    /// Wedge label per `wheel-v2.js` DEFAULT_SECTIONS `label` field.
+    /// Note: `Providers` reads `"PROVIDER"` (singular) — that's the
+    /// prototype's value, not a typo here.
+    pub fn label(self) -> &'static str {
+        match self {
+            WheelWedge::Chat => "CHAT",
+            WheelWedge::Agents => "AGENTS",
+            WheelWedge::Models => "MODELS",
+            WheelWedge::Tools => "TOOLS",
+            WheelWedge::Skills => "SKILLS",
+            WheelWedge::Memory => "MEMORY",
+            WheelWedge::Sessions => "SESSIONS",
+            WheelWedge::Providers => "PROVIDER",
+            WheelWedge::Gateway => "GATEWAY",
+            WheelWedge::Settings => "SYSTEM",
+        }
+    }
+
+    /// Wedge sublabel per `wheel-v2.js` DEFAULT_SECTIONS `sub` field.
+    pub fn sub(self) -> &'static str {
+        match self {
+            WheelWedge::Chat => "INTELLIGENCE CONSOLE",
+            WheelWedge::Agents => "AUTONOMOUS WORKERS",
+            WheelWedge::Models => "LANGUAGE CORES",
+            WheelWedge::Tools => "INSTRUMENT BAY",
+            WheelWedge::Skills => "CAPABILITY LATTICE",
+            WheelWedge::Memory => "PERSISTENT CONTEXT",
+            WheelWedge::Sessions => "ACTIVE TRANSCRIPTS",
+            WheelWedge::Providers => "INFERENCE GATEWAYS",
+            WheelWedge::Gateway => "NETWORK BRIDGE",
+            WheelWedge::Settings => "CONFIGURATION",
+        }
+    }
+
+    /// Wedge glyph per `wheel-v2.js` DEFAULT_SECTIONS `glyph` field.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            WheelWedge::Chat => "▓",
+            WheelWedge::Agents => "◆",
+            WheelWedge::Models => "◇",
+            WheelWedge::Tools => "◈",
+            WheelWedge::Skills => "✦",
+            WheelWedge::Memory => "⬢",
+            WheelWedge::Sessions => "▣",
+            WheelWedge::Providers => "◉",
+            WheelWedge::Gateway => "⌬",
+            WheelWedge::Settings => "⚙",
+        }
+    }
+
+    /// 1:1 mapping from wheel wedge to screen target. The three
+    /// off-wheel screens (`Screen::Soul`, `Screen::Schedules`,
+    /// `Screen::Office`) are deliberately unreachable from this
+    /// function — they are visited via the Settings sub-nav per D-10.
+    pub fn to_screen(self) -> Screen {
+        match self {
+            WheelWedge::Chat => Screen::Chat,
+            WheelWedge::Agents => Screen::Agents,
+            WheelWedge::Models => Screen::Models,
+            WheelWedge::Tools => Screen::Tools,
+            WheelWedge::Skills => Screen::Skills,
+            WheelWedge::Memory => Screen::Memory,
+            WheelWedge::Sessions => Screen::Sessions,
+            WheelWedge::Providers => Screen::Providers,
+            WheelWedge::Gateway => Screen::Gateway,
+            WheelWedge::Settings => Screen::Settings,
+        }
+    }
+}
+
+/// Wheel position + size + currently-active wedge.
+///
+/// Default geometry `(24.0, 24.0)` / `240.0` matches the prototype's
+/// initial mount and avoids the RESEARCH Pitfall 4 first-resize jump
+/// (the JS prototype reads from `--wheel-size: 240px` in `tokens.css`).
+/// `Copy` is intentionally NOT derived — the tuple position field plus
+/// future drag-velocity extensions are cheaper to share by reference.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct WheelState {
+    pub position: (f64, f64),
+    pub size: f64,
+    pub active_wedge: WheelWedge,
+}
+
+impl Default for WheelState {
+    fn default() -> Self {
+        Self {
+            position: (24.0, 24.0),
+            size: 240.0,
+            active_wedge: WheelWedge::Chat,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-03 newtype wrappers — disambiguate the two Signal<String> providers
+// ---------------------------------------------------------------------------
+//
+// Plan 03 publishes a theme signal as `Signal<String>` via
+// `use_context_provider`; Plan 06 publishes a session-id signal also as
+// `Signal<String>`. Without newtypes, `use_context::<Signal<String>>()`
+// would be ambiguous at compile time and resolve to whichever provider
+// the runtime saw last. The two newtypes below force disambiguation —
+// consumers read via `use_context::<ThemeContext>().0` or
+// `use_context::<SessionIdContext>().0` instead.
+//
+// Per D-26 these are NOT feature-gated. Only `Clone, Copy` are derived
+// because `Signal` already provides interior mutability and identity
+// equality from Dioxus — no `PartialEq`/`Debug`/`Default`/`Serialize`.
+// (The `Signal` import lives at the top of this file alongside the
+// `ShellSettings` use.)
+
+#[derive(Clone, Copy)]
+pub struct ThemeContext(pub Signal<String>);
+
+#[derive(Clone, Copy)]
+pub struct SessionIdContext(pub Signal<String>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
