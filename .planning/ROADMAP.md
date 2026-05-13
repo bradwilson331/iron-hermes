@@ -776,16 +776,6 @@ Plans:
 Plans:
 - [x] 26.3.2-01-PLAN.md — Add ironhermes-core::browser_profile::reconcile_singleton_lock (stale-lock detection + sentinel cleanup + live-lock ephemeral fallback, dep-free) with 7 unit tests; wire it into both browser_session.rs spawn() call sites
 
-### Phase 26.3.1: web ui side tabs panel (INSERTED)
-
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 26.3
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 26.3.1 to break down)
-
 ### Phase 26.2: Fix Dioxus ui session tabs (INSERTED)
 
 **Goal:** Make the Dioxus TitleBar session tab strip fully interactive (click switches active session, + creates a new session, x removes a tab, last-tab close auto-creates a replacement, streaming gates clicks); also land four code-quality fixes (WR-01 stale-AI Finished arm, WR-02 busy-gate false rejection, WR-03 over-broad parity assertions, IN-01 duplicate allow-attr) carried over from the Phase 26.1 review.
