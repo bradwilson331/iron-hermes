@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 /// Port of `warp2ironhermes/project/app/shell.jsx` lines 115-130 per CONTEXT D-01.
 ///
 /// Note on naming: `crate::state::CommandLine` is the data struct;
-/// `crate::components::shell::CommandLine` is this component function.
+/// `crate::components::shell_legacy::CommandLine` is this component function.
 /// We import only `Token` here so the names don't collide.
 #[component]
 pub fn CommandLine(
