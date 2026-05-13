@@ -249,11 +249,30 @@ mod tests {
     }
 
     #[test]
-    fn ui_prefs_round_trips_through_json() {
+    fn round_trip_via_serde_json() {
+        // Plan 09 Wave-0 contract: UiPrefs::default() serialises and
+        // deserialises through serde_json without data loss. Test name is
+        // grep-locked by VALIDATION.md line 64.
         let original = UiPrefs::default();
-        let json = serde_json::to_string(&original).expect("serialize");
-        let parsed: UiPrefs = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string(&original).expect("serialize UiPrefs::default()");
+        let parsed: UiPrefs =
+            serde_json::from_str(&json).expect("deserialize UiPrefs JSON blob");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn unknown_field_falls_back_to_default() {
+        // T-26.2.1-05 mitigation: a partial / malformed UiPrefs JSON blob
+        // must fail to deserialize (returning Err) so hydration's `.ok()`
+        // swallows the error and falls back to `UiPrefs::default()`. If
+        // serde silently filled in missing fields, a tampered blob could
+        // partially overwrite live prefs.
+        let partial = r#"{ "accent": "Teal" }"#;
+        let result: Result<UiPrefs, _> = serde_json::from_str(partial);
+        assert!(
+            result.is_err(),
+            "partial UiPrefs JSON should fail to deserialize; got {result:?}"
+        );
     }
 
     #[test]

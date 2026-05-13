@@ -906,8 +906,12 @@ mod tests {
     }
 
     #[test]
-    fn screen_round_trips_through_json() {
-        for s in [
+    fn screen_round_trip_via_serde_json() {
+        // Plan 09 Wave-0 contract: every Screen variant survives a
+        // serialise → deserialise cycle. Test name is grep-locked by
+        // VALIDATION.md Per-Task Verification Map.
+        use crate::state::Screen;
+        const ALL: [Screen; 13] = [
             Screen::Chat,
             Screen::Sessions,
             Screen::Agents,
@@ -921,10 +925,38 @@ mod tests {
             Screen::Office,
             Screen::Settings,
             Screen::Providers,
-        ] {
-            let json = serde_json::to_string(&s).expect("serialize");
-            let parsed: Screen = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(parsed, s);
+        ];
+        for s in ALL.iter() {
+            let json = serde_json::to_string(s).expect("Screen serializes");
+            let back: Screen = serde_json::from_str(&json).expect("Screen deserializes");
+            assert_eq!(*s, back, "Screen variant did not round-trip via serde_json");
+        }
+    }
+
+    #[test]
+    fn wheel_wedge_variant_order_matches_d10() {
+        // CONTEXT D-10 / wheel-v2.js DEFAULT_SECTIONS lines 11-22 lock the
+        // canonical 10-tuple wedge order. If a future planner adds or
+        // removes a wedge, this test must be updated in lockstep with
+        // CONTEXT.md D-10 — the test is the source-grep-traceable lock.
+        const EXPECTED: [crate::state::WheelWedge; 10] = [
+            crate::state::WheelWedge::Chat,
+            crate::state::WheelWedge::Agents,
+            crate::state::WheelWedge::Models,
+            crate::state::WheelWedge::Tools,
+            crate::state::WheelWedge::Skills,
+            crate::state::WheelWedge::Memory,
+            crate::state::WheelWedge::Sessions,
+            crate::state::WheelWedge::Providers,
+            crate::state::WheelWedge::Gateway,
+            crate::state::WheelWedge::Settings,
+        ];
+        for (i, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                crate::state::WheelWedge::from_index(i),
+                *expected,
+                "wedge at index {i} does not match D-10 / wheel-v2.js DEFAULT_SECTIONS"
+            );
         }
     }
 }

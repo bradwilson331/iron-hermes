@@ -810,6 +810,52 @@ mod tests {
             assert!(p.starts_with("M "), "wedge {i} path malformed: {p}");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Plan 09 — Wave-0 named assertions extracted for VALIDATION.md grep lock.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn min_size_within_resize_range() {
+        // wheel-v2.js lines 426-427 + Pitfall 4 floor: [MIN_SIZE, MAX_SIZE]
+        // bounds the wheel resize gesture. Asserted as a standalone test so
+        // VALIDATION.md Wave 0 can grep for the safety bound by name.
+        assert_eq!(MIN_SIZE, 240.0);
+        assert_eq!(MAX_SIZE, 640.0);
+        assert!(
+            MIN_SIZE < MAX_SIZE,
+            "MIN_SIZE ({MIN_SIZE}) must be strictly less than MAX_SIZE ({MAX_SIZE})"
+        );
+    }
+
+    #[test]
+    fn drag_margin_is_conservative() {
+        // RESEARCH Pitfall 3: DRAG_MARGIN = 12 + RING_GAP + 7 = 33.
+        // The margin must exceed RING_GAP so the resize ring stays inside
+        // the viewport during translate.
+        assert_eq!(DRAG_MARGIN, 33.0);
+        assert!(
+            DRAG_MARGIN > RING_GAP,
+            "DRAG_MARGIN ({DRAG_MARGIN}) must exceed RING_GAP ({RING_GAP}) so the resize ring stays inside the viewport"
+        );
+    }
+
+    #[test]
+    fn step_is_thirty_six_degrees() {
+        // CONTEXT D-10: 10 wedges exactly tile the circle, so STEP = 360 / N = 36°.
+        assert_eq!(STEP, 36.0);
+        assert!(
+            (STEP * N as f64 - 360.0).abs() < 1e-9,
+            "10 wedges × STEP must exactly tile 360°"
+        );
+    }
+
+    #[test]
+    fn viewbox_equals_size_plus_padding() {
+        // wheel-v2.js line 33: VB = SIZE + PAD * 2 = 380 + 22*2 = 424.
+        assert!((VB - (SIZE + PAD * 2.0)).abs() < 1e-9);
+        assert_eq!(VB, 424.0);
+    }
 }
 
 // Canonical 10-wedge order documented for grep lock-down (CONTEXT D-10):
