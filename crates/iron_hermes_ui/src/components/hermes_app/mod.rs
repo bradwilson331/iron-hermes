@@ -6,10 +6,9 @@
 //! hydration gate exactly once on mount, and then keeps localStorage in
 //! sync via three persistence effects (RESEARCH Pattern 5).
 //!
-//! Plans 04 and 05 insert the wheel SVG / wheel-rail and the tweaks-panel /
-//! theme-effects respectively. The clearly-marked `// Plan 04 inserts` /
-//! `// Plan 05 inserts` comments inside the rsx! body mark those insertion
-//! points so wave-2 plans can land cleanly without re-discovery.
+//! Plan 04 (this commit) mounts the wheel SVG + wheel-rail; Plan 05 will
+//! insert the tweaks-panel + theme-effects at the remaining marker comment
+//! inside the rsx! body so wave-2 work can land cleanly without re-discovery.
 
 use crate::state::ThemeContext;
 use crate::state::{Screen, WheelState};
@@ -22,6 +21,8 @@ pub mod hud_chrome;
 pub mod screen_router;
 pub mod screens;
 pub mod sys_meta;
+pub mod wheel;
+pub mod wheel_rail;
 
 /// Root component of the Phase 26.2.1 wheel-driven shell.
 ///
@@ -106,8 +107,9 @@ pub fn HermesApp() -> Element {
             screen_router::ScreenRouter {}
         }
         app_footer::AppFooter {}
+        wheel_rail::WheelRail {}
+        wheel::Wheel {}
 
-        // Plan 04 inserts: wheel::Wheel {} wheel_rail::WheelRail {}
         // Plan 05 inserts: tweaks_panel::TweaksPanel {}
     }
 }
