@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: completed
+status: executing
 stopped_at: context exhaustion at 75% (2026-05-14)
-last_updated: "2026-05-14T20:27:10.489Z"
-last_activity: 2026-05-14
+last_updated: "2026-05-14T23:12:59.123Z"
+last_activity: 2026-05-14 -- Phase 27.1.4.2 planning complete
 progress:
-  total_phases: 24
-  completed_phases: 23
-  total_plans: 116
-  completed_plans: 116
-  percent: 96
+  total_phases: 49
+  completed_phases: 36
+  total_plans: 194
+  completed_plans: 193
+  percent: 99
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING (15/15 plans, round-5 synonym closure complete)
+Phase: 27.1.4.2 (hexapod-led-off-fails) — Not planned yet
 Plan: 15 of 15
 Plans: 15/15 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3 + Plan 15 round-4 scanlines feature removal + Plan 15 round-5 scan-bar synonym closure)
-Status: Phase complete — UAT human visual re-check PASS (2026-05-14: scan-bar removed, other features regression-clean)
-Last activity: 2026-05-14
+Status: Ready to execute
+Last activity: 2026-05-14 -- Phase 27.1.4.2 planning complete
 
 ## Performance Metrics
 
@@ -434,6 +434,7 @@ Recent decisions affecting current work:
 - Phase 26.5 inserted after Phase 26: tui_rata overlay layer + theming — modal-overlay primitive, Skin model (3 built-ins) + /skin wiring, session picker + model picker overlays; ports Ink-TUI UX into the in-process ratatui REPL (URGENT)
 - Phase 26.6 inserted after Phase 26: tui_rata thinking panel + Skills Hub + rich prompts — togglable expanded thinking panel (knight-rider = collapsed view), browse-only Skills Hub overlay, rich approval/secret/sudo overlays; depends on 26.5 (URGENT)
 - Phase 26.2.1 inserted after Phase 26.2: new web ui with wheel menu (URGENT)
+- Phase 27.1.4.2 inserted after Phase 27.1.4.1.1: hexapod led_off fails (URGENT)
 
 ### Pending Todos
 
