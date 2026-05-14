@@ -82,20 +82,6 @@ a { color: inherit; text-decoration: none; }
   z-index: 2;
 }
 
-.scan-bar {
-  position: fixed; left: 0; right: 0; top: 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, var(--teal-glow), var(--teal), var(--teal-glow), transparent);
-  pointer-events: none;
-  z-index: 9001;
-  animation: scan-bar-move 7s linear infinite;
-  opacity: 0.75;
-}
-@keyframes scan-bar-move {
-  0%   { transform: translateY(0vh); }
-  100% { transform: translateY(100vh); }
-}
-
 /* Corner brackets */
 .corner {
   position: fixed;
