@@ -288,7 +288,7 @@ a { color: inherit; text-decoration: none; }
 /* Hide HUD scanlines slightly so screen content stays legible */
 .scanlines { opacity: 0.35; }
 .hud-grid { opacity: 0.35; }
-body.no-scanlines .scanlines { display: none; }
+body.no-scanlines .scanlines { display: none !important; }
 body.no-breadcrumb .breadcrumb,
 body.no-breadcrumb .sys-meta { display: none; }
 body.no-footer .app-footer { display: none; }
