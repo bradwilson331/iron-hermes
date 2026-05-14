@@ -145,14 +145,26 @@
   "hotPaths": [
     {
       "path": ".planning/STATE.md",
-      "accessCount": 40,
-      "lastAccessed": 1778783742050,
+      "accessCount": 41,
+      "lastAccessed": 1778792885923,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 33,
+      "lastAccessed": 1778793668702,
       "type": "file"
     },
     {
       "path": ".planning/ROADMAP.md",
       "accessCount": 22,
       "lastAccessed": 1778777923656,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/registry.rs",
+      "accessCount": 20,
+      "lastAccessed": 1778793699386,
       "type": "file"
     },
     {
@@ -169,20 +181,20 @@
     },
     {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-CONTEXT.md",
-      "accessCount": 11,
-      "lastAccessed": 1778447779547,
+      "accessCount": 12,
+      "lastAccessed": 1778787297537,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/app_runtime_factory.rs",
+      "accessCount": 12,
+      "lastAccessed": 1778793753915,
       "type": "file"
     },
     {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-VALIDATION.md",
       "accessCount": 10,
       "lastAccessed": 1778447999805,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-tools/src/registry.rs",
-      "accessCount": 9,
-      "lastAccessed": 1778448417964,
       "type": "file"
     },
     {
@@ -216,6 +228,18 @@
       "type": "file"
     },
     {
+      "path": "crates/ironhermes-cli/src/main.rs",
+      "accessCount": 7,
+      "lastAccessed": 1778787167989,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/constants.rs",
+      "accessCount": 7,
+      "lastAccessed": 1778793719747,
+      "type": "file"
+    },
+    {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-01-PLAN.md",
       "accessCount": 6,
       "lastAccessed": 1778447155721,
@@ -240,12 +264,6 @@
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cli/src/main.rs",
-      "accessCount": 6,
-      "lastAccessed": 1778448405905,
-      "type": "file"
-    },
-    {
       "path": "crates/ironhermes-cli/src/tui_rata/event_loop.rs",
       "accessCount": 6,
       "lastAccessed": 1778476750564,
@@ -258,6 +276,18 @@
       "type": "file"
     },
     {
+      "path": "crates/ironhermes-agent/src/agent_loop.rs",
+      "accessCount": 6,
+      "lastAccessed": 1778787308344,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-tools/src/lib.rs",
+      "accessCount": 5,
+      "lastAccessed": 1778787616461,
+      "type": "file"
+    },
+    {
       "path": "crates/ironhermes-tools/src/cronjob_tool.rs",
       "accessCount": 4,
       "lastAccessed": 1778448379459,
@@ -267,12 +297,6 @@
       "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-03-PLAN.md",
       "accessCount": 4,
       "lastAccessed": 1778462862525,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/agent_loop.rs",
-      "accessCount": 4,
-      "lastAccessed": 1778476735756,
       "type": "file"
     },
     {
@@ -300,12 +324,6 @@
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-agent/src/app_runtime_factory.rs",
-      "accessCount": 3,
-      "lastAccessed": 1778474600080,
-      "type": "file"
-    },
-    {
       "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-VERIFICATION.md",
       "accessCount": 3,
       "lastAccessed": 1778752564486,
@@ -330,12 +348,6 @@
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-tools/src/lib.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778448349835,
-      "type": "file"
-    },
-    {
       "path": ".planning/PROJECT.md",
       "accessCount": 2,
       "lastAccessed": 1778448797113,
@@ -345,12 +357,6 @@
       "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-VALIDATION.md",
       "accessCount": 2,
       "lastAccessed": 1778449411264,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/constants.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778473045240,
       "type": "file"
     },
     {
@@ -369,12 +375,6 @@
       "path": ".planning/phases/26.4.1-config-fix/26.4.1-CONTEXT.md",
       "accessCount": 1,
       "lastAccessed": 1778445398442,
-      "type": "file"
-    },
-    {
-      "path": "CLAUDE.md",
-      "accessCount": 1,
-      "lastAccessed": 1778446356268,
       "type": "file"
     },
     {
