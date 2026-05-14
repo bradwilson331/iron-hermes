@@ -1,7 +1,7 @@
 <!-- generated-by: gsd-doc-writer -->
 # Testing
 
-IronHermes uses the Rust standard test harness (`cargo test`) across a Cargo workspace. There are 215 source files containing inline unit test modules (`#[cfg(test)]`) and 108 standalone integration test files under `tests/` directories. Snapshot testing uses `insta`; static-grep invariant tests use `include_str!` macros against source files.
+IronHermes uses the Rust standard test harness (`cargo test`) across a Cargo workspace. There are 215 source files containing inline unit test modules (`#[cfg(test)]`) and 105 standalone integration test files under `tests/` directories. Snapshot testing uses `insta`; static-grep invariant tests use `include_str!` macros against source files.
 
 ## Test Framework and Setup
 

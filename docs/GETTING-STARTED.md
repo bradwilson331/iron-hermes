@@ -14,7 +14,7 @@ details see the sections below; for configuration depth see
 |---|---|---|
 | Rust toolchain | stable (2024 edition) | Install via [rustup.rs](https://rustup.rs) |
 | Cargo | bundled with Rust | Required to build from source |
-| LLM API key | — | OpenRouter, Anthropic, OpenAI, Gemini, Groq, or a local Ollama instance |
+| LLM API key | — | OpenRouter, Anthropic, OpenAI, google, Groq, or a local Ollama instance |
 
 > If you are using the one-line installer (prebuilt binary path below), Rust is
 > not required unless no prebuilt binary exists for your platform, in which case

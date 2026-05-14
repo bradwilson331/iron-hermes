@@ -53,6 +53,10 @@ Environment variables live in `~/.ironhermes/.env` (or the `IRONHERMES_HOME`-sco
 | `TELEGRAM_BOT_TOKEN` | Required (if using Telegram gateway) | Telegram bot token |
 | `TELEGRAM_ALLOWED_USERS` | Optional | Comma-separated Telegram chat IDs to allow |
 | `TELEGRAM_HOME_CHANNEL` | Optional | Home channel chat ID for the Telegram gateway |
+| `DISCORD_BOT_TOKEN` | Optional | Discord bot token (future) |
+| `DISCORD_ALLOWED_USERS` | Optional | Comma-separated Discord user IDs to allow (future) |
+| `SLACK_BOT_TOKEN` | Optional | Slack bot token (future) |
+| `SLACK_APP_TOKEN` | Optional | Slack app-level token (future) |
 
 ### Terminal / Sandbox
 
@@ -126,7 +130,9 @@ providers:
 | `tools` | Per-toolset enable/disable |
 | `auxiliary` | Auxiliary model routing for helper tasks |
 | `browser` | Browser automation settings |
+| `extract` | Web extraction (web_extract tool) tuning |
 | `autonomous` | Autonomous (yolo) mode |
+| `mcp_servers` | MCP server configurations (raw YAML, parsed by ironhermes-mcp) |
 
 ---
 
@@ -232,6 +238,12 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 | `max_concurrent_runs` | `8` | Maximum concurrent agent runs |
 | `whitelist` | `[]` | Allowed Telegram chat IDs (empty = deny all) |
 
+### Cron (`cron:`)
+
+| Key | Default | Description |
+|---|---|---|
+| `cron.wrap_response` | `true` | Wrap cron job responses with metadata |
+
 ### Skills (`skills:`)
 
 | Key | Default | Description |
@@ -252,6 +264,10 @@ Default skill scan paths (in priority order):
 | `subagent.timeout_secs` | `300` | Timeout per subagent execution in seconds |
 | `subagent.max_subagents` | `3` | Maximum concurrent subagents |
 | `subagent.max_iterations` | `10` | Maximum LLM iterations per subagent |
+| `subagent.default_toolsets` | `["terminal", "file", "web"]` | Default toolset groups for child agents |
+| `subagent.model` | `null` | Model override for subagents (null = use parent's model) |
+| `subagent.provider` | `null` | Provider override for subagents (null = use parent's provider) |
+| `subagent.base_url` | `null` | API base URL override for subagents (null = use parent's) |
 
 ### Rate Limiting (`rate_limit:`)
 
@@ -260,15 +276,46 @@ Default skill scan paths (in priority order):
 | `rate_limit.messages_per_minute` | `10` | Maximum sustained messages per minute per user |
 | `rate_limit.burst_size` | `3` | Maximum burst size |
 
+### Batch Processing (`batch:`)
+
+| Key | Default | Description |
+|---|---|---|
+| `batch.workers` | `4` | Default worker concurrency |
+| `batch.max_turns` | `20` | Default max agent iterations per prompt |
+| `batch.output_dir` | `batch_output` | Default output directory (relative to cwd) |
+
 ### Security (`security:`)
 
 | Key | Default | Description |
 |---|---|---|
 | `security.redact_secrets` | `true` | Redact secrets in logs and output |
 
+### Browser (`browser:`)
+
+| Key | Default | Description |
+|---|---|---|
+| `browser.headed` | `false` | Run with a visible window (true) or headless (false) |
+| `browser.no_sandbox` | `false` | Allow `--no-sandbox` flag (required on Docker/restricted envs) |
+| `browser.allowed_domains` | `[]` | Domain allowlist for browser_navigate (empty = allow all hosts) |
+| `browser.allowed_schemes` | `["http", "https"]` | Scheme allowlist for browser_navigate |
+| `browser.chromium_path` | `null` | Explicit chromium binary path (null = autodiscover) |
+| `browser.timeout_seconds` | `30` | Per-operation timeout in seconds |
+| `browser.user_data_dir` | `null` | Persistent browser profile directory (null = `$HERMES_HOME/browser-profile`) |
+
+### Web Extract (`extract:`)
+
+| Key | Default | Description |
+|---|---|---|
+| `extract.max_parallel_summaries` | `4` | Semaphore permits for parallel URL fetching and summarization |
+| `extract.summary_chunk_chars` | `100000` | Chunk size in chars for tier-3 summarization |
+| `extract.refuse_threshold_chars` | `2000000` | Content size above which web_extract refuses entirely |
+| `extract.summary_tier2_threshold_chars` | `5000` | Boundary between tier-1 (direct) and tier-2 (light summary) |
+| `extract.summary_tier3_threshold_chars` | `500000` | Boundary between tier-2 and tier-3 (chunked summary) |
+| `extract.redact_url_patterns` | `[]` | Extra secret-URL patterns to redact (appended to built-in defaults) |
+
 ### Tools (`tools:`)
 
-Toolsets enabled by default: `memory`, `session`, `agent`, `skills`
+Toolsets enabled by default via `ToolsConfig::default()`: `memory`, `session`, `agent`, `skills`. All known toolsets (including `robotics`) are additionally ensured present via `with_default_toolsets_merged()`, which iterates over `crate::constants::ALL_TOOLSETS`.
 
 Toolsets disabled by default: `web`, `code`, `browser`
 
@@ -283,6 +330,8 @@ tools:
       enabled: true
     skills:
       enabled: true
+    robotics:
+      enabled: true   # gates further on HEXAPOD_IP env var
     web:
       enabled: false   # opt-in required
     code:
@@ -304,6 +353,7 @@ providers:
     # default_model: "anthropic/claude-sonnet-4"
     # api_mode: chat_completions
     # fallback_providers: ["local-llama"]
+    # disabled: false
 
   anthropic:
     api_key_env: ANTHROPIC_API_KEY

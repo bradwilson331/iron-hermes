@@ -151,7 +151,7 @@ ironhermes/
 | `SandboxConfig` | struct | Tunable parameters: `python_path`, `timeout_secs` (300), `max_rpc_calls` (50), `max_output_bytes` (50 KB), `max_stderr_bytes` (10 KB) |
 | `RpcServer` | struct | Unix socket JSON-RPC server that dispatches tool calls from the Python script |
 | `ToolDispatch` | trait | Decouples the RPC server from `ToolRegistry`; implemented by `ExecuteCodeTool` |
-| `ProcessRegistry` | struct | In-memory registry of background processes (`MAX_PROCESSES=64`, `FINISHED_TTL=30 min`) |
+| `ProcessRegistry` | struct | In-memory registry of background processes (`MAX_PROCESSES=64`, `FINISHED_TTL_SECONDS=30 min`) |
 | `ProcessSession` | struct | A tracked child process with output buffer, watch patterns, and cancellation token |
 | `WatchState` | struct | Rate-limiter for watch-pattern hits (`WATCH_MAX_PER_WINDOW=8` per 10 s) |
 | `CancellationToken` | re-export | `tokio_util::sync::CancellationToken` for `Sandbox::run` callers |
@@ -175,8 +175,8 @@ ironhermes/
 | Item | Kind | Description |
 |------|------|-------------|
 | `JobStore` | struct | Persistent list of scheduled cron jobs |
-| `CronJob` / `CronJobDisplay` | structs | Job definition and human-readable rendering |
-| `CronParser` / `parse_cron_expression` | struct + fn | Parse standard 5-field cron expressions |
+| `CronJob` | struct | Job definition |
+| `parse_cron_expression` | fn | Parse standard 5-field cron expressions |
 | `scan_cron_prompt` | fn | Extract cron expressions from natural language |
 | `TickResult` / `run_tick_check` | struct + fn | Evaluate which jobs are due; return due-job list |
 | `DeliveryTarget` | struct | Deliver a due job to the agent loop |
@@ -200,12 +200,12 @@ ironhermes/
 | Item | Kind | Description |
 |------|------|-------------|
 | `HookRegistry` | struct | Central dispatcher; holds sync and async listeners |
-| `HookListener` / `AsyncHookListener` | traits | Sync and async hook subscriber interfaces |
+| `HookListener` / `AsyncHookListener` | type aliases | Sync and async hook subscriber interfaces |
 | `HookEvent` / `HookEventKind` | structs | Event envelope and tagged event variant |
 | `HookEventKind` variants | enum | `MessageReceived`, `ToolCalled`, `ToolCompleted`, `ResponseSent`, `SkillActivated`, `ContextPreCompress`, and others |
 | `HooksConfig` / `WebhookEndpointConfig` | structs | Config types loaded from `config.yaml` |
 | `ErrorDetailLevel` | enum | Controls how much error detail is included in hook payloads |
-| `GuardrailHook` / `BlocklistGuardrail` / `GuardrailDecision` | structs | Pre-execution tool-call guardrails |
+| `GuardrailHook` / `BlocklistGuardrail` / `GuardrailDecision` | trait + structs | Pre-execution tool-call guardrails |
 | `format_guardrail_error` | fn | Human-readable guardrail block message |
 | `RetryQueue` | struct | In-memory retry queue for failed webhook deliveries |
 | `WebhookDelivery` / `create_webhook_listener` / `drain_retry_queue` | struct + fns | HTTP webhook dispatch with HMAC-SHA256 signing |
@@ -266,7 +266,7 @@ ironhermes/
 | `Tool` | trait | `name()`, `toolset()`, `description()`, `schema()`, `is_available()`, `prerequisites()`, `redact_args()`, `on_session_end()`, `execute()` |
 | `ToolRegistry` | struct | Holds all registered `Box<dyn Tool>` instances; dispatches by name |
 | `Prerequisite` | struct | Per-tool env-var or config-field requirement for the setup wizard |
-| `InterceptHandler` | trait | Pre-execution intercept point (used by guardrails) |
+| `InterceptHandler` | type alias | Pre-execution intercept point (used by guardrails) |
 | `MemoryManagerHandle` | trait | Shared `Arc<Mutex<MemoryManager>>` wrapper passed to memory tools |
 | `RegistryToolsetSession` | struct | Production `ToolsetSessionHandle` implementation for toolset switching |
 | `WebExtractTool` | struct | Firecrawl / local fallback web content extraction |
@@ -310,7 +310,7 @@ Tool modules (each exports one or more `Tool` implementations):
 | Item | Kind | Description |
 |------|------|-------------|
 | `McpManager` | struct | Orchestrates all MCP server tasks; `start_all()` / `shutdown_all()` |
-| `StartResult` | enum | Per-server start outcome |
+| `StartResult` | struct | Per-server start outcome |
 | `McpServerConfig` / `SamplingConfig` | structs | Config parsed from `mcp.yaml` / `config.yaml` |
 | `interpolate_config` / `interpolate_env` | fns | `${ENV_VAR}` substitution in config values |
 | `McpTool` | struct | `Tool` impl wrapping an MCP tool call; names are `server__tool` |

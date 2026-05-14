@@ -1,64 +1,131 @@
+<!-- generated-by: gsd-doc-writer -->
 # IronHermes
 
-The self-improving AI agent, rewritten in Rust. A port of [hermes-agent](https://github.com/NousResearch/hermes-agent) by Nous Research.
+The self-improving AI agent, rewritten in Rust. A port of [hermes-agent](https://github.com/NousResearch/hermes-agent) by Nous Research — built for developers who live in the terminal.
 
-## Architecture
+---
 
-IronHermes is organized as a Cargo workspace with modular crates:
+## What it is
 
-| Crate | Description |
-|-------|-------------|
-| `ironhermes-core` | Shared types, config, constants, error handling |
-| `ironhermes-state` | SQLite state store with FTS5 search (session persistence) |
-| `ironhermes-tools` | Tool registry + implementations (terminal, file ops, web search) |
-| `ironhermes-agent` | LLM client, agent loop, prompt builder, context compression |
-| `ironhermes-cli` | Interactive CLI binary |
-| `ironhermes-gateway` | Multi-platform messaging gateway (Telegram adapter) |
-| `ironhermes-cron` | Cron job scheduler |
-| `iron_hermes_ui` | Dioxus 0.7 web UI — terminal-style chat shell with streaming LLM responses |
+IronHermes is a terminal-native AI agent runtime. Users interact with an AI (Hermes) through a streaming shell where commands, responses, tool calls, and errors surface as typed blocks. Multiple sessions, personality presets, and a keyboard-driven command palette make it a configurable, expert-level tool.
+
+The system accepts prompts through three entry points: an interactive CLI REPL, a Telegram gateway, and a Dioxus 0.7 web UI with an embedded agent server. At its core is a Cargo workspace of 13 focused crates organized in a layered architecture — shared types at the base, an agentic loop in the middle, and multiple frontends at the top.
+
+---
+
+## Installation
+
+### Option 1 — one-line installer (recommended)
+
+Downloads a prebuilt binary, scaffolds `~/.ironhermes/`, copies config templates, and adds the binary to `~/.local/bin`. Falls back to `cargo install` if no prebuilt binary is available for your platform.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
+```
+
+Reload your shell after install:
+
+```bash
+source ~/.bashrc   # bash
+source ~/.zshrc    # zsh
+```
+
+### Option 2 — build from source
+
+Requires a stable Rust toolchain (2024 edition). Install via [rustup.rs](https://rustup.rs) if needed.
+
+```bash
+git clone https://github.com/bradwilson331/ironhermes
+cd ironhermes
+cargo build --release
+# Binary: target/release/ironhermes
+```
+
+---
 
 ## Quick Start
 
-```bash
-# Build
-cargo build --release
-
-# Run interactive chat
-cargo run --bin ironhermes
-
-# Run a single prompt
-cargo run --bin ironhermes -- -e "What is the capital of France?"
-
-# Show status
-cargo run --bin ironhermes -- status
-
-# Check configuration
-cargo run --bin ironhermes -- doctor
-```
-
-## Configuration
-
-IronHermes looks for configuration in `~/.ironhermes/`:
-
-- `config.yaml` — Model, provider, terminal, web, and gateway settings
-- `.env` — API keys (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, etc.)
-
-Set `IRONHERMES_HOME` to override the default home directory.
-
-### Minimal Setup
+**1. Set your API key**
 
 ```bash
 mkdir -p ~/.ironhermes
 echo "OPENROUTER_API_KEY=your-key-here" > ~/.ironhermes/.env
 ```
 
+OpenRouter is the default provider. Anthropic, OpenAI, Gemini, Groq, and local Ollama are also supported — see [Configuration](#configuration).
+
+**2. Verify setup**
+
+```bash
+ironhermes doctor
+```
+
+Checks that environment variables are present, the config parses cleanly, and configured providers are reachable.
+
+**3. Start the agent**
+
+```bash
+ironhermes
+```
+
+Opens an interactive REPL. Type a prompt and press Enter. The agent streams a response, calling tools as needed.
+
+**One-shot mode:**
+
+```bash
+ironhermes -e "Summarize the files changed in the last git commit"
+```
+
+---
+
+## Usage
+
+**Interactive chat session:**
+
+```bash
+ironhermes
+```
+
+Starts a REPL where you can send prompts and the agent responds with tool calls and streaming output.
+
+**One-shot prompt:**
+
+```bash
+ironhermes -e "Summarize the files changed in the last git commit"
+```
+
+The agent runs the prompt to completion and exits.
+
+**Diagnose configuration:**
+
+```bash
+ironhermes doctor
+```
+
+Checks that required environment variables are set, the config file is valid, and all configured providers are reachable.
+
+**Check agent status:**
+
+```bash
+ironhermes status
+```
+
+Prints the active provider, model, and session store path.
+
+---
+
+## Configuration
+
+IronHermes looks for configuration in `~/.ironhermes/`:
+
+- `config.yaml` — model, provider, terminal, web, and gateway settings
+- `.env` — API keys (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
+
+Set `IRONHERMES_HOME` to override the default home directory.
+
 ### Provider fallback
 
-Set `fallback_providers` on a provider to swap to another provider on hard
-failure (HTTP 401, 403, 404, 429, or 5xx). The swap is one-shot per session
-and the fallback uses the **fallback provider's own `default_model`** — the
-primary's model string is not carried over, so a local model server doesn't
-need to know the primary's model name.
+Set `fallback_providers` on a provider to swap to another provider on hard failure (HTTP 401, 403, 404, 429, or 5xx). The swap is one-shot per session and the fallback uses the **fallback provider's own `default_model`**.
 
 ```yaml
 providers:
@@ -74,19 +141,7 @@ custom_providers:
     default_model: llama3.2:latest
 ```
 
-#### Quick setup via CLI
-
-```bash
-hermes config set providers.openrouter.fallback_providers[0] local-ollama
-```
-
 #### Cloud-primary + local Ollama fallback (canonical example)
-
-Use OpenRouter as the primary and a local Ollama server as the fallback. If OpenRouter
-returns 429 (rate limit), 5xx (server error), or 401 (auth failure), IronHermes
-retries the request using the fallback provider. The fallback request uses the
-**fallback provider's own `default_model`** — not the primary's model name — so the
-local Ollama server only needs to have `gemma4:latest` loaded.
 
 ```yaml
 custom_providers:
@@ -101,13 +156,16 @@ model:
 
 providers:
   openrouter:
-    api_key_env: OPENROUTER_API_KEY    # secret lives in ~/.ironhermes/.env
+    api_key_env: OPENROUTER_API_KEY
     fallback_providers:
       - local-ollama
 ```
 
-The `fallback_providers` list is tried in order. The swap is one-shot per session;
-if the fallback also fails the error is returned to the caller.
+The `fallback_providers` list is tried in order. The swap is one-shot per session; if the fallback also fails the error is returned to the caller.
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference and [docs/providers.md](docs/providers.md) for per-provider setup.
+
+---
 
 ## Tools
 
@@ -120,44 +178,61 @@ Built-in tools available to the agent:
 - **search_files** — Regex search across files
 - **web_search** — Web search via Firecrawl API
 
+---
+
+## Architecture
+
+IronHermes is organized as a Cargo workspace with modular crates:
+
+| Crate | Description |
+|-------|-------------|
+| `ironhermes-core` | Shared types, config, constants, provider abstraction, skill registry, SSRF guard |
+| `ironhermes-state` | SQLite state store with FTS5 search (session persistence) |
+| `ironhermes-trajectory` | Append-only JSONL tool-call ledger |
+| `ironhermes-tools` | Tool registry + implementations (terminal, file ops, web, browser, memory, MCP bridge) |
+| `ironhermes-agent` | LLM client, agent loop, prompt builder, context compression, subagent runner |
+| `ironhermes-cli` | Interactive CLI binary + ratatui REPL |
+| `ironhermes-gateway` | Multi-platform messaging gateway (Telegram adapter) |
+| `ironhermes-cron` | Cron job scheduler |
+| `ironhermes-hooks` | Event hook registry, webhook delivery, guardrails, hot-reload config |
+| `ironhermes-exec` | Python sandbox via Unix socket RPC |
+| `ironhermes-hub` | Skills Hub: install / update / uninstall from GitHub / skills.sh |
+| `ironhermes-mcp` | MCP client: stdio + HTTP transports, per-server task, sampling handler |
+| `iron_hermes_ui` | Dioxus 0.7 fullstack web/desktop UI with embedded agent server |
+
+Memory providers (pluggable): `providers/memory-sqlite`, `providers/memory-grafeo`, `providers/memory-duckdb`.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/crates.md](docs/crates.md) for full detail.
+
+---
+
 ## Web UI (`iron_hermes_ui`)
 
-A Dioxus 0.7 fullstack web app — a terminal-style chat shell that streams LLM responses
-directly from an embedded agent server. Requires the Dioxus CLI (`dx`).
+A Dioxus 0.7 fullstack web app — a terminal-style chat shell that streams LLM responses directly from an embedded agent server. Requires the Dioxus CLI (`dx`).
 
 ### Prerequisites
 
 ```bash
-# Install the Dioxus CLI
 cargo install dioxus-cli
-
-# Ensure your API key is in ~/.ironhermes/.env
 echo "OPENROUTER_API_KEY=your-key-here" >> ~/.ironhermes/.env
 ```
 
 ### Build and run (standalone binary)
 
 ```bash
-# Build the web bundle (run from workspace root)
 dx bundle --platform web -p iron_hermes_ui
-
-# Run the server
 RUST_LOG=info ./target/dx/iron_hermes_ui/debug/web/iron_hermes_ui
 ```
 
-The server starts on `http://localhost:8080` by default. Set `IP` / `PORT` environment
-variables or use `DIOXUS_ADDRESS` to change the bind address.
+The server starts on `http://localhost:8080` by default. Set `IP` / `PORT` environment variables or use `DIOXUS_ADDRESS` to change the bind address.
 
 ### Development mode (hot reload)
 
 ```bash
-# Run from workspace root — proxies through dx serve
 dx serve --package iron_hermes_ui
 ```
 
-> **Note:** `dx serve` routes WebSocket traffic through a proxy that may impose a short
-> idle-close timeout (~9 seconds). The standalone binary above does not have this
-> limitation and is recommended for normal use.
+> **Note:** `dx serve` routes WebSocket traffic through a proxy that may impose a short idle-close timeout (~9 seconds). The standalone binary above does not have this limitation and is recommended for normal use.
 
 ### Release build
 
@@ -166,10 +241,11 @@ dx bundle --platform web -p iron_hermes_ui --release
 ./target/dx/iron_hermes_ui/release/web/iron_hermes_ui
 ```
 
-## Gateway deployment (launchd / systemd / cron)
+---
 
-Run the Telegram gateway as a long-lived background service. Templates and an
-OS-detecting installer live in `scripts/deploy/`:
+## Gateway Deployment (launchd / systemd / cron)
+
+Run the Telegram gateway as a long-lived background service. Templates and an OS-detecting installer live in `scripts/deploy/`:
 
 ```
 scripts/deploy/
@@ -181,9 +257,7 @@ scripts/deploy/
 └── ironhermes-gateway.service    Linux systemd --user unit
 ```
 
-Preflight: build the release binary (`cargo build --release`) and put a
-`TELEGRAM_BOT_TOKEN` in `~/.ironhermes/.env`. The installer runs
-`ironhermes doctor` before doing anything.
+Preflight: build the release binary (`cargo build --release`) and set `TELEGRAM_BOT_TOKEN` in `~/.ironhermes/.env`. The installer runs `ironhermes doctor` before doing anything.
 
 ### macOS (launchd)
 
@@ -197,14 +271,10 @@ launchctl kickstart -k gui/$UID/com.ironhermes.gateway
 launchctl bootout    gui/$UID/com.ironhermes.gateway
 ```
 
-The plist uses `KeepAlive={Crashed:true, SuccessfulExit:false}` (restart on
-crash, not after a clean exit) and `ThrottleInterval=30` to cap restart storms.
-
 ### Linux (systemd --user)
 
 ```bash
 scripts/deploy/install.sh
-# verify
 systemctl --user status ironhermes-gateway
 journalctl --user -u ironhermes-gateway -f
 # headless servers (no graphical login) — run once:
@@ -213,9 +283,7 @@ loginctl enable-linger $USER
 
 ### Cron watchdog (fallback)
 
-For hosts without launchd/systemd, a 1-minute cron entry runs
-`gateway-watchdog.sh`, which parses `~/.ironhermes/gateway.pid` and relaunches
-the gateway via `gateway-run.sh` if the process is dead:
+For hosts without launchd/systemd:
 
 ```bash
 scripts/deploy/install.sh --cron
@@ -235,76 +303,29 @@ Logs in `~/.ironhermes/logs/` are kept on uninstall.
 
 ### Profiles
 
-Set `IRONHERMES_PROFILE` in the environment (or in the systemd unit /
-`EnvironmentVariables` block of the plist) and `gateway-run.sh` will pass
-`--profile $IRONHERMES_PROFILE` to the binary.
+Set `IRONHERMES_PROFILE` in the environment (or in the systemd unit / `EnvironmentVariables` block of the plist) and `gateway-run.sh` will pass `--profile $IRONHERMES_PROFILE` to the binary.
+
+---
+
+## Documentation
+
+| Doc | Description |
+|---|---|
+| [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) | Prerequisites, install options, first run |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate layout, component diagram, data flow |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `config.yaml` and environment variable reference |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local dev workflow, build commands, code style |
+| [docs/TESTING.md](docs/TESTING.md) | Test framework, running tests, CI integration |
+| [docs/crates.md](docs/crates.md) | Per-crate public API reference |
+| [docs/providers.md](docs/providers.md) | LLM provider configuration |
+| [docs/skills-system.md](docs/skills-system.md) | Skills architecture |
+| [docs/skills-cli.md](docs/skills-cli.md) | Skills CLI reference |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker and deployment options |
+| [SECURITY.md](SECURITY.md) | Security model and DEFCON scale |
+| [troubleshooting_guide.md](troubleshooting_guide.md) | Common issues and fixes |
+
+---
 
 ## License
 
-MIT
-
-## Installation
-
-**Option 1 — one-line installer (prebuilt binary):**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
-```
-
-The installer detects your OS and architecture, downloads the appropriate prebuilt binary
-from GitHub Releases, scaffolds `~/.ironhermes/`, copies config templates, and adds the
-binary to `~/.local/bin`. Falls back to `cargo install` if no prebuilt binary is available
-for your platform.
-
-**Option 2 — build from source:**
-
-```bash
-# Prerequisites: Rust toolchain (https://rustup.rs)
-git clone https://github.com/bradwilson331/ironhermes
-cd ironhermes
-cargo build --release
-# Binary is at target/release/ironhermes
-```
-
-After installation, configure your API key:
-
-```bash
-mkdir -p ~/.ironhermes
-echo "OPENROUTER_API_KEY=your-key-here" > ~/.ironhermes/.env
-```
-
-## Usage
-
-**Interactive chat session:**
-
-```bash
-ironhermes
-```
-
-Starts a REPL where you can send prompts and the agent responds with tool calls
-and streaming output.
-
-**One-shot prompt:**
-
-```bash
-ironhermes -e "Summarize the files changed in the last git commit"
-```
-
-The agent runs the prompt to completion and exits.
-
-**Diagnose configuration:**
-
-```bash
-ironhermes doctor
-```
-
-Checks that required environment variables are set, the config file is valid,
-and all configured providers are reachable.
-
-**Check agent status:**
-
-```bash
-ironhermes status
-```
-
-Prints the active provider, model, and session store path.
+MIT — Authors: Nous Research.

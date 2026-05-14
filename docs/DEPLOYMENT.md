@@ -5,7 +5,7 @@ IronHermes is a Rust binary that runs on Linux and macOS. It supports three depl
 
 1. **Native install** — binary dropped into `~/.local/bin/` via the installer script, run interactively or as a background gateway service.
 2. **Docker container** — multi-stage image producing a minimal Debian Bookworm runtime.
-3. **Gateway service** — long-running `hermes gateway` process managed by launchd (macOS), systemd --user (Linux), or a cron watchdog (fallback).
+3. **Gateway service** — long-running `ironhermes gateway` process managed by launchd (macOS), systemd --user (Linux), or a cron watchdog (fallback).
 
 ---
 
@@ -52,7 +52,7 @@ The installer:
 2. Downloads a prebuilt binary from GitHub Releases, or falls back to `cargo install`
 3. Installs the binary to `~/.local/bin/ironhermes`
 4. Scaffolds `~/.ironhermes/` with `config.yaml`, `.env`, and directory structure
-5. Copies `cli-config.yaml.example` → `~/.ironhermes/config.yaml` and `env.example` → `~/.ironhermes/.env`
+5. Copies `cli-config.yaml.example` → `~/.ironhermes/config.yaml` and `.env.example` → `~/.ironhermes/.env`
 
 After install, seed your API keys in `~/.ironhermes/.env` and set the model provider in `~/.ironhermes/config.yaml`. See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
 
@@ -108,7 +108,7 @@ docker run -d \
 
 ## Gateway Service Setup
 
-The Telegram gateway runs as a persistent background process (`hermes gateway`). Use the platform-appropriate service manager.
+The Telegram gateway runs as a persistent background process (`ironhermes gateway`). Use the platform-appropriate service manager.
 
 ### macOS — LaunchAgent
 

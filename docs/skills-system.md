@@ -254,7 +254,7 @@ Skills occupy **slot 5** in the 9-layer system prompt assembly model:
 | 8 | PlatformHints | CLI/Telegram/Discord/Slack platform notes |
 | 9 | SessionOverlay | Active personality overlay |
 
-Slots 1–6 are durable (stable across turns, Anthropic prompt cache hits them). Slots 7–9 are ephemeral (regenerated per turn).
+Slots 1–6 are durable (stable across turns, Anthropic prompt cache hits them). Slots 7–10 are ephemeral (regenerated per turn).
 
 The catalog text format is:
 
