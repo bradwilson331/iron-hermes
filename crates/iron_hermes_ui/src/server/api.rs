@@ -70,6 +70,14 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
 
     let out = sessions
         .into_iter()
+        // GAP-26.2.1-09-R3 / D-26.2.1-14-B (USER CHOSE OPTION A, 2026-05-14):
+        // Drop non-loadable sessions. The D-26.2.1-13-A surgical lift broadened
+        // the listing to ~74 entries from ~/.ironhermes/sessions/, but some
+        // are foreign-format directories (only trajectories.jsonl, no SQLite
+        // messages row → message_count == 0) that the chat-load path cannot
+        // populate. Filtering message_count > 0 yields ONLY sessions the
+        // SESSIONS wedge can actually open. See 26.2.1-UAT.md round-3 notes.
+        .filter(|s| s.message_count > 0)
         .map(|session| SessionInfo {
             id: session.id,
             title: session.title,
