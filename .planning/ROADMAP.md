@@ -925,6 +925,16 @@ Plans:
 
 **Phase directory:** `.planning/phases/27.1.4-hexapod-video-and-sonic-stream-capture-for-navigation/`
 
+### Phase 27.1.4.2: hexapod led_off fails (INSERTED)
+
+**Goal:** Fix two bugs in `ironhermes-tools`: (1) `CMD_LED_OFF` sends the wrong Freenove wire command (`CMD_LED#0` → `CMD_LED_MOD#0`) causing LEDs to not turn off on the physical robot; (2) `hexapod_tcp` and `hexapod_video` tests race on `HEXAPOD_IP` via separate module-local `ENV_LOCK` statics — unify to a single crate-level lock in `lib.rs`. Add a static-invariant test locking the correct constant and blocking regression to the old one.
+**Requirements**: PROV-HEXAPOD
+**Depends on:** Phase 27.1.4
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 27.1.4.2 to break down)
+
 ### Phase 27.1.4.1: gateway fallback gap (INSERTED)
 
 **Goal:** Provider fallback wired at every AgentLoop construction site (gateway cron, agent subagent, CLI batch) via one shared `wire_fallback_if_configured` helper that emits `tracing::warn!` on misconfiguration; the two existing inline-if-let fallback sites refactored onto the same helper; config/docs consistent — `cli-config.yaml.example` gains the `learning:` and `tools:` sections, README documents `fallback_providers`.
@@ -949,6 +959,16 @@ Plans:
 
 Plans:
 - [x] 27.1.4.1.1-01-PLAN.md — Add transport-failure detection helper to classify_llm_error, repurpose + add transport unit tests, new static-invariant grep file
+
+### Phase 27.1.4.1.1.1: INCORRECTLY_ADDED_FROZEN (renumbering error)
+
+**Goal:** [FROZEN — incorrectly added duplicate; 27.1.4.2 is the canonical phase for this work]
+**Requirements**: N/A
+**Depends on:** Phase 27.1.4.1.1
+**Plans:** 0 plans
+
+Plans:
+- [ ] N/A — use Phase 27.1.4.2 instead
 
 ### Phase 28: Skills Trust Tiers
 
