@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: verifying
-stopped_at: Phase 26.2.1 UI-SPEC approved
-last_updated: "2026-05-14T14:18:46.129Z"
+stopped_at: Plan 26.2.1-14 SUMMARY.md written; round-4 human-verify gate pending (UAT Test 6 + Test 9 re-run)
+last_updated: "2026-05-14T16:59:20.997Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 47
   completed_phases: 36
-  total_plans: 191
-  completed_plans: 191
+  total_plans: 192
+  completed_plans: 192
   percent: 100
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING (12/12 plans, gap closure complete)
-Plan: 12 of 12
-Plans: 12/12 complete (9 baseline + 3 gap-closure for UAT Gaps 1, 2, 3, 4, 5)
-Status: Phase complete — ready for verification
+Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING (14/14 plans, round-3 gap closure complete)
+Plan: 14 of 14
+Plans: 14/14 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3)
+Status: Phase complete with 1 user-approved deferred residual (GAP-26.2.1-09-R3-RESIDUAL → 26.2.12) — ready for round-4 human re-verify gate
 Last activity: 2026-05-14
 
 ## Performance Metrics
@@ -165,6 +165,7 @@ Last activity: 2026-05-14
 | Phase 25.2 P14 | 25 | 3 tasks | 5 files |
 | Phase 25.5 P05 | 2min | 1 tasks | 3 files |
 | Phase 27.1 P03 | 1 | 2 tasks | 1 files |
+| Phase 26.2.1 P14 | 35min | 4 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -384,6 +385,8 @@ Recent decisions affecting current work:
 - [Phase 25.2]: Plan 14: AnyClientSummarizationHandle is verbatim port of AnyClientVisionHandle (any_client.rs:158-238); register_web_extract_tool wired in run_chat/run_single/run_gateway with parity guard test; smoke test uses ToolSchema 2-level shape (d.function.name, not d.name)
 - [Phase 25.5]: Replaced mock STATUS_TEXT with dynamic config_summary data for /status handler — real model/provider/context displayed
 - [Phase ?]: FROZEN.md committed in source Hexapod repo at 7ba53c1 — freeze is git-recorded per Claude's Discretion bullet 2
+- [Phase ?]: Plan 26.2.1-14: GAP-07-R3 closed via Branch (c) live-DOM-diagnostic-driven CSS triple-guard (html-prefix specificity 0,2,1->0,2,2 + visibility/opacity !important); D-26.2.1-14-C diagnostic-first GAP closure pattern established
+- [Phase ?]: Plan 26.2.1-14: GAP-09-R3 partially closed via .filter(|s| s.message_count > 0) post-filter in api.rs (D-26.2.1-14-B option i); D-26.2.1-14-D user-approved residual deferred to phase 26.2.12 (foreign-format directories with non-zero msg_count still leak)
 
 ### Roadmap Evolution
 
@@ -446,6 +449,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-14T14:18:46.122Z
-Stopped at: Phase 26.2.1 UI-SPEC approved
-Resume file: None
+Last session: 2026-05-14T14:18:46.122Z (Plan 14 round-3 gap closure complete; pending round-4 human re-verify gate)
+Stopped at: Plan 26.2.1-14 SUMMARY.md written; round-4 human-verify gate pending (UAT Test 6 + Test 9 re-run)
+Resume file: .planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-14-SUMMARY.md

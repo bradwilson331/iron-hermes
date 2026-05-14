@@ -792,13 +792,15 @@ Plans:
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 26.2
-**Plans:** 13/13 plans complete
+**Plans:** 14/14 plans complete
 
 Plans:
 - [x] TBD (run /gsd-plan-phase 26.2.1 to break down) (completed 2026-05-13)
 - [x] 26.2.1-10-PLAN.md — Gap closure: restore dropped chrome CSS (app.html lines 42-112, 315-316, 320) + 5 per-theme `[data-theme]` var-override blocks (closes UAT Gaps 2 & 3) (completed 2026-05-14)
 - [x] 26.2.1-11-PLAN.md — Gap closure: client-side `/clear` slash-command dispatch via `dispatch_slash` helper in hermes_app/mod.rs; unknown slash arms render local error bubble (closes UAT Gap 4; D-20 amended) (completed 2026-05-14)
 - [x] 26.2.1-12-PLAN.md — Gap closure: tail-slice SID badge in chat.rs (last 8 chars instead of constant `agent:ma` prefix) + remove broken `cargo run --features server` step from UAT-26.2.1.md §How-to-run (closes UAT Gaps 5 & 1) (completed 2026-05-14)
+- [x] 26.2.1-13-PLAN.md — Gap closure round 2: GAP-06 footer/HUD z-index lift + GAP-07 scanlines `!important` + GAP-08 dispatch_slash bool fall-through + GAP-09 D-02 surgical lift list_sessions(None) (closes UAT round-2 gaps 06/08; round-3 reopens GAP-07-R3 + GAP-09-R3) (completed 2026-05-14)
+- [x] 26.2.1-14-PLAN.md — Gap closure round 3: GAP-07-R3 scanlines Branch (c) triple-guard via live DOM diagnostic + GAP-09-R3 message_count > 0 post-filter (PARTIAL with user-approved RESIDUAL deferred to 26.2.12) (completed 2026-05-14)
 
 **Cross-cutting constraints:**
 - src/server/ws.rs, src/server/api.rs, src/server/state.rs, src/protocol.rs are byte-for-byte unchanged (D-02)
