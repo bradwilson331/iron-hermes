@@ -261,8 +261,7 @@ pub fn HermesApp() -> Element {
         if trimmed.is_empty() {
             return;
         }
-        if trimmed.starts_with('/') {
-            dispatch_slash(&trimmed, &mut bubbles, &mut next_id);
+        if trimmed.starts_with('/') && dispatch_slash(&trimmed, &mut bubbles, &mut next_id) {
             return;
         }
         let sid = session_id.read().clone();
@@ -339,28 +338,20 @@ pub fn HermesApp() -> Element {
 fn dispatch_slash(
     cmd: &str,
     bubbles: &mut Signal<Vec<ChatBubble>>,
-    next_id: &mut Signal<u64>,
-) {
+    _next_id: &mut Signal<u64>,
+) -> bool {
     let mut parts = cmd.trim().splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("");
     match head {
         "/clear" => {
             bubbles.write().clear();
+            true
         }
-        // Stubs per UAT-26.2.1.md missing[1] — skeleton "unknown command"
-        // arm is fine; /help, /status, /personality can be wired in a
-        // follow-up phase. No `ChatBubble::system` constructor exists in
-        // `screens/chat.rs` (only `user`, `assistant`, `error`), so the
-        // unknown-command arm uses `::error` for visual distinction.
-        _ => {
-            let id = {
-                let n = *next_id.read();
-                next_id.set(n + 1);
-                n
-            };
-            let msg = format!("unknown command: {head}");
-            bubbles.write().push(ChatBubble::error(id, msg));
-        }
+        // Per D-26.2.1-13-B: unknown slashes are NOT handled
+        // client-side. Fall through to ws.send_raw so the server
+        // (or LLM) routes them. /research weather, /help (future),
+        // /status (future) all reach the backend via this path.
+        _ => false,
     }
 }
 
@@ -386,17 +377,17 @@ mod tests {
             MOD_RS.contains("fn dispatch_slash"),
             "dispatch_slash helper must exist in mod.rs (GAP-26.2.1-04 regression)",
         );
+        assert!(
+            MOD_RS.contains(") -> bool"),
+            "dispatch_slash must return bool per GAP-26.2.1-08 (D-26.2.1-13-B)",
+        );
     }
 
     #[test]
     fn send_eventhandler_intercepts_slash_prefix_before_websocket() {
         assert!(
-            MOD_RS.contains("trimmed.starts_with('/')"),
-            "send EventHandler must intercept slash-prefixed input before the WebSocket path",
-        );
-        assert!(
-            MOD_RS.contains("dispatch_slash(&trimmed, &mut bubbles, &mut next_id)"),
-            "the slash-prefix branch must call dispatch_slash",
+            MOD_RS.contains("trimmed.starts_with('/') && dispatch_slash(&trimmed, &mut bubbles, &mut next_id)"),
+            "send EventHandler must combine starts_with('/') with dispatch_slash bool return per GAP-26.2.1-08",
         );
     }
 
@@ -413,10 +404,27 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command_arm_appends_error_bubble_locally() {
+    fn unknown_command_arm_falls_through_to_websocket() {
+        // Per GAP-26.2.1-08 (D-26.2.1-13-B): unknown slashes must NOT
+        // be handled client-side. The `_` arm returns false so the
+        // call site falls through to ws.send_raw(ChatRequest).
+        //
+        // Note: we check for the specific `format!("unknown command:` string
+        // rather than a ChatBubble::error call because other error paths in
+        // the send handler legitimately use ChatBubble::error.
+        // The old dispatch_slash code built a local error message whose
+        // format string began with the two words below (split here to avoid
+        // the include_str! self-match):
+        let pat = ["unknown", " command: {head}"].concat();
         assert!(
-            MOD_RS.contains("ChatBubble::error(id, msg)"),
-            "unknown slash commands must append a ChatBubble::error locally",
+            !MOD_RS.contains(&pat),
+            "GAP-26.2.1-08: dispatch_slash must not build a local error message for unhandled slashes",
+        );
+        // Positive assertion: the `_` arm must yield `false` so the
+        // call site short-circuits and falls through.
+        assert!(
+            MOD_RS.contains("_ => false"),
+            "GAP-26.2.1-08: unknown-slash arm must return false to enable fall-through to ws.send_raw",
         );
     }
 
