@@ -245,9 +245,24 @@ pub fn HermesApp() -> Element {
     // Send-handler — invoked by ScreenChat's input box on Enter (or the
     // submit button). Serialization failure does NOT silently drop — it
     // surfaces as an error bubble so the user always gets feedback (B-05).
+    //
+    // Plan 26.2.1-11 — client-side slash-command dispatch (GAP-26.2.1-04).
+    // Messages beginning with `/` are intercepted here BEFORE the
+    // WebSocket send path: `/clear` clears the local bubble list with no
+    // server round-trip; unknown slash commands append a single
+    // "unknown command" error bubble. Plain messages still flow through
+    // `ws.send_raw(ChatRequest)` exactly as before. This amends D-20 from
+    // "server-side CommandRouter dispatch" to "client-side dispatch for
+    // purely-visual commands; server-side dispatch reserved for future
+    // server-effecting commands and requires a follow-up phase that lifts
+    // D-02" (the 26.2.1 D-02 server-untouched constraint).
     let send = EventHandler::new(move |text: String| {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
+            return;
+        }
+        if trimmed.starts_with('/') {
+            dispatch_slash(&trimmed, &mut bubbles, &mut next_id);
             return;
         }
         let sid = session_id.read().clone();
@@ -303,5 +318,122 @@ pub fn HermesApp() -> Element {
         wheel::Wheel {}
         theme_effects::ThemeEffects {}
         tweaks_panel::TweaksPanel {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 26.2.1-11 — Client-side slash-command dispatch (GAP-26.2.1-04).
+// ---------------------------------------------------------------------------
+//
+// `/clear` empties the local bubble list with no LLM round-trip. Unknown
+// slash commands append a single error-styled bubble locally. Plain
+// (non-slash) messages still flow through the existing WebSocket path in
+// the `send` EventHandler closure — this helper is only reached after the
+// `text.starts_with('/')` early-return branch.
+//
+// Signals are passed by `&mut` even though they implement `Copy` in Dioxus
+// 0.7; this preserves the call-site spelling `&mut bubbles` / `&mut next_id`
+// for clarity at the only call site, and `.write()` / `.set()` take `&self`
+// internally so this compiles cleanly under both default and `legacy-shell`
+// features.
+fn dispatch_slash(
+    cmd: &str,
+    bubbles: &mut Signal<Vec<ChatBubble>>,
+    next_id: &mut Signal<u64>,
+) {
+    let mut parts = cmd.trim().splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("");
+    match head {
+        "/clear" => {
+            bubbles.write().clear();
+        }
+        // Stubs per UAT-26.2.1.md missing[1] — skeleton "unknown command"
+        // arm is fine; /help, /status, /personality can be wired in a
+        // follow-up phase. No `ChatBubble::system` constructor exists in
+        // `screens/chat.rs` (only `user`, `assistant`, `error`), so the
+        // unknown-command arm uses `::error` for visual distinction.
+        _ => {
+            let id = {
+                let n = *next_id.read();
+                next_id.set(n + 1);
+                n
+            };
+            let msg = format!("unknown command: {head}");
+            bubbles.write().push(ChatBubble::error(id, msg));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Plan 26.2.1-11 — static-grep regression guards for
+    //! GAP-26.2.1-04 (client-side slash-command interception).
+    //!
+    //! Dioxus 0.7 `Signal<T>` is component-scoped; constructing one outside
+    //! a component requires a `dioxus::prelude::ScopeId` and a live
+    //! VirtualDom, which would substantially expand this crate's test
+    //! footprint. The crate's existing test bootstrap (see e.g.
+    //! `wheel.rs` tests) does not yet construct signals outside a
+    //! component context. Per the plan: "If the existing test bootstrap
+    //! pattern doesn't easily support signals outside a component …
+    //! skip the unit test and rely on a static-grep regression test".
+    //! That is the choice made here.
+    const MOD_RS: &str = include_str!("mod.rs");
+
+    #[test]
+    fn dispatch_slash_helper_exists() {
+        assert!(
+            MOD_RS.contains("fn dispatch_slash"),
+            "dispatch_slash helper must exist in mod.rs (GAP-26.2.1-04 regression)",
+        );
+    }
+
+    #[test]
+    fn send_eventhandler_intercepts_slash_prefix_before_websocket() {
+        assert!(
+            MOD_RS.contains("trimmed.starts_with('/')"),
+            "send EventHandler must intercept slash-prefixed input before the WebSocket path",
+        );
+        assert!(
+            MOD_RS.contains("dispatch_slash(&trimmed, &mut bubbles, &mut next_id)"),
+            "the slash-prefix branch must call dispatch_slash",
+        );
+    }
+
+    #[test]
+    fn clear_arm_empties_bubble_list_locally() {
+        assert!(
+            MOD_RS.contains("\"/clear\""),
+            "dispatch_slash must match on the literal `/clear` head",
+        );
+        assert!(
+            MOD_RS.contains("bubbles.write().clear()"),
+            "the `/clear` arm must empty the bubble list locally",
+        );
+    }
+
+    #[test]
+    fn unknown_command_arm_appends_error_bubble_locally() {
+        assert!(
+            MOD_RS.contains("ChatBubble::error(id, msg)"),
+            "unknown slash commands must append a ChatBubble::error locally",
+        );
+    }
+
+    #[test]
+    fn slash_branch_precedes_websocket_send_path() {
+        // The early-return slash branch MUST appear before `let sid =
+        // session_id.read().clone();` — otherwise a `/clear` would
+        // re-emit a user bubble + WS frame before the helper runs.
+        let idx_slash = MOD_RS
+            .find("trimmed.starts_with('/')")
+            .expect("starts_with('/') branch must be present");
+        let idx_sid = MOD_RS
+            .find("let sid = session_id.read().clone();")
+            .expect("WebSocket-path `let sid` must still be present");
+        assert!(
+            idx_slash < idx_sid,
+            "slash-prefix branch must come BEFORE the WebSocket path so /clear never round-trips",
+        );
     }
 }
