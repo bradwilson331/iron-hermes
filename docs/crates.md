@@ -231,7 +231,7 @@ ironhermes/
 | Item | Kind | Description |
 |------|------|-------------|
 | `install` / `uninstall` / `update` | fns | Primary lifecycle operations |
-| `InstallOutcome` / `UninstallOutcome` / `UpdateOutcome` | enums | Operation results |
+| `InstallOutcome` / `UninstallOutcome` / `UpdateOutcome` | structs | Operation results |
 | `HubSource` / `SkillBundle` / `SkillMeta` / `BundleFile` | trait + structs | Source abstraction and bundle representation |
 | `GitHubSource` / `GitHubTap` | structs | GitHub repo source with optional tap configuration |
 | `SkillsShBlobSource` / `BlobSkill` | structs | skills.sh blob backend |
@@ -284,7 +284,7 @@ Tool modules (each exports one or more `Tool` implementations):
 | `web_search` | `web_search` (Brave / Firecrawl search) |
 | `web_extract` | `web_extract` (Firecrawl or local HTML→Markdown) |
 | `web_local` | Shared HTML→Markdown helpers |
-| `browser_*` (13 modules) | `browser_navigate`, `browser_click`, `browser_type`, `browser_scroll`, `browser_press`, `browser_back`, `browser_close`, `browser_snapshot`, `browser_get_images`, `browser_console`, `browser_vision`, `browser_session` |
+| `browser_*` (12 modules) | `browser_navigate`, `browser_click`, `browser_type`, `browser_scroll`, `browser_press`, `browser_back`, `browser_close`, `browser_snapshot`, `browser_get_images`, `browser_console`, `browser_vision`, `browser_session` |
 | `memory_tool` | `memory_read`, `memory_write` |
 | `skills_tool` | `skills_install`, `skills_list`, `skills_search` |
 | `cronjob_tool` | `cronjob_create`, `cronjob_list`, `cronjob_delete` |

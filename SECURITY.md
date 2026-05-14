@@ -131,7 +131,7 @@ Primary implementation files audited:
 **Attack:** Robot sends partial response or no response; tool blocks the async executor indefinitely.
 **Disposition:** MITIGATE
 **Mitigation:** All sensor reads are wrapped in `timeout(Duration::from_secs(3), ...)`. Timeout expiry returns `Ok("Error: read timed out after 3s waiting for robot response")`.
-**Evidence:** `hexapod_tcp.rs:401-408` (battery), `hexapod_tcp.rs:411-419` (distance) — both use `tokio::time::timeout(Duration::from_secs(3), ...)`.
+**Evidence:** `hexapod_tcp.rs:400-409` (battery), `hexapod_tcp.rs:411-420` (distance) — both use `tokio::time::timeout(Duration::from_secs(3), ...)`.
 **Status:** CLOSED
 
 #### THREAT-D-03: TCP connect hangs indefinitely on unreachable robot
