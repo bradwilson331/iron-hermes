@@ -221,3 +221,87 @@ a { color: inherit; text-decoration: none; }
   border-color: var(--border-strong);
   box-shadow: none;
 }
+
+/* ─── Chrome positioning + body-class toggles (ported from app.html lines 42-112, 315-316, 320) ─── */
+
+/* Screen-label chip in the top bar */
+.breadcrumb {
+  position: fixed;
+  top: 22px;
+  left: 360px;   /* sits to the right of the wheel */
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gray);
+  pointer-events: none;
+}
+.breadcrumb .dot { width: 5px; height: 5px; background: var(--teal); box-shadow: 0 0 6px var(--teal); animation: blink 2.2s ease-in-out infinite; }
+.breadcrumb .v { color: var(--teal); font-weight: 700; }
+.breadcrumb .sep { color: var(--border); }
+
+/* Top-right system meta */
+.sys-meta {
+  position: fixed;
+  top: 22px;
+  right: 28px;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gray);
+  pointer-events: none;
+}
+.sys-meta .v { color: var(--teal); font-weight: 700; }
+
+/* Footer status (lighter than index.html ticker) */
+.app-footer {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: 30px;
+  border-top: 1px solid var(--border-faint);
+  background: rgba(13, 17, 23, 0.85);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  padding: 0 28px;
+  gap: 22px;
+  z-index: 50;
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--gray);
+}
+.app-footer .v { color: var(--teal); font-weight: 700; }
+.app-footer .sep { width: 1px; height: 12px; background: var(--border); }
+.app-footer-right { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+
+/* Hide HUD scanlines slightly so screen content stays legible */
+.scanlines { opacity: 0.35; }
+.hud-grid { opacity: 0.35; }
+body.no-scanlines .scanlines { display: none; }
+body.no-breadcrumb .breadcrumb,
+body.no-breadcrumb .sys-meta { display: none; }
+body.no-footer .app-footer { display: none; }
+body.has-rail   #wheel-rail { display: flex !important; }
+body:not(.has-rail) #wheel-rail,
+body:not(.on-chat)  #wheel-rail { display: none !important; }
+body.density-dense .screen { padding-top: 70px; gap: 16px; }
+body.density-dense .screen-title { font-size: 28px; }
+body.density-dense .card { padding: 12px 14px; }
+body.density-dense .panel { padding: 14px 16px; }
+
+/* When rail toggled ON, push chat right to clear it */
+body.has-rail.on-chat #screen-chat { padding-left: 360px; }
+body.has-rail.on-chat #screen-chat .screen-header { padding-left: 0; }
+
+@media (max-width: 1100px) {
+  #screen-chat { padding-left: 36px; padding-right: 20px; }
+  body.has-rail.on-chat #screen-chat { padding-left: 300px; }
+}
