@@ -1,3 +1,4 @@
+<!-- generated-by: gsd-doc-writer -->
 # SECURITY.md — Phase 27.1.1 (safe-foundation)
 
 **Generated:** 2026-05-11
@@ -33,7 +34,7 @@ Primary implementation files audited:
 **Attack:** LLM passes a string that looks like a valid action but is a typo, injection, or alternate encoding of a blocked command.
 **Disposition:** MITIGATE
 **Mitigation:** Compile-time exhaustive `match action { "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos" => { ... } other => Ok(format!("Action '{other}' is blocked...")) }`. No fuzzy matching — string equality only. The match fires before any I/O.
-**Evidence:** `hexapod_tcp.rs:225-302` — outer match arm with explicit 5-value allowlist; catch-all fires for any other string including `"Walk"`, `"WALK"`, `"calibration"`, etc.
+**Evidence:** `hexapod_tcp.rs:343-585` — outer match arm with explicit 15-value allowlist; catch-all fires for any other string including `"Walk"`, `"WALK"`, `"calibration"`, etc.
 **Status:** CLOSED
 
 #### THREAT-S-02: LLM spoofs direction/speed fields to inject a different movement profile
@@ -41,7 +42,7 @@ Primary implementation files audited:
 **Attack:** LLM passes `direction: "forward\0"` or `direction: "forward#0#0#99#0\n"` to escape the wire format.
 **Disposition:** MITIGATE
 **Mitigation:** `build_walk_wire` uses a `match` on the direction string — only four exact values (`"forward"`, `"backward"`, `"left"`, `"right"`) produce a branch; anything else falls to the safe default (forward). Speed is clamped with `.clamp(2, 10)` before being interpolated into the format string.
-**Evidence:** `hexapod_tcp.rs:66-75` — direction match; `hexapod_tcp.rs:67` — `speed.clamp(2, 10)`. The format string uses `{s}` (the clamped integer), not the raw direction string, so no `#`-injection is possible through the speed field.
+**Evidence:** `hexapod_tcp.rs:116-124` — direction match; `hexapod_tcp.rs:117` — `speed.clamp(2, 10)`. The format string uses `{s}` (the clamped integer), not the raw direction string, so no `#`-injection is possible through the speed field.
 **Status:** CLOSED
 
 ---
@@ -53,7 +54,7 @@ Primary implementation files audited:
 **Attack:** LLM passes `direction: "forward#0#0#99#0"` to append extra fields to the CMD_MOVE command.
 **Disposition:** MITIGATE
 **Mitigation:** `direction` is never interpolated directly into the wire string. `build_walk_wire` uses a hard-coded match; the direction value selects a fully pre-formed format string. The actual direction string never appears in the wire output.
-**Evidence:** `hexapod_tcp.rs:68-74` — each branch returns a complete `format!()` with only `{s}` (clamped speed integer) as the variable component.
+**Evidence:** `hexapod_tcp.rs:119-123` — each branch returns a complete `format!()` with only `{s}` (clamped speed integer) as the variable component.
 **Status:** CLOSED
 
 #### THREAT-T-02: LLM injects `#`-delimited fields via speed value
@@ -61,7 +62,7 @@ Primary implementation files audited:
 **Attack:** LLM passes `speed: 999` or a value outside the expected range to cause protocol confusion.
 **Disposition:** MITIGATE
 **Mitigation:** Speed is clamped to 2..=10 with `.clamp(2, 10)` before any use. The resulting integer cannot contain `#`, newlines, or other wire-protocol characters.
-**Evidence:** `hexapod_tcp.rs:67` — `let s = speed.clamp(2, 10);`
+**Evidence:** `hexapod_tcp.rs:117` — `let s = speed.clamp(2, 10);`
 **Status:** CLOSED
 
 #### THREAT-T-03: Command string constants could be mutated at runtime
@@ -81,7 +82,7 @@ Primary implementation files audited:
 **Attack:** If the robot moves unexpectedly, there is no evidence of what commands were sent or by which session.
 **Disposition:** MITIGATE (partial — ASVS L1 minimum)
 **Mitigation:** A `debug!` log is emitted at the entry of each permitted action: `debug!("hexapod_tcp: action={action} addr={addr}")`. This records the action name and destination address at the tracing `DEBUG` level. The existing IronHermes hook system (`HookRegistry` with JSONL event log) provides session-level event capture. The `addr` string contains the IP.
-**Evidence:** `hexapod_tcp.rs:238` — `debug!("hexapod_tcp: action={action} addr={addr}")`.
+**Evidence:** `hexapod_tcp.rs:359` — `debug!("hexapod_tcp: action={action} addr={addr}")`.
 **Caveat:** Logging is at DEBUG level; if the operator does not enable DEBUG tracing, commands are not logged. No separate hexapod-specific audit log is written. Accepted for Phase 1 / ASVS L1 — escalation path is to add an INFO-level structured event or hook emission in a future phase.
 **Status:** CLOSED (ASVS L1 acceptable; advisory: promote to INFO or hook emission for production use)
 
@@ -93,8 +94,8 @@ Primary implementation files audited:
 **Component:** `hexapod_tcp.rs::execute()`
 **Attack:** The robot's LAN IP address is written to logs, exposing internal network topology.
 **Disposition:** ACCEPT
-**Mitigation:** The `debug!` line at `hexapod_tcp.rs:238` logs `addr` which contains `{ip}:5002`. This is an operator-supplied env var (not user or LLM-controlled data). The IP appears only at DEBUG level, which requires explicit opt-in. Accepted: this is operator-configured infrastructure data, not user PII or secrets. Operators running in sensitive environments should set appropriate tracing filters.
-**Evidence:** `hexapod_tcp.rs:238` — `debug!("hexapod_tcp: action={action} addr={addr}")`.
+**Mitigation:** The `debug!` line at `hexapod_tcp.rs:359` logs `addr` which contains `{ip}:5002`. This is an operator-supplied env var (not user or LLM-controlled data). The IP appears only at DEBUG level, which requires explicit opt-in. Accepted: this is operator-configured infrastructure data, not user PII or secrets. Operators running in sensitive environments should set appropriate tracing filters.
+**Evidence:** `hexapod_tcp.rs:359` — `debug!("hexapod_tcp: action={action} addr={addr}")`.
 **Status:** CLOSED (accepted risk — operator env var, DEBUG level only)
 
 #### THREAT-I-02: TCP response data from robot leaks sensitive information
@@ -102,7 +103,7 @@ Primary implementation files audited:
 **Attack:** The robot's TCP response contains data beyond what is displayed (e.g., firmware version, calibration state, internal error codes).
 **Disposition:** ACCEPT
 **Mitigation:** Only `CMD_POWER` and `CMD_SONIC` responses are read. `parse_battery_response` extracts only two float fields; `parse_distance_response` extracts one distance field. Unparsed fields are discarded. No raw response bytes are returned to the LLM for battery/distance — only formatted human-readable strings.
-**Evidence:** `hexapod_tcp.rs:80-93` — both parse helpers extract only named fields; surplus fields silently drop.
+**Evidence:** `hexapod_tcp.rs:142-160` — both parse helpers extract only named fields; surplus fields silently drop.
 **Status:** CLOSED
 
 #### THREAT-I-03: HEXAPOD_IP env var readable by all tools in the same process
@@ -130,7 +131,7 @@ Primary implementation files audited:
 **Attack:** Robot sends partial response or no response; tool blocks the async executor indefinitely.
 **Disposition:** MITIGATE
 **Mitigation:** All sensor reads are wrapped in `timeout(Duration::from_secs(3), ...)`. Timeout expiry returns `Ok("Error: read timed out after 3s waiting for robot response")`.
-**Evidence:** `hexapod_tcp.rs:272-279` (battery), `hexapod_tcp.rs:281-290` (distance) — both use `tokio::time::timeout(Duration::from_secs(3), ...)`.
+**Evidence:** `hexapod_tcp.rs:401-408` (battery), `hexapod_tcp.rs:411-419` (distance) — both use `tokio::time::timeout(Duration::from_secs(3), ...)`.
 **Status:** CLOSED
 
 #### THREAT-D-03: TCP connect hangs indefinitely on unreachable robot
@@ -138,7 +139,7 @@ Primary implementation files audited:
 **Attack:** Robot is powered off or network is partitioned; `TcpStream::connect` hangs for OS-level TCP timeout (2+ minutes).
 **Disposition:** ACCEPT (partial mitigation)
 **Mitigation:** For sensor commands (`read_battery`, `read_distance`), the outer 3-second timeout covers the connect phase as well. For fire-and-forget commands (`walk`, `stop`, `relax_servos`), there is NO connect timeout — if the robot is unreachable, `TcpStream::connect` will hang until the OS-level TCP timeout fires (typically 75+ seconds on Linux). On connection error, the tool returns the D-17 error string.
-**Evidence:** `hexapod_tcp.rs:125-130` — `send_fire_and_forget` has no timeout wrapper. `hexapod_tcp.rs:245-249` — walk arm wraps only with `match`, not `timeout`.
+**Evidence:** `hexapod_tcp.rs:192-197` — `send_fire_and_forget` has no timeout wrapper. `hexapod_tcp.rs:362-380` — walk arm wraps only with `match`, not `timeout`.
 **Accepted risk:** Fire-and-forget commands are expected to be fast (local LAN). A future phase should add a connect timeout (e.g., 5 seconds) to `send_fire_and_forget`. Not a blocker for ASVS L1 Phase 1 supervised use, but should be addressed before unattended operation.
 **Status:** CLOSED (accepted risk with advisory — see OPEN_ADVISORIES below)
 
@@ -146,15 +147,15 @@ Primary implementation files audited:
 **Component:** `hexapod_tcp.rs::on_session_end()` / `registry.rs::call_session_end_hooks()`
 **Attack:** Tokio runtime shuts down before the spawned `send_stop_and_relax` future completes, leaving the robot walking.
 **Disposition:** ACCEPT
-**Mitigation:** `on_session_end` uses `tokio::spawn` (fire-and-forget). The spawned task reads `HEXAPOD_IP` and sends stop+relax. If the runtime shuts down before the task completes, the stop command may not reach the robot. This is documented in the code as "best-effort at shutdown" (`hexapod_tcp.rs:149`). The stop command is sent first, then relax — the critical safety action (stop) has first priority. The risk is accepted because: (a) the walk command itself is fire-and-forget with no acknowledgment; (b) the robot's own inactivity timer (Freenove server) will eventually halt motion; (c) this is Phase 1 supervised use.
-**Evidence:** `hexapod_tcp.rs:310-320` — `tokio::spawn(async move { if let Ok(ip) = env::var("HEXAPOD_IP") { ... } })`; comment at `hexapod_tcp.rs:149` — "All errors are swallowed — this is best-effort at shutdown."
+**Mitigation:** `on_session_end` uses `tokio::spawn` (fire-and-forget). The spawned task reads `HEXAPOD_IP` and sends stop+relax. If the runtime shuts down before the task completes, the stop command may not reach the robot. This is documented in the code as "best-effort at shutdown" (`hexapod_tcp.rs:216`). The stop command is sent first, then relax — the critical safety action (stop) has first priority. The risk is accepted because: (a) the walk command itself is fire-and-forget with no acknowledgment; (b) the robot's own inactivity timer (Freenove server) will eventually halt motion; (c) this is Phase 1 supervised use.
+**Evidence:** `hexapod_tcp.rs:597-602` — `tokio::spawn(async move { if let Ok(ip) = env::var("HEXAPOD_IP") { ... } })`; comment at `hexapod_tcp.rs:216` — "All errors are swallowed — this is best-effort at shutdown."
 **Status:** CLOSED (accepted risk — documented best-effort; physically supervised use)
 
 #### THREAT-D-05: CMD_RELAX toggle leaves robot in unexpected servo state
 **Component:** `hexapod_tcp.rs` — `RELAX_CMD`
 **Attack:** `CMD_RELAX` is a toggle on the Freenove server — calling it twice re-enables servos. Session-end halt sends stop then relax; if a prior `relax_servos` call was made, the session-end relax toggles servos back ON.
 **Disposition:** ACCEPT
-**Mitigation:** The toggle behavior is documented in the code: `hexapod_tcp.rs:23` — "NOTE: CMD_RELAX is a toggle — each invocation flips the servo-enabled state. Calling twice re-enables servos." The stop command (`CMD_MOVE#0#0#0#0#0\n`) is sent first and halts motion regardless of servo power state. `CMD_SERVOPOWER` would be more reliable but is blocked (D-16). Accepted: the stop command is the primary safety action; relax is supplementary.
+**Mitigation:** The toggle behavior is documented in the code: `hexapod_tcp.rs:21` — "NOTE: CMD_RELAX is a toggle — each invocation flips the servo-enabled state. Calling twice re-enables servos." The stop command (`CMD_MOVE#0#0#0#0#0\n`) is sent first and halts motion regardless of servo power state. `CMD_SERVOPOWER` would be more reliable but is blocked (D-16). Accepted: the stop command is the primary safety action; relax is supplementary.
 **Evidence:** `hexapod_tcp.rs:18-24` — toggle comment on `RELAX_CMD` constant.
 **Status:** CLOSED (accepted risk — documented; stop command is primary safety action)
 
@@ -166,8 +167,8 @@ Primary implementation files audited:
 **Component:** `hexapod_tcp.rs::execute()`
 **Attack:** LLM attempts `action: "calibration"` or `action: "servo_power"` to access hardware control functions beyond Phase 1 scope.
 **Disposition:** MITIGATE
-**Mitigation:** Compile-time exhaustive `match` with explicit 5-value allowlist. Catch-all arm returns D-16 blocked string and performs NO I/O — no TCP connection is opened, no env var is read.
-**Evidence:** `hexapod_tcp.rs:225-302` — outer match; catch-all at line 299: `other => Ok(format!("Action '{other}' is blocked — not permitted via hexapod_tcp. Never send this command."))`. Tests at lines 383-417 verify `calibration` and `servo_power` are blocked.
+**Mitigation:** Compile-time exhaustive `match` with explicit 15-value allowlist. Catch-all arm returns D-16 blocked string and performs NO I/O — no TCP connection is opened, no env var is read.
+**Evidence:** `hexapod_tcp.rs:343-585` — outer match; catch-all at line 582: `other => Ok(format!("Action '{other}' is blocked — not permitted via hexapod_tcp. Never send this command."))`. Tests at lines 664-701 verify `calibration` and `servo_power` are blocked.
 **Status:** CLOSED
 
 #### THREAT-E-02: Toolset config bypassed — hexapod_tcp visible when robotics: {enabled: false}
@@ -188,11 +189,11 @@ Primary implementation files audited:
 **Status:** CLOSED
 
 #### THREAT-E-04: is_available() bypass — tool callable even when HEXAPOD_IP is unset
-**Component:** `registry.rs::execute_tool()` vs `execute_tool_force()`
-**Attack:** A caller uses `execute_tool_force()` to bypass `is_available()` and invoke `hexapod_tcp` without `HEXAPOD_IP` being set.
+**Component:** `registry.rs::execute_tool()` vs `handle_tool_call()`
+**Attack:** A caller uses `handle_tool_call()` to bypass `is_available()` and invoke `hexapod_tcp` without `HEXAPOD_IP` being set.
 **Disposition:** ACCEPT
-**Mitigation:** `execute_tool_force` is documented at `registry.rs:391-398` as an internal method for `/toolset` commands that need to call tools reporting `is_available() = false`. `hexapod_tcp::execute()` independently reads `HEXAPOD_IP` at call time and returns `Ok("Error: HEXAPOD_IP env var not set...")` if absent. The defense-in-depth layer (the env var check inside `execute()`) operates independently of `is_available()`.
-**Evidence:** `hexapod_tcp.rs:228-235` — env var check at execute time; `registry.rs:391-439` — `execute_tool_force` documented usage.
+**Mitigation:** `handle_tool_call` is documented at `registry.rs:400-410` as an internal method for `/toolset` commands that need to call tools reporting `is_available() = false`. `hexapod_tcp::execute()` independently reads `HEXAPOD_IP` at call time and returns `Ok("Error: HEXAPOD_IP env var not set...")` if absent. The defense-in-depth layer (the env var check inside `execute()`) operates independently of `is_available()`.
+**Evidence:** `hexapod_tcp.rs:349-357` — env var check at execute time; `registry.rs:400-410` — `handle_tool_call` documented usage.
 **Status:** CLOSED
 
 #### THREAT-E-05: SSRF via LLM-controlled HEXAPOD_IP
@@ -200,7 +201,7 @@ Primary implementation files audited:
 **Attack:** LLM influences the value of `HEXAPOD_IP` to redirect TCP connections to an internal service (e.g., `169.254.169.254` cloud metadata).
 **Disposition:** MITIGATE
 **Mitigation:** `HEXAPOD_IP` is read from the process environment via `env::var("HEXAPOD_IP")`. The LLM has no mechanism to set environment variables in the IronHermes process. The env var is set by the operator before process start.
-**Evidence:** `hexapod_tcp.rs:228` — `let ip = match env::var("HEXAPOD_IP") { Ok(v) => v, ... }`. No code path allows LLM-supplied input to influence the env var value.
+**Evidence:** `hexapod_tcp.rs:349` — `let ip = match env::var("HEXAPOD_IP") { Ok(v) => v, ... }`. No code path allows LLM-supplied input to influence the env var value.
 **Status:** CLOSED
 
 ---
@@ -251,7 +252,7 @@ Primary implementation files audited:
 | AR-04 | THREAT-D-05 — CMD_RELAX toggle | Stop command is primary safety action; relax is supplementary | Future: use `CMD_SERVOPOWER` (currently blocked) or track toggle state in session |
 | AR-05 | THREAT-R-01 — DEBUG-only logging | ASVS L1 acceptable; commands visible when debug tracing enabled | Future: emit INFO-level structured event or hook emission per command |
 | AR-06 | THREAT-I-01 — IP in debug log | Operator env var; not PII or credential; DEBUG level only | Acceptable for all phases unless network topology is sensitive |
-| AR-07 | THREAT-E-04 — execute_tool_force bypass | Defense-in-depth: execute() independently validates env var; no actual bypass possible | No action needed — defense-in-depth is sufficient |
+| AR-07 | THREAT-E-04 — handle_tool_call bypass | Defense-in-depth: execute() independently validates env var; no actual bypass possible | No action needed — defense-in-depth is sufficient |
 
 ---
 

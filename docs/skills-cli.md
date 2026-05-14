@@ -1,3 +1,4 @@
+<!-- generated-by: gsd-doc-writer -->
 # `ironhermes skills` — CLI reference
 
 User-facing reference for the skill management CLI shipped in Phase 21.8. Manages remote skill download, install, list, update, and removal against [skills.sh](https://skills.sh) and any GitHub-hosted source.
@@ -184,14 +185,15 @@ Community sources from skills.sh require their `<owner>/<repo>` to be on this al
 | `GITHUB_API_BASE` | GitHub Trees API base (test/dev) | `https://api.github.com` |
 | `GITHUB_RAW_CONTENT_BASE` | Raw content base (test/dev) | `https://raw.githubusercontent.com` |
 
-`SkillsShBlobSource` enforces `https_only(true)` on its HTTP client by default. The TLS-only enforcement is **only** relaxed if at least one of the four override URLs above starts with `http://` — intended for test rigs and wiremock backends, not production. Production HTTPS is preserved unless you explicitly point at an `http://` mirror.
+`SkillsShBlobSource` enforces `https_only(true)` on its HTTP client by default. The TLS-only enforcement is **only** relaxed if at least one of the three override URLs above starts with `http://` — intended for test rigs and wiremock backends, not production. Production HTTPS is preserved unless you explicitly point at an `http://` mirror.
 
 ---
 
 ## Authentication
 
 GitHub Trees API and raw content fetches reuse Phase 19.1's auth machinery (`GitHubAuth`):
-- `GITHUB_TOKEN` env var (preferred)
+- `HERMES_GITHUB_TOKEN` env var (highest priority)
+- `GITHUB_TOKEN` env var
 - `gh auth token` shell-out fallback
 - Anonymous (rate-limited) if neither is configured
 

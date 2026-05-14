@@ -242,3 +242,69 @@ Set `IRONHERMES_PROFILE` in the environment (or in the systemd unit /
 ## License
 
 MIT
+
+## Installation
+
+**Option 1 — one-line installer (prebuilt binary):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
+```
+
+The installer detects your OS and architecture, downloads the appropriate prebuilt binary
+from GitHub Releases, scaffolds `~/.ironhermes/`, copies config templates, and adds the
+binary to `~/.local/bin`. Falls back to `cargo install` if no prebuilt binary is available
+for your platform.
+
+**Option 2 — build from source:**
+
+```bash
+# Prerequisites: Rust toolchain (https://rustup.rs)
+git clone https://github.com/bradwilson331/ironhermes
+cd ironhermes
+cargo build --release
+# Binary is at target/release/ironhermes
+```
+
+After installation, configure your API key:
+
+```bash
+mkdir -p ~/.ironhermes
+echo "OPENROUTER_API_KEY=your-key-here" > ~/.ironhermes/.env
+```
+
+## Usage
+
+**Interactive chat session:**
+
+```bash
+ironhermes
+```
+
+Starts a REPL where you can send prompts and the agent responds with tool calls
+and streaming output.
+
+**One-shot prompt:**
+
+```bash
+ironhermes -e "Summarize the files changed in the last git commit"
+```
+
+The agent runs the prompt to completion and exits.
+
+**Diagnose configuration:**
+
+```bash
+ironhermes doctor
+```
+
+Checks that required environment variables are set, the config file is valid,
+and all configured providers are reachable.
+
+**Check agent status:**
+
+```bash
+ironhermes status
+```
+
+Prints the active provider, model, and session store path.
