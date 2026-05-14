@@ -50,8 +50,6 @@ pub struct UiPrefs {
     /// Wheel diameter in CSS pixels — written to the `--wheel-size`
     /// custom property by Plan 05.
     pub wheel_size: f64,
-    /// HUD scanline overlay toggle.
-    pub scanlines: bool,
     /// Breadcrumb chip (`NODE HERMES-7 › BRIDGE › CHAT`) toggle.
     pub breadcrumb: bool,
     /// App-footer strip toggle.
@@ -67,7 +65,6 @@ impl Default for UiPrefs {
         Self {
             accent: AccentColor::Teal,
             wheel_size: 240.0,
-            scanlines: true,
             breadcrumb: true,
             footer: true,
             density: Density::Comfy,
@@ -241,7 +238,6 @@ mod tests {
         let p = UiPrefs::default();
         assert_eq!(p.accent, AccentColor::Teal);
         assert_eq!(p.wheel_size, 240.0);
-        assert!(p.scanlines);
         assert!(p.breadcrumb);
         assert!(p.footer);
         assert_eq!(p.density, Density::Comfy);
@@ -273,6 +269,31 @@ mod tests {
             result.is_err(),
             "partial UiPrefs JSON should fail to deserialize; got {result:?}"
         );
+    }
+
+    #[test]
+    fn legacy_scanlines_blob_round_trips_without_panic() {
+        // GAP-26.2.1-07-R3-FEATURE-REMOVAL migration test (Plan 15):
+        // Existing users who hydrated under Plan 14 have a localStorage
+        // `ih.ui.tweaks` blob that includes `"scanlines": true`. After Plan 15
+        // removes the field, the legacy blob must still deserialize successfully
+        // — serde's default `deny_unknown_fields = false` posture silently
+        // ignores the unknown `scanlines` key. Per D-26.2.1-15-C, we do NOT add
+        // `#[serde(default)]` to the struct; this test asserts the no-change
+        // posture is sufficient.
+        let legacy_blob = serde_json::json!({
+            "accent": "Teal",
+            "wheel_size": 240.0,
+            "scanlines": true,        // ← removed in Plan 15; must be ignored
+            "breadcrumb": true,
+            "footer": true,
+            "density": "Comfy",
+            "rail": true,
+        })
+        .to_string();
+        let parsed: UiPrefs = serde_json::from_str(&legacy_blob)
+            .expect("legacy blob with scanlines key must deserialize after Plan 15");
+        assert_eq!(parsed, UiPrefs::default());
     }
 
     #[test]
