@@ -458,7 +458,15 @@ mod tests {
         // 10, 13, 14 Branch (c), and the Plan 14 round-3 UAT confirmed the
         // triple-guard CSS still did not hide the overlay), the user decision
         // 2026-05-14 was to remove the scanlines feature entirely. This test
-        // guards against accidental re-introduction in any of three surfaces.
+        // guards against accidental re-introduction.
+        //
+        // Round-5 (2026-05-14): user reported the scrolling-line effect was
+        // still visible after Plan 15 shipped. Root cause: the visible
+        // animation lived under a synonym — `.scan-bar` (a 2px teal line
+        // animating translateY(0vh → 100vh) over 7s, infinite loop) added
+        // by Plan 26.2.1-03's HudChrome composer. The original 3-surface
+        // guard never considered the synonym. Scope expanded here to also
+        // forbid `.scan-bar` and its `scan-bar-move` keyframes.
 
         // (1) site.css — no `.scanlines` selectors, no `no-scanlines` body class
         assert!(
@@ -480,6 +488,23 @@ mod tests {
         assert!(
             !UI_PREFS_RS.contains("pub scanlines: bool"),
             "GAP-26.2.1-07-R3-FEATURE-REMOVAL: ui_prefs.rs must NOT contain `pub scanlines: bool` field",
+        );
+
+        // (4) Round-5 synonym closure — no `.scan-bar` selector or
+        //     `scan-bar-move` keyframes in site.css; no `class: \"scan-bar\"`
+        //     RSX in hud_chrome.rs. `.scan-bar` is the renamed scrolling-line
+        //     overlay that produced the same visual effect as `.scanlines`.
+        assert!(
+            !SITE_CSS.contains(".scan-bar"),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL (round-5): site.css must NOT contain `.scan-bar` selector",
+        );
+        assert!(
+            !SITE_CSS.contains("scan-bar-move"),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL (round-5): site.css must NOT contain `scan-bar-move` keyframes",
+        );
+        assert!(
+            !HUD_CHROME_RS.contains("class: \"scan-bar\""),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL (round-5): hud_chrome.rs must NOT render `class: \"scan-bar\"`",
         );
     }
 
