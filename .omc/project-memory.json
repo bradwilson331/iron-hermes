@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1778444871528,
+  "lastScanned": 1778713316450,
   "projectRoot": "/Users/twilson/code/ironhermes",
   "techStack": {
     "languages": [
@@ -56,14 +56,14 @@
       "path": "crates",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1778444871518,
+      "lastAccessed": 1778713316440,
       "keyFiles": []
     },
     "docker": {
       "path": "docker",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778444871520,
+      "lastAccessed": 1778713316440,
       "keyFiles": [
         "SOUL.md",
         "entrypoint.sh"
@@ -73,7 +73,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 1,
-      "lastAccessed": 1778444871520,
+      "lastAccessed": 1778713316442,
       "keyFiles": [
         "skills-cli.md"
       ]
@@ -82,7 +82,7 @@
       "path": "optional-skills",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778444871520,
+      "lastAccessed": 1778713316442,
       "keyFiles": [
         "DESCRIPTION.md"
       ]
@@ -91,14 +91,14 @@
       "path": "providers",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1778444871520,
+      "lastAccessed": 1778713316442,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
-      "fileCount": 1,
-      "lastAccessed": 1778444871520,
+      "fileCount": 2,
+      "lastAccessed": 1778713316442,
       "keyFiles": [
         "ci-gates.sh"
       ]
@@ -107,14 +107,14 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1778444871520,
+      "lastAccessed": 1778713316442,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1778444871520,
+      "fileCount": 3,
+      "lastAccessed": 1778713316443,
       "keyFiles": [
         "CACHEDIR.TAG"
       ]
@@ -123,7 +123,7 @@
       "path": "tmp",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1778444871521,
+      "lastAccessed": 1778713316443,
       "keyFiles": [
         "ComfyUI_LoRA_Guide.md",
         "ComfyUI_LoRA_Workflow_Examples.json",
@@ -136,7 +136,7 @@
       "path": "website",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1778444871521,
+      "lastAccessed": 1778713316443,
       "keyFiles": [
         "IronHermes Design System-handoff.zip"
       ]
@@ -144,15 +144,15 @@
   },
   "hotPaths": [
     {
-      "path": ".planning/ROADMAP.md",
-      "accessCount": 18,
-      "lastAccessed": 1778481341078,
+      "path": ".planning/STATE.md",
+      "accessCount": 40,
+      "lastAccessed": 1778783742050,
       "type": "file"
     },
     {
-      "path": ".planning/STATE.md",
-      "accessCount": 18,
-      "lastAccessed": 1778481346856,
+      "path": ".planning/ROADMAP.md",
+      "accessCount": 22,
+      "lastAccessed": 1778777923656,
       "type": "file"
     },
     {
@@ -306,6 +306,12 @@
       "type": "file"
     },
     {
+      "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-VERIFICATION.md",
+      "accessCount": 3,
+      "lastAccessed": 1778752564486,
+      "type": "file"
+    },
+    {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-01-SUMMARY.md",
       "accessCount": 2,
       "lastAccessed": 1778447785595,
@@ -411,6 +417,30 @@
       "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-gap-02-PLAN.md",
       "accessCount": 1,
       "lastAccessed": 1778481332140,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-01-SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1778713339794,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-02-SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1778713340693,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-03-SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1778713341130,
+      "type": "file"
+    },
+    {
+      "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-04-SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1778713342161,
       "type": "file"
     }
   ],
