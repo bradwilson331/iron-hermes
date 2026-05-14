@@ -5,11 +5,10 @@
 **Prerequisite:** `cargo check -p iron_hermes_ui` exits 0 AND `cargo test -p iron_hermes_ui --bin iron_hermes_ui` exits 0 AND `cargo test -p iron_hermes_ui --test wave0_smoke` exits 0 AND `cargo clippy -p iron_hermes_ui --all-features -- -D warnings` exits 0 AND `cargo check -p iron_hermes_ui --features legacy-shell` exits 0
 
 **How to run:**
-1. Start the server-side binary with `cargo run -p iron_hermes_ui --bin iron_hermes_ui --features server`.
-2. In a second terminal, start the WASM dev server with `dx serve --package iron_hermes_ui`.
-3. Open `http://localhost:8080/` in a Chromium-based browser (DevTools open for the localStorage + network checks).
-4. Walk through every section below in order; tick each box as you confirm the behavior.
-5. After every section is green, return to the planning workflow and run `/gsd-verify-work`.
+1. Start the dev server with `dx serve --package iron_hermes_ui`. (This is Dioxus 0.7's unified fullstack launcher — it builds the WASM client and runs the server in one process. The standalone `cargo run … --features server` path is NOT supported in this phase: it panics on a missing `target/debug/public` directory that only `dx serve` populates.)
+2. Open `http://localhost:8080/` in a Chromium-based browser (DevTools open for the localStorage + network checks).
+3. Walk through every section below in order; tick each box as you confirm the behavior.
+4. After every section is green, return to the planning workflow and run `/gsd-verify-work`.
 
 ---
 
