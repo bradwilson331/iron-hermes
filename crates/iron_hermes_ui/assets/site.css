@@ -221,3 +221,204 @@ a { color: inherit; text-decoration: none; }
   border-color: var(--border-strong);
   box-shadow: none;
 }
+
+/* ─── Chrome positioning + body-class toggles (ported from app.html lines 42-112, 315-316, 320) ─── */
+
+/* Screen-label chip in the top bar */
+.breadcrumb {
+  position: fixed;
+  top: 22px;
+  left: 360px;   /* sits to the right of the wheel */
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gray);
+  pointer-events: none;
+}
+.breadcrumb .dot { width: 5px; height: 5px; background: var(--teal); box-shadow: 0 0 6px var(--teal); animation: blink 2.2s ease-in-out infinite; }
+.breadcrumb .v { color: var(--teal); font-weight: 700; }
+.breadcrumb .sep { color: var(--border); }
+
+/* Top-right system meta */
+.sys-meta {
+  position: fixed;
+  top: 22px;
+  right: 28px;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gray);
+  pointer-events: none;
+}
+.sys-meta .v { color: var(--teal); font-weight: 700; }
+
+/* Footer status (lighter than index.html ticker) */
+.app-footer {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: 30px;
+  border-top: 1px solid var(--border-faint);
+  background: rgba(13, 17, 23, 0.85);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  padding: 0 28px;
+  gap: 22px;
+  z-index: 50;
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--gray);
+}
+.app-footer .v { color: var(--teal); font-weight: 700; }
+.app-footer .sep { width: 1px; height: 12px; background: var(--border); }
+.app-footer-right { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+
+/* Hide HUD scanlines slightly so screen content stays legible */
+.scanlines { opacity: 0.35; }
+.hud-grid { opacity: 0.35; }
+body.no-scanlines .scanlines { display: none; }
+body.no-breadcrumb .breadcrumb,
+body.no-breadcrumb .sys-meta { display: none; }
+body.no-footer .app-footer { display: none; }
+body.has-rail   #wheel-rail { display: flex !important; }
+body:not(.has-rail) #wheel-rail,
+body:not(.on-chat)  #wheel-rail { display: none !important; }
+body.density-dense .screen { padding-top: 70px; gap: 16px; }
+body.density-dense .screen-title { font-size: 28px; }
+body.density-dense .card { padding: 12px 14px; }
+body.density-dense .panel { padding: 14px 16px; }
+
+/* When rail toggled ON, push chat right to clear it */
+body.has-rail.on-chat #screen-chat { padding-left: 360px; }
+body.has-rail.on-chat #screen-chat .screen-header { padding-left: 0; }
+
+@media (max-width: 1100px) {
+  #screen-chat { padding-left: 36px; padding-right: 20px; }
+  body.has-rail.on-chat #screen-chat { padding-left: 300px; }
+}
+
+/* ─── Per-theme legacy-var overrides (aligns site.css legacy vars with tokens.css [data-theme] palettes) ─── */
+
+[data-theme="slate-dark"] {
+  --bg:            #0d1117;
+  --bg-deep:       #070a0e;
+  --bg-card:       #161b22;
+  --bg-card-hover: #1c2129;
+  --bg-input:      #11161d;
+  --border:        #30363d;
+  --border-faint:  #1f242c;
+  --border-strong: #404750;
+  --teal:          #39c5cf;
+  --teal-bright:   #56d4dd;
+  --teal-dim:      rgba(57, 197, 207, 0.55);
+  --teal-faint:    rgba(57, 197, 207, 0.15);
+  --teal-glow:     rgba(57, 197, 207, 0.32);
+  --text:          #e6edf3;
+  --text-dim:      #9aa4ad;
+  --gray:          #6e7681;
+  --gray-faint:    rgba(110, 118, 129, 0.45);
+  --green:         #3fb950;
+  --red:           #f85149;
+  --amber:         #d29922;
+}
+
+[data-theme="slate-light"] {
+  --bg:            #f5f3ee;
+  --bg-deep:       #e8e6e0;
+  --bg-card:       #ffffff;
+  --bg-card-hover: #f0eee8;
+  --bg-input:      #faf8f3;
+  --border:        #d4d0c4;
+  --border-faint:  #e4e1d6;
+  --border-strong: #aaa595;
+  --teal:          #1f9ba4;
+  --teal-bright:   #2db4be;
+  --teal-dim:      rgba(31, 155, 164, 0.55);
+  --teal-faint:    rgba(31, 155, 164, 0.15);
+  --teal-glow:     rgba(31, 155, 164, 0.32);
+  --text:          #1d2228;
+  --text-dim:      #555c66;
+  --gray:          #7a8088;
+  --gray-faint:    rgba(122, 128, 136, 0.45);
+  --green:         #2a9942;
+  --red:           #d83e3a;
+  --amber:         #b07810;
+}
+
+[data-theme="iron-dark"] {
+  --bg:            #0a0807;
+  --bg-deep:       #050404;
+  --bg-card:       #14110f;
+  --bg-card-hover: #1a1614;
+  --bg-input:      #0f0c0a;
+  --border:        #3a2e26;
+  --border-faint:  #251d18;
+  --border-strong: #4c3d33;
+  --teal:          #f0883e;
+  --teal-bright:   #ff9a4a;
+  --teal-dim:      rgba(240, 136, 62, 0.55);
+  --teal-faint:    rgba(240, 136, 62, 0.15);
+  --teal-glow:     rgba(240, 136, 62, 0.32);
+  --text:          #f0e5db;
+  --text-dim:      #b59e8c;
+  --gray:          #7d6d61;
+  --gray-faint:    rgba(125, 109, 97, 0.45);
+  --green:         #6abf4b;
+  --red:           #ff5a4a;
+  --amber:         #f0883e;
+}
+
+[data-theme="terminal-dark"] {
+  --bg:            #000000;
+  --bg-deep:       #000000;
+  --bg-card:       #0a0d0a;
+  --bg-card-hover: #121712;
+  --bg-input:      #040604;
+  --border:        #1f3a1f;
+  --border-faint:  #132113;
+  --border-strong: #2e5a2e;
+  --teal:          #3fb950;
+  --teal-bright:   #56e070;
+  --teal-dim:      rgba(63, 185, 80, 0.55);
+  --teal-faint:    rgba(63, 185, 80, 0.15);
+  --teal-glow:     rgba(63, 185, 80, 0.32);
+  --text:          #b5f5b5;
+  --text-dim:      #7ac57a;
+  --gray:          #4a8a4a;
+  --gray-faint:    rgba(74, 138, 74, 0.45);
+  --green:         #56e070;
+  --red:           #ff5a4a;
+  --amber:         #f0c14a;
+}
+
+[data-theme="parchment-light"] {
+  --bg:            #f4ecdc;
+  --bg-deep:       #e6dcc6;
+  --bg-card:       #fcf6e8;
+  --bg-card-hover: #f2eadb;
+  --bg-input:      #fbf3df;
+  --border:        #c8b896;
+  --border-faint:  #ddd0b3;
+  --border-strong: #a89366;
+  --teal:          #a67c2c;
+  --teal-bright:   #c5984a;
+  --teal-dim:      rgba(166, 124, 44, 0.55);
+  --teal-faint:    rgba(166, 124, 44, 0.15);
+  --teal-glow:     rgba(166, 124, 44, 0.32);
+  --text:          #2a2218;
+  --text-dim:      #645540;
+  --gray:          #8a785a;
+  --gray-faint:    rgba(138, 120, 90, 0.45);
+  --green:         #3a8a3a;
+  --red:           #c43a35;
+  --amber:         #a67c2c;
+}
