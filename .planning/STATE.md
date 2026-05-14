@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: verifying
-stopped_at: Plan 26.2.1-14 SUMMARY.md written; round-4 human-verify gate pending (UAT Test 6 + Test 9 re-run)
-last_updated: "2026-05-14T17:33:12.027Z"
+stopped_at: Plan 26.2.1-15 round-5 complete (scan-bar synonym closure); UAT human re-check pending (no horizontal line scrolls on dx serve)
+last_updated: "2026-05-14T19:35:00.000Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 47
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING (14/14 plans, round-3 gap closure complete)
-Plan: 14 of 14
-Plans: 14/14 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3)
-Status: Phase complete — ready for verification
+Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING (15/15 plans, round-5 synonym closure complete)
+Plan: 15 of 15
+Plans: 15/15 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3 + Plan 15 round-4 scanlines feature removal + Plan 15 round-5 scan-bar synonym closure)
+Status: Phase complete — pending human visual UAT re-check that no horizontal line scrolls on the rendered webpage
 Last activity: 2026-05-14
 
 ## Performance Metrics
@@ -387,6 +387,8 @@ Recent decisions affecting current work:
 - [Phase ?]: FROZEN.md committed in source Hexapod repo at 7ba53c1 — freeze is git-recorded per Claude's Discretion bullet 2
 - [Phase ?]: Plan 26.2.1-14: GAP-07-R3 closed via Branch (c) live-DOM-diagnostic-driven CSS triple-guard (html-prefix specificity 0,2,1->0,2,2 + visibility/opacity !important); D-26.2.1-14-C diagnostic-first GAP closure pattern established
 - [Phase ?]: Plan 26.2.1-14: GAP-09-R3 partially closed via .filter(|s| s.message_count > 0) post-filter in api.rs (D-26.2.1-14-B option i); D-26.2.1-14-D user-approved residual deferred to phase 26.2.12 (foreign-format directories with non-zero msg_count still leak)
+- [Phase ?]: Plan 26.2.1-15 (round-4): scanlines feature removal across 7 source files; removal-guard test `scanlines_feature_is_fully_removed` added; legacy serde migration via default tolerant posture; D-26.2.1-15-A/B/C established
+- [Phase ?]: Plan 26.2.1-15 (round-5): synonym closure — `.scan-bar` overlay (Plan 03 HudChrome) deleted from site.css + hud_chrome.rs; removal-guard test extended with 3 new asserts (`.scan-bar`, `scan-bar-move`, `class: "scan-bar"`); D-26.2.1-15-D in-place amendment / D-26.2.1-15-E textual-pattern guard preserved; lesson: textual-grep removal guards cannot catch synonyms — future feature removals should consider structural CSS pattern matching or wasm-bindgen-test runtime assertions
 
 ### Roadmap Evolution
 
@@ -449,6 +451,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:33:12.021Z
-Stopped at: Plan 26.2.1-14 SUMMARY.md written; round-4 human-verify gate pending (UAT Test 6 + Test 9 re-run)
-Resume file: None
+Last session: 2026-05-14T19:35:00.000Z
+Stopped at: Plan 26.2.1-15 round-5 complete (scan-bar synonym closure); UAT human re-check pending — confirm no horizontal line scrolls on dx serve
+Resume file: .planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-15-SUMMARY.md
