@@ -610,15 +610,8 @@ impl Tool for HexapodTcpTool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// Serialize env-var-mutating tests within this module.
-    /// NOTE: This mutex only protects against races within this module.
-    /// Run the full test binary with RUST_TEST_THREADS=1 to avoid races
-    /// with other modules that may also read HEXAPOD_IP.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::ENV_LOCK;
 
     // -----------------------------------------------------------------------
     // Test 1: Missing env var returns Ok(error) — D-12
