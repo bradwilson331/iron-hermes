@@ -930,10 +930,10 @@ Plans:
 **Goal:** Fix two bugs in `ironhermes-tools`: (1) `CMD_LED_OFF` sends the wrong Freenove wire command (`CMD_LED#0` → `CMD_LED_MOD#0`) causing LEDs to not turn off on the physical robot; (2) `hexapod_tcp` and `hexapod_video` tests race on `HEXAPOD_IP` via separate module-local `ENV_LOCK` statics — unify to a single crate-level lock in `lib.rs`. Add a static-invariant test locking the correct constant and blocking regression to the old one.
 **Requirements**: PROV-HEXAPOD
 **Depends on:** Phase 27.1.4
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 27.1.4.2-01-PLAN.md — Fix CMD_LED_OFF wire (CMD_LED_MOD#0), unify crate-level ENV_LOCK across hexapod_tcp+hexapod_video tests, add static-invariant regression gate
+- [x] 27.1.4.2-01-PLAN.md — Fix CMD_LED_OFF wire (CMD_LED_MOD#0), unify crate-level ENV_LOCK across hexapod_tcp+hexapod_video tests, add static-invariant regression gate
 
 ### Phase 27.1.4.1: gateway fallback gap (INSERTED)
 
@@ -968,7 +968,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
-- [ ] N/A — use Phase 27.1.4.2 instead
+- [x] N/A — use Phase 27.1.4.2 instead (completed 2026-05-14)
 
 ### Phase 28: Skills Trust Tiers
 
