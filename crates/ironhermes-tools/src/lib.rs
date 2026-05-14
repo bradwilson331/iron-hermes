@@ -34,3 +34,15 @@ pub use registry::{
 };
 pub use toolset_session::RegistryToolsetSession;
 pub use web_extract::WebExtractTool;
+
+// ---------------------------------------------------------------------------
+// Crate-level test utilities
+// ---------------------------------------------------------------------------
+
+/// Shared env-var serialization lock for all hexapod test modules.
+///
+/// Replaces the per-module `static ENV_LOCK` in `hexapod_tcp::tests` and
+/// `hexapod_video::tests`, which raced on `HEXAPOD_IP` across modules.
+/// All call sites use: `ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())`
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

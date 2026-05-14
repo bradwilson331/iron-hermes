@@ -53,9 +53,10 @@ pub(crate) const BUZZER_OFF_CMD: &str = "CMD_BUZZER#0\n";
 /// The Freenove server defaults led_mode='1' (solid color) so no mode-set preamble is needed.
 pub(crate) const CMD_LED: &str     = "CMD_LED";
 
-/// LED off command (D-03). Sets led_mode=0 which triggers color_wipe([0,0,0]) — the server's
-/// dedicated off path. Do NOT use CMD_LED#0#0#0\n (that sets color, not mode).
-pub(crate) const CMD_LED_OFF: &str = "CMD_LED#0\n";
+/// LED off command (D-03). Sends CMD_LED_MOD#0 on the mode channel — the Freenove server's
+/// dedicated off path (led.py CMD_LED_MOD handler: mode 0 → color_wipe([0,0,0])).
+/// Use CMD_LED_MOD (mode channel), not CMD_LED (color channel), for lights-out.
+pub(crate) const CMD_LED_OFF: &str = "CMD_LED_MOD#0\n";
 
 /// Camera gimbal pan range (server-enforced: server.py restrict_value(50, 180)). Per D-15.
 pub(crate) const CAMERA_PAN_MIN: i64  = 50;
@@ -609,15 +610,8 @@ impl Tool for HexapodTcpTool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// Serialize env-var-mutating tests within this module.
-    /// NOTE: This mutex only protects against races within this module.
-    /// Run the full test binary with RUST_TEST_THREADS=1 to avoid races
-    /// with other modules that may also read HEXAPOD_IP.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::ENV_LOCK;
 
     // -----------------------------------------------------------------------
     // Test 1: Missing env var returns Ok(error) — D-12
@@ -934,16 +928,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 22: CMD_LED_OFF constant equals "CMD_LED#0\n" — NOT "CMD_LED#0#0#0\n"
-    // The server's mode-0 off path is CMD_LED#0\n; CMD_LED#0#0#0\n would attempt
-    // to set color (0,0,0) instead of activating the dedicated off path (D-03).
+    // Test 22: CMD_LED_OFF constant equals "CMD_LED_MOD#0\n" (mode channel, not color channel)
     // -----------------------------------------------------------------------
     #[test]
     fn test_cmd_led_off_constant_value() {
-        // The correct wire is CMD_LED#0\n (mode 0 = server off path per D-03)
-        assert_eq!(CMD_LED_OFF, "CMD_LED#0\n");
-        // Explicitly confirm it is NOT the naive color-zero form
-        assert_ne!(CMD_LED_OFF, "CMD_LED#0#0#0\n");
+        // CMD_LED_MOD#0\n is the correct off command per Freenove led.py CMD_LED_MOD handler.
+        assert_eq!(CMD_LED_OFF, "CMD_LED_MOD#0\n");
     }
 
     // -----------------------------------------------------------------------
