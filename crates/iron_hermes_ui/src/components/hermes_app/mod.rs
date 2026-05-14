@@ -371,6 +371,10 @@ mod tests {
     //! That is the choice made here.
     const MOD_RS: &str = include_str!("mod.rs");
 
+    // GAP-26.2.1-07-R3 / GAP-26.2.1-09-R3 — Plan 14 regression sources.
+    const SITE_CSS: &str = include_str!("../../../assets/site.css");
+    const API_RS: &str = include_str!("../../server/api.rs");
+
     #[test]
     fn dispatch_slash_helper_exists() {
         assert!(
@@ -442,6 +446,47 @@ mod tests {
         assert!(
             idx_slash < idx_sid,
             "slash-prefix branch must come BEFORE the WebSocket path so /clear never round-trips",
+        );
+    }
+
+    #[test]
+    fn scanlines_toggle_hide_rule_exists_in_site_css() {
+        // GAP-26.2.1-07-R3 regression: the no-scanlines body-class hide rule
+        // must remain in site.css. Plan 14 Branch (c) bumped specificity
+        // (html prefix → 0,2,2) and added a triple-guard (display + visibility
+        // + opacity) — the rule body spans multiple lines, so we scan for the
+        // selector first, then assert the declaration block following it
+        // contains `display: none`. The minimum invariant is that some hide
+        // rule with `no-scanlines` in the selector still drives `display: none`.
+        let selector_idx = SITE_CSS.find("no-scanlines .scanlines").expect(
+            "GAP-26.2.1-07-R3: site.css must contain a selector matching `no-scanlines .scanlines`",
+        );
+        // Look for the declaration block that follows — bounded by the next
+        // `}` so we don't accidentally match a later unrelated rule.
+        let after_selector = &SITE_CSS[selector_idx..];
+        let block_end = after_selector
+            .find('}')
+            .expect("GAP-26.2.1-07-R3: selector must be followed by a closing `}`");
+        let block = &after_selector[..block_end];
+        assert!(
+            block.contains("display") && block.contains("none"),
+            "GAP-26.2.1-07-R3: the `no-scanlines .scanlines` rule must set `display: none` (Plan 14 Branch c triple-guard)",
+        );
+    }
+
+    #[test]
+    fn list_sessions_filters_by_message_count_in_api_rs() {
+        // GAP-26.2.1-09-R3 regression: list_sessions must filter the Vec<Session>
+        // by message_count > 0 before mapping to SessionInfo, otherwise foreign-
+        // format directories (only trajectories.jsonl) leak into the SESSIONS
+        // wedge and produce dead row-clicks.
+        assert!(
+            API_RS.contains(".filter(|s| s.message_count > 0)"),
+            "GAP-26.2.1-09-R3: api.rs list_sessions must include `.filter(|s| s.message_count > 0)` per D-26.2.1-14-B",
+        );
+        assert!(
+            API_RS.contains("GAP-26.2.1-09-R3"),
+            "GAP-26.2.1-09-R3: api.rs must cite the gap ID in the filter's explanatory comment",
         );
     }
 }
