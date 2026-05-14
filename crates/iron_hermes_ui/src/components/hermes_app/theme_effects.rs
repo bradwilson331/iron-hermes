@@ -8,7 +8,7 @@
 //! Allowed mutations (D-03 / D-24):
 //!   1. `<html data-theme="…">` attribute  (theme picker)
 //!   2. `<html style="--teal: …; --teal-bright: …">`  (accent override)
-//!   3. `<body class="no-scanlines no-breadcrumb no-footer has-rail
+//!   3. `<body class="no-breadcrumb no-footer has-rail
 //!                   density-dense on-chat">` toggles
 //!
 //! NOTHING ELSE in the DOM is touched here. Persistence to localStorage is
@@ -58,10 +58,9 @@ pub fn ThemeEffects() -> Element {
     });
 
     // -----------------------------------------------------------------------
-    // Effect 2 — toggle six classes on `<body>` from UiPrefs + Screen.
+    // Effect 2 — toggle five classes on `<body>` from UiPrefs + Screen.
     //
     // Per D-17 + RESEARCH Pattern 6 + app.html lines 102–112:
-    //   body.no-scanlines  .scanlines  { display: none }
     //   body.no-breadcrumb .breadcrumb { display: none }
     //   body.no-footer     .app-footer { display: none }
     //   body.has-rail.on-chat #wheel-rail { display: flex !important }
@@ -77,7 +76,6 @@ pub fn ThemeEffects() -> Element {
                 .and_then(|d| d.body())
             {
                 let list = body.class_list();
-                let _ = list.toggle_with_force("no-scanlines", !p.scanlines);
                 let _ = list.toggle_with_force("no-breadcrumb", !p.breadcrumb);
                 let _ = list.toggle_with_force("no-footer", !p.footer);
                 let _ = list.toggle_with_force("has-rail", p.rail);
