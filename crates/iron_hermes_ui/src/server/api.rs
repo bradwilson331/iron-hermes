@@ -57,8 +57,13 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
         .state_store
         .lock()
         .unwrap()
+        // GAP-26.2.1-09 / D-26.2.1-13-A (USER-APPROVED 2026-05-14):
+        // Pass None instead of Some(Platform::Web) so the SESSIONS wedge sources
+        // the full cross-platform on-disk session catalog (~/.ironhermes/sessions/).
+        // See .planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-UAT.md
+        // §"Round-2 D-02 Decision" for the user authorization quote.
         .list_sessions(
-            Some(&ironhermes_core::types::Platform::Web.to_string()),
+            None,
             100,
         )
         .map_err(|e| ServerFnError::new(format!("StateStore list sessions failed: {e}")))?;
