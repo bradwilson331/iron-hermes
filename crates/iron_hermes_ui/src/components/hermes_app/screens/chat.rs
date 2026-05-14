@@ -161,7 +161,11 @@ pub fn ScreenChat(is_active: bool) -> Element {
     let streaming = streaming_id.read().is_some();
     let (used, max) = *tokens.read();
     let sid_full = session_id.read().clone();
-    let sid_short: String = sid_full.chars().take(8).collect();
+    let sid_short: String = if sid_full.len() <= 8 {
+        sid_full.clone()
+    } else {
+        sid_full[sid_full.len() - 8..].to_string()
+    };
 
     rsx! {
         section {
