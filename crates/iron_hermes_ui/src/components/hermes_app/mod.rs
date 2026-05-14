@@ -374,6 +374,8 @@ mod tests {
     // GAP-26.2.1-07-R3 / GAP-26.2.1-09-R3 — Plan 14 regression sources.
     const SITE_CSS: &str = include_str!("../../../assets/site.css");
     const API_RS: &str = include_str!("../../server/api.rs");
+    const HUD_CHROME_RS: &str = include_str!("hud_chrome.rs");
+    const UI_PREFS_RS: &str = include_str!("../../ui_prefs.rs");
 
     #[test]
     fn dispatch_slash_helper_exists() {
@@ -450,27 +452,34 @@ mod tests {
     }
 
     #[test]
-    fn scanlines_toggle_hide_rule_exists_in_site_css() {
-        // GAP-26.2.1-07-R3 regression: the no-scanlines body-class hide rule
-        // must remain in site.css. Plan 14 Branch (c) bumped specificity
-        // (html prefix → 0,2,2) and added a triple-guard (display + visibility
-        // + opacity) — the rule body spans multiple lines, so we scan for the
-        // selector first, then assert the declaration block following it
-        // contains `display: none`. The minimum invariant is that some hide
-        // rule with `no-scanlines` in the selector still drives `display: none`.
-        let selector_idx = SITE_CSS.find("no-scanlines .scanlines").expect(
-            "GAP-26.2.1-07-R3: site.css must contain a selector matching `no-scanlines .scanlines`",
-        );
-        // Look for the declaration block that follows — bounded by the next
-        // `}` so we don't accidentally match a later unrelated rule.
-        let after_selector = &SITE_CSS[selector_idx..];
-        let block_end = after_selector
-            .find('}')
-            .expect("GAP-26.2.1-07-R3: selector must be followed by a closing `}`");
-        let block = &after_selector[..block_end];
+    fn scanlines_feature_is_fully_removed() {
+        // GAP-26.2.1-07-R3-FEATURE-REMOVAL regression (Plan 15):
+        // After 4 failed attempts to make the SCANLINES toggle engage (Plans
+        // 10, 13, 14 Branch (c), and the Plan 14 round-3 UAT confirmed the
+        // triple-guard CSS still did not hide the overlay), the user decision
+        // 2026-05-14 was to remove the scanlines feature entirely. This test
+        // guards against accidental re-introduction in any of three surfaces.
+
+        // (1) site.css — no `.scanlines` selectors, no `no-scanlines` body class
         assert!(
-            block.contains("display") && block.contains("none"),
-            "GAP-26.2.1-07-R3: the `no-scanlines .scanlines` rule must set `display: none` (Plan 14 Branch c triple-guard)",
+            !SITE_CSS.contains(".scanlines"),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL: site.css must NOT contain `.scanlines` selector",
+        );
+        assert!(
+            !SITE_CSS.contains("no-scanlines"),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL: site.css must NOT contain `no-scanlines` selector",
+        );
+
+        // (2) hud_chrome.rs — no `class: \"scanlines\"` RSX element
+        assert!(
+            !HUD_CHROME_RS.contains("class: \"scanlines\""),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL: hud_chrome.rs must NOT render `class: \"scanlines\"`",
+        );
+
+        // (3) ui_prefs.rs — no `pub scanlines: bool` struct field
+        assert!(
+            !UI_PREFS_RS.contains("pub scanlines: bool"),
+            "GAP-26.2.1-07-R3-FEATURE-REMOVAL: ui_prefs.rs must NOT contain `pub scanlines: bool` field",
         );
     }
 
