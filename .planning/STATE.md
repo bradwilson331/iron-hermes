@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: verifying
-stopped_at: Plan 26.2.1-15 round-5 complete (scan-bar synonym closure); UAT human re-check pending (no horizontal line scrolls on dx serve)
+status: complete
+stopped_at: Plan 26.2.1-15 round-5 complete (scan-bar synonym closure); UAT human re-check PASS (user-confirmed 2026-05-14: "pass - the scan-bar is gone and other features work")
 last_updated: "2026-05-14T19:35:00.000Z"
 last_activity: 2026-05-14
 progress:
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 Phase: 26.2.1 (new-web-ui-with-wheel-menu) — EXECUTING (15/15 plans, round-5 synonym closure complete)
 Plan: 15 of 15
 Plans: 15/15 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3 + Plan 15 round-4 scanlines feature removal + Plan 15 round-5 scan-bar synonym closure)
-Status: Phase complete — pending human visual UAT re-check that no horizontal line scrolls on the rendered webpage
+Status: Phase complete — UAT human visual re-check PASS (2026-05-14: scan-bar removed, other features regression-clean)
 Last activity: 2026-05-14
 
 ## Performance Metrics
@@ -452,5 +452,5 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-05-14T19:35:00.000Z
-Stopped at: Plan 26.2.1-15 round-5 complete (scan-bar synonym closure); UAT human re-check pending — confirm no horizontal line scrolls on dx serve
+Stopped at: Plan 26.2.1-15 round-5 complete (scan-bar synonym closure); UAT human re-check PASS — user confirmed scan-bar gone, other features clean
 Resume file: .planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-15-SUMMARY.md
