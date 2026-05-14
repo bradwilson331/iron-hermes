@@ -288,7 +288,17 @@ a { color: inherit; text-decoration: none; }
 /* Hide HUD scanlines slightly so screen content stays legible */
 .scanlines { opacity: 0.35; }
 .hud-grid { opacity: 0.35; }
-body.no-scanlines .scanlines { display: none !important; }
+/* GAP-26.2.1-07-R3 / D-26.2.1-14-C Branch (c): live DOM diagnostic
+ * confirmed body.no-scanlines lands but display:none !important at
+ * (0,2,1) failed to engage visually. Escalate specificity with html
+ * prefix (0,2,2) AND triple-guard with visibility + opacity so the
+ * element is non-visible regardless of any animation- or hydration-
+ * driven reassertion of `display`. See plan §"Diagnostic Result". */
+html body.no-scanlines .scanlines {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+}
 body.no-breadcrumb .breadcrumb,
 body.no-breadcrumb .sys-meta { display: none; }
 body.no-footer .app-footer { display: none; }
