@@ -176,7 +176,8 @@ ironhermes/
 |------|------|-------------|
 | `JobStore` | struct | Persistent list of scheduled cron jobs |
 | `CronJob` | struct | Job definition |
-| `parse_cron_expression` | fn | Parse standard 5-field cron expressions |
+| `parse_duration` | fn | Parse duration strings (e.g. `"5m"`, `"1h"`) into seconds |
+| `parse_schedule` | fn | Parse standard 5-field cron expressions into a `ScheduleParsed` |
 | `scan_cron_prompt` | fn | Extract cron expressions from natural language |
 | `TickResult` / `run_tick_check` | struct + fn | Evaluate which jobs are due; return due-job list |
 | `DeliveryTarget` | struct | Deliver a due job to the agent loop |
@@ -244,7 +245,7 @@ ironhermes/
 | `sanitize_name` / `sanitize_subpath` / `is_path_safe` / `sanitize_metadata` | fns | Path and metadata sanitization |
 | `GitHubAuth` | struct | GitHub OAuth token management |
 | `fetch_audit` / `AuditData` / `PartnerAudit` | fn + structs | Partner audit data retrieval |
-| `HubError` / `HubErrorKind` | structs | Typed hub errors |
+| `HubError` / `HubErrorKind` | enums | Typed hub errors |
 
 **Sibling dependencies:** `ironhermes-core`
 

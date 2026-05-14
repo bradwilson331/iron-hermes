@@ -54,13 +54,22 @@ The following top-level categories are present in the bundled library:
 | `devops` | DevOps skills — webhooks, infrastructure automation |
 | `diagramming` | Diagram creation and visualization |
 | `dogfood` | Systematic exploratory QA testing of web applications |
+| `domain` | Domain registration and DNS management |
+| `email` | Email workflows and automation |
+| `feeds` | RSS/Atom feed reading and monitoring |
 | `gaming` | Gaming and game-server skills |
+| `gifs` | GIF search and generation |
 | `github` | GitHub workflow automation |
 | `hermes-agent` | Complete guide to using and extending Hermes Agent |
 | `hexapod` | Protocol reference for the Freenove hexapod robot |
-| `media` | Media skills — YouTube, GIF search, audio |
+| `inference-sh` | Remote inference and model hosting via inference.sh |
+| `leisure` | Leisure and entertainment skills |
+| `mcp` | MCP server setup and tool integration |
+| `media` | Media skills — YouTube, audio processing |
 | `mlops` | Machine learning operations and model deployment |
+| `note-taking` | Note-taking and knowledge capture workflows |
 | `productivity` | Productivity tools — Linear, Notion, Google Workspace, PowerPoint, OCR |
+| `red-teaming` | Adversarial testing and red-team workflows |
 | `research` | Research workflows — arXiv, Polymarket, blog watching, paper writing |
 | `software-development` | Software development practices — TDD, code review, planning, debugging |
 | `social-media` | Social media automation |
@@ -240,7 +249,7 @@ The active toolset/tool snapshot is captured at session start from the merged to
 
 ## Prompt Slot Placement
 
-Skills occupy **slot 5** in the 9-layer system prompt assembly model:
+Skills occupy **slot 5** in the 10-layer system prompt assembly model:
 
 | Slot | Name | Content |
 |------|------|---------|
@@ -253,6 +262,7 @@ Skills occupy **slot 5** in the 9-layer system prompt assembly model:
 | 7 | Timestamp | Current time, turn number, session ID |
 | 8 | PlatformHints | CLI/Telegram/Discord/Slack platform notes |
 | 9 | SessionOverlay | Active personality overlay |
+| 10 | UserMessage | Current user turn content |
 
 Slots 1–6 are durable (stable across turns, Anthropic prompt cache hits them). Slots 7–10 are ephemeral (regenerated per turn).
 
