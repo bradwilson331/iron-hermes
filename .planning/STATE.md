@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: executing
+status: ready_to_plan
 stopped_at: context exhaustion at 75% (2026-05-14)
 last_updated: "2026-05-14T23:12:59.123Z"
 last_activity: 2026-05-14 -- Phase 27.1.4.2 planning complete
 progress:
   total_phases: 49
-  completed_phases: 36
+  completed_phases: 37
   total_plans: 194
   completed_plans: 193
-  percent: 99
+  percent: 76
 ---
 
 # Project State
@@ -25,17 +25,17 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 27.1.4.2 (hexapod-led-off-fails) — Not planned yet
-Plan: 15 of 15
+Phase: 28
+Plan: Not started
 Plans: 15/15 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3 + Plan 15 round-4 scanlines feature removal + Plan 15 round-5 scan-bar synonym closure)
-Status: Ready to execute
-Last activity: 2026-05-14 -- Phase 27.1.4.2 planning complete
+Status: Ready to plan
+Last activity: 2026-05-14
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 107
+- Total plans completed: 108
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -70,6 +70,7 @@ Last activity: 2026-05-14 -- Phase 27.1.4.2 planning complete
 | 27.1.4.1 | 2 | - | - |
 | 27.1.4.1.1 | 1 | - | - |
 | 26.3.2 | 1 | - | - |
+| 27.1.4.2 | 1 | - | - |
 
 **Recent Trend:**
 
