@@ -11,7 +11,7 @@
 //! 2. **UI Preferences block (writable)** — theme picker (5 themes),
 //!    accent picker (5 `AccentColor` variants), wheel-size slider
 //!    (240..=640 mirroring Plan 04 `MIN_SIZE` / `MAX_SIZE`), four boolean
-//!    toggles (scanlines / breadcrumb / footer / rail), and a comfy/dense
+//!    toggles (breadcrumb / footer / rail), and a comfy/dense
 //!    density two-state. All writes target `Signal<UiPrefs>` plus the
 //!    theme `Signal<String>` (consumed via the B-03 `ThemeContext`
 //!    newtype) plus `Signal<WheelState>` for the wheel-size mirror.
@@ -62,7 +62,6 @@ pub fn ScreenSettings(is_active: bool) -> Element {
         cur_theme,
         cur_accent,
         cur_wheel_size,
-        cur_scanlines,
         cur_breadcrumb,
         cur_footer,
         cur_rail,
@@ -74,7 +73,6 @@ pub fn ScreenSettings(is_active: bool) -> Element {
             t.clone(),
             p.accent,
             p.wheel_size,
-            p.scanlines,
             p.breadcrumb,
             p.footer,
             p.rail,
@@ -232,20 +230,6 @@ pub fn ScreenSettings(is_active: bool) -> Element {
                         },
                     }
                     span { class: "row-sub", "{cur_wheel_size as u32}px" }
-                }
-
-                // ── Boolean toggle: Scanlines ────────────────────────
-                div { class: "field-row",
-                    div { class: "field-label",
-                        "Scanlines"
-                        span { class: "help", "HUD scanline overlay" }
-                    }
-                    button {
-                        class: "btn btn--sm",
-                        class: if cur_scanlines { "is-active" },
-                        onclick: move |_| prefs.with_mut(|p| p.scanlines = !p.scanlines),
-                        if cur_scanlines { "ON" } else { "OFF" }
-                    }
                 }
 
                 // ── Boolean toggle: Breadcrumb ───────────────────────

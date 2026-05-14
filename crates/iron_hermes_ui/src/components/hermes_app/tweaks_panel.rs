@@ -6,7 +6,7 @@
 //! matches the prototype pattern and avoids signal teardown on close.
 //!
 //! Controls write back through three context signals:
-//!   - `Signal<UiPrefs>` — accent, wheel_size, scanlines, breadcrumb,
+//!   - `Signal<UiPrefs>` — accent, wheel_size, breadcrumb,
 //!     footer, density, rail (each `with_mut` write)
 //!   - `ThemeContext.0`  — the active theme slug (`Signal<String>`)
 //!   - `Signal<WheelState>` — wheel_size slider mirrors UiPrefs.wheel_size
@@ -57,7 +57,6 @@ pub fn TweaksPanel() -> Element {
     let current_theme = theme.read().clone();
     let current_accent = prefs.read().accent;
     let current_wheel_size = prefs.read().wheel_size;
-    let current_scanlines = prefs.read().scanlines;
     let current_breadcrumb = prefs.read().breadcrumb;
     let current_footer = prefs.read().footer;
     let current_rail = prefs.read().rail;
@@ -175,20 +174,9 @@ pub fn TweaksPanel() -> Element {
                     }
                 }
 
-                // ---- Chrome toggles (scanlines / breadcrumb / footer / rail) ----
+                // ---- Chrome toggles (breadcrumb / footer / rail) ----
                 div { class: "tweaks-section",
                     div { class: "tweaks-label", "Chrome" }
-                    div { class: "tweaks-row",
-                        span { class: "lbl", "Scanlines" }
-                        button {
-                            class: "tweaks-toggle",
-                            class: if current_scanlines { "is-on" },
-                            onclick: move |_| {
-                                prefs.with_mut(|p| p.scanlines = !p.scanlines);
-                            },
-                            if current_scanlines { "ON" } else { "OFF" }
-                        }
-                    }
                     div { class: "tweaks-row",
                         span { class: "lbl", "Breadcrumb" }
                         button {
