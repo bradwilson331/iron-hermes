@@ -44,12 +44,12 @@ call time, not at session start.
 | `buzzer_on` | Activate onboard buzzer |
 | `buzzer_off` | Deactivate onboard buzzer |
 | `led` | Set all 8 LEDs to a solid RGB color (0–255 per channel) |
-| `led_off` | Turn LEDs off via the server's dedicated mode-0 path |
+| `led_off` | Turn all 8 LEDs off (`CMD_LED#0#0#0\n` — color channel at zero; fast ledIndex path) |
 
 **Blocked actions** (return an error string without any network attempt):
 - `calibration` — moves servos to uncalibrated positions; risk of hardware damage
 - `servo_power` — cuts servo power mid-stance; use `relax_servos` instead
-- `chase`, `blink`, `breathing`, `rainbow` (LED animation modes) — async interference with solid-color control
+- `CMD_LED_MOD` (all modes) — mode 0 triggers a 350 ms `colorWipe` corrupted by `stop_thread` (LEDs stay lit); modes 2–5 (`chase`, `blink`, `breathing`, `rainbow`) are async animations that interfere with solid-color control. Use `led_off` (`CMD_LED#0#0#0\n`) instead of any `CMD_LED_MOD` command.
 
 **Session-end safety halt:** `HexapodTcpTool::on_session_end()` fires when the IronHermes
 session closes. It spawns an async task that sends `CMD_MOVE#0#0#0#0#0\n` (stop) then
@@ -182,7 +182,7 @@ The authoritative protocol reference for agent use is `skills/hexapod/SKILL.md`.
 - All 15 `hexapod_tcp` actions with wire format, parameter ranges, and clamping rules
 - `hexapod_video` connection details and usage pattern
 - Camera gimbal joint-axis behavior (why `camera_pan` sends `y=90` and `camera_tilt` sends `x=115`)
-- LED off vs. LED color-zero distinction (`CMD_LED#0\n` vs. `CMD_LED#0#0#0\n`)
+- LED off behavior: `led_off` sends `CMD_LED#0#0#0\n` (color channel, fast ledIndex path); why `CMD_LED_MOD#0` must not be used (350 ms `colorWipe` corrupted by `stop_thread`)
 - Rotate timing constant (`ROTATE_MS_PER_DEGREE = 20`) and calibration note
 - Session-end safety halt behavior
 
@@ -228,7 +228,7 @@ The following capabilities are deferred to future phases:
 - **Background video streaming** (`start_stream` / `stop_stream`) — continuous frames to a
   ring buffer; not needed for single-frame navigation decisions
 - **`CMD_LED_MOD` animated modes** (chase, blink, breathing, rainbow) — blocked pending an
-  async-safe LED control design
+  async-safe LED control design; `CMD_LED_MOD#0` (off) is also blocked — use `led_off` instead
 - **DEFCON-tiered security for symlink bypass in `skills.rs`** (CR-01) — deferred to a future
   DEFCON phase, unrelated to hexapod
 - **Video stream + vision at scale** — Phase 27.1.4 delivers single-frame capture; multi-frame
