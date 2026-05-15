@@ -1054,6 +1054,22 @@ Plans:
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
 
+### Phase 32.1: Agent cron execution (INSERTED)
+
+**Goal:** Port the agent-runner side of Python `hermes-agent/cron/scheduler.py::run_job` (~600 LOC) into a new `ironhermes-cron-runner` workspace crate at full feature parity, close the incidental parity gaps catalogued in `crates/ironhermes-cron/PARITY.md` §11 (except `JobState::Error`, deferred), and add `hermes cron tick` / `hermes cron daemon` / `hermes cron trigger` CLI commands so cron runs without the Telegram gateway.
+**Requirements:** CRON-PARITY-SCOPE, CRON-JOB-FIELDS, CRON-ORIGIN-DEFENSIVE, CRON-ACTIVITY-TRACKER, CRON-AGENT-INTERRUPT, CRON-STORE-FSYNC, CRON-STORE-CHMOD, CRON-STORE-CTRLCHAR-REPAIR, CRON-STORE-TRIGGER-JOB, CRON-STORE-ONESHOT-GRACE, CRON-STORE-DYNAMIC-GRACE, CRON-STORE-DUE-RECOVERY, CRON-PARSER-ANCHORING, CRON-DELIVERY-MULTI-TARGET, CRON-DELIVERY-ALLOWLIST, CRON-DELIVERY-HOME-CHANNEL, CRON-DELIVERY-LEGACY-ENV, CRON-DELIVERY-THREAD-ENV, CRON-DELIVERY-ORIGIN-FALLBACK, CRON-DELIVERY-FSYNC-CHMOD, CRON-RUNNER-CRATE, CRON-RUNNER-TASKLOCALS, CRON-RUNNER-SCRIPT-SANDBOX, CRON-RUNNER-WAKE-GATE, CRON-RUNNER-PROMPT-ASSEMBLY, CRON-RUNNER-PROMPT-RESCAN, CRON-RUNNER-INACTIVITY-TIMEOUT, CRON-RUNNER-CONTEXT, CRON-RUNNER-RUN-JOB, CRON-RUNNER-NO-AGENT, CRON-RUNNER-WAKE-SKIP, CRON-RUNNER-EMPTY-SOFT-FAIL, CRON-RUNNER-MULTI-DELIVERY, CRON-RUNNER-WRAP-RESPONSE, CRON-RUNNER-MEDIA-EXTRACTION, CRON-RUNNER-LAST-DELIVERY-ERROR, CRON-RUNNER-TICK-LOOP, CRON-RUNNER-WORKDIR-PARTITION, CRON-CLI-TRIGGER, CRON-CLI-TICK-ONCE, CRON-CLI-DAEMON, CRON-GATEWAY-MIGRATION, CRON-GATEWAY-CALL-NEW-CRATE
+**Depends on:** Phase 32
+**Plans:** 7 plans
+
+Plans:
+- [ ] 32.1-01-PLAN.md — PARITY.md scope amend + CronJob field additions + defensive JobOrigin deserializer (Wave 1)
+- [ ] 32.1-02-PLAN.md — AgentLoop activity tracker API + interrupt() (Wave 1)
+- [ ] 32.1-03-PLAN.md — JobStore hardening: fsync, chmod, control-char repair, trigger_job, dynamic grace, due-job recovery, compute_next_run anchoring (Wave 2)
+- [ ] 32.1-04-PLAN.md — Multi-target delivery routing: allowlist, env-var tables, resolve_delivery_targets plural API, save_job_output fsync+chmod (Wave 2)
+- [ ] 32.1-05-PLAN.md — New ironhermes-cron-runner crate skeleton + script_runner + prompt_builder + timeout primitives (Wave 3)
+- [ ] 32.1-06-PLAN.md — Runner orchestration: CronRunnerContext, run_cron_job, dispatch_all_targets, run_tick_loop (Wave 4)
+- [ ] 32.1-07-PLAN.md — CLI Trigger/Tick/Daemon subcommands + gateway migration to runner crate (Wave 5)
+
 ### Phase 33: Autonomous Skill Creation & Self-Improvement
 
 **Goal:** Land the agent-curated skill side of the Learning Loop. At task completion, the agent evaluates whether the path is worth documenting via heuristic (5+ tool calls / error recovery / user correction / non-obvious workflow) and autonomously writes a SKILL.md following the agentskills.io standard. The new `skill_manage` tool exposes 6 actions (create/patch/edit/delete/write_file/remove_file) with `patch` preferred for token-efficient updates.
