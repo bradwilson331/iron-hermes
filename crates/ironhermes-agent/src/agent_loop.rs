@@ -137,6 +137,13 @@ pub struct AgentLoop {
     /// Optional cancellation token for cooperative shutdown (D-21).
     /// When cancelled, the loop returns early with "Cancelled by parent".
     cancel_token: Option<CancellationToken>,
+    // Phase 32.1 Plan 02: activity tracker fields.
+    // Wrapped in Arc<std::sync::Mutex> so `activity_summary()` can be called from
+    // a separate tokio task while `run()` is in-flight (cron runner polling pattern).
+    // Pattern mirrors `active_skills: Arc<std::sync::Mutex<...>>` (with_active_skills).
+    activity_last: Arc<std::sync::Mutex<std::time::Instant>>,
+    activity_kind: Arc<std::sync::Mutex<ActivityKind>>,
+    current_tool: Arc<std::sync::Mutex<Option<String>>>,
     /// Shared iteration budget handle (PROV-09, PROV-10, D-15).
     /// Tracks total turns across parent + child agents and exposes the
     /// pressure-tier ladder (None / Caution70 / Warning90 / Stop100) via
@@ -225,6 +232,11 @@ impl AgentLoop {
             request_id: uuid::Uuid::new_v4().to_string(),
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             cancel_token: None,
+            // Phase 32.1 Plan 02: activity tracker — initialise to ApiCall sentinel
+            // because the first observable event in any run() is the LLM API call.
+            activity_last: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
+            activity_kind: Arc::new(std::sync::Mutex::new(ActivityKind::ApiCall)),
+            current_tool: Arc::new(std::sync::Mutex::new(None)),
             budget: None,
             last_pressure_tier_seen: PressureTier::None,
             fallback_client: None,
@@ -574,6 +586,69 @@ impl AgentLoop {
         ));
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         Self::new(client, registry, 1)
+    }
+
+    // ── Phase 32.1 Plan 02: activity tracker public API ────────────────────
+
+    /// Return a live snapshot of the most-recent observable agent activity.
+    ///
+    /// Non-async — uses `std::sync::Mutex` so it can be called from any
+    /// tokio task (including the cron runner's polling loop) without holding
+    /// an async lock that could interact with the agent's own awaits.
+    pub fn activity_summary(&self) -> ActivitySummary {
+        let last = *self.activity_last.lock().expect("activity_last poisoned");
+        let kind = *self.activity_kind.lock().expect("activity_kind poisoned");
+        let tool = self.current_tool.lock().expect("current_tool poisoned").clone();
+        ActivitySummary {
+            seconds_since: last.elapsed().as_secs_f64(),
+            last_kind: kind,
+            current_tool: tool,
+        }
+    }
+
+    /// Interrupt the agent by cancelling its `CancellationToken`.
+    ///
+    /// Non-async, safe to call from any context. When the token fires, the
+    /// next `token.cancelled()` await in `run()` resolves and the loop returns
+    /// early with `StopReason::Cancelled`. If no token is configured (e.g. in
+    /// unit tests), this is a no-op with a warning log.
+    pub fn interrupt(&self, reason: &str) {
+        tracing::warn!(reason = %reason, "AgentLoop interrupted");
+        if let Some(ref token) = self.cancel_token {
+            token.cancel();
+        } else {
+            tracing::warn!("AgentLoop::interrupt called but no CancellationToken is set — no-op");
+        }
+    }
+
+    /// Return `true` when the underlying `CancellationToken` has been cancelled.
+    /// Returns `false` when no token is configured.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .map(|t| t.is_cancelled())
+            .unwrap_or(false)
+    }
+
+    /// Bump the activity tracker to `kind` with an optional in-flight tool name.
+    ///
+    /// Called from three sites inside `run()` and `call_llm_streaming()`:
+    ///   1. Before each LLM API call — `(ApiCall, None)`
+    ///   2. Before each tool dispatch — `(ToolCall, Some(name))`
+    ///   3. After each tool dispatch — `(ToolCall, None)` (clears in-flight name)
+    ///   4. On each streamed content delta — `(StreamToken, None)`
+    fn mark_activity(&self, kind: ActivityKind, current_tool: Option<String>) {
+        *self.activity_last.lock().expect("activity_last poisoned") = std::time::Instant::now();
+        *self.activity_kind.lock().expect("activity_kind poisoned") = kind;
+        *self.current_tool.lock().expect("current_tool poisoned") = current_tool;
+    }
+
+    /// Test-only shim for `mark_activity`. Exposes the internal helper so
+    /// tests can verify the bump → `activity_summary()` round-trip without
+    /// exercising a full `run()`.
+    #[cfg(test)]
+    pub fn mark_activity_for_test(&self, kind: ActivityKind, current_tool: Option<String>) {
+        self.mark_activity(kind, current_tool);
     }
 
     /// Check the current pressure tier and return advisory text if this
@@ -3001,6 +3076,41 @@ mod memory_provider_wiring_tests {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 32.1 Plan 02: activity tracker types, accessors, and tests
+// ---------------------------------------------------------------------------
+
+/// Classifies the most-recent observable event inside `AgentLoop::run`.
+/// Used by the cron runner to distinguish idle LLM-wait from active tool execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    /// The agent just issued (or is waiting on) an LLM API call.
+    /// This is also the sentinel "no activity yet" value — it is the first
+    /// observable event in any `run()` so initialising to it is correct.
+    ApiCall,
+    /// A tool call was dispatched (or is in-flight).
+    ToolCall,
+    /// A streamed content delta was received from the LLM.
+    StreamToken,
+}
+
+/// Snapshot of the most-recent observable agent activity.
+/// Returned by `AgentLoop::activity_summary()` and consumed by the cron runner
+/// to implement the inactivity-tracked timeout (CONTEXT.md §Timeout & resilience).
+#[derive(Debug, Clone)]
+pub struct ActivitySummary {
+    /// Seconds elapsed since the last activity bump.
+    /// Computed as `Instant::now() - last_bump` at the moment of the call — not
+    /// a stored elapsed value — so successive calls yield monotonically advancing
+    /// readings without any additional state.
+    pub seconds_since: f64,
+    /// Kind of the most-recent observable event.
+    pub last_kind: ActivityKind,
+    /// Name of the tool currently in-flight, if any.
+    /// `None` when no tool call is currently being dispatched.
+    pub current_tool: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Phase 25.3 Plan 9 (D-T-1 / D-T-3): trajectory wireup tests
 // ---------------------------------------------------------------------------
 
@@ -3055,6 +3165,121 @@ mod trajectory_wireup_tests {
         assert!(
             agent.trajectory_writer.is_none(),
             "Phase 25.3 D-T-3: AgentLoop::new MUST default trajectory_writer to None"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 32.1 Plan 02 Task 1: activity tracker unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod activity_tracker_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Test 1: `AgentLoop::for_tests()` constructs an instance whose
+    /// `activity_summary()` returns a fresh `ActivitySummary` with
+    /// `seconds_since` < 1.0, `last_kind == ActivityKind::ApiCall` (sentinel),
+    /// and `current_tool == None`.
+    #[test]
+    fn activity_summary_initial_state() {
+        let agent = AgentLoop::for_tests();
+        let summary = agent.activity_summary();
+        assert!(
+            summary.seconds_since < 1.0,
+            "seconds_since should be near-zero after construction, got {}",
+            summary.seconds_since
+        );
+        assert_eq!(
+            summary.last_kind,
+            ActivityKind::ApiCall,
+            "initial sentinel kind should be ApiCall"
+        );
+        assert_eq!(
+            summary.current_tool, None,
+            "initial current_tool should be None"
+        );
+    }
+
+    /// Test 2: Calling `activity_summary()` twice with a 50ms sleep between
+    /// them yields a second `seconds_since` greater than the first, proving
+    /// the timestamp is computed live from `Instant::now()` rather than a
+    /// frozen elapsed value.
+    #[test]
+    fn activity_summary_seconds_since_advances() {
+        let agent = AgentLoop::for_tests();
+        let first = agent.activity_summary().seconds_since;
+        std::thread::sleep(Duration::from_millis(50));
+        let second = agent.activity_summary().seconds_since;
+        assert!(
+            second > first,
+            "second seconds_since ({second}) must be > first ({first}) after 50ms sleep"
+        );
+    }
+
+    /// Test 3: `interrupt("inactivity timeout")` cancels the agent's underlying
+    /// `CancellationToken`, which is reflected by `is_cancelled()` returning `true`.
+    #[test]
+    fn interrupt_cancels_token() {
+        let token = CancellationToken::new();
+        let agent = AgentLoop::for_tests().with_cancellation_token(token.clone());
+        assert!(!agent.is_cancelled(), "should not be cancelled before interrupt");
+        agent.interrupt("inactivity timeout");
+        assert!(
+            agent.is_cancelled(),
+            "is_cancelled() should return true after interrupt()"
+        );
+        assert!(
+            token.is_cancelled(),
+            "the underlying CancellationToken should also be cancelled"
+        );
+    }
+
+    /// Test 4: `mark_activity_for_test` bumps the tracker — verified by reading
+    /// `activity_summary()` afterwards and asserting the updated kind and tool name.
+    #[test]
+    fn mark_activity_for_test_updates_summary() {
+        let agent = AgentLoop::for_tests();
+        // Start: sentinel ApiCall / None
+        assert_eq!(agent.activity_summary().last_kind, ActivityKind::ApiCall);
+        assert_eq!(agent.activity_summary().current_tool, None);
+
+        // Bump to ToolCall with a named tool
+        agent.mark_activity_for_test(ActivityKind::ToolCall, Some("web_read".into()));
+        let summary = agent.activity_summary();
+        assert_eq!(
+            summary.last_kind,
+            ActivityKind::ToolCall,
+            "last_kind should reflect the bumped kind"
+        );
+        assert_eq!(
+            summary.current_tool,
+            Some("web_read".to_string()),
+            "current_tool should hold the in-flight tool name"
+        );
+        assert!(
+            summary.seconds_since < 1.0,
+            "seconds_since should be near-zero just after bump, got {}",
+            summary.seconds_since
+        );
+
+        // Post-dispatch reset: clear current_tool
+        agent.mark_activity_for_test(ActivityKind::ToolCall, None);
+        let after = agent.activity_summary();
+        assert_eq!(after.last_kind, ActivityKind::ToolCall);
+        assert_eq!(after.current_tool, None, "current_tool should be cleared after reset");
+    }
+
+    /// Test 5: `interrupt()` on an agent without a CancellationToken is a no-op
+    /// (does not panic). `is_cancelled()` returns `false`.
+    #[test]
+    fn interrupt_without_token_is_noop() {
+        let agent = AgentLoop::for_tests(); // no with_cancellation_token()
+        agent.interrupt("should not panic");
+        assert!(
+            !agent.is_cancelled(),
+            "is_cancelled() should be false when no token is configured"
         );
     }
 }
