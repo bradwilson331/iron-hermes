@@ -877,3 +877,282 @@ mod tests {
         assert!(store.remove_job(&job.id).is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 32.1 Plan 03 hardening tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod store_phase_32_1_tests {
+    use super::*;
+    use crate::job::{JobState, RepeatConfig, ScheduleParsed};
+    use chrono::Duration;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn tmp_store() -> (TempDir, JobStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let store = JobStore::open(cron_dir).expect("store");
+        (dir, store)
+    }
+
+    fn tmp_store_dir() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        (dir, cron_dir)
+    }
+
+    fn interval_sched(minutes: u32) -> ScheduleParsed {
+        ScheduleParsed::Interval {
+            minutes,
+            display: format!("every {}m", minutes),
+        }
+    }
+
+    fn once_sched(run_at: DateTime<Utc>) -> ScheduleParsed {
+        ScheduleParsed::Once {
+            run_at,
+            display: "once".to_string(),
+        }
+    }
+
+    fn add_interval_job(store: &mut JobStore, name: &str, minutes: u32) -> CronJob {
+        store
+            .add_job(
+                name,
+                "do something",
+                interval_sched(minutes),
+                format!("every {}m", minutes),
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add_job")
+    }
+
+    // Test 1: save() produces a valid JSON file
+    #[test]
+    fn test1_save_produces_valid_json() {
+        let (_dir, mut store) = tmp_store();
+        add_interval_job(&mut store, "job1", 60);
+        store.save().expect("save");
+        let contents = fs::read_to_string(&store.path).expect("read back");
+        let parsed: serde_json::Value = serde_json::from_str(&contents).expect("valid json");
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    // Test 2 (Unix only): permissions after open and save
+    #[cfg(unix)]
+    #[test]
+    fn test2_unix_permissions_after_open_and_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, cron_dir) = tmp_store_dir();
+        let mut store = JobStore::open(cron_dir.clone()).expect("open");
+
+        // Directory should be 0700
+        let dir_meta = fs::metadata(&cron_dir).expect("dir meta");
+        let dir_mode = dir_meta.permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "cron dir must be 0700, got {:o}", dir_mode);
+
+        // After save, jobs.json should be 0600
+        add_interval_job(&mut store, "perm-job", 60);
+        store.save().expect("save");
+        let file_meta = fs::metadata(&store.path).expect("file meta");
+        let file_mode = file_meta.permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "jobs.json must be 0600, got {:o}", file_mode);
+    }
+
+    // Test 3: control-char repair — bell byte in name is repaired
+    #[test]
+    fn test3_control_char_repair() {
+        let (_dir, cron_dir) = tmp_store_dir();
+        fs::create_dir_all(&cron_dir).unwrap();
+
+        // Write a jobs.json with a bare ASCII 0x07 (BEL) in the name field
+        let raw = "[{\"id\":\"x\",\"name\":\"\u{0007}bad\",\"prompt\":\"p\",\
+            \"skills\":[],\
+            \"schedule\":{\"kind\":\"interval\",\"minutes\":60,\"display\":\"every 60m\"},\
+            \"schedule_display\":\"every 60m\",\
+            \"repeat\":{\"times\":null,\"completed\":0},\
+            \"enabled\":true,\"state\":\"scheduled\",\
+            \"paused_at\":null,\"paused_reason\":null,\"deliver\":\"local\",\
+            \"origin\":null,\"created_at\":\"2026-01-01T00:00:00Z\",\
+            \"next_run_at\":null,\"last_run_at\":null,\
+            \"last_status\":null,\"last_error\":null}]";
+        let jobs_path = cron_dir.join("jobs.json");
+        fs::write(&jobs_path, raw).unwrap();
+
+        let store = JobStore::open(cron_dir.clone()).expect("open with ctrl chars");
+        assert_eq!(store.list_jobs().len(), 1, "must load 1 job after repair");
+        // BEL (0x07) must be replaced — name must not contain the byte 0x07
+        let name = &store.list_jobs()[0].name;
+        assert!(!name.contains('\u{0007}'), "name must not contain BEL after repair: {:?}", name);
+        assert!(name.contains("bad"), "name must still contain 'bad'");
+
+        // The repaired file must not contain bare 0x07 either
+        let repaired = fs::read(jobs_path).expect("read repaired");
+        assert!(!repaired.contains(&0x07u8), "repaired file must not contain bare 0x07");
+    }
+
+    // Test 4: trigger_job by id sets next_run_at ≈ now
+    #[test]
+    fn test4_trigger_job_by_id() {
+        let (_dir, cron_dir) = tmp_store_dir();
+        let mut store = JobStore::open(cron_dir.clone()).expect("open");
+        let job = add_interval_job(&mut store, "trig-id", 60);
+
+        let before = Utc::now() - Duration::seconds(5);
+        store.trigger_job(&job.id).expect("trigger by id");
+        let after = Utc::now() + Duration::seconds(5);
+
+        // Reload and verify
+        let store2 = JobStore::open(cron_dir).expect("reload");
+        let updated = store2.get_job(&job.id).expect("job must exist");
+        let nra = updated.next_run_at.expect("next_run_at must be Some");
+        assert!(nra >= before && nra <= after, "next_run_at={:?} not within 5s window", nra);
+    }
+
+    // Test 5: trigger_job by name (case-insensitive)
+    #[test]
+    fn test5_trigger_job_by_name() {
+        let (_dir, cron_dir) = tmp_store_dir();
+        let mut store = JobStore::open(cron_dir.clone()).expect("open");
+        let job = add_interval_job(&mut store, "daily-sync", 60);
+
+        let before = Utc::now() - Duration::seconds(5);
+        store.trigger_job("daily-sync").expect("trigger by name");
+        let after = Utc::now() + Duration::seconds(5);
+
+        let store2 = JobStore::open(cron_dir).expect("reload");
+        let updated = store2.get_job(&job.id).expect("job must exist");
+        let nra = updated.next_run_at.expect("next_run_at must be Some");
+        assert!(nra >= before && nra <= after, "next_run_at={:?} not within 5s window", nra);
+    }
+
+    // Test 6: trigger_job nonexistent returns Err with "job not found"
+    #[test]
+    fn test6_trigger_job_nonexistent_returns_err() {
+        let (_dir, mut store) = tmp_store();
+        let err = store.trigger_job("nope").unwrap_err();
+        assert!(
+            err.to_string().contains("job not found"),
+            "error must mention 'job not found', got: {}",
+            err
+        );
+    }
+
+    // Test 7: dynamic grace — Interval(10min) job 200s past is still due (grace=300s)
+    #[test]
+    fn test7_dynamic_grace_interval_within_grace() {
+        let (_dir, mut store) = tmp_store();
+        let job = add_interval_job(&mut store, "grace-test", 10);
+        // Set next_run_at to 200s ago (within 300s grace for 10min interval)
+        store.jobs[0].next_run_at = Some(Utc::now() - Duration::seconds(200));
+
+        let due = store.get_due_jobs();
+        assert_eq!(due.len(), 1, "job within dynamic grace (200s < 300s) should be due");
+        assert_eq!(due[0].id, job.id);
+    }
+
+    // Test 8: oneshot grace — Once job 60s past is still due (grace=120s)
+    #[test]
+    fn test8_oneshot_grace_within_window() {
+        let (_dir, mut store) = tmp_store();
+        let run_at = Utc::now() - Duration::seconds(60);
+        let sched = once_sched(run_at);
+        let job = store
+            .add_job("once-grace", "p", sched, "once", "local", vec![], None)
+            .expect("add");
+        // Set next_run_at to None so we exercise the Once recovery path
+        store.jobs[0].next_run_at = None;
+        // last_run_at stays None (never ran)
+
+        let due = store.get_due_jobs();
+        assert_eq!(due.len(), 1, "Once job 60s past should be due within 120s grace");
+        assert_eq!(due[0].id, job.id);
+    }
+
+    // Test 9: oneshot beyond grace — Once job 200s past is NOT due
+    #[test]
+    fn test9_oneshot_beyond_grace_not_due() {
+        let (_dir, mut store) = tmp_store();
+        let run_at = Utc::now() - Duration::seconds(200);
+        let sched = once_sched(run_at);
+        store
+            .add_job("once-old", "p", sched, "once", "local", vec![], None)
+            .expect("add");
+        store.jobs[0].next_run_at = None;
+        // last_run_at stays None
+
+        let due = store.get_due_jobs();
+        assert!(due.is_empty(), "Once job 200s past should NOT be due (beyond 120s grace)");
+    }
+
+    // Test 10: due recovery for recurring — None next_run_at gets recomputed
+    #[test]
+    fn test10_due_recovery_recurring_recomputes_next_run() {
+        let (_dir, mut store) = tmp_store();
+        add_interval_job(&mut store, "recover-interval", 1); // 1-min interval
+        // Wipe next_run_at to simulate corrupted/missing field
+        store.jobs[0].next_run_at = None;
+        store.jobs[0].last_run_at = None;
+
+        let _due = store.get_due_jobs();
+        // After get_due_jobs, next_run_at must be Some (recomputed)
+        assert!(
+            store.jobs[0].next_run_at.is_some(),
+            "next_run_at must be recomputed after recovery"
+        );
+    }
+
+    // Test 11: due recovery for Once — None next_run_at within grace returns job as due
+    #[test]
+    fn test11_due_recovery_once_within_grace() {
+        let (_dir, mut store) = tmp_store();
+        let run_at = Utc::now() - Duration::seconds(30); // 30s ago — within 120s grace
+        let sched = once_sched(run_at);
+        let job = store
+            .add_job("once-recover", "p", sched, "once", "local", vec![], None)
+            .expect("add");
+        store.jobs[0].next_run_at = None;
+        store.jobs[0].last_run_at = None; // never ran
+
+        let due = store.get_due_jobs();
+        assert_eq!(due.len(), 1, "Once job 30s past with None next_run should be due");
+        assert_eq!(due[0].id, job.id);
+    }
+
+    // Test 12: jobs_mut accessor allows in-place mutation, persists via save
+    #[test]
+    fn test12_jobs_mut_accessor() {
+        let (_dir, cron_dir) = tmp_store_dir();
+        let mut store = JobStore::open(cron_dir.clone()).expect("open");
+        add_interval_job(&mut store, "job-a", 30);
+        add_interval_job(&mut store, "job-b", 60);
+        let job_b_id = store.jobs[1].id.clone();
+
+        // Mutate via jobs_mut
+        {
+            let jobs = store.jobs_mut();
+            jobs[1].last_delivery_error = Some("test-err".to_string());
+        }
+        store.save().expect("save after jobs_mut");
+
+        // Reload and verify
+        let store2 = JobStore::open(cron_dir).expect("reload");
+        assert_eq!(
+            store2.get_job(&job_b_id).unwrap().last_delivery_error.as_deref(),
+            Some("test-err"),
+            "job-b last_delivery_error must persist"
+        );
+        // job-a must be unchanged
+        let job_a_id = store.jobs[0].id.clone();
+        assert_eq!(
+            store2.get_job(&job_a_id).unwrap().last_delivery_error,
+            None,
+            "job-a last_delivery_error must remain None"
+        );
+    }
+}
