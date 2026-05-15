@@ -185,15 +185,13 @@ pub async fn run_job_script(script_name: &str) -> Result<ScriptOutcome> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_util::env_lock as shared_env_lock;
     use tempfile::TempDir;
 
-    // Serialize all env-mutating tests to avoid data races.
-    // Returns the guard even if the lock was poisoned by a prior test panic.
+    // Crate-wide lock — serializes against `prompt_builder` tests that also
+    // mutate IRONHERMES_HOME. Returns a guard that survives lock poisoning.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let m = LOCK.get_or_init(|| Mutex::new(()));
-        m.lock().unwrap_or_else(|e| e.into_inner())
+        shared_env_lock().lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // Helper: create a script file in <tmpdir>/scripts/ and set IRONHERMES_HOME.

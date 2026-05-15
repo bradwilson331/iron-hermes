@@ -234,6 +234,7 @@ mod tests {
     use chrono::Utc;
     use ironhermes_cron::{CronJob, ScheduleParsed};
     use std::fs;
+    use crate::test_util::env_lock;
     use tempfile::TempDir;
 
     fn make_job(prompt: &str) -> CronJob {
@@ -360,8 +361,8 @@ mod tests {
         let file_content = "This is the context output.";
         fs::write(output_dir.join(file_name), file_content).unwrap();
 
-        // Point IRONHERMES_HOME to tempdir
-        // SAFETY: test-only; single-threaded (--test-threads=1)
+        // Point IRONHERMES_HOME to tempdir; serialize against other env-mutating tests.
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let mut job = make_job("use the context");
@@ -393,7 +394,7 @@ mod tests {
         let big_content = "x".repeat(10000);
         fs::write(output_dir.join("20260515_120000.md"), &big_content).unwrap();
 
-        // SAFETY: test-only; single-threaded (--test-threads=1)
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let mut job = make_job("use context");
@@ -426,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn test6_context_from_uuid_guard_rejects_non_uuid() {
         let tmp = TempDir::new().unwrap();
-        // SAFETY: test-only; single-threaded (--test-threads=1)
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let mut job = make_job("test");
@@ -452,7 +453,7 @@ mod tests {
         fs::create_dir_all(&output_dir).unwrap();
         fs::write(output_dir.join("20260515_120000.md"), "ctx content").unwrap();
 
-        // SAFETY: test-only; single-threaded (--test-threads=1)
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let (_skill_dir, registry) = make_skill_registry(&[("my-skill", "skill body text")]);
