@@ -750,86 +750,44 @@ impl GatewayRunner {
             let adapter_tick = adapter.clone();
 
             join_set.spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
                 // UAT gap 2 / test 13: first-tick-after-boot burst guard.
-                // Fast-forward any stale scheduled jobs BEFORE the first real
-                // tick so a gateway restart doesn't burst-fire jobs whose
-                // next_run_at drifted into the recent past while the gateway
-                // was down.
-                let mut first_tick = true;
-
-                loop {
-                    tokio::select! {
-                        _ = tick_cancel.cancelled() => {
-                            info!("Cron tick task shutting down");
-                            break;
-                        }
-                        _ = interval.tick() => {
-                            if first_tick {
-                                first_tick = false;
-                                match fast_forward_backlog(&job_store_tick).await {
-                                    Ok(n) if n > 0 => {
-                                        info!(
-                                            "First-tick burst guard fast-forwarded {} job(s)",
-                                            n
-                                        );
-                                    }
-                                    Ok(_) => {
-                                        debug!("First-tick burst guard: no backlog");
-                                    }
-                                    Err(e) => {
-                                        error!("First-tick burst guard error: {}", e);
-                                        // Fall through — a failed burst guard is
-                                        // not a reason to skip future scheduling.
-                                    }
-                                }
-                                // Do NOT run run_tick_check on the first tick.
-                                // The next interval.tick() (60s later) will run
-                                // the normal path.
-                                continue;
-                            }
-
-                            match ironhermes_cron::run_tick_check(&job_store_tick).await {
-                                Ok((due_jobs, result, _lock_guard)) => {
-                                    if result.jobs_run > 0 {
-                                        info!("Tick: {} jobs due", due_jobs.len());
-                                    }
-                                    for job in &due_jobs {
-                                        info!("Job due: {} ({})", job.name, job.id);
-
-                                        // D-01 / D-04 / D-14 / T-07.3-04: call extracted
-                                        // helper; single-job failure does NOT panic the
-                                        // tick task (helper returns Result<()>).
-                                        if let Err(e) = execute_cron_job(
-                                            job,
-                                            &job_store_tick,
-                                            &skill_registry_tick,
-                                            &tool_registry_tick,
-                                            &memory_manager_tick,
-                                            &hook_registry_tick,
-                                            &config_tick,
-                                            Some(adapter_tick.clone() as Arc<dyn TgSendApi>),
-                                        )
-                                        .await
-                                        {
-                                            error!(
-                                                "execute_cron_job failed for job {} ({}): {}",
-                                                job.name, job.id, e
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Tick error: {}", e);
-                                }
-                            }
-                        }
+                // Fast-forward any stale scheduled jobs BEFORE entering the
+                // run_tick_loop so a gateway restart doesn't burst-fire jobs
+                // whose next_run_at drifted into the recent past.
+                match fast_forward_backlog(&job_store_tick).await {
+                    Ok(n) if n > 0 => {
+                        info!(
+                            "First-tick burst guard fast-forwarded {} job(s)",
+                            n
+                        );
+                    }
+                    Ok(_) => {
+                        debug!("First-tick burst guard: no backlog");
+                    }
+                    Err(e) => {
+                        error!("First-tick burst guard error: {}", e);
+                        // Fall through — a failed burst guard is not a reason
+                        // to skip the tick loop.
                     }
                 }
+
+                // Construct CronRunnerContext from the gateway's shared Arcs
+                // and delegate to ironhermes_cron_runner::run_tick_loop.
+                // Plan 32.1-07: execute_cron_job + dispatch_delivery moved to
+                // crates/ironhermes-cron-runner.
+                let cron_ctx = std::sync::Arc::new(ironhermes_cron_runner::CronRunnerContext {
+                    job_store: job_store_tick,
+                    skill_registry: skill_registry_tick,
+                    tool_registry: tool_registry_tick,
+                    memory_manager: memory_manager_tick,
+                    hook_registry: hook_registry_tick,
+                    config: config_tick,
+                    mcp_manager: None, // gateway's McpManager is not yet threaded into the tick task
+                    tg_client: Some(adapter_tick.clone() as Arc<dyn TgSendApi>),
+                });
+                ironhermes_cron_runner::run_tick_loop(cron_ctx, tick_cancel).await;
             });
-            info!("Cron tick task started (60s interval)");
+            info!("Cron tick task started (60s interval, delegating to ironhermes-cron-runner)");
         }
 
         // --- 11. Run dispatch loop concurrently with shutdown signal ---
@@ -993,241 +951,11 @@ async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> 
     Ok(forwarded)
 }
 
-/// Execute a single cron job: build a fresh AgentLoop, run it with the resolved full_input,
-/// fire MessageReceived + ResponseSent hook events, and persist the real LLM output via
-/// ironhermes_cron::complete_job_run. Extracted from the tick task closure so tests can
-/// invoke it directly without spinning up the 60s interval timer.
-///
-/// Per D-09: fresh AgentLoop per call.
-/// Per D-10: construction mirrors handler.rs::run_agent except it omits streaming and
-///           tool-progress callbacks (cron is headless — no adapter to stream to).
-/// Per D-14: `complete_job_run` success flag reflects AgentLoop::run() Result.
-/// Per T-07.3-03: agent errors are sanitized to "[Agent error: {display}]" — raw LLM payloads
-///                never flow into JSONL/webhooks.
-/// Dispatch job output to a delivery platform (Phase 22.4.2.1 Plan 02).
-///
-/// Called after `complete_job_run` returns `Ok(Some(target))`. Separated into its own
-/// `pub` function so `tests/cron_delivery.rs` (integration test) can call it directly
-/// without running a full agent loop. D-03 test-coverage mandate.
-///
-/// Non-fatal per D-09: any send error is logged via `tracing::error!` and the function
-/// returns normally — `complete_job_run(success=true)` already fired.
-pub async fn dispatch_delivery(
-    target: Option<ironhermes_cron::DeliveryTarget>,
-    output: &str,
-    tg_client: &Option<Arc<dyn TgSendApi>>,
-    job_name: &str,
-) {
-    let Some(target) = target else {
-        // Ok(None) path — local delivery or [SILENT]
-        return;
-    };
-    if target.platform == "telegram" {
-        if let Some(tg) = tg_client {
-            if let Err(e) = tg
-                .send_message(&target.chat_id, output, target.thread_id.as_deref())
-                .await
-            {
-                error!(
-                    "Delivery failed for job {} -> telegram:{}: {}",
-                    job_name, target.chat_id, e
-                );
-                // D-09: delivery failure is non-fatal — complete_job_run already succeeded
-            }
-        } else {
-            warn!(
-                "Job {} has deliver=telegram but no TgClient wired",
-                job_name
-            );
-        }
-    } else {
-        warn!(
-            "Unsupported delivery platform '{}' for job {} — skipping (webhook deferred)",
-            target.platform, job_name
-        );
-    }
-}
-
-/// Per T-07.3-04: returns `Result<()>` so a single failing job does not panic the tick task.
-pub(crate) async fn execute_cron_job(
-    job: &ironhermes_cron::CronJob,
-    job_store: &Arc<Mutex<ironhermes_cron::JobStore>>,
-    skill_registry: &Option<Arc<SkillRegistry>>,
-    tool_registry: &Arc<RwLock<ironhermes_tools::ToolRegistry>>,
-    memory_manager: &Option<Arc<TokioMutex<MemoryManager>>>,
-    hook_registry: &Option<Arc<ironhermes_hooks::HookRegistry>>,
-    config: &Config,
-    tg_client: Option<Arc<dyn TgSendApi>>,
-) -> Result<()> {
-    // D-02: full_input (no underscore); content unchanged from existing logic
-    let full_input = if let Some(skill_reg) = skill_registry {
-        let skill_context = resolve_skill_context(skill_reg, &job.skills);
-        if skill_context.is_empty() {
-            job.prompt.clone()
-        } else {
-            format!("{}\n\n---\n\n{}", skill_context, job.prompt)
-        }
-    } else {
-        job.prompt.clone()
-    };
-
-    // D-12: chat_id from job origin (falls back to job.id), platform = "cron"
-    let cron_chat_id = job
-        .origin
-        .as_ref()
-        .map(|o| o.chat_id.clone())
-        .unwrap_or_else(|| job.id.clone());
-    let request_id = uuid::Uuid::new_v4().to_string();
-
-    // D-04 / D-06 / D-07: fire MessageReceived with cron metadata (same registry Arc
-    // as Telegram-triggered runs use — the Arc is cloned from self.hook_registry in the
-    // tick task closure capture block).
-    if let Some(registry) = hook_registry {
-        registry.fire(ironhermes_hooks::HookEvent::new(
-            &request_id,
-            ironhermes_hooks::HookEventKind::MessageReceived {
-                platform: "cron".to_string(),
-                chat_id: cron_chat_id.clone(),
-                content_preview: ironhermes_hooks::event::preview(&full_input, 200),
-            },
-        ));
-    }
-
-    // D-09 / D-10 / D-11: build a FRESH AgentLoop per job, mirroring handler.rs
-    // but omitting stream_callback + tool_callback (cron path has no adapter to push to).
-    let resolver = ProviderResolver::build(config)?;
-    let max_turns = config.agent.max_turns;
-
-    // Build system message via PromptBuilder — loads SOUL.md + AGENTS.md + project context
-    // + memory + skill catalog, identical to handler.rs Telegram path except platform="cron".
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let model = resolver.resolve_for_main().default_model.clone();
-    let mut prompt_builder = PromptBuilder::new(&model, "cron").load_context(&cwd);
-    if let Some(mgr) = memory_manager {
-        prompt_builder.set_memory_manager(mgr.clone());
-    }
-    if let Some(skill_reg) = skill_registry {
-        prompt_builder.set_skill_registry(skill_reg.clone());
-    }
-    prompt_builder.load_memory().await;
-    let system_msg = prompt_builder.build_system_message();
-
-    // Build user message with the resolved full_input (skill content + user prompt)
-    let user_msg = ChatMessage {
-        role: Role::User,
-        content: Some(MessageContent::text(&full_input)),
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-    };
-    let messages = vec![system_msg, user_msg];
-
-    // D-11 / D-12: pre-populate active_skills from job's attached skills
-    // so the cron AgentLoop enforces allowed_tools the same as conversation mode.
-    let active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    if let Some(skill_reg) = skill_registry {
-        let mut skills_guard = active_skills.lock().unwrap();
-        for skill_name in &job.skills {
-            if let Some(record) = skill_reg.find(skill_name) {
-                skills_guard.push(record.clone());
-            }
-            // Missing skills already warned by resolve_skill_context above
-        }
-    }
-
-    // Construct client via ProviderResolver — wire fallback via shared helper (same as handler.rs main path)
-    let client = build_main_client(&resolver)?;
-    let mut agent = AgentLoop::new(client, tool_registry.clone(), max_turns);
-
-    // Wire fallback so cron jobs retry on primary model failure (PROV-07 / phase 27.1.4.1)
-    agent = wire_fallback_if_configured(agent, &resolver); // chains .with_fallback() via the shared helper — PROV-07
-
-    // Wire active_skills so cron runs get the same enforcement as conversation mode
-    agent = agent.with_active_skills(active_skills);
-
-    // D-06 / D-08: conditional hook registry wiring (Option<Arc<...>>, None is valid)
-    if let Some(registry) = hook_registry {
-        agent = agent.with_hook_registry(registry.clone());
-    }
-
-    // D-03 / D-14 / T-07.3-03: run agent, pass real output and real success flag into
-    // complete_job_run. On error, sanitize to "[Agent error: {display}]" so raw LLM
-    // payloads never leak into JSONL / webhooks.
-    match agent.run(messages).await {
-        Ok(result) => {
-            info!(
-                "Cron agent completed for job {} ({}), turns_used={}",
-                job.name, job.id, result.turns_used
-            );
-            let output = result
-                .final_response
-                .unwrap_or_else(|| "[No response generated]".to_string());
-
-            // D-04 / D-06: fire ResponseSent with the SAME request_id + cron metadata
-            if let Some(registry) = hook_registry {
-                registry.fire(ironhermes_hooks::HookEvent::new(
-                    &request_id,
-                    ironhermes_hooks::HookEventKind::ResponseSent {
-                        platform: "cron".to_string(),
-                        chat_id: cron_chat_id.clone(),
-                        response_preview: ironhermes_hooks::event::preview(&output, 200),
-                    },
-                ));
-            }
-
-            // Phase 22.4.2.1 Plan 02: consume Result<Option<DeliveryTarget>> via match.
-            // D-03 / D-13: real output into complete_job_run; delivery dispatch follows.
-            match ironhermes_cron::complete_job_run(job_store, job, &output, true).await {
-                Err(e) => {
-                    error!("Failed to complete job run: {}", e);
-                    return Err(e);
-                }
-                Ok(None) => {
-                    // local delivery or [SILENT] — no platform dispatch
-                }
-                Ok(Some(target)) => {
-                    dispatch_delivery(Some(target), &output, &tg_client, &job.name).await;
-                }
-            }
-            Ok(())
-        }
-        Err(e) => {
-            // T-07.3-03: sanitized error — do NOT forward raw LLM payload
-            error!("Agent error for cron job {} ({}): {}", job.name, job.id, e);
-            let error_output = format!("[Agent error: {}]", e);
-
-            // D-04: still fire ResponseSent so observability captures the failure
-            if let Some(registry) = hook_registry {
-                registry.fire(ironhermes_hooks::HookEvent::new(
-                    &request_id,
-                    ironhermes_hooks::HookEventKind::ResponseSent {
-                        platform: "cron".to_string(),
-                        chat_id: cron_chat_id.clone(),
-                        response_preview: ironhermes_hooks::event::preview(&error_output, 200),
-                    },
-                ));
-            }
-
-            // D-14: success=false; Phase 22.4.2.1 Plan 02: consume delivery target from error path too.
-            match ironhermes_cron::complete_job_run(job_store, job, &error_output, false).await {
-                Err(ce) => {
-                    error!("Failed to complete job run after agent error: {}", ce);
-                    return Err(ce);
-                }
-                Ok(None) => {
-                    // local delivery or [SILENT] — no platform dispatch
-                }
-                Ok(Some(target)) => {
-                    // D-09: best-effort delivery of error output; non-fatal
-                    dispatch_delivery(Some(target), &error_output, &tg_client, &job.name).await;
-                }
-            }
-            Ok(())
-        }
-    }
-}
+// Plan 32.1-07: execute_cron_job + dispatch_delivery moved to
+// crates/ironhermes-cron-runner. Both functions are deleted from this file.
+// The cron tick task (above) now calls ironhermes_cron_runner::run_tick_loop.
+// The regression test execute_cron_job_no_longer_exists_in_gateway (below)
+// guards against any future re-introduction of these deleted symbols.
 
 /// Resolve the bot token from config value or environment variable.
 /// Supports `${ENV_VAR}` syntax for indirection through environment.
@@ -1406,19 +1134,19 @@ mod tests {
         let config = ironhermes_core::Config::load().expect("load config for LLM integration test");
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::default()));
 
-        // 4. Call execute_cron_job directly (the helper Task 4 extracts)
-        let result = execute_cron_job(
-            &job,
-            &job_store,
-            &Some(skill_registry),
-            &tool_registry,
-            &None, // memory_manager
-            &None, // hook_registry
-            &config,
-            None, // tg_client: no delivery in integration test
-        )
-        .await;
-        assert!(result.is_ok(), "execute_cron_job failed: {:?}", result);
+        // 4. Call run_cron_job via CronRunnerContext (Plan 32.1-07: execute_cron_job moved to cron-runner)
+        let cron_ctx = ironhermes_cron_runner::CronRunnerContext {
+            job_store: job_store.clone(),
+            skill_registry: Some(skill_registry),
+            tool_registry: tool_registry.clone(),
+            memory_manager: None,
+            hook_registry: None,
+            config: config.clone(),
+            mcp_manager: None,
+            tg_client: None,
+        };
+        let result = ironhermes_cron_runner::run_cron_job(&job, &cron_ctx).await;
+        assert!(result.is_ok(), "run_cron_job failed: {:?}", result);
 
         // 5. Verify the stored last_status contains the token
         let guard = job_store.lock().unwrap();
@@ -1957,20 +1685,21 @@ mod tests {
             ..Default::default()
         };
 
-        // 4. Call execute_cron_job — expect it to return Err (LLM unreachable),
+        // 4. Call run_cron_job via CronRunnerContext — expect it to return Err (LLM unreachable),
         //    but the hook events must still fire.
+        //    (Plan 32.1-07: execute_cron_job moved to ironhermes_cron_runner::run_cron_job)
         let tool_registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
-        let _ = execute_cron_job(
-            &job,
-            &job_store,
-            &None, // no skill registry
-            &tool_registry,
-            &None, // no memory store
-            &Some(hook_registry),
-            &config,
-            None, // tg_client: no delivery in test
-        )
-        .await;
+        let cron_ctx = ironhermes_cron_runner::CronRunnerContext {
+            job_store: job_store.clone(),
+            skill_registry: None,
+            tool_registry: tool_registry.clone(),
+            memory_manager: None,
+            hook_registry: Some(hook_registry),
+            config: config.clone(),
+            mcp_manager: None,
+            tg_client: None,
+        };
+        let _ = ironhermes_cron_runner::run_cron_job(&job, &cron_ctx).await;
         // Give tokio::spawn listeners 50ms to drain
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -2014,52 +1743,21 @@ mod tests {
         }
     }
 
-    /// Source-text regression guard for execute_cron_job hook fires.
+    /// Plan 32.1-07 regression guard: execute_cron_job must NOT exist in gateway runner.rs.
     ///
-    /// Counts the exact number of `registry.fire` calls in runner.rs that use
-    /// MessageReceived and ResponseSent, ensuring:
-    ///   - Exactly 1 MessageReceived fire (pre-agent, before agent.run())
-    ///   - Exactly 2 ResponseSent fires (one in Ok arm, one in Err arm — D-04)
-    ///
-    /// Any duplication or deletion would change these counts and fail CI.
-    /// The `concat!` trick prevents this test's own assertion strings from
-    /// matching the pattern they search for (same fix as agent_loop.rs test 5).
+    /// execute_cron_job was extracted to ironhermes-cron-runner in Plan 32.1-07.
+    /// This test ensures it is never re-introduced into the gateway layer.
+    /// The hook-fire contract (MessageReceived + ResponseSent) is now verified
+    /// in ironhermes-cron-runner's own tests.
     #[test]
-    fn test_runner_source_execute_cron_job_fires_events_exactly_as_expected() {
+    fn execute_cron_job_no_longer_exists_in_gateway() {
         let src = include_str!("runner.rs");
-
-        // Locate execute_cron_job function body — take everything after its fn declaration.
-        // We find the function signature, then count fires only within that function.
-        let fn_marker = "pub(crate) async fn execute_cron_job(";
-        let fn_start = src
-            .find(fn_marker)
-            .expect("execute_cron_job not found in runner.rs");
-        // The function ends before the next pub/pub(crate) fn or the resolve_token fn.
-        let after_fn = &src[fn_start..];
-        let end_marker = "\nfn resolve_token";
-        let fn_body = if let Some(end) = after_fn.find(end_marker) {
-            &after_fn[..end]
-        } else {
-            after_fn
-        };
-
-        // Count MessageReceived fires inside execute_cron_job
-        let msg_recv_pattern = concat!("HookEventKind::", "MessageReceived");
-        let msg_recv_count = fn_body.matches(msg_recv_pattern).count();
-
-        // Count ResponseSent fires inside execute_cron_job (one per branch: Ok + Err)
-        let resp_sent_pattern = concat!("HookEventKind::", "ResponseSent");
-        let resp_sent_count = fn_body.matches(resp_sent_pattern).count();
-
-        assert_eq!(
-            msg_recv_count, 1,
-            "execute_cron_job must contain exactly 1 MessageReceived fire, found {msg_recv_count}: \
-             adding more would create duplicate events"
-        );
-        assert_eq!(
-            resp_sent_count, 2,
-            "execute_cron_job must contain exactly 2 ResponseSent fires (Ok arm + Err arm), \
-             found {resp_sent_count}: D-04 requires ResponseSent fires on both success and failure"
+        // Use concat! so this test's own source string doesn't match.
+        let fn_marker = concat!("pub(crate) async fn ", "execute_cron_job(");
+        assert!(
+            !src.contains(fn_marker),
+            "Plan 32.1-07 violation: execute_cron_job function was re-introduced into \
+             ironhermes-gateway/src/runner.rs. Job execution must live in ironhermes-cron-runner."
         );
     }
 

@@ -29,6 +29,7 @@ ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-gateway = { path = "../ironhermes-gateway" }
 ironhermes-cron = { path = "../ironhermes-cron" }
+ironhermes-cron-runner = { path = "../ironhermes-cron-runner" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-hub = { path = "../ironhermes-hub" }
 ironhermes-mcp = { path = "../ironhermes-mcp" }
