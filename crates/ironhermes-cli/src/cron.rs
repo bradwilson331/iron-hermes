@@ -457,15 +457,17 @@ async fn cmd_tick() -> Result<()> {
     let config = ironhermes_core::config::Config::load().unwrap_or_default();
     let ctx = build_cron_runner_ctx(&config).await?;
 
-    // Acquire the tick file-lock so concurrent gateway / daemon ticks don't
-    // overlap. Returns None if another tick is already holding the lock.
-    let Some(_lock) = ironhermes_cron::acquire_tick_lock()? else {
+    // run_tick_check acquires the tick file-lock internally; acquiring it
+    // here too would deadlock against ourselves because .tick.lock is an
+    // O_CREAT|O_EXCL file lock with no same-process re-entry (the PID-alive
+    // check sees our own PID and returns None).
+    let (due_jobs, tick_result, _lock) =
+        ironhermes_cron::run_tick_check(&ctx.job_store).await?;
+
+    if _lock.is_none() {
         println!("Another tick is already running. Exiting.");
         return Ok(());
-    };
-
-    let (due_jobs, tick_result, _inner_lock) =
-        ironhermes_cron::run_tick_check(&ctx.job_store).await?;
+    }
 
     for job in &due_jobs {
         if let Err(e) = ironhermes_cron_runner::run_cron_job(job, &ctx).await {
