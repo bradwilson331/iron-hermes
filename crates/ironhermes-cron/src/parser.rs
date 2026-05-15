@@ -154,6 +154,132 @@ pub fn compute_next_run(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod parser_tests_phase_32_1 {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn t(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    fn interval(minutes: u32) -> ScheduleParsed {
+        ScheduleParsed::Interval {
+            minutes,
+            display: format!("every {}m", minutes),
+        }
+    }
+
+    fn cron_sched(expr: &str) -> ScheduleParsed {
+        ScheduleParsed::Cron {
+            expr: expr.to_string(),
+            display: expr.to_string(),
+        }
+    }
+
+    fn once_sched(run_at: DateTime<Utc>) -> ScheduleParsed {
+        ScheduleParsed::Once {
+            run_at,
+            display: "once".to_string(),
+        }
+    }
+
+    // Test 1: ONESHOT_GRACE_SECONDS is 120
+    #[test]
+    fn test1_oneshot_grace_seconds_is_120() {
+        assert_eq!(ONESHOT_GRACE_SECONDS, 120i64);
+        // Also verify it is accessible at the crate root level via re-export
+        assert_eq!(crate::ONESHOT_GRACE_SECONDS, 120i64);
+    }
+
+    // Test 2: compute_grace_seconds for Interval 10min = 300
+    #[test]
+    fn test2_grace_interval_10min_returns_300() {
+        let sched = interval(10);
+        assert_eq!(compute_grace_seconds(&sched), 300);
+    }
+
+    // Test 3: compute_grace_seconds for Interval 1min clamps up to 120
+    #[test]
+    fn test3_grace_interval_1min_clamps_to_120() {
+        let sched = interval(1);
+        assert_eq!(compute_grace_seconds(&sched), 120);
+    }
+
+    // Test 4: compute_grace_seconds for Interval 600min clamps down to 7200
+    #[test]
+    fn test4_grace_interval_600min_clamps_to_7200() {
+        let sched = interval(600);
+        assert_eq!(compute_grace_seconds(&sched), 7200);
+    }
+
+    // Test 5: compute_grace_seconds for Cron returns 3600
+    #[test]
+    fn test5_grace_cron_returns_3600() {
+        let sched = cron_sched("0 9 * * *");
+        assert_eq!(compute_grace_seconds(&sched), 3600);
+    }
+
+    // Test 6: compute_grace_seconds for Once returns 120 (== ONESHOT_GRACE_SECONDS)
+    #[test]
+    fn test6_grace_once_returns_120() {
+        let sched = once_sched(t(2026, 1, 1, 12, 0, 0));
+        assert_eq!(compute_grace_seconds(&sched), ONESHOT_GRACE_SECONDS);
+    }
+
+    // Test 7: compute_next_run_from with None matches compute_next_run (backward compat)
+    #[test]
+    fn test7_compute_next_run_from_none_matches_compute_next_run() {
+        let t0 = t(2026, 1, 1, 12, 0, 0);
+        let sched = interval(10);
+        let expected = compute_next_run(&sched, t0).unwrap();
+        let actual = compute_next_run_from(&sched, t0, None).unwrap();
+        assert_eq!(expected, actual);
+    }
+
+    // Test 8: compute_next_run_from with Some(t_last) anchors at t_last + interval
+    #[test]
+    fn test8_compute_next_run_from_anchors_at_last_run() {
+        let t_last = t(2026, 1, 1, 10, 0, 0);
+        let t_now = t(2026, 1, 1, 12, 0, 0); // t_now differs from t_last
+        let sched = interval(10);
+        let result = compute_next_run_from(&sched, t_now, Some(t_last)).unwrap();
+        let expected = Some(t_last + Duration::minutes(10));
+        assert_eq!(result, expected);
+    }
+
+    // Test 9: compute_next_run_from for Cron anchors at t_last (first tick after t_last, not t_now)
+    #[test]
+    fn test9_compute_next_run_from_cron_anchors_at_last_run() {
+        // "0 9 * * *" fires at 09:00 UTC every day
+        let sched = cron_sched("0 9 * * *");
+        let t_last = t(2026, 1, 1, 8, 0, 0); // 08:00 Jan 1
+        let t_now = t(2026, 1, 2, 10, 0, 0); // 10:00 Jan 2 — if we anchor at now, next would be Jan 3
+        let result = compute_next_run_from(&sched, t_now, Some(t_last)).unwrap();
+        // First tick strictly after t_last (2026-01-01 08:00) should be 2026-01-01 09:00
+        let expected = Some(t(2026, 1, 1, 9, 0, 0));
+        assert_eq!(result, expected);
+    }
+
+    // Test 10: compute_next_run (old signature) still compiles and equals compute_next_run_from(..., None)
+    #[test]
+    fn test10_compute_next_run_wrapper_equals_from_none() {
+        let t0 = t(2026, 6, 15, 12, 0, 0);
+
+        // Interval
+        let sched_interval = interval(30);
+        let old = compute_next_run(&sched_interval, t0).unwrap();
+        let new = compute_next_run_from(&sched_interval, t0, None).unwrap();
+        assert_eq!(old, new, "Interval: old and new must agree");
+
+        // Cron
+        let sched_cron = cron_sched("*/5 * * * *");
+        let old_cron = compute_next_run(&sched_cron, t0).unwrap();
+        let new_cron = compute_next_run_from(&sched_cron, t0, None).unwrap();
+        assert_eq!(old_cron, new_cron, "Cron: old and new must agree");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Datelike, Utc};
