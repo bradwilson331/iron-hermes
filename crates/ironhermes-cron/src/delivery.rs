@@ -164,6 +164,15 @@ mod tests {
             last_run_at: None,
             last_status: None,
             last_error: None,
+            model: None,
+            provider: None,
+            base_url: None,
+            script: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            workdir: None,
+            last_delivery_error: None,
         }
     }
 

@@ -61,6 +61,15 @@ impl From<LegacyCronJob> for CronJob {
             last_run_at: legacy.last_run,
             last_status: legacy.last_output.as_ref().map(|_| "ok".to_string()),
             last_error: None,
+            model: None,
+            provider: None,
+            base_url: None,
+            script: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            workdir: None,
+            last_delivery_error: None,
         }
     }
 }
@@ -244,6 +253,15 @@ impl JobStore {
             last_run_at: None,
             last_status: None,
             last_error: None,
+            model: None,
+            provider: None,
+            base_url: None,
+            script: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            workdir: None,
+            last_delivery_error: None,
         };
 
         info!("Adding cron job '{}' (id={})", job.name, job.id);
