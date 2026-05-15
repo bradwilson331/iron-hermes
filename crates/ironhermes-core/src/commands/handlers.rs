@@ -1646,7 +1646,7 @@ mod tests {
             "prompt",
             "tools",
             // "toolsets" removed — replaced by `/toolset` (Phase 25 Plan 04, D-06)
-            "cron",
+            // "cron" removed — now has real handler (Phase 32.1 Plan 07)
             // "reload-mcp" and "reload" removed — now have real handlers (Phase 21.2 Plan 04)
             "browser",
             "plugins",
