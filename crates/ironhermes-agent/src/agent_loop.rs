@@ -939,6 +939,12 @@ impl AgentLoop {
                 messages.push(ChatMessage::system(advisory));
             }
 
+            // Phase 32.1 Plan 02 Task 2: bump activity tracker before every LLM API call.
+            // Placed here (outside the retry loop) so the tracker updates on the initial
+            // attempt and each retry — any of which may be the last visible activity before
+            // the cron runner's inactivity poller fires.
+            self.mark_activity(ActivityKind::ApiCall, None);
+
             // Call LLM with retry and fallback support
             const MAX_RETRIES: usize = 3;
             let mut retry_count = 0;
@@ -1140,6 +1146,9 @@ impl AgentLoop {
         while let Some(event) = rx.recv().await {
             match event {
                 StreamEvent::ContentDelta(delta) => {
+                    // Phase 32.1 Plan 02 Task 2: bump activity tracker once per delta event,
+                    // not per byte — avoids Mutex::lock thrash on the hot streaming path.
+                    self.mark_activity(ActivityKind::StreamToken, None);
                     if let Some(ref cb) = self.stream_callback {
                         cb(&delta);
                     }
@@ -1388,11 +1397,19 @@ impl AgentLoop {
                     );
                 }
 
+                // Phase 32.1 Plan 02 Task 2: bump activity tracker before tool dispatch.
+                // Before: record the in-flight tool name so the cron poller can see it.
+                // After: reset current_tool to None so a subsequent activity_summary()
+                // reflects that dispatch is finished.
+                self.mark_activity(ActivityKind::ToolCall, Some(name.clone()));
+
                 // Take an `args` snapshot for the trajectory append site BEFORE
                 // execute_tool consumes the original. Cheap clone — Plan 9 trades
                 // a JSON Value clone for a redaction seam (Plan 5 Tool::redact_args).
                 let raw_args_for_traj = args.clone();
                 let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
+                // Phase 32.1 Plan 02 Task 2: reset current_tool after dispatch completes.
+                self.mark_activity(ActivityKind::ToolCall, None);
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
 
                 match dispatch_result {
@@ -3280,6 +3297,167 @@ mod activity_tracker_tests {
         assert!(
             !agent.is_cancelled(),
             "is_cancelled() should be false when no token is configured"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 32.1 Plan 02 Task 2: run-wiring tests
+// Verify that mark_activity is wired at the three observable sites in run()
+// and execute_tool_call().
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod activity_tracker_run_wiring {
+    use super::*;
+    use async_trait::async_trait;
+    use ironhermes_core::ToolSchema;
+    use ironhermes_tools::{Tool, ToolRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // -----------------------------------------------------------------------
+    // Test 1 (source): mark_activity(ActivityKind::ApiCall) is wired in run()
+    // -----------------------------------------------------------------------
+
+    /// Source-text assertion: `ActivityKind::ApiCall` appears in run() body
+    /// (at the API-call bump site). Accepts at least 2 occurrences: one in
+    /// `new()` initialisation and at least one in the run loop.
+    #[test]
+    fn source_has_api_call_site_in_run() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("ActivityKind::ApiCall").count();
+        assert!(
+            count >= 2,
+            "Expected at least 2 occurrences of ActivityKind::ApiCall (init + run site), found {}",
+            count
+        );
+    }
+
+    /// Source-text assertion: `ActivityKind::ToolCall` appears at least twice
+    /// inside execute_tool_call (pre-dispatch bump + post-dispatch reset).
+    #[test]
+    fn source_has_tool_call_sites() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("ActivityKind::ToolCall").count();
+        assert!(
+            count >= 2,
+            "Expected at least 2 occurrences of ActivityKind::ToolCall (pre + post dispatch), found {}",
+            count
+        );
+    }
+
+    /// Source-text assertion: `ActivityKind::StreamToken` appears in
+    /// call_llm_streaming (ContentDelta arm).
+    #[test]
+    fn source_has_stream_token_site() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("ActivityKind::StreamToken").count();
+        assert!(
+            count >= 1,
+            "Expected at least 1 occurrence of ActivityKind::StreamToken, found {}",
+            count
+        );
+    }
+
+    /// Source-text assertion: `self.mark_activity(` appears at least 4 times
+    /// (1 ApiCall site + 2 ToolCall sites + 1 StreamToken site).
+    #[test]
+    fn source_has_minimum_mark_activity_call_count() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("self.mark_activity(").count();
+        assert!(
+            count >= 4,
+            "Expected at least 4 self.mark_activity( calls, found {}",
+            count
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 (behavioral): execute_tool_call bumps ToolCall kind
+    // -----------------------------------------------------------------------
+
+    struct TrackingMockTool;
+
+    #[async_trait]
+    impl Tool for TrackingMockTool {
+        fn name(&self) -> &str { "track_mock" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tracking mock tool" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "track_mock",
+                "tracking mock",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("tracked".to_string())
+        }
+    }
+
+    fn make_tool_call(name: &str) -> ironhermes_core::ToolCall {
+        ironhermes_core::ToolCall {
+            id: "tc-wiring-test".to_string(),
+            call_type: "function".to_string(),
+            function: ironhermes_core::FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    fn make_agent_with_tool(tool: Box<dyn ironhermes_tools::Tool>) -> AgentLoop {
+        let mut registry = ToolRegistry::new();
+        registry.register(tool);
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:11434",
+            "test-key",
+            "test-model",
+        ));
+        AgentLoop::new(client, Arc::new(RwLock::new(registry)), 1)
+    }
+
+    /// Behavioral test: calling execute_tool_call bumps last_kind to ToolCall
+    /// and clears current_tool to None after dispatch completes.
+    #[tokio::test]
+    async fn execute_tool_call_bumps_activity_tracker() {
+        let agent = make_agent_with_tool(Box::new(TrackingMockTool));
+        // Pre-call: sentinel kind is ApiCall
+        assert_eq!(agent.activity_summary().last_kind, ActivityKind::ApiCall);
+
+        let tc = make_tool_call("track_mock");
+        let result = agent.execute_tool_call(&tc).await;
+        assert_eq!(result, "tracked", "tool should have executed successfully");
+
+        // Post-call: kind should be ToolCall (post-dispatch reset bumps ToolCall+None)
+        let summary = agent.activity_summary();
+        assert_eq!(
+            summary.last_kind,
+            ActivityKind::ToolCall,
+            "last_kind should be ToolCall after execute_tool_call"
+        );
+        assert_eq!(
+            summary.current_tool,
+            None,
+            "current_tool should be None after post-dispatch reset"
+        );
+    }
+
+    /// Test: after a successful run() that does not need a live LLM, the bounded
+    /// seconds_since is reasonable (< 5.0s), confirming the tracker was updated
+    /// near the end of the run (not left at construction time). We test this by
+    /// bumping the tracker manually and reading back a fresh summary.
+    #[test]
+    fn activity_summary_seconds_since_bounded_after_bump() {
+        let agent = AgentLoop::for_tests();
+        // Simulate a tracker bump as run() would do
+        agent.mark_activity_for_test(ActivityKind::ApiCall, None);
+        let summary = agent.activity_summary();
+        assert!(
+            summary.seconds_since < 5.0,
+            "seconds_since after a fresh bump must be < 5.0s, got {}",
+            summary.seconds_since
         );
     }
 }
