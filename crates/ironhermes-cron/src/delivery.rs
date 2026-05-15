@@ -68,12 +68,59 @@ fn home_channel_thread_env_var(platform: &str) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Telegram config.yaml whitelist fallback (gap-closure 32.1-09)
+// ---------------------------------------------------------------------------
+//
+// Restores pre-32.1 gateway parity: when TELEGRAM_HOME_CHANNEL is unset,
+// resolve to the single entry of `gateway.platforms.telegram.whitelist`
+// from `config.yaml` if and only if the whitelist has exactly one entry.
+// Zero or multiple entries return None (matching Config::telegram_default_origin's
+// OriginDecision::None / OriginDecision::Multi semantics).
+//
+// SCOPE: telegram only. Other platforms (discord/slack/matrix/etc.) do
+// not currently carry whitelist semantics in `Config::gateway.platforms`
+// shaped like Telegram, so the fallback is intentionally telegram-scoped.
+fn lookup_telegram_whitelist_fallback() -> Option<DeliveryTarget> {
+    // Config::load reads ${IRONHERMES_HOME}/config.yaml (or defaults if missing).
+    // Failures are non-fatal — fallback simply returns None.
+    let config = match ironhermes_core::config::Config::load() {
+        Ok(c)  => c,
+        Err(e) => {
+            tracing::debug!(error = %e, "telegram fallback: Config::load failed — skipping");
+            return None;
+        }
+    };
+    let tg = config.gateway.platforms.get("telegram")?;
+    if !tg.enabled {
+        return None;
+    }
+    match tg.whitelist.len() {
+        1 => {
+            let chat_id = tg.whitelist[0].to_string();
+            if chat_id.is_empty() {
+                return None;
+            }
+            Some(DeliveryTarget {
+                platform: "telegram".to_string(),
+                chat_id,
+                thread_id: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // lookup_home_channel
 // ---------------------------------------------------------------------------
 
 /// Look up the home channel for a platform via env vars.
 /// Allowlist gate runs FIRST — no env-var read for unknown platforms.
 /// Returns `None` if the platform is unknown or the env var is unset/empty.
+///
+/// For the `telegram` platform, if both the primary and legacy env vars yield
+/// nothing, falls back to `Config::gateway.platforms.telegram.whitelist` when
+/// it has exactly one entry (gap-closure 32.1-09 — restores pre-32.1 parity).
 fn lookup_home_channel(platform: &str) -> Option<DeliveryTarget> {
     // Allowlist gate FIRST — no env var read for unknown platforms
     if !KNOWN_DELIVERY_PLATFORMS.contains(&platform) {
@@ -86,7 +133,19 @@ fn lookup_home_channel(platform: &str) -> Option<DeliveryTarget> {
             legacy_home_channel_env_var(platform)
                 .and_then(|v| std::env::var(v).ok())
                 .filter(|s| !s.is_empty())
-        })?;
+        });
+
+    // Gap-closure 32.1-09: telegram-only config.yaml whitelist fallback.
+    // Runs ONLY when both the primary and legacy env vars yielded nothing,
+    // AND the platform is telegram. Other platforms remain env-only.
+    if chat_id.is_none() && platform == "telegram" {
+        if let Some(target) = lookup_telegram_whitelist_fallback() {
+            return Some(target);
+        }
+    }
+
+    let chat_id = chat_id?;
+
     let thread_id = home_channel_thread_env_var(platform)
         .and_then(|v| std::env::var(v).ok())
         .filter(|s| !s.is_empty());
@@ -328,7 +387,15 @@ mod tests {
     use super::*;
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
         CronJob {
@@ -375,9 +442,21 @@ mod tests {
 
     #[test]
     fn origin_no_origin_field_returns_none() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        // Isolate IRONHERMES_HOME so the telegram config.yaml whitelist fallback
+        // (32.1-09) does not fire against the developer's real config.yaml.
+        unsafe {
+            std::env::remove_var("TELEGRAM_HOME_CHANNEL");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         let job = make_job("origin", None);
-        // No home channels configured in this test context — returns None
-        assert_eq!(resolve_delivery_target(&job), None);
+        let result = resolve_delivery_target(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        // No home channels configured and no config.yaml in empty tempdir — returns None
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -641,15 +720,23 @@ mod multi_target_tests {
     }
 
     // Test 6: bare platform, home unset → empty and warn
+    // Isolation: IRONHERMES_HOME is pointed at an empty tempdir so that the
+    // new telegram config.yaml whitelist fallback (32.1-09) does not pick up
+    // a real ~/.ironhermes/config.yaml on the developer's machine.
     #[test]
     fn test6_bare_platform_home_unset_returns_empty() {
         let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
         unsafe {
             std::env::remove_var("TELEGRAM_HOME_CHANNEL");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
         }
         let job = make_job("telegram", None);
         let targets = resolve_delivery_targets(&job);
-        assert!(targets.is_empty(), "should return empty when home channel unset");
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(targets.is_empty(), "should return empty when home channel unset and no config.yaml");
     }
 
     // Test 7: legacy env var fallback for qq
@@ -747,9 +834,13 @@ mod multi_target_tests {
     }
 
     // Test 12: deliver=origin without origin, no home channels → empty and warn
+    // Isolation: IRONHERMES_HOME is pointed at an empty tempdir so the
+    // telegram config.yaml whitelist fallback (32.1-09) does not fire via
+    // the origin→first-home-channel fallback path.
     #[test]
     fn test12_origin_no_origin_no_home_channel_returns_empty() {
         let _guard = env_lock();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
         unsafe {
             std::env::remove_var("TELEGRAM_HOME_CHANNEL");
             std::env::remove_var("DISCORD_HOME_CHANNEL");
@@ -759,9 +850,13 @@ mod multi_target_tests {
             std::env::remove_var("WEBHOOK_HOME_CHANNEL");
             std::env::remove_var("QQ_HOME_CHANNEL");
             std::env::remove_var("QQBOT_HOME_CHANNEL");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
         }
         let job = make_job("origin", None);
         let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
         assert!(targets.is_empty());
     }
 
@@ -904,5 +999,361 @@ mod save_job_output_tests_phase_32_1 {
         assert!(!tmp_path.exists(), ".tmp file must not exist after rename");
         let read_back = fs::read_to_string(&path).expect("read back");
         assert_eq!(read_back, content);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — telegram whitelist fallback (gap-closure 32.1-09)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod telegram_whitelist_fallback_tests {
+    use super::*;
+    use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
+    use chrono::Utc;
+    use std::io::Write;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::TempDir;
+
+    /// Serialise all env-mutating tests to avoid races.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
+        CronJob {
+            id: "test-job-id".to_string(),
+            name: "Test Job".to_string(),
+            prompt: "do something".to_string(),
+            skills: vec![],
+            schedule: ScheduleParsed::Interval {
+                minutes: 60,
+                display: "every 60m".to_string(),
+            },
+            schedule_display: "every 60m".to_string(),
+            repeat: RepeatConfig::default(),
+            enabled: true,
+            state: JobState::Scheduled,
+            paused_at: None,
+            paused_reason: None,
+            deliver: deliver.to_string(),
+            origin,
+            created_at: Utc::now(),
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            model: None,
+            provider: None,
+            base_url: None,
+            script: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            workdir: None,
+            last_delivery_error: None,
+        }
+    }
+
+    /// Write a config.yaml fixture to `{tmp}/config.yaml` with the given YAML content.
+    fn write_config(tmp: &TempDir, yaml: &str) {
+        let path = tmp.path().join("config.yaml");
+        let mut f = std::fs::File::create(&path).expect("create config.yaml");
+        f.write_all(yaml.as_bytes()).expect("write config.yaml");
+    }
+
+    /// Clear all telegram-related env vars.
+    fn clear_telegram_env() {
+        unsafe {
+            std::env::remove_var("TELEGRAM_HOME_CHANNEL");
+            std::env::remove_var("TELEGRAM_HOME_CHANNEL_THREAD_ID");
+        }
+    }
+
+    // Test 1: env var wins — single whitelist entry in config but env var is set
+    #[test]
+    fn test1_env_var_wins_over_single_whitelist_entry() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [99999]\n",
+        );
+        unsafe {
+            std::env::set_var("TELEGRAM_HOME_CHANNEL", "env-value");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            clear_telegram_env();
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_eq!(targets.len(), 1, "should have one target");
+        assert_eq!(targets[0].platform, "telegram");
+        assert_eq!(targets[0].chat_id, "env-value", "env var must win over config.yaml whitelist");
+    }
+
+    // Test 2: config fallback fires — single whitelist entry, env unset
+    #[test]
+    fn test2_config_fallback_single_whitelist_entry() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [12345]\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_eq!(targets.len(), 1, "fallback should yield one target");
+        assert_eq!(targets[0].platform, "telegram");
+        assert_eq!(targets[0].chat_id, "12345");
+        assert_eq!(targets[0].thread_id, None, "config fallback must not fabricate thread_id");
+    }
+
+    // Test 3: config fallback — zero whitelist entries, env unset → empty
+    #[test]
+    fn test3_config_fallback_zero_whitelist_returns_empty() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: []\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(targets.is_empty(), "zero-entry whitelist must return empty");
+    }
+
+    // Test 4: config fallback — multiple whitelist entries, env unset → empty
+    #[test]
+    fn test4_config_fallback_multi_whitelist_returns_empty() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [11111, 22222]\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(
+            targets.is_empty(),
+            "multi-entry whitelist must return empty (ambiguous — matches OriginDecision::Multi semantics)"
+        );
+    }
+
+    // Test 5: config fallback — telegram section missing entirely → empty, no panic
+    #[test]
+    fn test5_config_fallback_no_telegram_section_returns_empty() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        // config.yaml exists but has no telegram section
+        write_config(&tmp, "gateway:\n  platforms: {}\n");
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(targets.is_empty(), "no telegram section must return empty");
+    }
+
+    // Test 6: config fallback — telegram section present but enabled: false → empty
+    #[test]
+    fn test6_config_fallback_telegram_disabled_returns_empty() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: false\n      whitelist: [12345]\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(targets.is_empty(), "disabled telegram section must return empty");
+    }
+
+    // Test 7: no fallback for non-telegram platform (discord) — config not consulted
+    #[test]
+    fn test7_no_config_fallback_for_discord() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        // Even if we had a hypothetical discord whitelist in config, it won't be consulted
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [55555]\n",
+        );
+        unsafe {
+            std::env::remove_var("DISCORD_HOME_CHANNEL");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("discord", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(targets.is_empty(), "discord has no config fallback — must return empty");
+    }
+
+    // Test 8: no config fallback for qq platform either
+    #[test]
+    fn test8_no_config_fallback_for_qq() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [66666]\n",
+        );
+        unsafe {
+            std::env::remove_var("QQ_HOME_CHANNEL");
+            std::env::remove_var("QQBOT_HOME_CHANNEL");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("qq", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(targets.is_empty(), "qq has no config fallback — must return empty");
+    }
+
+    // Test 9: thread_id env var still wins when env var is set
+    #[test]
+    fn test9_thread_id_env_var_still_wins() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [77777]\n",
+        );
+        unsafe {
+            std::env::set_var("TELEGRAM_HOME_CHANNEL", "env-tg");
+            std::env::set_var("TELEGRAM_HOME_CHANNEL_THREAD_ID", "42");
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            clear_telegram_env();
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].chat_id, "env-tg", "env var chat_id must win");
+        assert_eq!(targets[0].thread_id, Some("42".to_string()), "thread_id must be set from env");
+    }
+
+    // Test 10: config fallback yields no thread_id (config.yaml has no thread_id semantics)
+    #[test]
+    fn test10_config_fallback_yields_no_thread_id() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [12345]\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].chat_id, "12345");
+        assert_eq!(
+            targets[0].thread_id, None,
+            "config fallback must not fabricate thread_id"
+        );
+    }
+
+    // Test 11: explicit platform:chat_id bypasses both env and config fallback
+    #[test]
+    fn test11_explicit_chat_id_bypasses_config_fallback() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [88888]\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job = make_job("telegram:caller-supplied", None);
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_eq!(targets.len(), 1, "explicit chat_id form must produce one target");
+        assert_eq!(
+            targets[0].chat_id, "caller-supplied",
+            "explicit chat_id must win over config whitelist"
+        );
+    }
+
+    // Test 12: deliver=origin with origin set — origin wins over config fallback
+    #[test]
+    fn test12_origin_routing_wins_over_config_fallback() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        write_config(
+            &tmp,
+            "gateway:\n  platforms:\n    telegram:\n      enabled: true\n      whitelist: [44444]\n",
+        );
+        unsafe {
+            clear_telegram_env();
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let origin = JobOrigin {
+            platform: "telegram".to_string(),
+            chat_id: "origin-1".to_string(),
+            chat_name: None,
+            thread_id: None,
+        };
+        let job = make_job("origin", Some(origin));
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].chat_id, "origin-1",
+            "origin routing must win over config whitelist fallback"
+        );
     }
 }
