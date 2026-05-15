@@ -220,11 +220,14 @@ Legend:
 
 ---
 
-## 10. Agent execution — out of scope
+## 10. Agent execution — pulled into Phase 32.1
 
-Everything below lives inside Python's `run_job` (≈600 LOC, lines 1013–1656)
-and is **not implemented anywhere in this crate**. It belongs in the executor /
-agent layer and is listed here for traceability only.
+These items live inside Python's `run_job` (≈600 LOC, lines 1013–1656) and are
+being ported in Phase 32.1 via the new `ironhermes-cron-runner` crate. The
+bullet list below is preserved as the port checklist for that crate. Note that
+`JobState::Error` is intentionally deferred (see CONTEXT.md decisions — the Rust
+`cron` crate always succeeds for syntactically valid expressions, so Python's
+failure mode has no analogue).
 
 - `no_agent` short-circuit: bash/python script's stdout delivered verbatim
 - `script` pre-run + wake-gate parsing (`{"wakeAgent": false}` ⇒ silent skip)
@@ -254,6 +257,10 @@ agent layer and is listed here for traceability only.
 ## 11. Summary of intentional vs incidental gaps
 
 **Intentional gaps** — these belong outside the crate by design:
+
+As of Phase 32.1, the items below move into the in-scope checklist tracked by the new
+`ironhermes-cron-runner` crate; only `JobState::Error` (incidental gap #2 below) remains
+deferred.
 
 - `run_job` / agent loop / AIAgent construction
 - Script execution and wake-gate parsing
@@ -287,6 +294,8 @@ agent layer and is listed here for traceability only.
 20. **`format_delivery_message` `wrap_response` header/footer** (currently always `[Job: <name>]\n…`)
 21. **`rewrite_skill_refs`** curator hook (called by the skill curator after consolidation)
 22. **Defensive `JobOrigin` parsing** — non-dict origins from hand-edited `jobs.json` should be treated as missing instead of failing serde
+
+Items #1, #3–#22 above are all closed by Phase 32.1's plan set; item #2 (`JobState::Error`) is deferred per CONTEXT.md decisions.
 
 **Rust-only additions** worth keeping:
 
