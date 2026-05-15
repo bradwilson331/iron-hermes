@@ -53,10 +53,11 @@ pub(crate) const BUZZER_OFF_CMD: &str = "CMD_BUZZER#0\n";
 /// The Freenove server defaults led_mode='1' (solid color) so no mode-set preamble is needed.
 pub(crate) const CMD_LED: &str     = "CMD_LED";
 
-/// LED off command (D-03). Sends CMD_LED_MOD#0 on the mode channel — the Freenove server's
-/// dedicated off path (led.py CMD_LED_MOD handler: mode 0 → color_wipe([0,0,0])).
-/// Use CMD_LED_MOD (mode channel), not CMD_LED (color channel), for lights-out.
-pub(crate) const CMD_LED_OFF: &str = "CMD_LED_MOD#0\n";
+/// LED off command. Uses the color channel (CMD_LED#0#0#0) — sets all three channels to 0
+/// via the fast ledIndex path, which completes in microseconds and cannot be interrupted.
+/// DO NOT use CMD_LED_MOD#0: it triggers a 350 ms pixel-by-pixel colorWipe that is
+/// reliably corrupted when stop_thread async-raises SystemExit mid-write.
+pub(crate) const CMD_LED_OFF: &str = "CMD_LED#0#0#0\n";
 
 /// Camera gimbal pan range (server-enforced: server.py restrict_value(50, 180)). Per D-15.
 pub(crate) const CAMERA_PAN_MIN: i64  = 50;
@@ -928,12 +929,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 22: CMD_LED_OFF constant equals "CMD_LED_MOD#0\n" (mode channel, not color channel)
+    // Test 22: CMD_LED_OFF uses color channel at zero (fast ledIndex path, not colorWipe)
     // -----------------------------------------------------------------------
     #[test]
     fn test_cmd_led_off_constant_value() {
-        // CMD_LED_MOD#0\n is the correct off command per Freenove led.py CMD_LED_MOD handler.
-        assert_eq!(CMD_LED_OFF, "CMD_LED_MOD#0\n");
+        // CMD_LED#0#0#0\n: color channel, all zeros — fast ledIndex, cannot be interrupted.
+        // CMD_LED_MOD#0 is wrong: 350 ms colorWipe is corrupted by stop_thread async-raise.
+        assert_eq!(CMD_LED_OFF, "CMD_LED#0#0#0\n");
     }
 
     // -----------------------------------------------------------------------
