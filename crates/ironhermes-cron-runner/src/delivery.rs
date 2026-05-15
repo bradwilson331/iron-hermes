@@ -160,9 +160,9 @@ pub async fn dispatch_all_targets(
     }
 
     for target in &targets {
-        // Extract MEDIA: tags (TODO Plan 07: route by extension via
-        // send_voice/send_image_file/send_video). For now, body minus
-        // MEDIA: lines is sent as text; media paths are logged.
+        // Strip MEDIA: tags from the text body and collect their paths;
+        // the paths are dispatched via route_media_payload after the text
+        // send below (caption-style ordering).
         let (body_no_media, media_paths) = extract_media_paths(output);
 
         let payload = wrap_for_delivery(job, config, &body_no_media);

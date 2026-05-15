@@ -392,15 +392,14 @@ mod tests {
     use chrono::Utc;
     use ironhermes_cron::job::{JobState, RepeatConfig, ScheduleParsed};
     use ironhermes_cron::store::JobStore;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use crate::test_util::env_lock;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
-    // Serialise env-mutating tests
+    // Crate-wide env lock — serialises against prompt_builder + script_runner
+    // tests that also mutate IRONHERMES_HOME / BASH_PATH / TERMINAL_CWD.
     fn env_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        env_lock().lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // -----------------------------------------------------------------------
