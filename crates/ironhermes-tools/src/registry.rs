@@ -94,7 +94,11 @@ pub type InterceptHandler = std::sync::Arc<
 >;
 
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    /// Phase 32.1-06: changed from `Box<dyn Tool>` to `Arc<dyn Tool>` to enable
+    /// `scope_to()` (which constructs a filtered clone without a Clone bound on dyn Tool).
+    /// The public `register` / `register_dynamic` API still accepts `Box<dyn Tool>`;
+    /// we convert to Arc on insert so all existing callers are unchanged.
+    tools: HashMap<String, Arc<dyn Tool>>,
     guardrails: Vec<Box<dyn ironhermes_hooks::GuardrailHook>>,
     error_detail: ironhermes_hooks::ErrorDetailLevel,
     /// D-14 (Phase 25): intercepted tools stored separately from regular tools.
@@ -130,7 +134,7 @@ impl ToolRegistry {
             "register: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
             name,
         );
-        self.tools.insert(name, tool);
+        self.tools.insert(name, Arc::from(tool));
     }
 
     /// Register a tool dynamically (e.g., from MCP discovery). Per D-10.
@@ -144,7 +148,7 @@ impl ToolRegistry {
             "register_dynamic: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
             name,
         );
-        self.tools.insert(name, tool);
+        self.tools.insert(name, Arc::from(tool));
     }
 
     /// Register an intercepted tool by name, schema, and async handler (D-12 / D-14, Phase 25).
@@ -222,6 +226,33 @@ impl ToolRegistry {
 
     /// Unique set of toolset() values across all currently-registered tools, sorted alphabetically.
     /// Per D-03: membership is read at runtime from the trait, no separate table.
+    /// Return a new `ToolRegistry` that contains only the tools whose
+    /// `toolset()` value is listed in `toolset_names`.
+    ///
+    /// Added in Phase 32.1 Plan 06 to implement
+    /// D-CONTEXT §Per-job runtime overrides: "enabled_toolsets ⇒ scoped tool registry".
+    /// The original `Arc<RwLock<ToolRegistry>>` is NOT mutated — callers get an
+    /// independent view. Guardrails, intercepts, and `toolset_config` are NOT
+    /// carried over (the scoped registry is lightweight; callers may re-apply
+    /// them if needed).
+    pub fn scope_to(&self, toolset_names: &[String]) -> Self {
+        let allowed: std::collections::HashSet<&str> =
+            toolset_names.iter().map(|s| s.as_str()).collect();
+        let tools = self
+            .tools
+            .iter()
+            .filter(|(_, t)| allowed.contains(t.toolset()))
+            .map(|(k, t)| (k.clone(), t.clone()))
+            .collect();
+        Self {
+            tools,
+            guardrails: Vec::new(),
+            error_detail: self.error_detail.clone(),
+            intercepts: HashMap::new(),
+            toolset_config: None,
+        }
+    }
+
     /// Only includes regular tools (from the `tools` map); intercepted tools have no Tool::toolset()
     /// method. Plan 4's `hermes toolset list` presents intercepted-only names through a separate path.
     pub fn list_toolsets(&self) -> Vec<String> {
