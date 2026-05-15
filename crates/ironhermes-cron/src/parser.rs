@@ -7,6 +7,15 @@ use std::str::FromStr;
 use crate::job::ScheduleParsed;
 
 // ---------------------------------------------------------------------------
+// Grace window constants
+// ---------------------------------------------------------------------------
+
+/// The grace window (in seconds) for one-shot jobs: a `Once` job whose
+/// `run_at` was up to this many seconds ago and has never run is still
+/// considered due.
+pub const ONESHOT_GRACE_SECONDS: i64 = 120;
+
+// ---------------------------------------------------------------------------
 // parse_duration
 // ---------------------------------------------------------------------------
 
@@ -113,17 +122,41 @@ pub fn parse_schedule(input: &str) -> Result<ScheduleParsed> {
 }
 
 // ---------------------------------------------------------------------------
-// compute_next_run
+// compute_grace_seconds
 // ---------------------------------------------------------------------------
 
-/// Compute the next run time after `after` for a parsed schedule.
+/// Return the grace window in seconds for a given schedule:
 ///
-/// - `Once`:    returns `Some(run_at)` if `run_at > after`, else `None`
-/// - `Interval`: returns `Some(after + minutes)`
-/// - `Cron`:    normalise to 6-field, find next occurrence via cron crate
-pub fn compute_next_run(
+/// - `Interval { minutes }`: `(minutes * 60) / 2`, clamped to `[120, 7200]`
+/// - `Cron`: `3600` (one hour)
+/// - `Once`: `ONESHOT_GRACE_SECONDS` (120)
+pub fn compute_grace_seconds(schedule: &ScheduleParsed) -> i64 {
+    match schedule {
+        ScheduleParsed::Interval { minutes, .. } => {
+            ((*minutes as i64) * 60 / 2).clamp(120, 7200)
+        }
+        ScheduleParsed::Cron { .. } => 3600,
+        ScheduleParsed::Once { .. } => ONESHOT_GRACE_SECONDS,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// compute_next_run / compute_next_run_from
+// ---------------------------------------------------------------------------
+
+/// Compute the next run time after `after` for a parsed schedule, optionally
+/// anchored at `last_run_at` instead of `after` for recurring schedules.
+///
+/// - `Once`:    returns `Some(run_at)` if `run_at > after`, else `None`.
+///              `last_run_at` is ignored for Once.
+/// - `Interval`: when `last_run_at` is `Some(t)`, returns `Some(t + period)`;
+///               when `None`, returns `Some(after + period)`. This prevents
+///               drift across crashes by anchoring at the last known run.
+/// - `Cron`:    finds the first tick strictly after `last_run_at.unwrap_or(after)`.
+pub fn compute_next_run_from(
     schedule: &ScheduleParsed,
     after: DateTime<Utc>,
+    last_run_at: Option<DateTime<Utc>>,
 ) -> Result<Option<DateTime<Utc>>> {
     match schedule {
         ScheduleParsed::Once { run_at, .. } => {
@@ -134,9 +167,11 @@ pub fn compute_next_run(
             }
         }
         ScheduleParsed::Interval { minutes, .. } => {
-            Ok(Some(after + Duration::minutes(*minutes as i64)))
+            let anchor = last_run_at.unwrap_or(after);
+            Ok(Some(anchor + Duration::minutes(*minutes as i64)))
         }
         ScheduleParsed::Cron { expr, .. } => {
+            let anchor = last_run_at.unwrap_or(after);
             let normalised = if expr.split_whitespace().count() == 5 {
                 format!("0 {}", expr)
             } else {
@@ -144,9 +179,25 @@ pub fn compute_next_run(
             };
             let sched = Schedule::from_str(&normalised)
                 .with_context(|| format!("invalid cron expression: {:?}", expr))?;
-            Ok(sched.after(&after).next())
+            Ok(sched.after(&anchor).next())
         }
     }
+}
+
+/// Compute the next run time after `after` for a parsed schedule.
+///
+/// This is a thin wrapper around [`compute_next_run_from`] with
+/// `last_run_at = None`, preserving backward compatibility for all
+/// existing call sites.
+///
+/// - `Once`:    returns `Some(run_at)` if `run_at > after`, else `None`
+/// - `Interval`: returns `Some(after + minutes)`
+/// - `Cron`:    normalise to 6-field, find next occurrence via cron crate
+pub fn compute_next_run(
+    schedule: &ScheduleParsed,
+    after: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    compute_next_run_from(schedule, after, None)
 }
 
 // ---------------------------------------------------------------------------
