@@ -1059,11 +1059,11 @@ Plans:
 **Goal:** Port the agent-runner side of Python `hermes-agent/cron/scheduler.py::run_job` (~600 LOC) into a new `ironhermes-cron-runner` workspace crate at full feature parity, close the incidental parity gaps catalogued in `crates/ironhermes-cron/PARITY.md` §11 (except `JobState::Error`, deferred), and add `hermes cron tick` / `hermes cron daemon` / `hermes cron trigger` CLI commands so cron runs without the Telegram gateway.
 **Requirements:** CRON-PARITY-SCOPE, CRON-JOB-FIELDS, CRON-ORIGIN-DEFENSIVE, CRON-ACTIVITY-TRACKER, CRON-AGENT-INTERRUPT, CRON-STORE-FSYNC, CRON-STORE-CHMOD, CRON-STORE-CTRLCHAR-REPAIR, CRON-STORE-TRIGGER-JOB, CRON-STORE-ONESHOT-GRACE, CRON-STORE-DYNAMIC-GRACE, CRON-STORE-DUE-RECOVERY, CRON-STORE-JOBS-MUT, CRON-PARSER-ANCHORING, CRON-DELIVERY-MULTI-TARGET, CRON-DELIVERY-ALLOWLIST, CRON-DELIVERY-HOME-CHANNEL, CRON-DELIVERY-LEGACY-ENV, CRON-DELIVERY-THREAD-ENV, CRON-DELIVERY-ORIGIN-FALLBACK, CRON-DELIVERY-FSYNC-CHMOD, CRON-RUNNER-CRATE, CRON-RUNNER-TASKLOCALS, CRON-RUNNER-SCRIPT-SANDBOX, CRON-RUNNER-WAKE-GATE, CRON-RUNNER-PROMPT-ASSEMBLY, CRON-RUNNER-PROMPT-RESCAN, CRON-RUNNER-INACTIVITY-TIMEOUT, CRON-RUNNER-CONTEXT, CRON-RUNNER-RUN-JOB, CRON-RUNNER-NO-AGENT, CRON-RUNNER-WAKE-SKIP, CRON-RUNNER-EMPTY-SOFT-FAIL, CRON-RUNNER-MULTI-DELIVERY, CRON-RUNNER-WRAP-RESPONSE, CRON-RUNNER-MEDIA-EXTRACTION, CRON-RUNNER-LAST-DELIVERY-ERROR, CRON-RUNNER-TICK-LOOP, CRON-RUNNER-WORKDIR-PARTITION, CRON-CLI-TRIGGER, CRON-CLI-TICK-ONCE, CRON-CLI-DAEMON, CRON-GATEWAY-MIGRATION, CRON-GATEWAY-CALL-NEW-CRATE
 **Depends on:** Phase 32
-**Plans:** 8 plans
+**Plans:** 2/8 plans executed
 
 Plans:
-- [ ] 32.1-01-PLAN.md — PARITY.md scope amend + CronJob field additions + defensive JobOrigin deserializer (Wave 1)
-- [ ] 32.1-02-PLAN.md — AgentLoop activity tracker API + interrupt() (Wave 1)
+- [x] 32.1-01-PLAN.md — PARITY.md scope amend + CronJob field additions + defensive JobOrigin deserializer (Wave 1)
+- [x] 32.1-02-PLAN.md — AgentLoop activity tracker API + interrupt() (Wave 1)
 - [ ] 32.1-03-PLAN.md — JobStore hardening: fsync, chmod, control-char repair, trigger_job, dynamic grace, due-job recovery, compute_next_run anchoring (Wave 2)
 - [ ] 32.1-04-PLAN.md — Multi-target delivery routing: allowlist, env-var tables, resolve_delivery_targets plural API, save_job_output fsync+chmod (Wave 2)
 - [ ] 32.1-05a-PLAN.md — New ironhermes-cron-runner crate skeleton + script_runner (Wave 3)
