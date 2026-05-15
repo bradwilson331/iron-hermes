@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
-use crate::parser::{compute_next_run, parse_schedule};
+use crate::parser::{compute_grace_seconds, compute_next_run, compute_next_run_from, parse_schedule, ONESHOT_GRACE_SECONDS};
 
 // ---------------------------------------------------------------------------
 // LegacyCronJob — matches the OLD CronJob shape for migration
@@ -96,7 +96,6 @@ pub struct JobUpdate {
 pub struct JobStore {
     path: PathBuf,
     pub jobs: Vec<CronJob>,
-    pub grace_seconds: i64,
 }
 
 impl JobStore {
@@ -110,96 +109,125 @@ impl JobStore {
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create cron directory: {}", dir.display()))?;
 
+        // Unix: restrict cron directory to owner only (0700)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
+
         let path = dir.join("jobs.json");
         let jobs = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
 
-            // Try new format first, then legacy
-            if let Ok(jobs) = serde_json::from_str::<Vec<CronJob>>(&raw) {
-                debug!(
-                    "JobStore loaded {} job(s) from {} (new format)",
-                    jobs.len(),
-                    path.display()
-                );
-                jobs
-            } else if let Ok(legacy_jobs) = serde_json::from_str::<Vec<LegacyCronJob>>(&raw) {
-                info!(
-                    "Migrating {} legacy job(s) from {}",
-                    legacy_jobs.len(),
-                    path.display()
-                );
-                let jobs: Vec<CronJob> = legacy_jobs.into_iter().map(CronJob::from).collect();
-                // Save migrated jobs immediately
-                let tmp_path = path.with_extension("json.tmp");
-                let json = serde_json::to_string_pretty(&jobs).context("serialize migrated")?;
-                {
-                    let mut f = fs::File::create(&tmp_path)
-                        .with_context(|| format!("create tmp: {}", tmp_path.display()))?;
-                    f.write_all(json.as_bytes())?;
-                    f.flush()?;
+            // Try new format first, then legacy, with control-char repair fallback
+            let parse_result = parse_jobs_with_repair(&raw, &path);
+            match parse_result {
+                ParseResult::NewFormat(jobs) => {
+                    debug!(
+                        "JobStore loaded {} job(s) from {} (new format)",
+                        jobs.len(),
+                        path.display()
+                    );
+                    jobs
                 }
-                fs::rename(&tmp_path, &path)?;
-                jobs
-            } else {
-                warn!(
-                    "Could not parse {} as new or legacy format, starting empty",
-                    path.display()
-                );
-                Vec::new()
+                ParseResult::Legacy(jobs) => {
+                    info!(
+                        "Migrating {} legacy job(s) from {}",
+                        jobs.len(),
+                        path.display()
+                    );
+                    let migrated: Vec<CronJob> = jobs.into_iter().map(CronJob::from).collect();
+                    // Save migrated jobs immediately
+                    let tmp_path = path.with_extension("json.tmp");
+                    let json =
+                        serde_json::to_string_pretty(&migrated).context("serialize migrated")?;
+                    {
+                        let mut f = fs::File::create(&tmp_path)
+                            .with_context(|| format!("create tmp: {}", tmp_path.display()))?;
+                        f.write_all(json.as_bytes())?;
+                        f.flush()?;
+                        f.sync_all()?;
+                    }
+                    fs::rename(&tmp_path, &path)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+                    }
+                    migrated
+                }
+                ParseResult::Empty => {
+                    warn!(
+                        "Could not parse {} as new or legacy format, starting empty",
+                        path.display()
+                    );
+                    Vec::new()
+                }
             }
         } else {
             Vec::new()
         };
 
-        Ok(Self {
-            path,
-            jobs,
-            grace_seconds: 3600,
-        })
+        Ok(Self { path, jobs })
     }
 
     /// Re-read `jobs.json` into `self.jobs` without recreating the handle.
     ///
-    /// Preserves `self.path` and `self.grace_seconds`. Honors the same
-    /// format-fallback ladder as `open()` (new format -> legacy -> empty+warn).
+    /// Honors the same format-fallback ladder as `open()` (new format -> legacy -> empty+warn).
     /// Does not create the directory; the store must already be open.
     pub fn reload(&mut self) -> Result<()> {
         let jobs = if self.path.exists() {
             let raw = fs::read_to_string(&self.path)
                 .with_context(|| format!("failed to read {}", self.path.display()))?;
 
-            if let Ok(jobs) = serde_json::from_str::<Vec<CronJob>>(&raw) {
-                debug!(
-                    "JobStore reloaded {} job(s) from {} (new format)",
-                    jobs.len(),
-                    self.path.display()
-                );
-                jobs
-            } else if let Ok(legacy_jobs) = serde_json::from_str::<Vec<LegacyCronJob>>(&raw) {
-                info!(
-                    "Reload: migrating {} legacy job(s) from {}",
-                    legacy_jobs.len(),
-                    self.path.display()
-                );
-                let jobs: Vec<CronJob> = legacy_jobs.into_iter().map(CronJob::from).collect();
-                // Persist migrated format so subsequent reloads take the fast path.
-                let tmp_path = self.path.with_extension("json.tmp");
-                let json = serde_json::to_string_pretty(&jobs).context("serialize migrated")?;
-                {
-                    let mut f = fs::File::create(&tmp_path)
-                        .with_context(|| format!("create tmp: {}", tmp_path.display()))?;
-                    f.write_all(json.as_bytes())?;
-                    f.flush()?;
+            match parse_jobs_with_repair(&raw, &self.path) {
+                ParseResult::NewFormat(jobs) => {
+                    debug!(
+                        "JobStore reloaded {} job(s) from {} (new format)",
+                        jobs.len(),
+                        self.path.display()
+                    );
+                    jobs
                 }
-                fs::rename(&tmp_path, &self.path)?;
-                jobs
-            } else {
-                warn!(
-                    "Reload: could not parse {} as new or legacy format, keeping empty",
-                    self.path.display()
-                );
-                Vec::new()
+                ParseResult::Legacy(legacy_jobs) => {
+                    info!(
+                        "Reload: migrating {} legacy job(s) from {}",
+                        legacy_jobs.len(),
+                        self.path.display()
+                    );
+                    let jobs: Vec<CronJob> =
+                        legacy_jobs.into_iter().map(CronJob::from).collect();
+                    // Persist migrated format so subsequent reloads take the fast path.
+                    let tmp_path = self.path.with_extension("json.tmp");
+                    let json =
+                        serde_json::to_string_pretty(&jobs).context("serialize migrated")?;
+                    {
+                        let mut f = fs::File::create(&tmp_path)
+                            .with_context(|| format!("create tmp: {}", tmp_path.display()))?;
+                        f.write_all(json.as_bytes())?;
+                        f.flush()?;
+                        f.sync_all()?;
+                    }
+                    fs::rename(&tmp_path, &self.path)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(
+                            &self.path,
+                            fs::Permissions::from_mode(0o600),
+                        );
+                    }
+                    jobs
+                }
+                ParseResult::Empty => {
+                    warn!(
+                        "Reload: could not parse {} as new or legacy format, keeping empty",
+                        self.path.display()
+                    );
+                    Vec::new()
+                }
             }
         } else {
             Vec::new()
@@ -340,41 +368,125 @@ impl JobStore {
         &self.jobs
     }
 
+    /// Mutable accessor over the in-memory job list. Used by the
+    /// `ironhermes-cron-runner` crate to set `last_delivery_error`
+    /// in place after dispatching delivery (Plan 32.1-06 Task 2).
+    ///
+    /// Callers MUST follow up with `self.save()` to persist mutations.
+    /// Prefer `update_job` + `JobUpdate` for canonical partial updates;
+    /// this accessor exists specifically because `last_delivery_error`
+    /// accumulation in the cron runner is a write-only side effect
+    /// that doesn't model cleanly as a `JobUpdate` variant.
+    pub fn jobs_mut(&mut self) -> &mut Vec<CronJob> {
+        &mut self.jobs
+    }
+
     /// Return jobs that are enabled, scheduled, and whose `next_run_at` is at or before now.
-    /// Skips stale jobs (next_run_at is more than grace_seconds old) and fast-forwards them.
+    ///
+    /// - Jobs with missing `next_run_at` (None) are recovered:
+    ///   - `Once`: treated as due if `run_at` is within `ONESHOT_GRACE_SECONDS` and never run
+    ///   - `Interval`/`Cron`: recomputed from `last_run_at` anchor and persisted (best-effort)
+    /// - Jobs whose `next_run_at` is stale (older than per-schedule grace) are fast-forwarded.
     pub fn get_due_jobs(&mut self) -> Vec<&CronJob> {
         let now = Utc::now();
-        let grace = self.grace_seconds;
 
-        // Fast-forward stale jobs
+        // Track which jobs had their next_run_at recomputed (for best-effort save)
+        let mut needs_save = false;
+
+        // Pass 1: recovery + stale fast-forward
         for job in self.jobs.iter_mut() {
             if job.state != JobState::Scheduled || !job.enabled {
                 continue;
             }
-            if let Some(next_run_at) = job.next_run_at {
-                let age_secs = (now - next_run_at).num_seconds();
-                if age_secs > grace {
-                    // Fast-forward: compute next from now
-                    if let Ok(Some(new_next)) = compute_next_run(&job.schedule, now) {
-                        warn!(
-                            "Fast-forwarding stale job '{}' from {} to {}",
-                            job.name, next_run_at, new_next
-                        );
-                        job.next_run_at = Some(new_next);
+
+            match job.next_run_at {
+                None => {
+                    // Recovery: recompute next_run_at for recurring schedules
+                    match &job.schedule {
+                        ScheduleParsed::Once { .. } => {
+                            // Handled in the filter below — leave None, let Once grace logic run
+                        }
+                        _ => {
+                            if let Ok(Some(new_next)) =
+                                compute_next_run_from(&job.schedule, now, job.last_run_at)
+                            {
+                                debug!(
+                                    "Recovering missing next_run_at for job '{}': set to {}",
+                                    job.name, new_next
+                                );
+                                job.next_run_at = Some(new_next);
+                                needs_save = true;
+                            }
+                        }
+                    }
+                }
+                Some(next_run_at) => {
+                    // Stale fast-forward: per-schedule dynamic grace
+                    let grace_secs = compute_grace_seconds(&job.schedule);
+                    let age_secs = (now - next_run_at).num_seconds();
+                    if age_secs > grace_secs {
+                        if let Ok(Some(new_next)) = compute_next_run(&job.schedule, now) {
+                            warn!(
+                                "Fast-forwarding stale job '{}' from {} to {}",
+                                job.name, next_run_at, new_next
+                            );
+                            job.next_run_at = Some(new_next);
+                            needs_save = true;
+                        }
                     }
                 }
             }
         }
 
-        // Collect due jobs (borrow again after mutation)
+        // Best-effort save for recovered next_run_at values
+        if needs_save {
+            if let Err(e) = self.save() {
+                warn!("get_due_jobs: failed to persist recovered next_run_at: {}", e);
+            }
+        }
+
+        // Pass 2: collect due jobs
+        // Clone the vec of references from the immutable borrow after mutation
+        let now = Utc::now();
         self.jobs
             .iter()
             .filter(|j| {
-                j.state == JobState::Scheduled
-                    && j.enabled
-                    && j.next_run_at.is_some_and(|t| now >= t)
+                if j.state != JobState::Scheduled || !j.enabled {
+                    return false;
+                }
+                match j.next_run_at {
+                    Some(t) => now >= t,
+                    None => {
+                        // Only Once schedules reach here (recurring was recovered above)
+                        if let ScheduleParsed::Once { run_at, .. } = &j.schedule {
+                            let age = (now - *run_at).num_seconds();
+                            j.last_run_at.is_none() && age >= 0 && age <= ONESHOT_GRACE_SECONDS
+                        } else {
+                            false
+                        }
+                    }
+                }
             })
             .collect()
+    }
+
+    /// Manually trigger a job by id or name: sets `next_run_at = Utc::now()` and persists.
+    pub fn trigger_job(&mut self, id_or_name: &str) -> Result<()> {
+        let id = self
+            .find_job(id_or_name)
+            .map(|j| j.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("job not found: {id_or_name}"))?;
+
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .expect("id found above");
+
+        let now = Utc::now();
+        job.next_run_at = Some(now);
+        info!("Job id={id} manually triggered");
+        self.save()
     }
 
     /// Enable or disable a job.
@@ -449,6 +561,10 @@ impl JobStore {
     }
 
     /// Atomically write the current state to disk.
+    ///
+    /// Write sequence: serialize → write tmp → flush → sync_all → rename.
+    /// `sync_all` ensures the new inode's bytes are durable before the rename
+    /// makes them visible, satisfying POSIX durability (PARITY §11.18).
     pub fn save(&self) -> Result<()> {
         let json = serde_json::to_string_pretty(&self.jobs).context("failed to serialise jobs")?;
 
@@ -459,6 +575,7 @@ impl JobStore {
             f.write_all(json.as_bytes())
                 .with_context(|| format!("failed to write temp file: {}", tmp_path.display()))?;
             f.flush()?;
+            f.sync_all()?;
         }
         fs::rename(&tmp_path, &self.path).with_context(|| {
             format!(
@@ -468,6 +585,13 @@ impl JobStore {
             )
         })?;
 
+        // Unix: restrict jobs.json to owner only (0600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+        }
+
         debug!(
             "JobStore saved {} job(s) to {}",
             self.jobs.len(),
@@ -475,6 +599,77 @@ impl JobStore {
         );
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Result of parsing a jobs.json file (with control-char repair fallback).
+enum ParseResult {
+    NewFormat(Vec<CronJob>),
+    Legacy(Vec<LegacyCronJob>),
+    Empty,
+}
+
+/// Returns true if the raw string contains bare control characters (0x00–0x1F
+/// except `\n`, `\r`, `\t`) — indicating a corrupted jobs.json.
+fn raw_has_bare_ctrl_chars(raw: &str) -> bool {
+    raw.bytes()
+        .any(|b| b < 0x20 && !matches!(b, b'\n' | b'\r' | b'\t'))
+}
+
+/// Strip bare control characters (0x00–0x1F, preserving `\n`/`\r`/`\t`) by
+/// replacing them with a space. Used to repair corrupted jobs.json files.
+fn strip_ctrl_chars(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if (c as u32) < 0x20 && !matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Parse a raw jobs.json string, attempting new format, then legacy, then
+/// control-char repair (PARITY §11.17). Returns `ParseResult::Empty` only
+/// when all attempts fail.
+fn parse_jobs_with_repair(raw: &str, path: &std::path::Path) -> ParseResult {
+    // Fast path: new format parses cleanly
+    if let Ok(jobs) = serde_json::from_str::<Vec<CronJob>>(raw) {
+        return ParseResult::NewFormat(jobs);
+    }
+
+    // Fast path: legacy format parses cleanly
+    if let Ok(legacy) = serde_json::from_str::<Vec<LegacyCronJob>>(raw) {
+        return ParseResult::Legacy(legacy);
+    }
+
+    // Control-char repair: strip bare control bytes and retry
+    if raw_has_bare_ctrl_chars(raw) {
+        let cleaned = strip_ctrl_chars(raw);
+        if let Ok(jobs) = serde_json::from_str::<Vec<CronJob>>(&cleaned) {
+            warn!(
+                "jobs.json had bare control characters — repaired and rewriting: {}",
+                path.display()
+            );
+            // Best-effort rewrite — write errors surface on next save()
+            let _ = fs::write(path, &cleaned);
+            return ParseResult::NewFormat(jobs);
+        }
+        if let Ok(legacy) = serde_json::from_str::<Vec<LegacyCronJob>>(&cleaned) {
+            warn!(
+                "jobs.json had bare control characters (legacy format) — repaired and rewriting: {}",
+                path.display()
+            );
+            let _ = fs::write(path, &cleaned);
+            return ParseResult::Legacy(legacy);
+        }
+    }
+
+    ParseResult::Empty
 }
 
 // ---------------------------------------------------------------------------
