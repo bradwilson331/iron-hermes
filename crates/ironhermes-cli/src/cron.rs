@@ -476,10 +476,10 @@ async fn cmd_tick() -> Result<()> {
     }
 
     println!(
-        "Tick complete. {} due, {} ran, {} errors.",
+        "Tick complete. {} due, {} ran, {} idle.",
         due_jobs.len(),
         tick_result.jobs_run,
-        tick_result.jobs_skipped
+        tick_result.jobs_idle,
     );
     Ok(())
 }

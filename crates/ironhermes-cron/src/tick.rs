@@ -13,9 +13,13 @@ use crate::{LockGuard, acquire_tick_lock};
 /// Summary of a tick run.
 #[derive(Debug, Default)]
 pub struct TickResult {
+    /// Total number of enabled jobs found in the store this tick.
     pub jobs_checked: usize,
+    /// Number of due jobs that were actually run by this tick.
     pub jobs_run: usize,
-    pub jobs_skipped: usize,
+    /// Number of enabled jobs that were NOT due this tick.
+    /// This is `jobs_checked - jobs_run`; it is NOT a failure count.
+    pub jobs_idle: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -40,7 +44,7 @@ pub async fn run_tick_check(
             TickResult {
                 jobs_checked: 0,
                 jobs_run: 0,
-                jobs_skipped: 0,
+                jobs_idle: 0,
             },
             None,
         ));
@@ -62,12 +66,12 @@ pub async fn run_tick_check(
     };
 
     let jobs_run = due_jobs.len();
-    let jobs_skipped = total_enabled.saturating_sub(jobs_run);
+    let jobs_idle = total_enabled.saturating_sub(jobs_run);
 
     let result = TickResult {
         jobs_checked: total_enabled,
         jobs_run,
-        jobs_skipped,
+        jobs_idle,
     };
 
     Ok((due_jobs, result, lock_guard))
@@ -163,6 +167,19 @@ mod tests {
             thread_id: None,
         });
         job
+    }
+
+    #[test]
+    fn tick_result_idle_counts_enabled_but_not_due() {
+        // Construct a TickResult by hand and assert the new field
+        // exists with the documented semantics.
+        let r = TickResult {
+            jobs_checked: 10,
+            jobs_run: 2,
+            jobs_idle: 8,
+        };
+        assert_eq!(r.jobs_idle, r.jobs_checked - r.jobs_run);
+        assert_eq!(r.jobs_idle, 8);
     }
 
     #[test]
