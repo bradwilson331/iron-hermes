@@ -17,7 +17,9 @@ pub use pid::{
     GatewayPidRecord, PidLiveness, PidLockGuard, acquire_pid_lock, is_pid_alive, read_gateway_pid,
     write_gateway_pid,
 };
-pub use runner::{GatewayRunner, dispatch_delivery};
+pub use runner::GatewayRunner;
+// Note: dispatch_delivery (Plan 22.4.2.1) was removed in Plan 32.1-07.
+// Delivery dispatch is now handled by ironhermes_cron_runner::dispatch_all_targets.
 pub use session::GatewaySession;
 pub use stream_consumer::StreamConsumer;
 pub use ironhermes_cron::TgSendApi;
