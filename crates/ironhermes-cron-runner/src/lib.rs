@@ -9,9 +9,16 @@
 //! Plan 32.1-06 lands the orchestration modules (`runner`,
 //! `delivery`, `tick_loop`) and the `run_cron_job` public entry point.
 
+pub mod delivery;
 pub mod prompt_builder;
+pub mod runner;
 pub mod script_runner;
+pub mod tick_loop;
 pub mod timeout;
+
+pub use delivery::dispatch_all_targets;
+pub use runner::{CronRunnerContext, run_cron_job};
+pub use tick_loop::{prepare_mcp_for_tick, run_tick_loop};
 
 #[cfg(test)]
 pub(crate) mod test_util {

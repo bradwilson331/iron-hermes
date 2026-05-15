@@ -2,29 +2,10 @@ use crate::adapter::PlatformAdapter;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
+// TgSendApi trait now lives in ironhermes-cron::adapter (Phase 32.1 Plan 06)
+pub use ironhermes_cron::TgSendApi;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// TgSendApi — testable seam for cron delivery dispatch (Phase 22.4.2.1 Plan 02)
-// ---------------------------------------------------------------------------
-
-/// Minimal send trait used by `execute_cron_job` so tests can inject a
-/// `FakeTgClient` without a live HTTP connection.
-///
-/// Defined in `ironhermes-gateway::telegram` to keep it alongside
-/// `TelegramAdapter` while allowing `Option<Arc<dyn TgSendApi>>` as a
-/// parameter type in `runner.rs`. Implemented by `TelegramAdapter` (production)
-/// and `FakeTgClient` (tests).
-#[async_trait]
-pub trait TgSendApi: Send + Sync {
-    async fn send_message(
-        &self,
-        chat_id: &str,
-        content: &str,
-        thread_id: Option<&str>,
-    ) -> anyhow::Result<()>;
-}
 
 #[async_trait]
 impl TgSendApi for TelegramAdapter {

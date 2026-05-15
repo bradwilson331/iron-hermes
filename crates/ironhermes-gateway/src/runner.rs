@@ -24,7 +24,8 @@ use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal;
 use crate::session::SessionStore;
-use crate::telegram::{TelegramAdapter, TgBotCommand, TgSendApi, tg_message_to_event};
+use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
+use ironhermes_cron::TgSendApi;
 use crate::user_queue::UserQueueManager;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,

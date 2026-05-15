@@ -9,6 +9,7 @@ use tracing::debug;
 // Sub-modules
 // ---------------------------------------------------------------------------
 
+pub mod adapter;
 pub mod delivery;
 pub mod display;
 pub mod job;
@@ -17,6 +18,7 @@ pub mod scanner;
 pub mod store;
 pub mod tick;
 
+pub use adapter::TgSendApi;
 pub use delivery::*;
 pub use job::*;
 pub use parser::*;
