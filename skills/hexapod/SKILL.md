@@ -40,7 +40,7 @@ The `hexapod_tcp` tool sends TCP commands to a Freenove hexapod robot at `HEXAPO
 | buzzer_on | — | `CMD_BUZZER#1\n` | `"OK"` | — |
 | buzzer_off | — | `CMD_BUZZER#0\n` | `"OK"` | — |
 | led | r, g, b | `CMD_LED#{r}#{g}#{b}\n` | `"OK"` | sets all 8 LEDs to solid color; each channel clamped to 0–255 |
-| led_off | — | `CMD_LED#0\n` | `"OK"` | mode-0 server off path — NOT `CMD_LED#0#0#0\n` (see note) |
+| led_off | — | `CMD_LED#0#0#0\n` | `"OK"` | color channel, all zeros — fast ledIndex path; see note |
 | stream_distance | samples | `CMD_SONIC\n` × N with 200ms sleep | `"Distances: [d1, d2, ...] cm \| min=M max=X avg=A.B"` | samples clamped to [1, 20]; 20 × 200ms = 4s max |
 | camera_pan | x | `CMD_CAMERA#{x}#90\n` | `"OK"` | x clamped to 50–180; y defaults to midpoint 90 (CMD_CAMERA sets both axes) |
 | camera_tilt | y | `CMD_CAMERA#115#{y}\n` | `"OK"` | y clamped to 0–180; x defaults to midpoint 115 (CMD_CAMERA sets both axes) |
@@ -58,9 +58,13 @@ The `hexapod_tcp` tool sends TCP commands to a Freenove hexapod robot at `HEXAPO
 
 rotate sends `CMD_MOVE#1#0#0#5#10\n` (clockwise) or `CMD_MOVE#1#0#0#5#-10\n` (counterclockwise), sleeps for `abs(degrees) * ROTATE_MS_PER_DEGREE` milliseconds, then sends `CMD_MOVE#0#0#0#0#0\n` to stop. The stop command is best-effort — if it fails the tool returns a warning string but does not fail.
 
-### LED Off vs LED Color-Zero
+### LED Off — Correct Command and Why
 
-`led_off` sends `CMD_LED#0\n` which sets the server's internal `led_mode` to 0, triggering `color_wipe([0,0,0])` — the dedicated off path. Do NOT call `led` with `r=0, g=0, b=0` as a substitute: `CMD_LED#0#0#0\n` sets the color to black without activating the server's off path.
+`led_off` sends `CMD_LED#0#0#0\n` (color channel, all three fields zero). This routes through the server's `ledIndex` path, which writes all 8 pixels in microseconds and cannot be interrupted.
+
+**Do NOT use `CMD_LED_MOD#0\n`.** That command triggers a 350 ms pixel-by-pixel `colorWipe` in a background thread. The server uses `ctypes`-based `stop_thread` (async `SystemExit` raise) to cancel the previous LED thread when a new command arrives. Raising mid-`colorWipe` leaves the strip in a partially-written state — LEDs do not turn off. Confirmed on physical hardware: `CMD_LED_MOD#0` returns `"OK"` (TCP write succeeded) but LEDs remain lit.
+
+`led {r=0, g=0, b=0}` and `led_off` produce identical wire output (`CMD_LED#0#0#0\n`) and are interchangeable.
 
 ### Camera Gimbal Joint-Axis Behavior
 
@@ -90,7 +94,7 @@ The following are explicitly blocked by `hexapod_tcp`. Attempting to call them r
 
 - **CMD_CALIBRATION** (`calibration` action): moves servos to uncalibrated positions; risk of hardware damage
 - **CMD_SERVOPOWER** (`servo_power` action): cuts servo power mid-stance causing the robot to drop; use `relax_servos` instead — it is the safe alternative
-- **CMD_LED_MOD modes 2–5** (`chase`, `blink`, `breathing`, `rainbow`): asynchronous LED animations that may interfere with solid-color LED control; blocked pending async-safe design
+- **CMD_LED_MOD (all modes, including #0)**: all `CMD_LED_MOD` commands are blocked. Modes 2–5 (`chase`, `blink`, `breathing`, `rainbow`) are async animations that interfere with solid-color control. Mode 0 (`CMD_LED_MOD#0`) appears to be the off path but triggers a 350 ms `colorWipe` that is reliably corrupted by `stop_thread` — LEDs stay lit. Use `led_off` (`CMD_LED#0#0#0\n`) instead.
 
 Never attempt to work around these blocks by constructing raw TCP commands manually.
 
