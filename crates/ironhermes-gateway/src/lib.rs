@@ -20,8 +20,9 @@ pub use pid::{
 pub use runner::{GatewayRunner, dispatch_delivery};
 pub use session::GatewaySession;
 pub use stream_consumer::StreamConsumer;
+pub use ironhermes_cron::TgSendApi;
 pub use telegram::{
-    TelegramAdapter, TgBotCommand, TgChat, TgDocument, TgFile, TgMessage, TgPhotoSize, TgSendApi,
-    TgUpdate, TgUser,
+    TelegramAdapter, TgBotCommand, TgChat, TgDocument, TgFile, TgMessage, TgPhotoSize, TgUpdate,
+    TgUser,
 };
 pub use user_queue::UserQueueManager;
