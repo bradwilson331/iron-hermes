@@ -1059,7 +1059,7 @@ Plans:
 **Goal:** Port the agent-runner side of Python `hermes-agent/cron/scheduler.py::run_job` (~600 LOC) into a new `ironhermes-cron-runner` workspace crate at full feature parity, close the incidental parity gaps catalogued in `crates/ironhermes-cron/PARITY.md` §11 (except `JobState::Error`, deferred), and add `hermes cron tick` / `hermes cron daemon` / `hermes cron trigger` CLI commands so cron runs without the Telegram gateway.
 **Requirements:** CRON-PARITY-SCOPE, CRON-JOB-FIELDS, CRON-ORIGIN-DEFENSIVE, CRON-ACTIVITY-TRACKER, CRON-AGENT-INTERRUPT, CRON-STORE-FSYNC, CRON-STORE-CHMOD, CRON-STORE-CTRLCHAR-REPAIR, CRON-STORE-TRIGGER-JOB, CRON-STORE-ONESHOT-GRACE, CRON-STORE-DYNAMIC-GRACE, CRON-STORE-DUE-RECOVERY, CRON-STORE-JOBS-MUT, CRON-PARSER-ANCHORING, CRON-DELIVERY-MULTI-TARGET, CRON-DELIVERY-ALLOWLIST, CRON-DELIVERY-HOME-CHANNEL, CRON-DELIVERY-LEGACY-ENV, CRON-DELIVERY-THREAD-ENV, CRON-DELIVERY-ORIGIN-FALLBACK, CRON-DELIVERY-FSYNC-CHMOD, CRON-RUNNER-CRATE, CRON-RUNNER-TASKLOCALS, CRON-RUNNER-SCRIPT-SANDBOX, CRON-RUNNER-WAKE-GATE, CRON-RUNNER-PROMPT-ASSEMBLY, CRON-RUNNER-PROMPT-RESCAN, CRON-RUNNER-INACTIVITY-TIMEOUT, CRON-RUNNER-CONTEXT, CRON-RUNNER-RUN-JOB, CRON-RUNNER-NO-AGENT, CRON-RUNNER-WAKE-SKIP, CRON-RUNNER-EMPTY-SOFT-FAIL, CRON-RUNNER-MULTI-DELIVERY, CRON-RUNNER-WRAP-RESPONSE, CRON-RUNNER-MEDIA-EXTRACTION, CRON-RUNNER-LAST-DELIVERY-ERROR, CRON-RUNNER-TICK-LOOP, CRON-RUNNER-WORKDIR-PARTITION, CRON-CLI-TRIGGER, CRON-CLI-TICK-ONCE, CRON-CLI-DAEMON, CRON-GATEWAY-MIGRATION, CRON-GATEWAY-CALL-NEW-CRATE
 **Depends on:** Phase 32
-**Plans:** 8/8 plans complete
+**Plans:** 8/8 plans complete (Round 1) — 2 gap-closure plans pending (Round 2)
 
 Plans:
 - [x] 32.1-01-PLAN.md — PARITY.md scope amend + CronJob field additions + defensive JobOrigin deserializer (Wave 1)
@@ -1070,6 +1070,10 @@ Plans:
 - [x] 32.1-05b-PLAN.md — Cron-runner crate: prompt_builder five-step assembly + timeout primitives (Wave 3)
 - [x] 32.1-06-PLAN.md — Runner orchestration: CronRunnerContext, run_cron_job, dispatch_all_targets, run_tick_loop (Wave 4)
 - [x] 32.1-07-PLAN.md — CLI Trigger/Tick/Daemon subcommands + gateway migration to runner crate (Wave 5)
+
+**Round 2 (Gap closure — from 32.1-HUMAN-UAT.md):**
+- [ ] 32.1-08-PLAN.md — UX: rename `TickResult.jobs_skipped` -> `jobs_idle` + update `cmd_tick` println label from `errors` to `idle` so the summary line stops misreporting enabled-but-not-due jobs as failures (Wave 6, gap_closure, autonomous)
+- [ ] 32.1-09-PLAN.md — Regression: restore pre-32.1 config.yaml whitelist fallback in `lookup_home_channel` so `deliver=telegram` resolves to `gateway.platforms.telegram.whitelist[0]` when `TELEGRAM_HOME_CHANNEL` is unset and the whitelist has exactly one entry; env var still wins; telegram-only scope (Wave 6, gap_closure, autonomous)
 
 ### Phase 33: Autonomous Skill Creation & Self-Improvement
 
