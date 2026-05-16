@@ -1153,7 +1153,7 @@ Plans:
   3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
   4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
@@ -1166,7 +1166,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 32-03-PLAN.md — Web UI nudge wiring (nudge_turns HashMap on AppState, fire site inside run_web_turn after agent.run() returns Ok, tokio::spawn fire-and-forget, mirrors gateway pattern)
+- [x] 32-03-PLAN.md — Web UI nudge wiring (nudge_turns HashMap on AppState, fire site inside run_web_turn after agent.run() returns Ok, tokio::spawn fire-and-forget, mirrors gateway pattern)
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
 
