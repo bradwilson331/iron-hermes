@@ -1153,7 +1153,7 @@ Plans:
   3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
   4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
 
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 
 Plans:
 **Wave 1**
@@ -1162,7 +1162,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 32-02-PLAN.md — Gateway handler wiring + counter-logic tests (nudge_turns HashMap per session in GatewayHandler, fire site in handle_with_multimodal, should_nudge helper, 3 counter-logic unit tests)
+- [x] 32-02-PLAN.md — Gateway handler wiring + counter-logic tests (nudge_turns HashMap per session in GatewayHandler, fire site in handle_with_multimodal, should_nudge helper, 3 counter-logic unit tests)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
