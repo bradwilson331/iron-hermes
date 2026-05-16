@@ -150,6 +150,10 @@ impl AppState {
         tool_result_callback: Option<ToolResultCallback>,
     ) -> Result<ironhermes_agent::AgentResult> {
         let messages = self.build_messages_for_turn(session_id, user_input).await?;
+        // Snapshot the messages BEFORE agent.run consumes them — the nudge
+        // (if it fires) sees the exact turn the model just consumed, not any
+        // post-tool-call mutation. Matches the gateway pattern from Plan 32-02.
+        let messages_snapshot = messages.clone();
         let mut agent = self.build_agent_loop(stream_callback, tool_progress_callback)?;
         if let Some(cb) = tool_result_callback {
             agent = agent.with_tool_result(cb);
@@ -159,6 +163,42 @@ impl AppState {
         let mut store = self.state_store.lock().unwrap();
         for msg in &result.appended {
             let _ = store.add_message(session_id, msg);
+        }
+        // Drop the state_store guard explicitly so we don't hold two locks
+        // when we acquire the nudge_turns Mutex below.
+        drop(store);
+
+        // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
+        // Fires AFTER agent.run() succeeded and AFTER result.appended is persisted.
+        let nudge_interval = self.config.memory.nudge_interval;
+        if nudge_interval > 0 && self.config.memory.memory_enabled {
+            let should_fire = {
+                let mut map = self.nudge_turns.lock().unwrap_or_else(|e| e.into_inner());
+                let count = map.entry(session_id.to_string()).or_insert(0);
+                *count += 1;
+                if *count >= nudge_interval {
+                    *count = 0;
+                    true
+                } else {
+                    false
+                }
+            }; // std::sync::Mutex guard dropped here — BEFORE any await/spawn
+            if should_fire {
+                if let Some(ref mgr) = self.memory_manager {
+                    let mgr_clone = Arc::clone(mgr);
+                    let client_clone = build_main_client(&self.resolver)?;
+                    let config_clone = (*self.config).clone();
+                    tokio::spawn(async move {
+                        ironhermes_agent::nudge::spawn_nudge_review(
+                            messages_snapshot,
+                            mgr_clone,
+                            client_clone,
+                            &config_clone,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
 
         Ok(result)
