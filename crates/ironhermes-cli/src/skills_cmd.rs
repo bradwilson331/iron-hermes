@@ -204,6 +204,8 @@ pub fn trust_level_str(s: ironhermes_core::SkillSource) -> &'static str {
         ironhermes_core::SkillSource::Official => "official",
         ironhermes_core::SkillSource::Trusted => "trusted",
         ironhermes_core::SkillSource::Community => "community",
+        // Phase 33 LEARN-04: agent-authored skills via `skill_manage`.
+        ironhermes_core::SkillSource::SelfCreated => "self-created",
     }
 }
 

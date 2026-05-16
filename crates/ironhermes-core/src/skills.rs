@@ -30,13 +30,17 @@ const SKILL_NAME_MAX_LEN: usize = 64;
 const SKILL_DESC_MIN_LEN: usize = 1;
 const SKILL_DESC_MAX_LEN: usize = 1024;
 
-/// Validate a skill name. Returns `Err(reason)` if invalid.
+/// Validates a skill slug against agentskills.io name rules. Returns `Err(reason)`
+/// with a human-readable message if invalid.
 ///
 /// Strict rules (reject on failure):
 /// - Length 1..=64
 /// - Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 /// - Must not contain consecutive hyphens (`--`)
-fn validate_skill_name(name: &str) -> Result<(), &'static str> {
+///
+/// Exposed as `pub` in Phase 33 for cross-crate use by `SkillManageTool`
+/// (`crates/ironhermes-tools/src/skill_manage.rs`).
+pub fn validate_skill_name(name: &str) -> Result<(), &'static str> {
     if name.len() < SKILL_NAME_MIN_LEN {
         return Err("name is empty");
     }
@@ -114,12 +118,22 @@ pub struct HermesMetadata {
 /// Phase 19.1 adds `Trusted` for hub-installed skills whose origin is on
 /// hub.trusted_repos. All hub installs default to Community; Trusted is
 /// assigned when the adapter's trust_level_for returns it (D-06, D-08).
+/// Phase 33 (LEARN-04) adds `SelfCreated` for skills authored by the agent
+/// via the `skill_manage` tool. SelfCreated is treated as WARN-BUT-LOAD
+/// (not Community hard-reject) — the agent is a known author, not an
+/// untrusted external source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillSource {
     Builtin,
     Official,
     Trusted,
     Community,
+    /// Phase 33 LEARN-04: skill authored by the agent via `skill_manage`.
+    /// Serializes as the hyphenated string "Self-created" per agentskills.io
+    /// frontmatter convention (matches the `metadata.hermes.trust_tier` value
+    /// emitted by `SkillManageTool::action_create`).
+    #[serde(rename = "Self-created")]
+    SelfCreated,
 }
 
 impl Default for SkillSource {
@@ -585,11 +599,15 @@ fn try_register_skill_from_dir(
                 );
                 return; // D-15 community hard-reject
             }
-            SkillSource::Builtin | SkillSource::Official | SkillSource::Trusted => {
+            SkillSource::Builtin
+            | SkillSource::Official
+            | SkillSource::Trusted
+            | SkillSource::SelfCreated => {
+                // Phase 33: SelfCreated — WARN-BUT-LOAD (agent-authored, not untrusted external)
                 warn!(
                     skill = %frontmatter.name,
                     path = %skill_md_path.display(),
-                    "SkillRegistry: WARN-BUT-LOAD — scan hit on builtin/official/trusted skill"
+                    "SkillRegistry: WARN-BUT-LOAD — scan hit on builtin/official/trusted/self-created skill"
                 );
                 // proceed — D-15 WARN-BUT-LOAD
             }
@@ -2574,19 +2592,21 @@ Body.
 
     #[test]
     fn test_skill_source_variants_exhaustive() {
-        // Exhaustive match proves all 4 variants compile-checked. If a variant
+        // Exhaustive match proves all 5 variants compile-checked. If a variant
         // is added/removed, this test fails to compile.
         for v in [
             SkillSource::Builtin,
             SkillSource::Official,
             SkillSource::Trusted,
             SkillSource::Community,
+            SkillSource::SelfCreated,
         ] {
             let label = match v {
                 SkillSource::Builtin => "builtin",
                 SkillSource::Official => "official",
                 SkillSource::Trusted => "trusted",
                 SkillSource::Community => "community",
+                SkillSource::SelfCreated => "self-created",
             };
             assert!(!label.is_empty());
         }
