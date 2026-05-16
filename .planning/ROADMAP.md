@@ -1153,12 +1153,12 @@ Plans:
   3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
   4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
 
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 32-01-PLAN.md — Config extension + nudge module + run_chat wiring (nudge_interval in MemoryConfig, MEMORY_REVIEW_PROMPT, spawn_nudge_review with memory-only ToolRegistry, turns_since_nudge counter in run_chat)
+- [x] 32-01-PLAN.md — Config extension + nudge module + run_chat wiring (nudge_interval in MemoryConfig, MEMORY_REVIEW_PROMPT, spawn_nudge_review with memory-only ToolRegistry, turns_since_nudge counter in run_chat)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
