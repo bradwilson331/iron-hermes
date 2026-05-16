@@ -1047,10 +1047,11 @@ Plans:
   2. The agent can write to MEMORY.md/USER.md within the existing 3,575 char total cap during a nudge cycle; persisted entries appear in the next session's prompt without breaking the current session's prompt cache
   3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
   4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
-**Plans:** TBD (estimated 2 plans — nudge fire mechanism + memory persistence judgment prompt design)
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 32 to break down)
+- [ ] 32-01-PLAN.md — Config + nudge module (nudge_interval field in MemoryConfig, MEMORY_REVIEW_PROMPT const, run_memory_nudge async fn with memory-only ToolRegistry, unit tests)
+- [ ] 32-02-PLAN.md — Wiring + verification (turns_since_nudge in run_chat, nudge_turn_counts in gateway handler, tokio::spawn fire sites post-turn, wizard.rs memory.nudge_interval write, static-grep invariant tests)
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
 
