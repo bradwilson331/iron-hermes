@@ -16,12 +16,14 @@
 **Plans:** 4/4 plans complete
 
 Plans:
+
 - [x] 20-01-trait-enrichment-and-factory-fix-PLAN.md — Enrich MemoryProvider trait (defaulted new hooks + required `name()`), introduce `ConfigField`/`MemoryAction` in `ironhermes-core/src/config_schema.rs`, delete `MemoryProviderConfig`, migrate all three provider crates + file `MemoryStore` to new `initialize(session_id, hermes_home, &Value)` signature, make factory async with `load_from_disk` for every provider + `is_available` fallback, round-trip regression test (Fix 1)
 - [x] 20-02-memory-manager-and-wiring-PLAN.md — Create `crates/ironhermes-agent/src/memory/manager.rs` (`MemoryManager` wrapping primary + optional write-only mirror, 5s timeout, swallow-on-error, reserved-name guard), rewire `MemoryTool` / `agent_loop.queue_prefetch` / `context_engine.on_pre_compress` / `prompt_builder.system_prompt_block`, add hook-ordering contract test
 - [x] 20-03-setup-wizard-and-chat-wiring-PLAN.md — `hermes memory setup` CLI wizard (minimal per D-08; POSIX-safe .env appends, deny-list, `RedactedValue`), wire `MemoryManager` into `run_chat` / `run_single` (Fix 2), cross-invocation persistence regression test
 - [x] 20-04-provider-hook-adoption-PLAN.md — Each provider (file/sqlite/duckdb/grafeo) overrides `name()` + `get_config_schema()` with real fields; per-provider config-schema unit tests; sqlite mirror fixture proving `on_memory_write` end-to-end through MemoryManager
 
 **Wave structure:**
+
 - Wave 1: 20-01 (trait + factory + provider migration — autonomous)
 - Wave 2: 20-02 (MemoryManager + wiring — depends on 20-01, autonomous)
 - Wave 3: 20-03 and 20-04 in parallel (depends on 20-02, both autonomous)
@@ -37,10 +39,12 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 22-01-PLAN.md — Wire cron_tool, skills_tool, execute_code_tool (with shared active_skills Arc and D-04 safe-subset RPC registry), and BlocklistGuardrail + error_detail into both run_chat and run_single, matching run_gateway's tool registration sequence per D-08.
 - [x] 22-02-PLAN.md — Construct HookRegistry with JSONL listener (D-06) and webhook listeners (D-07) in both CLI paths. Wire hook_registry into run_agent_turn (AgentLoop builder) and attach_context_engine (D-09). Drain retry queue on startup. Add static-grep regression tests for all wiring calls.
 
 **Wave structure:**
+
 - Wave 1: 22-01 (tool registration parity — autonomous)
 - Wave 2: 22-02 (HookRegistry wiring + regression tests — depends on 22-01, autonomous)
 
@@ -57,6 +61,7 @@ Plans:
 **Plans:** 13/13 plans complete
 
 Plans:
+
 - [x] 22.4-00-PLAN.md — Wave 0: Workspace dep floor bump (crossterm 0.28 → 0.29 with event-stream feature; ratatui 0.30, tui-textarea 0.7, ansi-to-tui 8, tui-logger 0.18 workspace + crate deps) + cargo-tree spike confirming single ratatui compile unit (Pitfall §1). Checkpoint if spike fails → tui-textarea-2 fallback approval.
 - [x] 22.4-01-PLAN.md — Wave 1: tui_rata/ scaffold + verbatim-lift pure cores (knight_rider.rs + double_ctrl_c.rs); create lib.rs target so integration tests can `use ironhermes_cli::tui_rata::*`.
 - [x] 22.4-02-PLAN.md — Wave 2: port `tui/keybindings.rs` → `tui_rata/keybindings.rs` with TuiExtension dep surgically removed per D-09 (widget-slot system retired in tui_rata/).
@@ -72,6 +77,7 @@ Plans:
 - [x] 22.4-12-PLAN.md — Wave 10 (gap closure, D-17 / CR-02): wire `AgentLoop::with_tool_progress(...)` + new `AgentLoop::with_tool_result(...)` builder on per-turn AgentLoop in `spawn_turn` so all 8 D-17 canonical StreamEvent variants (adding ToolCall, ToolProgress, ToolResult) are emitted from production — not just from direct-inject snapshot tests. Adds a small symmetric `ToolResultCallback = Box<dyn Fn(&str, bool) + Send + Sync>` type to agent_loop.rs + 6 callback-firing sites at existing `fire_hook(HookEventKind::ToolCompleted { success, .. })` locations. Adds INV-22.4-26 (with_tool_progress / with_tool_result chained) + INV-22.4-27 (all 3 variants constructed in event_loop.rs). Closes VERIFICATION.md Gap 2 + REVIEW.md CR-02.
 
 **Wave structure:**
+
 - Wave 0: 22.4-00 (workspace dep floor + spike checkpoint — autonomous except checkpoint)
 - Wave 1: 22.4-01 (tui_rata/ scaffold + pure-core lifts — autonomous)
 - Wave 2: 22.4-02 (keybindings port — depends on 01, autonomous)
@@ -98,6 +104,7 @@ Waves 2–8 are serialised because each plan extends `tui_rata/mod.rs`; file-own
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] TBD (run /gsd-plan-phase 22.4.2 to break down) (completed 2026-04-26)
 
 ### Phase 22.4.2.3: fix the pre-existing INV-22.3-02 banner-bleed before milestone (INSERTED)
@@ -108,6 +115,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 22.4.2.3-01-PLAN.md — Rewrite + rename `invariant_22_3_02_banner_called_exactly_once_before_tui_init` to relaxed-count (`>= 1`) + every-position-before-`TuiHandle::new_with_extensions` form per CONTEXT D-01..D-06; test-only edit, main.rs untouched.
 
 ### Phase 22.4.2.2: Cron create defaults to TG origin when gateway active (INSERTED)
@@ -118,10 +126,12 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 22.4.2.2-01-PLAN.md — CLI default-routing: add `OriginDecision` enum + `Config::telegram_default_origin()` to `ironhermes-core::config`; flip `Create.deliver` to `Option<String>` and consult the helper from `cmd_create` via new `pub(crate) fn resolve_cron_deliver`; 5 behavioral tests in new `cron_default_deliver.rs` + 4 unit tests in `config.rs::mod tests` + INV-22.4.2.2-01 (function 63)
 - [x] 22.4.2.2-02-PLAN.md — LLM tool default-routing: consult Plan 01's helper from `cronjob_tool::handle_create` (lazy `Config::load()` inside the handler) using `tracing::warn!` for the multi-chat hint; 5 behavioral tests in new `cronjob_tool_default_deliver.rs` mirroring Plan 01 + INV-22.4.2.2-02 (function 64); pure addition — `CronjobTool::new` signature, `register_cronjob_tool`, and main.rs / tui_rata callsites all unchanged
 
 **Wave structure:**
+
 - Wave 1: 22.4.2.2-01 (helper + CLI consumer + 5 tests + INV-01 — autonomous)
 - Wave 2: 22.4.2.2-02 (LLM-tool consumer + 5 tests + INV-02 — depends on 22.4.2.2-01 because it consults the helper added by Plan 01; autonomous)
 
@@ -133,6 +143,7 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] TBD (run /gsd-plan-phase 22.4.2.1 to break down) (completed 2026-04-26)
 
 ### Phase 22.4.1: tui_rata handler re-port — route dispatch_slash through CommandRouter and registry handlers (INSERTED)
@@ -144,11 +155,13 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 22.4.1-00-PLAN.md — Wave 1: core registry — register 4 new CommandDefs (`mouse`/Configuration/CliOnly, `mcp`/ToolsAndSkills/Universal, `sessions`/Session/Universal, `memory`/ToolsAndSkills/Universal) in `crates/ironhermes-core/src/commands/registry.rs` + add INV-22.4-32 (router_membership) to `tests/invariants_22_4.rs` with new `CORE_REGISTRY` const. Behavior-neutral — tui_rata fast-paths still fire BEFORE the router until Plan 01 retires them. Implements D-01, D-05 (registry portion), D-09, D-14.
 - [x] 22.4.1-01-PLAN.md — Wave 2: tui_rata refactor — retire 4 `strip_prefix` fast-paths in `dispatch_slash`; widen `invoke_handler` signature to `(name, _ctx, router)`; add post-router App-side hook `if def.name == "mouse"` calling `handle_mouse_slash(app, args)` with `def.name`-interpolated args extraction (D-10/D-11/D-12); add 4 new invoke_handler arms (mouse/mcp/sessions/memory) per D-08 stub format; replace hand-built `render_help` with private `render_help_router(router, &Platform::Local)` lifted from `tui::commands::format_help` inner loop (D-13); delete 3 dead helpers `handle_mcp_slash`/`handle_sessions_slash`/`handle_memory_slash` (RESEARCH Finding 7); preserve `handle_mouse_slash` + `/agents` + `/skills` arms + generic `not yet wired` fallback verbatim (D-06/D-07); invert INV-22.4-29 sub-(b) + INV-22.4-31 Strategy 2 + 2b in place; remove INV-22.4-31 /mouse sanity (INV-34 owns it); add INV-22.4-34 (dispatch_slash_no_strip_prefix). `cargo insta` re-baseline gate (zero diffs predicted per RESEARCH Finding 3). Implements D-02, D-05 (tui_rata 4-arm portion), D-06, D-07, D-09, D-10, D-11, D-12, D-13, D-14, D-15.
 - [x] 22.4.1-02-PLAN.md — Wave 3: bulk Session + Configuration arm expansion — add 26 new `"<name>" => CommandResult::Output(...)` arms in `invoke_handler` (13 Session: history/save/retry/undo/title/compress/rollback/stop/background/btw/queue/status/resume — 13 Configuration: config/provider/prompt/personality/statusbar/verbose/yolo/reasoning/skin/voice/model/fast/debug). GatewayOnly names (approve/deny/sethome/start) excluded per RESEARCH Pitfall 6. Every arm carries the `Phase 22.4.1 stub:` marker per D-08; total marker count ≥ 30 (4 from Plan 01 + 26 from Plan 02). Add INV-22.4-33 (invoke_handler_arms) with per-name loop assertion + stub-marker count threshold. Implements D-05 (bulk portion), D-08, D-09, D-14.
 
 **Wave structure:**
+
 - Wave 1: 22.4.1-00 (core registry + INV-32 — autonomous; no file overlap with other plans)
 - Wave 2: 22.4.1-01 (tui_rata pure-router refactor + 4 arms + render_help_router + INV-29/-31 inversion + INV-34 — depends on 22.4.1-00 because the router must resolve the 4 new names as ResolveResult::Exact before the fast-paths can be retired without behavior change; autonomous)
 - Wave 3: 22.4.1-02 (26 bulk arms + INV-33 — depends on 22.4.1-01 because the new arms are appended to the same `invoke_handler` match table; autonomous)
@@ -165,6 +178,7 @@ Plans:
 **Plans:** 12/12 plans complete
 
 Plans:
+
 - [x] 22.3-01-PLAN.md — Wave 1: Levenshtein typo suggester pure function (`commands::typo::suggest_typo`) with 10 unit tests; module declaration in `commands/mod.rs`. No new crate dep.
 - [x] 22.3-02-PLAN.md — Wave 1: `TranscriptWriter::touch()` (sync std::fs OpenOptions create+append) called from `subagent_runner.rs` BEFORE `reg.write().await.register(info)` (corrected ordering — RESEARCH inverted CONTEXT D-07); integration test asserting file exists immediately after touch.
 - [x] 22.3-03-PLAN.md — Wave 1: rustyline 15 history activation in `repl_input.rs` (corrected API: `set_history_ignore_dups(true)`, NotFound on first run silently ignored, `set_max_history_size(1000)`, save on Shutdown); `run_chat` passes `Some($HERMES_HOME/repl_history)` to `ReplInputChannel::spawn` (run_chat-only per CONTEXT D-15).
@@ -179,6 +193,7 @@ Plans:
 - [x] 22.3-12-PLAN.md — Wave 3 (gap-closure lockdown): Three new static-grep regression gates INV-22.3-07/08/09 in sibling test file `crates/ironhermes-cli/tests/invariants_22_3_streaming.rs` locking the Plan 22.3-11 streaming-discipline fix: helper exists + is re-exported + imported by main.rs (07); `run_agent_turn` body uses helper, raw `print!("{}", delta)` is gone from inside `run_agent_turn` but still present in `run_single` per D-15 (08); DECSTBM/DECSC/DECRC bytes do NOT appear inline in main.rs — encapsulation invariant (09). Original 6-test file untouched.
 
 **Wave structure:**
+
 - Wave 1 (parallel, autonomous): 22.3-01..04 (original) + 22.3-07/08/09/10 (gap-closure WR-01..04). Zero file overlap among the four gap-closure Wave 1 plans (transcript+subagent_runner, render.rs, repl_input.rs, gateway/handler.rs).
 - Wave 2 (sequential, autonomous, depends on Wave 1): 22.3-05 (`run_chat` integration), then 22.3-06 (original INV regression tests). Then 22.3-11 (streaming-discipline GAP-22.3-01 closure — depends on 22.3-08 only because both touch render.rs).
 - Wave 3 (autonomous, depends on 22.3-11): 22.3-12 (new INV gates locking the streaming-discipline fix).
@@ -195,10 +210,12 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 22.1-01-PLAN.md — Define pure-function type contracts: TuiExtension trait, Widget/LayoutSlot/TuiEvent types, KeybindingRegistry, CommandRegistry with extension-first dispatch chain and unit tests
 - [x] 22.1-02-PLAN.md — Wire extension contracts into render loop (dynamic DECSTBM, widget slot compositing, TuiEvent channel) and REPL loop (pre-readline keybinding dispatch, extension-first command routing)
 
 **Wave structure:**
+
 - Wave 1: 22.1-01 (pure types + trait + registries — autonomous)
 - Wave 2: 22.1-02 (render.rs + main.rs integration — depends on 22.1-01, autonomous)
 
@@ -217,6 +234,7 @@ Phase 22.2 was never broken into plans during v2.0. The ACP adapter is a substan
 Artifacts preserved (do not delete): `.planning/phases/22.2-acp-adapter/22.2-CONTEXT.md` and `22.2-DISCUSSION-LOG.md`.
 
 Plans:
+
 - [ ] DEFERRED — moved to v2.1 (re-plan when v2.1 milestone opens)
 
 ---
@@ -230,11 +248,13 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 21-01-tui-scaffold-and-pure-cores-PLAN.md — Scaffold `crates/ironhermes-cli/src/tui/` module tree (mod.rs, activity.rs, pills.rs, knight_rider.rs, double_ctrl_c.rs, status_line.rs). Implement all pure-function cores with full unit tests: pill color rotation (D-04), knight-rider triangle-wave frame generator (D-06/D-07), double-ctrl-c state machine (D-10..D-14), status-line pure renderer (D-03/D-05). No main.rs wiring yet — zero runtime behavior change.
 - [x] 21-02-activity-watch-and-render-task-PLAN.md — Build the rendering I/O layer: `TuiHandle` owning two `tokio::sync::watch` channels (ActivityState + StatusLineState) and a 100ms-tick render task that writes to stderr via crossterm absolute cursor positioning with Hide/Show flicker guards (D-15/D-16/D-17). Auto-detects non-tty stderr and no-ops (Open Q5). Re-queries `size()` each tick for SIGWINCH tolerance. Not yet wired into main.rs.
 - [x] 21-03-run-chat-integration-and-double-ctrl-c-PLAN.md — Wire TuiHandle into `run_chat` (streaming + tool-progress callbacks publish ActivityState; remove old `\r Running: …` clutter per D-08). Install `tokio::signal::ctrl_c` in a `tokio::select!` around the agent future (D-10). Parent CancellationToken lives the session; per-turn children via `.child_token()` (RESEARCH §Pitfall 2). Wire DoubleCtrlCState (D-11, D-12, D-13). Preserve rustyline-Interrupted branch (D-14). 3rd-ctrl-c-within-3s emergency escape (RESEARCH §Pitfall 7). Static-grep regression tests for INV-1..INV-6. Manual VALIDATION.md walkthrough (D-22). Move rolled-in todo to completed/.
 
 **Wave structure:**
+
 - Wave 1: 21-01 (pure-function cores — autonomous)
 - Wave 2: 21-02 (TuiHandle + render task — depends on 21-01, autonomous)
 - Wave 3: 21-03 (main.rs integration + manual QA — depends on 21-01 and 21-02, NOT fully autonomous: final task is `checkpoint:human-verify`)
@@ -252,6 +272,7 @@ Plans:
 **Plans:** 6/6 plans complete
 
 Plans:
+
 - [x] 21.8-01-PLAN.md — Wave 0 test infra: create `sanitize.rs` with 9 pure-function security primitives (D-16/D-17/D-18/D-20), extend `HubErrorKind` with ShaMismatch/ScanHit/PathTraversal/Audit (D-24), add `to_skill_slug` golden-vector integration test (20+ cases, reference TS byte-for-byte match).
 - [x] 21.8-02-PLAN.md — Wave 1 data + network: create `blob.rs` (SkillsShBlobSource, 3-hop fetchers, with_one_retry wrapper, D-06 corrected path-based URL, D-08 10s timeout, D-22 User-Agent) and `lock.rs` (SkillLock/SkillLockEntry camelCase schema, compute_folder_hash with NO separator per D-13 corrected, D-12 alphabetical sort + atomic save, paths::skills_lock_path).
 - [x] 21.8-03-PLAN.md — Wave 2 pipeline rework: create `audit.rs` (fetch_audit soft-fail, D-19 3s timeout), add `migrate_from_hub_manifest` to lock.rs (D-15 idempotent 19.1->21.8), rework installer.rs to write SkillLock (not HubManifest), insert audit between fetch+quarantine, gate remove_dir_all with assert_temp_contained, verify post-rename computed_hash vs server snapshot_hash (ShaMismatch path), deprecate HubManifest::save.
@@ -260,6 +281,7 @@ Plans:
 - [x] 21.8-06-PLAN.md — Wave 5 gap closure: realign installer post-install hash compare with D-14 opaque contract — make server-vs-client snapshotHash equality ADVISORY (tracing::warn, not ShaMismatch) in install()/update(), preserve D-13 compute_folder_hash as the client-authoritative drift sentinel, add unit + wiremock integration tests locking the divergence path; unblocks UAT Tests 3 + 4 which 100% failed on live skills.sh due to server/client hash algorithm divergence (G-01).
 
 **Wave structure:**
+
 - Wave 1: 21.8-01 (sanitize.rs + HubErrorKind + slug golden vectors — autonomous)
 - Wave 2: 21.8-02 (blob.rs + lock.rs + paths — depends on 01, autonomous)
 - Wave 3: 21.8-03 (audit.rs + installer.rs rework + migration + manifest deprecation — depends on 01, 02, autonomous)
@@ -277,6 +299,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 21.8.1-01-PLAN.md — Wave 1 pure-additive surface: HubErrorKind::LocalSourceMissing variant, recompute_trust_str "local-dir" arm, D-D1 pre-dispatch hint, lock-file forward-compat round-trip test
 - [x] 21.8.1-02-PLAN.md — Wave 2 LocalDirSource adapter: new ironhermes-hub/src/local_dir.rs implementing HubSource (walk source dir, skip symlinks/.git/node_modules/target, D-17 frontmatter check, snapshot_hash: None) + crate-root re-export
 - [x] 21.8.1-03-PLAN.md — Wave 3 CLI wiring: build_sources adds LocalDirSource; cmd_install local: arm with D-A2 canonicalization (tilde + relative + canonicalize); cmd_update generalizes via existing source_id lookup; cmd_list [local] annotation
@@ -292,6 +315,7 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 21.8.2-01-PLAN.md — Title Case / spaces normalization in parse_skill_md (D-10/D-11/D-12) + 9 unit/integration tests; standalone live-regression fix (Wave 1, no deps)
 - [x] 21.8.2-02-PLAN.md — Foundation layer: CommandResult::SkillsReload + SkillActivated variants; cmd_skills(args, ctx) signature + reload arm; with_skill_registry wired at all 4 CommandContext sites; tui_rata App.skill_registry field; 11 unit + static-grep tests (Wave 1, parallel with 01)
 - [x] 21.8.2-03-PLAN.md — Integration layer: REPL/gateway/TUI SkillsReload + SkillActivated arms; SKILL-13 NotFound fallback at 3 dispatch sites; hermes skills reload CLI subcommand; prompt_builder.activate_skill helper; 14+ tests including 2 subprocess end-to-end tests (Wave 2, depends on 02)
@@ -304,9 +328,9 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 21.8.3-01-PLAN.md — Streaming-scroll fix in app.rs: transcript_line_count parity (D-06/D-07), Finished snap (D-08), submit() helper unification (D-09), End/Ctrl+End binding (D-10), paused indicator (D-11) + 6 RED→GREEN unit tests (Wave 1, no deps)
 - [x] 21.8.3-02-PLAN.md — Scrollbar widget render in ui.rs: VerticalRight orientation inside border (D-01..D-05), default style, ScrollbarState built per-render from app.transcript_line_count + transcript_scroll, TestBackend snapshot test (D-14) (Wave 2, depends on 21.8.3-01 for parity-fixed line count)
-
 
 ### Phase 21.8.3.1: personality applied doesn't chage the llm responses (INSERTED)
 
@@ -319,6 +343,7 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 21.8.3.1-01-PLAN.md — TUI fix: rename `next_turn_personality_overlay` -> `active_personality_overlay` (D-02) + inject overlay into `messages_snapshot[0].content` in `spawn_turn` (D-03/D-04/D-06) + add `/personality clear` pre-check in `handle_subsystem_mutator` (D-05). Three modified files in `crates/ironhermes-cli/src/tui_rata/`.
 - [x] 21.8.3.1-02-PLAN.md — Gateway fix: add `active_personality_overlay: Option<String>` to `GatewayMessageHandler` (D-07), detect personality apply in `CoreCommandResult::Output` arm (D-08), pre-dispatch clear short-circuit (D-05 gateway analog, RESEARCH Option B), per-turn `prompt_builder.set_overlay(text.clone())` (D-09). Plus core regression test locking the "clear is surface-only" contract.
 
@@ -333,6 +358,7 @@ Plans:
 **Plans:** 11/11 plans complete
 
 Plans:
+
 - [x] 21.7-00-wave0-test-infra-PLAN.md — Wave 0 test infra + dev-deps (insta/assert_cmd/tracing-test/sysinfo/nix) + `ensure_home_dirs()` extension for `subagent-transcripts/` + `BudgetHandle` type shell + three static-grep regression gates (E-05/E-08/E-09)
 - [x] 21.7-01-budget-handle-pressure-tiers-PLAN.md — `BudgetHandle` impl (consume/pressure/advisory_text) with SeqCst atomics + 10k-loop concurrent-consume stress test (E-05/S-13) — PROV-09/PROV-10 type foundation
 - [x] 21.7-02-process-registry-module-PLAN.md — `ProcessRegistry` + `ProcessSession` module (`ironhermes-exec/src/process_registry.rs`): constants verbatim from hermes-agent, spawn/poll/wait/kill/logs, LRU prune at 64, TTL 30min, watch-pattern rate limiter with sustained-overload auto-disable (D-23..D-29, E-03/E-04)
@@ -346,6 +372,7 @@ Plans:
 - [x] 21.7-10-eval-scenarios-and-ci-gates-PLAN.md — S-01..S-18 scenario tests (cascade-cancel, yolo-guardrails, process-registry) + M-01 cascade-cancel p95 < 500ms bench + `scripts/ci-gates.sh` with four static-grep gates (E-05/E-08/E-09/D-12) + `cargo insta test --unreferenced=reject --workspace` + optional CI workflow edit
 
 **Wave structure:**
+
 - Wave 0: 21.7-00 (test infra + dev-deps + home-dirs + static-grep gates + BudgetHandle shell — autonomous; blocks all downstream)
 - Wave 1: 21.7-01, 21.7-02, 21.7-03, 21.7-04 in parallel (new types: BudgetHandle impl, ProcessRegistry, SubagentRegistry+transcript, status_cmd skeleton — all autonomous, all depend on Wave 0)
 - Wave 2: 21.7-05, 21.7-06, 21.7-07 in parallel (integration: BudgetHandle three-site, ProcessRegistry wiring + on_session_end, SubagentRegistry+pill+transcript wiring — all autonomous, depend on Wave 1 respective foundations)
@@ -364,11 +391,13 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 21.6-01-PLAN.md — Create .env.example (all provider/tool/gateway env vars, commented-out), cli-config.yaml.example (full Config struct mirror with inline docs), .dockerignore, docker/SOUL.md default identity seed, and ensure_home_dirs() first-run directory scaffolding in main.rs
 - [x] 21.6-02-PLAN.md — Create Dockerfile (multi-stage: gosu + rust:latest builder + debian:bookworm-slim runtime with python3, non-root ironhermes user UID 10000, IRONHERMES_HOME=/opt/data volume) and docker/entrypoint.sh (privilege drop via gosu, UID/GID remapping, directory creation, template seeding)
 - [x] 21.6-03-PLAN.md — Create install.sh (curl-pipe end-user installer: OS/arch detection, GitHub Releases binary download with cargo install fallback, directory scaffolding, template seeding, PATH patching) and setup-ironhermes.sh (post-clone dev setup: Rust check, cargo build --release, symlink, config scaffolding)
 
 **Wave structure:**
+
 - Wave 1: 21.6-01 (config templates + .dockerignore + SOUL.md + ensure_home_dirs — autonomous)
 - Wave 2: 21.6-02 and 21.6-03 in parallel (Dockerfile + entrypoint, install/setup scripts — both depend on 01, both autonomous)
 
@@ -382,12 +411,14 @@ Plans:
 **Plans:** 4/4 plans complete
 
 Plans:
+
 - [x] 21.5-01-PLAN.md — Factory config loading: load_provider_config helper reads $HERMES_HOME/<name>.json (D-01/D-02), replace Value::Null stubs in both build_memory_provider and build_tokio_provider. Refactor SqliteMemoryProvider.conn to Arc<Mutex<Connection>> for tokio::spawn compatibility.
 - [x] 21.5-02-PLAN.md — SQLite provider: memory_recall via FTS5 MATCH with bm25 ranking and snippet generation (D-03/D-05/D-11), handle_tool_call dispatch, sync_turn fire-and-forget FTS5 rebuild (D-07), on_pre_compress indexes compressed messages (D-08), system_prompt_block surfaces recent entries (D-10), queue_prefetch FTS5 cache warming (D-09).
 - [x] 21.5-03-PLAN.md — Grafeo provider: memory_recall via content substring match with relevance scoring (D-12), entity extraction heuristic helper, system_prompt_block with knowledge graph summary (D-10). DuckDB provider: memory_recall via ILIKE bridge command (D-13), new fire-and-forget DuckDbCommand variants (SyncTurn/OnPreCompress/QueuePrefetch), system_prompt_block with analytical summary (D-10).
 - [x] 21.5-04-PLAN.md — Agent loop wiring: inject memory provider tool schemas into LLM tool list via memory_manager.get_tool_schemas(), add memory_provider_tool_names HashSet field, intercept memory_recall calls before registry dispatch and route to MemoryManager.handle_tool_call (D-03/D-04).
 
 **Wave structure:**
+
 - Wave 1: 21.5-01 (factory config loading + SQLite Arc refactor — autonomous)
 - Wave 2: 21.5-02 and 21.5-03 in parallel (SQLite hooks + Grafeo/DuckDB hooks — both depend on 01, both autonomous)
 - Wave 3: 21.5-04 (agent loop wiring — depends on 02 and 03, autonomous)
@@ -402,11 +433,13 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 21.4-01-PLAN.md — Produce structured GAP-ANALYSIS.md audit report: feature-by-feature comparison against REFERENCE-hermes-agent-memory.md, provider lifecycle hook wiring matrix (11 hooks), MEM-06 frozen snapshot verification, 6 gaps catalogued with severity ratings
 - [x] 21.4-02-PLAN.md — Close GAP-1/2/3/4: add memory_enabled and user_profile_enabled config toggles to MemoryConfig, update build_memory_manager to return Option (None when disabled), wire memory_manager into AgentLoop (run_agent_turn + gateway handler) and context engine (build_context_engine + attach_context_engine), static-grep regression tests
 - [x] 21.4-03-PLAN.md — Close GAP-5/6: add hermes memory status (provider info, store sizes, mirror status) and hermes memory off (reset to file provider) CLI subcommands in memory_cmd.rs, wire on_session_end in run_single and run_chat clean exit paths
 
 **Wave structure:**
+
 - Wave 1: 21.4-01 (GAP-ANALYSIS.md audit report -- autonomous)
 - Wave 2: 21.4-02 and 21.4-03 in parallel (config toggles + lifecycle wiring, CLI subcommands + on_session_end -- both autonomous)
 
@@ -420,6 +453,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 21.3-01-PLAN.md — Create ModelMetadata/ModelCapabilities/ModelRegistry structs with static lookup table (30+ models across 7 families), canonical ID + alias map (versioned/prefixed/legacy name resolution), TokenEstimator wrapping tiktoken-rs singletons (cl100k_base + o200k_base), global estimator with OnceLock, warm function. All in ironhermes-core with comprehensive TDD unit tests.
 - [x] 21.3-02-PLAN.md — Wire metadata through resolution chain: add model_metadata to ResolvedEndpoint, populate from ModelRegistry in ProviderResolver::build(), replace text.len()/4 heuristic with tiktoken in context_compressor, parameterize attach_context_engine with context_length, update all four hardcoded 128_000 sites in main.rs and gateway handler.
 - [x] 21.3-03-PLAN.md — Implement disk cache (ModelsCache with load/save to ~/.ironhermes/models-cache.json) and API fetch layer (models.dev primary + OpenRouter fallback per D-03), parse functions for both API response formats, normalize_model_id, fetch_all with fallback chain and FetchResult reporting.
@@ -427,6 +461,7 @@ Plans:
 - [x] 21.3-05-PLAN.md — Gap closure: Wire ModelsCache::load() + merge_cache() into ProviderResolver::build() so disk cache is auto-loaded at startup for all runtime entry points (D-02, D-06 completion). Regression tests.
 
 **Wave structure:**
+
 - Wave 1: 21.3-01 (ModelMetadata + TokenEstimator + static table — autonomous)
 - Wave 2: 21.3-02 and 21.3-03 in parallel (wiring + cache/fetch — both depend on 01, both autonomous)
 - Wave 3: 21.3-04 (CLI subcommand + slash command — depends on 02 and 03, autonomous)
@@ -442,6 +477,7 @@ Plans:
 **Plans:** 11/11 plans complete
 
 Plans:
+
 - [x] 21.2-01-PLAN.md — Create ironhermes-mcp crate scaffold with rmcp dependency, McpServerConfig (hermes-agent-compatible YAML schema), env var interpolation, build_safe_env allowlist, sanitize_error credential stripping, and mcp_servers field on Config struct
 - [x] 21.2-02-PLAN.md — Add register_dynamic/unregister_by_prefix to ToolRegistry and migrate all Arc<ToolRegistry> callsites to Arc<RwLock<ToolRegistry>> across 6 files (rpc_registry stays Arc<ToolRegistry> for safe subset isolation)
 - [x] 21.2-03-PLAN.md — Implement McpManager orchestrating per-server tokio tasks, McpTool (Tool trait impl with channel-based dispatch), stdio/HTTP transport helpers via rmcp SDK, sampling handler with rate limiting, exponential backoff reconnection (5 retries, max 60s), tool naming (server__tool), description prefixing ([MCP: server_name]), enabled_tools filtering, and reload capability
@@ -455,6 +491,7 @@ Plans:
 - [x] 21.2-11-PLAN.md — GAP-8 close: ironhermes gateway Ctrl+C hang (pending)
 
 **Wave structure:**
+
 - Wave 1: 21.2-01 and 21.2-02 in parallel (crate scaffold + registry migration — both autonomous)
 - Wave 2: 21.2-03 (McpManager + server tasks + McpTool — depends on 01 and 02, autonomous)
 - Wave 3: 21.2-04 and 21.2-05 in parallel (slash command wiring + CLI subcommands — both depend on 03, both autonomous)
@@ -469,10 +506,12 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 21.1-01-PLAN.md — Build CommandRouter in ironhermes-core: CommandDef/PlatformFilter/CommandCategory types, three-stage resolve_command (exact/alias/prefix), full 44-command registry with wired handlers and TODO stubs, CommandContext struct, comprehensive unit tests
 - [x] 21.1-02-PLAN.md — Wire CommandRouter into CLI (replace core_dispatch, update dispatch_command chain, construct CommandContext in REPL loop) and gateway (replace handle_slash_command with router-based dispatch, delete old cmd_* methods). Static-grep regression tests.
 
 **Wave structure:**
+
 - Wave 1: 21.1-01 (core router + registry + handlers + tests — autonomous)
 - Wave 2: 21.1-02 (CLI + gateway integration — depends on 21.1-01, autonomous)
 
@@ -489,6 +528,7 @@ Plans:
 > Phase numbering continues from v2.0 last phase (22.4.2.3). New phases start at 23.
 
 **Architectural principles** (carried through every v2.1 phase, sourced from canonical hermes-agent design):
+
 1. The Learning Loop is the unifying philosophy — Skills + Memory + Session Search are outputs of one continuous process
 2. Cache-awareness is load-bearing — three cache breakers (model switch, memory file change, context file change) must be enforced (Phase 27) and surfaced in config UX (Phases 23/25/26)
 3. 3,575 char total memory limit (already aligned: MEM-01 + MEM-02 = 3,575)
@@ -503,13 +543,16 @@ Plans:
 **Depends on:** Phase 21 (config infrastructure), Phase 20 (memory setup wizard pattern)
 **Requirements:** CFG-01, CFG-02, CFG-03
 **Success Criteria** (what must be TRUE):
+
   1. Running `hermes` for the first time launches an interactive setup wizard that asks for provider selection, API key, model, and writes a valid `config.yaml`
   2. `hermes config set <key> <value>` updates a config.yaml key and `hermes config get <key>` reads it back
   3. `hermes config show` prints the active config with redacted secrets
   4. `hermes config migrate` scans installed skills for unconfigured settings and prompts the user to fill them in
+
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 23-01-PLAN.md — Schema extension + pure-function core (wizard, validate, dotted-path setter) + Wave 0 test scaffolding
 - [x] 23-02-PLAN.md — CLI surfaces (`hermes setup` + `hermes config`) + rustyline I/O + first-run pre-flight middleware + manual UAT
 
@@ -521,13 +564,16 @@ Plans:
 **Depends on:** Phase 23 (config CLI must exist before profiles can reference configs)
 **Requirements:** CFG-04
 **Success Criteria** (what must be TRUE):
+
   1. `hermes --profile work chat` uses `~/.ironhermes/profiles/work/` as HERMES_HOME, separate from default
   2. Memory stores and session history for `work` profile are completely isolated from `personal` profile
   3. Gateway started under one profile does not interfere with gateway under another profile (separate PID files)
   4. Profile directory is scaffolded automatically on first use with the same `ensure_home_dirs()` structure as default
+
 **Plans:** 7/7 plans complete
 
 Plans:
+
 - [x] TBD (run /gsd-plan-phase 24 to break down) (completed 2026-04-29)
 
 **Phase directory:** `.planning/phases/24-profile-isolation/`
@@ -538,14 +584,17 @@ Plans:
 **Depends on:** Phase 23 (setup wizard integration requires CFG-01 wizard infrastructure), Phase 21.1 (slash command registry for toolset commands)
 **Requirements:** TOOL-01, TOOL-02, TOOL-03, TOOL-04, TOOL-05
 **Success Criteria** (what must be TRUE):
+
   1. Each tool has an `is_available()` check; tools whose prerequisites (env vars, API keys) are absent are silently excluded from the schema sent to the LLM
   2. Tools are grouped into named toolsets (e.g., `web`, `code`, `memory`) and operator can list/enable/disable a toolset at runtime
   3. Adding a new tool requires only a registration call — no changes to dispatch logic
   4. Agent-intercepted tools (memory, session_search, delegate_task) are handled before registry dispatch without being visible to the LLM as duplicates
   5. `hermes setup` (or first-run wizard) detects tools with missing prerequisites and guides the user through configuring them
+
 **Plans:** 5 plans
 
 Plans:
+
 - [ ] 25-01-PLAN.md — Trait surface (Prerequisite + prerequisites()) + toolset() name fixes (terminal/file_tools/cronjob) + web prereqs declared
 - [ ] 25-02-PLAN.md — Registry expansion: intercepts map + register_intercepted/dispatch_intercepts/list_unavailable/list_toolsets + D-15 panic guards + todo schemas
 - [ ] 25-03-PLAN.md — Config (ToolsConfig + DEFAULT_TOOLSETS) + get_definitions toolset filter + agent_loop migration (with_intercepts builder, dispatch_intercepts call site, session_search injection removal)
@@ -561,6 +610,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 25.5-01-PLAN.md — Git integration + Cargo.toml fullstack wiring: remove nested .git (D-05), add Dioxus fullstack + backend crate deps behind server feature (D-06), exclude UI from default cargo build via default-members (D-07), dual main.rs (server + client)
 - [x] 25.5-02-PLAN.md — Platform::Web + server API layer + WebSocket endpoint: add Platform::Web to core types (D-03/D-04), create server/ module with #[server] functions (list_slash_commands, list_sessions, get_config_summary, list_tools, create_session) and WebSocket chat endpoint (D-01)
 - [x] 25.5-03-PLAN.md — Wire static-data components: command palette (49 real slash commands from CommandRouter), status bar (real model/provider/tokens from Config), title bar (real sessions from StateStore). Replace demo_palette_items/demo_tabs with server function calls (D-02 static half)
@@ -568,6 +618,7 @@ Plans:
 - [x] 25.5-05-PLAN.md — Integration verification + mock retirement: gate mocks/ behind cfg(test|demo), verify all 13 components wired to real data, human smoke test (dx serve → chat loop end-to-end)
 
 **Wave structure:**
+
 - Wave 1 parallel: 25.5-01 (git + cargo wiring — autonomous) + 25.5-02 (Platform::Web + server API — autonomous). Zero file overlap.
 - Wave 2 parallel: 25.5-03 (static components — depends on 01+02, autonomous) + 25.5-04 (interactive components — depends on 01+02, autonomous). Shared file: warp_hermes.rs — executor must sequentialise edits to this file.
 - Wave 3: 25.5-05 (mock retirement + human verification — depends on 03+04, NOT autonomous: checkpoint:human-verify)
@@ -584,11 +635,13 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 25.6-01-PLAN.md — Create shared in-process app runtime factory in `ironhermes-agent` (CLI-parity tool/guardrail/hook/MCP wiring contracts + parity tests)
 - [x] 25.6-02-PLAN.md — Migrate CLI + ratatui callsites to consume shared runtime factory while preserving existing behavior
 - [x] 25.6-03-PLAN.md — Migrate web AppState/WS/API to startup-scoped shared runtime and Platform::Web session parity
 
 **Wave structure:**
+
 - Wave 1: 25.6-01 (shared factory foundation)
 - Wave 2: 25.6-02 and 25.6-03 in parallel (both depend on 25.6-01; no file overlap)
 
@@ -602,6 +655,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-discuss-phase 25.4 then /gsd-plan-phase 25.4 to break down)
 
 ### Phase 25.3: session-workspace parity (INSERTED)
@@ -612,6 +666,7 @@ Plans:
 **Plans:** 18/18 plans complete
 
 Plans:
+
 - [x] 25.3-00-PLAN.md — D-P0-1 RESERVED_ROLE_NAMES["curator"] (6→7) + D-W-1 schema migration v8 (workspace_root TEXT NULL) + 26-CONTEXT.md doc-update
 - [x] 25.3-01-PLAN.md — D-T-1 / D-T-2 ironhermes-trajectory crate scaffold + TrajectoryEntry/ImpactLevel format spec + golden JSONL test
 - [x] 25.3-02-PLAN.md — D-W-1 Workspace newtype + resolve_from_cwd walk-up algorithm in ironhermes-core
@@ -639,6 +694,7 @@ Plans:
 **Plans:** 15/15 plans complete
 
 Plans:
+
 - [x] 25.2-00-PLAN.md — Wave 0 file scaffolding + pdf-extract dep + module wiring
 - [x] 25.2-01-PLAN.md — D-04 web_local refactor (extract shared helpers from web_read.rs)
 - [x] 25.2-02-PLAN.md — D-22 ExtractConfig struct + RESERVED_ROLE_NAMES update
@@ -663,6 +719,7 @@ Plans:
 **Plans:** 19/19 plans complete
 
 Plans:
+
 - [x] 25.1-01-PLAN.md — Wave 0 foundations: chromiumoxide 0.9 + base64 deps; 12 module stubs in lib.rs; AnthropicClient ImageUrl→Image ContentBlock conversion (closes OQ-2)
 - [x] 25.1-02-PLAN.md — BrowserSession struct + lazy spawn + find_chromium_binary (D-05 walk); BrowserConfig in core (D-18); browser entry in default ToolsConfig (D-04 disabled)
 - [x] 25.1-03-PLAN.md — Simple navigation/keyboard tools: browser_back, browser_press, browser_scroll
@@ -684,12 +741,15 @@ Plans:
 **Depends on:** Phase 21 (ProviderResolver infrastructure), Phase 23 (config CLI for setting provider values)
 **Requirements:** PROV-04, PROV-06, PROV-08
 **Success Criteria** (what must be TRUE):
+
   1. Configuring two providers with different base URLs and different API keys sends the correct key to each endpoint — no key leaks to the wrong URL
   2. Setting `auxiliary_model` in config.yaml routes compression, vision, and session-search tasks to that model instead of the main conversational model
   3. A named custom provider (e.g., `my-local-llm`) defined in config.yaml is selectable as `--provider my-local-llm` and resolves its base URL, API key, and model correctly
+
 **Plans:** 5 plans
 
 Plans:
+
 - [ ] 26-01-PLAN.md — Config schema (ProviderConfig.api_key_env + disabled, AuxiliaryConfig, RoleOverride alias, validate_api_key_env, validate_role_name)
 - [ ] 26-02-PLAN.md — ProviderResolver: D-11 leak fix + D-12/D-13/D-01 deprecation banners + D-02 custom_providers migration + D-14 disabled gate + D-05/D-07 resolve_role cascade
 - [ ] 26-03-PLAN.md — Agent crate wire-through audit + compression cascade regression + greenfield-role TODOs (vision/session_search/skills_hub/mcp_helper per Open Question 1)
@@ -697,6 +757,7 @@ Plans:
 - [ ] 26-05-PLAN.md — hermes setup auxiliary stage (D-19) + apply_auxiliary_answer wizard + D-20 Test 2 (auxiliary_routes_to_separate_model — PROV-06 end-to-end)
 
 **Wave structure:**
+
 - Wave 1: 26-01 (config schema — autonomous)
 - Wave 2: 26-02 (provider resolver — depends on 26-01, autonomous)
 - Wave 3: 26-03 (agent wire-through — depends on 26-02, autonomous)
@@ -713,6 +774,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-discuss-phase 26.6 then /gsd-plan-phase 26.6 to break down — est. 2–3 plans: thinking panel + toggle; Skills Hub overlay; rich approval/secret/sudo overlays + UAT)
 
 ### Phase 26.5: tui_rata overlay layer and theming (INSERTED)
@@ -723,6 +785,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-discuss-phase 26.5 then /gsd-plan-phase 26.5 to break down — est. 4 plans, 2 waves: W1 = overlay primitive, skin model + `/skin` wiring; W2 = session picker overlay, model picker overlay)
 
 ### Phase 26.4: web ui side tabs panel (INSERTED)
@@ -733,12 +796,14 @@ Plans:
 **Plans:** 0/4 plans executed
 
 Plans:
+
 - [ ] 26.4-01-PLAN.md — Add `memory_enabled: bool` to `ConfigSummary` struct + populate in `get_config_summary` handler from `cfg.memory.memory_enabled` (server-only, 1 file, 2 lines added)
 - [ ] 26.4-02-PLAN.md — Insert 6 new CSS rule families (`.wh-side-tabs`, `.wh-side-tab` + `:hover` + `.is-active` + `.is-active::after`, `.wh-side-info`, `.wh-side-info-card`, `.wh-side-info-heading`, `.wh-side-info-row` + key/val) into `warp-ih.css` between `.wh-side-scroll` and `.wh-msg`; tokens-only, no raw hex, `::after` + `bottom: 0` (NOT `::before` like TitleBar tabs)
 - [ ] 26.4-03-PLAN.md — Extend `AgentPanel` from 1-prop to 9-prop signature; add `.wh-side-tabs` strip with two hardcoded buttons (AGENT/INFO) below `.wh-side-head`; wrap existing `.wh-side-scroll` in `if active_side_tab() == 0` branch; add `.wh-side-info` else-branch with two `.wh-side-info-card` sections (SESSION + CONFIG) per UI-SPEC Copywriting Contract
 - [ ] 26.4-04-PLAN.md — Wire `active_side_tab` signal + `on_side_tab_click` closure into `WarpHermes`; widen `config_summary()` destructure to 4-tuple `(model_name, provider_name, context_length, memory_enabled)`; replace 1-prop `AgentPanel { messages: messages }` call with 9-prop call site; D-09 invariant: `on_tab_click` (TitleBar session handler) must NOT touch `active_side_tab`. Closes with a `checkpoint:human-verify` UAT against UI-SPEC.
 
 **Wave structure:**
+
 - Wave 1 parallel (zero file overlap): 26.4-01 (server `api.rs`), 26.4-02 (CSS `warp-ih.css`), 26.4-03 (`agent_panel.rs`)
 - Wave 2: 26.4-04 (`warp_hermes.rs`) — depends on 26.4-01 (uses `cfg.memory_enabled`) and 26.4-03 (calls 9-prop AgentPanel)
 
@@ -752,6 +817,7 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 26.4.1-01-PLAN.md — CFG-01: rewrite run_minimum_viable_flow API-key persistence to .env + providers.{provider}.api_key_env (drop deprecated model.api_key write)
 - [x] 26.4.1-02-PLAN.md — CFG-02: add KNOWN_AUX_PROVIDERS allow-list + is_known_aux_provider guard at both auxiliary call sites (run_minimum_viable_flow + run_agent_section); warn-and-skip on unknown values
 - [x] 26.4.1-03-PLAN.md — CFG-03: widen run_preflight gate in main.rs to cover Commands::Gateway (Chat | Gateway | None) while keeping is_interactive_repl / is_chat_or_bare un-widened; add invariants_26_4_1_cfg_03.rs
@@ -764,6 +830,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 26.3-01-PLAN.md — Add BrowserConfig.user_data_dir + wire into spawn() (both crates) + ensure_home_dirs() scaffolding + 5 tests
 
 ### Phase 26.3.2: Chrome singleton user browser-profile (INSERTED)
@@ -774,6 +841,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 26.3.2-01-PLAN.md — Add ironhermes-core::browser_profile::reconcile_singleton_lock (stale-lock detection + sentinel cleanup + live-lock ephemeral fallback, dep-free) with 7 unit tests; wire it into both browser_session.rs spawn() call sites
 
 ### Phase 26.2: Fix Dioxus ui session tabs (INSERTED)
@@ -784,6 +852,7 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 26.2-01-PLAN.md — Wave 1: apply Phase 26.1 review fixes (WR-01 Finished arm uses streaming_block_id; WR-02 ws.rs busy-gate opportunistic clear; WR-03 branch-anchored parity assertions + new busy-gate regression test; IN-01 dedup allow(unused_mut))
 - [x] 26.2-02-PLAN.md — Wave 2: extend Tab struct with session_id; rewrite TitleBar with EventHandler<usize/()> props, stop_propagation close button, and disabled streaming-gate prop; add tabs Signal + on_tab_click/new/close closures + D-07/D-08 mount + list_sessions seeders in WarpHermes; 3 new source-text regression tests
 
@@ -795,6 +864,7 @@ Plans:
 **Plans:** 15/15 plans complete
 
 Plans:
+
 - [x] TBD (run /gsd-plan-phase 26.2.1 to break down) (completed 2026-05-13)
 - [x] 26.2.1-10-PLAN.md — Gap closure: restore dropped chrome CSS (app.html lines 42-112, 315-316, 320) + 5 per-theme `[data-theme]` var-override blocks (closes UAT Gaps 2 & 3) (completed 2026-05-14)
 - [x] 26.2.1-11-PLAN.md — Gap closure: client-side `/clear` slash-command dispatch via `dispatch_slash` helper in hermes_app/mod.rs; unknown slash arms render local error bubble (closes UAT Gap 4; D-20 amended) (completed 2026-05-14)
@@ -803,6 +873,7 @@ Plans:
 - [x] 26.2.1-14-PLAN.md — Gap closure round 3: GAP-07-R3 scanlines Branch (c) triple-guard via live DOM diagnostic + GAP-09-R3 message_count > 0 post-filter (PARTIAL with user-approved RESIDUAL deferred to 26.2.12) (completed 2026-05-14)
 
 **Cross-cutting constraints:**
+
 - src/server/ws.rs, src/server/api.rs, src/server/state.rs, src/protocol.rs are byte-for-byte unchanged (D-02)
 
 ### Phase 26.1: Fix websocket error for chat (INSERTED)
@@ -813,6 +884,7 @@ Plans:
 **Plans:** 2/3 plans complete
 
 Plans:
+
 - [x] 26.1-01-PLAN.md — Refactor `/api/ws/chat` websocket lifecycle for live concurrent event forwarding and clean disconnect teardown, harden client reconnect loop in `warp_hermes.rs`, and lock invariants with `websocket_lifecycle_parity.rs` regression tests.
 - [x] 26.1-02-PLAN.md — Gap closure: isolate server-only websocket runtime symbols behind feature boundaries, switch client protocol references to `crate::protocol`, and lock build-boundary invariants so default web build (`dx serve`) succeeds.
 - [ ] 26.1-03-PLAN.md — Gap closure: resolve live browser reset-without-close loop by normalizing server disconnect teardown semantics, hardening client reconnect receive lifecycle continuity, and rerunning manual UAT checkpoint for disconnect + in-flight double-submit race.
@@ -825,12 +897,15 @@ Plans:
 **Depends on:** Phase 26 (PROV-04 key scoping ensures Anthropic requests use the correct key before caching is wired), Phase 15 (10-layer prompt assembly)
 **Requirements:** PRMT-08, PRMT-09
 **Success Criteria** (what must be TRUE):
+
   1. When using an Anthropic Claude model, the system prompt and last 3 non-system messages carry `cache_control` breakpoints in the request payload
   2. Prompt caching is automatically enabled for Anthropic models and silently skipped for non-Anthropic providers — no config change needed
   3. The configurable TTL (5m or 1h) is respected in the `cache_control` type field
+
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 27 to break down)
 
 **Phase directory:** `.planning/phases/27-prompt-caching/`
@@ -843,6 +918,7 @@ Plans:
 **Plans:** 4/4 plans complete
 
 Plans:
+
 - [x] TBD (run /gsd-plan-phase 27.1 to break down) (completed 2026-05-10)
 
 **Phase directory:** `.planning/phases/27.1-import-free-hexapod-gsd-planning/`
@@ -853,14 +929,17 @@ Plans:
 **Requirements:** HXP-TOOL-01, HXP-TOOL-02, HXP-TOOL-03, HXP-TOOL-04, HXP-TOOL-05, HXP-TOOL-06, HXP-LOCO-01, HXP-LOCO-02, HXP-LOCO-03, HXP-LOCO-04, HXP-LOCO-05
 **Depends on:** Phase 27.1
 **Success Criteria** (what must be TRUE):
+
   1. ✅ Hexapod physically walks forward, backward, left, right on command
   2. ✅ Agent can halt the robot and return it to neutral stance
   3. ✅ Battery voltage string returned (e.g., "Battery: 7.2V / 8.1V (OK)")
   4. ✅ Ultrasonic distance value returned in centimeters
   5. ✅ Robot automatically halts and relaxes servos on IronHermes session end
+
 **Plans:** 7/7 plans complete
 
 Plans:
+
 - [x] 27.1.1-01-PLAN.md — Tool trait extension: on_session_end default + ToolRegistry::call_session_end_hooks
 - [x] 27.1.1-02-PLAN.md — hexapod_tcp.rs core: HexapodTcpTool with allowlist, wire translation, sensor parsing, session-end halt, inline tests
 - [x] 27.1.1-03-PLAN.md — Wire call_session_end_hooks into run_single, run_chat, and ratatui shutdown paths
@@ -868,6 +947,7 @@ Plans:
 - [x] 27.1.1-05-PLAN.md — Manual UAT on a powered hexapod (non-autonomous) — PASSED
 
 **Follow-ups:**
+
 - 27.1.1-gap-01-PLAN.md ✅ DONE (2026-05-11) — canonical `ToolRegistry::register_defaults_except` entry point; all production paths (CLI REPL/batch, ratatui TUI, iron_hermes_ui, gateway) delegate to it; dead-code builders deleted; `build_rpc_registry` kept restricted with a SAFETY rationale; 3 regression tests added.
 - 27.1.1-gap-02-PLAN.md ✅ DONE (2026-05-11) — `set_toolset_config` now wired at startup via `build_app_runtime_bundle` so `config.yaml`'s `tools.toolsets` section is enforced at session start; back-compat-preserving merge helper (`ToolsConfig::with_default_toolsets_merged` — absent toolsets default enabled, DEFAULT_TOOLSETS members added-if-absent, explicit `enabled: false` respected); `PromptBuilder.active_toolsets` populated at all 4 production construction sites (closes the "Phase 20 wires real toolset state" TODO); subagent/RPC sub-registries confirmed isolated; 12 regression tests added.
 
@@ -879,12 +959,15 @@ Plans:
 **Requirements:** HXP-NAV-01, HXP-NAV-03, HXP-NAV-04
 **Depends on:** Phase 27.1.1
 **Success Criteria** (what must be TRUE):
+
   1. Robot rotates clockwise and counterclockwise by specified degrees
   2. Head pan and tilt move independently within safe servo ranges
   3. Buzzer turns on and off on command (audible confirmation)
+
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 27.1.2-01-PLAN.md — Extend hexapod_tcp.rs with 5 new actions (rotate, head_pan, head_tilt, buzzer_on, buzzer_off), 5 constants, build_rotate_wire helper, updated schema, and 7 new unit tests (tests 14–20)
 
 **Phase directory:** `.planning/phases/27.1.2-navigation-inserted/`
@@ -895,12 +978,15 @@ Plans:
 **Requirements:** HXP-NAV-02, HXP-DOC-01
 **Depends on:** Phase 27.1.2
 **Success Criteria** (what must be TRUE):
+
   1. All LEDs change to specified RGB color on command; turn off on command
   2. `skills/hexapod/DESCRIPTION.md` is present and contains all CMD_* wire formats, action list, and blocked commands
   3. Agent can invoke any Phase 1–3 protocol action using the skill doc alone (no inline prompt guidance needed)
+
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 27.1.3-01-PLAN.md — Extend hexapod_tcp.rs with led/led_off actions, CMD_LED/CMD_LED_OFF constants, r/g/b schema properties, DESCRIPTION update, and 4 new unit tests (tests 21–24)
 - [x] 27.1.3-02-PLAN.md — Create skills/hexapod/SKILL.md with protocol-complete content (all 12 actions, wire formats, blocked commands, parameter ranges) and verify DESCRIPTION const
 
@@ -912,13 +998,16 @@ Plans:
 **Requirements:** D-01..D-15 (phase decisions in 27.1.4-CONTEXT.md — no formal HXP-* IDs assigned; the CONTEXT decisions are the contract)
 **Depends on:** Phase 27.1.3
 **Success Criteria** (what must be TRUE):
+
   1. `hexapod_video/capture_frame` returns a `data:image/jpeg;base64,<...>` string from the robot's video port (8002); missing HEXAPOD_IP and port-busy each return a specific error string with no hang
   2. `hexapod_tcp/stream_distance(samples=N)` returns `"Distances: [...] cm | min=N max=N avg=N.N"` with N clamped to [1, 20]
   3. `hexapod_tcp/camera_pan(x)` and `camera_tilt(y)` send `CMD_CAMERA#x#y\n` (unused axis at its midpoint) and return `"OK"`; all three new actions pass the compile-time allowlist
   4. `skills/hexapod/SKILL.md` documents all 15 hexapod_tcp actions plus the hexapod_video tool — the agent can invoke any of them from the skill doc alone
+
 **Plans:** 3/3 plans complete
 
 Plans:
+
 - [x] 27.1.4-01-PLAN.md — Extend hexapod_tcp.rs with stream_distance / camera_pan / camera_tilt actions, 7 new constants, updated schema + DESCRIPTION, and 5 new unit tests
 - [x] 27.1.4-02-PLAN.md — Create hexapod_video.rs (HexapodVideoTool, capture_frame action — port 8002, 4-byte LE length prefix, base64 data URI) and wire it into lib.rs + registry.rs with tests
 - [x] 27.1.4-03-PLAN.md — Update skills/hexapod/SKILL.md with the three new hexapod_tcp action rows, the camera joint-axis explanation, the new parameter ranges, and a new hexapod_video tool section
@@ -933,6 +1022,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 27.1.4.2-01-PLAN.md — Fix CMD_LED_OFF wire (CMD_LED_MOD#0), unify crate-level ENV_LOCK across hexapod_tcp+hexapod_video tests, add static-invariant regression gate
 
 ### Phase 27.1.4.1: gateway fallback gap (INSERTED)
@@ -943,11 +1033,11 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 27.1.4.1-01-PLAN.md — Shared wire_fallback_if_configured helper + lib.rs re-export + wire 5 AgentLoop sites + 3 PROV-07 invariant test files
 - [x] 27.1.4.1-02-PLAN.md — Add learning: and tools: sections to cli-config.yaml.example; extend README Provider fallback section; finalize ROADMAP entry
 
 **Phase directory:** `.planning/phases/27.1.4.1-gateway-fallback-gap/`
-
 
 ### Phase 27.1.4.1.1: fallback on transport errors not just HTTP status (INSERTED)
 
@@ -958,6 +1048,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 27.1.4.1.1-01-PLAN.md — Add transport-failure detection helper to classify_llm_error, repurpose + add transport unit tests, new static-invariant grep file
 
 ### Phase 27.1.4.1.1.1: INCORRECTLY_ADDED_FROZEN (renumbering error)
@@ -968,6 +1059,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [x] N/A — use Phase 27.1.4.2 instead (completed 2026-05-14)
 
 ### Phase 28: Skills Trust Tiers
@@ -976,12 +1068,15 @@ Plans:
 **Depends on:** Phase 21.8 (skills lock + install pipeline that this tier system annotates), Phase 25 (toolset management — trust tier enforcement reuses the is_available() check pattern)
 **Requirements:** SKILL-09
 **Success Criteria** (what must be TRUE):
+
   1. Skills shipped inside the binary are classified as `builtin`; skills from the optional-skills/ directory as `official`; skills from known repo sources as `trusted`; all others as `community`
   2. Community skills that fail the security scan are hard-rejected at load time; builtin/official/trusted skills that fail emit a warning but still load
   3. `hermes skills list` shows each skill's trust tier alongside its name and status
+
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 28 to break down)
 
 **Phase directory:** `.planning/phases/28-skills-trust-tiers/`
@@ -992,14 +1087,17 @@ Plans:
 **Depends on:** Phase 21 (gateway architecture already implemented), Phase 21.1 (slash command dispatch verified separately)
 **Requirements:** GW-01, GW-02, GW-03, GW-04, GW-06, GW-07, GW-09, GW-10
 **Success Criteria** (what must be TRUE):
+
   1. `build_session_key()` produces the documented `agent:main:{platform}:{chat_type}:{chat_id}` format and tests cover all platform/chat_type combinations
   2. The two-level message guard is tested: base adapter queues messages when agent is active, and gateway runner bypasses /stop /approve /deny while blocking other commands
   3. Authorization allowlist tests confirm that messages from non-whitelisted chats are denied and DM pairing codes gate access correctly
   4. Hook lifecycle event tests confirm `gateway:startup`, `session:start/end`, `agent:start/step/end` fire at the correct points in the message processing pipeline
   5. Token lock tests confirm `acquire_scoped_lock` / `release_scoped_lock` prevent two gateway instances from sharing the same bot token
+
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 29 to break down)
 
 **Phase directory:** `.planning/phases/29-gateway-formal-verification/`
@@ -1010,13 +1108,16 @@ Plans:
 **Depends on:** Phase 22 (CLI infrastructure, AgentLoop wiring), Phase 22.2 (ACP context and discussion artifacts), Phase 24 (profile isolation — ACP sessions benefit from per-session isolation)
 **Requirements:** CLI-03, CLI-04, CLI-08
 **Success Criteria** (what must be TRUE):
+
   1. `hermes acp` starts a JSON-RPC stdio server; a client can send a `session.create` request and receive a session ID in response
   2. Each ACP session is bound to the editor's cwd at creation time; file and terminal tool calls resolve relative to that cwd
   3. `session.fork` creates a child session inheriting parent context; `session.list` enumerates active sessions; `session.remove` tears down a session cleanly
   4. Sessions survive across multiple JSON-RPC calls within the same stdio connection and are cleaned up when the connection closes
+
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 30 to break down)
 
 **Phase directory:** `.planning/phases/30-acp-adapter-core/`
@@ -1027,12 +1128,15 @@ Plans:
 **Depends on:** Phase 30 (ACP server and SessionManager must exist before bridges can be wired)
 **Requirements:** CLI-05, CLI-06, CLI-07
 **Success Criteria** (what must be TRUE):
+
   1. AgentLoop streaming events (tool_progress, thinking, step, stream_delta) appear as `session_update` JSON-RPC notifications in the editor within 100ms of the event firing
   2. When a tool requires dangerous-command approval, the editor receives a permission request and `allow_once` / `allow_always` / `reject` responses are correctly honored by the agent
   3. File-write tool calls produce a diff-format content block; shell-command tool calls produce a command-preview block; text-generation produces a plain text block — all in the ACP content schema
+
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 31 to break down)
 
 **Phase directory:** `.planning/phases/31-acp-adapter-bridges/`
@@ -1043,15 +1147,25 @@ Plans:
 **Depends on:** v2.0 memory framework (MEM-01..06 done); v2.0 PRMT-06 (frozen-at-session-start memory snapshot already shipped)
 **Requirements:** LEARN-01, LEARN-02
 **Success Criteria** (what must be TRUE):
+
   1. A periodic nudge fires at the configured interval (default 5 min) during an active chat session, injecting a system-level prompt without user input
   2. The agent can write to MEMORY.md/USER.md within the existing 3,575 char total cap during a nudge cycle; persisted entries appear in the next session's prompt without breaking the current session's prompt cache
   3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
   4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
+
 **Plans:** 3 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 32-01-PLAN.md — Config extension + nudge module + run_chat wiring (nudge_interval in MemoryConfig, MEMORY_REVIEW_PROMPT, spawn_nudge_review with memory-only ToolRegistry, turns_since_nudge counter in run_chat)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 32-02-PLAN.md — Gateway handler wiring + counter-logic tests (nudge_turns HashMap per session in GatewayHandler, fire site in handle_with_multimodal, should_nudge helper, 3 counter-logic unit tests)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 32-03-PLAN.md — Web UI nudge wiring (nudge_turns HashMap on AppState, fire site inside run_web_turn after agent.run() returns Ok, tokio::spawn fire-and-forget, mirrors gateway pattern)
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
@@ -1064,6 +1178,7 @@ Plans:
 **Plans:** 10/10 plans complete
 
 Plans:
+
 - [x] 32.1-01-PLAN.md — PARITY.md scope amend + CronJob field additions + defensive JobOrigin deserializer (Wave 1)
 - [x] 32.1-02-PLAN.md — AgentLoop activity tracker API + interrupt() (Wave 1)
 - [x] 32.1-03-PLAN.md — JobStore hardening: fsync, chmod, control-char repair, trigger_job, dynamic grace, due-job recovery, compute_next_run anchoring (Wave 2)
@@ -1074,6 +1189,7 @@ Plans:
 - [x] 32.1-07-PLAN.md — CLI Trigger/Tick/Daemon subcommands + gateway migration to runner crate (Wave 5)
 
 **Round 2 (Gap closure — from 32.1-HUMAN-UAT.md):**
+
 - [x] 32.1-08-PLAN.md — UX: rename `TickResult.jobs_skipped` -> `jobs_idle` + update `cmd_tick` println label from `errors` to `idle` so the summary line stops misreporting enabled-but-not-due jobs as failures (Wave 6, gap_closure, autonomous)
 - [x] 32.1-09-PLAN.md — Regression: restore pre-32.1 config.yaml whitelist fallback in `lookup_home_channel` so `deliver=telegram` resolves to `gateway.platforms.telegram.whitelist[0]` when `TELEGRAM_HOME_CHANNEL` is unset and the whitelist has exactly one entry; env var still wins; telegram-only scope (Wave 6, gap_closure, autonomous)
 
@@ -1083,13 +1199,16 @@ Plans:
 **Depends on:** Phase 25 (toolset registry — registers skill_manage as a new toolset entry); Phase 28 (SKILL-09 trust tiers — adds the `Self-created` tier that LEARN-04 assigns by default); v2.0 skill framework (Phase 19, done)
 **Requirements:** LEARN-03, LEARN-04, LEARN-05
 **Success Criteria** (what must be TRUE):
+
   1. After a task that hit a trigger heuristic completes, the agent emits a tool_call to `skill_manage(action="create", ...)` that produces a valid SKILL.md under `~/.hermes/skills/<category>/<slug>/SKILL.md` with the `Self-created` trust tier set
   2. Updates to existing skills are made via `skill_manage(action="patch", ...)` by default; the `patch` payload contains only the changed text, not the full skill content (token-efficient)
   3. All 6 actions (create, patch, edit, delete, write_file, remove_file) are exposed via the `skill_manage` tool with the same JSON schema shape as the existing memory tool actions; runtime tests confirm each action's behavior
   4. New self-created skills appear in the next session's skill index with the `Self-created` trust tier; agents can load them via the existing progressive-disclosure path (names+summaries → on-demand full content)
+
 **Plans:** 3 plans
 
 Plans:
+
 - [ ] 33-01-PLAN.md — Add SkillSource::SelfCreated + pub validate_skill_name + inject skill-creation trigger guidance into PromptBuilder ToolGuidance slot
 - [ ] 33-02-PLAN.md — Implement SkillManageTool with 6 actions (create/patch/edit/delete/write_file/remove_file), security scanning, path traversal protection; register_skill_manage_tool in ToolRegistry
 - [ ] 33-03-PLAN.md — Register 'learning' toolset in KNOWN_TOOLSETS/toolset_members_map/DEFAULT_TOOLSETS; wire register_skill_manage_tool in app_runtime_factory; 7 INV-33-* static-grep regression tests (INV-33-07: AppState uses build_app_runtime_bundle — confirms skill_manage registered for web turns)
@@ -1102,14 +1221,17 @@ Plans:
 **Depends on:** Phase 32 (nudge infrastructure), Phase 33 (skill_manage tool)
 **Requirements:** LEARN-01, LEARN-02, LEARN-03, LEARN-04, LEARN-05 (parity across all surfaces)
 **Success Criteria** (what must be TRUE):
+
   1. `AppState.run_web_turn` fires `spawn_nudge_review` after every `nudge_interval` successful web turns; per-session counter persists across WebSocket reconnects for the same session_id
   2. Web chat sessions are stored in the same SQLite-backed `SessionStore` as gateway sessions, keyed by `Platform::Web + session_id`; `AppState.ensure_web_session` uses this unified store
   3. `DiscordAdapter` implements `PlatformAdapter`; a Discord message routed through `GatewayHandler.handle_with_multimodal` produces an agent response and fires nudge at the configured interval
   4. `SlackAdapter` implements `PlatformAdapter`; same routing and nudge behaviour as Discord
   5. INV-33-07 static-grep test passes: `AppState::new` calls `build_app_runtime_bundle`, confirming `skill_manage` is registered for web turns
+
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 34 to break down)
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
