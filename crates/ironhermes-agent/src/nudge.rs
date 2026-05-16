@@ -126,6 +126,31 @@ pub async fn spawn_nudge_review(
     }
 }
 
+/// Returns true when the nudge should fire. Increments `*counter`; resets to 0 on fire.
+///
+/// Returns `false` immediately when `interval == 0` (disabled — documented sentinel
+/// across run_chat + gateway callers); leaves `*counter` untouched in the disabled
+/// case so a later config flip to `interval > 0` starts counting from 0, not from
+/// a stale partial total.
+///
+/// Extracted from the inline post-turn fire logic so the counter behavior can be
+/// unit-tested independently of `AgentLoop`, `MemoryManager`, or the surrounding
+/// REPL / gateway machinery. Both call sites (CLI `run_chat`, gateway
+/// `run_agent`) inline the same shape — this helper is the canonical reference
+/// for the counter contract.
+pub(crate) fn should_nudge(interval: u32, counter: &mut u32) -> bool {
+    if interval == 0 {
+        return false;
+    }
+    *counter += 1;
+    if *counter >= interval {
+        *counter = 0;
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +190,49 @@ mod tests {
             "MEMORY_REVIEW_PROMPT must include the 'Nothing to save.' \
              short-circuit signal"
         );
+    }
+
+    // LEARN-01 (Plan 32-02 Task 1): counter-logic invariants for the
+    // turn-based nudge fire predicate. These tests live in the agent crate so
+    // both CLI run_chat and gateway run_agent callers can rely on a single
+    // canonical contract.
+
+    /// interval=3: turns 1/2 return false; turn 3 fires (true) and resets the
+    /// counter to 0; turn 1 of the next cycle is back to false.
+    #[test]
+    fn fires_at_interval() {
+        let mut c = 0u32;
+        assert!(!should_nudge(3, &mut c)); // turn 1: c=1
+        assert!(!should_nudge(3, &mut c)); // turn 2: c=2
+        assert!(should_nudge(3, &mut c)); // turn 3: fires, c=0
+        assert_eq!(c, 0, "counter must reset to 0 after firing");
+        assert!(!should_nudge(3, &mut c)); // turn 1 of next cycle
+    }
+
+    /// interval=0 is the documented disable sentinel: should_nudge must
+    /// return false on every call AND leave the counter at 0 (no side effect).
+    #[test]
+    fn disabled_when_zero() {
+        let mut c = 0u32;
+        for _ in 0..20 {
+            assert!(
+                !should_nudge(0, &mut c),
+                "should_nudge must return false when interval==0"
+            );
+        }
+        assert_eq!(c, 0, "counter must stay at 0 when interval==0 (no side effect)");
+    }
+
+    /// interval=2 fires at turn 2, resets, and fires again at turn 2 of the
+    /// next cycle — proving the reset is reusable, not a one-shot.
+    #[test]
+    fn counter_resets_after_fire() {
+        let mut c = 0u32;
+        assert!(!should_nudge(2, &mut c)); // turn 1: c=1
+        assert!(should_nudge(2, &mut c)); // turn 2: fires, c=0
+        assert_eq!(c, 0);
+        assert!(!should_nudge(2, &mut c)); // turn 1 of cycle 2: c=1
+        assert!(should_nudge(2, &mut c)); // turn 2: fires again, c=0
+        assert_eq!(c, 0);
     }
 }
