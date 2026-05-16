@@ -1,5 +1,6 @@
 //! Shared server state for the Dioxus UI backend.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -30,6 +31,13 @@ pub struct AppState {
     pub resolver: Arc<ProviderResolver>,
     pub runtime_bundle: Arc<AppRuntimeBundle>,
     pub memory_manager: Option<Arc<tokio::sync::Mutex<MemoryManager>>>,
+    /// Per-session nudge turn counter. Arc<Mutex<HashMap>> mirrors the gateway
+    /// nudge_turns pattern from Plan 32-02. Interior mutability required: run_web_turn
+    /// takes &self, but the counter must mutate across calls for the same session.
+    /// Session key is the same String used by run_web_turn (e.g.
+    /// "agent:main:web:dm:{uuid}" produced by api.rs create_session).
+    /// (Phase 32 LEARN-01 — web UI nudge wiring)
+    pub nudge_turns: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -108,6 +116,7 @@ impl AppState {
             resolver: Arc::new(resolver),
             runtime_bundle: Arc::new(runtime_bundle),
             memory_manager,
+            nudge_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
