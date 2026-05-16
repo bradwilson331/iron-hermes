@@ -35,8 +35,11 @@ pub const PROFILES_SUBDIR: &str = "profiles";
 /// `is_available()`, which then gates on HEXAPOD_IP per Phase 27.1.1 D-13. Without this
 /// entry, even a perfectly-configured robot would have its tool filtered out before
 /// the prerequisite check runs.
+/// "learning" (Phase 33): autonomous skill creation via skill_manage. No external prereqs
+/// — writes only to HERMES_HOME/skills/. Same risk profile as "memory" (T-33-03-A).
 /// web and code are disabled by default (require API keys / high blast radius).
-pub const DEFAULT_TOOLSETS: &[&str] = &["memory", "session", "agent", "skills", "robotics"];
+pub const DEFAULT_TOOLSETS: &[&str] =
+    &["memory", "session", "agent", "skills", "robotics", "learning"];
 
 /// D-20 (Phase 27.1.1-gap-02): canonical exhaustive list of all known toolset names.
 ///
@@ -51,7 +54,7 @@ pub const DEFAULT_TOOLSETS: &[&str] = &["memory", "session", "agent", "skills", 
 /// "web" and "code" require external API keys. All other toolsets are enabled by default
 /// as they have no external prerequisites.
 pub const ALL_TOOLSETS: &[&str] = &[
-    "memory", "session", "agent", "skills", "robotics", "web", "code", "browser",
+    "memory", "session", "agent", "skills", "robotics", "learning", "web", "code", "browser",
 ];
 
 /// Get the IronHermes home directory (default: ~/.ironhermes).

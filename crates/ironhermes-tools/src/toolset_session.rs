@@ -66,6 +66,8 @@ impl RegistryToolsetSession {
         m.insert("agent", &["delegate_task", "cronjob"]);
         m.insert("skills", &["skills"]);
         m.insert("session", &["session_search"]);
+        // Phase 33: learning toolset — kept in sync with toolset_cmd.rs::toolset_members_map.
+        m.insert("learning", &["skill_manage"]);
         m.insert(
             "browser",
             &[
