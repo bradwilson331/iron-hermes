@@ -410,6 +410,19 @@ fn default_nudge_interval() -> u32 {
     10
 }
 
+/// Default `skill_creation_guidance` for [`MemoryConfig`] — true (Phase 33 LEARN-04).
+/// When the `skill_manage` tool is registered AND this flag is true, the system
+/// prompt includes the "Skill Creation (Learning Loop)" trigger guidance block
+/// per RESEARCH.md Pattern 6. Set to `false` in YAML to suppress the section.
+///
+/// Lives on `MemoryConfig` (typed) rather than the wizard-managed raw-YAML
+/// `learning:` block because Plan 33-01 needs a typed, Config-readable flag
+/// the prompt builder can consume directly; the `learning:` block has no
+/// typed `Config` analog today (see `wizard.rs` raw-YAML splice).
+fn default_skill_creation_guidance() -> bool {
+    true
+}
+
 // =============================================================================
 // MemoryConfig (MEM-12)
 // =============================================================================
@@ -442,6 +455,14 @@ pub struct MemoryConfig {
     /// Honors PRMT-06: mid-session writes persist to disk; the active prompt is unchanged.
     #[serde(default = "default_nudge_interval")]
     pub nudge_interval: u32,
+    /// Phase 33 LEARN-04: when true (default), the system prompt includes the
+    /// "Skill Creation (Learning Loop)" trigger guidance block whenever the
+    /// `skill_manage` tool is registered in the active tool set. Set to false
+    /// in YAML to suppress the block (e.g. for child agents or restricted
+    /// deployments). Read by `PromptBuilder::set_skill_creation_guidance` at
+    /// session freeze time.
+    #[serde(default = "default_skill_creation_guidance")]
+    pub skill_creation_guidance: bool,
 }
 
 impl Default for MemoryConfig {
@@ -452,6 +473,7 @@ impl Default for MemoryConfig {
             memory_enabled: true,
             user_profile_enabled: true,
             nudge_interval: 10,
+            skill_creation_guidance: true,
         }
     }
 }
