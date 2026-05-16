@@ -403,27 +403,30 @@ loop {
 **Deprecated/outdated:**
 - `learning.periodic_nudge_interval_seconds` (wizard key): This is the setup-wizard raw YAML key. The runtime should read from `memory.nudge_interval` (typed). The wizard should write both keys, or be updated to write only the typed one.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Turn-based vs. time-based?**
    - What we know: Python is turn-based (`nudge_interval: 10` turns); LEARN-01 says "default 5 minutes" (time-based framing)
    - What's unclear: The requirement text says "at configurable intervals" — could mean either
    - Recommendation: Use turn-based (matches Python reference). At ~30s/turn, 10 turns ≈ 5 minutes. Simpler, no timer synchronization needed. If time-based is required, add a second implementation path.
-   - **This is an assumption that should be confirmed before planning.**
+   - RESOLVED: Turn-based (matches Python reference). Plans implement `memory.nudge_interval: u32` (turn count, default 10). LEARN-01's "default 5 minutes" is an approximation at ~30s/turn. No time-based implementation needed.
 
 2. **User visibility of nudge result?**
    - What we know: Python prints "💾 Self-improvement review: {summary}" to user. The nudge is "silent" in the sense it doesn't produce a chat response, but the save summary is shown.
    - What's unclear: For the Rust REPL, showing the summary requires either writing to stdout/scroll_region or using a tracing-level log.
    - Recommendation: Use `tracing::info!` for gateway; print directly for CLI REPL (same approach as streaming token output). Gateway can surface via `background_review_callback` pattern.
+   - RESOLVED: CLI REPL logs via `tracing::info!("nudge: memory review complete")`; gateway likewise. nudge.rs emits tracing events on completion. No stdout print required for MVP — mirrors tracing pattern used throughout ironhermes-cli.
 
 3. **Gateway session turn counter?**
    - What we know: Gateway creates a new `AgentLoop` per message but the session persists across messages. The turn counter must survive across gateway messages for the same session.
    - What's unclear: Where to store the per-session counter. Options: (a) in `SessionStore` as a field; (b) in a `HashMap<session_key, u32>` in `GatewayRunner`; (c) derive from counting messages in `StateStore`.
    - Recommendation: Option (b) — a `HashMap<String, u32>` in `GatewayRunner` (alongside other per-session state). Most direct.
+   - RESOLVED: Option (b) — `nudge_turns: Arc<std::sync::Mutex<HashMap<SessionKey, u32>>>` field on `GatewayHandler`, using the same interior-mutability pattern as `skill_overlays`. Implemented in Plan 32-02.
 
 4. **Should `run_single` support nudges?**
    - What we know: `run_single` is for one-shot prompts, not interactive sessions.
    - Recommendation: No — nudge is session-level. Only `run_chat` and gateway.
+   - RESOLVED: No nudge in `run_single`. Turn counter wired only in `run_chat` (Plan 32-01) and gateway `handler.rs` (Plan 32-02).
 
 ## Environment Availability
 
