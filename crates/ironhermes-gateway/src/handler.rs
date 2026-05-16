@@ -153,6 +153,19 @@ pub struct GatewayMessageHandler {
     /// skill_overlays — handle_slash_command takes &self, not &mut self (deviation from
     /// plan assumption; auto-fixed Rule 1). Per-session keying prevents cross-user bleed.
     active_personality_overlay: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, String>>>,
+
+    /// Phase 32 Plan 02 (LEARN-01): per-session nudge turn counter.
+    ///
+    /// Arc<Mutex<HashMap>> mirrors the `skill_overlays` / `active_personality_overlay`
+    /// interior-mutability pattern — `run_agent` takes `&self`, so we cannot mutate a
+    /// plain field. The std::sync::Mutex is intentional: the guard is taken in a small
+    /// synchronous block, the should_fire bool is extracted, and the guard is dropped
+    /// BEFORE any `tokio::spawn` / `.await` (T-32-07 mitigation; clippy `await_holding_lock`).
+    ///
+    /// Key: SessionKey (cloned from `key` in `run_agent`). Value: u32 turn count.
+    /// Reset to 0 on fire; entries removed via session_store eviction is best-effort
+    /// (T-32-06 accepted — one u32 per active session is negligible memory).
+    nudge_turns: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, u32>>>,
 }
 
 impl GatewayMessageHandler {
@@ -194,6 +207,9 @@ impl GatewayMessageHandler {
             // Phase 21.8.3.1 D-07: no personality active until /personality <name> sets it.
             // Arc<Mutex<HashMap>> mirrors skill_overlays — &self constraint requires interior mutability.
             active_personality_overlay: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // Phase 32 Plan 02 (LEARN-01): per-session nudge counter starts empty;
+            // entries created lazily on first turn per session in run_agent's fire site.
+            nudge_turns: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -902,6 +918,10 @@ impl GatewayMessageHandler {
         let max_turns = self.config.agent.max_turns;
 
         let client = build_main_client(&self.resolver)?;
+        // Phase 32 Plan 02 (LEARN-01): clone the AnyClient for the post-turn
+        // nudge tokio::spawn. AnyClient derives Clone; the next line moves
+        // `client` into AgentLoop::new, so the snapshot must happen first.
+        let nudge_client = client.clone();
 
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
@@ -996,6 +1016,11 @@ impl GatewayMessageHandler {
         );
 
         // 8. Run agent with error recovery (D-18)
+        // Phase 32 Plan 02 (LEARN-01): snapshot the outgoing message vec for
+        // the post-turn nudge. The clone happens BEFORE the move into
+        // agent.run(messages) so the snapshot reflects the exact turn the
+        // model just consumed. Cheap relative to the network round-trip.
+        let messages_for_nudge = messages.clone();
         let agent_result = agent.run(messages).await;
 
         // 9. Drop agent first — its callbacks hold cloned channel senders
@@ -1025,6 +1050,54 @@ impl GatewayMessageHandler {
                         },
                     );
                     registry.fire(hook_event);
+                }
+
+                // Phase 32 Plan 02 (LEARN-01): periodic memory-review nudge.
+                //
+                // Per-session counter `nudge_turns` is incremented inside a small
+                // synchronous std::sync::Mutex critical section; the `should_fire`
+                // bool is extracted and the guard is dropped BEFORE any
+                // `tokio::spawn` / `.await` (T-32-07 mitigation; clippy
+                // `await_holding_lock`).
+                //
+                // Gate: only when memory.nudge_interval > 0 (disable sentinel),
+                // memory.memory_enabled is true, AND we have a MemoryManager
+                // configured. spawn_nudge_review is fire-and-forget so the
+                // gateway response is not blocked on nudge completion (T-32-05).
+                let nudge_interval = self.config.memory.nudge_interval;
+                if nudge_interval > 0 && self.config.memory.memory_enabled {
+                    let should_fire = {
+                        let mut map = self
+                            .nudge_turns
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let count = map.entry(key.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= nudge_interval {
+                            *count = 0;
+                            true
+                        } else {
+                            false
+                        }
+                    }; // std::sync::MutexGuard dropped here — before any .await / tokio::spawn
+
+                    if should_fire {
+                        if let Some(ref mgr) = self.memory_manager {
+                            let mgr_clone = Arc::clone(mgr);
+                            let client_clone = nudge_client.clone();
+                            let messages_snapshot = messages_for_nudge.clone();
+                            let config_clone = self.config.clone();
+                            tokio::spawn(async move {
+                                ironhermes_agent::nudge::spawn_nudge_review(
+                                    messages_snapshot,
+                                    mgr_clone,
+                                    client_clone,
+                                    &config_clone,
+                                )
+                                .await;
+                            });
+                        }
+                    }
                 }
 
                 // 11. Update session with agent's response messages (write-through to SQLite).
