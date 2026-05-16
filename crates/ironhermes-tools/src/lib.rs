@@ -20,6 +20,7 @@ pub mod hexapod_video; // Phase 27.1.4 — stateless single-frame JPEG capture v
 pub mod memory_manager_handle;
 pub mod memory_tool;
 pub mod registry;
+pub mod skill_manage; // Phase 33 — learning toolset (LEARN-04, LEARN-05)
 pub mod skills_tool;
 pub mod terminal;
 pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
