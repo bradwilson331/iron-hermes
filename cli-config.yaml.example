@@ -154,6 +154,18 @@ memory:
   # Enable/disable USER.md profile store (default: true)
   # user_profile_enabled: true
 
+  # Periodic memory-review nudge interval, in user turns (default: 10).
+  # After this many successful agent turns, a fire-and-forget background
+  # nudge asks the model to decide what's worth persisting to MEMORY.md /
+  # USER.md vs. leaving in session history (searchable via session_search).
+  # The nudge runs in all three surfaces (CLI run_chat, Telegram gateway,
+  # embedded web UI) and uses a private memory-only ToolRegistry — it cannot
+  # call session_search, web_read, execute_code, or browser tools.
+  #   nudge_interval: 10   # recommended starting point
+  #   nudge_interval: 3    # aggressive (more memory writes, more API cost)
+  #   nudge_interval: 0    # disable the periodic nudge entirely
+  # nudge_interval: 10
+
 # --- Compression ---
 compression:
   # Tokens to protect at end of conversation (default: 20000)

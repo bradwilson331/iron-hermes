@@ -75,6 +75,15 @@ Environment variables live in `~/.ironhermes/.env` (or the `IRONHERMES_HOME`-sco
 | `EXEC_PYTHON_PATH` | Optional | `python3` | Path to Python interpreter |
 | `EXEC_TIMEOUT_SECS` | Optional | `300` | Execution timeout in seconds |
 
+### Cron Job Execution
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `IRONHERMES_CRON_TIMEOUT` | Optional | `600` | Inactivity timeout in seconds. The cron runner polls the agent every 5 s; if no API call, tool call, or stream token has been produced for this many seconds the job is interrupted. `0` = unlimited. |
+| `IRONHERMES_CRON_WALL_TIMEOUT_SECS` | Optional | `14400` | Hard wall-clock ceiling in seconds (4 h). Kills a runaway job even if it keeps producing activity. `0` = unlimited. |
+| `IRONHERMES_CRON_SCRIPT_TIMEOUT` | Optional | `120` | Per-script execution timeout in seconds for jobs that use the `script` field. |
+| `IRONHERMES_CRON_MAX_PARALLEL` | Optional | `0` | Maximum number of non-workdir cron jobs to run concurrently per tick. `0` = unbounded (Python-equivalent serial behavior requires `1`). |
+
 ### IronHermes Home
 
 | Variable | Required | Default | Description |
@@ -213,6 +222,97 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 | `memory.memory_enabled` | `true` | Enable/disable the memory subsystem entirely |
 | `memory.user_profile_enabled` | `true` | Enable/disable the USER.md profile store |
 | `memory.mirror_provider` | `null` | Optional write-only mirror provider |
+| `memory.nudge_interval` | `10` | Turns between periodic memory-review nudges. `0` disables the nudge entirely. See [Periodic Memory Review Nudge](#periodic-memory-review-nudge) below. |
+
+#### Periodic Memory Review Nudge
+
+After every `memory.nudge_interval` successful agent turns, IronHermes fires a
+**fire-and-forget** background nudge that asks the model to review the recent
+conversation and decide what (if anything) is worth persisting to long-term
+memory. The nudge runs in all three agent surfaces:
+
+| Surface | File | Fire site |
+|---|---|---|
+| CLI REPL (`hermes chat`) | `crates/ironhermes-cli/src/main.rs` | `run_chat` post-turn (line ~2138) |
+| Telegram gateway | `crates/ironhermes-gateway/src/handler.rs` | `handle_with_multimodal` post-`agent.run()` (line ~1067) |
+| Embedded web UI | `crates/iron_hermes_ui/src/server/state.rs` | `run_web_turn` post-`agent.run()` (line ~171) |
+
+**Two-tier judgment (LEARN-02).** The nudge prompt (`MEMORY_REVIEW_PROMPT`
+in `crates/ironhermes-agent/src/nudge.rs`) asks the model to decide per-item
+between two persistence layers:
+
+- **Important enough to be present in every future conversation** → use the
+  memory tool (persists to `MEMORY.md` / `USER.md`).
+- **Useful only when topic comes up** → leave in session history (searchable
+  via `session_search` later). The nudge will NOT push these into prompt
+  memory.
+
+The combined cap is **3,575 chars** (`MEMORY.md` 2,200 + `USER.md` 1,375),
+so the prompt explicitly steers the model to be selective. If nothing is
+worth saving, the model returns `"Nothing to save."` and the nudge exits.
+
+**Tool isolation.** The nudge runs in a private `ToolRegistry` containing
+**only** the `MemoryTool` — `session_search`, `web_read`, `execute_code`,
+browser_*, and skill tools are deliberately excluded so the periodic nudge
+cannot run expensive search / fetch operations on a turn-counter cadence.
+
+**Configuration examples:**
+
+```yaml
+# Default — nudge fires every 10 user turns (recommended starting point).
+memory:
+  provider: file
+  nudge_interval: 10
+
+# Aggressive — nudge after every 3 turns (more memory writes, more API cost).
+memory:
+  provider: file
+  nudge_interval: 3
+
+# Disabled — no periodic nudge at all.
+memory:
+  provider: file
+  nudge_interval: 0
+
+# Disabled by another mechanism — the nudge also short-circuits when the
+# entire memory subsystem is off.
+memory:
+  memory_enabled: false
+```
+
+**Set at runtime via the CLI:**
+
+```bash
+# Read the current value
+hermes config get memory.nudge_interval
+
+# Change interval (writes ~/.ironhermes/cli-config.yaml)
+hermes config set memory.nudge_interval 5
+
+# Disable the nudge entirely
+hermes config set memory.nudge_interval 0
+```
+
+The setup wizard (`hermes setup`) also writes this key on its first run,
+alongside the legacy `learning.periodic_nudge_interval_seconds` entry kept
+for backward compatibility with older Python-era configs.
+
+**Verifying the feature is live:**
+
+```bash
+# 1. Confirm config field is present and parsed
+hermes config get memory.nudge_interval
+
+# 2. Run the dedicated unit tests
+cargo test -p ironhermes-core --lib config_nudge_interval   # 4 tests, all green
+cargo test -p ironhermes-agent --lib nudge::tests           # 6 tests, all green
+
+# 3. Watch the nudge fire in a live CLI session — set a small interval and
+# enable tracing at info level. After 3 turns you'll see one of:
+#   INFO ironhermes_agent::nudge: memory-review nudge: spawned ...
+#   INFO ironhermes_agent::nudge: memory-review nudge: nothing to save
+RUST_LOG=ironhermes_agent::nudge=info hermes chat
+```
 
 ### Compression (`compression:`)
 
@@ -242,7 +342,7 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 
 | Key | Default | Description |
 |---|---|---|
-| `cron.wrap_response` | `true` | Wrap cron job responses with metadata |
+| `cron.wrap_response` | `true` | Prepend `Cronjob Response: {name}` header and append management footer to delivered output. Set to `false` to deliver raw agent output. |
 
 ### Skills (`skills:`)
 
