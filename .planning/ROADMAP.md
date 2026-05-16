@@ -1050,8 +1050,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 32-01-PLAN.md — Config + nudge module (nudge_interval field in MemoryConfig, MEMORY_REVIEW_PROMPT const, run_memory_nudge async fn with memory-only ToolRegistry, unit tests)
-- [ ] 32-02-PLAN.md — Wiring + verification (turns_since_nudge in run_chat, nudge_turn_counts in gateway handler, tokio::spawn fire sites post-turn, wizard.rs memory.nudge_interval write, static-grep invariant tests)
+- [ ] 32-01-PLAN.md — Config extension + nudge module + run_chat wiring (nudge_interval in MemoryConfig, MEMORY_REVIEW_PROMPT, spawn_nudge_review with memory-only ToolRegistry, turns_since_nudge counter in run_chat)
+- [ ] 32-02-PLAN.md — Gateway handler wiring + counter-logic tests (nudge_turns HashMap per session in GatewayHandler, fire site in handle_with_multimodal, should_nudge helper, 3 counter-logic unit tests)
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
 
@@ -1086,9 +1086,11 @@ Plans:
   2. Updates to existing skills are made via `skill_manage(action="patch", ...)` by default; the `patch` payload contains only the changed text, not the full skill content (token-efficient)
   3. All 6 actions (create, patch, edit, delete, write_file, remove_file) are exposed via the `skill_manage` tool with the same JSON schema shape as the existing memory tool actions; runtime tests confirm each action's behavior
   4. New self-created skills appear in the next session's skill index with the `Self-created` trust tier; agents can load them via the existing progressive-disclosure path (names+summaries → on-demand full content)
-**Plans:** TBD (estimated 3 plans — trigger heuristic detection, SKILL.md scaffold + agentskills.io frontmatter, skill_manage tool + 6 actions)
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 33 to break down)
+- [ ] 33-01-PLAN.md — Add SkillSource::SelfCreated + pub validate_skill_name + inject skill-creation trigger guidance into PromptBuilder ToolGuidance slot
+- [ ] 33-02-PLAN.md — Implement SkillManageTool with 6 actions (create/patch/edit/delete/write_file/remove_file), security scanning, path traversal protection; register_skill_manage_tool in ToolRegistry
+- [ ] 33-03-PLAN.md — Register 'learning' toolset in KNOWN_TOOLSETS/toolset_members_map/DEFAULT_TOOLSETS; wire register_skill_manage_tool in app_runtime_factory; 6 INV-33-* static-grep regression tests
 
 **Phase directory:** `.planning/phases/33-autonomous-skill-creation/`
