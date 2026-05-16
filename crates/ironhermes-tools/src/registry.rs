@@ -594,6 +594,18 @@ impl ToolRegistry {
         self.register(Box::new(MemoryTool::new(manager)));
     }
 
+    /// Register the skill_manage tool for the 'learning' toolset (Phase 33).
+    ///
+    /// No constructor args — `SkillManageTool` is stateless and uses
+    /// `get_hermes_home()` internally for path resolution. Callers invoke
+    /// this when the 'learning' toolset is enabled (Plan 33-03 wires the
+    /// entry points). Not added to `register_defaults_except` — same gating
+    /// pattern as `register_memory_tool` ('memory' toolset opt-in).
+    pub fn register_skill_manage_tool(&mut self) {
+        use crate::skill_manage::SkillManageTool;
+        self.register(Box::new(SkillManageTool::new()));
+    }
+
     /// Register the cronjob tool with a shared JobStore.
     /// Called separately from register_defaults() because it requires a JobStore instance.
     pub fn register_cronjob_tool(&mut self, store: Arc<Mutex<JobStore>>) {
