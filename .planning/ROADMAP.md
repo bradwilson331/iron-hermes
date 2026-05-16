@@ -1205,13 +1205,13 @@ Plans:
   3. All 6 actions (create, patch, edit, delete, write_file, remove_file) are exposed via the `skill_manage` tool with the same JSON schema shape as the existing memory tool actions; runtime tests confirm each action's behavior
   4. New self-created skills appear in the next session's skill index with the `Self-created` trust tier; agents can load them via the existing progressive-disclosure path (names+summaries → on-demand full content)
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 
 - [x] 33-01-PLAN.md — Add SkillSource::SelfCreated + pub validate_skill_name + inject skill-creation trigger guidance into PromptBuilder ToolGuidance slot
 - [x] 33-02-PLAN.md — Implement SkillManageTool with 6 actions (create/patch/edit/delete/write_file/remove_file), security scanning, path traversal protection; register_skill_manage_tool in ToolRegistry
-- [ ] 33-03-PLAN.md — Register 'learning' toolset in KNOWN_TOOLSETS/toolset_members_map/DEFAULT_TOOLSETS; wire register_skill_manage_tool in app_runtime_factory; 7 INV-33-* static-grep regression tests (INV-33-07: AppState uses build_app_runtime_bundle — confirms skill_manage registered for web turns)
+- [x] 33-03-PLAN.md — Register 'learning' toolset in KNOWN_TOOLSETS/toolset_members_map/DEFAULT_TOOLSETS; wire register_skill_manage_tool in app_runtime_factory; 7 INV-33-* static-grep regression tests (INV-33-07: AppState uses build_app_runtime_bundle — confirms skill_manage registered for web turns)
 
 **Phase directory:** `.planning/phases/33-autonomous-skill-creation/`
 
