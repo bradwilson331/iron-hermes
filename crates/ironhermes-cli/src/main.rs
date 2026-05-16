@@ -1462,6 +1462,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // the user sees the prompt line rather than waiting on a keystroke.
     io::stdout().flush().ok();
     io::stderr().flush().ok();
+
+    // Phase 32 Plan 01 (LEARN-01): periodic memory nudge — turn counter lives
+    // in the outer REPL loop (not in AgentLoop, which is constructed per
+    // turn). When `turns_since_nudge` reaches `nudge_interval`, the post-turn
+    // fire site below tokio::spawns `spawn_nudge_review` (fire-and-forget so
+    // the REPL is not blocked). `nudge_interval == 0` disables the feature.
+    // See `ironhermes_agent::nudge` module docs for the tool-surface narrowing
+    // (T-32-01 mitigation) and the frozen-snapshot invariant (PRMT-06).
+    let nudge_interval = config.memory.nudge_interval;
+    let mut turns_since_nudge: u32 = 0;
+
     loop {
         // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
@@ -2074,6 +2085,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     }
                 };
 
+                // Phase 32 LEARN-01 (Rule 3 auto-fix): explicitly drop the
+                // pinned `run_fut` so its mutable borrow of `messages` is
+                // released. The post-turn nudge fire site below clones
+                // `messages` to build the snapshot for `spawn_nudge_review`;
+                // the borrow checker rejects that clone while `run_fut` is
+                // still in scope because its destructor runs at end-of-arm.
+                // The future has already resolved at this point (either via
+                // `&mut run_fut => break 'turn r?` or `break 'turn None`),
+                // so dropping it is a no-op against an exhausted future.
+                drop(run_fut);
+
                 agent_running.store(false, std::sync::atomic::Ordering::SeqCst);
 
                 // Plan 21.7-11 (T-21.7-11-01): drain any buffered mid-turn
@@ -2103,6 +2125,40 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     println!();
                 }
                 println!();
+
+                // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
+                // Increment the counter only when an actual agent turn produced a
+                // response (cancelled / quit paths return None and must not
+                // advance the counter). When the threshold is reached, fire the
+                // nudge as a tokio::spawn fire-and-forget — the REPL must NOT
+                // block on nudge completion (T-32-05 availability mitigation).
+                // The narrow tool-surface (T-32-01) is enforced inside
+                // `ironhermes_agent::nudge::spawn_nudge_review` itself.
+                if response.is_some() && nudge_interval > 0 && config.memory.memory_enabled {
+                    turns_since_nudge += 1;
+                    if turns_since_nudge >= nudge_interval {
+                        turns_since_nudge = 0;
+                        if let Some(ref mgr) = memory_manager {
+                            let mgr_clone = Arc::clone(mgr);
+                            let client_clone = client.clone();
+                            // `messages` already contains the freshly-pushed
+                            // assistant response (AgentLoop appends inside
+                            // `run_agent_turn`), so the snapshot captures the
+                            // full turn.
+                            let messages_snapshot = messages.clone();
+                            let config_clone = config.clone();
+                            tokio::spawn(async move {
+                                ironhermes_agent::nudge::spawn_nudge_review(
+                                    messages_snapshot,
+                                    mgr_clone,
+                                    client_clone,
+                                    &config_clone,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                }
 
                 // WR-04 fix: if ExitCleanly was signalled from the 'turn loop,
                 // break the outer REPL loop to reach on_session_end cleanup.

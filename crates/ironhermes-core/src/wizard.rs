@@ -76,6 +76,15 @@ pub fn apply_learning_loop_answer(config: &mut Config, raw_input: &str) -> serde
     config.memory.memory_enabled = enabled;
     config.memory.user_profile_enabled = enabled;
 
+    // Phase 32 LEARN-01: companion write of the typed runtime field
+    // `memory.nudge_interval` (turn count, default 10). The wizard surfaces
+    // this as "every N turns" in its prompt text; the runtime is turn-based,
+    // not time-based, so the typed `MemoryConfig.nudge_interval` field
+    // (Phase 32 Plan 01 Task 1) is the canonical source of truth. The
+    // legacy `learning.periodic_nudge_interval_seconds` key continues to be
+    // written below for ROADMAP Phase 32 Success Criterion 4 back-compat.
+    config.memory.nudge_interval = 10;
+
     // learning.* — serde_yaml::Mapping for unknown-key survival (D-15).
     let mut block = serde_yaml::Mapping::new();
     block.insert(

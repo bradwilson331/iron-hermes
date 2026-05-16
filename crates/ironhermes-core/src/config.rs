@@ -403,6 +403,13 @@ fn default_true() -> bool {
     true
 }
 
+/// Default `nudge_interval` for [`MemoryConfig`] — 10 user turns.
+/// Matches the Python hermes-agent reference (`memory.nudge_interval: 10`).
+/// Set to 0 in YAML to disable the periodic nudge entirely. (Phase 32 LEARN-01)
+fn default_nudge_interval() -> u32 {
+    10
+}
+
 // =============================================================================
 // MemoryConfig (MEM-12)
 // =============================================================================
@@ -428,6 +435,13 @@ pub struct MemoryConfig {
     /// to User target with a clear error. Default: true (D-07, T-21.4-03).
     #[serde(default = "default_true")]
     pub user_profile_enabled: bool,
+    /// Phase 32 LEARN-01: periodic memory nudge interval in user turns.
+    /// Default 10. Set 0 to disable.
+    /// At every N user turns the agent receives a background memory-review prompt
+    /// (`MEMORY_REVIEW_PROMPT`, see `ironhermes_agent::nudge`).
+    /// Honors PRMT-06: mid-session writes persist to disk; the active prompt is unchanged.
+    #[serde(default = "default_nudge_interval")]
+    pub nudge_interval: u32,
 }
 
 impl Default for MemoryConfig {
@@ -437,6 +451,7 @@ impl Default for MemoryConfig {
             mirror_provider: None,
             memory_enabled: true,
             user_profile_enabled: true,
+            nudge_interval: 10,
         }
     }
 }
@@ -2321,5 +2336,53 @@ custom_providers:
                 name
             );
         }
+    }
+
+    // =========================================================================
+    // Phase 32 Plan 01 (LEARN-01): MemoryConfig.nudge_interval tests.
+    // =========================================================================
+
+    #[test]
+    fn config_nudge_interval_default() {
+        // Default is 10 user turns — matches Python hermes-agent reference.
+        let mc = MemoryConfig::default();
+        assert_eq!(
+            mc.nudge_interval, 10,
+            "Phase 32 LEARN-01: MemoryConfig::default().nudge_interval must be 10"
+        );
+    }
+
+    #[test]
+    fn config_nudge_interval_deserialize() {
+        // Explicit YAML value is preserved through serde.
+        let yaml = "provider: file\nnudge_interval: 5\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(
+            mc.nudge_interval, 5,
+            "Phase 32 LEARN-01: explicit nudge_interval value must round-trip"
+        );
+    }
+
+    #[test]
+    fn config_nudge_interval_missing_uses_default() {
+        // Backward compat: YAML without nudge_interval gives the default (10).
+        let yaml = "provider: file\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(
+            mc.nudge_interval, 10,
+            "Phase 32 LEARN-01: missing nudge_interval key must default to 10"
+        );
+    }
+
+    #[test]
+    fn config_nudge_interval_zero_disabled() {
+        // nudge_interval=0 is the documented "disable" sentinel; serde must
+        // preserve it so the runtime can detect the disabled state.
+        let yaml = "nudge_interval: 0\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(
+            mc.nudge_interval, 0,
+            "Phase 32 LEARN-01: nudge_interval=0 must deserialize as 0 (disable sentinel)"
+        );
     }
 }
