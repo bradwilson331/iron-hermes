@@ -705,6 +705,82 @@ mod tests {
         assert!(output.contains("Nous Research"));
     }
 
+    // -------------------------------------------------------------------------
+    // Phase 33 Plan 01: Skill Creation trigger guidance (LEARN-03/04)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_skill_creation_guidance_present_when_skill_manage_active() {
+        // LEARN-03/04: when skill_manage is in the active tool set AND the
+        // guidance flag is enabled (default true), the system prompt must
+        // contain the "Skill Creation" section header and all four trigger
+        // conditions verbatim per RESEARCH.md Pattern 6.
+        let mut tools: HashSet<String> = HashSet::new();
+        tools.insert("skill_manage".to_string());
+
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(tools);
+
+        let output = builder.build();
+        assert!(
+            output.contains("Skill Creation"),
+            "guidance section header must appear when skill_manage is active"
+        );
+        assert!(
+            output.contains("skill_manage"),
+            "guidance must reference the skill_manage tool name"
+        );
+        assert!(
+            output.contains("5 or more tool calls"),
+            "trigger condition (a) missing"
+        );
+        assert!(
+            output.contains("tool error"),
+            "trigger condition (b) missing"
+        );
+        assert!(
+            output.contains("corrected"),
+            "trigger condition (c) missing"
+        );
+        assert!(
+            output.contains("non-obvious workflow"),
+            "trigger condition (d) missing"
+        );
+    }
+
+    #[test]
+    fn test_skill_creation_guidance_absent_when_flag_disabled() {
+        // LEARN-04: when skill_creation_guidance is explicitly disabled,
+        // the section must NOT appear even when skill_manage is active.
+        let mut tools: HashSet<String> = HashSet::new();
+        tools.insert("skill_manage".to_string());
+
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(tools);
+        builder.set_skill_creation_guidance(false);
+
+        let output = builder.build();
+        assert!(
+            !output.contains("Skill Creation"),
+            "guidance must be suppressed when flag is false"
+        );
+    }
+
+    #[test]
+    fn test_skill_creation_guidance_absent_when_tool_not_registered() {
+        // LEARN-04: with the default flag (true) but no skill_manage tool in
+        // the active set, the guidance must NOT appear — injecting the section
+        // when the agent cannot act on it would be wasted tokens.
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(HashSet::new());
+
+        let output = builder.build();
+        assert!(
+            !output.contains("Skill Creation"),
+            "guidance must be absent when skill_manage is not in the active tool set"
+        );
+    }
+
     #[test]
     fn default_agent_identity_includes_secret_handling_rule() {
         // Plan 25.2-16 / UAT Issue 9 R1 fix: the system prompt must instruct the model
