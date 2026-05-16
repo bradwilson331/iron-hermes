@@ -129,18 +129,26 @@ pub async fn spawn_nudge_review(
 /// Returns true when the nudge should fire. Increments `*counter`; resets to 0 on fire.
 ///
 /// Returns `false` immediately when `interval == 0` (disabled — documented sentinel
-/// across run_chat + gateway callers).
+/// across run_chat + gateway callers); leaves `*counter` untouched in the disabled
+/// case so a later config flip to `interval > 0` starts counting from 0, not from
+/// a stale partial total.
 ///
 /// Extracted from the inline post-turn fire logic so the counter behavior can be
 /// unit-tested independently of `AgentLoop`, `MemoryManager`, or the surrounding
 /// REPL / gateway machinery. Both call sites (CLI `run_chat`, gateway
-/// `run_agent`) still inline the same logic — this helper is the canonical
-/// reference for the counter contract.
-///
-/// TDD RED stub — Plan 32-02 Task 1. Real body lands in the GREEN commit.
-pub(crate) fn should_nudge(_interval: u32, _counter: &mut u32) -> bool {
-    // Intentionally wrong: lets RED tests fail at runtime before the GREEN fix.
-    false
+/// `run_agent`) inline the same shape — this helper is the canonical reference
+/// for the counter contract.
+pub(crate) fn should_nudge(interval: u32, counter: &mut u32) -> bool {
+    if interval == 0 {
+        return false;
+    }
+    *counter += 1;
+    if *counter >= interval {
+        *counter = 0;
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
