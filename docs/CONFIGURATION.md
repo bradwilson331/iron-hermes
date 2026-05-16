@@ -223,6 +223,7 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 | `memory.user_profile_enabled` | `true` | Enable/disable the USER.md profile store |
 | `memory.mirror_provider` | `null` | Optional write-only mirror provider |
 | `memory.nudge_interval` | `10` | Turns between periodic memory-review nudges. `0` disables the nudge entirely. See [Periodic Memory Review Nudge](#periodic-memory-review-nudge) below. |
+| `memory.skill_creation_guidance` | `true` | When `true` AND the `skill_manage` tool is registered, the system prompt includes the "Skill Creation (Learning Loop)" trigger block that tells the agent when to author a `SKILL.md`. Set to `false` in YAML to suppress the block (e.g. for child agents or restricted deployments). See [Autonomous Skill Creation](#autonomous-skill-creation-learning-toolset) below. |
 
 #### Periodic Memory Review Nudge
 
@@ -312,6 +313,112 @@ cargo test -p ironhermes-agent --lib nudge::tests           # 6 tests, all green
 #   INFO ironhermes_agent::nudge: memory-review nudge: spawned ...
 #   INFO ironhermes_agent::nudge: memory-review nudge: nothing to save
 RUST_LOG=ironhermes_agent::nudge=info hermes chat
+```
+
+#### Autonomous Skill Creation (Learning Toolset)
+
+Phase 33 introduces the **`learning` toolset** — a single tool, `skill_manage`,
+that lets the agent author and curate its own skills (`SKILL.md` files) at
+runtime. Combined with the `skill_creation_guidance` trigger block in the
+system prompt (see above), this delivers the autonomous skill-creation loop:
+the agent recognises when a workflow is worth documenting, then writes a
+durable skill it can find later via the existing skill-scanner.
+
+**What the agent decides on its own.** The trigger block (above the user
+prompt at every session freeze) instructs the agent to author a `SKILL.md`
+when **any** of these signal a non-trivial workflow:
+
+- It made 5 or more tool calls to complete the task
+- It recovered from a tool error or unexpected result mid-task
+- The user corrected its approach mid-task
+- It discovered a non-obvious workflow that worked well
+
+You can verify the block is live with:
+
+```bash
+grep "## Skill Creation (Learning Loop)" <(hermes config show prompt 2>/dev/null) || true
+# or directly from source:
+grep -A3 "^const SKILL_CREATION_GUIDANCE" crates/ironhermes-agent/src/prompt_builder.rs
+```
+
+**The `skill_manage` tool — 6 JSON-schema actions** (from
+`crates/ironhermes-tools/src/skill_manage.rs`):
+
+| Action | Purpose | Notes |
+|---|---|---|
+| `create` | Write a new `SKILL.md` with `Self-created` trust_tier | Two-level path: `$HERMES_HOME/skills/<category>/<slug>/SKILL.md`. Frontmatter includes `platforms` and `metadata.hermes.{tags, category, trust_tier}`. Skill name validated cross-crate via `pub fn validate_skill_name`. |
+| `patch` | Surgical edit: `content.replacen(old_string, new_string, 1)` | Returns JSON `{ "error": "not_found", ... }` when `old_string` isn't present. Prefer this for incremental skill improvement — pass only the changed substring, not the whole file. |
+| `edit` | Full SKILL.md rewrite | Overwrites the entire file. Use only for major rewrites. |
+| `delete` | Remove the whole skill directory | Canonical-path verified — must resolve under `$HERMES_HOME/skills/` or the call is rejected. |
+| `write_file` | Write a companion file inside the skill dir (e.g. `references/api.md`, `scripts/helper.py`) | Path-traversal blocked: `..` segments and absolute paths rejected; runs the content-scan gate. |
+| `remove_file` | Remove a companion file inside the skill dir | Same canonical-path verification as `delete`. |
+
+**`Self-created` trust tier** (LEARN-04). The `SkillSource` enum gains a
+fourth variant (`#[serde(rename = "Self-created")]`) alongside `Builtin`,
+`Catalog`, and `Local`. Self-created skills are routed through a
+**WARN-BUT-LOAD** branch in the scan enforcer — they are loaded into the
+runtime registry but logged so you can spot a runaway loop in the
+operator dashboard. Verify with:
+
+```bash
+grep -n "SelfCreated\|Self-created" crates/ironhermes-core/src/skills.rs | head -5
+```
+
+**Enabling / disabling the toolset.** `learning` is wired into every
+registration surface — `KNOWN_TOOLSETS` (CLI), `toolset_members_map`
+(toolset session), `ALL_TOOLSETS` (constants), and the
+`app_runtime_factory` registration loop — so you can toggle it like any
+other toolset. **Note:** profiles that were saved before Phase 33 carry an
+explicit `tools.toolsets:` map that does NOT mention `learning`; the
+`with_default_toolsets_merged()` migration adds it as **disabled**. Run
+`hermes toolset enable learning` once to opt in.
+
+```bash
+# Status check
+hermes toolset list                # 'learning' will appear in the table
+hermes toolset show learning       # members + registered tools + prerequisites
+
+# Toggle persistently in the active profile config.yaml
+hermes toolset enable learning
+hermes toolset disable learning
+```
+
+When the toolset is disabled, `skill_manage` is not in the LLM-visible tool
+list AND the prompt's skill-creation block is suppressed automatically
+(the block is gated on `active_tools.contains("skill_manage")` regardless
+of `skill_creation_guidance`).
+
+**Suppressing only the prompt guidance** (e.g. child agents or restricted
+deployments) while keeping the tool registered:
+
+```yaml
+memory:
+  skill_creation_guidance: false   # tool still available, guidance suppressed
+```
+
+```bash
+hermes config set memory.skill_creation_guidance false
+```
+
+**Verifying the feature is live:**
+
+```bash
+# 1. Workspace builds and invariants are locked
+cargo test -p ironhermes-agent --test invariants_33    # 6/6 INV-33-* tests
+cargo test -p ironhermes-tools --lib skill_manage      # 7/7 unit tests
+                                                       #   - schema_actions (lists all 6)
+                                                       #   - create_frontmatter, edit_overwrites
+                                                       #   - patch, create_blocked_content
+                                                       #   - path_traversal_rejected
+                                                       #   - delete_removes_dir
+
+# 2. CLI surfaces the new toolset
+hermes toolset list | grep learning
+hermes toolset show learning
+
+# 3. Watch the agent author a skill in a CLI session — confirm the block is
+# in the prompt and the agent calls skill_manage when a long workflow ends
+RUST_LOG=ironhermes_tools::skill_manage=info hermes chat
 ```
 
 ### Compression (`compression:`)
@@ -415,9 +522,21 @@ Default skill scan paths (in priority order):
 
 ### Tools (`tools:`)
 
-Toolsets enabled by default via `ToolsConfig::default()`: `memory`, `session`, `agent`, `skills`. All known toolsets (including `robotics`) are additionally ensured present via `with_default_toolsets_merged()`, which iterates over `crate::constants::ALL_TOOLSETS`.
+Toolsets enabled by default via `ToolsConfig::default()`: `memory`, `session`, `agent`, `skills`, `robotics`, `learning`. All known toolsets are additionally ensured present via `with_default_toolsets_merged()`, which iterates over `crate::constants::ALL_TOOLSETS`.
 
 Toolsets disabled by default: `web`, `code`, `browser`
+
+| Toolset | Members | Notes |
+|---|---|---|
+| `memory` | `memory` | Persistent memory tool (`MEMORY.md` / `USER.md`) |
+| `session` | `session_search`, `session_recent` | Search the current/past session transcripts |
+| `agent` | `delegate_task` | Spawn subagents |
+| `skills` | discovery + invocation tools | Read existing skills from `skills/` paths |
+| `robotics` | hexapod / robot tools | Gates further on `HEXAPOD_IP` env var |
+| `learning` | `skill_manage` | **Phase 33** — autonomous skill creation (see [Autonomous Skill Creation](#autonomous-skill-creation-learning-toolset)) |
+| `web` | `web_read`, `web_extract` | Opt-in; web scraping |
+| `code` | `execute_code` | Opt-in; Python sandbox |
+| `browser` | `browser_*` | Opt-in; headed browser automation |
 
 ```yaml
 tools:
@@ -432,6 +551,8 @@ tools:
       enabled: true
     robotics:
       enabled: true   # gates further on HEXAPOD_IP env var
+    learning:
+      enabled: true   # Phase 33 — autonomous skill creation
     web:
       enabled: false   # opt-in required
     code:

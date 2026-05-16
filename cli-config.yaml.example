@@ -166,6 +166,16 @@ memory:
   #   nudge_interval: 0    # disable the periodic nudge entirely
   # nudge_interval: 10
 
+  # Autonomous skill-creation guidance (Phase 33, LEARN-03/04).
+  # When true AND the `skill_manage` tool is registered (via the `learning`
+  # toolset), the system prompt includes the "Skill Creation (Learning Loop)"
+  # trigger block telling the agent when to author a new SKILL.md. The
+  # `skill_manage` tool writes self-created skills under
+  # $HERMES_HOME/skills/<category>/<slug>/SKILL.md with trust_tier="Self-created".
+  # Set to false to keep `skill_manage` available but suppress the prompt
+  # block (e.g. for child agents or restricted deployments).
+  # skill_creation_guidance: true
+
 # --- Compression ---
 compression:
   # Tokens to protect at end of conversation (default: 20000)
@@ -324,12 +334,16 @@ providers:
 #       enabled: true
 #     skills:
 #       enabled: true
+#     robotics:
+#       enabled: true   # gates further on HEXAPOD_IP env var
+#     learning:
+#       enabled: true   # Phase 33 — autonomous skill creation (skill_manage tool)
 #     web:
-#       enabled: false
+#       enabled: false   # opt-in required
 #     code:
-#       enabled: false
+#       enabled: false   # opt-in required
 #     browser:
-#       enabled: false
+#       enabled: false   # opt-in required
 
 # --- Hooks ---
 # hooks:
