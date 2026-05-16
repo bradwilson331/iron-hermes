@@ -33,6 +33,28 @@ const TOOL_USE_GUIDANCE: &str = r#"When you need to use tools:
 4. Chain tool calls when needed for multi-step tasks
 5. Report results clearly to the user"#;
 
+/// Phase 33 LEARN-04 / RESEARCH.md Pattern 6: behavioral guidance that fires the
+/// agent's judgment to write a SKILL.md via `skill_manage` after task completion.
+/// Injected into the ToolGuidance slot only when `skill_manage` is in the active
+/// tool set AND `skill_creation_guidance` is true (default).
+///
+/// The four trigger conditions are kept verbatim — the invariant tests in this
+/// crate (see `test_skill_creation_guidance_present_when_skill_manage_active`)
+/// grep for each phrase. Rewording any of these will break that gate, which is
+/// intentional: the wording is the contract Plan 02's `skill_manage` tool
+/// description references.
+const SKILL_CREATION_GUIDANCE: &str = r#"## Skill Creation (Learning Loop)
+
+After completing a task, evaluate whether the approach is worth documenting. Write a SKILL.md if ANY of these conditions is true:
+- You made 5 or more tool calls to complete the task
+- You recovered from a tool error or unexpected result during the task
+- The user corrected your approach mid-task
+- You discovered a non-obvious workflow that worked well
+
+When creating a skill, call skill_manage(action="create", ...). For subsequent improvements to an existing skill, prefer skill_manage(action="patch", ...) — pass only the changed substring, not the full file. Full rewrites use action="edit".
+
+Self-created skills appear in your skill index next session. Choose a descriptive category (e.g. "development", "automation", "data", "research") and a kebab-case name."#;
+
 /// Ordered slots for the 9-layer prompt assembly model.
 /// BTreeMap ordering uses the discriminant values (1-10).
 /// Slots 1-6 are durable (stable across turns, cacheable).
@@ -96,6 +118,12 @@ pub struct PromptBuilder {
     /// GAP-4 / D-08: when false, load_memory skips the USER.md block.
     /// Mirrors config.memory.user_profile_enabled. Default: true.
     user_profile_enabled: bool,
+    /// Phase 33 LEARN-04: when true (default), the "Skill Creation (Learning
+    /// Loop)" trigger guidance block is appended to the ToolGuidance slot
+    /// whenever the `skill_manage` tool is in `active_tools`. Mirrors
+    /// `config.memory.skill_creation_guidance`; production callers set it
+    /// at session freeze via `set_skill_creation_guidance`.
+    skill_creation_guidance: bool,
 }
 
 impl PromptBuilder {
@@ -116,6 +144,9 @@ impl PromptBuilder {
             active_toolsets: HashSet::new(),
             active_tools: HashSet::new(),
             user_profile_enabled: true,
+            // Phase 33 LEARN-04: default-on to match `MemoryConfig::default()`.
+            // Production callers re-assert via set_skill_creation_guidance.
+            skill_creation_guidance: true,
         }
     }
 
@@ -187,6 +218,15 @@ impl PromptBuilder {
     /// Called from main.rs after prompt_builder construction when config.memory.user_profile_enabled=false.
     pub fn set_user_profile_enabled(&mut self, enabled: bool) {
         self.user_profile_enabled = enabled;
+    }
+
+    /// Phase 33 LEARN-04: toggle the "Skill Creation (Learning Loop)" trigger
+    /// guidance block. When true (default), the block is appended to the
+    /// ToolGuidance slot whenever `skill_manage` is in the active tool set.
+    /// Mirrors `config.memory.skill_creation_guidance` — Plan 33-03 wires the
+    /// config flag through at session freeze time.
+    pub fn set_skill_creation_guidance(&mut self, enabled: bool) {
+        self.skill_creation_guidance = enabled;
     }
 
     /// Set the skill registry for catalog injection into the system prompt.
@@ -635,6 +675,12 @@ impl PromptBuilder {
     }
 
     /// Build ToolGuidance slot content (slot 2). Includes model/provider context. Per D-14.
+    ///
+    /// Phase 33 LEARN-04: when `skill_manage` is in the active tool set AND
+    /// `skill_creation_guidance` is true, the "Skill Creation (Learning Loop)"
+    /// guidance block is appended (separated by a blank line so it reads as a
+    /// distinct section, not a continuation of the bulleted tool-use list).
+    /// Living in this slot keeps it durable (cache-stable per D-04).
     fn build_tool_guidance(&self) -> String {
         let mut parts = vec![TOOL_USE_GUIDANCE.to_string()];
         if !self.model.is_empty() {
@@ -646,7 +692,12 @@ impl PromptBuilder {
         if let Some(ctx_len) = self.context_length {
             parts.push(format!("Context window: {} tokens", ctx_len));
         }
-        parts.join("\n")
+        let mut out = parts.join("\n");
+        if self.skill_creation_guidance && self.active_tools.contains("skill_manage") {
+            out.push_str("\n\n");
+            out.push_str(SKILL_CREATION_GUIDANCE);
+        }
+        out
     }
 
     /// Build Timestamp slot content (slot 6). Regenerated per turn. Per D-12.
@@ -703,6 +754,82 @@ mod tests {
         let output = builder.build();
         assert!(output.contains("IronHermes"));
         assert!(output.contains("Nous Research"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 33 Plan 01: Skill Creation trigger guidance (LEARN-03/04)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_skill_creation_guidance_present_when_skill_manage_active() {
+        // LEARN-03/04: when skill_manage is in the active tool set AND the
+        // guidance flag is enabled (default true), the system prompt must
+        // contain the "Skill Creation" section header and all four trigger
+        // conditions verbatim per RESEARCH.md Pattern 6.
+        let mut tools: HashSet<String> = HashSet::new();
+        tools.insert("skill_manage".to_string());
+
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(tools);
+
+        let output = builder.build();
+        assert!(
+            output.contains("Skill Creation"),
+            "guidance section header must appear when skill_manage is active"
+        );
+        assert!(
+            output.contains("skill_manage"),
+            "guidance must reference the skill_manage tool name"
+        );
+        assert!(
+            output.contains("5 or more tool calls"),
+            "trigger condition (a) missing"
+        );
+        assert!(
+            output.contains("tool error"),
+            "trigger condition (b) missing"
+        );
+        assert!(
+            output.contains("corrected"),
+            "trigger condition (c) missing"
+        );
+        assert!(
+            output.contains("non-obvious workflow"),
+            "trigger condition (d) missing"
+        );
+    }
+
+    #[test]
+    fn test_skill_creation_guidance_absent_when_flag_disabled() {
+        // LEARN-04: when skill_creation_guidance is explicitly disabled,
+        // the section must NOT appear even when skill_manage is active.
+        let mut tools: HashSet<String> = HashSet::new();
+        tools.insert("skill_manage".to_string());
+
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(tools);
+        builder.set_skill_creation_guidance(false);
+
+        let output = builder.build();
+        assert!(
+            !output.contains("Skill Creation"),
+            "guidance must be suppressed when flag is false"
+        );
+    }
+
+    #[test]
+    fn test_skill_creation_guidance_absent_when_tool_not_registered() {
+        // LEARN-04: with the default flag (true) but no skill_manage tool in
+        // the active set, the guidance must NOT appear — injecting the section
+        // when the agent cannot act on it would be wasted tokens.
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(HashSet::new());
+
+        let output = builder.build();
+        assert!(
+            !output.contains("Skill Creation"),
+            "guidance must be absent when skill_manage is not in the active tool set"
+        );
     }
 
     #[test]
