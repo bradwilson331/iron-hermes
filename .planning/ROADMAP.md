@@ -1047,11 +1047,12 @@ Plans:
   2. The agent can write to MEMORY.md/USER.md within the existing 3,575 char total cap during a nudge cycle; persisted entries appear in the next session's prompt without breaking the current session's prompt cache
   3. The agent demonstrably routes some items to prompt memory and others to session-search-only, exercising the "permanence threshold" judgment LEARN-02 specifies
   4. Nudge interval is configurable via `hermes config set learning.periodic_nudge_interval_seconds <N>` (Phase 23 setup wizard surfaces this option)
-**Plans:** 2 plans
+**Plans:** 3 plans
 
 Plans:
 - [ ] 32-01-PLAN.md — Config extension + nudge module + run_chat wiring (nudge_interval in MemoryConfig, MEMORY_REVIEW_PROMPT, spawn_nudge_review with memory-only ToolRegistry, turns_since_nudge counter in run_chat)
 - [ ] 32-02-PLAN.md — Gateway handler wiring + counter-logic tests (nudge_turns HashMap per session in GatewayHandler, fire site in handle_with_multimodal, should_nudge helper, 3 counter-logic unit tests)
+- [ ] 32-03-PLAN.md — Web UI nudge wiring (nudge_turns HashMap on AppState, fire site inside run_web_turn after agent.run() returns Ok, tokio::spawn fire-and-forget, mirrors gateway pattern)
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
 
@@ -1091,6 +1092,24 @@ Plans:
 Plans:
 - [ ] 33-01-PLAN.md — Add SkillSource::SelfCreated + pub validate_skill_name + inject skill-creation trigger guidance into PromptBuilder ToolGuidance slot
 - [ ] 33-02-PLAN.md — Implement SkillManageTool with 6 actions (create/patch/edit/delete/write_file/remove_file), security scanning, path traversal protection; register_skill_manage_tool in ToolRegistry
-- [ ] 33-03-PLAN.md — Register 'learning' toolset in KNOWN_TOOLSETS/toolset_members_map/DEFAULT_TOOLSETS; wire register_skill_manage_tool in app_runtime_factory; 6 INV-33-* static-grep regression tests
+- [ ] 33-03-PLAN.md — Register 'learning' toolset in KNOWN_TOOLSETS/toolset_members_map/DEFAULT_TOOLSETS; wire register_skill_manage_tool in app_runtime_factory; 7 INV-33-* static-grep regression tests (INV-33-07: AppState uses build_app_runtime_bundle — confirms skill_manage registered for web turns)
 
 **Phase directory:** `.planning/phases/33-autonomous-skill-creation/`
+
+### Phase 34: Webchat & Multi-Platform Gateway Chats
+
+**Goal:** Complete Learning Loop parity across all agent-execution surfaces. Wire per-session nudge counter into `AppState.run_web_turn` (web UI path). Migrate web chat sessions to the shared SQLite-backed `SessionStore` used by the gateway (Platform::Web, same session infrastructure as Telegram). Implement `DiscordAdapter` and `SlackAdapter` for the `PlatformAdapter` trait; Discord and Slack sessions inherit nudge and skill-create automatically via `handle_with_multimodal`.
+**Depends on:** Phase 32 (nudge infrastructure), Phase 33 (skill_manage tool)
+**Requirements:** LEARN-01, LEARN-02, LEARN-03, LEARN-04, LEARN-05 (parity across all surfaces)
+**Success Criteria** (what must be TRUE):
+  1. `AppState.run_web_turn` fires `spawn_nudge_review` after every `nudge_interval` successful web turns; per-session counter persists across WebSocket reconnects for the same session_id
+  2. Web chat sessions are stored in the same SQLite-backed `SessionStore` as gateway sessions, keyed by `Platform::Web + session_id`; `AppState.ensure_web_session` uses this unified store
+  3. `DiscordAdapter` implements `PlatformAdapter`; a Discord message routed through `GatewayHandler.handle_with_multimodal` produces an agent response and fires nudge at the configured interval
+  4. `SlackAdapter` implements `PlatformAdapter`; same routing and nudge behaviour as Discord
+  5. INV-33-07 static-grep test passes: `AppState::new` calls `build_app_runtime_bundle`, confirming `skill_manage` is registered for web turns
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 34 to break down)
+
+**Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
