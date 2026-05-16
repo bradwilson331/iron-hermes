@@ -1868,10 +1868,15 @@ model:
             DEFAULT_TOOLSETS.contains(&"robotics"),
             "Phase 27.1.1-gap-01: DEFAULT_TOOLSETS must contain 'robotics'"
         );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"learning"),
+            "Phase 33 LEARN-03..05: DEFAULT_TOOLSETS must contain 'learning' \
+             (autonomous skill creation via skill_manage; no external prereqs)"
+        );
         assert_eq!(
             DEFAULT_TOOLSETS.len(),
-            5,
-            "DEFAULT_TOOLSETS must contain exactly 5 entries (memory, session, agent, skills, robotics)"
+            6,
+            "DEFAULT_TOOLSETS must contain exactly 6 entries (memory, session, agent, skills, robotics, learning)"
         );
     }
 

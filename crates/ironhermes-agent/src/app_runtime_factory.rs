@@ -113,6 +113,14 @@ pub async fn build_app_runtime_bundle(
         HashMap::new(),
     );
 
+    // Phase 33 LEARN-04 / LEARN-05: skill_manage backs the 'learning' toolset
+    // (autonomous skill authoring). Stateless tool — registers unconditionally;
+    // visibility to the LLM is controlled by set_toolset_config below, which
+    // filters tools whose toolset (`learning` here) is disabled in the merged
+    // ToolsConfig. This mirrors register_skills_tool's pattern (always register;
+    // toolset filter hides the schema).
+    registry.register_skill_manage_tool();
+
     let summarization_handle = Arc::new(AnyClientSummarizationHandle::new(input.resolver.clone()));
     registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
 
