@@ -3,7 +3,8 @@ phase: 34b-context-system-parity
 plan: 01
 type: execute
 wave: 1
-depends_on: []
+depends_on:
+  - 34b-00
 files_modified:
   - crates/ironhermes-agent/src/context_refs.rs
   - crates/ironhermes-agent/src/lib.rs

@@ -1,6 +1,7 @@
 # Phase 34b: Context-System Parity — Pattern Map
 
 **Mapped:** 2026-05-16
+**Revised:** 2026-05-16 (Blocker 1 — corrected `once_cell::sync::Lazy` to `std::sync::LazyLock` to match the actual codebase pattern in `ssrf.rs` and `skills.rs`; `once_cell` is NOT a workspace dep)
 **Files analyzed:** 8 (1 new, 7 modified)
 **Analogs found:** 8 / 8
 
@@ -46,13 +47,12 @@ No existing regex parser module exists in the ironhermes-agent crate. The `nudge
 //!   falls back to raw HTTP on LLM failure with a warning (D-02).
 ```
 
-**Imports pattern** (mirror of `nudge.rs` lines 31-40, adapted):
+**Imports pattern** (mirror of `nudge.rs` lines 31-40, adapted; uses `std::sync::LazyLock` — `once_cell` is NOT a workspace dep, RESEARCH §10 outdated assumption):
 ```rust
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use tokio::process::Command;
 
@@ -61,9 +61,9 @@ use ironhermes_tools::web_extract::WebExtractTool;
 use crate::context_compressor::estimate_tokens;
 ```
 
-**Static regex pattern** — no existing Lazy<Regex> in the agent crate; use the `once_cell` + `regex` pattern (both are workspace deps). Confirmed by RESEARCH.md §2.3:
+**Static regex pattern** — use the `std::sync::LazyLock` + `regex` pattern. `LazyLock` is stable since Rust 1.80 and is the established codebase idiom (see `crates/ironhermes-core/src/ssrf.rs:19` and `crates/ironhermes-core/src/skills.rs:23`). **Do NOT use `once_cell::sync::Lazy` — `once_cell` is not in the workspace deps; adding it would be a new dependency for no benefit.**
 ```rust
-static REFERENCE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static REFERENCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>(?:`[^`\n]+`|"[^"\n]+"|\x27[^\x27\n]+\x27)(?::\d+(?:-\d+)?)?|\S+))"#
     ).unwrap()
@@ -308,7 +308,7 @@ pub trait ContextEngine: Send + Sync + 'static {
 
 ### `crates/ironhermes-agent/src/context_compressor.rs` (utility state, CRUD)
 
-**Analog:** Self — add `on_session_reset` override. The `compression_count` field (line 44) is a bare `usize`.
+**Analog:** Self — add `on_session_reset` override. The `compression_count` field (line 44) is a bare `usize`. **Python-parity token-counter fields (`last_prompt_tokens`, `last_completion_tokens`, `last_total_tokens`) do NOT currently exist on the Rust struct — Plan 34b-02 Task 1 adds them as `AtomicUsize` fields and zeroes them in `reset()` to satisfy CONTEXT.md `<specifics>`.**
 
 **Existing `ContextCompressor` struct** (lines 39-45):
 ```rust
@@ -317,20 +317,30 @@ pub struct ContextCompressor {
     threshold_percent: f64,
     protect_first_n: usize,
     protect_last_tokens: usize,
-    compression_count: usize,   // ← must be cleared by on_session_reset
+    compression_count: usize,   // ← must be cleared by reset()
+    // Plan 34b-02 Task 1 adds these three fields (AtomicUsize for interior mutability under &self):
+    // last_prompt_tokens: AtomicUsize,
+    // last_completion_tokens: AtomicUsize,
+    // last_total_tokens: AtomicUsize,
 }
 ```
 
 **Key insight from RESEARCH.md §8.3:** `LocalPruningEngine::compress` creates a **new** `ContextCompressor::new(...)` every call (confirmed at `context_engine.rs` lines 252-256). Therefore `LocalPruningEngine.on_session_reset` is a genuine no-op — no persistent compressor accumulates state across turns.
 
-**`on_session_reset` override pattern** — place as inherent method on `ContextCompressor` (since it's not a trait implementor); the `LocalPruningEngine` trait impl is a no-op:
+**`reset` method pattern** — place as inherent method on `ContextCompressor` (since it's not a trait implementor); the `LocalPruningEngine` trait impl is a no-op:
 ```rust
 impl ContextCompressor {
     // ... existing methods ...
 
-    /// Reset per-session counters. Called by LocalPruningEngine::on_session_reset.
+    /// Reset per-session counters. Called by ContextEngine::on_session_reset overrides.
+    /// Per CONTEXT.md <specifics>, zeroes compression_count AND the three Python-parity
+    /// token counters (added in Plan 34b-02 Task 1 if not present).
     pub fn reset(&mut self) {
         self.compression_count = 0;
+        // Plan 34b-02 Task 1 adds these three (using Atomic store with Ordering::Relaxed):
+        // self.last_prompt_tokens.store(0, Ordering::Relaxed);
+        // self.last_completion_tokens.store(0, Ordering::Relaxed);
+        // self.last_total_tokens.store(0, Ordering::Relaxed);
     }
 }
 ```
@@ -347,10 +357,8 @@ let summary = format!(
 // PATCHED — add memory-authority reminder per CONTEXT.md <specifics>:
 let summary = format!(
     "[CONTEXT COMPACTED] {} earlier messages were removed to save context space. \
-     The conversation continues from the most recent messages below. \
-     Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS \
-     authoritative — never ignore or deprioritize memory content due to this compaction note.",
-    dropped_count
+     The conversation continues from the most recent messages below. {}",
+    dropped_count, MEMORY_AUTHORITY_REMINDER
 );
 ```
 
@@ -367,6 +375,19 @@ mod tests {
         let header = /* extract from compacted messages[protect_first_n] */;
         assert!(header.contains("MEMORY.md"), "header must mention MEMORY.md");
         assert!(header.contains("ALWAYS authoritative"), "header must include authority reminder");
+    }
+
+    #[test]
+    fn test_context_compressor_reset_zeroes_counter() {
+        // Per CONTEXT.md <specifics>: all four counters MUST be zero after reset().
+        let mut compressor = ContextCompressor::new(/* ... */);
+        compressor.compression_count = 5;
+        // (Plan 34b-02 Task 1 also seeds the three token-counter AtomicUsize fields.)
+        compressor.reset();
+        assert_eq!(compressor.compression_count, 0);
+        // assert_eq!(compressor.last_prompt_tokens.load(Ordering::Relaxed), 0);
+        // assert_eq!(compressor.last_completion_tokens.load(Ordering::Relaxed), 0);
+        // assert_eq!(compressor.last_total_tokens.load(Ordering::Relaxed), 0);
     }
 }
 ```
@@ -741,6 +762,7 @@ Ok(result) => {
 **Apply to:** Any counter fields that `on_session_reset` needs to clear
 - Hooks are `&self` → counters must be `AtomicUsize` or `Mutex<T>`
 - Pattern: `Arc<std::sync::Mutex<...>>` for std-context fields, `Arc<TokioMutex<...>>` for async fields
+- The three new `last_*_tokens` fields on `ContextCompressor` (Plan 34b-02 Task 1) use `AtomicUsize` — consistent with this pattern and avoids changing `&self` callers.
 
 ### Error Handling
 **Source:** `crates/ironhermes-agent/src/nudge.rs` lines 117-122
@@ -790,12 +812,14 @@ info!(
 **Analog search scope:** `crates/ironhermes-agent/src/`, `crates/ironhermes-cli/src/`, `crates/ironhermes-gateway/src/`, `crates/iron_hermes_ui/src/server/`, `crates/ironhermes-tools/src/`
 **Files scanned:** ~12 source files read in full or targeted sections
 **Pattern extraction date:** 2026-05-16
+**Pattern correction date:** 2026-05-16 (Blocker 1 — `LazyLock` confirmed, `once_cell` removed)
 
 **Key confirmed facts:**
 - `AggregatedUsage` is defined at `agent_loop.rs` lines 94-99 and re-exported in `lib.rs` line 26
-- `once_cell`/`regex` crates: no existing `Lazy<Regex>` in `ironhermes-agent` — both workspace deps confirmed in use elsewhere; planner must verify `Cargo.toml` workspace deps include `once_cell` and `regex`
+- **Static-init pattern is `std::sync::LazyLock` (Rust 1.80+) — confirmed in `crates/ironhermes-core/src/ssrf.rs:14,19` and `crates/ironhermes-core/src/skills.rs:3,23`. `once_cell` is NOT a workspace dep (verified via grep on root Cargo.toml + crate Cargo.toml — zero matches). The earlier RESEARCH.md §10 note about `once_cell` was an outdated assumption.**
 - `check_pressure` default no-op (context_engine.rs line 63) is the exact template for all 5 new hooks
 - `LocalPruningEngine` creates a fresh `ContextCompressor::new(...)` every compress call (context_engine.rs lines 252-256) → `on_session_reset` is a genuine no-op for `LocalPruningEngine`
 - `SummarizingEngine` stores running summary IN the message list → `on_session_reset` is also a genuine no-op (messages.truncate(1) handles it)
 - Web UI `on_session_reset` trigger does not currently exist — planner must define scope
 - `WebExtractTool::execute` takes `serde_json::Value` args with `urls: Vec<String>`, `use_llm_processing: bool`, `format: &str`
+- **`ContextCompressor` struct (line 39-45) holds only `compression_count: usize` today; Python-parity fields `last_prompt_tokens`, `last_completion_tokens`, `last_total_tokens` do NOT exist on the Rust struct and are added by Plan 34b-02 Task 1 as `AtomicUsize` fields to satisfy CONTEXT.md `<specifics>` without requiring executor judgment.**

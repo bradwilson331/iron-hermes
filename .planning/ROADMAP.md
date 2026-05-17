@@ -1258,7 +1258,12 @@ Plans:
 
 Plans:
 
+**Wave 1**
+
 - [ ] 34b-01-PLAN.md — @-reference module (parser + expander + blocklist + budget) + 3-surface preprocessor wiring
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 34b-02-PLAN.md — ContextEngine lifecycle hooks + ContextCompressor/SummarizingEngine resets + memory-authority reminder + 3-surface session-hook wiring
 
 **Phase directory:** `.planning/phases/34b-context-system-parity/`
