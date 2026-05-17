@@ -175,6 +175,54 @@ pub async fn get_memory() -> Result<MemoryInfo> {
     Ok(MemoryInfo { entries: out })
 }
 
+/// Phase 26.7 Plan 04 (D-10, R-1): Known model types for the Models screen.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModelInfo {
+    pub id: String,
+    /// Inferred from model ID prefix (e.g. "claude*" → "Anthropic (Claude)").
+    pub family: String,
+    /// Human-readable context window: "8k", "128k", "200k", "1M".
+    pub context_window: String,
+    /// "DEFAULT" when id matches state.config.model.default, else "AVAILABLE".
+    pub status: String,
+}
+
+/// Phase 26.7 Plan 04 (D-10, R-1): Read-only list of all known models from the
+/// runtime ModelRegistry (static table + cache overlay). Reached via
+/// state.resolver.model_registry() — sync accessor, no lock.
+#[get("/api/models")]
+pub async fn list_models() -> Result<Vec<ModelInfo>> {
+    let state = crate::server::state::global_app_state();
+    let registry = state.resolver.model_registry();
+    let default_id = state.config.model.default.clone();
+
+    let out = registry.all_models().into_iter().map(|(id, meta)| ModelInfo {
+        id: id.to_string(),
+        family: infer_family(id),
+        context_window: format_context_window(meta.context_length),
+        status: if id == default_id.as_str() { "DEFAULT".to_string() } else { "AVAILABLE".to_string() },
+    }).collect();
+
+    Ok(out)
+}
+
+fn infer_family(id: &str) -> String {
+    if id.starts_with("claude") { "Anthropic (Claude)".to_string() }
+    else if id.starts_with("gpt") || id.starts_with("o3") || id.starts_with("o4") || id.starts_with("o1") { "OpenAI".to_string() }
+    else if id.starts_with("gemini") { "Google (Gemini)".to_string() }
+    else if id.starts_with("llama") { "Meta (Llama)".to_string() }
+    else if id.starts_with("mistral") || id.starts_with("mixtral") || id.starts_with("codestral") { "Mistral".to_string() }
+    else if id.starts_with("deepseek") { "DeepSeek".to_string() }
+    else if id.starts_with("qwen") { "Qwen".to_string() }
+    else { "Other".to_string() }
+}
+
+fn format_context_window(ctx: usize) -> String {
+    if ctx >= 1_000_000 { format!("{}M", ctx / 1_000_000) }
+    else if ctx >= 1_000 { format!("{}k", ctx / 1_000) }
+    else { format!("{}", ctx) }
+}
+
 /// Phase 26.7 Plan 03 (D-09, R-1, R-4): Read-only catalog of skills from the
 /// runtime SkillRegistry, with per-skill `enabled` reflecting the current
 /// session's `active_skills` set. SkillRegistry.list() is sync — no await
