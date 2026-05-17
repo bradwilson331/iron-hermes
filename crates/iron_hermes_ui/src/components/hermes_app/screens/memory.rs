@@ -1,16 +1,56 @@
 //! Memory screen — ported from `app.html` `<section id="screen-memory">`
-//! (lines 797-882). Renders memory entries from `stub_data::memory_entries()`
-//! plus the static user-profile + provider side panels from the prototype.
-//! Pure visual stub (D-04) — zero server calls.
+//! (lines 797-882). Wired to the live `api::get_memory()` server fn
+//! (Phase 26.7 Plan 02 / D-07, D-08, R-3).
+//!
+//! Two-panel split layout:
+//! - Left `.panel`: agent memory (MEMORY.md text blocks) + filter input
+//! - Right column TOP `.panel`: user memory (USER.md text blocks)
+//! - Right column BOTTOM `.panel`: Provider dl — stays static per D-07
+//!
+//! Filter is purely client-side (no server round-trip per UI-SPEC §"Filter input").
+//! MemoryManager-disabled path (state.memory_manager == None) renders empty
+//! panels without error — `get_memory()` returns `MemoryInfo::default()`.
 
 use dioxus::prelude::*;
 
-use crate::mocks::stub_data::{memory_entries, MemoryEntryStub};
-
 #[component]
 pub fn ScreenMemory(is_active: bool) -> Element {
-    let entries = memory_entries();
-    let entry_count = entries.len();
+    // Fetch memory once on mount. `?` suspends until first resolution.
+    let memory_resource = use_server_future(crate::server::api::get_memory)?;
+
+    // Client-side filter signal.
+    let mut filter_text = use_signal(String::new);
+
+    // Extract data and error flag BEFORE rsx! — signal borrow discipline
+    // per iron_hermes_ui/clippy.toml (no GenerationalRef held across RSX).
+    let memory_info: crate::server::api::MemoryInfo = match memory_resource() {
+        Some(Ok(v)) => v,
+        _ => crate::server::api::MemoryInfo::default(),
+    };
+    let load_error = matches!(memory_resource(), Some(Err(_)));
+
+    // Drop read borrow immediately by calling to_lowercase() (returns owned String).
+    let needle = filter_text.read().to_lowercase();
+
+    // Partition and filter entries BEFORE rsx! (PATTERNS.md Gotchas — signal borrow safety).
+    let agent_rows: Vec<crate::server::api::MemoryEntry> = memory_info
+        .entries
+        .iter()
+        .filter(|e| e.store == "agent")
+        .filter(|e| needle.is_empty() || e.body.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
+
+    let user_rows: Vec<crate::server::api::MemoryEntry> = memory_info
+        .entries
+        .iter()
+        .filter(|e| e.store == "user")
+        .filter(|e| needle.is_empty() || e.body.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
+
+    let agent_count = agent_rows.len();
+    let user_count = user_rows.len();
 
     rsx! {
         section {
@@ -28,48 +68,73 @@ pub fn ScreenMemory(is_active: bool) -> Element {
                     }
                 }
                 div { class: "screen-actions",
+                    // EXPORT and + ENTRY: static affordance per D-07 / UI-SPEC §"Read-only phase"
                     button { class: "btn btn--ghost btn--sm", "EXPORT" }
                     button { class: "btn btn--sm", "+ ENTRY" }
                 }
             }
 
             div { class: "split",
+
+                // ── Left panel: Agent memory (MEMORY.md) ────────────────
                 div { class: "panel",
                     div { style: "display:flex;justify-content:space-between;align-items:center;",
                         div { class: "panel-title",
                             "Entries "
-                            span { class: "count", style: "color:var(--teal)", "· {entry_count}" }
+                            span { class: "count", style: "color:var(--teal)", "· {agent_count}" }
                         }
                         div { class: "search", style: "width: 220px; padding: 5px 12px;",
                             span { class: "search-glyph", "⌕" }
-                            input { placeholder: "Filter…" }
+                            input {
+                                placeholder: "Filter…",
+                                value: "{filter_text}",
+                                oninput: move |evt| filter_text.set(evt.value()),
+                            }
                         }
                     }
                     div { class: "row-list", style: "gap: 0;",
-                        for e in entries.iter() {
-                            MemoryEntryRow {
-                                key: "{e.scope}::{e.key}",
-                                entry: e.clone()
+                        if load_error {
+                            div {
+                                style: "color:var(--danger);font-size:var(--fs-12);",
+                                "Could not load memory — check server connection."
+                            }
+                        } else {
+                            for entry in agent_rows.iter() {
+                                MemoryEntryRow {
+                                    key: "agent-{entry.body.len()}-{entry.body.chars().take(16).collect::<String>()}",
+                                    entry: entry.clone(),
+                                }
                             }
                         }
                     }
                 }
 
                 div { style: "display: flex; flex-direction: column; gap: 14px;",
+
+                    // ── Right-top panel: User memory (USER.md) ───────────
                     div { class: "panel",
-                        div { class: "panel-title", "User Profile" }
-                        dl { class: "kv",
-                            dt { "Operator" } dd { "ALPHA-7" }
-                            dt { "Locale" } dd { "en-US · America/Los_Angeles" }
-                            dt { "Role" } dd { "Intelligence Analyst" }
-                            dt { "Clearance" } dd { style: "color:var(--teal)", "L4" }
+                        div { class: "panel-title",
+                            "User Profile "
+                            span { class: "count", style: "color:var(--teal)", "· {user_count}" }
                         }
-                        button {
-                            class: "btn btn--ghost btn--sm",
-                            style: "width:100%;justify-content:center;",
-                            "EDIT PROFILE"
+                        div { class: "row-list", style: "gap: 0;",
+                            if load_error {
+                                div {
+                                    style: "color:var(--danger);font-size:var(--fs-12);",
+                                    "Could not load memory — check server connection."
+                                }
+                            } else {
+                                for entry in user_rows.iter() {
+                                    MemoryEntryRow {
+                                        key: "user-{entry.body.len()}-{entry.body.chars().take(16).collect::<String>()}",
+                                        entry: entry.clone(),
+                                    }
+                                }
+                            }
                         }
                     }
+
+                    // ── Right-bottom panel: Provider dl — STATIC per D-07 ──
                     div { class: "panel",
                         div { class: "panel-title", "Provider" }
                         dl { class: "kv",
@@ -91,14 +156,16 @@ pub fn ScreenMemory(is_active: bool) -> Element {
     }
 }
 
+/// One row in the memory entry list.
+/// `mem-ts` shows em dash (U+2014) — no per-block timestamp in underlying API (R-3).
 #[component]
-fn MemoryEntryRow(entry: MemoryEntryStub) -> Element {
+fn MemoryEntryRow(entry: crate::server::api::MemoryEntry) -> Element {
     rsx! {
         div { class: "mem-entry",
-            div { class: "mem-ts", "{entry.updated}" }
+            div { class: "mem-ts", "—" }
             div { class: "mem-body",
-                "{entry.value_preview} "
-                span { class: "mem-tag", "{entry.scope}" }
+                "{entry.body} "
+                span { class: "mem-tag", "{entry.store.to_uppercase()}" }
             }
         }
     }
