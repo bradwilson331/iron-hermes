@@ -1256,11 +1256,15 @@ Plans:
   4. `SlackAdapter` implements `PlatformAdapter`; same routing and nudge behaviour as Discord
   5. INV-33-07 static-grep test passes: `AppState::new` calls `build_app_runtime_bundle`, confirming `skill_manage` is registered for web turns
 
-**Plans:** TBD
+**Plans:** 5 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 34 to break down)
+- [ ] 34-01-PLAN.md — Wave 0 invariant scaffolds (INV-33-07 + INV-34-01/02 + web-session lock)
+- [ ] 34-02-PLAN.md — SessionStore unification (api.rs Platform::Web filter) + Cargo deps (serenity + slack-morphism, gated by human-verify) + PlatformGatewayConfig.app_token
+- [ ] 34-03-PLAN.md — DiscordAdapter (serenity 0.12.5; PlatformAdapter impl + EventHandler + run_discord_adapter; threat mitigations T-34-01/02/03)
+- [ ] 34-04-PLAN.md — SlackAdapter (slack-morphism 2.22.0 Socket Mode; two-token shape; non-blocking ACK; T-34-04 mitigation)
+- [ ] 34-05-PLAN.md — Multi-platform GatewayRunner wiring (optional Discord/Slack spawns + INV-34-03/04 lock)
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
 
