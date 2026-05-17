@@ -665,6 +665,199 @@ If all skills score ≥7, respond with [SILENT]." \
 
 ---
 
+## Delegation-Powered Cron Jobs
+
+These templates use `delegate_task` inside the cron prompt to fan out parallel subagents. The cron agent orchestrates; subagents do the work independently and return structured summaries.
+
+See [DELEGATION.md](DELEGATION.md) for the full `delegate_task` reference.
+
+---
+
+### Parallel Competitor Scout
+
+Spawns one subagent per competitor repo simultaneously. Each subagent searches its own repo and returns a structured summary; the cron agent synthesizes a single digest.
+
+**Trigger:** Schedule (daily)
+
+```bash
+ironhermes cron create "0 8 * * *" \
+  "Scout competitor AI agent repositories for notable activity in the last 24 hours.
+
+Use delegate_task in batch mode to research all repos in parallel:
+
+delegate_task(tasks=[
+    {
+        \"goal\": \"Check anthropics/claude-code for new PRs, issues, and releases in the last 24 hours\",
+        \"context\": \"Run: gh pr list --repo anthropics/claude-code --state all --json number,title,author,createdAt,mergedAt --limit 15. Run: gh issue list --repo anthropics/claude-code --state open --json number,title,labels,createdAt --limit 10. Filter to items from the last 24 hours. Skip routine dep bumps and CI fixes. If nothing notable, say NO_ACTIVITY.\",
+        \"toolsets\": [\"terminal\"]
+    },
+    {
+        \"goal\": \"Check All-Hands-AI/OpenHands for new PRs, issues, and releases in the last 24 hours\",
+        \"context\": \"Run: gh pr list --repo All-Hands-AI/OpenHands --state all --json number,title,author,createdAt,mergedAt --limit 15. Run: gh issue list --repo All-Hands-AI/OpenHands --state open --json number,title,labels,createdAt --limit 10. Filter to items from the last 24 hours. Skip routine dep bumps and CI fixes. If nothing notable, say NO_ACTIVITY.\",
+        \"toolsets\": [\"terminal\"]
+    },
+    {
+        \"goal\": \"Check Aider-AI/aider for new PRs, issues, and releases in the last 24 hours\",
+        \"context\": \"Run: gh pr list --repo Aider-AI/aider --state all --json number,title,author,createdAt,mergedAt --limit 15. Run: gh issue list --repo Aider-AI/aider --state open --json number,title,labels,createdAt --limit 10. Filter to items from the last 24 hours. Skip routine dep bumps and CI fixes. If nothing notable, say NO_ACTIVITY.\",
+        \"toolsets\": [\"terminal\"]
+    }
+])
+
+After all three subagents return, synthesize their summaries into a single digest:
+- Group by repo
+- Flag architectural changes, new integrations, and security fixes
+- Note anything that could inform IronHermes development
+- If all three say NO_ACTIVITY, respond with [SILENT]." \
+  --name "Parallel competitor scout" \
+  --deliver telegram
+```
+
+---
+
+### Parallel Crate Audit
+
+Delegates one subagent per crate in parallel. Each subagent runs clippy, counts test files, and writes a health report. The orchestrating cron agent rolls up the results.
+
+**Trigger:** Schedule (weekly)
+
+```bash
+ironhermes cron create "0 9 * * 0" \
+  "Run a parallel health audit across the ironhermes workspace crates.
+
+Use delegate_task in batch mode (max 3 concurrent):
+
+Round 1 — core crates:
+delegate_task(tasks=[
+    {
+        \"goal\": \"Audit crates/ironhermes-cron for health issues\",
+        \"context\": \"cd ~/code/ironhermes. Run: cargo clippy -p ironhermes-cron 2>&1 | grep -c 'warning'. Run: cargo test -p ironhermes-cron 2>&1 | tail -3. Count: find crates/ironhermes-cron/src -name '*.rs' | xargs grep -l '#[cfg(test)]' | wc -l. Count unwrap() calls: grep -rn 'unwrap()' crates/ironhermes-cron/src --include='*.rs' | grep -v test | wc -l. Report: clippy warning count, test pass/fail, test file count, unwrap count. Flag any test failure as CRITICAL.\",
+        \"toolsets\": [\"terminal\"]
+    },
+    {
+        \"goal\": \"Audit crates/ironhermes-tools for health issues\",
+        \"context\": \"cd ~/code/ironhermes. Run: cargo clippy -p ironhermes-tools 2>&1 | grep -c 'warning'. Run: cargo test -p ironhermes-tools 2>&1 | tail -3. Count: find crates/ironhermes-tools/src -name '*.rs' | xargs grep -l '#[cfg(test)]' | wc -l. Count unwrap() in non-test code: grep -rn 'unwrap()' crates/ironhermes-tools/src --include='*.rs' | grep -v test | wc -l. Report: clippy warning count, test pass/fail, test file count, unwrap count.\",
+        \"toolsets\": [\"terminal\"]
+    },
+    {
+        \"goal\": \"Audit crates/ironhermes-agent for health issues\",
+        \"context\": \"cd ~/code/ironhermes. Run: cargo clippy -p ironhermes-agent 2>&1 | grep -c 'warning'. Run: cargo test -p ironhermes-agent 2>&1 | tail -3. Count: find crates/ironhermes-agent/src -name '*.rs' | xargs grep -l '#[cfg(test)]' | wc -l. Count unwrap() in non-test code: grep -rn 'unwrap()' crates/ironhermes-agent/src --include='*.rs' | grep -v test | wc -l. Report: clippy warning count, test pass/fail, test file count, unwrap count.\",
+        \"toolsets\": [\"terminal\"]
+    }
+])
+
+After subagents return, synthesize into a workspace health summary:
+- Table: crate | clippy warnings | tests | test files | unwrap count | status
+- Flag any CRITICAL items (test failures) at the top
+- List top 3 cleanup priorities across all crates
+- Write the summary to ~/code/ironhermes/docs/health/WEEKLY-$(date +%Y%m%d).md
+- If all crates are clean (0 warnings, 0 failures), respond with [SILENT]." \
+  --name "Parallel crate audit" \
+  --deliver telegram
+```
+
+---
+
+### Research → Synthesize Pipeline
+
+Delegates parallel research subagents then synthesizes their findings into a single report written to a file. Two-phase: fan-out research, then fan-in synthesis.
+
+**Trigger:** Schedule (weekly)
+
+```bash
+ironhermes cron create "0 10 * * 3" \
+  "Research the Rust async ecosystem for patterns relevant to IronHermes, then synthesize findings into a design note.
+
+Phase 1 — fan out research in parallel:
+delegate_task(tasks=[
+    {
+        \"goal\": \"Research current best practices for Tokio CancellationToken propagation in 2025\",
+        \"context\": \"Focus on: propagating tokens through Arc<dyn Trait>, handling cancel in select! vs poll, cleanup on drop. Summarize 3-5 concrete patterns with code sketches.\",
+        \"toolsets\": [\"web\"]
+    },
+    {
+        \"goal\": \"Research tower-http middleware composition patterns for Axum in 2025\",
+        \"context\": \"Focus on: ServiceBuilder chaining, custom Layer implementations, error handling across middleware. Summarize 3-5 concrete patterns.\",
+        \"toolsets\": [\"web\"]
+    },
+    {
+        \"goal\": \"Research Rust structured concurrency patterns — JoinSet, TaskTracker, and scope-based approaches in 2025\",
+        \"context\": \"Focus on: graceful shutdown with JoinSet, tokio-util TaskTracker, async-scoped approaches. Summarize tradeoffs and when to use each.\",
+        \"toolsets\": [\"web\"]
+    }
+])
+
+Phase 2 — synthesize after all three subagents return:
+Write a design note to ~/code/ironhermes/docs/research/async-patterns-$(date +%Y%m%d).md with:
+
+# Async Ecosystem Research — [date]
+
+## CancellationToken Propagation
+[synthesized from subagent 1]
+
+## Tower Middleware Composition
+[synthesized from subagent 2]
+
+## Structured Concurrency
+[synthesized from subagent 3]
+
+## Relevance to IronHermes
+[2-3 bullet points on what's most applicable to the current codebase]
+
+Keep each section to 200 words max. Include links." \
+  --name "Async research pipeline" \
+  --deliver telegram
+```
+
+---
+
+### Parity Gap Analysis with Parallel Subagents
+
+Delegates one subagent per PARITY.md file in the workspace, each counting ❌ and ⚠️ gaps and writing a per-crate gap card.
+
+**Trigger:** Schedule (weekly)
+
+```bash
+ironhermes cron create "0 7 * * 1" \
+  "Run a parallel parity gap analysis across all ironhermes crates with PARITY.md files.
+
+Step 1: discover parity files
+find ~/code/ironhermes/crates -name 'PARITY.md' | sort
+
+Step 2: delegate one subagent per PARITY.md found (run up to 3 at a time):
+delegate_task(tasks=[
+    {
+        \"goal\": \"Analyze PARITY.md for ironhermes-cron and produce a gap card\",
+        \"context\": \"Read ~/code/ironhermes/crates/ironhermes-cron/PARITY.md. Count rows marked ✅, ⚠️, and ❌. For each ❌ item: extract the feature name, its Python source location, and estimate complexity (simple/medium/complex) based on the description. Write a gap card to ~/code/ironhermes/docs/parity/ironhermes-cron-gaps.md with: total feature count, parity %, and a table of ❌ items sorted by estimated complexity.\",
+        \"toolsets\": [\"file\"]
+    },
+    {
+        \"goal\": \"Analyze PARITY.md for ironhermes-tools and produce a gap card\",
+        \"context\": \"Read ~/code/ironhermes/crates/ironhermes-tools/PARITY.md. Count rows marked ✅, ⚠️, and ❌. For each ❌ item: extract the feature name, its Python source location, and estimate complexity (simple/medium/complex). Write a gap card to ~/code/ironhermes/docs/parity/ironhermes-tools-gaps.md.\",
+        \"toolsets\": [\"file\"]
+    },
+    {
+        \"goal\": \"Analyze PARITY.md for ironhermes-agent and produce a gap card\",
+        \"context\": \"Read ~/code/ironhermes/crates/ironhermes-agent/PARITY.md. Count rows marked ✅, ⚠️, and ❌. For each ❌ item: extract the feature name, its Python source location, and estimate complexity (simple/medium/complex). Write a gap card to ~/code/ironhermes/docs/parity/ironhermes-agent-gaps.md.\",
+        \"toolsets\": [\"file\"]
+    }
+])
+
+Step 3: after all subagents return, write ~/code/ironhermes/docs/parity/OVERVIEW.md:
+- Ranked table: crate | ✅ | ⚠️ | ❌ | parity%
+- Top 5 gaps to close next (by: simple complexity + high impact)
+- Any ⚠️ items where the behavioral difference is a known risk
+
+If all crates are at 100% parity, respond with [SILENT]." \
+  --name "Parallel parity gap analysis" \
+  --deliver telegram
+```
+
+---
+
+> Batch mode runs up to `subagent.max_subagents` children concurrently (default: 3). For jobs that discover more items than the batch limit, split into sequential rounds as shown in the Parallel Crate Audit example above. The cron prompt's LLM call itself is the orchestrator — it fans out, waits for summaries, then synthesizes.
+
+---
+
 ## Quick Reference
 
 ### Cron Schedule Syntax
