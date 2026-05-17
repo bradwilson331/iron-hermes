@@ -1170,19 +1170,19 @@ Plans:
 
 **Phase directory:** `.planning/phases/32-periodic-nudge-memory-curation/`
 
-### Phase 32.3: delegation agent runaway (INSERTED)
+### Phase 32.3: delegation agent runaway (INSERTED) ✅ COMPLETE
 
 **Goal:** Close the runaway-child registry-leak bug (6.7-hour ghost canonical bug) and ship the shrike service — operator-facing termination surface (`/agents kill | interrupt | prune | status`) at three-surface parity (tui_rata + iron_hermes_ui + gateway), plus a `/help` discoverability audit (audit-only, fixes deferred).
 **Requirements:** D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12
 **Depends on:** Phase 32, Phase 32.2
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] 32.3-01-PLAN.md — RAII RegistrationGuard on SubagentRegistry::register; unregister becomes pub(crate); SubagentConfig.stale_warn_seconds default 120; regression tests cover natural/timeout/panic/cancel exit paths + end-to-end 6.7-hour ghost repro (Wave 1)
-- [ ] 32.3-02-PLAN.md — AgentLoop::activity_last_arc accessor + per-task stale_warn_seconds schema + Stale status pill in /agents tree + once-per-id tracing::warn (Wave 2)
-- [ ] 32.3-03-PLAN.md — ShrikeService module (kill/interrupt/prune/status) + SubagentListSnapshot trait extension + cmd_agents arm wiring + kill-arm migration to ShrikeService (W3) + /agents interrupt|prune|status help entries in build_registry (B3) + shrike_service.rs unit tests (Wave 3)
-- [ ] 32.3-04-PLAN.md — Three-surface adapters: tui_rata smoke / iron_hermes_ui REST endpoints / gateway with_subagent_registry attach + D-09 confirm-token gate (Wave 4)
-- [ ] 32.3-05-PLAN.md — docs/DELEGATION.md sweep (stale_warn_seconds, Shrike Service, gateway confirm token, 6.7-hour ghost) + /help discoverability audit (audit-only per D-12; B3 carve-out delegated to Plan 03) (Wave 4)
+- [x] 32.3-01-PLAN.md — RAII RegistrationGuard on SubagentRegistry::register; unregister becomes pub(crate); SubagentConfig.stale_warn_seconds default 120; regression tests cover natural/timeout/panic/cancel exit paths + end-to-end 6.7-hour ghost repro (Wave 1)
+- [x] 32.3-02-PLAN.md — AgentLoop::activity_last_arc accessor + per-task stale_warn_seconds schema + Stale status pill in /agents tree + once-per-id tracing::warn (Wave 2)
+- [x] 32.3-03-PLAN.md — ShrikeService module (kill/interrupt/prune/status) + SubagentListSnapshot trait extension + cmd_agents arm wiring + kill-arm migration to ShrikeService (W3) + /agents interrupt|prune|status help entries in build_registry (B3) + shrike_service.rs unit tests (Wave 3)
+- [x] 32.3-04-PLAN.md — Three-surface adapters: tui_rata smoke / iron_hermes_ui REST endpoints / gateway with_subagent_registry attach + D-09 confirm-token gate (Wave 4)
+- [x] 32.3-05-PLAN.md — docs/DELEGATION.md sweep (stale_warn_seconds, Shrike Service, gateway confirm token, 6.7-hour ghost) + /help discoverability audit (audit-only per D-12; B3 carve-out delegated to Plan 03) (Wave 4)
 
 ### Phase 32.2: subagent delegation parity (INSERTED)
 
