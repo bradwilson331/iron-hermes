@@ -405,6 +405,23 @@ impl GatewayMessageHandler {
                 ctx
             }
         };
+        // Phase 32.3 Plan 04 (D-08 / RESEARCH Pitfall 3): attach the
+        // subagent_registry so /agents list|kill|interrupt|prune|status
+        // actually reach cmd_agents instead of hitting the "subagent registry
+        // not wired" fallback. The gateway has had `self.subagent_registry`
+        // since Plan 21.7-07 but `handle_slash_command` never called
+        // `with_subagent_registry` — this fixes the pre-existing wiring gap
+        // identified in 32.3-RESEARCH.md Pitfall 3 (lines 336-355) and
+        // confirmed at handler.rs:386-406 before this change.
+        let ctx = if let Some(ref reg) = self.subagent_registry {
+            use ironhermes_agent::subagent_registry::SubagentRegistryHandle;
+            use ironhermes_core::commands::context::SubagentListSnapshot;
+            let handle: Arc<dyn SubagentListSnapshot> =
+                Arc::new(SubagentRegistryHandle::new(reg.clone()));
+            ctx.with_subagent_registry(handle)
+        } else {
+            ctx
+        };
         // Phase 25.3-15 CR-02 close-out: slash-dispatch CommandContext no longer
         // attaches a trajectory writer. The previous implementation attached a
         // process-wide handle that was unreachable from `hermes session export`.
@@ -433,6 +450,30 @@ impl GatewayMessageHandler {
                     }
                     with_rate_limit_retry(|| {
                         adapter.send_message(&event.chat_id, "Personality cleared.", None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
+                // Phase 32.3 Plan 04 (D-09 / T-32.3-01 mitigation): gateway-only
+                // confirm-token gate for destructive `/agents` subcommands.
+                // Telegram messages can be spoofed via edit-replay; requiring
+                // the operator to re-type `confirm` as an extra arg means a
+                // replayed original message (which lacks `confirm`) is refused.
+                // TUI and iron_hermes_ui surfaces do NOT require this token
+                // (they have synchronous user presence). Only `kill` and `prune`
+                // are destructive; `interrupt` and `status` are not gated.
+                if def.name == "agents"
+                    && !args.is_empty()
+                    && requires_confirm(args[0], &args[1..])
+                {
+                    let refusal = format!(
+                        "Destructive op `/agents {}`. Re-run as:\n  `/agents {} {}confirm`",
+                        args[0],
+                        args[0],
+                        if args.len() > 1 { format!("{} ", args[1]) } else { String::new() },
+                    );
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, &refusal, None)
                     })
                     .await?;
                     return Ok(());
@@ -1488,6 +1529,29 @@ mod tests {
 /// - If there is an image_data_uri: creates a multipart message with text + image.
 /// - If there is a text_prefix (document): prepends it to the message content.
 /// - Otherwise: plain text message.
+/// Phase 32.3 Plan 04 (D-09 / T-32.3-01): pure predicate — does this `/agents`
+/// subcommand require a `confirm` token to proceed on the gateway?
+///
+/// - `"kill"` and `"prune"` are destructive — must have `"confirm"` somewhere
+///   in `args` (tolerant position so operators can type
+///   `/agents kill sub_xxx confirm` OR `/agents kill confirm sub_xxx`).
+/// - `"interrupt"` and `"status"` are NOT destructive — never require confirm.
+/// - Any other subcommand (`"list"`, `"logs"`, unknown) — never require confirm.
+///
+/// Returns `true` when the subcommand IS destructive AND the confirm token
+/// is missing — i.e. the gateway should refuse to dispatch.
+///
+/// Extracted as a free fn so tests can exercise the D-09 contract directly
+/// without constructing a full GatewayMessageHandler + adapter pipeline.
+pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
+    let is_destructive = matches!(subcommand, "kill" | "prune");
+    if !is_destructive {
+        return false;
+    }
+    // Tolerant position: any arg after the subcommand may be "confirm".
+    !args.iter().any(|a| *a == "confirm")
+}
+
 fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> ChatMessage {
     if let Some(data_uri) = processed.image_data_uri {
         // Vision input: multipart message with optional caption + image

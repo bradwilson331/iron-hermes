@@ -132,3 +132,55 @@ pub async fn create_session() -> Result<String> {
 
     Ok(session_key)
 }
+
+// =============================================================================
+// Phase 32.3 Plan 04: /api/agents/{kill,interrupt,prune,status} REST endpoints
+// =============================================================================
+//
+// Four Dioxus server functions wrapping the free fns in `state.rs`. They
+// follow the established `#[get(...)]` / `#[post(...)]` pattern in this file
+// (list_slash_commands, list_sessions, etc.) — iron_hermes_ui's REST surface
+// is Dioxus server functions, not a separate Axum routes.rs (main.rs has only
+// one Axum mount point: `serve_dioxus_application`).
+//
+// **No confirm token on the web surface** (Phase 32.3 D-09 — only the
+// Telegram gateway enforces `confirm` because of spoof-replay risk; TUI and
+// web both have synchronous user presence).
+
+/// Phase 32.3 Plan 04 (D-08): `POST /api/agents/kill` body `{"id": "sub_xxx"}`.
+/// Returns the JSON shape documented in `state::api_agents_kill`.
+#[post("/api/agents/kill")]
+pub async fn api_agents_kill(id: String) -> Result<serde_json::Value> {
+    let state = crate::server::state::global_app_state();
+    Ok(state.api_agents_kill(serde_json::json!({ "id": id })))
+}
+
+/// Phase 32.3 Plan 04 (D-08): `POST /api/agents/interrupt` body `{"id": "sub_xxx"}`.
+#[post("/api/agents/interrupt")]
+pub async fn api_agents_interrupt(id: String) -> Result<serde_json::Value> {
+    let state = crate::server::state::global_app_state();
+    Ok(state.api_agents_interrupt(serde_json::json!({ "id": id })))
+}
+
+/// Phase 32.3 Plan 04 (D-08): `POST /api/agents/prune` body `{"stale_secs": 120}`
+/// (optional; defaults to 120 to match `SubagentConfig::stale_warn_seconds`).
+#[post("/api/agents/prune")]
+pub async fn api_agents_prune(stale_secs: Option<u64>) -> Result<serde_json::Value> {
+    let state = crate::server::state::global_app_state();
+    let body = match stale_secs {
+        Some(s) => serde_json::json!({ "stale_secs": s }),
+        None => serde_json::json!({}),
+    };
+    Ok(state.api_agents_prune(body))
+}
+
+/// Phase 32.3 Plan 04 (D-08): `GET /api/agents/status?id=sub_xxx`.
+/// Returns the `SubagentStatusInfo` JSON (Serialize derived in Plan 03), or
+/// a `not_found` error when the id is unknown.
+#[get("/api/agents/status")]
+pub async fn api_agents_status(id: String) -> Result<serde_json::Value> {
+    let state = crate::server::state::global_app_state();
+    Ok(state
+        .api_agents_status(&id)
+        .ok_or_else(|| ServerFnError::new(format!("subagent {} not found", id)))?)
+}
