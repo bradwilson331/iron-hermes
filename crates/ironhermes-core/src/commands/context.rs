@@ -56,6 +56,22 @@ pub trait BudgetSnapshot: Send + Sync {
     fn pressure_label(&self) -> &'static str;
 }
 
+/// D-11 / Phase 32.2 Plan 04: Flat entry for the `/agents` tree view.
+///
+/// Produced by `SubagentListSnapshot::tree_summary()`. The `status` field carries
+/// the per-node status pill required by D-12 tui_rata spec.
+#[derive(Debug, Clone)]
+pub struct SubagentTreeEntry {
+    pub id: String,
+    pub task_summary: String,
+    pub uptime: std::time::Duration,
+    /// D-12 status pill: `"running"` or `"killed"`. Default impl uses `"running"`;
+    /// `SubagentRegistryHandle` derives from `SubagentInfo.cancel.is_cancelled()`.
+    pub status: String,
+    pub parent_id: Option<String>,
+    pub depth: usize,
+}
+
 /// D-03 / D-09: Subagent registry snapshot for `/agents list|kill|logs`.
 /// Implemented in `ironhermes-agent` for `Arc<RwLock<SubagentRegistry>>`.
 pub trait SubagentListSnapshot: Send + Sync {
@@ -67,6 +83,28 @@ pub trait SubagentListSnapshot: Send + Sync {
     fn kill(&self, id: &str) -> bool;
     /// `/agents logs <id>` — transcript file path for a registered subagent.
     fn transcript_path(&self, id: &str) -> Option<std::path::PathBuf>;
+    /// D-11 / Phase 32.2 Plan 04: tree-structured summary of active subagents.
+    ///
+    /// Default implementation returns a flat list (no parent/child nesting) derived
+    /// from `list_summary()` with `status: "running"`, `parent_id: None`, `depth: 0`.
+    /// This default ensures all existing `SubagentListSnapshot` impls (e.g. test fakes)
+    /// compile unchanged — they do NOT need to override this method.
+    ///
+    /// `SubagentRegistryHandle` in ironhermes-agent overrides this with a real
+    /// recursive tree walk using `SubagentRegistry::build_tree()`.
+    fn tree_summary(&self) -> Vec<SubagentTreeEntry> {
+        self.list_summary()
+            .into_iter()
+            .map(|(id, task_summary, uptime)| SubagentTreeEntry {
+                id,
+                task_summary,
+                uptime,
+                status: "running".to_string(),
+                parent_id: None,
+                depth: 0,
+            })
+            .collect()
+    }
 }
 
 /// D-26: Process registry snapshot for `hermes status` sandbox view.
@@ -285,8 +323,9 @@ pub struct CommandContext {
     /// D-09: Concurrency semaphore surfaced to handlers that read
     /// `.available_permits()` for capacity reporting.
     pub subagent_semaphore: Option<Arc<tokio::sync::Semaphore>>,
-    /// D-04: Max concurrent subagents — denominator of the `agents: N/M` pill.
-    pub max_subagents: Option<usize>,
+    /// D-04: Max concurrent children — denominator of the `agents: N/M` pill.
+    /// (D-07: renamed from max_subagents)
+    pub max_concurrent_children: Option<usize>,
 
     // ---- Phase 22.4.2 Plan 00: D-04 eight new optional handles.
     // All Option<Arc<...>> for backwards-compat — None when not wired.
@@ -350,7 +389,7 @@ impl CommandContext {
             subagent_registry: None,
             budget: None,
             subagent_semaphore: None,
-            max_subagents: None,
+            max_concurrent_children: None,
             // Phase 22.4.2 Plan 00: D-04 eight new optional handles.
             mcp_manager: None,
             memory_manager: None,
@@ -408,10 +447,11 @@ impl CommandContext {
         self
     }
 
-    /// Builder: attach the configured max subagent count (D-04 / Plan 21.7-07).
+    /// Builder: attach the configured max concurrent children count (D-04 / Plan 21.7-07).
     /// Denominator of the `agents: N/M` status-line pill.
-    pub fn with_max_subagents(mut self, max: usize) -> Self {
-        self.max_subagents = Some(max);
+    /// (D-07: renamed from with_max_subagents)
+    pub fn with_max_concurrent_children(mut self, max: usize) -> Self {
+        self.max_concurrent_children = Some(max);
         self
     }
 
@@ -521,7 +561,7 @@ mod plan_21_7_07_tests {
         assert!(c.subagent_registry.is_none());
         assert!(c.budget.is_none());
         assert!(c.subagent_semaphore.is_none());
-        assert!(c.max_subagents.is_none());
+        assert!(c.max_concurrent_children.is_none());
     }
 
     #[test]
@@ -529,12 +569,41 @@ mod plan_21_7_07_tests {
         let sem = Arc::new(tokio::sync::Semaphore::new(4));
         let c = ctx()
             .with_subagent_semaphore(sem.clone())
-            .with_max_subagents(4);
+            .with_max_concurrent_children(4);
         assert_eq!(
             c.subagent_semaphore.as_ref().map(|s| s.available_permits()),
             Some(4)
         );
-        assert_eq!(c.max_subagents, Some(4));
+        assert_eq!(c.max_concurrent_children, Some(4));
+    }
+
+    #[test]
+    fn invariant_no_legacy_max_subagents_in_context_rs() {
+        let source = include_str!("context.rs");
+        // The field and builder were renamed in Phase 32.2 D-07.
+        // This test locks the rename against future regressions.
+        // Note: "max_subagents" must NOT appear as a live identifier
+        // (field name or builder method). Comments or string literals
+        // containing the word for historical reference are excluded by
+        // checking for the identifier pattern.
+        let legacy_hits: Vec<&str> = source
+            .lines()
+            .filter(|l| {
+                let trimmed = l.trim();
+                // skip comment lines
+                !trimmed.starts_with("//")
+                    && !trimmed.starts_with("///")
+                    // skip string literals (test fixtures / doc strings)
+                    && !trimmed.contains('"')
+                    && trimmed.contains("max_subagents")
+            })
+            .collect();
+        assert!(
+            legacy_hits.is_empty(),
+            "max_subagents must not appear as a live identifier in context.rs post-rename (D-07). \
+             Found in lines: {:?}",
+            legacy_hits
+        );
     }
 
     // BudgetSnapshot impl for testing; real impl lives in ironhermes-agent.
@@ -591,6 +660,46 @@ mod plan_21_7_07_tests {
         assert_eq!(r.list_summary().len(), 1);
         assert!(r.kill("sub_deadbeef"));
         assert!(r.transcript_path("sub_x").is_some());
+    }
+
+    #[test]
+    fn test_default_tree_summary_flattens_list_summary() {
+        // Phase 32.2 Plan 04 Task 1: FakeSubagentList does NOT override tree_summary()
+        // — this test proves the default impl works and produces the correct flat output.
+        let fake = FakeSubagentList;
+        let list = fake.list_summary();
+        let tree = fake.tree_summary();
+
+        // Same number of entries as list_summary
+        assert_eq!(
+            tree.len(),
+            list.len(),
+            "tree_summary default must produce same count as list_summary"
+        );
+
+        // Every entry must have parent_id=None, depth=0, status="running"
+        for entry in &tree {
+            assert!(
+                entry.parent_id.is_none(),
+                "default tree_summary must set parent_id=None; got {:?}",
+                entry.parent_id
+            );
+            assert_eq!(
+                entry.depth, 0,
+                "default tree_summary must set depth=0; got {}",
+                entry.depth
+            );
+            assert_eq!(
+                entry.status, "running",
+                "default tree_summary must set status='running'; got {}",
+                entry.status
+            );
+        }
+
+        // Entry fields must match list_summary content
+        assert_eq!(tree[0].id, "sub_deadbeef");
+        assert_eq!(tree[0].task_summary, "do thing");
+        assert_eq!(tree[0].uptime, std::time::Duration::from_secs(3));
     }
 
     // ProcessRegistrySnapshotHandle fake for testing.
