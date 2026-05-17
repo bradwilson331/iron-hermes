@@ -27,8 +27,8 @@ Label, prioritize, and summarize new issues every night. Delivers a digest to yo
 **Trigger:** Schedule (nightly)
 
 ```bash
-ironhermes cron create "0 2 * * *" \
-  "You are a project manager triaging the bradwilson331/ironhermes GitHub repo.
+ironhermes cron create --schedule "0 2 * * *" \
+  --prompt "You are a project manager triaging the bradwilson331/ironhermes GitHub repo.
 
 1. Run: gh issue list --repo bradwilson331/ironhermes --state open --json number,title,labels,author,createdAt --limit 30
 2. Identify issues opened in the last 24 hours
@@ -113,8 +113,8 @@ Weekly scan of merged PRs to find API changes that need documentation updates.
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 9 * * 1" \
-  "Scan the bradwilson331/ironhermes repo for documentation drift.
+ironhermes cron create --schedule "0 9 * * 1" \
+  --prompt "Scan the bradwilson331/ironhermes repo for documentation drift.
 
 1. Run: gh pr list --repo bradwilson331/ironhermes --state merged --json number,title,files,mergedAt --limit 30
 2. Filter to PRs merged in the last 7 days
@@ -139,8 +139,8 @@ Daily scan for known vulnerabilities in project dependencies.
 **Trigger:** Schedule (daily)
 
 ```bash
-ironhermes cron create "0 6 * * *" \
-  "Run a dependency security audit on the ironhermes project.
+ironhermes cron create --schedule "0 6 * * *" \
+  --prompt "Run a dependency security audit on the ironhermes project.
 
 1. cd ~/code/ironhermes && cargo audit 2>&1
 2. Check for any CVEs with CVSS score >= 7.0
@@ -233,8 +233,8 @@ else:
 ```
 
 ```bash
-ironhermes cron create "every 30m" \
-  "If the script reports OUTAGE DETECTED, summarize which services are down and suggest likely causes. If NO_ISSUES, respond with [SILENT]." \
+ironhermes cron create --schedule "every 30m" \
+  --prompt "If the script reports OUTAGE DETECTED, summarize which services are down and suggest likely causes. If NO_ISSUES, respond with [SILENT]." \
   --script ~/.ironhermes/scripts/check-uptime.py \
   --name "Uptime monitor" \
   --deliver telegram
@@ -253,8 +253,8 @@ Watches `NousResearch/hermes-agent` for changes to cron-related code and flags a
 **Trigger:** Schedule (daily)
 
 ```bash
-ironhermes cron create "0 7 * * *" \
-  "Check the NousResearch/hermes-agent repository for cron-related changes in the last 24 hours.
+ironhermes cron create --schedule "0 7 * * *" \
+  --prompt "Check the NousResearch/hermes-agent repository for cron-related changes in the last 24 hours.
 
 1. Run: gh pr list --repo NousResearch/hermes-agent --state merged --json number,title,files,mergedAt --limit 20
 2. Filter to PRs merged in the last 24 hours
@@ -283,8 +283,8 @@ Every Monday, produce a structured summary of what remains unimplemented in `iro
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 9 * * 1" \
-  "Generate a parity gap report for the ironhermes-cron crate.
+ironhermes cron create --schedule "0 9 * * 1" \
+  --prompt "Generate a parity gap report for the ironhermes-cron crate.
 
 1. Read: cat ~/code/ironhermes/crates/ironhermes-cron/PARITY.md
 2. Count and list all rows marked ❌ (missing in Rust) and ⚠️ (partial)
@@ -333,8 +333,8 @@ Run the cron crate's test suite every night and report failures.
 **Trigger:** Schedule (nightly)
 
 ```bash
-ironhermes cron create "0 3 * * *" \
-  "Run the ironhermes-cron test suite and report results.
+ironhermes cron create --schedule "0 3 * * *" \
+  --prompt "Run the ironhermes-cron test suite and report results.
 
 1. cd ~/code/ironhermes && cargo test -p ironhermes-cron 2>&1
 2. Count: total tests, passed, failed, ignored
@@ -363,11 +363,11 @@ fi
 ```
 
 ```bash
-ironhermes cron create "every 5m" \
+ironhermes cron create --schedule "every 5m" \
   --no-agent \
   --script ~/.ironhermes/scripts/memory-watchdog.sh \
-  --deliver telegram \
-  --name "memory-watchdog"
+  --name "memory-watchdog" \
+  --deliver telegram
 ```
 
 No prompt, no model call. The scheduler runs the script; non-empty stdout goes to Telegram.
@@ -395,8 +395,8 @@ Scores every crate in the workspace on test coverage, doc completeness, and pari
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 8 * * 1" \
-  "You are a Rust workspace health auditor for the ironhermes project.
+ironhermes cron create --schedule "0 8 * * 1" \
+  --prompt "You are a Rust workspace health auditor for the ironhermes project.
 
 Score each crate in ~/code/ironhermes/crates/ on a scale of 1–10 across 5 dimensions (2 pts each). For any crate scoring below 6, write a detailed action plan to ~/code/ironhermes/docs/health/[CRATE_NAME].md.
 
@@ -493,8 +493,8 @@ Reads the roadmap, scores each active phase on readiness criteria, writes an exe
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 9 * * 1" \
-  "You are a phase readiness auditor for the IronHermes project.
+ironhermes cron create --schedule "0 9 * * 1" \
+  --prompt "You are a phase readiness auditor for the IronHermes project.
 
 Score each active phase from ROADMAP.md on a 1–10 rubric. For the top 2 phases by readiness score, write an execution brief to .planning/readiness/[PHASE_ID].md.
 
@@ -584,8 +584,8 @@ Scans every skill in `skills/` against a quality rubric. Writes an audit card fo
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 10 * * 0" \
-  "You are a skills library quality auditor for IronHermes.
+ironhermes cron create --schedule "0 10 * * 0" \
+  --prompt "You are a skills library quality auditor for IronHermes.
 
 Score every skill in ~/code/ironhermes/skills/ on a 1–10 rubric. Write an audit card to docs/skills-audit/[SKILL_PATH].md for any skill scoring below 7.
 
@@ -680,8 +680,8 @@ Spawns one subagent per competitor repo simultaneously. Each subagent searches i
 **Trigger:** Schedule (daily)
 
 ```bash
-ironhermes cron create "0 8 * * *" \
-  "Scout competitor AI agent repositories for notable activity in the last 24 hours.
+ironhermes cron create --schedule "0 8 * * *" \
+  --prompt "Scout competitor AI agent repositories for notable activity in the last 24 hours.
 
 Use delegate_task in batch mode to research all repos in parallel:
 
@@ -721,8 +721,8 @@ Delegates one subagent per crate in parallel. Each subagent runs clippy, counts 
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 9 * * 0" \
-  "Run a parallel health audit across the ironhermes workspace crates.
+ironhermes cron create --schedule "0 9 * * 0" \
+  --prompt "Run a parallel health audit across the ironhermes workspace crates.
 
 Use delegate_task in batch mode (max 3 concurrent):
 
@@ -764,8 +764,8 @@ Delegates parallel research subagents then synthesizes their findings into a sin
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 10 * * 3" \
-  "Research the Rust async ecosystem for patterns relevant to IronHermes, then synthesize findings into a design note.
+ironhermes cron create --schedule "0 10 * * 3" \
+  --prompt "Research the Rust async ecosystem for patterns relevant to IronHermes, then synthesize findings into a design note.
 
 Phase 1 — fan out research in parallel:
 delegate_task(tasks=[
@@ -817,8 +817,8 @@ Delegates one subagent per PARITY.md file in the workspace, each counting ❌ an
 **Trigger:** Schedule (weekly)
 
 ```bash
-ironhermes cron create "0 7 * * 1" \
-  "Run a parallel parity gap analysis across all ironhermes crates with PARITY.md files.
+ironhermes cron create --schedule "0 7 * * 1" \
+  --prompt "Run a parallel parity gap analysis across all ironhermes crates with PARITY.md files.
 
 Step 1: discover parity files
 find ~/code/ironhermes/crates -name 'PARITY.md' | sort
@@ -917,7 +917,8 @@ ironhermes cron remove <job_id>               # delete permanently
 ### Per-Job Model Override
 
 ```bash
-ironhermes cron create "0 8 * * *" "..." \
+ironhermes cron create --schedule "0 8 * * *" \
+  --prompt "..." \
   --model claude-opus-4-7 \
   --name "Heavy analysis"
 ```
