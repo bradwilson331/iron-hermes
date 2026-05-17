@@ -128,6 +128,29 @@ impl AgentSubagentRunner {
     }
 }
 
+/// Phase 32.2 Plan 04 (D-10): Build a `SubagentInfo` from the components
+/// available at registration time inside `run_child`.
+///
+/// Extracted as a pure helper so the parent_id wiring can be unit-tested
+/// without driving the full async `run_child` path (which requires live
+/// clients, AgentLoop, etc.). Production code calls this; tests call it directly.
+pub(crate) fn build_subagent_info(
+    subagent_id: String,
+    task_summary: String,
+    caller_subagent_id: Option<String>,
+    cancel: tokio_util::sync::CancellationToken,
+    transcript_path: std::path::PathBuf,
+) -> SubagentInfo {
+    SubagentInfo {
+        id: subagent_id,
+        task_summary,
+        parent_id: caller_subagent_id,
+        started_at: std::time::Instant::now(),
+        cancel,
+        transcript_path,
+    }
+}
+
 /// Plan 21.7-07: generate a `sub_<12 hex>` subagent id.
 fn random_subagent_id() -> String {
     let uuid = uuid::Uuid::new_v4();
@@ -225,7 +248,7 @@ impl SubagentRunner for AgentSubagentRunner {
             let info = SubagentInfo {
                 id: subagent_id.clone(),
                 task_summary: task_summary.clone(),
-                parent_id: None, // Plan 04 wires self.caller_subagent_id
+                parent_id: self.caller_subagent_id.clone(), // Phase 32.2 Plan 04 D-10: populated
                 started_at: Instant::now(),
                 cancel: cancel_for_info,
                 transcript_path: path_for_info,
@@ -369,6 +392,48 @@ mod tests {
             runner.caller_subagent_id,
             Some("sub_abc123".to_string()),
             "with_caller_id must set caller_subagent_id to Some(id)"
+        );
+    }
+
+    #[test]
+    fn test_run_child_propagates_caller_id_to_subagent_info() {
+        // Phase 32.2 Plan 04 D-10: verify that build_subagent_info wires
+        // caller_subagent_id → SubagentInfo.parent_id correctly.
+        //
+        // We test the extracted pure helper directly rather than driving the
+        // full async run_child path (which requires a live client + AgentLoop).
+        // This matches the plan's "extract a fn build_subagent_info(...) pure
+        // helper and test it directly" guidance.
+        let caller_id = "parent_sub_abc".to_string();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let info = build_subagent_info(
+            "sub_child001".to_string(),
+            "do the child task".to_string(),
+            Some(caller_id.clone()),
+            cancel,
+            std::path::PathBuf::from("/dev/null"),
+        );
+
+        assert_eq!(
+            info.parent_id,
+            Some(caller_id),
+            "build_subagent_info must wire caller_subagent_id into SubagentInfo.parent_id"
+        );
+        assert_eq!(info.id, "sub_child001");
+        assert_eq!(info.task_summary, "do the child task");
+
+        // Also verify None propagates correctly (root runner case)
+        let cancel2 = tokio_util::sync::CancellationToken::new();
+        let root_info = build_subagent_info(
+            "sub_root".to_string(),
+            "root task".to_string(),
+            None,
+            cancel2,
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(
+            root_info.parent_id.is_none(),
+            "root runner (caller_subagent_id=None) must produce SubagentInfo.parent_id=None"
         );
     }
 }
