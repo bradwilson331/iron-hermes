@@ -294,8 +294,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     // EXEC-01..04: code execution sandbox configuration
     pub exec: ExecConfig,
-    // AGENT-01..05: subagent delegation configuration
-    pub subagent: SubagentConfig,
+    // AGENT-01..05: subagent delegation configuration (D-07: renamed from subagent)
+    pub delegation: SubagentConfig,
     // BATCH-01..04: batch processing configuration
     pub batch: BatchConfig,
     // MEM-12: memory provider selection
@@ -401,6 +401,11 @@ fn default_gateway_threshold() -> f32 {
 }
 fn default_true() -> bool {
     true
+}
+/// Default `max_spawn_depth` for [`SubagentConfig`] — 1 (flat delegation only).
+/// Matches the Python hermes-agent reference (D-02, Phase 32.2).
+fn default_max_spawn_depth() -> u32 {
+    1
 }
 
 /// Default `nudge_interval` for [`MemoryConfig`] — 10 user turns.
@@ -899,40 +904,79 @@ impl Default for ExecConfig {
 // SubagentConfig (AGENT-01..05)
 // =============================================================================
 
-/// Subagent delegation configuration (D-08, D-09, D-16, D-25).
+/// Subagent delegation configuration (D-07/D-08/D-09, Phase 32.2).
+///
+/// YAML key: `delegation:` (renamed from `subagent:` in Phase 32.2 D-07).
+/// A startup-detection gate in `Config::load_from` rejects configs that still
+/// use the old `subagent:` key with an actionable error message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubagentConfig {
-    /// Timeout in seconds for each subagent execution. Default: 300 (5 minutes).
-    pub timeout_secs: u64,
-    /// Maximum concurrent subagents. Default: 3.
-    pub max_subagents: usize,
-    /// Maximum LLM iterations per subagent. Default: 10.
+    /// Timeout in seconds for each child agent execution. Default: 300 (5 minutes).
+    /// (D-07: renamed from `timeout_secs`)
+    pub child_timeout_seconds: u64,
+    /// Maximum concurrent child agents. Default: 3.
+    /// (D-07: renamed from `max_subagents`)
+    pub max_concurrent_children: usize,
+    /// Maximum LLM iterations per child agent. Default: 50 (D-08: raised from 10).
     pub max_iterations: usize,
     /// Default toolset groups for child agents (D-01). Default: ["terminal", "file", "web"].
     pub default_toolsets: Vec<String>,
-    /// Optional model override for subagents (D-23). None = use parent's model.
+    /// Optional model override for child agents (D-23). None = use parent's model.
     pub model: Option<String>,
-    /// Optional provider override for subagents (D-23). None = use parent's provider.
+    /// Optional provider override for child agents (D-23). None = use parent's provider.
     pub provider: Option<String>,
-    /// Optional custom API base URL for subagents (D-23). None = use parent's.
+    /// Optional custom API base URL for child agents (D-23). None = use parent's.
     pub base_url: Option<String>,
-    /// Optional custom API key for subagents (D-23). None = use parent's.
+    /// Optional custom API key for child agents (D-23). None = use parent's.
     pub api_key: Option<String>,
+    /// Maximum spawn depth for orchestrator chains (D-02). Default: 1 (flat delegation only).
+    /// Raise to 2 to allow orchestrators to spawn leaf grandchildren, 3 for three levels.
+    #[serde(default = "default_max_spawn_depth")]
+    pub max_spawn_depth: u32,
+    /// Global kill switch: when false, every child is downgraded to leaf role (D-03).
+    /// Default: true (orchestration allowed up to max_spawn_depth).
+    #[serde(default = "default_true")]
+    pub orchestrator_enabled: bool,
 }
 
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: 300,
-            max_subagents: 3,
-            max_iterations: 10,
+            child_timeout_seconds: 300,
+            max_concurrent_children: 3,
+            max_iterations: 50,
             default_toolsets: vec!["terminal".into(), "file".into(), "web".into()],
             model: None,
             provider: None,
             base_url: None,
             api_key: None,
+            max_spawn_depth: 1,
+            orchestrator_enabled: true,
         }
+    }
+}
+
+/// Detect the legacy `subagent:` YAML key in raw config file content.
+///
+/// Returns `Some(message)` when a line beginning with `subagent:` is found
+/// (after stripping leading whitespace), indicating the user must rename the
+/// key to `delegation:`.  Returns `None` when no legacy key is detected.
+///
+/// The check is line-start–only so that a string value containing the word
+/// "subagent" (e.g., a task description) does NOT trigger the gate.
+pub(crate) fn detect_legacy_subagent_key(content: &str) -> Option<String> {
+    let found = content
+        .lines()
+        .any(|line| line.trim_start().starts_with("subagent:"));
+    if found {
+        Some(
+            "Config key 'subagent:' is deprecated and no longer supported. \
+             Rename it to 'delegation:' in your config.yaml."
+                .to_string(),
+        )
+    } else {
+        None
     }
 }
 
@@ -991,6 +1035,12 @@ impl Config {
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
             let content = std::fs::read_to_string(path)?;
+            // D-07: detect legacy `subagent:` key before parse so users get an
+            // actionable message rather than silent defaults.
+            if let Some(msg) = detect_legacy_subagent_key(&content) {
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
             let mut config: Config = serde_yaml::from_str(&content)?;
             // D-02: migrate custom_providers entries that are missing from providers HashMap.
             // If providers.foo already exists, the custom_providers.foo entry is silently
@@ -1264,17 +1314,19 @@ model:
     #[test]
     fn test_subagent_config_default() {
         let default = SubagentConfig::default();
-        assert_eq!(default.timeout_secs, 300);
-        assert_eq!(default.max_subagents, 3);
-        assert_eq!(default.max_iterations, 10);
+        assert_eq!(default.child_timeout_seconds, 300);
+        assert_eq!(default.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(default.max_iterations, 50);
     }
 
     #[test]
     fn test_config_default_includes_subagent() {
         let config = Config::default();
-        assert_eq!(config.subagent.timeout_secs, 300);
-        assert_eq!(config.subagent.max_subagents, 3);
-        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(config.delegation.child_timeout_seconds, 300);
+        assert_eq!(config.delegation.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(config.delegation.max_iterations, 50);
     }
 
     #[test]
@@ -1285,13 +1337,14 @@ model:
   provider: "openrouter"
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
-        assert_eq!(config.subagent.timeout_secs, 300);
-        assert_eq!(config.subagent.max_subagents, 3);
-        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(config.delegation.child_timeout_seconds, 300);
+        assert_eq!(config.delegation.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(config.delegation.max_iterations, 50);
     }
 
     #[test]
-    fn test_subagent_config_default_includes_new_fields() {
+    fn test_subagent_config_defaults_include_new_fields() {
         let default = SubagentConfig::default();
         assert_eq!(
             default.default_toolsets,
@@ -1312,31 +1365,90 @@ model:
             "base_url should default to None"
         );
         assert!(default.api_key.is_none(), "api_key should default to None");
+        // D-32.2 new fields
+        assert_eq!(default.max_spawn_depth, 1, "max_spawn_depth must default to 1");
+        assert!(default.orchestrator_enabled, "orchestrator_enabled must default to true");
+        // D-08: raised from 10 to 50
+        assert_eq!(default.max_iterations, 50, "max_iterations must default to 50 per D-08");
     }
 
     #[test]
     fn test_subagent_config_backward_compat_parse() {
-        // Only timeout_secs in YAML — all new fields should get defaults
+        // Only child_timeout_seconds in YAML (new name) — all other fields should get defaults
         let yaml = r#"
-subagent:
-  timeout_secs: 600
+delegation:
+  child_timeout_seconds: 600
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
-        assert_eq!(config.subagent.timeout_secs, 600);
-        assert_eq!(config.subagent.max_subagents, 3);
-        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(config.delegation.child_timeout_seconds, 600);
+        assert_eq!(config.delegation.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(config.delegation.max_iterations, 50);
         assert_eq!(
-            config.subagent.default_toolsets,
+            config.delegation.default_toolsets,
             vec![
                 "terminal".to_string(),
                 "file".to_string(),
                 "web".to_string()
             ]
         );
-        assert!(config.subagent.model.is_none());
-        assert!(config.subagent.provider.is_none());
-        assert!(config.subagent.base_url.is_none());
-        assert!(config.subagent.api_key.is_none());
+        assert!(config.delegation.model.is_none());
+        assert!(config.delegation.provider.is_none());
+        assert!(config.delegation.base_url.is_none());
+        assert!(config.delegation.api_key.is_none());
+        assert_eq!(config.delegation.max_spawn_depth, 1);
+        assert!(config.delegation.orchestrator_enabled);
+    }
+
+    #[test]
+    fn test_config_parses_delegation_key() {
+        let yaml = r#"
+delegation:
+  max_concurrent_children: 5
+  child_timeout_seconds: 120
+  max_spawn_depth: 2
+  orchestrator_enabled: false
+  max_iterations: 100
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.delegation.max_concurrent_children, 5);
+        assert_eq!(config.delegation.child_timeout_seconds, 120);
+        assert_eq!(config.delegation.max_spawn_depth, 2);
+        assert!(!config.delegation.orchestrator_enabled);
+        assert_eq!(config.delegation.max_iterations, 100);
+    }
+
+    #[test]
+    fn test_legacy_subagent_key_detected() {
+        let yaml = "subagent:\n  max_subagents: 5\n";
+        let result = detect_legacy_subagent_key(yaml);
+        assert!(result.is_some(), "legacy subagent: key must be detected");
+        let msg = result.unwrap();
+        assert!(msg.contains("subagent:"), "message must mention the old key");
+        assert!(msg.contains("delegation:"), "message must mention the new key");
+        assert!(msg.contains("config.yaml"), "message must mention the config file");
+    }
+
+    #[test]
+    fn test_delegation_key_not_flagged() {
+        let yaml = "delegation:\n  max_concurrent_children: 3\n";
+        let result = detect_legacy_subagent_key(yaml);
+        assert!(result.is_none(), "delegation: key must NOT trigger the legacy detector");
+    }
+
+    #[test]
+    fn test_subagent_substring_in_value_not_flagged() {
+        // A string value containing "subagent" must NOT trigger the gate
+        let yaml = r#"
+agent:
+  name: "my_subagent_runner"
+  description: "subagent: handles delegated tasks"
+"#;
+        let result = detect_legacy_subagent_key(yaml);
+        assert!(
+            result.is_none(),
+            "subagent substring inside a value must NOT trigger the gate (line-start check only)"
+        );
     }
 
     // =========================================================================
