@@ -167,12 +167,12 @@ impl DelegateTaskTool {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("tasks must be an array"))?;
 
-        // D-06: truncate to max_subagents (default 3)
-        let max_batch = self.config.max_subagents;
+        // D-06: truncate to max_concurrent_children (default 3)
+        let max_batch = self.config.max_concurrent_children;
         let tasks: Vec<_> = tasks_array.iter().take(max_batch).collect();
         if tasks_array.len() > max_batch {
             tracing::warn!(
-                "Batch truncated from {} to {} tasks (max_subagents limit)",
+                "Batch truncated from {} to {} tasks (max_concurrent_children limit)",
                 tasks_array.len(),
                 max_batch
             );
@@ -240,7 +240,7 @@ impl DelegateTaskTool {
             let per_task_timeout_secs = task_obj
                 .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(config.timeout_secs);
+                .unwrap_or(config.child_timeout_seconds);
 
             let handle = tokio::spawn(async move {
                 // D-19: Emit Started progress event
@@ -630,7 +630,7 @@ impl Tool for DelegateTaskTool {
         let effective_timeout_secs = args
             .get("timeout_seconds")
             .and_then(|v| v.as_u64())
-            .unwrap_or(self.config.timeout_secs);
+            .unwrap_or(self.config.child_timeout_seconds);
 
         // D-08 / AI-SPEC Pitfall 5: clone the child cancel token so the
         // timeout arm can call `.cancel()` on it after handing the
@@ -984,7 +984,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig {
-                timeout_secs: 1,
+                child_timeout_seconds: 1,
                 ..SubagentConfig::default()
             },
             None,
@@ -1376,7 +1376,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig {
-                max_subagents: 2,
+                max_concurrent_children: 2,
                 ..SubagentConfig::default()
             },
             None,

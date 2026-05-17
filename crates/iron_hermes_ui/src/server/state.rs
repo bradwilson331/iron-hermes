@@ -98,8 +98,8 @@ impl AppState {
                 .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
             delegate_task: Some(DelegateTaskWiring {
                 runner: subagent_runner,
-                semaphore: Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents)),
-                config: config.subagent.clone(),
+                semaphore: Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children)),
+                config: config.delegation.clone(),
                 cancel_token: None,
                 progress_callback: None,
             }),

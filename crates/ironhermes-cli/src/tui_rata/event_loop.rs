@@ -249,7 +249,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     }
 
     // delegate_task — D-18 item 5 / AGENT-01..05 (lift from main.rs:487-507)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
     let subagent_runner = Arc::new(
         AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
             .with_subagent_registry(subagent_registry.clone())
@@ -271,7 +271,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         delegate_task: Some(DelegateTaskWiring {
             runner: subagent_runner.clone(),
             semaphore: subagent_semaphore.clone(),
-            config: config.subagent.clone(),
+            config: config.delegation.clone(),
             cancel_token: Some(cancel_parent.clone()),
             progress_callback: None,
         }),
@@ -287,7 +287,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         memory_manager
             .clone()
             .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        config.subagent.clone(),
+        config.delegation.clone(),
         Some(cancel_parent.clone()),
         None, // no progress callback in Phase 22.4 (status-pill integration is follow-up)
     );

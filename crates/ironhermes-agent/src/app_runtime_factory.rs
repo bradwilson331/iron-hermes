@@ -398,7 +398,7 @@ mod tests {
         input.delegate_task = Some(DelegateTaskWiring {
             runner: Arc::new(NoopRunner),
             semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-            config: config.subagent.clone(),
+            config: config.delegation.clone(),
             cancel_token: None,
             progress_callback: None,
         });
