@@ -46,6 +46,16 @@ pub struct AgentSubagentRunner {
     hermes_home: Option<PathBuf>,
     /// Plan 21.7-07 (D-05): session id used in the transcript path.
     session_id: Option<String>,
+    /// Phase 32.2 D-04: current depth in the spawn tree.
+    /// 0 = root caller (the runner attached to the top-level DelegateTaskTool);
+    /// children spawned by an orchestrator child at depth N run at depth N+1.
+    /// Depth threading is internal to AgentSubagentRunner state — the
+    /// SubagentRunner trait signature is NOT changed (per RESEARCH Pitfall 6).
+    pub current_depth: u32,
+    /// Phase 32.2 D-10: the subagent_id of the runner's parent caller.
+    /// None = root (this runner is attached to the top-level parent agent).
+    /// Populated via `with_caller_id`; Plan 04 wires it into SubagentInfo.parent_id.
+    pub caller_subagent_id: Option<String>,
 }
 
 impl AgentSubagentRunner {
@@ -61,6 +71,8 @@ impl AgentSubagentRunner {
             subagent_registry: None,
             hermes_home: None,
             session_id: None,
+            current_depth: 0,
+            caller_subagent_id: None,
         }
     }
 
@@ -79,6 +91,40 @@ impl AgentSubagentRunner {
         self.hermes_home = Some(hermes_home);
         self.session_id = Some(session_id);
         self
+    }
+
+    /// Phase 32.2 D-04: set the current depth in the spawn tree.
+    /// Root caller is depth 0; children of an orchestrator at depth N run at depth N+1.
+    /// Use this builder when constructing a runner for an orchestrator child's DelegateTaskTool
+    /// so that `build_child_registry` receives the correct depth for gating further nesting.
+    pub fn with_current_depth(mut self, depth: u32) -> Self {
+        self.current_depth = depth;
+        self
+    }
+
+    /// Phase 32.2 D-10: set the caller's subagent_id for parent-child tracing.
+    /// Plan 04 wires this into `SubagentInfo.parent_id` for the `/agents` tree view.
+    pub fn with_caller_id(mut self, id: String) -> Self {
+        self.caller_subagent_id = Some(id);
+        self
+    }
+
+    /// Test-only constructor that creates a runner with dummy client state.
+    /// Used to test field initialization and builder methods without network calls.
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        use crate::client::LlmClient;
+        let dummy_client = AnyClient::ChatCompletions(LlmClient::new(
+            "http://localhost:9999",
+            "dummy-key",
+            "dummy-model",
+        ));
+        // SAFETY: ProviderResolver is only used in run_child, which is not called
+        // in field-inspection tests. We build a real resolver from a minimal Config.
+        let config = ironhermes_core::Config::default();
+        let resolver = ironhermes_core::ProviderResolver::build(&config)
+            .expect("default Config should produce a valid resolver");
+        Self::new(dummy_client, resolver, None)
     }
 }
 
@@ -179,7 +225,7 @@ impl SubagentRunner for AgentSubagentRunner {
             let info = SubagentInfo {
                 id: subagent_id.clone(),
                 task_summary: task_summary.clone(),
-                parent_id: None, // v2.1+ will thread parent id
+                parent_id: None, // Plan 04 wires self.caller_subagent_id
                 started_at: Instant::now(),
                 cancel: cancel_for_info,
                 transcript_path: path_for_info,
@@ -279,6 +325,52 @@ fn derive_task_summary(system_prompt: &str) -> String {
     // Take up through the first blank line (goal is separated from context by \n\n)
     let goal = tail.split("\n\n").next().unwrap_or(tail);
     truncate_summary(goal, 80)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `AgentSubagentRunner` for field-inspection tests.
+    fn make_runner() -> AgentSubagentRunner {
+        AgentSubagentRunner::new_for_test()
+    }
+
+    #[test]
+    fn test_default_current_depth_is_zero() {
+        // Phase 32.2 D-04: new() must initialise current_depth=0 (root caller)
+        // and caller_subagent_id=None (no parent).
+        let runner = make_runner();
+        assert_eq!(
+            runner.current_depth, 0,
+            "default current_depth must be 0 (root caller)"
+        );
+        assert!(
+            runner.caller_subagent_id.is_none(),
+            "default caller_subagent_id must be None (root)"
+        );
+    }
+
+    #[test]
+    fn test_with_current_depth_sets_field() {
+        // Phase 32.2 D-04: with_current_depth(N) must set current_depth to N.
+        let runner = make_runner().with_current_depth(2);
+        assert_eq!(
+            runner.current_depth, 2,
+            "with_current_depth(2) must set field to 2"
+        );
+    }
+
+    #[test]
+    fn test_with_caller_id_sets_field() {
+        // Phase 32.2 D-10: with_caller_id(id) must set caller_subagent_id to Some(id).
+        let runner = make_runner().with_caller_id("sub_abc123".to_string());
+        assert_eq!(
+            runner.caller_subagent_id,
+            Some("sub_abc123".to_string()),
+            "with_caller_id must set caller_subagent_id to Some(id)"
+        );
+    }
 }
 
 #[cfg(test)]
