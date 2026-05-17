@@ -595,6 +595,8 @@ mod plan_21_7_07_tests {
                     && !trimmed.starts_with("///")
                     // skip string literals (test fixtures / doc strings)
                     && !trimmed.contains('"')
+                    // skip this invariant test's own function name
+                    && !trimmed.starts_with("fn invariant_no_legacy")
                     && trimmed.contains("max_subagents")
             })
             .collect();
