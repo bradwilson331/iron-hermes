@@ -157,6 +157,31 @@ delegate_task(tasks=[
 ])
 ```
 
+### `stale_warn_seconds` — per-call soft-warn threshold
+
+Seconds of inactivity before this subagent is flagged `[stale]` in `/agents` output. Falls back to `delegation.stale_warn_seconds` from config (default 120s). Soft signal only — operator decides whether to `/agents kill` (Phase 32.3).
+
+Activity is bumped on each LLM API call, each streamed content delta, and each tool call (before + after). A subagent humming along on a long-running tool call is NOT stale; one waiting on a wedged LLM stream for >120s IS stale.
+
+```
+delegate_task(
+    task="Research LoRA training pipeline — read repos, summarize findings",
+    stale_warn_seconds=1800,
+    toolsets=["web"]
+)
+```
+
+In batch mode, `stale_warn_seconds` is per-task:
+
+```
+delegate_task(tasks=[
+    {"goal": "Quick lookup",            "stale_warn_seconds": 30,   "toolsets": ["file"]},
+    {"goal": "Long-running research",   "stale_warn_seconds": 1800, "toolsets": ["web"]}
+])
+```
+
+The hard-kill ceiling remains `child_timeout_seconds` (default 300s). `stale_warn_seconds` is a soft signal; the timeout is the actual safety net.
+
 ---
 
 ## Practical Examples
@@ -349,6 +374,174 @@ The JSON shape produced by `AppState::subagent_tree_json` for the same 3-node tr
 
 ---
 
+## Stale-Child Detection
+
+Phase 32.3 introduced a soft-warning system that flags subagents which have gone idle long enough to look stuck without yet hitting their hard-kill ceiling. The mechanism is purely observational — no automatic action is taken at the warn threshold.
+
+### How it works
+
+Every subagent's `AgentLoop` carries an `ActivityTracker` (landed in Phase 32.1) that bumps a shared `last_activity` clock on four observable events:
+
+1. Before each LLM API call.
+2. On each streamed content delta (token-by-token).
+3. Before each tool dispatch.
+4. After each tool dispatch returns.
+
+The registry derives status at read time by comparing `now - last_activity` against the subagent's effective `stale_warn_seconds`:
+
+| Condition | Status pill |
+|-----------|-------------|
+| `cancel_token.is_cancelled()` (operator killed or parent-cancel propagated) | `[killed]` |
+| `now - last_activity > stale_warn_seconds` | `[stale]` |
+| Otherwise | `[running]` |
+
+The `[killed] > [stale] > [running]` priority order means a killed subagent never renders as stale, even if it was already past the threshold when killed.
+
+### What you see
+
+```text
+Active subagents:
+├── sub_3f9a12  orchestrate the migration pipeline  42s   [running]
+│   ├── sub_a1b2c3  fetch and parse data            30s   [running]
+│   └── sub_d4e5f6  write output files              180s  [stale]
+└── sub_7g8h9i  run full test suite                 18s   [running]
+```
+
+In the flat-list fallback (when no nesting exists), the pill is appended only when status is not `[running]` — preserving byte-identical legacy output for the common non-orchestrated case:
+
+```text
+Active subagents:
+- subagent-1 (sub_3f9a12c8d041) (orchestrate the migration pipeline) — 42s
+- subagent-2 (sub_d4e5f6a7b8c9) (write output files) — 180s [stale]
+```
+
+### Tracing emission
+
+When a subagent first crosses the stale threshold, a single `tracing::warn!` fires with `subagent_id`, `idle_secs`, and `stale_warn_seconds`. The emission is deduplicated per-id — the warn fires exactly once per subagent crossing, not once per render frame. The dedup state is cleared when the subagent deregisters, so a long-lived id that re-registers (never happens in practice — subagent ids are unique nonces) would start fresh.
+
+### Operator response
+
+`[stale]` is informational. The recommended response is:
+
+- **Tail the transcript** with `/agents logs <id>` to see what the child was doing.
+- **Decide:** if the work is recoverable (a research subagent waiting on a slow API), leave it alone — the hard-kill ceiling (`child_timeout_seconds`, default 300s) will eventually fire if it never recovers.
+- **Or terminate:** if you want it gone now, use `/agents kill <id>` (Shrike Service below).
+
+The stale threshold defaults to 120s. Raise it per-call (`stale_warn_seconds`) for legitimately long-running research tasks where 120s of idle time is normal.
+
+---
+
+## Shrike Service — Operator Termination Surface
+
+Phase 32.3 added a coherent termination/diagnostic subcommand family on `/agents`, available across all three surfaces (TUI, web, gateway/Telegram). The internal Rust module is `crates/ironhermes-agent/src/shrike.rs`; the operator-facing name "shrike" is the bird-of-prey metaphor for the surface that impales runaway children cleanly.
+
+All four subcommands route through the same `ShrikeService` library, so behavior is identical regardless of which surface you issue the command from.
+
+### `/agents kill <id>` — hard kill
+
+Cancels the cancellation token AND aborts the child's `JoinHandle`. The RAII `RegistrationGuard` (see the 6.7-hour ghost note below) fires on the dropped future and deregisters atomically — no leak path.
+
+```text
+> /agents kill sub_3f9a12
+Killed sub_3f9a12 (ran 42s, 0 turns).
+```
+
+Use when:
+- A subagent is wedged on a tool call that ignores its cancel token.
+- You want immediate cleanup, not graceful finalization.
+
+### `/agents interrupt <id>` — soft cancel
+
+Cancels the cancellation token only — does NOT abort the `JoinHandle`. The child observes the cancel at its next iteration boundary and finalizes naturally (writing any pending transcript output, returning a structured result).
+
+```text
+> /agents interrupt sub_3f9a12
+Interrupted sub_3f9a12 — finalizing...
+```
+
+Use when:
+- You want to stop the work but keep whatever partial output the child has accumulated.
+- The child is in the middle of a clean tool sequence that should finish its current step.
+
+### `/agents prune` — sweep stale entries
+
+Walks the registry, finds every entry idle longer than the configured stale threshold (120s default), cancels each one's token, and aborts each `JoinHandle`. Returns the list of pruned ids.
+
+```text
+> /agents prune
+Pruned 2 stale entries: [sub_d4e5f6, sub_7g8h9i]
+```
+
+Or if nothing is stale:
+
+```text
+> /agents prune
+No stale entries to prune.
+```
+
+Use when:
+- You see multiple `[stale]` entries and want to clean them up in one shot.
+- You suspect a leak (pre-32.3 6.7-hour-ghost class) — `prune` is the one-shot manual override that fixes already-leaked ghosts without restart. (Phase 32.3 RAII guard makes leaks structurally impossible going forward, but `prune` remains a useful belt-and-braces tool.)
+
+### `/agents status <id>` — diagnostic snapshot
+
+Returns a key/value block (TUI/gateway) or JSON (web) with every observable field on the subagent:
+
+```text
+> /agents status sub_3f9a12
+id:                 sub_3f9a12c8d041
+parent_id:          (root)
+task_summary:       orchestrate the migration pipeline
+role:               orchestrator
+depth:              0
+uptime_secs:        42
+last_activity_secs: 3
+turns_used:         (not yet wired)
+transcript_path:    ~/.ironhermes/subagent-transcripts/abc/sub_3f9a12c8d041.jsonl
+status:             running
+```
+
+Fields that the underlying registry doesn't yet capture (`turns_used` is a Phase 32.4+ ActivityTracker counter wiring) render as `(not yet wired)`. The field is reserved in the struct so the diagnostic shape stays stable as the registry grows.
+
+### Gateway Confirm Token (Telegram only)
+
+Telegram messages can come from spoofed message-edit replays, and the gateway has no synchronous user presence. To resist replay attacks, destructive operations on the gateway surface require a literal `confirm` token as the LAST argument:
+
+```text
+/agents kill sub_3f9a12 confirm
+/agents prune confirm
+```
+
+`/agents interrupt` and `/agents status` are non-destructive and do NOT require `confirm` on any surface.
+
+The TUI and web surfaces do NOT require `confirm` for any subcommand — the operator is clearly synchronously present at the keyboard. The Telegram divergence is the only behavioral asymmetry between surfaces.
+
+If you forget the `confirm` token on Telegram, the gateway returns an explanatory error rather than silently accepting the destructive op:
+
+```text
+> /agents kill sub_3f9a12
+Destructive op requires 'confirm' on Telegram: /agents kill sub_3f9a12 confirm
+```
+
+---
+
+## The 6.7-Hour Ghost Bug (Phase 32.3 Fix Reference)
+
+If you saw `/agents` reporting a subagent as Active for hours after its output files were written, this was a pre-32.3 registry-leak bug. The canonical live repro was `sub_20667cb71808` remaining Active for 24,150s (~6.7 hours) after writing its final files at 02:52 AM — the registry entry leaked because the `tokio::time::timeout` wrapper dropped the `run_child` future before its explicit `unregister` call could run.
+
+Phase 32.3 fixed it with a RAII `RegistrationGuard` whose `Drop` impl calls `unregister_internal` synchronously. Every exit path — natural completion, timeout-induced drop, panic, cancel, `JoinHandle::abort` — now deregisters atomically. The fix is at the type level: Rust's drop semantics guarantee the guard fires when the future is dropped, so no code path can bypass cleanup.
+
+The relevant invariants are locked by regression tests:
+- `test_guard_deregisters_on_natural_completion`
+- `test_guard_deregisters_on_timeout` — **THE canonical 6.7-hour ghost regression**
+- `test_guard_deregisters_on_panic`
+- `test_guard_deregisters_on_cancel`
+- `test_registration_counter_balanced`
+
+If you ever see a stuck registry entry post-32.3, run `/agents prune` to clear it and file an issue — the structural guarantee should make this class of bug impossible, so a recurrence indicates a regression worth investigating. See `.planning/phases/32.3-delegation-agent-runaway/32.3-CONTEXT.md` and `32.3-RESEARCH.md` for the engineering detail.
+
+---
+
 ## Configuration
 
 Set global defaults in `~/.ironhermes/config.yaml` under the `delegation:` key:
@@ -357,6 +550,10 @@ Set global defaults in `~/.ironhermes/config.yaml` under the `delegation:` key:
 delegation:
   # Wall-clock timeout per child agent in seconds (default: 300)
   child_timeout_seconds: 300
+
+  # Stale-warn threshold; soft signal only. Hard kill ceiling is child_timeout_seconds.
+  # Seconds of inactivity before a subagent is flagged [stale] in /agents output (default: 120)
+  stale_warn_seconds: 120
 
   # Maximum concurrent children per batch (default: 3)
   max_concurrent_children: 3
@@ -439,3 +636,4 @@ Field rename summary:
 | `max_iterations` | `max_iterations` | Default changed: 10 → 50 |
 | _(new)_ | `max_spawn_depth` | Default: 1 (flat) |
 | _(new)_ | `orchestrator_enabled` | Default: true |
+| _(new — Phase 32.3)_ | `stale_warn_seconds` | Default: 120. Soft-warn threshold; absent in pre-32.3 configs is treated as 120 via serde default. Per-call override on `delegate_task`. |
