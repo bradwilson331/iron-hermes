@@ -386,6 +386,7 @@ mod tests {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("ok".to_string()))
         }
