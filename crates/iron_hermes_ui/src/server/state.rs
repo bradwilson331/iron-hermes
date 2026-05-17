@@ -38,6 +38,16 @@ pub struct AppState {
     /// "agent:main:web:dm:{uuid}" produced by api.rs create_session).
     /// (Phase 32 LEARN-01 — web UI nudge wiring)
     pub nudge_turns: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    /// Phase 32.3 Plan 04 (D-08): subagent registry Arc — same handle threaded
+    /// into the AgentSubagentRunner via `with_subagent_registry`. Held on
+    /// AppState so the four `/api/agents/*` endpoints can read it for status
+    /// / prune (which need the full registry, not just the ShrikeService).
+    pub subagent_registry: Arc<RwLock<ironhermes_agent::subagent_registry::SubagentRegistry>>,
+    /// Phase 32.3 Plan 04 (D-08): operator-facing termination service from
+    /// Plan 03. Constructed once in `AppState::init` from the same
+    /// `subagent_registry` Arc above (so kill/interrupt/prune/status all
+    /// operate on the registry the agent actually writes to).
+    pub shrike: Option<Arc<ironhermes_agent::shrike::ShrikeService>>,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -75,13 +85,23 @@ impl AppState {
         let subagent_registry = Arc::new(RwLock::new(
             ironhermes_agent::subagent_registry::SubagentRegistry::new(),
         ));
+        // Phase 32.3 Plan 04 (D-08): construct the ShrikeService once from the
+        // same registry Arc threaded into the runner so all four endpoints
+        // (kill/interrupt/prune/status) operate on the live registry the
+        // agent writes to. Mirrors the auto-construction inside
+        // `SubagentRegistryHandle::new` (subagent_registry.rs:219-222) — both
+        // ShrikeService instances share the same registry, so the abort
+        // semantics (W3 from Plan 03) flow through this path too.
+        let shrike = Arc::new(ironhermes_agent::shrike::ShrikeService::new(
+            subagent_registry.clone(),
+        ));
         let subagent_runner = Arc::new(
             AgentSubagentRunner::new(
                 build_main_client(&resolver)?,
                 resolver.clone(),
                 Some(budget),
             )
-            .with_subagent_registry(subagent_registry)
+            .with_subagent_registry(subagent_registry.clone())
             .with_transcript_scope(
                 ironhermes_core::constants::get_hermes_home(),
                 "web-ui".to_string(),
@@ -117,6 +137,11 @@ impl AppState {
             runtime_bundle: Arc::new(runtime_bundle),
             memory_manager,
             nudge_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 32.3 Plan 04: subagent_registry + shrike — same Arcs the
+            // delegate-task runner uses, so the four `/api/agents/*` endpoints
+            // operate on the live registry.
+            subagent_registry,
+            shrike: Some(shrike),
         })
     }
 
@@ -354,6 +379,122 @@ impl AppState {
     }
 }
 
+// =============================================================================
+// Phase 32.3 Plan 04: /api/agents/{kill,interrupt,prune,status} REST handlers
+// =============================================================================
+//
+// Four free functions taking `&AppState` + a JSON request body (or id query)
+// and returning a `serde_json::Value` response. They mirror the
+// `subagent_tree_json` adapter pattern from Plan 32.2-05 — keep the logic
+// in `state.rs` next to the registry, expose Dioxus server fns in `api.rs`
+// as thin wrappers (Dioxus is the project's REST surface here; main.rs has
+// only one Axum route — `serve_dioxus_application` — so we follow the
+// established Dioxus server-fn convention rather than inventing a routes.rs).
+//
+// **No confirm token on the web surface** (Phase 32.3 D-09 — only the
+// Telegram gateway enforces `confirm` because of spoof-replay risk;
+// TUI and web both have synchronous user presence).
+
+/// Phase 32.3 Plan 04 (D-08): `POST /api/agents/kill` body handler.
+///
+/// Body shape: `{"id": "sub_xxxx"}`. Returns:
+/// - `{"killed": true, "id": "sub_xxxx", "uptime_secs": N, "turns_used": M}` on success
+/// - `{"killed": false, "id": "sub_xxxx"}` when the id is unknown / already gone
+///
+/// Maps to `ShrikeService::kill` → `KillResult` (W3 abort semantics from Plan 03).
+///
+/// Implemented as a free fn over `Option<&ShrikeService>` so tests can call it
+/// without constructing the heavyweight `AppState`. The `AppState::api_agents_*`
+/// wrappers below delegate here.
+pub fn api_agents_kill(
+    shrike: Option<&ironhermes_agent::shrike::ShrikeService>,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    match shrike.and_then(|sh| sh.kill(&id)) {
+        Some(kr) => serde_json::json!({
+            "killed": true,
+            "id": kr.id,
+            "uptime_secs": kr.uptime_secs,
+            "turns_used": kr.turns_used,
+        }),
+        None => serde_json::json!({ "killed": false, "id": id }),
+    }
+}
+
+/// Phase 32.3 Plan 04 (D-08): `POST /api/agents/interrupt` body handler.
+///
+/// Body shape: `{"id": "sub_xxxx"}`. Returns:
+/// - `{"interrupted": true, "id": "sub_xxxx"}` on cancel-token signalled
+/// - `{"interrupted": false, "id": "sub_xxxx"}` when the id is unknown
+///
+/// Soft cancel only — does NOT abort the JoinHandle (per D-08).
+pub fn api_agents_interrupt(
+    shrike: Option<&ironhermes_agent::shrike::ShrikeService>,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let interrupted = shrike.map(|sh| sh.interrupt(&id)).unwrap_or(false);
+    serde_json::json!({ "interrupted": interrupted, "id": id })
+}
+
+/// Phase 32.3 Plan 04 (D-08): `POST /api/agents/prune` body handler.
+///
+/// Body shape: `{"stale_secs": 120}` (optional, defaults to 120 to match the
+/// `SubagentConfig::stale_warn_seconds` default from Plan 01 D-05).
+/// Returns: `{"pruned": ["sub_xxx", ...]}`.
+pub fn api_agents_prune(
+    shrike: Option<&ironhermes_agent::shrike::ShrikeService>,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let stale_secs = body.get("stale_secs").and_then(|v| v.as_u64()).unwrap_or(120);
+    let pruned: Vec<String> = shrike.map(|sh| sh.prune(stale_secs)).unwrap_or_default();
+    serde_json::json!({ "pruned": pruned })
+}
+
+/// Phase 32.3 Plan 04 (D-08): `GET /api/agents/status?id=sub_xxx` handler.
+///
+/// Returns `Some(json)` with the `SubagentStatusInfo` shape (Serialize derived
+/// in Plan 03 context.rs:89) when the id is active, or `None` for 404.
+pub fn api_agents_status(
+    shrike: Option<&ironhermes_agent::shrike::ShrikeService>,
+    id: &str,
+) -> Option<serde_json::Value> {
+    shrike
+        .and_then(|sh| sh.status(id))
+        .and_then(|info| serde_json::to_value(info).ok())
+}
+
+impl AppState {
+    /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_kill`.
+    pub fn api_agents_kill(&self, body: serde_json::Value) -> serde_json::Value {
+        api_agents_kill(self.shrike.as_deref(), body)
+    }
+
+    /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_interrupt`.
+    pub fn api_agents_interrupt(&self, body: serde_json::Value) -> serde_json::Value {
+        api_agents_interrupt(self.shrike.as_deref(), body)
+    }
+
+    /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_prune`.
+    pub fn api_agents_prune(&self, body: serde_json::Value) -> serde_json::Value {
+        api_agents_prune(self.shrike.as_deref(), body)
+    }
+
+    /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_status`.
+    pub fn api_agents_status(&self, id: &str) -> Option<serde_json::Value> {
+        api_agents_status(self.shrike.as_deref(), id)
+    }
+}
+
 fn stored_to_chat_message(row: &StoredMessage) -> Option<ChatMessage> {
     let role = match row.role.as_str() {
         "system" => Role::System,
@@ -447,5 +588,154 @@ mod plan_32_2_05_tests {
         assert_eq!(leaf["task_summary"], "task for sub_leaf2222");
         let leaf_children = leaf["children"].as_array().expect("leaf.children should be array");
         assert!(leaf_children.is_empty(), "leaf should have no children");
+    }
+}
+
+// =============================================================================
+// Phase 32.3 Plan 04 tests — REST endpoint JSON shapes (no AppState required)
+// =============================================================================
+//
+// These tests construct a `ShrikeService` directly from a `SubagentRegistry`
+// Arc and exercise the four free-function endpoints. AppState's full init is
+// too heavy for a unit-test (Config/StateStore/MemoryManager), so we test the
+// endpoint JSON-shaping layer directly — which IS the load-bearing surface
+// (Plan 03's shrike_service.rs already covers the underlying kill/interrupt/
+// prune/status semantics).
+//
+// Tests use `flavor = "multi_thread"` per Plan 03 Pitfall 1 — ShrikeService's
+// methods bridge async→sync via `block_in_place + block_on` which requires
+// the multi-thread runtime.
+#[cfg(test)]
+mod plan_32_3_04_tests {
+    use super::*;
+    use ironhermes_agent::shrike::ShrikeService;
+    use ironhermes_agent::subagent_registry::{SubagentInfo, SubagentRegistry};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tokio_util::sync::CancellationToken;
+
+    fn make_info(id: &str) -> SubagentInfo {
+        SubagentInfo {
+            id: id.to_string(),
+            task_summary: format!("task for {}", id),
+            parent_id: None,
+            started_at: std::time::Instant::now(),
+            cancel: CancellationToken::new(),
+            transcript_path: PathBuf::from("/dev/null"),
+            activity_last: Some(Arc::new(std::sync::Mutex::new(std::time::Instant::now()))),
+            stale_warn_seconds: 120,
+        }
+    }
+
+    /// Register an info with a dangling Weak so the guard's Drop is a silent
+    /// no-op — endpoint tests care about the JSON shape, not lifecycle.
+    async fn register_for_endpoint_test(reg: &Arc<RwLock<SubagentRegistry>>, id: &str) {
+        let weak: std::sync::Weak<RwLock<SubagentRegistry>> = std::sync::Weak::new();
+        let mut w = reg.write().await;
+        let guard = w.register_guarded(make_info(id), weak);
+        std::mem::forget(guard);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_api_agents_kill_returns_killed_true_for_active_id() {
+        let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
+        register_for_endpoint_test(&reg, "sub_kill0000").await;
+        let shrike = ShrikeService::new(reg.clone());
+
+        let body = serde_json::json!({ "id": "sub_kill0000" });
+        let resp = api_agents_kill(Some(&shrike), body);
+
+        assert_eq!(resp["killed"], serde_json::Value::Bool(true));
+        assert_eq!(resp["id"], "sub_kill0000");
+        assert!(
+            resp["uptime_secs"].is_number(),
+            "uptime_secs should be a number: {}",
+            resp
+        );
+        assert!(
+            resp["turns_used"].is_number(),
+            "turns_used should be a number: {}",
+            resp
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_api_agents_kill_returns_killed_false_for_missing_id() {
+        let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
+        let shrike = ShrikeService::new(reg.clone());
+
+        let body = serde_json::json!({ "id": "sub_missing0" });
+        let resp = api_agents_kill(Some(&shrike), body);
+
+        assert_eq!(resp["killed"], serde_json::Value::Bool(false));
+        assert_eq!(resp["id"], "sub_missing0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_api_agents_interrupt_returns_true_for_active_id() {
+        let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
+        register_for_endpoint_test(&reg, "sub_intr0000").await;
+        let shrike = ShrikeService::new(reg.clone());
+
+        let body = serde_json::json!({ "id": "sub_intr0000" });
+        let resp = api_agents_interrupt(Some(&shrike), body);
+
+        assert_eq!(resp["interrupted"], serde_json::Value::Bool(true));
+        assert_eq!(resp["id"], "sub_intr0000");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_api_agents_prune_returns_pruned_array() {
+        // Empty registry → empty pruned list (covers the JSON-shape path)
+        let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
+        let shrike = ShrikeService::new(reg);
+
+        let body = serde_json::json!({ "stale_secs": 1 });
+        let resp = api_agents_prune(Some(&shrike), body);
+
+        assert!(resp["pruned"].is_array(), "pruned must be an array: {}", resp);
+        let arr = resp["pruned"].as_array().unwrap();
+        assert!(arr.is_empty(), "no stale entries yet: {}", resp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_api_agents_status_returns_some_for_active_id() {
+        let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
+        register_for_endpoint_test(&reg, "sub_stat0000").await;
+        let shrike = ShrikeService::new(reg);
+
+        let resp = api_agents_status(Some(&shrike), "sub_stat0000");
+        let resp = resp.expect("status should return Some for active id");
+
+        assert_eq!(resp["id"], "sub_stat0000");
+        assert!(resp["uptime_secs"].is_number());
+        assert_eq!(resp["status"], "running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_api_agents_status_returns_none_for_missing_id() {
+        let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
+        let shrike = ShrikeService::new(reg);
+
+        let resp = api_agents_status(Some(&shrike), "sub_missing0");
+        assert!(resp.is_none(), "status should return None for missing id");
+    }
+
+    /// AppState shrike: None — the endpoints must degrade gracefully without
+    /// panicking. Locks the "no ShrikeService configured" path.
+    #[test]
+    fn test_api_agents_endpoints_degrade_gracefully_with_none_shrike() {
+        let killed = api_agents_kill(None, serde_json::json!({ "id": "sub_xxx" }));
+        assert_eq!(killed["killed"], serde_json::Value::Bool(false));
+
+        let interrupted = api_agents_interrupt(None, serde_json::json!({ "id": "sub_xxx" }));
+        assert_eq!(interrupted["interrupted"], serde_json::Value::Bool(false));
+
+        let pruned = api_agents_prune(None, serde_json::json!({}));
+        assert!(pruned["pruned"].is_array());
+
+        let status = api_agents_status(None, "sub_xxx");
+        assert!(status.is_none());
     }
 }
