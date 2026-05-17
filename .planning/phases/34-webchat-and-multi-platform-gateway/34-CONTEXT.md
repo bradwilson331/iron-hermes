@@ -21,29 +21,30 @@ Phase 34 **depends on** Phase 32 and Phase 33 completing first — nudge infrast
 ## Implementation Decisions
 
 ### Phase 32 — Web UI nudge wiring (Plan 32-03)
-- **D-01:** Nudge turn counter lives on `AppState` as `nudge_turns: Arc<Mutex<HashMap<String, u32>>>` — mirrors the gateway's `nudge_turns: Arc<Mutex<HashMap<SessionKey, u32>>>` pattern exactly
-- **D-02:** Fire site is inside `run_web_turn`, after `agent.run()` returns `Ok` — keeps nudge logic co-located with the agent call, mirrors `handle_with_multimodal`
-- **D-03:** `tokio::spawn` fire-and-forget, same as CLI and gateway paths — `run_web_turn` must not block on nudge completion
-- **D-04:** Plan 32-03 file location: `.planning/phases/32-periodic-nudge-memory-curation/32-03-PLAN.md` (wave 3, standalone plan)
+> D-01..D-04 describe Phase 32's shipped wiring (verified by research). Phase 34 does not re-implement them.
+- **D-01 [informational]:** Nudge turn counter lives on `AppState` as `nudge_turns: Arc<Mutex<HashMap<String, u32>>>` — mirrors the gateway's `nudge_turns: Arc<Mutex<HashMap<SessionKey, u32>>>` pattern exactly
+- **D-02 [informational]:** Fire site is inside `run_web_turn`, after `agent.run()` returns `Ok` — keeps nudge logic co-located with the agent call, mirrors `handle_with_multimodal`
+- **D-03 [informational]:** `tokio::spawn` fire-and-forget, same as CLI and gateway paths — `run_web_turn` must not block on nudge completion
+- **D-04 [informational]:** Plan 32-03 file location: `.planning/phases/32-periodic-nudge-memory-curation/32-03-PLAN.md` (wave 3, standalone plan)
 
 ### Phase 33 — Web path invariant test (Plan 33-03 update)
 - **D-05:** Add `INV-33-07` to existing `invariants_33.rs` in Plan 33-03 Task 2 — verifies `AppState::new` calls `build_app_runtime_bundle` (confirming `skill_manage` is registered for web turns)
-- **D-06:** No changes to `prompt_builder.rs` skill-creation trigger guidance — existing guidance is platform-agnostic; verify during Phase 34 research
+- **D-06 [informational]:** No changes to `prompt_builder.rs` skill-creation trigger guidance — existing guidance is platform-agnostic; verify during Phase 34 research
 
 ### Session unification
 - **D-07:** Web chat sessions must use the **same SQLite-backed `SessionStore`** as gateway sessions, keyed by `Platform::Web` + `session_id`
 - **D-08:** `AppState` currently has its own `state_store` field — Phase 34 migrates this to share the singleton `SessionStore` used by the gateway
-- **D-09:** Session identity across surfaces: a `Platform::Web` session and a `Platform::Telegram` session remain distinct — no cross-surface session merging in this phase
+- **D-09 [informational]:** Session identity across surfaces: a `Platform::Web` session and a `Platform::Telegram` session remain distinct — no cross-surface session merging in this phase
 
 ### Multi-platform adapters
 - **D-10:** Discord adapter: implement `DiscordAdapter` for the `PlatformAdapter` trait — route through existing `GatewayHandler.handle_with_multimodal`
 - **D-11:** Slack adapter: implement `SlackAdapter` for the `PlatformAdapter` trait — same routing
 - **D-12:** Learning Loop coverage for Discord/Slack is **structural** — `handle_with_multimodal` already has nudge + skill-create wired; new adapters inherit it automatically; no per-adapter Learning Loop code needed
-- **D-13:** No end-to-end UAT tests per platform in Phase 34 — integration tests confirming adapters route through `handle_with_multimodal` are sufficient
+- **D-13 [informational]:** No end-to-end UAT tests per platform in Phase 34 — integration tests confirming adapters route through `handle_with_multimodal` are sufficient
 
 ### Phase 34 ordering and scope
-- **D-14:** Phase 34 depends on Phase 32 and Phase 33 completing first (sequential dependency)
-- **D-15:** Phase 34 is numbered immediately after Phase 33 in the roadmap — phases 32 → 33 → 34 form the complete Learning Loop trilogy
+- **D-14 [informational]:** Phase 34 depends on Phase 32 and Phase 33 completing first (sequential dependency)
+- **D-15 [informational]:** Phase 34 is numbered immediately after Phase 33 in the roadmap — phases 32 → 33 → 34 form the complete Learning Loop trilogy
 
 ### Claude's Discretion
 - Which Discord/Slack API version and SDK library to use — researcher determines most tractable approach given existing `ironhermes-gateway` patterns
