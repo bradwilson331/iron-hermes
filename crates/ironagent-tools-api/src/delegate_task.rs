@@ -156,8 +156,9 @@ impl DelegateTaskTool {
 impl DelegateTaskTool {
     /// Batch execution mode: spawn parallel child agents for multiple tasks (D-05).
     ///
-    /// Tasks are truncated to `config.max_subagents` (D-06), spawned as tokio tasks
-    /// sharing the global semaphore, and results are sorted by original index (D-07).
+    /// When tasks.len() > config.max_concurrent_children, returns an Err immediately (D-06 Phase 32.2).
+    /// Otherwise spawns all tasks as parallel tokio tasks sharing the global semaphore,
+    /// and results are sorted by original index (D-07).
     async fn execute_batch(
         &self,
         tasks_val: &serde_json::Value,
@@ -167,16 +168,17 @@ impl DelegateTaskTool {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("tasks must be an array"))?;
 
-        // D-06: truncate to max_subagents (default 3)
-        let max_batch = self.config.max_subagents;
-        let tasks: Vec<_> = tasks_array.iter().take(max_batch).collect();
+        // D-06 Phase 32.2: return Err immediately if batch exceeds max_concurrent_children
+        let max_batch = self.config.max_concurrent_children;
         if tasks_array.len() > max_batch {
-            tracing::warn!(
-                "Batch truncated from {} to {} tasks (max_subagents limit)",
+            anyhow::bail!(
+                "Batch size {} exceeds max_concurrent_children limit of {}. \
+                 Increase delegation.max_concurrent_children in config.yaml to allow larger batches.",
                 tasks_array.len(),
                 max_batch
             );
         }
+        let tasks: Vec<_> = tasks_array.iter().collect();
 
         // Spawn tokio tasks for parallel execution
         let mut handles = Vec::new();
@@ -234,13 +236,20 @@ impl DelegateTaskTool {
                 });
 
             // Phase 21.7 Plan 09 Task 9-01 (D-08): per-task `timeout_seconds`
-            // override. Falls back to config.timeout_secs when absent. Read
+            // override. Falls back to config.child_timeout_seconds when absent. Read
             // here (outside the spawned task) so we don't have to re-parse
             // the task_obj JSON inside the async block.
             let per_task_timeout_secs = task_obj
                 .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(config.timeout_secs);
+                .unwrap_or(config.child_timeout_seconds);
+
+            // D-08 Phase 32.2: per-task max_iterations override; falls back to config default.
+            let per_task_max_iterations = task_obj
+                .get("max_iterations")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(config.max_iterations);
 
             let handle = tokio::spawn(async move {
                 // D-19: Emit Started progress event
@@ -295,7 +304,7 @@ impl DelegateTaskTool {
                     runner.run_child(
                         Arc::new(RwLock::new(child_registry)),
                         system_prompt,
-                        config.max_iterations,
+                        per_task_max_iterations,
                         config.model.as_deref(),
                         child_cancel_token,
                         child_tool_progress,
@@ -362,6 +371,8 @@ impl DelegateTaskTool {
 /// - `skills` is silently stripped (D-05: not available to subagents)
 /// - `execute_code` is silently stripped (not available to subagents)
 /// - `cronjob` is silently stripped (not available to subagents)
+/// - `clarify` is silently stripped (D-05 Phase 32.2: no clarify_callback channel in children)
+/// - `send_message` is silently stripped (D-05 Phase 32.2: no platform session in children)
 /// - Unknown tool names cause an immediate error (D-04: fail-early)
 /// - `terminal` gets an isolated CWD (AGENT-04)
 /// - `memory` gets read-only mode (D-12)
@@ -379,6 +390,8 @@ pub fn build_child_registry(
             "skills" => { /* D-05: not available to subagents */ }
             "execute_code" => { /* not available to subagents */ }
             "cronjob" => { /* not available to subagents */ }
+            "clarify" => { /* no clarify_callback channel in children (Python: NEVER_PARALLEL_TOOLS) */ }
+            "send_message" => { /* no platform session in children (Python: toolsets.py) */ }
 
             // File tools
             "read_file" => registry.register(Box::new(crate::file_tools::ReadFileTool)),
@@ -462,7 +475,9 @@ impl Tool for DelegateTaskTool {
                             "properties": {
                                 "goal": { "type": "string", "description": "Task description for the child agent." },
                                 "context": { "type": "string", "description": "Additional context for the child agent." },
-                                "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." }
+                                "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." },
+                                "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-task timeout override in seconds." },
+                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config." }
                             },
                             "required": ["goal"]
                         },
@@ -476,7 +491,12 @@ impl Tool for DelegateTaskTool {
                     "timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Per-call wall-clock timeout override in seconds. Defaults to subagent.timeout_secs from config (D-08)."
+                        "description": "Per-call wall-clock timeout override in seconds. Defaults to delegation.child_timeout_seconds from config (D-08)."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config."
                     }
                 },
                 "required": []
@@ -630,7 +650,14 @@ impl Tool for DelegateTaskTool {
         let effective_timeout_secs = args
             .get("timeout_seconds")
             .and_then(|v| v.as_u64())
-            .unwrap_or(self.config.timeout_secs);
+            .unwrap_or(self.config.child_timeout_seconds);
+
+        // D-08 Phase 32.2: per-call max_iterations override; falls back to config default.
+        let effective_max_iterations = args
+            .get("max_iterations")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(self.config.max_iterations);
 
         // D-08 / AI-SPEC Pitfall 5: clone the child cancel token so the
         // timeout arm can call `.cancel()` on it after handing the
@@ -645,7 +672,7 @@ impl Tool for DelegateTaskTool {
             self.runner.run_child(
                 Arc::new(RwLock::new(child_registry)),
                 system_prompt,
-                self.config.max_iterations,
+                effective_max_iterations,
                 self.config.model.as_deref(),
                 child_cancel_token,
                 child_tool_progress,
@@ -984,7 +1011,7 @@ mod tests {
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig {
-                timeout_secs: 1,
+                child_timeout_seconds: 1,
                 ..SubagentConfig::default()
             },
             None,
@@ -1369,14 +1396,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_batch_truncates_to_max_subagents() {
-        // D-06: max_subagents=2, so only first 2 tasks should run
+    async fn test_batch_oversize_returns_err() {
+        // D-06 Phase 32.2: batch size > max_concurrent_children must return Err immediately
         let tool = DelegateTaskTool::new(
             Arc::new(OrderedMockRunner),
             Arc::new(Semaphore::new(3)),
             None,
             SubagentConfig {
-                max_subagents: 2,
+                max_concurrent_children: 2,
                 ..SubagentConfig::default()
             },
             None,
@@ -1385,17 +1412,21 @@ mod tests {
             .execute(json!({
                 "task": "ignored",
                 "tasks": [
-                    { "goal": "A" },
-                    { "goal": "B" },
-                    { "goal": "C" },
-                    { "goal": "D" }
+                    { "goal": "A" }, { "goal": "B" },
+                    { "goal": "C" }, { "goal": "D" }
                 ]
             }))
-            .await
-            .unwrap();
-        // Should have exactly 2 task results
-        let task_count = result.matches("## Task").count();
-        assert_eq!(task_count, 2, "should truncate to 2 tasks (max_subagents)");
+            .await;
+        assert!(result.is_err(), "oversize batch must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("max_concurrent_children"),
+            "error should cite config key; got: {msg}"
+        );
+        assert!(
+            msg.contains("delegation.max_concurrent_children"),
+            "error should cite full YAML path; got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1632,6 +1663,126 @@ mod tests {
             props["tasks"]["type"].as_str(),
             Some("array"),
             "tasks should be an array"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // D-05: clarify / send_message exclusion tests (Phase 32.2 Plan 02)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_child_registry_strips_clarify() {
+        // D-05: clarify has no clarify_callback channel in children
+        let registry = build_child_registry(
+            &["read_file".to_string(), "clarify".to_string()],
+            None,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(
+            !tools.contains(&"clarify"),
+            "clarify must be stripped from child registry (D-05, Phase 32.2)"
+        );
+        assert_eq!(tools.len(), 1, "should have only read_file");
+    }
+
+    #[test]
+    fn test_build_child_registry_strips_send_message() {
+        // D-05: send_message has no platform session in children
+        let registry = build_child_registry(
+            &["read_file".to_string(), "send_message".to_string()],
+            None,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(
+            !tools.contains(&"send_message"),
+            "send_message must be stripped from child registry (D-05, Phase 32.2)"
+        );
+        assert_eq!(tools.len(), 1, "should have only read_file");
+    }
+
+    // -----------------------------------------------------------------------
+    // D-08: max_iterations schema + resolver tests (Phase 32.2 Plan 02)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_delegate_task_schema_has_max_iterations() {
+        let tool = make_delegate_tool();
+        let schema = tool.schema();
+        let props = &schema.function.parameters["properties"];
+        // Top-level max_iterations
+        assert!(
+            props.get("max_iterations").is_some(),
+            "schema should have top-level max_iterations property"
+        );
+        assert_eq!(
+            props["max_iterations"]["type"].as_str(),
+            Some("integer"),
+            "max_iterations should be an integer"
+        );
+        // Per-task max_iterations inside tasks.items.properties
+        let tasks_item_props = &props["tasks"]["items"]["properties"];
+        assert!(
+            tasks_item_props.get("max_iterations").is_some(),
+            "tasks.items.properties should have max_iterations"
+        );
+        assert_eq!(
+            tasks_item_props["max_iterations"]["type"].as_str(),
+            Some("integer"),
+            "tasks.items.properties.max_iterations should be an integer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_per_call_max_iterations_overrides_config() {
+        use std::sync::Mutex;
+
+        struct IterCapture {
+            captured: Arc<Mutex<Option<usize>>>,
+        }
+
+        #[async_trait]
+        impl SubagentRunner for IterCapture {
+            async fn run_child(
+                &self,
+                _registry: Arc<RwLock<ToolRegistry>>,
+                _system_prompt: String,
+                max_iterations: usize,
+                _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
+            ) -> anyhow::Result<Option<String>> {
+                *self.captured.lock().unwrap() = Some(max_iterations);
+                Ok(Some("ok".to_string()))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let tool = DelegateTaskTool::new(
+            Arc::new(IterCapture {
+                captured: captured.clone(),
+            }),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig {
+                max_iterations: 99,
+                ..SubagentConfig::default()
+            },
+            None,
+        );
+
+        let _result = tool
+            .execute(json!({"task": "test task", "max_iterations": 3}))
+            .await
+            .unwrap();
+
+        let seen = captured.lock().unwrap().expect("runner was called");
+        assert_eq!(
+            seen, 3,
+            "per-call max_iterations=3 should override config max_iterations=99"
         );
     }
 }
