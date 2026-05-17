@@ -75,6 +75,7 @@ impl SubagentRunner for RegisteringRunner {
         _model_override: Option<&str>,
         _cancel_token: Option<CancellationToken>,
         _tool_progress: Option<ChildToolProgressCallback>,
+        _stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>> {
         // "Register": bump active count.
         self.active.fetch_add(1, Ordering::SeqCst);
@@ -183,6 +184,7 @@ async fn test_runaway_repro_natural_completion_also_deregisters() {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             self.active.fetch_add(1, Ordering::SeqCst);
             let _guard = ActiveCounterGuard {

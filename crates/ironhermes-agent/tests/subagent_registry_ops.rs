@@ -23,6 +23,8 @@ fn mk(id: &str, cancel: CancellationToken) -> SubagentInfo {
         cancel,
         transcript_path: PathBuf::from(format!("/tmp/{}.jsonl", id)),
         activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default; ops tests don't assert staleness.
+        stale_warn_seconds: 120,
     }
 }
 

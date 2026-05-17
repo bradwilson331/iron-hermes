@@ -105,6 +105,12 @@ pub trait SubagentRunner: Send + Sync {
     ///
     /// `tool_progress` enables per-tool-call progress callbacks (D-19).
     /// The callback receives (tool_name, args_preview) for each tool execution.
+    ///
+    /// `stale_warn_seconds` is the effective stale-warn threshold (Phase 32.3
+    /// Plan 02, D-05). Resolved by `DelegateTaskTool::execute` /
+    /// `execute_batch` from the per-call schema field with config fallback;
+    /// the runner stores it on `SubagentInfo` so the registry render code can
+    /// compute `elapsed > stale_warn_seconds` without re-reading config.
     async fn run_child(
         &self,
         registry: Arc<RwLock<ToolRegistry>>,
@@ -113,6 +119,7 @@ pub trait SubagentRunner: Send + Sync {
         model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
         tool_progress: Option<ChildToolProgressCallback>,
+        stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>>;
 }
 
@@ -272,6 +279,14 @@ impl DelegateTaskTool {
                 .map(|v| v as usize)
                 .unwrap_or(config.max_iterations);
 
+            // Phase 32.3 Plan 02 (D-05): per-task stale_warn_seconds override;
+            // falls back to config.stale_warn_seconds (default 120). Same
+            // shape as `max_iterations` per-task override above.
+            let per_task_stale_warn_seconds = task_obj
+                .get("stale_warn_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(config.stale_warn_seconds);
+
             // Phase 32.2 D-01: per-task role; default Leaf on absence or parse failure.
             let per_task_role: ChildRole = task_obj
                 .get("role")
@@ -354,6 +369,7 @@ impl DelegateTaskTool {
                         config.model.as_deref(),
                         child_cancel_token,
                         child_tool_progress,
+                        per_task_stale_warn_seconds,
                     ),
                 )
                 .await;
@@ -583,6 +599,7 @@ impl Tool for DelegateTaskTool {
                                 "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." },
                                 "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-task timeout override in seconds." },
                                 "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config." },
+                                "stale_warn_seconds": { "type": "integer", "minimum": 1, "description": "Seconds of inactivity before this subagent is flagged Stale. Default: 120 (or delegation.stale_warn_seconds from config). Soft warn threshold only; hard-kill ceiling stays at timeout_seconds." },
                                 "role": { "type": "string", "enum": ["leaf", "orchestrator"], "default": "leaf", "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth." }
                             },
                             "required": ["goal"]
@@ -603,6 +620,11 @@ impl Tool for DelegateTaskTool {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config."
+                    },
+                    "stale_warn_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Seconds of inactivity before this subagent is flagged Stale. Default: 120 (or delegation.stale_warn_seconds from config). Soft warn threshold only; hard-kill ceiling stays at timeout_seconds."
                     },
                     "role": {
                         "type": "string",
@@ -792,6 +814,15 @@ impl Tool for DelegateTaskTool {
             .map(|v| v as usize)
             .unwrap_or(self.config.max_iterations);
 
+        // Phase 32.3 Plan 02 (D-05): per-call stale_warn_seconds override;
+        // falls back to config.stale_warn_seconds (default 120). Threaded
+        // through `run_child` and stored on `SubagentInfo` so the registry
+        // render code computes `elapsed > stale_warn_seconds` from the entry.
+        let effective_stale_warn_seconds = args
+            .get("stale_warn_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.config.stale_warn_seconds);
+
         // D-08 / AI-SPEC Pitfall 5: clone the child cancel token so the
         // timeout arm can call `.cancel()` on it after handing the
         // original to `run_child`. `tokio::time::timeout` alone does NOT
@@ -809,6 +840,7 @@ impl Tool for DelegateTaskTool {
                 self.config.model.as_deref(),
                 child_cancel_token,
                 child_tool_progress,
+                effective_stale_warn_seconds,
             ),
         )
         .await;
@@ -1046,6 +1078,7 @@ mod tests {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("mock child response".to_string()))
         }
@@ -1182,6 +1215,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 tokio::time::sleep(Duration::from_secs(999)).await;
                 Ok(Some("should not reach".to_string()))
@@ -1218,6 +1252,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 Ok(None)
             }
@@ -1408,6 +1443,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 // Return the system prompt so we can inspect it
                 Ok(Some(system_prompt))
@@ -1459,6 +1495,7 @@ mod tests {
                 model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 Ok(Some(format!("model={}", model_override.unwrap_or("none"))))
             }
@@ -1548,6 +1585,7 @@ mod tests {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             // Extract the goal from the prompt to echo it back
             let goal = system_prompt
@@ -1644,6 +1682,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 // Task with "slow" sleeps longer — it has a higher index but should
                 // still appear in correct position in output
@@ -1721,6 +1760,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 let current = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
                 // Update max if this is the highest seen
@@ -1820,6 +1860,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 Ok(Some(system_prompt))
             }
@@ -1961,6 +2002,7 @@ mod tests {
                 _model_override: Option<&str>,
                 _cancel_token: Option<CancellationToken>,
                 _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
             ) -> anyhow::Result<Option<String>> {
                 *self.captured.lock().unwrap() = Some(max_iterations);
                 Ok(Some("ok".to_string()))

@@ -606,6 +606,18 @@ impl AgentLoop {
         }
     }
 
+    /// Phase 32.3 Plan 02 (D-04 / RESEARCH A1): return a clonable shared handle
+    /// to the live `activity_last` clock. The returned `Arc<Mutex<Instant>>` is
+    /// the SAME instance bumped by the four `mark_activity` sites (ApiCall,
+    /// StreamToken, ToolCall before, ToolCall after) — no new bump points are
+    /// added. Consumers (`SubagentInfo.activity_last`) clone this handle and
+    /// call `.lock().elapsed()` at registry-read time for live staleness.
+    ///
+    /// Zero-copy live clock — no push updates, no periodic polling.
+    pub fn activity_last_arc(&self) -> Arc<std::sync::Mutex<std::time::Instant>> {
+        self.activity_last.clone()
+    }
+
     /// Interrupt the agent by cancelling its `CancellationToken`.
     ///
     /// Non-async, safe to call from any context. When the token fires, the

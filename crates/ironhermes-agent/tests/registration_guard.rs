@@ -33,6 +33,9 @@ fn make_info(id: &str) -> SubagentInfo {
         cancel: CancellationToken::new(),
         transcript_path: PathBuf::from(format!("/tmp/{}.jsonl", id)),
         activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default; these tests assert guard
+        // lifecycle, not stale derivation.
+        stale_warn_seconds: 120,
     }
 }
 

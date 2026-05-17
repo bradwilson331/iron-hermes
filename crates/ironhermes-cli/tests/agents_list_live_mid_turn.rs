@@ -65,6 +65,8 @@ fn fake_info(id: &str, summary: &str) -> SubagentInfo {
         transcript_path: PathBuf::from(format!("/tmp/transcript-{}.jsonl", id)),
         // Phase 32.3 Plan 01 (D-04 reservation): wired by Plan 02.
         activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default; this test asserts tree shape only.
+        stale_warn_seconds: 120,
     }
 }
 
@@ -185,6 +187,8 @@ async fn cmd_agents_kill_cancels_registered_subagent() {
         transcript_path: PathBuf::from("/tmp/transcript-killme.jsonl"),
         // Phase 32.3 Plan 01 (D-04 reservation): wired by Plan 02.
         activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default; this test asserts kill path only.
+        stale_warn_seconds: 120,
     };
     register_for_test(&reg, info).await;
 
