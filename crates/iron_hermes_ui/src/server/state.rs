@@ -392,16 +392,29 @@ mod plan_32_2_05_tests {
             started_at: std::time::Instant::now(),
             cancel: CancellationToken::new(),
             transcript_path: PathBuf::from("/dev/null"),
+            // Phase 32.3 Plan 01 (D-04 reservation): test helpers leave None;
+            // tree-json only inspects parent_id/depth, not activity.
+            activity_last: None,
         }
+    }
+
+    /// Phase 32.3 Plan 01: register_guarded with a dangling Weak so the
+    /// guard's Drop is a silent no-op. Tests assert tree-json shape, not
+    /// lifecycle — that lives in `ironhermes-agent/tests/registration_guard.rs`.
+    fn register_no_lifecycle(reg: &mut SubagentRegistry, info: SubagentInfo) {
+        let weak: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>> =
+            std::sync::Weak::new();
+        let guard = reg.register_guarded(info, weak);
+        std::mem::forget(guard);
     }
 
     #[test]
     fn test_subagent_tree_json_serializes_nested_tree() {
         // 3-node tree: root → mid → leaf
         let mut reg = SubagentRegistry::new();
-        reg.register(make_info("sub_root0000", None));
-        reg.register(make_info("sub_mid11111", Some("sub_root0000")));
-        reg.register(make_info("sub_leaf2222", Some("sub_mid11111")));
+        register_no_lifecycle(&mut reg, make_info("sub_root0000", None));
+        register_no_lifecycle(&mut reg, make_info("sub_mid11111", Some("sub_root0000")));
+        register_no_lifecycle(&mut reg, make_info("sub_leaf2222", Some("sub_mid11111")));
 
         let value = build_subagent_tree_json(&reg);
 

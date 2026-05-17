@@ -63,7 +63,22 @@ fn fake_info(id: &str, summary: &str) -> SubagentInfo {
         started_at: Instant::now(),
         cancel: CancellationToken::new(),
         transcript_path: PathBuf::from(format!("/tmp/transcript-{}.jsonl", id)),
+        // Phase 32.3 Plan 01 (D-04 reservation): wired by Plan 02.
+        activity_last: None,
     }
+}
+
+/// Phase 32.3 Plan 01: register_guarded with the live Arc's Weak. The guard
+/// is detached (`std::mem::forget`) so these tests retain their original
+/// "registered until kill or test end" semantics. Lifecycle coverage is in
+/// `ironhermes-agent/tests/registration_guard.rs`.
+async fn register_for_test(
+    reg: &Arc<RwLock<SubagentRegistry>>,
+    info: SubagentInfo,
+) {
+    let weak = Arc::downgrade(reg);
+    let guard = reg.write().await.register_guarded(info, weak);
+    std::mem::forget(guard);
 }
 
 // =========================================================================
@@ -86,10 +101,11 @@ async fn cmd_agents_list_returns_active_subagents_when_registry_populated() {
     // production SubagentRegistryHandle trait-object, and install on
     // CommandContext via the real with_subagent_registry builder.
     let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
-    reg.write().await.register(fake_info(
-        "sub_deadbeefcafe",
-        "research LoRA training corpora",
-    ));
+    register_for_test(
+        &reg,
+        fake_info("sub_deadbeefcafe", "research LoRA training corpora"),
+    )
+    .await;
 
     let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);
@@ -167,8 +183,10 @@ async fn cmd_agents_kill_cancels_registered_subagent() {
         started_at: Instant::now(),
         cancel: token.clone(),
         transcript_path: PathBuf::from("/tmp/transcript-killme.jsonl"),
+        // Phase 32.3 Plan 01 (D-04 reservation): wired by Plan 02.
+        activity_last: None,
     };
-    reg.write().await.register(info);
+    register_for_test(&reg, info).await;
 
     let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);

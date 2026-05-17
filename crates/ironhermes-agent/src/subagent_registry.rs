@@ -3,7 +3,7 @@
 //! Populated by the existing `SubagentProgressCallback` in
 //! crates/ironhermes-cli/src/main.rs — wired in Wave 2 Plan 07.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -29,11 +29,58 @@ pub struct SubagentInfo {
     pub started_at: Instant,
     pub cancel: CancellationToken,
     pub transcript_path: PathBuf,
+    /// Phase 32.3 Plan 01 (D-04 reservation): shared live clock from
+    /// `AgentLoop::activity_last`. Plan 01 reserves the field initialised to
+    /// `None`; Plan 02 wires the real `Arc<Mutex<Instant>>` from the child
+    /// AgentLoop so the registry can compute live `last_activity.elapsed()`
+    /// without push updates.
+    pub activity_last: Option<std::sync::Arc<std::sync::Mutex<std::time::Instant>>>,
 }
 
 #[derive(Default)]
 pub struct SubagentRegistry {
     active: HashMap<SubagentId, SubagentInfo>,
+    /// Phase 32.3 Plan 01 (D-06 prerequisite): IDs that have already emitted
+    /// `tracing::warn!` for the stale-threshold crossing. `unregister_internal`
+    /// removes the id from this set so a re-registration starts fresh.
+    /// Plan 02 consumes this field when wiring the once-per-child stale warn.
+    stale_warned: HashSet<SubagentId>,
+}
+
+/// Phase 32.3 Plan 01 (D-01 / D-02 / D-03): RAII guard returned by
+/// `SubagentRegistry::register_guarded`. On `Drop` (any exit path — natural
+/// return, error, `tokio::time::timeout` future-drop, panic, cancel,
+/// `JoinHandle::abort`) the guard calls `unregister_internal` synchronously
+/// via the existing `block_in_place` + `block_on` bridge pattern.
+///
+/// The guard holds a `Weak<RwLock<SubagentRegistry>>` so it does not extend
+/// registry lifetime: if the Arc is gone (session shutdown), Drop is a silent
+/// no-op which is the correct behavior.
+///
+/// **Constraint:** Drop calls `block_in_place` — only safe on the tokio
+/// multi-thread runtime. Tests that exercise the Drop path must use
+/// `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` or higher
+/// (RESEARCH.md Pitfall 1).
+pub struct RegistrationGuard {
+    registry: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>>,
+    id: SubagentId,
+}
+
+impl Drop for RegistrationGuard {
+    fn drop(&mut self) {
+        if let Some(arc) = self.registry.upgrade() {
+            let id = self.id.clone();
+            // Same block_in_place + block_on bridge as SubagentRegistryHandle::kill
+            // (lines 187-190). Safe on multi-thread runtime; required because Rust
+            // has no async Drop.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async { arc.write().await.unregister_internal(&id) });
+            });
+        }
+        // If upgrade() is None the registry's Arc has already been dropped
+        // (session shutdown). Silent no-op — there is nothing to unregister.
+    }
 }
 
 impl SubagentRegistry {
@@ -41,11 +88,30 @@ impl SubagentRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, info: SubagentInfo) {
-        self.active.insert(info.id.clone(), info);
+    /// Phase 32.3 Plan 01 (D-01 / D-03): Register a subagent and return a
+    /// `RegistrationGuard`. The guard MUST be bound (e.g. `let _guard = ...`)
+    /// for the lifetime that registration should cover; dropping the guard
+    /// triggers `unregister_internal` synchronously.
+    ///
+    /// `weak` is `Arc::downgrade(&registry_arc)`, taken from the
+    /// `Arc<RwLock<SubagentRegistry>>` that wraps this registry.
+    pub fn register_guarded(
+        &mut self,
+        info: SubagentInfo,
+        weak: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>>,
+    ) -> RegistrationGuard {
+        let id = info.id.clone();
+        self.active.insert(id.clone(), info);
+        RegistrationGuard { registry: weak, id }
     }
 
-    pub fn unregister(&mut self, id: &str) -> Option<SubagentInfo> {
+    /// Phase 32.3 Plan 01 (D-01): Called exclusively from
+    /// `RegistrationGuard::drop`. External callers must not call this directly
+    /// — that's why visibility is `pub(crate)`. Removing the id from
+    /// `stale_warned` here preserves once-per-child warn semantics across
+    /// re-registration (D-06 prerequisite consumed by Plan 02).
+    pub(crate) fn unregister_internal(&mut self, id: &str) -> Option<SubagentInfo> {
+        self.stale_warned.remove(id);
         self.active.remove(id)
     }
 
@@ -233,7 +299,34 @@ mod tests {
             started_at: std::time::Instant::now(),
             cancel: CancellationToken::new(),
             transcript_path: PathBuf::from("/dev/null"),
+            activity_last: None,
         }
+    }
+
+    /// Helper for tests that hold a `&mut SubagentRegistry` directly and only
+    /// assert tree shape / status derivation, NOT the guard lifecycle.
+    ///
+    /// Uses a dangling `Weak` so the guard's Drop is a silent no-op
+    /// (`upgrade()` returns None). The guard itself is then forgotten so it
+    /// does not fire at end-of-scope. Plan 01's new `tests/registration_guard.rs`
+    /// integration suite is the canonical exercise of Drop behaviour against
+    /// a live Arc — those tests use real `Arc::downgrade(...)` weaks.
+    fn register_into_sync(reg: &mut SubagentRegistry, info: SubagentInfo) {
+        let weak: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>> = std::sync::Weak::new();
+        let guard = reg.register_guarded(info, weak);
+        std::mem::forget(guard);
+    }
+
+    /// Async variant: tests that hold `Arc<RwLock<SubagentRegistry>>` and want
+    /// to register without exercising the guard lifecycle. Uses a dangling
+    /// Weak (same rationale as `register_into_sync`).
+    async fn register_into_arc(
+        reg_arc: &std::sync::Arc<tokio::sync::RwLock<SubagentRegistry>>,
+        info: SubagentInfo,
+    ) {
+        let weak: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>> = std::sync::Weak::new();
+        let guard = reg_arc.write().await.register_guarded(info, weak);
+        std::mem::forget(guard);
     }
 
     // -----------------------------------------------------------------------
@@ -244,9 +337,9 @@ mod tests {
     fn test_build_tree_flat_when_no_parents() {
         // Three root agents (parent_id=None) → tree has 3 roots, each childless.
         let mut reg = SubagentRegistry::new();
-        reg.register(make_info("a", None));
-        reg.register(make_info("b", None));
-        reg.register(make_info("c", None));
+        register_into_sync(&mut reg, make_info("a", None));
+        register_into_sync(&mut reg, make_info("b", None));
+        register_into_sync(&mut reg, make_info("c", None));
 
         let tree = reg.build_tree();
         assert_eq!(tree.len(), 3, "expected 3 root nodes");
@@ -263,9 +356,9 @@ mod tests {
     fn test_build_tree_groups_by_parent() {
         // root → [child_a, child_b]
         let mut reg = SubagentRegistry::new();
-        reg.register(make_info("root", None));
-        reg.register(make_info("child_a", Some("root")));
-        reg.register(make_info("child_b", Some("root")));
+        register_into_sync(&mut reg, make_info("root", None));
+        register_into_sync(&mut reg, make_info("child_a", Some("root")));
+        register_into_sync(&mut reg, make_info("child_b", Some("root")));
 
         let tree = reg.build_tree();
         assert_eq!(tree.len(), 1, "expected 1 root node");
@@ -286,9 +379,9 @@ mod tests {
     fn test_build_tree_three_levels() {
         // root → mid → leaf  (3-level chain)
         let mut reg = SubagentRegistry::new();
-        reg.register(make_info("root", None));
-        reg.register(make_info("mid", Some("root")));
-        reg.register(make_info("leaf", Some("mid")));
+        register_into_sync(&mut reg, make_info("root", None));
+        register_into_sync(&mut reg, make_info("mid", Some("root")));
+        register_into_sync(&mut reg, make_info("leaf", Some("mid")));
 
         let tree = reg.build_tree();
         assert_eq!(tree.len(), 1, "expected 1 root");
@@ -322,15 +415,13 @@ mod tests {
             started_at: std::time::Instant::now(),
             cancel: child_killed_token,
             transcript_path: PathBuf::from("/dev/null"),
+            activity_last: None,
         };
 
         let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
-        {
-            let mut w = reg.write().await;
-            w.register(root_info);
-            w.register(child_running_info);
-            w.register(child_killed_info);
-        }
+        register_into_arc(&reg, root_info).await;
+        register_into_arc(&reg, child_running_info).await;
+        register_into_arc(&reg, child_killed_info).await;
 
         let handle = SubagentRegistryHandle::new(reg);
         // tree_summary uses block_in_place; must be called inside a blocking-capable runtime context.
