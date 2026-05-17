@@ -33,6 +33,19 @@ pub struct ToolInfo {
     pub description: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MemoryEntry {
+    /// "agent" for MEMORY.md, "user" for USER.md.
+    pub store: String,
+    /// Raw text block from MemoryEntries Vec<String> — one row per block.
+    pub body: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct MemoryInfo {
+    pub entries: Vec<MemoryEntry>,
+}
+
 #[get("/api/commands")]
 pub async fn list_slash_commands() -> Result<Vec<SlashCommandInfo>> {
     let state = crate::server::state::global_app_state();
@@ -118,6 +131,37 @@ pub async fn list_tools() -> Result<Vec<ToolInfo>> {
         })
         .collect();
     Ok(out)
+}
+
+/// Phase 26.7 Plan 02 (D-07, D-08, R-3): Read-only snapshot of MemoryManager
+/// content for the Memory screen. Returns one MemoryEntry per raw text block in
+/// each MemoryTarget store. Em-dash placeholder for timestamps (no per-block
+/// timestamp exists in the underlying `Vec<String>` storage).
+#[get("/api/memory")]
+pub async fn get_memory() -> Result<MemoryInfo> {
+    let state = crate::server::state::global_app_state();
+    let Some(ref mgr) = state.memory_manager else {
+        // Memory disabled at runtime — render empty panels, not an error.
+        return Ok(MemoryInfo::default());
+    };
+    // tokio Mutex .lock().await.to_memory_entries().await chained; guard
+    // drops at the `;`. Pattern mirrors list_tools (api.rs:107-112).
+    let entries = mgr.lock().await.to_memory_entries().await;
+
+    let mut out: Vec<MemoryEntry> = Vec::new();
+    for (target, items) in entries.entries.iter() {
+        let store = match target {
+            ironhermes_core::memory_store::MemoryTarget::Memory => "agent",
+            ironhermes_core::memory_store::MemoryTarget::User   => "user",
+        };
+        for body in items.iter() {
+            out.push(MemoryEntry {
+                store: store.to_string(),
+                body: body.clone(),
+            });
+        }
+    }
+    Ok(MemoryInfo { entries: out })
 }
 
 #[post("/api/sessions/create")]
