@@ -72,6 +72,35 @@ pub struct SubagentTreeEntry {
     pub depth: usize,
 }
 
+/// Phase 32.3 Plan 03 (D-08): Diagnostic snapshot returned by
+/// [`SubagentListSnapshot::status`] / `ShrikeService::status`.
+///
+/// Cross-trait struct lives in `ironhermes-core` so both
+/// `ironhermes-agent::shrike::ShrikeService` and the slash-command handler in
+/// `ironhermes-core::commands::handlers::cmd_agents` can consume it without a
+/// circular crate dep. The `Serialize` derive supports the JSON web surface
+/// in Plan 04 (`iron_hermes_ui` REST endpoint).
+///
+/// Fields that the registry does not yet capture (`role`, `depth`,
+/// `turns_used`) are `Option<...>` and reported as `None` today. Plan 04 may
+/// extend the registry to populate them once those values are surfaced
+/// through the runner.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubagentStatusInfo {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub task_summary: String,
+    pub role: Option<String>,
+    pub depth: Option<u32>,
+    pub uptime_secs: u64,
+    pub last_activity_secs: Option<u64>,
+    pub turns_used: Option<u32>,
+    pub transcript_path: String,
+    /// One of `"running"`, `"stale"`, `"killed"` — same derivation order as
+    /// `flatten_tree` in subagent_registry.rs (cancelled > stale > running).
+    pub status: String,
+}
+
 /// D-03 / D-09: Subagent registry snapshot for `/agents list|kill|logs`.
 /// Implemented in `ironhermes-agent` for `Arc<RwLock<SubagentRegistry>>`.
 pub trait SubagentListSnapshot: Send + Sync {
@@ -104,6 +133,39 @@ pub trait SubagentListSnapshot: Send + Sync {
                 depth: 0,
             })
             .collect()
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): soft-cancel a subagent. Cancels the
+    /// `CancellationToken` only — the child finalizes its current
+    /// iteration before exiting. Default impl returns false so non-Shrike
+    /// implementors (e.g. test fakes that haven't opted in) continue to
+    /// compile without modification.
+    ///
+    /// `SubagentRegistryHandle` overrides this to forward to
+    /// `ShrikeService::interrupt`.
+    fn interrupt(&self, _id: &str) -> bool {
+        false
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): sweep stale registry entries whose
+    /// `activity_last.elapsed() > stale_secs`. Returns the pruned ids
+    /// (empty when nothing matched). Default impl returns an empty Vec.
+    ///
+    /// `SubagentRegistryHandle` overrides this to forward to
+    /// `ShrikeService::prune`.
+    fn prune(&self, _stale_secs: u64) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): diagnostic snapshot for a single
+    /// subagent. Default impl returns None — non-Shrike implementors
+    /// continue to compile and `cmd_agents status` will report "not
+    /// available" naturally.
+    ///
+    /// `SubagentRegistryHandle` overrides this to forward to
+    /// `ShrikeService::status`.
+    fn status(&self, _id: &str) -> Option<SubagentStatusInfo> {
+        None
     }
 }
 

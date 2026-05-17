@@ -201,12 +201,31 @@ impl SubagentRegistry {
 /// `ironhermes-core/src/commands/handlers.rs` for `/models refresh`. Safe on
 /// the tokio multi-thread runtime; locks uncontended in practice
 /// (single-session registry).
+///
+/// Phase 32.3 Plan 03 (D-08 / W3): the handle also owns an
+/// `Arc<ShrikeService>` so the trait overrides for `kill`/`interrupt`/
+/// `prune`/`status` route through the centralized termination surface.
+/// The `kill` override is the load-bearing W3 fix: it now performs
+/// `CancellationToken::cancel` AND `JoinHandle::abort` (via ShrikeService)
+/// instead of the bare `SubagentRegistry::kill` which only cancels the
+/// token.
 #[derive(Clone)]
-pub struct SubagentRegistryHandle(pub std::sync::Arc<tokio::sync::RwLock<SubagentRegistry>>);
+pub struct SubagentRegistryHandle {
+    pub(crate) inner: std::sync::Arc<tokio::sync::RwLock<SubagentRegistry>>,
+    pub(crate) shrike: std::sync::Arc<crate::shrike::ShrikeService>,
+}
 
 impl SubagentRegistryHandle {
     pub fn new(reg: std::sync::Arc<tokio::sync::RwLock<SubagentRegistry>>) -> Self {
-        Self(reg)
+        let shrike = std::sync::Arc::new(crate::shrike::ShrikeService::new(reg.clone()));
+        Self { inner: reg, shrike }
+    }
+
+    /// Accessor for the embedded ShrikeService. `DelegateTaskTool::execute_batch`
+    /// calls `.handle_map()` on the returned ShrikeService to register
+    /// spawned JoinHandles for later abort.
+    pub fn shrike(&self) -> std::sync::Arc<crate::shrike::ShrikeService> {
+        self.shrike.clone()
     }
 }
 
@@ -277,14 +296,15 @@ fn flatten_tree(
 impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegistryHandle {
     fn active_count(&self) -> usize {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { self.0.read().await.active_count() })
+            tokio::runtime::Handle::current()
+                .block_on(async { self.inner.read().await.active_count() })
         })
     }
 
     fn list_summary(&self) -> Vec<(String, String, std::time::Duration)> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let guard = self.0.read().await;
+                let guard = self.inner.read().await;
                 guard
                     .list()
                     .into_iter()
@@ -297,16 +317,21 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
         })
     }
 
+    /// Phase 32.3 Plan 03 (D-08 / W3): kill now routes through
+    /// `ShrikeService::kill` which performs CancellationToken cancel AND
+    /// JoinHandle::abort. The bare `SubagentRegistry::kill` (token cancel
+    /// only) is retained for internal callers but is NO LONGER reachable
+    /// from `cmd_agents kill <id>`. The trait method continues to return
+    /// `bool` for backward compat with the existing dispatch arm — true
+    /// when the id was present.
     fn kill(&self, id: &str) -> bool {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { self.0.write().await.kill(id) })
-        })
+        self.shrike.kill(id).is_some()
     }
 
     fn transcript_path(&self, id: &str) -> Option<PathBuf> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
-                .block_on(async { self.0.read().await.transcript_path(id) })
+                .block_on(async { self.inner.read().await.transcript_path(id) })
         })
     }
 
@@ -319,7 +344,7 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
     fn tree_summary(&self) -> Vec<ironhermes_core::commands::context::SubagentTreeEntry> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let guard = self.0.read().await;
+                let guard = self.inner.read().await;
                 let tree = guard.build_tree();
                 let mut out = Vec::new();
                 // Phase 32.3 Plan 02 (D-06): pass the registry's stale_warned
@@ -329,6 +354,30 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
                 out
             })
         })
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): forwards to `ShrikeService::interrupt`
+    /// — cancels the CancellationToken only, no JoinHandle::abort. Child
+    /// finalizes its current iteration before exiting.
+    fn interrupt(&self, id: &str) -> bool {
+        self.shrike.interrupt(id)
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): forwards to `ShrikeService::prune` — sweeps
+    /// every registry entry whose `activity_last.elapsed() > stale_secs`,
+    /// returns the pruned ids.
+    fn prune(&self, stale_secs: u64) -> Vec<String> {
+        self.shrike.prune(stale_secs)
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): forwards to `ShrikeService::status` —
+    /// diagnostic snapshot for one subagent. Returns None when the id
+    /// is not present.
+    fn status(
+        &self,
+        id: &str,
+    ) -> Option<ironhermes_core::commands::context::SubagentStatusInfo> {
+        self.shrike.status(id)
     }
 }
 

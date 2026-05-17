@@ -34,12 +34,38 @@ pub fn build_registry() -> Vec<CommandDef> {
             .platform(Universal),
         CommandDef::new("stop", "Stop the running agent", Session).platform(Universal),
         // Phase 21.7 Plan 08 (D-03): /agents list|kill|logs surface.
+        // Phase 32.3 Plan 03 (B3 / D-12 carve-out): args_hint extended with
+        // interrupt|prune|status so `/help` operators see the full surface.
         CommandDef::new(
             "agents",
-            "List, kill, or tail logs for active subagents",
+            "List, kill, interrupt, prune, or inspect active subagents",
             Session,
         )
-        .args_hint("[list|kill <id>|logs <id>]")
+        .args_hint("[list|kill <id>|interrupt <id>|prune|status <id>|logs <id>]")
+        .platform(Universal),
+        // Phase 32.3 Plan 03 (B3 / D-12 carve-out): the three new /agents
+        // subcommands get sibling CommandDef entries so `/help` lists each
+        // with a one-line description (mirrors the `"provider list"` /
+        // `"provider show"` precedent above).
+        CommandDef::new(
+            "agents interrupt",
+            "Soft-cancel a subagent (finalizes current iteration)",
+            Session,
+        )
+        .args_hint("<id>")
+        .platform(Universal),
+        CommandDef::new(
+            "agents prune",
+            "Sweep registry entries idle longer than the stale threshold",
+            Session,
+        )
+        .platform(Universal),
+        CommandDef::new(
+            "agents status",
+            "Show diagnostic info for one active subagent",
+            Session,
+        )
+        .args_hint("<id>")
         .platform(Universal),
         CommandDef::new("approve", "Approve a pending dangerous command", Session)
             .args_hint("[session|always]")

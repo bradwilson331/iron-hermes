@@ -12,7 +12,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use ironhermes_core::commands::context::{
-    CommandContext, ProcessRegistrySnapshotHandle, SubagentListSnapshot, SubagentTreeEntry,
+    CommandContext, ProcessRegistrySnapshotHandle, SubagentListSnapshot, SubagentStatusInfo,
+    SubagentTreeEntry,
 };
 use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
@@ -43,6 +44,31 @@ impl SubagentListSnapshot for FakeSubagents {
     }
     fn transcript_path(&self, _id: &str) -> Option<std::path::PathBuf> {
         None
+    }
+    // Phase 32.3 Plan 03 (D-08): trait overrides on the test fake so dispatch
+    // tests for `/agents interrupt|prune|status` exercise the canonical code
+    // path (not the trait-default no-op).
+    fn interrupt(&self, id: &str) -> bool {
+        self.entries.iter().any(|(i, _, _)| i == id)
+    }
+    fn prune(&self, _stale_secs: u64) -> Vec<String> {
+        // Return all entries as "pruned" for predictable test assertions.
+        self.entries.iter().map(|(id, _, _)| id.clone()).collect()
+    }
+    fn status(&self, id: &str) -> Option<SubagentStatusInfo> {
+        let (eid, summary, uptime) = self.entries.iter().find(|(i, _, _)| i == id)?.clone();
+        Some(SubagentStatusInfo {
+            id: eid,
+            parent_id: None,
+            task_summary: summary,
+            role: Some("leaf".to_string()),
+            depth: Some(0),
+            uptime_secs: uptime.as_secs(),
+            last_activity_secs: Some(3),
+            turns_used: Some(7),
+            transcript_path: "/tmp/fake-transcript.jsonl".to_string(),
+            status: "running".to_string(),
+        })
     }
 }
 
@@ -435,4 +461,201 @@ fn test_stale_warn_fires_once() {
     // Both calls produced output (no panic). The once-per-id contract is
     // structurally enforced by `flatten_tree` in subagent_registry.rs and
     // verified by `crates/ironhermes-agent/tests/stale_warn_once.rs`.
+}
+
+// =============================================================================
+// Phase 32.3 Plan 03 (D-08): /agents interrupt | prune | status dispatch tests
+// =============================================================================
+
+/// `/agents interrupt <id>` against a present id emits "Interrupted ... finalizing...".
+#[test]
+fn agents_interrupt_returns_finalizing() {
+    let fake = FakeSubagents {
+        entries: vec![(
+            "sub_intrtest".into(),
+            "to finalize".into(),
+            std::time::Duration::from_secs(5),
+        )],
+        killed: Mutex::new(vec![]),
+        kill_result: true,
+    };
+    let ctx = base_ctx().with_subagent_registry(Arc::new(fake));
+    let cmd = find_cmd("agents");
+    let r = router();
+    let res = dispatch(&cmd, &["interrupt", "sub_intrtest"], &ctx, &r);
+    match res {
+        CommandResult::Output(s) => {
+            assert!(
+                s.contains("Interrupted sub_intrtest"),
+                "expected 'Interrupted sub_intrtest' in output; got: {}",
+                s
+            );
+            assert!(
+                s.contains("finalizing"),
+                "expected 'finalizing' in interrupt output; got: {}",
+                s
+            );
+        }
+        other => panic!("expected Output, got {:?}", other),
+    }
+}
+
+/// `/agents interrupt` with no id returns an Error (same shape as kill arm).
+#[test]
+fn agents_interrupt_missing_id_returns_error() {
+    let fake = FakeSubagents {
+        entries: vec![],
+        killed: Mutex::new(vec![]),
+        kill_result: true,
+    };
+    let ctx = base_ctx().with_subagent_registry(Arc::new(fake));
+    let cmd = find_cmd("agents");
+    let r = router();
+    let res = dispatch(&cmd, &["interrupt"], &ctx, &r);
+    assert!(
+        matches!(res, CommandResult::Error(_)),
+        "missing id on /agents interrupt should return Error, got {:?}",
+        res
+    );
+}
+
+/// `/agents prune` with stale entries returns "Pruned N stale entries: [...]".
+#[test]
+fn agents_prune_returns_pruned_ids() {
+    let fake = FakeSubagents {
+        entries: vec![
+            (
+                "sub_stale001".into(),
+                "old1".into(),
+                std::time::Duration::from_secs(9999),
+            ),
+            (
+                "sub_stale002".into(),
+                "old2".into(),
+                std::time::Duration::from_secs(9999),
+            ),
+        ],
+        killed: Mutex::new(vec![]),
+        kill_result: true,
+    };
+    let ctx = base_ctx().with_subagent_registry(Arc::new(fake));
+    let cmd = find_cmd("agents");
+    let r = router();
+    let res = dispatch(&cmd, &["prune"], &ctx, &r);
+    match res {
+        CommandResult::Output(s) => {
+            assert!(
+                s.contains("Pruned 2 stale entries"),
+                "expected 'Pruned 2 stale entries' in output; got: {}",
+                s
+            );
+            assert!(
+                s.contains("sub_stale001"),
+                "expected stale id in output; got: {}",
+                s
+            );
+        }
+        other => panic!("expected Output, got {:?}", other),
+    }
+}
+
+/// `/agents prune` with no stale entries (FakeSubagents with empty entries
+/// returns empty pruned list) emits the "No stale entries to prune." message.
+#[test]
+fn agents_prune_no_stale_returns_no_op_message() {
+    let fake = FakeSubagents {
+        entries: vec![],
+        killed: Mutex::new(vec![]),
+        kill_result: true,
+    };
+    let ctx = base_ctx().with_subagent_registry(Arc::new(fake));
+    let cmd = find_cmd("agents");
+    let r = router();
+    let res = dispatch(&cmd, &["prune"], &ctx, &r);
+    match res {
+        CommandResult::Output(s) => assert!(
+            s.contains("No stale entries to prune"),
+            "expected no-op message; got: {}",
+            s
+        ),
+        other => panic!("expected Output, got {:?}", other),
+    }
+}
+
+/// `/agents status <id>` against a present id renders the key/value block
+/// with the canonical field names.
+#[test]
+fn agents_status_returns_kv_block() {
+    let fake = FakeSubagents {
+        entries: vec![(
+            "sub_stat0001".into(),
+            "diagnostic target".into(),
+            std::time::Duration::from_secs(42),
+        )],
+        killed: Mutex::new(vec![]),
+        kill_result: true,
+    };
+    let ctx = base_ctx().with_subagent_registry(Arc::new(fake));
+    let cmd = find_cmd("agents");
+    let r = router();
+    let res = dispatch(&cmd, &["status", "sub_stat0001"], &ctx, &r);
+    match res {
+        CommandResult::Output(s) => {
+            for needle in &[
+                "id: sub_stat0001",
+                "task: diagnostic target",
+                "role: leaf",
+                "depth: 0",
+                "uptime: 42s",
+                "last_activity: 3s ago",
+                "turns: 7",
+                "status: running",
+            ] {
+                assert!(
+                    s.contains(needle),
+                    "status output must contain '{}'; got:\n{}",
+                    needle,
+                    s
+                );
+            }
+        }
+        other => panic!("expected Output, got {:?}", other),
+    }
+}
+
+/// `/agents status` with missing id returns an Error.
+#[test]
+fn agents_status_missing_id_returns_error() {
+    let fake = FakeSubagents {
+        entries: vec![],
+        killed: Mutex::new(vec![]),
+        kill_result: true,
+    };
+    let ctx = base_ctx().with_subagent_registry(Arc::new(fake));
+    let cmd = find_cmd("agents");
+    let r = router();
+    let res = dispatch(&cmd, &["status"], &ctx, &r);
+    assert!(
+        matches!(res, CommandResult::Error(_)),
+        "missing id on /agents status should return Error, got {:?}",
+        res
+    );
+}
+
+/// B3 / D-12 carve-out: `/help` lists the new subcommands via `build_registry()`.
+/// Confirms three new CommandDef entries exist with the canonical names.
+#[test]
+fn build_registry_lists_new_agents_subcommands() {
+    let names: Vec<String> = build_registry()
+        .into_iter()
+        .map(|c| c.name.to_string())
+        .collect();
+    for needle in &["agents interrupt", "agents prune", "agents status"] {
+        assert!(
+            names.iter().any(|n| n == needle),
+            "build_registry() must list '{}' (B3 / D-12 carve-out); names: {:?}",
+            needle,
+            names
+        );
+    }
 }
