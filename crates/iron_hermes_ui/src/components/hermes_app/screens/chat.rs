@@ -13,10 +13,8 @@
 
 use dioxus::prelude::*;
 
-/// Assistant avatar (D-09) — chat-assistant shield, copied verbatim from the
-/// design handoff bundle. Hand-linked here rather than via `document::Link`
-/// because it is rendered as a per-bubble `<img>` source, not a stylesheet.
-const AVATAR_SHIELD: Asset = asset!("/assets/ih-shield-caduceus-transparent-256.png");
+/// Assistant avatar — copper low-poly wings logo used on agent chat bubbles.
+const AVATAR_LOGO: Asset = asset!("/assets/i_hermes_logo.png");
 
 // ---------------------------------------------------------------------------
 // Chat UI primitives (Plan 06)
@@ -222,8 +220,8 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                 // and error bubbles.
                                 match b.kind {
                                     ChatBubbleKind::Assistant => rsx! {
-                                        div { class: "avatar shield",
-                                            img { src: AVATAR_SHIELD, alt: "" }
+                                        div { class: "avatar logo",
+                                            img { src: AVATAR_LOGO, alt: "" }
                                         }
                                     },
                                     ChatBubbleKind::User => rsx! {

@@ -368,6 +368,15 @@
   padding: 0;
 }
 .avatar.shield img { width: 36px; height: 36px; display: block; }
+.avatar.logo {
+  width: 52px;
+  height: 36px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+}
+.avatar.logo img { width: 52px; height: 36px; object-fit: contain; display: block; }
 
 /* Code block */
 pre.code {
@@ -703,6 +712,8 @@ pre.code .v  { color: var(--text); }
   font-size: 12.5px;
   line-height: 1.65;
   color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 .chat-msg.assistant .chat-bubble { border-left: 2px solid var(--teal); }
 .chat-msg.user .chat-bubble { background: rgba(57,197,207,0.06); border-color: var(--teal-faint); }
