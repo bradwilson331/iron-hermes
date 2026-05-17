@@ -771,13 +771,13 @@ Plans:
 **Goal:** Wire 5 stubbed web UI screens (Tools, Agents, Memory, Skills, Models) to real runtime services via `use_server_future` + `#[get]` server fns, replacing `stub_data::*` calls. Office, Soul, Schedules, Providers stay stubbed; Gateway deferred to Discord/Slack phase.
 **Requirements**: 26.7-D-01..D-13 (CONTEXT.md)
 **Depends on:** Phase 26
-**Plans:** 3/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 - [x] 26.7-01-tools-screen — wire ScreenTools to existing `api::list_tools` (pattern validation; smallest)
 - [x] 26.7-02-memory-screen — add `MemoryEntry`/`MemoryInfo` + `get_memory` fn; render two-panel raw-text rows
 - [x] 26.7-03-skills-screen — add `SkillInfo` (no version per R-4) + `list_skills` fn; dynamic counts in sub-copy/ALL tab
-- [ ] 26.7-04-models-screen — add `ModelInfo` + `list_models` fn; preserve family grouping with owned `String`
+- [x] 26.7-04-models-screen — add `ModelInfo` + `list_models` fn; preserve family grouping with owned `String`
 - [ ] 26.7-05-agents-screen — add NEW `api_agents_list` + `AgentInfo`; wire kill/interrupt/prune with KILL? 3s inline confirm
 
 ### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
