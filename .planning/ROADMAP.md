@@ -1235,3 +1235,30 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 34 to break down)
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
+
+### Phase 34b: Context-System Parity (@-references + ContextEngine lifecycle + Compressor reset)
+
+**Goal:** Close the parity gap with three hermes-agent context-system modules. (1) Port `context_references.py` to a new `crates/ironhermes-agent/src/context_refs.rs` so chat messages with `@file:`, `@folder:`, `@diff`, `@staged`, `@git:N`, or `@url:` tokens are parsed pre-turn and expanded into `--- Attached Context ---` blocks; sensitive-path blocklist + 50% hard / 25% soft token-budget enforced. (2) Add 5 lifecycle hooks to the `ContextEngine` trait (`on_session_start`, `on_session_end`, `on_session_reset`, `update_from_response`, `update_model`, `has_content_to_compress`) as default no-ops; `ContextCompressor` exposes an inherent `reset()`; `PressureTracker` gains `reset_session(&session_id)`; `SummarizingEngine`'s pinned `[CONTEXT HISTORY]` segment and `ContextCompressor::drop_middle_messages` compaction header both gain the memory-authority reminder ("MEMORY.md, USER.md ... ALWAYS authoritative"). (3) Wire all of the above at the three agent surfaces — CLI `run_chat`, gateway `handle_with_multimodal`, web UI `run_web_turn`.
+**Depends on:** Phase 34a (read-side memory parity — shares the 3-surface wiring shape)
+**Requirements:** CTX-REF-01 (parser + token types + lookbehind), CTX-REF-02 (blocklist + budget + WebExtractTool integration + 3-surface preprocessor wiring), CTX-ENG-01 (6 trait hooks), CTX-ENG-02 (counter resets + PressureTracker::reset_session), CTX-ENG-03 (memory-authority reminder at both compaction sites), CTX-ENG-04 (3-surface session-hook wiring)
+**Success Criteria** (what must be TRUE):
+
+  1. `crates/ironhermes-agent/src/context_refs.rs` exists with `parse_context_references`, `preprocess_context_references_async`, `ContextReference`, `ContextReferenceResult`, `RefKind`; 14+ unit tests pass
+  2. Sensitive-path blocklist rejects every entry in SENSITIVE_HOME_DIRS + SENSITIVE_HOME_FILES + $HERMES_HOME/.env + $HERMES_HOME/skills/.hub/ with structured warning
+  3. Budget: hard 50% reject returns blocked=true with original_message; soft 25% adds warning but expands
+  4. `@url:` expansion routes through `WebExtractTool::execute` with `use_llm_processing: true` (D-01) and falls back to false on failure with a warning (D-02)
+  5. `ContextEngine` trait has 6 new default-no-op lifecycle hooks; existing LocalPruningEngine and SummarizingEngine compile unchanged
+  6. `ContextCompressor::drop_middle_messages` and `SummarizingEngine::make_history_message` both contain the literal strings `MEMORY.md` and `ALWAYS authoritative` in their output
+  7. All three surfaces invoke `preprocess_context_references_async` before agent dispatch (static-grep returns 3)
+  8. CLI, gateway, and web UI fire `on_session_start` on session creation and `update_from_response` after every successful `agent.run`; CLI and gateway fire `on_session_reset` from /new arms; CLI fires one-shot `update_model` at REPL start
+  9. Web UI exposes `reset_web_session(session_id)` as a documented stub (Open Question 1 deferred-stub path)
+  10. Cross-phase regression gates stay green: Phase 32 nudge::tests, Phase 33 invariants_33, Phase 34a memory_context + streaming_scrubber, D-12 test_snapshot_frozen_after_load
+
+**Plans:** 2 plans
+
+Plans:
+
+- [ ] 34b-01-PLAN.md — @-reference module (parser + expander + blocklist + budget) + 3-surface preprocessor wiring
+- [ ] 34b-02-PLAN.md — ContextEngine lifecycle hooks + ContextCompressor/SummarizingEngine resets + memory-authority reminder + 3-surface session-hook wiring
+
+**Phase directory:** `.planning/phases/34b-context-system-parity/`
