@@ -374,6 +374,297 @@ No prompt, no model call. The scheduler runs the script; non-empty stdout goes t
 
 ---
 
+## Directory & Markdown Agents
+
+These templates follow a structured output pattern: score items on a rubric, write a markdown file per item, write a rollup summary. Only items below a threshold get a written report — this keeps output directories clean on healthy runs.
+
+**Common structure:**
+1. **Discover** — list files, crates, or phases dynamically at runtime
+2. **Score** — explicit rubric (5 dimensions × 2 pts = 10 max)
+3. **Filter** — write files only for items below a score threshold
+4. **Write per-item** — structured markdown to `[DIR]/[ITEM_NAME].md`
+5. **Write summary** — a `SUMMARY.md` or `OVERVIEW.md` rollup
+6. **`[SILENT]`** — suppress delivery when everything passes
+
+---
+
+### Crate Health Auditor
+
+Scores every crate in the workspace on test coverage, doc completeness, and parity status. Writes a report per crate scoring below 6.
+
+**Trigger:** Schedule (weekly)
+
+```bash
+ironhermes cron create "0 8 * * 1" \
+  "You are a Rust workspace health auditor for the ironhermes project.
+
+Score each crate in ~/code/ironhermes/crates/ on a scale of 1–10 across 5 dimensions (2 pts each). For any crate scoring below 6, write a detailed action plan to ~/code/ironhermes/docs/health/[CRATE_NAME].md.
+
+## Step 1 — Discover crates
+Run: ls ~/code/ironhermes/crates/
+
+## Step 2 — For each crate, collect signals
+- Run: cargo test -p [crate] 2>&1 | tail -5
+- Count: find ~/code/ironhermes/crates/[crate]/src -name '*.rs' | xargs grep -l '#\[cfg(test)\]' | wc -l
+- Check: cat ~/code/ironhermes/crates/[crate]/src/lib.rs | head -30
+- Check PARITY.md if present: cat ~/code/ironhermes/crates/[crate]/PARITY.md 2>/dev/null | grep -c '❌'
+
+## Scoring Dimensions
+
+**1. Test Coverage Signal (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | ≥3 test files, tests pass cleanly |
+| 1 | 1–2 test files or tests have warnings |
+| 0 | No test files or tests fail |
+
+**2. Documentation Completeness (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | lib.rs has module-level doc comment, public API has /// docs |
+| 1 | Partial docs — some public items documented |
+| 0 | No doc comments on public API |
+
+**3. Parity Coverage (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | ≤2 ❌ items in PARITY.md |
+| 1 | 3–6 ❌ items |
+| 0 | >6 ❌ items or no PARITY.md when one is expected |
+
+**4. Dependency Hygiene (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | No unused deps, no duplicate version conflicts |
+| 1 | 1–2 minor issues flagged by cargo clippy |
+| 0 | Multiple clippy warnings or unused dep warnings |
+
+**5. Error Handling Maturity (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Uses anyhow/thiserror consistently, no unwrap() in non-test code |
+| 1 | Mix of unwrap() and proper error types |
+| 0 | Heavy use of unwrap()/expect() in non-test code |
+
+## Output Format (per crate)
+
+## [CRATE_NAME] Health Report
+**Audited:** [date]
+**Score:** [X/10]
+
+| Dimension | Score | Notes |
+|-----------|-------|-------|
+| Test Coverage | /2 | |
+| Documentation | /2 | |
+| Parity Coverage | /2 | |
+| Dependency Hygiene | /2 | |
+| Error Handling | /2 | |
+| **TOTAL** | **/10** | |
+
+**Action Required:** YES / MONITOR / HEALTHY
+**Top 3 Issues:**
+1.
+2.
+3.
+
+**Recommended Next Steps:**
+- [ ] [specific action]
+- [ ] [specific action]
+
+## Step 3 — Write files
+For each crate scoring < 6: write the scorecard to ~/code/ironhermes/docs/health/[CRATE_NAME].md
+Create the directory if it does not exist.
+
+## Step 4 — Write summary
+Write ~/code/ironhermes/docs/health/SUMMARY.md with a ranked table of all crates by score.
+Mark any crate scoring 0–3 as CRITICAL.
+
+If all crates score ≥8, respond with [SILENT]." \
+  --name "Weekly crate health audit" \
+  --deliver telegram
+```
+
+---
+
+### Phase Readiness Scorer
+
+Reads the roadmap, scores each active phase on readiness criteria, writes an execution brief for the top 2.
+
+**Trigger:** Schedule (weekly)
+
+```bash
+ironhermes cron create "0 9 * * 1" \
+  "You are a phase readiness auditor for the IronHermes project.
+
+Score each active phase from ROADMAP.md on a 1–10 rubric. For the top 2 phases by readiness score, write an execution brief to .planning/readiness/[PHASE_ID].md.
+
+## Step 1 — Read context
+- cat ~/code/ironhermes/PRODUCT.md
+- ls ~/code/ironhermes/.planning/phases/
+
+## Step 2 — Identify active phases
+List phases marked as in-progress, next, or otherwise not yet complete.
+
+## Scoring Dimensions
+
+**1. Requirements Clarity (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Phase has a written PLAN.md or description with acceptance criteria |
+| 1 | Title and brief description, no formal plan |
+| 0 | Title only, no description |
+
+**2. Dependency Status (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | All upstream phases complete, no blockers |
+| 1 | 1 upstream phase in-progress but not blocking |
+| 0 | Blocked by an incomplete upstream phase |
+
+**3. Scope Boundedness (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Touches ≤3 crates, single clear deliverable |
+| 1 | Touches 4–6 crates or 2 deliverables |
+| 0 | Cross-cutting change >6 crates or vague deliverable |
+
+**4. Test Strategy (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Plan includes explicit test targets or verification criteria |
+| 1 | Testing mentioned but not specified |
+| 0 | No test strategy mentioned |
+
+**5. Estimated Complexity (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Small — completable in 1–2 sessions |
+| 1 | Medium — 3–5 sessions estimated |
+| 0 | Large/unknown — no size estimate or likely >5 sessions |
+
+## Output Format (execution brief per phase)
+
+# Phase [PHASE_ID]: [Phase Title]
+**Readiness Score:** [X/10]
+**Recommended Start:** [this week / next week / needs prerequisite]
+
+| Dimension | Score | Notes |
+|-----------|-------|-------|
+| Requirements Clarity | /2 | |
+| Dependency Status | /2 | |
+| Scope Boundedness | /2 | |
+| Test Strategy | /2 | |
+| Estimated Complexity | /2 | |
+| **TOTAL** | **/10** | |
+
+## Pre-Work Checklist
+- [ ] [action needed before starting]
+
+## Suggested First 3 Tasks
+1.
+2.
+3.
+
+## Risk Flags
+- [blockers, ambiguities, or concerns]
+
+## Step 3 — Write files
+Top 2 phases by score: write to ~/code/ironhermes/.planning/readiness/[PHASE_ID].md
+Write a summary table to ~/code/ironhermes/.planning/readiness/OVERVIEW.md." \
+  --name "Weekly phase readiness scorer" \
+  --deliver telegram
+```
+
+---
+
+### Skills Library Auditor
+
+Scans every skill in `skills/` against a quality rubric. Writes an audit card for anything below 7.
+
+**Trigger:** Schedule (weekly)
+
+```bash
+ironhermes cron create "0 10 * * 0" \
+  "You are a skills library quality auditor for IronHermes.
+
+Score every skill in ~/code/ironhermes/skills/ on a 1–10 rubric. Write an audit card to docs/skills-audit/[SKILL_PATH].md for any skill scoring below 7.
+
+## Step 1 — Discover skills
+Run: find ~/code/ironhermes/skills -name 'SKILL.md' | sort
+
+## Step 2 — For each SKILL.md, score it
+
+**1. Description Completeness (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Clear 'When to Use' section and at least one concrete example |
+| 1 | Description present but no examples or vague trigger conditions |
+| 0 | Missing description or stub content only |
+
+**2. Trigger Clarity (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Explicit trigger keywords or conditions listed |
+| 1 | Implied triggers, requires inference |
+| 0 | No trigger conditions specified |
+
+**3. Workflow Specificity (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Step-by-step workflow with tool calls or commands |
+| 1 | High-level workflow without concrete steps |
+| 0 | No workflow defined |
+
+**4. Output Specification (0–2)**
+| Score | Criteria |
+|-------|----------|
+| 2 | Explicitly defines what the skill produces (files, messages, actions) |
+| 1 | Output implied but not stated |
+| 0 | No output specification |
+
+**5. Freshness (0–2)**
+Check: git -C ~/code/ironhermes log --follow -1 --format='%ci' [SKILL.md path]
+| Score | Criteria |
+|-------|----------|
+| 2 | Modified within last 90 days |
+| 1 | Modified 90–180 days ago |
+| 0 | Not modified in >180 days or never committed |
+
+## Output Format (audit card)
+
+# Skill Audit: [skill path]
+**Audited:** [date]
+**Score:** [X/10]
+**Last Modified:** [date from git]
+
+| Dimension | Score | Notes |
+|-----------|-------|-------|
+| Description Completeness | /2 | |
+| Trigger Clarity | /2 | |
+| Workflow Specificity | /2 | |
+| Output Specification | /2 | |
+| Freshness | /2 | |
+| **TOTAL** | **/10** | |
+
+**Status:** NEEDS WORK / REVIEW / OK
+**Issues Found:**
+- [specific problem]
+
+**Suggested Fixes:**
+- [ ] [concrete edit to make]
+
+## Step 3 — Write files
+mkdir -p ~/code/ironhermes/docs/skills-audit/
+For each skill scoring < 7: write to docs/skills-audit/[CATEGORY]-[SKILL_NAME]-audit.md
+Write a ranked summary table to docs/skills-audit/SUMMARY.md.
+
+If all skills score ≥7, respond with [SILENT]." \
+  --name "Weekly skills library audit" \
+  --deliver telegram
+```
+
+---
+
 ## Quick Reference
 
 ### Cron Schedule Syntax
