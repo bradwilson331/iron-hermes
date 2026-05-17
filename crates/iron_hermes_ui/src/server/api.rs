@@ -321,3 +321,53 @@ pub async fn api_agents_status(id: String) -> Result<serde_json::Value> {
         .api_agents_status(&id)
         .ok_or_else(|| ServerFnError::new(format!("subagent {} not found", id)))?)
 }
+
+// =============================================================================
+// Phase 26.7 Plan 05: /api/agents/list — flat list for Agents screen
+// =============================================================================
+
+/// Phase 26.7 Plan 05 (R-2): Flat list of all active subagents for the
+/// Agents screen. CONTEXT.md D-06 anticipated this existed via
+/// `get_agents_status()`, but the actual `api_agents_status` queries a SINGLE
+/// agent by id. The Agents screen needs a flat list — added here per user
+/// choice (flat, not tree).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AgentInfo {
+    /// Subagent ID (e.g. "sub_xxx") — used as the kill/interrupt body parameter.
+    pub id: String,
+    /// Task summary from delegation. Used as the card title/body.
+    pub task_summary: String,
+    /// Wall-clock seconds since started_at (computed at request time).
+    pub uptime_secs: u64,
+    /// Always "running" for any agent that appears in the active registry
+    /// (the registry only holds running agents per Phase 32.3 spec).
+    pub status: String,
+    /// Parent subagent ID if this was spawned by another subagent.
+    pub parent_id: Option<String>,
+}
+
+/// Phase 26.7 Plan 05 (R-2): `GET /api/agents/list` — returns a flat
+/// `Vec<AgentInfo>` from the live SubagentRegistry. Route uses `/list`
+/// suffix to avoid collision with the existing `/api/agents/status` route.
+/// tokio RwLock read guard is scoped to the `.list()` call and dropped
+/// before the `.into_iter().map(...)` transform runs — minimizing contention
+/// with the agent runner that takes the write lock at register/unregister.
+#[get("/api/agents/list")]
+pub async fn api_agents_list() -> Result<Vec<AgentInfo>> {
+    let state = crate::server::state::global_app_state();
+    // tokio RwLock read. SubagentRegistry::list() returns Vec<SubagentInfo>
+    // by value (cloned), so we drop the guard immediately after the call.
+    let infos: Vec<ironhermes_agent::subagent_registry::SubagentInfo> = {
+        let guard = state.subagent_registry.read().await;
+        guard.list()
+    };
+
+    let out = infos.into_iter().map(|info| AgentInfo {
+        id: info.id.clone(),
+        task_summary: info.task_summary.clone(),
+        uptime_secs: info.started_at.elapsed().as_secs(),
+        status: "running".to_string(),
+        parent_id: info.parent_id.clone(),
+    }).collect();
+    Ok(out)
+}
