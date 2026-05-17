@@ -1178,6 +1178,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 32.3-01-PLAN.md — RAII RegistrationGuard on SubagentRegistry::register; unregister becomes pub(crate); SubagentConfig.stale_warn_seconds default 120; regression tests cover natural/timeout/panic/cancel exit paths + end-to-end 6.7-hour ghost repro (Wave 1)
 - [x] 32.3-02-PLAN.md — AgentLoop::activity_last_arc accessor + per-task stale_warn_seconds schema + Stale status pill in /agents tree + once-per-id tracing::warn (Wave 2)
 - [x] 32.3-03-PLAN.md — ShrikeService module (kill/interrupt/prune/status) + SubagentListSnapshot trait extension + cmd_agents arm wiring + kill-arm migration to ShrikeService (W3) + /agents interrupt|prune|status help entries in build_registry (B3) + shrike_service.rs unit tests (Wave 3)
@@ -1192,6 +1193,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 32.2-01-PLAN.md — Config rename (subagent→delegation) + new fields (max_spawn_depth, orchestrator_enabled) + load-time deprecation gate + downstream consumer migration (Wave 1)
 - [x] 32.2-02-PLAN.md — Blocked tools (clarify, send_message) + batch oversize → Err + per-call max_iterations schema across both delegate_task.rs copies (Wave 2)
 - [x] 32.2-03-PLAN.md — ChildRole enum + role/depth/orchestrator_enabled-aware build_child_registry + AgentSubagentRunner current_depth/caller_subagent_id builder fields (Wave 3)
@@ -1260,10 +1262,18 @@ Plans:
 
 Plans:
 
+**Wave 1**
+
 - [ ] 34-01-PLAN.md — Wave 0 invariant scaffolds (INV-33-07 + INV-34-01/02 + web-session lock)
 - [ ] 34-02-PLAN.md — SessionStore unification (api.rs Platform::Web filter) + Cargo deps (serenity + slack-morphism, gated by human-verify) + PlatformGatewayConfig.app_token
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 34-03-PLAN.md — DiscordAdapter (serenity 0.12.5; PlatformAdapter impl + EventHandler + run_discord_adapter; threat mitigations T-34-01/02/03)
 - [ ] 34-04-PLAN.md — SlackAdapter (slack-morphism 2.22.0 Socket Mode; two-token shape; non-blocking ACK; T-34-04 mitigation)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 34-05-PLAN.md — Multi-platform GatewayRunner wiring (optional Discord/Slack spawns + INV-34-03/04 lock)
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
@@ -1319,6 +1329,7 @@ Plans:
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 35 to break down)
 
 **Phase directory:** `.planning/phases/35-computer-use-foundation/`
@@ -1342,6 +1353,7 @@ Plans:
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 35.1 to break down)
 
 **Phase directory:** `.planning/phases/35.1-cua-driver-mcp-backend/`
@@ -1363,6 +1375,7 @@ Plans:
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 35.2 to break down)
 
 **Phase directory:** `.planning/phases/35.2-cua-multimodal-wiring/`
@@ -1383,6 +1396,7 @@ Plans:
 **Plans:** TBD
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 35.3 to break down)
 
 **Phase directory:** `.planning/phases/35.3-cua-install-cli/`
