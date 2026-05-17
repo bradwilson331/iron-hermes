@@ -402,6 +402,17 @@ fn default_gateway_threshold() -> f32 {
 fn default_true() -> bool {
     true
 }
+/// Default `stale_warn_seconds` for [`SubagentConfig`] — 120 (2 minutes).
+///
+/// Phase 32.3 Plan 01 (D-05): seconds of inactivity before a subagent is
+/// flagged Stale. Per-call override via the delegate_task JSON schema; this
+/// is the fallback when no override is provided. D-07 ceiling
+/// (`child_timeout_seconds`, default 300) remains the hard-kill bound; this
+/// is only a soft warn threshold.
+fn default_stale_warn_seconds() -> u64 {
+    120
+}
+
 /// Default `max_spawn_depth` for [`SubagentConfig`] — 1 (flat delegation only).
 /// Matches the Python hermes-agent reference (D-02, Phase 32.2).
 fn default_max_spawn_depth() -> u32 {
@@ -914,7 +925,18 @@ impl Default for ExecConfig {
 pub struct SubagentConfig {
     /// Timeout in seconds for each child agent execution. Default: 300 (5 minutes).
     /// (D-07: renamed from `timeout_secs`)
+    ///
+    /// Phase 32.3 D-07: ceiling stays at 300 — the 6.7-hour ghost bug is the
+    /// leak surviving timeout, not the timeout not firing. RegistrationGuard
+    /// (Plan 01) closes the leak; this ceiling is unchanged.
     pub child_timeout_seconds: u64,
+    /// Phase 32.3 Plan 01 (D-05/D-06): seconds of inactivity before a subagent
+    /// is flagged Stale. Default: 120 (2 minutes). Per-call override via the
+    /// delegate_task JSON schema (`stale_warn_seconds`); this is the fallback
+    /// when no per-call value is supplied. Only a soft warn threshold — the
+    /// hard-kill ceiling remains `child_timeout_seconds` (D-07 unchanged).
+    #[serde(default = "default_stale_warn_seconds")]
+    pub stale_warn_seconds: u64,
     /// Maximum concurrent child agents. Default: 3.
     /// (D-07: renamed from `max_subagents`)
     pub max_concurrent_children: usize,
@@ -944,6 +966,9 @@ impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
             child_timeout_seconds: 300,
+            // Phase 32.3 Plan 01 (D-05): default soft-stale warn threshold.
+            // D-07 confirmed no-op: child_timeout_seconds stays at 300.
+            stale_warn_seconds: 120,
             max_concurrent_children: 3,
             max_iterations: 50,
             default_toolsets: vec!["terminal".into(), "file".into(), "web".into()],
@@ -1318,6 +1343,37 @@ model:
         assert_eq!(default.max_concurrent_children, 3);
         // D-08: default max_iterations raised from 10 to 50
         assert_eq!(default.max_iterations, 50);
+        // Phase 32.3 Plan 01 (D-05): stale_warn_seconds defaults to 120.
+        assert_eq!(
+            default.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 per D-05"
+        );
+        // Phase 32.3 Plan 01 (D-07): child_timeout_seconds ceiling is unchanged
+        // — the 6.7-hour ghost bug is the LEAK surviving timeout, not the
+        // timeout not firing. RegistrationGuard closes the leak structurally;
+        // the hard-kill ceiling stays at 300s.
+        assert_eq!(
+            default.child_timeout_seconds, 300,
+            "D-07: child_timeout_seconds ceiling is unchanged in 32.3"
+        );
+    }
+
+    /// Phase 32.3 Plan 01 (D-05 + D-07): standalone defaults check for the new
+    /// `stale_warn_seconds` field. Mirrored from `test_subagent_config_default`
+    /// per the plan's locked acceptance criteria — a dedicated test name
+    /// makes the regression intent explicit when greps line up against this
+    /// file.
+    #[test]
+    fn test_subagent_config_stale_warn_default() {
+        let default = SubagentConfig::default();
+        assert_eq!(
+            default.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 per D-05"
+        );
+        assert_eq!(
+            default.child_timeout_seconds, 300,
+            "D-07: child_timeout_seconds ceiling is unchanged in 32.3"
+        );
     }
 
     #[test]
@@ -1370,6 +1426,11 @@ model:
         assert!(default.orchestrator_enabled, "orchestrator_enabled must default to true");
         // D-08: raised from 10 to 50
         assert_eq!(default.max_iterations, 50, "max_iterations must default to 50 per D-08");
+        // Phase 32.3 Plan 01 (D-05): new soft-stale warn threshold field.
+        assert_eq!(
+            default.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 per D-05"
+        );
     }
 
     #[test]
@@ -1398,6 +1459,11 @@ delegation:
         assert!(config.delegation.api_key.is_none());
         assert_eq!(config.delegation.max_spawn_depth, 1);
         assert!(config.delegation.orchestrator_enabled);
+        // Phase 32.3 Plan 01 (D-05): serde default kicks in when YAML omits the field.
+        assert_eq!(
+            config.delegation.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 via #[serde(default = ...)]"
+        );
     }
 
     #[test]

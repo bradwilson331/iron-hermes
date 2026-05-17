@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent_loop::AgentLoop;
 use crate::any_client::{AnyClient, wire_fallback_if_configured};
 use crate::budget::BudgetHandle;
-use crate::subagent_registry::{SubagentInfo, SubagentRegistry};
+use crate::subagent_registry::{RegistrationGuard, SubagentInfo, SubagentRegistry};
 use crate::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
 
 /// Concrete `SubagentRunner` that spawns child `AgentLoop` instances.
@@ -148,6 +148,10 @@ pub(crate) fn build_subagent_info(
         started_at: std::time::Instant::now(),
         cancel,
         transcript_path,
+        // Phase 32.3 Plan 01 (D-04 reservation): live activity clock
+        // reservation — Plan 02 wires the real Arc<Mutex<Instant>> from the
+        // child AgentLoop. Initialise None here.
+        activity_last: None,
     }
 }
 
@@ -236,10 +240,13 @@ impl SubagentRunner for AgentSubagentRunner {
                 _ => None,
             };
 
-        // Register in the SubagentRegistry, if attached. The D-03/D-04 pill
-        // refresh in main.rs reads `active_count()` after this registration
-        // lands. Errors here are NOT possible — `register` is infallible.
-        if let Some(ref reg) = self.subagent_registry {
+        // Phase 32.3 Plan 01 (D-01 / D-02 / D-03): register via the RAII guard.
+        // `_guard` is bound for the entire remaining body of `run_child`; its
+        // Drop calls `unregister_internal` synchronously on every exit path
+        // (natural return, error, tokio::time::timeout future-drop, panic,
+        // cancel). The D-03/D-04 pill refresh in main.rs reads `active_count()`
+        // after this registration lands. `register_guarded` is infallible.
+        let _guard: Option<RegistrationGuard> = if let Some(ref reg) = self.subagent_registry {
             // Compose path for SubagentInfo even if we didn't open a writer.
             let path_for_info = transcript_writer
                 .as_ref()
@@ -252,9 +259,14 @@ impl SubagentRunner for AgentSubagentRunner {
                 started_at: Instant::now(),
                 cancel: cancel_for_info,
                 transcript_path: path_for_info,
+                // Phase 32.3 Plan 01 reservation; wired by Plan 02.
+                activity_last: None,
             };
-            reg.write().await.register(info);
-        }
+            let weak = Arc::downgrade(reg);
+            Some(reg.write().await.register_guarded(info, weak))
+        } else {
+            None
+        };
 
         // Wrap the caller's tool_progress callback so every tool event also
         // appends a TranscriptLine (D-05: per-turn writes).
@@ -325,10 +337,16 @@ impl SubagentRunner for AgentSubagentRunner {
             }
         }
 
-        // Unregister AFTER the terminal line lands so the pill drops to N-1
-        // only once the transcript file has seen its marker.
+        // Phase 32.3 Plan 01: RegistrationGuard drop handles deregistration on
+        // all exit paths via `_guard` going out of scope. Keep the explicit
+        // unregister_internal call below — Plan 02 deletes it. With the guard
+        // in place this call is redundant but safe: `unregister_internal` on
+        // an absent id is a no-op. The 6.7-hour ghost bug (sub_20667cb71808)
+        // was that `tokio::time::timeout` dropped this function's future
+        // before reaching this line — the guard's Drop is what closes that
+        // gap structurally.
         if let Some(ref reg) = self.subagent_registry {
-            reg.write().await.unregister(&subagent_id);
+            reg.write().await.unregister_internal(&subagent_id);
         }
 
         match outcome {
