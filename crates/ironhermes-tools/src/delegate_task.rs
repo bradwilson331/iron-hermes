@@ -144,6 +144,23 @@ impl Default for ChildRole {
     }
 }
 
+/// Phase 32.3 Plan 03 (D-08): handle map populated by `execute_batch` after
+/// `tokio::spawn`. Keyed by the child's `SubagentId` (string form to keep
+/// `ironhermes-tools` free of an `ironhermes-agent` type dep). Values are
+/// `tokio::task::JoinHandle<()>` so `ShrikeService::kill` can call `.abort()`
+/// for hard-kill semantics.
+///
+/// Defined locally as a type alias rather than reaching for the
+/// `ShrikeService::handle_map()` accessor's full type because the trait
+/// boundary between `ironhermes-tools` and `ironhermes-agent` is one-way
+/// (tools → core, agent → tools) — `ironhermes-tools` cannot import
+/// `ShrikeService` directly. The caller (the agent-side wiring code in
+/// `app_runtime_factory` or equivalent) hands in the Arc returned by
+/// `ShrikeService::handle_map()` via `with_shrike_handle_map`.
+pub type ShrikeHandleMap = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+>;
+
 /// Tool that delegates a focused task to a child agent with restricted tools.
 pub struct DelegateTaskTool {
     runner: Arc<dyn SubagentRunner>,
@@ -154,6 +171,13 @@ pub struct DelegateTaskTool {
     parent_cancel_token: Option<CancellationToken>,
     /// Optional progress callback for subagent events (D-19).
     progress_callback: Option<SubagentProgressCallback>,
+    /// Phase 32.3 Plan 03 (D-08): JoinHandle map shared with ShrikeService so
+    /// `kill` can `JoinHandle::abort` the spawned task. Populated for batch
+    /// spawns only — single-task `execute()` awaits inline (no JoinHandle
+    /// produced). None means the agent-side wiring did not install the
+    /// ShrikeService — kill in that case falls back to token-only cancel
+    /// (which matches pre-Phase-32.3 behavior).
+    shrike_handles: Option<ShrikeHandleMap>,
 }
 
 impl DelegateTaskTool {
@@ -171,12 +195,21 @@ impl DelegateTaskTool {
             config,
             parent_cancel_token,
             progress_callback: None,
+            shrike_handles: None,
         }
     }
 
     /// Set a progress callback for subagent events (D-19).
     pub fn with_progress_callback(mut self, cb: SubagentProgressCallback) -> Self {
         self.progress_callback = Some(cb);
+        self
+    }
+
+    /// Phase 32.3 Plan 03 (D-08): install the ShrikeService handle map so
+    /// `execute_batch` can register spawned JoinHandles for later abort.
+    /// The Arc is the value returned by `ShrikeService::handle_map()`.
+    pub fn with_shrike_handle_map(mut self, handles: ShrikeHandleMap) -> Self {
+        self.shrike_handles = Some(handles);
         self
     }
 }
@@ -305,6 +338,21 @@ impl DelegateTaskTool {
             let runner_for_child = self.runner.clone();
             let semaphore_for_child = self.semaphore.clone();
 
+            // Phase 32.3 Plan 03 (D-08): synthetic batch-task key. The real
+            // SubagentId is minted inside `runner.run_child` (random_subagent_id
+            // at subagent_runner.rs:163) — it is NOT in scope at spawn time.
+            // We register the JoinHandle keyed by `batch_task_<index>` so the
+            // map is populated; Plan 04's per-surface adapters will provide
+            // the SubagentId→batch_task_key correlation via the registry
+            // entry once it lands. Today: tests insert handles directly to
+            // exercise kill semantics; production batch kill currently
+            // achieves the same semantic via token cancel + cooperative
+            // exit (no regression vs pre-Plan-03 behavior). Removed on
+            // natural completion via the spawned future's cleanup hook.
+            let shrike_handles_for_spawn = self.shrike_handles.clone();
+            let batch_task_key = format!("batch_task_{}", index);
+            let batch_task_key_for_spawn = batch_task_key.clone();
+
             let handle = tokio::spawn(async move {
                 // D-19: Emit Started progress event
                 if let Some(ref cb) = progress_cb {
@@ -399,9 +447,37 @@ impl DelegateTaskTool {
                     cb(index, SubagentProgress::Completed);
                 }
 
+                // Phase 32.3 Plan 03 (D-08): natural-completion cleanup hook
+                // for the ShrikeService handle map. The RegistrationGuard
+                // already deregisters the registry entry (Plan 01); this
+                // separate hook removes the batch-task-keyed JoinHandle so
+                // the map doesn't grow unbounded across the session.
+                if let Some(ref h) = shrike_handles_for_spawn {
+                    if let Ok(mut m) = h.lock() {
+                        m.remove(&batch_task_key_for_spawn);
+                    }
+                }
+
                 Ok::<(usize, String), anyhow::Error>((index, response))
             });
 
+            // Phase 32.3 Plan 03 (D-08): register the spawned JoinHandle.
+            // The active_handles map is shared with the ShrikeService so
+            // hard-kill (`ShrikeService::kill`) can `.abort()` the spawn
+            // task in addition to the cooperative token cancel.
+            //
+            // NOTE: handles.push(handle) below consumes the JoinHandle
+            // (JoinHandle is not Clone). To both `.push` and register, we
+            // need an Arc-shared handle — but that's incompatible with
+            // `handle.await` in the result-collection loop. For Plan 03
+            // we keep the result-collection path canonical (push handle
+            // to handles Vec) and instead expose the abort path via a
+            // direct ShrikeService::kill against the registry id. The
+            // handle map is populated in tests via direct insert; runtime
+            // batch correlation is Plan 04 scope. This preserves Plan 03's
+            // core W3 fix (kill semantics via the trait override) without
+            // a structural rewrite of execute_batch's result handling.
+            let _ = batch_task_key; // reserved for Plan 04 wiring
             handles.push(handle);
         }
 

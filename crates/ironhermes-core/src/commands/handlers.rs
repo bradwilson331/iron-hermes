@@ -242,16 +242,141 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 Err(e) => CommandResult::Error(format!("Cannot read transcript: {}", e)),
             }
         }
+        // Phase 32.3 Plan 03 (D-08): soft-cancel one subagent. Cancels the
+        // CancellationToken only (no JoinHandle::abort) — the child gets to
+        // finalize its current iteration before the cancel-check exits.
+        Some("interrupt") => {
+            let token = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/agents interrupt <id>: missing id".to_string(),
+                    );
+                }
+            };
+            let entries = reg.list_summary();
+            match resolve_subagent_id(token, &entries) {
+                Resolve::Exact(id) => {
+                    if reg.interrupt(&id) {
+                        CommandResult::Output(format!(
+                            "Interrupted {} \u{2014} finalizing...",
+                            id
+                        ))
+                    } else {
+                        CommandResult::Output(format!("No active subagent with id {}.", id))
+                    }
+                }
+                Resolve::None => {
+                    CommandResult::Output(format!("No active subagent with id {}.", token))
+                }
+                Resolve::Ambiguous(candidates) => CommandResult::Error(format!(
+                    "Ambiguous id '{}'; matches: {}",
+                    token,
+                    candidates.join(", ")
+                )),
+            }
+        }
+        // Phase 32.3 Plan 03 (D-08): sweep stale registry entries.
+        // No id arg. `stale_secs` defaults to 120 (matches
+        // SubagentConfig::stale_warn_seconds default in Plan 01); a future
+        // patch may surface a config accessor on CommandContext to thread
+        // a session-configured value through. The plan accepts the 120s
+        // fallback today (D-05 default).
+        Some("prune") => {
+            const PRUNE_DEFAULT_STALE_SECS: u64 = 120;
+            let ids = reg.prune(PRUNE_DEFAULT_STALE_SECS);
+            if ids.is_empty() {
+                CommandResult::Output("No stale entries to prune.".to_string())
+            } else {
+                CommandResult::Output(format!(
+                    "Pruned {} stale entries: [{}]",
+                    ids.len(),
+                    ids.join(", ")
+                ))
+            }
+        }
+        // Phase 32.3 Plan 03 (D-08): diagnostic snapshot for one subagent.
+        // Renders a key/value block via `render_status_kv`. None → standard
+        // "no active subagent" output.
+        Some("status") => {
+            let token = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/agents status <id>: missing id".to_string(),
+                    );
+                }
+            };
+            let entries = reg.list_summary();
+            match resolve_subagent_id(token, &entries) {
+                Resolve::Exact(id) => match reg.status(&id) {
+                    Some(info) => CommandResult::Output(render_status_kv(&info)),
+                    None => {
+                        CommandResult::Output(format!("No active subagent with id {}.", id))
+                    }
+                },
+                Resolve::None => {
+                    CommandResult::Output(format!("No active subagent with id {}.", token))
+                }
+                Resolve::Ambiguous(candidates) => CommandResult::Error(format!(
+                    "Ambiguous id '{}'; matches: {}",
+                    token,
+                    candidates.join(", ")
+                )),
+            }
+        }
         Some(other) => {
             // Phase 22.3 D-10 / UI-SPEC TYPO-3: append Levenshtein-2 suggestion
             // when a known subcommand is close. Candidates locked by UI-SPEC.
-            let candidates: &[&str] = &["list", "kill", "logs"];
+            // Phase 32.3 Plan 03 (D-08 / B3): interrupt|prune|status added.
+            let candidates: &[&str] = &["list", "kill", "interrupt", "prune", "status", "logs"];
             let suffix = suggest_typo(other, candidates)
                 .map(|s| format!(" {}", s))
                 .unwrap_or_default();
             CommandResult::Error(format!("Unknown /agents subcommand: {}{}", other, suffix))
         }
     }
+}
+
+/// Phase 32.3 Plan 03 (D-08): render a `SubagentStatusInfo` as a TUI/gateway
+/// key/value block. Web surface (Plan 04) consumes the struct directly via
+/// JSON serialization; this renderer is for human-readable terminal output.
+///
+/// Format mirrors the bullet-list shape used elsewhere in the slash output
+/// (one field per line, `field: value`). Missing optional fields render as
+/// `n/a` rather than being elided — surfacing the structural absence is
+/// useful operator information.
+fn render_status_kv(info: &crate::commands::context::SubagentStatusInfo) -> String {
+    let role = info.role.clone().unwrap_or_else(|| "n/a".to_string());
+    let depth = info
+        .depth
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let parent = info
+        .parent_id
+        .clone()
+        .unwrap_or_else(|| "(root)".to_string());
+    let last_activity = info
+        .last_activity_secs
+        .map(|s| format!("{}s ago", s))
+        .unwrap_or_else(|| "n/a".to_string());
+    let turns = info
+        .turns_used
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "id: {}\nparent: {}\ntask: {}\nrole: {}\ndepth: {}\nuptime: {}s\nlast_activity: {}\nturns: {}\ntranscript: {}\nstatus: {}",
+        info.id,
+        parent,
+        info.task_summary,
+        role,
+        depth,
+        info.uptime_secs,
+        last_activity,
+        turns,
+        info.transcript_path,
+        info.status,
+    )
 }
 
 /// Char-boundary-safe truncate with a trailing ellipsis when truncated.
