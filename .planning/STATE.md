@@ -4,13 +4,13 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 32.2 context gathered
-last_updated: "2026-05-17T04:11:56.872Z"
-last_activity: 2026-05-17 -- Phase 32.2 planning complete
+last_updated: "2026-05-17T04:46:42.869Z"
+last_activity: 2026-05-17
 progress:
   total_phases: 54
   completed_phases: 40
   total_plans: 218
-  completed_plans: 210
+  completed_plans: 212
   percent: 74
 ---
 
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 33 — autonomous-skill-creation
+**Current focus:** Phase 32.2 — subagent-delegation-parity
 
 ## Current Position
 
-Phase: 33 (autonomous-skill-creation) — EXECUTING
-Plan: 1 of 3
+Phase: 32.2 (subagent-delegation-parity) — EXECUTING
+Plan: 2 of 5
 Plans: 15/15 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3 + Plan 15 round-4 scanlines feature removal + Plan 15 round-5 scan-bar synonym closure)
 Status: Ready to execute
-Last activity: 2026-05-17 -- Phase 32.2 planning complete
+Last activity: 2026-05-17
 
 ## Performance Metrics
 
@@ -168,6 +168,7 @@ Last activity: 2026-05-17 -- Phase 32.2 planning complete
 | Phase 25.5 P05 | 2min | 1 tasks | 3 files |
 | Phase 27.1 P03 | 1 | 2 tasks | 1 files |
 | Phase 26.2.1 P14 | 35min | 4 tasks | 5 files |
+| Phase 32.2 P02 | 18 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -391,6 +392,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Plan 26.2.1-14: GAP-09-R3 partially closed via .filter(|s| s.message_count > 0) post-filter in api.rs (D-26.2.1-14-B option i); D-26.2.1-14-D user-approved residual deferred to phase 26.2.12 (foreign-format directories with non-zero msg_count still leak)
 - [Phase ?]: Plan 26.2.1-15 (round-4): scanlines feature removal across 7 source files; removal-guard test `scanlines_feature_is_fully_removed` added; legacy serde migration via default tolerant posture; D-26.2.1-15-A/B/C established
 - [Phase ?]: Plan 26.2.1-15 (round-5): synonym closure — `.scan-bar` overlay (Plan 03 HudChrome) deleted from site.css + hud_chrome.rs; removal-guard test extended with 3 new asserts (`.scan-bar`, `scan-bar-move`, `class: "scan-bar"`); D-26.2.1-15-D in-place amendment / D-26.2.1-15-E textual-pattern guard preserved; lesson: textual-grep removal guards cannot catch synonyms — future feature removals should consider structural CSS pattern matching or wasm-bindgen-test runtime assertions
+- [Phase ?]: D-05 Phase 32.2: clarify and send_message silently excluded from build_child_registry for ALL children
+- [Phase ?]: D-06 Phase 32.2: execute_batch returns Err immediately on oversize batch, citing delegation.max_concurrent_children
+- [Phase ?]: D-08 Phase 32.2: max_iterations per-call override wired in both execute paths; no upper cap per PROV-09
 
 ### Roadmap Evolution
 
@@ -456,6 +460,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-17T03:28:19.661Z
+Last session: 2026-05-17T04:46:30.004Z
 Stopped at: Phase 32.2 context gathered
-Resume file: .planning/phases/32.2-subagent-delegation-parity/32.2-CONTEXT.md
+Resume file: None
