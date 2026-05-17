@@ -766,6 +766,20 @@ Plans:
 
 **Phase directory:** `.planning/phases/26-provider-polish/`
 
+### Phase 26.7: wire up web to real services (INSERTED)
+
+**Goal:** Wire 5 stubbed web UI screens (Tools, Agents, Memory, Skills, Models) to real runtime services via `use_server_future` + `#[get]` server fns, replacing `stub_data::*` calls. Office, Soul, Schedules, Providers stay stubbed; Gateway deferred to Discord/Slack phase.
+**Requirements**: 26.7-D-01..D-13 (CONTEXT.md)
+**Depends on:** Phase 26
+**Plans:** 5 plans
+
+Plans:
+- [ ] 26.7-01-tools-screen — wire ScreenTools to existing `api::list_tools` (pattern validation; smallest)
+- [ ] 26.7-02-memory-screen — add `MemoryEntry`/`MemoryInfo` + `get_memory` fn; render two-panel raw-text rows
+- [ ] 26.7-03-skills-screen — add `SkillInfo` (no version per R-4) + `list_skills` fn; dynamic counts in sub-copy/ALL tab
+- [ ] 26.7-04-models-screen — add `ModelInfo` + `list_models` fn; preserve family grouping with owned `String`
+- [ ] 26.7-05-agents-screen — add NEW `api_agents_list` + `AgentInfo`; wire kill/interrupt/prune with KILL? 3s inline confirm
+
 ### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
 
 **Goal:** Build on Phase 26.5's overlay primitive to add the remaining Ink-TUI UX to the in-process ratatui REPL (`crates/ironhermes-cli/src/tui_rata/`): (a) a `tui_rata/thinking_panel.rs` expanded "thinking" widget — tool trail rendered as a `├─`/`└─` tree, per-tool elapsed time, a hand-rolled braille spinner, optional 1-line chain-of-thought preview — fed from the existing stream-event arms, **togglable**, with the current single-row `knight_rider.rs` scanner serving as the collapsed view; (b) a browse-only `Overlay::SkillsHub` (categories → skills → SKILL.md info pane, sourced from `SkillRegistry`; in-TUI *install* is deferred since the install path is the interactive `hermes skills install`); (c) rich `Overlay::Approval` / `Overlay::Secret` / `Overlay::Sudo` prompts — centered overlays replacing the current transcript-line dangerous-command approval, with masked input for secrets — reusing tui_rata's existing `io_gate.rs`/`yolo.rs` plumbing. Telegram/gateway approval UX is explicitly out of scope (own later phase). No new workspace crates; spinners use a small built-in braille table (no `unicode-animations` equivalent dep). Closes with a `checkpoint:human-verify` UAT walking the expanded/collapsed thinking views, the Skills Hub, and each prompt overlay against the hermes-agent Ink reference (`ui-tui/src/components/thinking.tsx`, `skillsHub.tsx`, `prompts.tsx`, `maskedPrompt.tsx`).
