@@ -1,14 +1,27 @@
-//! Skills screen — ported from `app.html` `<section id="screen-skills">`
-//! (lines 594-688). Renders 6 skill cards from `stub_data::skills()`.
-//! Pure visual stub (D-04) — zero server calls.
+//! Skills screen — wired to the live `api::list_skills()` server fn
+//! (Phase 26.7 Plan 03 / D-09, R-1, R-4).
+//!
+//! Renders the full SkillRegistry catalog with per-skill enabled state
+//! derived from `runtime_bundle.active_skills`. Dynamic count in sub-copy
+//! and ALL tab. SkillCard reflects enabled state via `.tgl on` class;
+//! no onclick handler (write ops deferred per D-09 + deferred list).
 
 use dioxus::prelude::*;
 
-use crate::mocks::stub_data::{skills, SkillStub};
-
 #[component]
 pub fn ScreenSkills(is_active: bool) -> Element {
-    let skills_list = skills();
+    let skills_resource = use_server_future(crate::server::api::list_skills)?;
+
+    // Extract data and error flag BEFORE rsx! — signal borrow discipline
+    // per iron_hermes_ui/clippy.toml (no GenerationalRef held across RSX).
+    let skills_list: Vec<crate::server::api::SkillInfo> = match skills_resource() {
+        Some(Ok(v)) => v,
+        _ => Vec::new(),
+    };
+    let load_error = matches!(skills_resource(), Some(Err(_)));
+    let count = skills_list.len();
+    let enabled_count = skills_list.iter().filter(|s| s.enabled).count();
+
     rsx! {
         section {
             class: "screen",
@@ -21,7 +34,7 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                     div { class: "screen-tag", "// MODULE 04" }
                     h1 { class: "screen-title", "Skills" }
                     p { class: "screen-sub",
-                        "Composable capabilities the active agent can invoke. 142 loaded · 57 enabled for "
+                        "{count} loaded · {enabled_count} enabled for "
                         code { style: "color:var(--teal)", "default" }
                         "."
                     }
@@ -38,7 +51,7 @@ pub fn ScreenSkills(is_active: bool) -> Element {
             }
 
             div { class: "tabs",
-                button { class: "tab is-active", "ALL · 142" }
+                button { class: "tab is-active", "ALL · {count}" }
                 button { class: "tab", "BUNDLED · 87" }
                 button { class: "tab", "INSTALLED · 55" }
                 button { class: "tab", "ENABLED · 57" }
@@ -46,8 +59,15 @@ pub fn ScreenSkills(is_active: bool) -> Element {
             }
 
             div { class: "grid",
-                for s in skills_list.iter() {
-                    SkillCard { key: "{s.name}", skill: s.clone() }
+                if load_error {
+                    div {
+                        style: "color:var(--danger);font-size:var(--fs-12);",
+                        "Could not load skills — check server connection."
+                    }
+                } else {
+                    for skill in skills_list.iter() {
+                        SkillCard { key: "{skill.name}", skill: skill.clone() }
+                    }
                 }
             }
         }
@@ -55,28 +75,27 @@ pub fn ScreenSkills(is_active: bool) -> Element {
 }
 
 #[component]
-fn SkillCard(skill: SkillStub) -> Element {
-    let enabled = skill.status == "ENABLED";
+fn SkillCard(skill: crate::server::api::SkillInfo) -> Element {
     rsx! {
         div {
             class: "card",
-            class: if enabled { "is-active" },
-
+            class: if skill.enabled { "is-active" },
             div { class: "card-head",
                 div {
-                    class: if enabled { "card-icon" } else { "card-icon gray" },
+                    class: if skill.enabled { "card-icon" } else { "card-icon gray" },
                     "⊕"
                 }
                 div { style: "flex:1",
                     div { class: "card-title", "{skill.name}" }
-                    div { class: "card-meta", "{skill.version} · {skill.category}" }
+                    div { class: "card-meta", "{skill.category}" }
                 }
                 div {
-                    class: if enabled { "tgl on" } else { "tgl" },
+                    class: if skill.enabled { "tgl on" } else { "tgl" },
                     "data-tgl": "true",
+                    // No onclick — write ops out of scope (D-09 + deferred list).
                 }
             }
-            div { class: "card-body", "{skill.summary}" }
+            div { class: "card-body", "{skill.description}" }
         }
     }
 }
