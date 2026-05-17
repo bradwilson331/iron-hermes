@@ -215,8 +215,14 @@ skills:
 # Renamed from `subagent:` in Phase 32.2. See docs/DELEGATION.md for the full
 # spec including per-call `role` / `max_iterations` schema and migration guide.
 delegation:
-  # Timeout per child agent execution in seconds (default: 300)
+  # Wall-clock timeout per child agent in seconds (default: 300)
   # child_timeout_seconds: 300
+
+  # Stale-warn threshold; soft signal only. Hard kill ceiling is child_timeout_seconds.
+  # Seconds of inactivity before a subagent is flagged [stale] in /agents output (default: 120).
+  # Added in Phase 32.3 (D-05). Per-call override via the `stale_warn_seconds`
+  # field in delegate_task JSON args. See docs/DELEGATION.md "Stale-Child Detection".
+  # stale_warn_seconds: 120
 
   # Maximum concurrent children per batch (default: 3)
   # Oversize batches return a tool error rather than silently truncating
@@ -227,6 +233,9 @@ delegation:
   # max_iterations: 50
 
   # Maximum spawn depth for `orchestrator`-role children (default: 1 = flat, no nesting)
+  # 1 → only root agents can delegate (orchestrator children are downgraded to leaf)
+  # 2 → one level of orchestrator children allowed
+  # 3 → two levels (maximum supported value)
   # max_spawn_depth: 1
 
   # Global kill switch; when false all children downgrade to `leaf` regardless of per-call role (default: true)
