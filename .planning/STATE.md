@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 26.7 context gathered
-last_updated: "2026-05-17T21:56:56.825Z"
+stopped_at: Phase 26.7 UI-SPEC approved
+last_updated: "2026-05-17T22:19:57.405Z"
 last_activity: 2026-05-17 -- Phase 34 planning complete
 progress:
   total_phases: 59
@@ -464,8 +464,14 @@ Recent decisions affecting current work:
 - **Default config deadlock (18-11 scope):** With `compression.protect_first_n=3` (documented default) and a [sys, user, asst-tool_use, tool_result] shape, the two-direction guard correctly collapses the prune range to zero — compression cannot fire. UAT only passed after lowering to 2. Fix: auto-extend/auto-shrink `protect_first_n` around tool-pair boundaries.
 - **Post-compression retry loop (18-12 scope):** Live UAT saw the agent re-call `web_read` on every turn for 10 consecutive turns (hit MAX_COMPRESSION_PASSES), never returning a summary. `[CONTEXT HISTORY]` summary content does not convey tool-call completion, so the model treats every turn as a fresh request.
 
+## Quick Tasks Completed
+
+| Date       | Slug                       | Outcome                                                                                                  |
+|------------|----------------------------|----------------------------------------------------------------------------------------------------------|
+| 2026-05-17 | transparent-logo-asset     | Restored true PNG alpha on `crates/iron_hermes_ui/assets/i_hermes_logo.png` (removed baked-in checkerboard via 18%-fuzz floodfill). |
+
 ## Session Continuity
 
-Last session: 2026-05-17T21:56:56.817Z
-Stopped at: Phase 26.7 context gathered
-Resume file: .planning/phases/26.7-wire-up-web-to-real-services/26.7-CONTEXT.md
+Last session: 2026-05-17T22:19:57.397Z
+Stopped at: Phase 26.7 UI-SPEC approved
+Resume file: .planning/phases/26.7-wire-up-web-to-real-services/26.7-UI-SPEC.md
