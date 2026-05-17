@@ -1175,12 +1175,12 @@ Plans:
 **Goal:** Close the parity gap between IronHermes's `delegate_task` and the canonical Python hermes-agent delegation: nested orchestration via `role`+`max_spawn_depth`, complete blocked-tools set (`clarify`+`send_message`), batch oversize → tool error (no silent truncation), config rename `subagent:`→`delegation:` with new fields `max_spawn_depth`/`orchestrator_enabled` + per-call `max_iterations` schema, and `/agents` tree view threaded with `parent_id` across tui_rata + gateway + iron_hermes_ui surfaces.
 **Requirements:** DEL-01, DEL-02, DEL-03, DEL-04, DEL-05, DEL-06, DEL-07, DEL-08, DEL-09, DEL-10, DEL-11, DEL-12
 **Depends on:** Phase 32
-**Plans:** 2/5 plans executed
+**Plans:** 3/5 plans executed
 
 Plans:
 - [x] 32.2-01-PLAN.md — Config rename (subagent→delegation) + new fields (max_spawn_depth, orchestrator_enabled) + load-time deprecation gate + downstream consumer migration (Wave 1)
 - [x] 32.2-02-PLAN.md — Blocked tools (clarify, send_message) + batch oversize → Err + per-call max_iterations schema across both delegate_task.rs copies (Wave 2)
-- [ ] 32.2-03-PLAN.md — ChildRole enum + role/depth/orchestrator_enabled-aware build_child_registry + AgentSubagentRunner current_depth/caller_subagent_id builder fields (Wave 3)
+- [x] 32.2-03-PLAN.md — ChildRole enum + role/depth/orchestrator_enabled-aware build_child_registry + AgentSubagentRunner current_depth/caller_subagent_id builder fields (Wave 3)
 - [ ] 32.2-04-PLAN.md — SubagentInfo.parent_id population + SubagentRegistry::build_tree + SubagentListSnapshot::tree_summary default-impl extension (Wave 4)
 - [ ] 32.2-05-PLAN.md — cmd_agents tree render (ASCII connectors) + iron_hermes_ui subagent_tree_json adapter + docs/DELEGATION.md update (Wave 5)
 

@@ -4,13 +4,13 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 32.2 context gathered
-last_updated: "2026-05-17T04:46:42.869Z"
+last_updated: "2026-05-17T05:10:36.655Z"
 last_activity: 2026-05-17
 progress:
   total_phases: 54
   completed_phases: 40
   total_plans: 218
-  completed_plans: 212
+  completed_plans: 213
   percent: 74
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 32.2 (subagent-delegation-parity) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Plans: 15/15 complete (9 baseline + 3 round-1 gap-closure for UAT Gaps 1/2/3/4/5 + Plan 13 round-2 for GAPs 06/07/08/09 + Plan 14 round-3 for GAP-07-R3 + GAP-09-R3 + Plan 15 round-4 scanlines feature removal + Plan 15 round-5 scan-bar synonym closure)
 Status: Ready to execute
 Last activity: 2026-05-17
@@ -169,6 +169,7 @@ Last activity: 2026-05-17
 | Phase 27.1 P03 | 1 | 2 tasks | 1 files |
 | Phase 26.2.1 P14 | 35min | 4 tasks | 5 files |
 | Phase 32.2 P02 | 18 | 2 tasks | 2 files |
+| Phase 32.2-subagent-delegation-parity P03 | 1105 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -395,6 +396,9 @@ Recent decisions affecting current work:
 - [Phase ?]: D-05 Phase 32.2: clarify and send_message silently excluded from build_child_registry for ALL children
 - [Phase ?]: D-06 Phase 32.2: execute_batch returns Err immediately on oversize batch, citing delegation.max_concurrent_children
 - [Phase ?]: D-08 Phase 32.2: max_iterations per-call override wired in both execute paths; no upper cap per PROV-09
+- [Phase 32.2-subagent-delegation-parity]: ChildRole defaults to Leaf on all parse failures — least privilege per T-32.2-10
+- [Phase 32.2-subagent-delegation-parity]: effective_tools pre-pass adds delegate_task BEFORE the match loop — never after (RESEARCH Pitfall 1)
+- [Phase 32.2-subagent-delegation-parity]: Depth threading via AgentSubagentRunner struct fields — SubagentRunner trait signature unchanged (RESEARCH Pitfall 6)
 
 ### Roadmap Evolution
 
@@ -460,6 +464,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-17T04:46:30.004Z
+Last session: 2026-05-17T05:10:36.648Z
 Stopped at: Phase 32.2 context gathered
 Resume file: None
