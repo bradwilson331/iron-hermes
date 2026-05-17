@@ -54,6 +54,8 @@ dotenvy = { workspace = true }
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
 tokio = { version = "1", features = ["macros", "rt", "time"], default-features = false }
+# Phase 32.2-05: CancellationToken needed by subagent_tree_json test in state.rs.
+tokio-util = { workspace = true }
 
 [features]
 default = ["web"]

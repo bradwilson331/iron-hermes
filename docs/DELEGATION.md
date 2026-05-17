@@ -19,7 +19,7 @@ The `task` field (not `goal`) is the only required parameter. The child receives
 
 ## Parallel Batch
 
-Up to 3 concurrent subagents by default (configurable via `subagent.max_subagents`):
+Up to 3 concurrent subagents by default (configurable via `delegation.max_concurrent_children`):
 
 ```
 delegate_task(tasks=[
@@ -31,7 +31,7 @@ delegate_task(tasks=[
 
 Batch mode uses `tasks` (array of objects with `goal`, optional `context`, optional `toolsets`). Single mode uses `task` (string). The two are mutually exclusive.
 
-Results are sorted by original task index regardless of completion order. Batches larger than `max_subagents` are truncated with a `tracing::warn!` — they are not silently dropped.
+Results are sorted by original task index regardless of completion order. Batches larger than `max_concurrent_children` return a tool error rather than being silently truncated.
 
 ---
 
@@ -102,14 +102,60 @@ These are silently stripped from every child registry regardless of what you spe
 
 | Tool | Reason |
 |------|--------|
-| `delegate_task` | No recursion — flat delegation only (AGENT-05) |
+| `delegate_task` | Excluded for `leaf` role children; re-added for `orchestrator` children within depth limit |
 | `skills` | Not available to subagents |
 | `execute_code` | Not available to subagents |
 | `cronjob` | Not available to subagents |
+| `clarify` | No `clarify_callback` channel in children (Python: `_NEVER_PARALLEL_TOOLS`) |
+| `send_message` | No platform session in children |
 
 `memory` is available but **read-only** in child context — children can read shared memory but cannot write to it (D-12).
 
 Unknown tool names in `allowed_tools` cause an immediate error (fail-early, D-04).
+
+---
+
+## Per-Call Schema Fields
+
+### `role` — leaf or orchestrator
+
+Controls whether the child can itself delegate further:
+
+| Value | Behaviour |
+|-------|-----------|
+| `"leaf"` (default) | Child cannot delegate. `delegate_task` is excluded from its registry. |
+| `"orchestrator"` | Child retains `delegate_task` in its registry up to `max_spawn_depth`. |
+
+When `role="orchestrator"` is requested but the configured `max_spawn_depth` would be exceeded (or `orchestrator_enabled=false`), the child is **silently downgraded to `leaf`** and a `tracing::warn!` is emitted. No error is returned to the caller.
+
+```
+delegate_task(
+    task="Orchestrate the multi-step migration",
+    role="orchestrator",
+    toolsets=["terminal", "file"]
+)
+```
+
+### `max_iterations` — per-call override
+
+Override the number of LLM iterations allowed for this specific call. Falls back to `delegation.max_iterations` from config (default 50).
+
+```
+delegate_task(
+    task="Quick file existence check",
+    max_iterations=5,
+    toolsets=["terminal"]
+)
+```
+
+In batch mode, `max_iterations` can be specified per-task inside the `tasks` array:
+
+```
+delegate_task(tasks=[
+    {"goal": "Short task",  "max_iterations": 5,  "toolsets": ["file"]},
+    {"goal": "Longer task", "max_iterations": 30, "toolsets": ["terminal", "file"]}
+])
+```
 
 ---
 
@@ -204,7 +250,7 @@ Use `detach=true` for long-running tasks (builds, full test runs) where you want
 
 ## Per-Call Timeout
 
-Override the global `timeout_secs` for a single call:
+Override the global `child_timeout_seconds` for a single call:
 
 ```
 delegate_task(
@@ -245,27 +291,92 @@ The `/agents` command (alias `/tasks`) shows the live subagent registry:
 
 The registry drops the entry the moment the subagent writes its terminal transcript line — the pill in the status bar reflects this immediately.
 
+### Tree view: /agents
+
+When subagents are spawned with `role="orchestrator"`, `/agents list` renders an indented ASCII tree showing the parent–child relationship:
+
+```
+Active subagents:
+├── sub_3f9a12  orchestrate the migration pipeline  42s  [running]
+│   ├── sub_a1b2c3  fetch and parse data            30s  [running]
+│   └── sub_d4e5f6  write output files              25s  [killed]
+└── sub_7g8h9i  run full test suite                 18s  [running]
+```
+
+- **id prefix**: first 8 characters of the subagent UUID
+- **summary clip**: task summary truncated to 80 characters with `…` if longer
+- **uptime**: wall-clock seconds since the subagent was registered
+- **status pill**: `[running]` or `[killed]` (cancelled via token)
+
+When no nesting exists (all agents are root-level), the legacy flat-list format is used:
+
+```
+Active subagents:
+- subagent-1 (sub_3f9a12c8d041) (orchestrate the migration pipeline) — 42s
+- subagent-2 (sub_a1b2c3d4e5f6) (fetch and parse data) — 30s
+```
+
+The JSON shape produced by `AppState::subagent_tree_json` for the same 3-node tree:
+
+```json
+[
+  {
+    "id": "sub_root0000abcd",
+    "task_summary": "orchestrate the migration pipeline",
+    "uptime_secs": 42,
+    "started_at_unix_ms": null,
+    "children": [
+      {
+        "id": "sub_child1111ef",
+        "task_summary": "fetch and parse data",
+        "uptime_secs": 30,
+        "started_at_unix_ms": null,
+        "children": []
+      },
+      {
+        "id": "sub_child2222gh",
+        "task_summary": "write output files",
+        "uptime_secs": 25,
+        "started_at_unix_ms": null,
+        "children": []
+      }
+    ]
+  }
+]
+```
+
+`started_at_unix_ms` is `null` because `std::time::Instant` carries no wall-clock epoch. A future plan will thread the session-start `SystemTime` to expose absolute timestamps.
+
 ---
 
 ## Configuration
 
-Set global defaults in `~/.ironhermes/config.yaml` under the `subagent:` key:
+Set global defaults in `~/.ironhermes/config.yaml` under the `delegation:` key:
 
 ```yaml
-subagent:
-  # Wall-clock timeout per subagent in seconds (default: 300)
-  timeout_secs: 300
+delegation:
+  # Wall-clock timeout per child agent in seconds (default: 300)
+  child_timeout_seconds: 300
 
-  # Maximum concurrent subagents per batch (default: 3)
-  max_subagents: 3
+  # Maximum concurrent children per batch (default: 3)
+  max_concurrent_children: 3
 
-  # Maximum LLM iterations per subagent (default: 10)
-  max_iterations: 10
+  # Maximum LLM iterations per child agent (default: 50)
+  max_iterations: 50
+
+  # Maximum spawn depth for orchestrator children (default: 1 = flat)
+  # 1 → only root agents can delegate (orchestrator children are downgraded to leaf)
+  # 2 → one level of orchestrator children allowed
+  # 3 → two levels (maximum supported value)
+  max_spawn_depth: 1
+
+  # Global kill switch: set false to force all children to leaf regardless of role= (default: true)
+  orchestrator_enabled: true
 
   # Default toolset groups when none are specified per-call (default: all three)
   default_toolsets: ["terminal", "file", "web"]
 
-  # Route subagents to a cheaper/faster model (default: inherit parent's model)
+  # Route children to a cheaper/faster model (default: inherit parent's model)
   # model: "google/gemini-flash-2.0"
   # provider: "openrouter"
 
@@ -275,15 +386,56 @@ subagent:
   # api_key: "local-key"
 ```
 
-The semaphore emits a `tracing::warn!` at target `ironhermes_tools::delegate_task` if any task waits more than 2 seconds for a slot — useful for diagnosing concurrency pressure under high `max_subagents` values.
+The semaphore emits a `tracing::warn!` at target `ironhermes_tools::delegate_task` if any task waits more than 2 seconds for a slot — useful for diagnosing concurrency pressure under high `max_concurrent_children` values.
 
 ---
 
 ## Key Properties
 
-- **Flat delegation only.** `delegate_task` is structurally excluded from every child registry (AGENT-05). Children cannot spawn grandchildren — there is no `role` parameter or `max_spawn_depth` setting.
+- **Flat delegation by default.** At `max_spawn_depth: 1` (the default), `role="orchestrator"` is a no-op — the child is silently downgraded to leaf and `delegate_task` remains excluded from its registry. Raise `max_spawn_depth` to 2 or 3 to allow orchestrator children to spawn their own subagents.
 - **Isolated terminal CWD.** Each child's `terminal` tool starts in a fresh temp directory, not the parent's working directory (AGENT-04).
 - **Read-only memory.** Children can read shared memory but cannot write to it (D-12).
 - **Cancel propagation.** Interrupting the parent cancels all `detach=false` children. `detach=true` children run to completion.
 - **Inherit credentials.** Children inherit the parent's API key, provider, and rate-limit pool. Model can be overridden per-call or globally via config.
 - **Only the summary lands in parent context.** The full child turn history stays in the transcript file — the parent sees only the structured `**Actions Taken / Files Modified / Findings / Issues Encountered**` block.
+
+---
+
+## Migration from `subagent:` to `delegation:`
+
+Phase 32.2 (D-07) renamed the config key and several fields. If your `~/.ironhermes/config.yaml` still uses the old `subagent:` key, IronHermes will refuse to start with a clear error:
+
+```
+Config key 'subagent:' is deprecated and no longer supported.
+Rename it to 'delegation:' in your config.yaml.
+```
+
+Apply this diff to your config file:
+
+```yaml
+# BEFORE (old subagent: key)
+subagent:
+  timeout_secs: 300
+  max_subagents: 3
+  max_iterations: 10
+  default_toolsets: ["terminal", "file", "web"]
+
+# AFTER (new delegation: key)
+delegation:
+  child_timeout_seconds: 300
+  max_concurrent_children: 3
+  max_iterations: 50
+  max_spawn_depth: 1
+  orchestrator_enabled: true
+  default_toolsets: ["terminal", "file", "web"]
+```
+
+Field rename summary:
+
+| Old field | New field | Notes |
+|-----------|-----------|-------|
+| `timeout_secs` | `child_timeout_seconds` | Same semantics |
+| `max_subagents` | `max_concurrent_children` | Same semantics |
+| `max_iterations` | `max_iterations` | Default changed: 10 → 50 |
+| _(new)_ | `max_spawn_depth` | Default: 1 (flat) |
+| _(new)_ | `orchestrator_enabled` | Default: true |

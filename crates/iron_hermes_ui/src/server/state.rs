@@ -288,6 +288,72 @@ impl AppState {
     }
 }
 
+// =============================================================================
+// Phase 32.2 Plan 05 Task 2: subagent tree JSON adapter
+// =============================================================================
+
+/// Phase 32.2 D-12: Build a structured JSON tree from the current subagent registry.
+///
+/// Returns a `serde_json::Value::Array` of root nodes; each node carries:
+/// `id`, `task_summary`, `uptime_secs`, `started_at_unix_ms`, `children: [...]`.
+///
+/// **No HTTP route is added** — this is a callable method for future API use
+/// (RESEARCH confirmed no `/agents` endpoint exists in iron_hermes_ui today).
+///
+/// Call via `AppState::subagent_tree_json()` which delegates here.
+pub fn build_subagent_tree_json(
+    registry: &ironhermes_agent::subagent_registry::SubagentRegistry,
+) -> serde_json::Value {
+    let roots = registry.build_tree();
+    let root_values: Vec<serde_json::Value> = roots.iter().map(node_to_json).collect();
+    serde_json::Value::Array(root_values)
+}
+
+/// Recursively serialize a `SubagentTreeNode` into a JSON object.
+///
+/// Shape:
+/// ```json
+/// {
+///   "id": "sub_abcd1234",
+///   "task_summary": "orchestrate the pipeline",
+///   "uptime_secs": 42,
+///   "started_at_unix_ms": null,
+///   "children": [...]
+/// }
+/// ```
+///
+/// `started_at_unix_ms` is `null` because `std::time::Instant` carries no
+/// wall-clock epoch — it is relative-only. A future plan can thread the
+/// session-start `SystemTime` to compute an absolute epoch offset.
+fn node_to_json(node: &ironhermes_agent::subagent_registry::SubagentTreeNode) -> serde_json::Value {
+    let children: Vec<serde_json::Value> = node.children.iter().map(node_to_json).collect();
+    serde_json::json!({
+        "id": node.info.id,
+        "task_summary": node.info.task_summary,
+        "uptime_secs": node.info.started_at.elapsed().as_secs(),
+        "started_at_unix_ms": serde_json::Value::Null,
+        "children": children,
+    })
+}
+
+impl AppState {
+    /// Phase 32.2 Plan 05 D-12: return a structured JSON tree of active subagents.
+    ///
+    /// Accepts the subagent registry as a parameter — the caller is responsible
+    /// for locking and providing the guard. This avoids borrow-checker issues with
+    /// the `Arc<RwLock<SubagentRegistry>>` that lives inside the delegate-task wiring
+    /// and is not re-exposed through `AppRuntimeBundle`.
+    ///
+    /// **No HTTP route** — this is a callable method for future API surface use
+    /// (RESEARCH confirmed no `/agents` endpoint exists in iron_hermes_ui today).
+    pub fn subagent_tree_json(
+        &self,
+        registry: &ironhermes_agent::subagent_registry::SubagentRegistry,
+    ) -> serde_json::Value {
+        build_subagent_tree_json(registry)
+    }
+}
+
 fn stored_to_chat_message(row: &StoredMessage) -> Option<ChatMessage> {
     let role = match row.role.as_str() {
         "system" => Role::System,
@@ -309,4 +375,62 @@ fn stored_to_chat_message(row: &StoredMessage) -> Option<ChatMessage> {
         tool_call_id: row.tool_call_id.clone(),
         name: row.tool_name.clone(),
     })
+}
+
+#[cfg(test)]
+mod plan_32_2_05_tests {
+    use super::*;
+    use ironhermes_agent::subagent_registry::{SubagentInfo, SubagentRegistry};
+    use std::path::PathBuf;
+    use tokio_util::sync::CancellationToken;
+
+    fn make_info(id: &str, parent_id: Option<&str>) -> SubagentInfo {
+        SubagentInfo {
+            id: id.to_string(),
+            task_summary: format!("task for {}", id),
+            parent_id: parent_id.map(|s| s.to_string()),
+            started_at: std::time::Instant::now(),
+            cancel: CancellationToken::new(),
+            transcript_path: PathBuf::from("/dev/null"),
+        }
+    }
+
+    #[test]
+    fn test_subagent_tree_json_serializes_nested_tree() {
+        // 3-node tree: root → mid → leaf
+        let mut reg = SubagentRegistry::new();
+        reg.register(make_info("sub_root0000", None));
+        reg.register(make_info("sub_mid11111", Some("sub_root0000")));
+        reg.register(make_info("sub_leaf2222", Some("sub_mid11111")));
+
+        let value = build_subagent_tree_json(&reg);
+
+        // Top-level is an array with 1 root
+        let arr = value.as_array().expect("expected JSON array at top level");
+        assert_eq!(arr.len(), 1, "expected 1 root node");
+
+        let root = &arr[0];
+        assert_eq!(root["id"], "sub_root0000");
+        assert_eq!(root["task_summary"], "task for sub_root0000");
+        assert!(root["uptime_secs"].is_number(), "uptime_secs should be a number");
+        assert!(root["started_at_unix_ms"].is_null(), "started_at_unix_ms should be null");
+
+        // root.children has 1 mid node
+        let root_children = root["children"].as_array().expect("root.children should be array");
+        assert_eq!(root_children.len(), 1, "root should have 1 child (mid)");
+
+        let mid = &root_children[0];
+        assert_eq!(mid["id"], "sub_mid11111");
+        assert_eq!(mid["task_summary"], "task for sub_mid11111");
+
+        // mid.children has 1 leaf node
+        let mid_children = mid["children"].as_array().expect("mid.children should be array");
+        assert_eq!(mid_children.len(), 1, "mid should have 1 child (leaf)");
+
+        let leaf = &mid_children[0];
+        assert_eq!(leaf["id"], "sub_leaf2222");
+        assert_eq!(leaf["task_summary"], "task for sub_leaf2222");
+        let leaf_children = leaf["children"].as_array().expect("leaf.children should be array");
+        assert!(leaf_children.is_empty(), "leaf should have no children");
+    }
 }
