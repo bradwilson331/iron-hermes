@@ -337,17 +337,13 @@ impl SubagentRunner for AgentSubagentRunner {
             }
         }
 
-        // Phase 32.3 Plan 01: RegistrationGuard drop handles deregistration on
-        // all exit paths via `_guard` going out of scope. Keep the explicit
-        // unregister_internal call below — Plan 02 deletes it. With the guard
-        // in place this call is redundant but safe: `unregister_internal` on
-        // an absent id is a no-op. The 6.7-hour ghost bug (sub_20667cb71808)
-        // was that `tokio::time::timeout` dropped this function's future
-        // before reaching this line — the guard's Drop is what closes that
-        // gap structurally.
-        if let Some(ref reg) = self.subagent_registry {
-            reg.write().await.unregister_internal(&subagent_id);
-        }
+        // D-01: RegistrationGuard drop handles deregistration on all exit paths
+        // (natural / error / tokio::time::timeout / panic / cancel). The
+        // explicit unregister call that used to live here was the 6.7-hour
+        // ghost bug site: sub_20667cb71808 stayed Active for 24,150s because
+        // tokio::time::timeout dropped the run_child future before reaching
+        // this line. The `_guard` binding above covers the entire function
+        // body so Drop fires on every exit path — no manual cleanup needed.
 
         match outcome {
             Ok(()) => Ok(final_response),
