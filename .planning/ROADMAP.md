@@ -1281,3 +1281,90 @@ Plans:
 - [ ] 34b-02-PLAN.md — ContextEngine lifecycle hooks + ContextCompressor/SummarizingEngine resets + memory-authority reminder + 3-surface session-hook wiring
 
 **Phase directory:** `.planning/phases/34b-context-system-parity/`
+
+### Phase 35: Computer Use Agent — Foundation (INSERTED)
+
+**Goal:** Land the structural foundation for a `computer_use` tool that mirrors hermes-agent's surface (13 actions: `capture`, `click`/`double_click`/`right_click`/`middle_click`, `drag`, `scroll`, `type`, `key`, `set_value`, `wait`, `list_apps`, `focus_app`) without yet shipping a real backend. New crate-internal module `crates/ironhermes-tools/src/computer_use/` defines: `ComputerUseBackend` trait (mirrors hermes-agent's ABC at `tools/computer_use/backend.py:1–151`), `NoopBackend` for tests, OpenAI-style tool schema with `action` enum discriminator, hard-blocked dangerous key combos (`cmd+shift+backspace`, `cmd+ctrl+q`, etc.) and type patterns (`curl | bash`, `sudo rm -rf`, fork bombs), approval-gate wiring through the existing `approval` module, `safe`/`destructive` action categorization, and `darwin`-only platform gate. Tool registered behind a new `computer_use` toolset (default disabled). No screenshot capture, no real driver — backend always returns `NoopBackend` errors.
+**Depends on:** Phase 21.2 (MCP client transport, reused in Phase 35.1), Phase 22 (CLI parity — approval gate available in all three agent surfaces)
+**Requirements:** CUA-01 (backend trait + Noop), CUA-02 (tool schema + 13 actions), CUA-03 (safety allowlists), CUA-04 (approval gate), CUA-05 (toolset registration + darwin gate)
+**Success Criteria** (what must be TRUE):
+
+  1. `ComputerUseBackend` trait exists in `crates/ironhermes-tools/src/computer_use/backend.rs` with one method per action; default `unimplemented!` is forbidden — trait fns return `Result<ActionOutcome, ComputerUseError>` only
+  2. `NoopBackend` records calls into an `Arc<Mutex<Vec<RecordedAction>>>` and returns trivial results; used by unit tests to verify dispatch without a real driver
+  3. Tool schema serialized to JSON matches the hermes-agent shape byte-for-byte for the 13 action discriminator values (verified via `include_str!` fixture comparison)
+  4. Hard-blocked combos (5 key sets) and hard-blocked type patterns (5 regexes) reject **before** approval prompt with a structured `blocked_dangerous_action` error envelope
+  5. `darwin`-only gate: on non-macOS, `register_computer_use_tool` is a no-op and the tool does not appear in the registry; integration test on linux confirms absence
+  6. `computer_use` toolset added to `KNOWN_TOOLSETS` / `toolset_members_map` with default `enabled: false`; explicit opt-in via `tools.toolsets.computer_use.enabled: true`
+  7. Wired into all three agent surfaces (CLI `run_chat`, gateway, `iron_hermes_ui` web UI) via existing `app_runtime_factory` registration site — 3 static-grep INV gates lock the wiring
+  8. Cross-phase regression: existing browser_* + delegate_task + approval tests stay green
+
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 35 to break down)
+
+**Phase directory:** `.planning/phases/35-computer-use-foundation/`
+
+### Phase 35.1: Computer Use Agent — cua-driver MCP backend (INSERTED)
+
+**Goal:** Implement the real `CuaDriverBackend` by spawning `cua-driver` as an MCP stdio subprocess and translating each `ComputerUseBackend` method into the corresponding MCP tool call (`list_windows`, `get_window_state`, `screenshot`, `click`, `double_click`, `right_click`, `scroll`, `type_text_chars`, `press_key`, `hotkey`, `set_value`, `list_apps`). Reuses Phase 21.2 rmcp client transport and `connect_stdio` (with `kill_on_drop(true)` + Phase 21.2 Plan 11 child-handle shutdown plumbing). Returns `CaptureResult { png_b64, elements, width, height, png_bytes_len }` from `capture`. SOM (set-of-mark) overlay handled by the driver itself; AX-only fallback parses regex-extracted element lists from text output when MCP returns unstructured data. `drag` returns `not_supported` (parity with hermes-agent `cua_backend.py:495–497`).
+**Depends on:** Phase 35 (trait + tool registered), Phase 21.2 Plan 11 (stdio child kill-on-drop)
+**Requirements:** CUA-06 (cua-driver spawn + lifecycle), CUA-07 (12 MCP tool-call translations), CUA-08 (CaptureResult shape), CUA-09 (AX fallback parser), CUA-10 (env-var overrides)
+**Success Criteria** (what must be TRUE):
+
+  1. `CuaDriverBackend::new` spawns `cua-driver` (path from `IRONHERMES_CUA_DRIVER_CMD` env var, default `"cua-driver"`) and verifies the MCP handshake before returning `Ok`; spawn failure returns `cua_driver_unavailable` envelope with install instructions
+  2. Each of the 12 supported actions maps to exactly one MCP `tools/call`; arguments serialized as JSON matching the cua-driver tool schemas (verified by recording fixtures committed under `tests/fixtures/cua/`)
+  3. `capture` parses the driver response into `CaptureResult` with PNG/JPEG auto-detected from magic bytes (parity with `tool.py:428–430`); `png_b64` is valid base64 with the correct data URL prefix when wrapped in the multi-modal envelope
+  4. `drag` returns the structured `not_supported_by_backend` envelope without consuming MCP turn budget — caller surfaces this verbatim
+  5. AX-only fallback: when `get_window_state` returns text rather than structured JSON, regex-based `parse_elements_from_tree` extracts a `Vec<UIElement>` with `bounds = (0,0,0,0)`; covered by 3 fixture-driven unit tests
+  6. Backend shutdown: on `Drop` and on session end, the MCP subprocess is killed within 2 s (reuses Phase 21.2 Plan 11 `kill_on_drop(true)` + JoinHandle timeout)
+  7. Env-var overrides documented in DELEGATION-style doc at `docs/COMPUTER-USE.md`: `IRONHERMES_CUA_DRIVER_CMD`, `IRONHERMES_CUA_DRIVER_VERSION`, `IRONHERMES_COMPUTER_USE_BACKEND` (values: `cua` | `noop`)
+  8. Live UAT on macOS: full round trip of `capture → click → type → capture` against a real on-screen app produces a coherent screenshot pair
+
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 35.1 to break down)
+
+**Phase directory:** `.planning/phases/35.1-cua-driver-mcp-backend/`
+
+### Phase 35.2: Computer Use Agent — Multimodal Wiring & Screenshot Eviction (INSERTED)
+
+**Goal:** Wire CUA tool results into the conversation as multi-modal content blocks. Adopt hermes-agent's `_multimodal=True` envelope (`{ _multimodal: true, content: [text, image_url], text_summary }`) for capture results and any action with `capture_after=true`. Extend `anthropic_client.rs` to splice base64 images into `tool_result` content blocks (parity with `anthropic_adapter.py:1441–1622`). Implement screenshot eviction in `crates/ironhermes-agent/src/context_compressor.rs`: keep only the 3 most-recent screenshots in context; older ones replaced with `"[screenshot]"` placeholders (parity with `anthropic_adapter.py:602–623`). Add flat-rate image-token accounting (1500 tokens/image) to `crates/ironhermes-agent/src/budget.rs`. Cross-provider fallback: text-only providers receive `text_summary` only; image parts dropped via `_multimodal_text_summary` helper (parity with `run_agent.py:488–502`).
+**Depends on:** Phase 35.1 (backend produces capture results)
+**Requirements:** CUA-11 (multimodal envelope shape), CUA-12 (Anthropic image-block splicing), CUA-13 (screenshot eviction at 3-most-recent), CUA-14 (image token accounting), CUA-15 (text-only provider fallback)
+**Success Criteria** (what must be TRUE):
+
+  1. `compose_multimodal_tool_result` helper in `crates/ironhermes-tools/src/computer_use/envelope.rs` returns `{ _multimodal: true, content: [{type: "text", text}, {type: "image_url", image_url: { url: "data:image/<fmt>;base64,..." }}], text_summary }` matching hermes-agent shape; covered by serde round-trip test
+  2. Anthropic client routes multimodal tool results through new `convert_multimodal_tool_result` that emits Anthropic `tool_result` content with one `text` block + one `image` block (base64 stripped of data-URL prefix, format extracted)
+  3. Screenshot eviction: in any conversation with N>3 screenshots, only the 3 most-recent (by message position) carry image data; the rest collapse to the literal string `"[screenshot]"` — unit test plants 5 screenshots and asserts 2 evictions
+  4. `budget.rs` `estimate_message_tokens` adds 1500 tokens per image part to its return value; existing non-image paths byte-identical
+  5. Non-Anthropic providers receive the `text_summary` only; integration test against `OpenAiClient` confirms no `image_url` part leaks through
+  6. End-to-end Anthropic UAT: agent calls `capture`, image arrives in next assistant turn, agent describes what it sees — confirmed against `claude-sonnet-4-6` and `claude-3-5-sonnet-20241022`
+
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 35.2 to break down)
+
+**Phase directory:** `.planning/phases/35.2-cua-multimodal-wiring/`
+
+### Phase 35.3: Computer Use Agent — Install CLI & Version Pinning (INSERTED, OPTIONAL)
+
+**Goal:** Surface a `hermes cua install` subcommand that downloads and installs the `cua-driver` binary (curl-piped script from upstream, parity with hermes-agent's `hermes computer-use install`), verifies the version against `IRONHERMES_CUA_DRIVER_VERSION` (default pinned in `crates/ironhermes-cli/src/cua_install.rs::PINNED_CUA_DRIVER_VERSION`), and writes diagnostics to `hermes cua doctor` (checks: binary present, version match, macOS Accessibility permission, macOS Screen Recording permission). Optional polish phase — Phases 35/35.1/35.2 ship a working CUA without it; this gives end users a one-shot setup path.
+**Depends on:** Phase 35.1 (driver is what's being installed)
+**Requirements:** CUA-16 (`cua install` subcommand), CUA-17 (`cua doctor` subcommand), CUA-18 (version pin + drift warning)
+**Success Criteria** (what must be TRUE):
+
+  1. `hermes cua install` runs the upstream install script via `tokio::process::Command` (no shell), targets `$HERMES_HOME/bin/cua-driver`, and exits non-zero on download or extraction failure
+  2. `hermes cua doctor` returns 0 only when all 4 checks pass; output uses the existing `colored` palette + checkmark/X glyphs from `crates/ironhermes-cli/src/cmd_doctor.rs` pattern
+  3. Version mismatch (installed vs `PINNED_CUA_DRIVER_VERSION`) emits a `tracing::warn!` at startup + a stderr line on first `computer_use` invocation
+  4. macOS permission probes use the existing `screencaptureauthorized` / `AXIsProcessTrusted` checks (linked from system frameworks) — no new dep crates
+  5. Linux/Windows: both subcommands print a `not_supported_on_platform` message and exit 0 (informational, not error)
+
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 35.3 to break down)
+
+**Phase directory:** `.planning/phases/35.3-cua-install-cli/`
