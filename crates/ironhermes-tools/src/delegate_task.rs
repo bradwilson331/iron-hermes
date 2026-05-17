@@ -116,6 +116,27 @@ pub trait SubagentRunner: Send + Sync {
     ) -> anyhow::Result<Option<String>>;
 }
 
+/// Role of the child agent in the spawn tree (Phase 32.2 D-01).
+///
+/// - `Leaf` (default): child cannot delegate further; `delegate_task` is structurally
+///   excluded from the child registry (AGENT-05 behavior).
+/// - `Orchestrator`: child may spawn its own leaf children, subject to
+///   `config.max_spawn_depth` and `config.orchestrator_enabled`. When either
+///   limit blocks promotion, the child silently downgrades to Leaf and a
+///   `tracing::warn!` records the reason (D-02/D-03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildRole {
+    Leaf,
+    Orchestrator,
+}
+
+impl Default for ChildRole {
+    fn default() -> Self {
+        Self::Leaf
+    }
+}
+
 /// Tool that delegates a focused task to a child agent with restricted tools.
 pub struct DelegateTaskTool {
     runner: Arc<dyn SubagentRunner>,
@@ -251,6 +272,24 @@ impl DelegateTaskTool {
                 .map(|v| v as usize)
                 .unwrap_or(config.max_iterations);
 
+            // Phase 32.2 D-01: per-task role; default Leaf on absence or parse failure.
+            let per_task_role: ChildRole = task_obj
+                .get("role")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_else(|| {
+                    if task_obj.get("role").is_some() {
+                        tracing::warn!(
+                            target: "ironhermes_tools::delegate_task",
+                            "tasks[{}]: invalid role value; defaulting to leaf",
+                            index
+                        );
+                    }
+                    ChildRole::Leaf
+                });
+
+            let runner_for_child = self.runner.clone();
+            let semaphore_for_child = self.semaphore.clone();
+
             let handle = tokio::spawn(async move {
                 // D-19: Emit Started progress event
                 if let Some(ref cb) = progress_cb {
@@ -280,8 +319,15 @@ impl DelegateTaskTool {
                     .await
                     .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
 
-                let child_registry =
-                    build_child_registry(&allowed_tools, memory_manager, child_dir.path())?;
+                let child_registry = build_child_registry(
+                    &allowed_tools,
+                    memory_manager,
+                    child_dir.path(),
+                    per_task_role,
+                    0,
+                    &config,
+                    Some((runner_for_child.clone(), semaphore_for_child.clone())),
+                )?;
 
                 let mut system_prompt = format!(
                     "You are a focused assistant. Complete the following task:\n\n{}",
@@ -367,7 +413,9 @@ impl DelegateTaskTool {
 
 /// Build a child ToolRegistry from an allowlist, applying isolation rules.
 ///
-/// - `delegate_task` is silently stripped (AGENT-05: no recursion)
+/// - `delegate_task` is silently stripped for Leaf children (AGENT-05: no recursion).
+///   For Orchestrator children within depth and kill-switch limits, a real
+///   `DelegateTaskTool` is registered so the orchestrator can spawn leaf grandchildren.
 /// - `skills` is silently stripped (D-05: not available to subagents)
 /// - `execute_code` is silently stripped (not available to subagents)
 /// - `cronjob` is silently stripped (not available to subagents)
@@ -376,17 +424,74 @@ impl DelegateTaskTool {
 /// - Unknown tool names cause an immediate error (D-04: fail-early)
 /// - `terminal` gets an isolated CWD (AGENT-04)
 /// - `memory` gets read-only mode (D-12)
+///
+/// ## Phase 32.2 orchestrator parameters
+/// - `role`: whether the child is a Leaf or Orchestrator (D-01)
+/// - `child_depth`: the depth of the child in the spawn tree (0 = first-level child of root)
+/// - `config`: reads `max_spawn_depth` and `orchestrator_enabled` (D-02/D-03)
+/// - `runner_for_orchestrator`: `Some((runner, semaphore))` when the caller can supply runner
+///   state for an orchestrator's `DelegateTaskTool`. `None` causes silent downgrade to Leaf
+///   even when all depth/kill-switch conditions are met.
 pub fn build_child_registry(
     allowed_tools: &[String],
     memory_manager: Option<SharedMemoryManager>,
     child_cwd: &Path,
+    role: ChildRole,
+    child_depth: u32,
+    config: &SubagentConfig,
+    runner_for_orchestrator: Option<(Arc<dyn SubagentRunner>, Arc<Semaphore>)>,
 ) -> anyhow::Result<ToolRegistry> {
+    // Phase 32.2 D-01/D-02/D-03: expand tool list for orchestrators BEFORE the
+    // structural-exclusion match loop (RESEARCH Pitfall 1: re-add BEFORE not after).
+    let effective_tools: Vec<String> = if matches!(role, ChildRole::Orchestrator)
+        && child_depth < config.max_spawn_depth
+        && config.orchestrator_enabled
+        && runner_for_orchestrator.is_some()
+    {
+        let mut t = allowed_tools.to_vec();
+        if !t.iter().any(|s| s == "delegate_task") {
+            t.push("delegate_task".into());
+        }
+        t
+    } else {
+        if matches!(role, ChildRole::Orchestrator) {
+            tracing::warn!(
+                target: "ironhermes_tools::delegate_task",
+                "role=orchestrator ignored: depth={} max_spawn_depth={} orchestrator_enabled={}",
+                child_depth,
+                config.max_spawn_depth,
+                config.orchestrator_enabled
+            );
+        }
+        allowed_tools.to_vec()
+    };
+
     let mut registry = ToolRegistry::new();
 
-    for tool_name in allowed_tools {
+    for tool_name in &effective_tools {
         match tool_name.as_str() {
-            // Structurally excluded tools — silently skip
-            "delegate_task" => { /* AGENT-05: no recursion */ }
+            // Structurally excluded tools — silently skip for Leaf children (AGENT-05)
+            "delegate_task" if matches!(role, ChildRole::Leaf) => { /* AGENT-05: no recursion */ }
+
+            // Orchestrator within depth limit: register a real DelegateTaskTool so the
+            // orchestrator can spawn its own leaf children (D-01 Phase 32.2).
+            "delegate_task" => {
+                // runner_for_orchestrator is Some here because effective_tools only
+                // includes "delegate_task" when runner_for_orchestrator.is_some() above.
+                if let Some((runner, semaphore)) = runner_for_orchestrator.clone() {
+                    let child_tool = DelegateTaskTool::new(
+                        runner,
+                        semaphore,
+                        memory_manager.clone(),
+                        config.clone(),
+                        None,
+                    );
+                    registry.register(Box::new(child_tool));
+                }
+                // If runner_for_orchestrator is None (shouldn't reach here given effective_tools
+                // logic, but be defensive), skip silently — same as leaf behavior.
+            }
+
             "skills" => { /* D-05: not available to subagents */ }
             "execute_code" => { /* not available to subagents */ }
             "cronjob" => { /* not available to subagents */ }
@@ -477,7 +582,8 @@ impl Tool for DelegateTaskTool {
                                 "context": { "type": "string", "description": "Additional context for the child agent." },
                                 "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." },
                                 "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-task timeout override in seconds." },
-                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config." }
+                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config." },
+                                "role": { "type": "string", "enum": ["leaf", "orchestrator"], "default": "leaf", "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth." }
                             },
                             "required": ["goal"]
                         },
@@ -497,6 +603,12 @@ impl Tool for DelegateTaskTool {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["leaf", "orchestrator"],
+                        "default": "leaf",
+                        "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth."
                     }
                 },
                 "required": []
@@ -584,11 +696,32 @@ impl Tool for DelegateTaskTool {
             );
         }
 
+        // Phase 32.2 D-01: parse role from args; default Leaf on absence or parse failure.
+        let effective_role: ChildRole = args
+            .get("role")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_else(|| {
+                if args.get("role").is_some() {
+                    tracing::warn!(
+                        target: "ironhermes_tools::delegate_task",
+                        "invalid role value; defaulting to leaf"
+                    );
+                }
+                ChildRole::Leaf
+            });
+
         // Build child registry (D-01..D-05)
+        // child_depth=0 here: DelegateTaskTool::execute is invoked by the parent AgentLoop;
+        // the runner carries current_depth and the child's AgentSubagentRunner is constructed
+        // with current_depth+1 (Task 2 wiring in subagent_runner.rs).
         let child_registry = build_child_registry(
             &allowed_tools,
             self.memory_manager.clone(),
             child_dir.path(),
+            effective_role,
+            0,
+            &self.config,
+            Some((self.runner.clone(), self.semaphore.clone())),
         )?;
 
         // Build system prompt with structured summary instructions (D-10)
@@ -736,6 +869,10 @@ mod tests {
             &["read_file".to_string(), "write_file".to_string()],
             None,
             Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
         )
         .unwrap();
         let tools = registry.list_tools();
@@ -746,11 +883,15 @@ mod tests {
 
     #[test]
     fn test_build_child_registry_strips_delegate_task() {
-        // AGENT-05: delegate_task must never appear in child registry
+        // AGENT-05: delegate_task must never appear in child registry for leaf
         let registry = build_child_registry(
             &["read_file".to_string(), "delegate_task".to_string()],
             None,
             Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
         )
         .unwrap();
         let tools = registry.list_tools();
@@ -768,6 +909,10 @@ mod tests {
             &["read_file".to_string(), "skills".to_string()],
             None,
             Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
         )
         .unwrap();
         let tools = registry.list_tools();
@@ -780,8 +925,15 @@ mod tests {
     #[test]
     fn test_build_child_registry_unknown_tool_errors() {
         // D-04: fail-early on unknown tools
-        let result =
-            build_child_registry(&["nonexistent_tool".to_string()], None, Path::new("/tmp"));
+        let result = build_child_registry(
+            &["nonexistent_tool".to_string()],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+        );
         assert!(result.is_err(), "unknown tool should cause error");
         let err = result.err().unwrap().to_string();
         assert!(
@@ -793,14 +945,32 @@ mod tests {
     #[test]
     fn test_build_child_registry_empty_uses_no_tools() {
         // Empty list = empty registry (caller passes DEFAULT_SAFE_TOOLS when no user override)
-        let registry = build_child_registry(&[], None, Path::new("/tmp")).unwrap();
+        let registry = build_child_registry(
+            &[],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+        )
+        .unwrap();
         assert!(registry.list_tools().is_empty());
     }
 
     #[test]
     fn test_build_child_registry_terminal_gets_cwd() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = build_child_registry(&["terminal".to_string()], None, dir.path()).unwrap();
+        let registry = build_child_registry(
+            &["terminal".to_string()],
+            None,
+            dir.path(),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+        )
+        .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"terminal"), "should have terminal");
     }
@@ -826,8 +996,16 @@ mod tests {
 
         let mgr: SharedMemoryManager = Arc::new(tokio::sync::Mutex::new(NoopManager));
 
-        let registry =
-            build_child_registry(&["memory".to_string()], Some(mgr), Path::new("/tmp")).unwrap();
+        let registry = build_child_registry(
+            &["memory".to_string()],
+            Some(mgr),
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+        )
+        .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"memory"), "should have memory");
         // The actual read-only behavior is tested in memory_tool::tests
@@ -839,6 +1017,10 @@ mod tests {
             &["read_file".to_string(), "execute_code".to_string()],
             None,
             Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
         )
         .unwrap();
         let tools = registry.list_tools();
@@ -1100,16 +1282,33 @@ mod tests {
 
         // Child built from DEFAULT_SAFE_TOOLS must NOT have delegate_task
         let child_tools: Vec<String> = DEFAULT_SAFE_TOOLS.iter().map(|s| s.to_string()).collect();
-        let child_registry = build_child_registry(&child_tools, None, Path::new("/tmp")).unwrap();
+        let child_registry = build_child_registry(
+            &child_tools,
+            None,
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+        )
+        .unwrap();
         assert!(
             !child_registry.list_tools().contains(&"delegate_task"),
             "AGENT-05: child registry must never contain delegate_task"
         );
 
-        // Even if explicitly requested, delegate_task is stripped
+        // Even if explicitly requested, delegate_task is stripped for leaf
         let with_delegate: Vec<String> = vec!["read_file".to_string(), "delegate_task".to_string()];
-        let child_registry2 =
-            build_child_registry(&with_delegate, None, Path::new("/tmp")).unwrap();
+        let child_registry2 = build_child_registry(
+            &with_delegate,
+            None,
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+        )
+        .unwrap();
         assert!(
             !child_registry2.list_tools().contains(&"delegate_task"),
             "AGENT-05: delegate_task must be stripped even when explicitly requested"
@@ -1677,6 +1876,10 @@ mod tests {
             &["read_file".to_string(), "clarify".to_string()],
             None,
             Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
         )
         .unwrap();
         let tools = registry.list_tools();
@@ -1694,6 +1897,10 @@ mod tests {
             &["read_file".to_string(), "send_message".to_string()],
             None,
             Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
         )
         .unwrap();
         let tools = registry.list_tools();
@@ -1783,6 +1990,142 @@ mod tests {
         assert_eq!(
             seen, 3,
             "per-call max_iterations=3 should override config max_iterations=99"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 32.2 Plan 03: ChildRole + orchestrator depth-gating tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_orchestrator_role_includes_delegate_task() {
+        // D-01/D-02: role=orchestrator + depth < max_spawn_depth + enabled → delegate_task in registry
+        let config = SubagentConfig {
+            max_spawn_depth: 2,
+            orchestrator_enabled: true,
+            ..SubagentConfig::default()
+        };
+        let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
+        let semaphore = Arc::new(Semaphore::new(3));
+        let registry = build_child_registry(
+            &["read_file".to_string()],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Orchestrator,
+            0, // child_depth=0 < max_spawn_depth=2
+            &config,
+            Some((runner, semaphore)),
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(
+            tools.contains(&"delegate_task"),
+            "orchestrator within depth should have delegate_task in registry; got: {:?}",
+            tools
+        );
+        assert!(
+            tools.contains(&"read_file"),
+            "other allowed tools should still be registered"
+        );
+    }
+
+    #[test]
+    fn test_leaf_role_excludes_delegate_task() {
+        // AGENT-05: role=leaf → delegate_task never in registry regardless of config
+        let config = SubagentConfig {
+            max_spawn_depth: 2,
+            orchestrator_enabled: true,
+            ..SubagentConfig::default()
+        };
+        let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
+        let semaphore = Arc::new(Semaphore::new(3));
+        let registry = build_child_registry(
+            &["read_file".to_string(), "delegate_task".to_string()],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &config,
+            Some((runner, semaphore)),
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(
+            !tools.contains(&"delegate_task"),
+            "leaf must never have delegate_task in registry (AGENT-05)"
+        );
+    }
+
+    #[test]
+    fn test_orchestrator_at_max_depth_downgrades() {
+        // D-02: role=orchestrator but child_depth >= max_spawn_depth → downgrade to leaf
+        let config = SubagentConfig {
+            max_spawn_depth: 2,
+            orchestrator_enabled: true,
+            ..SubagentConfig::default()
+        };
+        let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
+        let semaphore = Arc::new(Semaphore::new(3));
+        let registry = build_child_registry(
+            &["read_file".to_string()],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Orchestrator,
+            2, // child_depth=2 == max_spawn_depth=2 → downgrade
+            &config,
+            Some((runner, semaphore)),
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(
+            !tools.contains(&"delegate_task"),
+            "orchestrator at max depth must not have delegate_task (D-02)"
+        );
+    }
+
+    #[test]
+    fn test_orchestrator_kill_switch_forces_leaf() {
+        // D-03: orchestrator_enabled=false → every child forced to leaf regardless of role
+        let config = SubagentConfig {
+            max_spawn_depth: 3,
+            orchestrator_enabled: false,
+            ..SubagentConfig::default()
+        };
+        let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
+        let semaphore = Arc::new(Semaphore::new(3));
+        let registry = build_child_registry(
+            &["read_file".to_string()],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Orchestrator,
+            0,
+            &config,
+            Some((runner, semaphore)),
+        )
+        .unwrap();
+        let tools = registry.list_tools();
+        assert!(
+            !tools.contains(&"delegate_task"),
+            "kill switch (orchestrator_enabled=false) must prevent delegate_task (D-03)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_role_parse_unknown_defaults_to_leaf() {
+        // T-32.2-10: bad role value in args → default Leaf, no crash
+        let tool = make_delegate_tool();
+        // "foo" is not a valid ChildRole value — should default to Leaf and run normally
+        let result = tool
+            .execute(json!({
+                "task": "test task with bad role",
+                "role": "foo"
+            }))
+            .await;
+        // Should succeed (no crash), returning MockRunner's response
+        assert!(
+            result.is_ok(),
+            "bad role value should not crash; got: {:?}",
+            result.err()
         );
     }
 }
