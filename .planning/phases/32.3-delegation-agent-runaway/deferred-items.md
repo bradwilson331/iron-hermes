@@ -1,25 +1,22 @@
 # Phase 32.3 Deferred Items
 
-## Pre-existing build failure in `ironhermes-cli` (HEAD as of 3dacf68e)
+## ~~Pre-existing build failure in `ironhermes-cli` (HEAD as of 3dacf68e)~~ — RESOLVED
 
-`cargo build -p ironhermes-cli` fails with 11 errors that PRE-DATE Plan 01:
+Originally logged: `cargo build -p ironhermes-cli` failed with 11 errors that
+pre-dated Plan 01:
 
 - `error[E0609]: no field 'subagent' on type 'ironhermes_core::Config'` — the
-  field was renamed to `delegation` in Phase 32.2 D-07. The CLI still references
-  the old name in ~10 call sites.
-- `error[E0599]: no method named 'with_max_subagents' found for struct 'CommandContext'`
-  — method was removed/renamed but a residual call site remains.
+  field was renamed to `delegation` in Phase 32.2 D-07.
+- `error[E0599]: no method named 'with_max_subagents' found for struct 'CommandContext'`.
 
-Verified pre-existing by `git stash`ing all Plan 01 edits, building, and
-seeing identical errors. Plan 01 does NOT introduce these errors.
-
-**Scope:** Out of scope for Plan 01 (this plan is about RAII registration
-guards; the CLI errors are a separate Phase 32.2 follow-up).
-
-**Action:** Track here; surface in Phase 32.3 SUMMARY.md "Deferred Issues".
-The CLI test target this plan touched (`agents_list_live_mid_turn.rs`) is a
-test-only file; the bin target's compile failure does not block this plan's
-test verification because lib + integration-test artifacts compile clean.
+**Status (post-phase-32.3 close):** Both errors are no longer reproducible.
+`cargo build --workspace` and `cargo test -p ironhermes-cli --no-run` both
+exit 0 at HEAD `d4a36010`. The only residual references to the old `config.subagent`
+path were two stale doc comments in `tui/status_line.rs:36` and
+`tui_rata/status_line.rs:40` — both were rewritten in the post-phase cleanup
+commit to point at the new `config.delegation.max_concurrent_children` path.
+The local struct field name `max_subagents` is intentionally preserved for
+identifier stability.
 
 ## Excluded crate `ironagent-tools-api/tests/delegate_task_timeout_cancel.rs`
 

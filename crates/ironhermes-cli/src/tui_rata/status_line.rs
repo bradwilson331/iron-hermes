@@ -37,7 +37,8 @@ pub struct StatusLineState {
     /// (Pitfall 8: NEVER awaits RwLock on the render path).
     pub active_subagents: usize,
     /// Plan 21.7-07 (D-04): denominator of the `agents: N/M` pill.
-    /// Seeded once from `config.subagent.max_subagents`.
+    /// Seeded once from `config.delegation.max_concurrent_children` (renamed
+    /// in Phase 32.2 D-07; the local struct field name is kept for stability).
     pub max_subagents: usize,
 }
 
