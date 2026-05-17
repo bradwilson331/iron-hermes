@@ -854,7 +854,7 @@ If all crates are at 100% parity, respond with [SILENT]." \
 
 ---
 
-> Batch mode runs up to `subagent.max_subagents` children concurrently (default: 3). For jobs that discover more items than the batch limit, split into sequential rounds as shown in the Parallel Crate Audit example above. The cron prompt's LLM call itself is the orchestrator — it fans out, waits for summaries, then synthesizes.
+> Batch mode runs up to `delegation.max_concurrent_children` children concurrently (default: 3); batches larger than this return a tool error rather than silently truncating. For jobs that discover more items than the batch limit, split into sequential rounds as shown in the Parallel Crate Audit example above. The cron prompt's LLM call itself is the orchestrator — it fans out, waits for summaries, then synthesizes.
 
 ---
 

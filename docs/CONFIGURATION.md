@@ -464,17 +464,21 @@ Default skill scan paths (in priority order):
 2. `~/.ironhermes/skills/` (or `$IRONHERMES_HOME/skills/`)
 3. `~/.agents/skills/`
 
-### Subagent (`subagent:`)
+### Delegation (`delegation:`)
 
 | Key | Default | Description |
 |---|---|---|
-| `subagent.timeout_secs` | `300` | Timeout per subagent execution in seconds |
-| `subagent.max_subagents` | `3` | Maximum concurrent subagents |
-| `subagent.max_iterations` | `10` | Maximum LLM iterations per subagent |
-| `subagent.default_toolsets` | `["terminal", "file", "web"]` | Default toolset groups for child agents |
-| `subagent.model` | `null` | Model override for subagents (null = use parent's model) |
-| `subagent.provider` | `null` | Provider override for subagents (null = use parent's provider) |
-| `subagent.base_url` | `null` | API base URL override for subagents (null = use parent's) |
+| `delegation.child_timeout_seconds` | `300` | Timeout per child agent execution in seconds |
+| `delegation.max_concurrent_children` | `3` | Maximum concurrent children per batch (oversize batches return a tool error) |
+| `delegation.max_iterations` | `50` | Maximum LLM iterations per child agent (per-call `max_iterations` overrides) |
+| `delegation.max_spawn_depth` | `1` | Maximum spawn depth for `orchestrator`-role children (1 = flat, no nesting) |
+| `delegation.orchestrator_enabled` | `true` | Global kill switch; when `false`, all children downgrade to `leaf` regardless of per-call `role` |
+| `delegation.default_toolsets` | `["terminal", "file", "web"]` | Default toolset groups when none are specified per-call |
+| `delegation.model` | `null` | Model override for children (null = inherit parent's model) |
+| `delegation.provider` | `null` | Provider override for children (null = inherit parent's provider) |
+| `delegation.base_url` | `null` | API base URL override for children (null = inherit parent's) |
+
+> The legacy `subagent:` key, `max_subagents`, and `timeout_secs` were renamed in Phase 32.2. See [DELEGATION.md](DELEGATION.md) for the per-call `role` / `max_iterations` schema, the `/agents` tree view, and a full migration guide.
 
 ### Rate Limiting (`rate_limit:`)
 

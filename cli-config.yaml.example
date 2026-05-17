@@ -211,25 +211,38 @@ skills:
   #   extra_taps: []
   #   well_known_origins: []
 
-# --- Subagent Delegation ---
-subagent:
-  # Timeout per subagent execution in seconds (default: 300)
-  # timeout_secs: 300
+# --- Delegation (subagent spawning via delegate_task) ---
+# Renamed from `subagent:` in Phase 32.2. See docs/DELEGATION.md for the full
+# spec including per-call `role` / `max_iterations` schema and migration guide.
+delegation:
+  # Timeout per child agent execution in seconds (default: 300)
+  # child_timeout_seconds: 300
 
-  # Maximum concurrent subagents (default: 3)
-  # max_subagents: 3
+  # Maximum concurrent children per batch (default: 3)
+  # Oversize batches return a tool error rather than silently truncating
+  # max_concurrent_children: 3
 
-  # Maximum LLM iterations per subagent (default: 10)
-  # max_iterations: 10
+  # Maximum LLM iterations per child agent (default: 50)
+  # Per-call `max_iterations` in the delegate_task tool args overrides this
+  # max_iterations: 50
 
-  # Default toolset groups for child agents
+  # Maximum spawn depth for `orchestrator`-role children (default: 1 = flat, no nesting)
+  # max_spawn_depth: 1
+
+  # Global kill switch; when false all children downgrade to `leaf` regardless of per-call role (default: true)
+  # orchestrator_enabled: true
+
+  # Default toolset groups when none are specified per-call
   # default_toolsets: ["terminal", "file", "web"]
 
-  # Override model for subagents (null = use parent's model)
+  # Override model for children (null = inherit parent's model)
   # model: null
 
-  # Override provider for subagents (null = use parent's provider)
+  # Override provider for children (null = inherit parent's provider)
   # provider: null
+
+  # Override API base URL for children (null = inherit parent's)
+  # base_url: null
 
 # --- Rate Limiting ---
 rate_limit:
