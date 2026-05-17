@@ -172,27 +172,13 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
     };
     match args.first().copied() {
         None | Some("list") => {
-            let entries = reg.list_summary();
+            let entries = reg.tree_summary();
             if entries.is_empty() {
                 return CommandResult::Output("No active subagents.".to_string());
             }
-            // Post-UAT fix: show the 1-indexed alias (subagent-N) alongside
-            // the full registry id so users know which labels /agents kill
-            // accepts. The alias is the ticker's visible label.
-            let body = entries
-                .iter()
-                .enumerate()
-                .map(|(idx, (id, summary, uptime))| {
-                    format!(
-                        "- subagent-{} ({}) ({}) \u{2014} {}s",
-                        idx + 1,
-                        id,
-                        truncate_ellipsis(summary, 80),
-                        uptime.as_secs()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            // Phase 32.2 D-12: render as indented ASCII tree when nesting exists;
+            // fall back to legacy flat-list format when all nodes are parentless.
+            let body = render_agent_tree(&entries);
             CommandResult::Output(format!("Active subagents:\n{}", body))
         }
         Some("kill") => {
@@ -280,6 +266,86 @@ fn truncate_ellipsis(s: &str, max: usize) -> String {
         idx -= 1;
     }
     format!("{}\u{2026}", &s[..idx])
+}
+
+/// Phase 32.2 D-12: Render a flat `Vec<SubagentTreeEntry>` as an indented ASCII tree.
+///
+/// **Flat-list fallback:** if every entry has `parent_id = None`, the output
+/// uses the legacy `- subagent-N (id) (summary) — uptimes` format (no connectors,
+/// no status pill) so existing behaviour is preserved for non-orchestrated sessions.
+///
+/// **Tree mode:** when any nesting exists, `render_nodes_recursive` is called to
+/// emit `├── ` / `└── ` connectors with `│   ` / `    ` continuation prefixes.
+fn render_agent_tree(entries: &[crate::commands::context::SubagentTreeEntry]) -> String {
+    // Flat-list fallback: all entries are root-level (no parent).
+    if entries.iter().all(|e| e.parent_id.is_none()) {
+        return entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| {
+                format!(
+                    "- subagent-{} ({}) ({}) \u{2014} {}s",
+                    idx + 1,
+                    e.id,
+                    truncate_ellipsis(&e.task_summary, 80),
+                    e.uptime.as_secs()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    // Tree mode: recurse from root nodes (parent_id = None).
+    let mut lines = Vec::new();
+    render_nodes_recursive(entries, None, "", &mut lines);
+    lines.join("\n")
+}
+
+/// Depth-first recursive renderer for the subagent tree.
+///
+/// `parent_id` — the parent whose children to render at this level (None = roots).
+/// `prefix`    — the inherited indentation string from ancestor levels.
+///
+/// Unicode box-drawing characters used as escaped codepoints to avoid any
+/// source-encoding ambiguity:
+/// - `\u{251C}\u{2500}\u{2500} ` → `├── ` (non-last child connector)
+/// - `\u{2514}\u{2500}\u{2500} ` → `└── ` (last child connector)
+/// - `\u{2502}   `               → `│   ` (continuation prefix for non-last ancestors)
+/// - `    `                      → `    ` (continuation prefix for last ancestors)
+fn render_nodes_recursive(
+    entries: &[crate::commands::context::SubagentTreeEntry],
+    parent_id: Option<&str>,
+    prefix: &str,
+    lines: &mut Vec<String>,
+) {
+    let children: Vec<_> = entries
+        .iter()
+        .filter(|e| e.parent_id.as_deref() == parent_id)
+        .collect();
+    let count = children.len();
+    for (i, entry) in children.iter().enumerate() {
+        let is_last = i == count - 1;
+        let connector = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251C}\u{2500}\u{2500} "
+        };
+        let child_prefix = if is_last {
+            format!("{}    ", prefix)
+        } else {
+            format!("{}\u{2502}   ", prefix)
+        };
+        let id_short = &entry.id[..entry.id.len().min(8)];
+        lines.push(format!(
+            "{}{}{}  {}  {}s  [{}]",
+            prefix,
+            connector,
+            id_short,
+            truncate_ellipsis(&entry.task_summary, 80),
+            entry.uptime.as_secs(),
+            entry.status,
+        ));
+        render_nodes_recursive(entries, Some(&entry.id), &child_prefix, lines);
+    }
 }
 
 /// Post-UAT helper: what a user-supplied `/agents kill|logs <token>`
@@ -2357,5 +2423,171 @@ mod skills_reload_tests {
         let ctx = empty_ctx().with_skill_registry(registry);
         let result = cmd_skills(&[], &ctx);
         assert!(matches!(result, CommandResult::Output(_)));
+    }
+}
+
+// =============================================================================
+// Phase 32.2 Plan 05: cmd_agents tree render tests
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_agents_tree_tests {
+    use super::*;
+    use crate::commands::context::{CommandContext, SubagentListSnapshot, SubagentTreeEntry};
+    use crate::commands::{CommandResult, Platform};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    fn empty_ctx() -> CommandContext {
+        CommandContext::new(
+            Platform::Local,
+            "test-session".to_string(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Fake registry that returns a configurable list of tree entries.
+    struct FakeListWithTree {
+        entries: Vec<SubagentTreeEntry>,
+    }
+
+    impl SubagentListSnapshot for FakeListWithTree {
+        fn active_count(&self) -> usize {
+            self.entries.len()
+        }
+        fn list_summary(&self) -> Vec<(String, String, Duration)> {
+            self.entries
+                .iter()
+                .map(|e| (e.id.clone(), e.task_summary.clone(), e.uptime))
+                .collect()
+        }
+        fn kill(&self, _id: &str) -> bool {
+            false
+        }
+        fn transcript_path(&self, _id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn tree_summary(&self) -> Vec<SubagentTreeEntry> {
+            self.entries.clone()
+        }
+    }
+
+    fn make_entry(id: &str, summary: &str, parent_id: Option<&str>, depth: usize) -> SubagentTreeEntry {
+        SubagentTreeEntry {
+            id: id.to_string(),
+            task_summary: summary.to_string(),
+            uptime: Duration::from_secs(10),
+            status: "running".to_string(),
+            parent_id: parent_id.map(|s| s.to_string()),
+            depth,
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 1: empty registry → "No active subagents."
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_cmd_agents_empty_registry() {
+        let fake = Arc::new(FakeListWithTree { entries: vec![] });
+        let ctx = empty_ctx().with_subagent_registry(fake);
+        let result = cmd_agents(&[], &ctx);
+        assert_eq!(
+            result,
+            CommandResult::Output("No active subagents.".to_string()),
+            "empty registry should return 'No active subagents.'"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 2: 3 parentless subagents → legacy flat-list format (no connectors)
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_cmd_agents_flat_list_unchanged() {
+        let entries = vec![
+            make_entry("sub_aabbcc", "task A", None, 0),
+            make_entry("sub_112233", "task B", None, 0),
+            make_entry("sub_xxyyzz", "task C", None, 0),
+        ];
+        let fake = Arc::new(FakeListWithTree { entries });
+        let ctx = empty_ctx().with_subagent_registry(fake);
+        let result = cmd_agents(&[], &ctx);
+        let output = match result {
+            CommandResult::Output(s) => s,
+            other => panic!("expected Output, got {:?}", other),
+        };
+        // Legacy flat-list format: "- subagent-N (id) (summary) — uptimes"
+        assert!(output.contains("subagent-1"), "should contain subagent-1 alias");
+        assert!(output.contains("subagent-2"), "should contain subagent-2 alias");
+        assert!(output.contains("subagent-3"), "should contain subagent-3 alias");
+        assert!(output.contains("task A"), "should contain task A summary");
+        // No tree connectors in flat mode
+        assert!(!output.contains("\u{2514}\u{2500}\u{2500}"), "flat mode should not have └── connector");
+        assert!(!output.contains("\u{251C}\u{2500}\u{2500}"), "flat mode should not have ├── connector");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 3: root + 2 children → tree with ├── and └── connectors and [running] pills
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_cmd_agents_renders_tree_when_nested() {
+        let entries = vec![
+            make_entry("sub_root1234", "orchestrate pipeline", None, 0),
+            make_entry("sub_child_aa", "fetch data", Some("sub_root1234"), 1),
+            make_entry("sub_child_bb", "write output", Some("sub_root1234"), 1),
+        ];
+        let fake = Arc::new(FakeListWithTree { entries });
+        let ctx = empty_ctx().with_subagent_registry(fake);
+        let result = cmd_agents(&[], &ctx);
+        let output = match result {
+            CommandResult::Output(s) => s,
+            other => panic!("expected Output, got {:?}", other),
+        };
+        // Should contain tree connectors
+        assert!(
+            output.contains("\u{251C}\u{2500}\u{2500}") || output.contains("\u{2514}\u{2500}\u{2500}"),
+            "nested tree should contain ├── or └── connector; got:\n{}",
+            output
+        );
+        // Last child gets └──
+        assert!(output.contains("\u{2514}\u{2500}\u{2500}"), "last child should have └── connector");
+        // Status pills
+        assert!(output.contains("[running]"), "should contain [running] status pill");
+        // Summaries present
+        assert!(output.contains("fetch data"), "should contain child_a summary");
+        assert!(output.contains("write output"), "should contain child_b summary");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 4: 3-level tree → correct │   continuation prefixes
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_render_agent_tree_three_levels() {
+        let entries = vec![
+            make_entry("sub_root0000", "root task", None, 0),
+            make_entry("sub_mid11111", "mid task", Some("sub_root0000"), 1),
+            make_entry("sub_leaf2222", "leaf task", Some("sub_mid11111"), 2),
+        ];
+        let output = render_agent_tree(&entries);
+        // root level: no prefix, gets connector
+        assert!(
+            output.contains("\u{2514}\u{2500}\u{2500}") || output.contains("\u{251C}\u{2500}\u{2500}"),
+            "should contain tree connector at root; got:\n{}",
+            output
+        );
+        // The mid level should have a continuation prefix (root is last, so "    ")
+        // and the leaf should be nested deeper.
+        assert!(output.contains("leaf task"), "leaf task should appear in output");
+        assert!(output.contains("mid task"), "mid task should appear in output");
+        assert!(output.contains("root task"), "root task should appear in output");
+        // 3-level: ensure leaf line contains two connector-depth's worth of prefix
+        let leaf_line = output.lines().find(|l| l.contains("leaf task"))
+            .expect("leaf task line should exist");
+        // At depth 2, leaf_line should have at least 4 spaces of indentation prefix before connector
+        assert!(
+            leaf_line.starts_with("    ") || leaf_line.starts_with("\u{2502}"),
+            "leaf line should have indentation; got: {:?}",
+            leaf_line
+        );
     }
 }
