@@ -46,6 +46,17 @@ pub struct MemoryInfo {
     pub entries: Vec<MemoryEntry>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// Derived from SkillSource: Builtin→"bundled", Official→"official",
+    /// Trusted→"trusted", Community→"installed", SelfCreated→"self-created".
+    pub category: String,
+    /// True if skill.name appears in runtime_bundle.active_skills.
+    pub enabled: bool,
+}
+
 #[get("/api/commands")]
 pub async fn list_slash_commands() -> Result<Vec<SlashCommandInfo>> {
     let state = crate::server::state::global_app_state();
@@ -162,6 +173,40 @@ pub async fn get_memory() -> Result<MemoryInfo> {
         }
     }
     Ok(MemoryInfo { entries: out })
+}
+
+/// Phase 26.7 Plan 03 (D-09, R-1, R-4): Read-only catalog of skills from the
+/// runtime SkillRegistry, with per-skill `enabled` reflecting the current
+/// session's `active_skills` set. SkillRegistry.list() is sync — no await
+/// needed for the registry read; only the std Mutex lock on active_skills.
+#[get("/api/skills")]
+pub async fn list_skills() -> Result<Vec<SkillInfo>> {
+    let state = crate::server::state::global_app_state();
+    let registry = &state.runtime_bundle.skill_registry;
+
+    // std::sync::Mutex — short-lived lock, no .await inside the held scope.
+    let active_names: std::collections::HashSet<String> = {
+        let guard = state.runtime_bundle.active_skills.lock()
+            .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
+        guard.iter().map(|r| r.name.clone()).collect()
+    };
+
+    let out = registry.list().iter().map(|r| {
+        let category = match r.source {
+            ironhermes_core::skills::SkillSource::Builtin     => "bundled",
+            ironhermes_core::skills::SkillSource::Official    => "official",
+            ironhermes_core::skills::SkillSource::Trusted     => "trusted",
+            ironhermes_core::skills::SkillSource::Community   => "installed",
+            ironhermes_core::skills::SkillSource::SelfCreated => "self-created",
+        };
+        SkillInfo {
+            name: r.name.clone(),
+            description: r.description.clone(),
+            category: category.to_string(),
+            enabled: active_names.contains(&r.name),
+        }
+    }).collect();
+    Ok(out)
 }
 
 #[post("/api/sessions/create")]
