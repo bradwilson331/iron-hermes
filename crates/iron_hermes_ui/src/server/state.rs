@@ -395,6 +395,8 @@ mod plan_32_2_05_tests {
             // Phase 32.3 Plan 01 (D-04 reservation): test helpers leave None;
             // tree-json only inspects parent_id/depth, not activity.
             activity_last: None,
+            // Phase 32.3 Plan 02 (D-05): default; tree-json doesn't read this.
+            stale_warn_seconds: 120,
         }
     }
 

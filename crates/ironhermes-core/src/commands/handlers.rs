@@ -278,17 +278,29 @@ fn truncate_ellipsis(s: &str, max: usize) -> String {
 /// emit `├── ` / `└── ` connectors with `│   ` / `    ` continuation prefixes.
 fn render_agent_tree(entries: &[crate::commands::context::SubagentTreeEntry]) -> String {
     // Flat-list fallback: all entries are root-level (no parent).
+    //
+    // Phase 32.3 Plan 02 (D-06): append `[{status}]` pill when status is NOT
+    // `"running"` (i.e. `"stale"` or `"killed"`). The "running" case stays
+    // pill-less to preserve byte-identical legacy output for the dominant
+    // non-orchestrated session pattern. Tree mode always renders the pill
+    // verbatim per Phase 32.2 Plan 04 D-12.
     if entries.iter().all(|e| e.parent_id.is_none()) {
         return entries
             .iter()
             .enumerate()
             .map(|(idx, e)| {
+                let pill = if e.status == "running" {
+                    String::new()
+                } else {
+                    format!("  [{}]", e.status)
+                };
                 format!(
-                    "- subagent-{} ({}) ({}) \u{2014} {}s",
+                    "- subagent-{} ({}) ({}) \u{2014} {}s{}",
                     idx + 1,
                     e.id,
                     truncate_ellipsis(&e.task_summary, 80),
-                    e.uptime.as_secs()
+                    e.uptime.as_secs(),
+                    pill,
                 )
             })
             .collect::<Vec<_>>()

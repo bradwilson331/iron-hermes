@@ -152,6 +152,10 @@ pub(crate) fn build_subagent_info(
         // reservation — Plan 02 wires the real Arc<Mutex<Instant>> from the
         // child AgentLoop. Initialise None here.
         activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default stale threshold for callers of
+        // this pure helper. The real production path in `run_child` constructs
+        // SubagentInfo directly with the resolved per-call value (see below).
+        stale_warn_seconds: 120,
     }
 }
 
@@ -195,6 +199,7 @@ impl SubagentRunner for AgentSubagentRunner {
         model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
         tool_progress: Option<ironhermes_tools::delegate_task::ChildToolProgressCallback>,
+        stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>> {
         // D-23/D-24: construct child client with model override if specified
         let child_client = if let Some(model) = model_override {
@@ -240,6 +245,51 @@ impl SubagentRunner for AgentSubagentRunner {
                 _ => None,
             };
 
+        // Wrap the caller's tool_progress callback so every tool event also
+        // appends a TranscriptLine (D-05: per-turn writes).
+        let tool_progress_wrapped: Option<
+            ironhermes_tools::delegate_task::ChildToolProgressCallback,
+        > = if let Some(writer) = transcript_writer.clone() {
+            let inner = tool_progress;
+            Some(Box::new(move |name: &str, args_preview: &str| {
+                // fire-and-forget; never stall the agent turn
+                writer.append(TranscriptLine::now_tool_call(name, args_preview));
+                if let Some(ref cb) = inner {
+                    cb(name, args_preview);
+                }
+            })
+                as ironhermes_tools::delegate_task::ChildToolProgressCallback)
+        } else {
+            tool_progress
+        };
+
+        // Phase 32.3 Plan 02 (D-04): construct AgentLoop FIRST so we can grab
+        // a clone of its live activity_last Arc before registering. The
+        // returned Arc is the same instance bumped by the four mark_activity
+        // sites; the registry reads it via SubagentInfo.activity_last for live
+        // staleness derivation (no push updates, no periodic polling).
+        let mut agent = AgentLoop::new(child_client, registry, max_iterations);
+        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1)
+        agent = wire_fallback_if_configured(agent, &self.resolver); // chains .with_fallback() via the shared helper — PROV-07
+        // D-21: Forward cancel token to child AgentLoop
+        if let Some(ref token) = cancel_token {
+            agent = agent.with_cancellation_token(token.clone());
+        }
+        // D-19: Forward (possibly wrapped) tool progress callback
+        if let Some(cb) = tool_progress_wrapped {
+            agent = agent.with_tool_progress(cb);
+        }
+        // Wire budget if available
+        if let Some(ref budget) = self.budget {
+            agent = agent.with_budget(budget.clone());
+        }
+
+        // Phase 32.3 Plan 02 (D-04): live activity clock — clone the Arc from
+        // the constructed AgentLoop. SAFE to grab before `agent.run` because
+        // the Arc is shared between the AgentLoop's internal `mark_activity`
+        // sites and the SubagentInfo stored in the registry.
+        let activity_last_arc = agent.activity_last_arc();
+
         // Phase 32.3 Plan 01 (D-01 / D-02 / D-03): register via the RAII guard.
         // `_guard` is bound for the entire remaining body of `run_child`; its
         // Drop calls `unregister_internal` synchronously on every exit path
@@ -259,48 +309,18 @@ impl SubagentRunner for AgentSubagentRunner {
                 started_at: Instant::now(),
                 cancel: cancel_for_info,
                 transcript_path: path_for_info,
-                // Phase 32.3 Plan 01 reservation; wired by Plan 02.
-                activity_last: None,
+                // Phase 32.3 Plan 02 (D-04): live Arc<Mutex<Instant>> cloned
+                // from `AgentLoop::activity_last_arc()`. Registry reads call
+                // `.lock().elapsed()` for live staleness derivation.
+                activity_last: Some(activity_last_arc.clone()),
+                // Phase 32.3 Plan 02 (D-05): resolved per-call threshold.
+                stale_warn_seconds,
             };
             let weak = Arc::downgrade(reg);
             Some(reg.write().await.register_guarded(info, weak))
         } else {
             None
         };
-
-        // Wrap the caller's tool_progress callback so every tool event also
-        // appends a TranscriptLine (D-05: per-turn writes).
-        let tool_progress_wrapped: Option<
-            ironhermes_tools::delegate_task::ChildToolProgressCallback,
-        > = if let Some(writer) = transcript_writer.clone() {
-            let inner = tool_progress;
-            Some(Box::new(move |name: &str, args_preview: &str| {
-                // fire-and-forget; never stall the agent turn
-                writer.append(TranscriptLine::now_tool_call(name, args_preview));
-                if let Some(ref cb) = inner {
-                    cb(name, args_preview);
-                }
-            })
-                as ironhermes_tools::delegate_task::ChildToolProgressCallback)
-        } else {
-            tool_progress
-        };
-
-        let mut agent = AgentLoop::new(child_client, registry, max_iterations);
-        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1)
-        agent = wire_fallback_if_configured(agent, &self.resolver); // chains .with_fallback() via the shared helper — PROV-07
-        // D-21: Forward cancel token to child AgentLoop
-        if let Some(ref token) = cancel_token {
-            agent = agent.with_cancellation_token(token.clone());
-        }
-        // D-19: Forward (possibly wrapped) tool progress callback
-        if let Some(cb) = tool_progress_wrapped {
-            agent = agent.with_tool_progress(cb);
-        }
-        // Wire budget if available
-        if let Some(ref budget) = self.budget {
-            agent = agent.with_budget(budget.clone());
-        }
 
         let messages = vec![
             ChatMessage::system(&system_prompt),

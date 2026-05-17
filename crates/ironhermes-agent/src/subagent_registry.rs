@@ -29,22 +29,32 @@ pub struct SubagentInfo {
     pub started_at: Instant,
     pub cancel: CancellationToken,
     pub transcript_path: PathBuf,
-    /// Phase 32.3 Plan 01 (D-04 reservation): shared live clock from
-    /// `AgentLoop::activity_last`. Plan 01 reserves the field initialised to
-    /// `None`; Plan 02 wires the real `Arc<Mutex<Instant>>` from the child
-    /// AgentLoop so the registry can compute live `last_activity.elapsed()`
-    /// without push updates.
+    /// Phase 32.3 Plan 01 (D-04 reservation), Plan 02 (live wiring): shared
+    /// live clock from `AgentLoop::activity_last_arc()`. Plan 01 reserved the
+    /// field as `None`; Plan 02 populates it with the real
+    /// `Arc<Mutex<Instant>>` from the child AgentLoop so the registry can
+    /// compute live `activity_last.lock().elapsed()` without push updates.
     pub activity_last: Option<std::sync::Arc<std::sync::Mutex<std::time::Instant>>>,
+    /// Phase 32.3 Plan 02 (D-05): effective stale warn threshold for THIS
+    /// subagent, resolved at delegation time from
+    /// `task_obj.stale_warn_seconds` (per-call) → `config.stale_warn_seconds`
+    /// (fallback) → 120. Stored on the entry so the registry render code can
+    /// compute `elapsed > stale_warn_seconds` without re-reading config.
+    pub stale_warn_seconds: u64,
 }
 
 #[derive(Default)]
 pub struct SubagentRegistry {
     active: HashMap<SubagentId, SubagentInfo>,
-    /// Phase 32.3 Plan 01 (D-06 prerequisite): IDs that have already emitted
-    /// `tracing::warn!` for the stale-threshold crossing. `unregister_internal`
-    /// removes the id from this set so a re-registration starts fresh.
-    /// Plan 02 consumes this field when wiring the once-per-child stale warn.
-    stale_warned: HashSet<SubagentId>,
+    /// Phase 32.3 Plan 01 (D-06 prerequisite), Plan 02 (interior mutability):
+    /// IDs that have already emitted `tracing::warn!` for the stale-threshold
+    /// crossing. Wrapped in `std::sync::Mutex` so the once-per-child gate can
+    /// fire from `&self` read paths (`flatten_tree` via `tree_summary` takes
+    /// `&self`). `unregister_internal` clears the id so a re-registration
+    /// starts fresh (matches the canonical Plan 01 D-06 prerequisite contract;
+    /// `SubagentId` is a unique nonce so cross-id leak is structurally
+    /// impossible — T-32.3-04 accepted).
+    stale_warned: std::sync::Mutex<HashSet<SubagentId>>,
 }
 
 /// Phase 32.3 Plan 01 (D-01 / D-02 / D-03): RAII guard returned by
@@ -111,7 +121,9 @@ impl SubagentRegistry {
     /// `stale_warned` here preserves once-per-child warn semantics across
     /// re-registration (D-06 prerequisite consumed by Plan 02).
     pub(crate) fn unregister_internal(&mut self, id: &str) -> Option<SubagentInfo> {
-        self.stale_warned.remove(id);
+        if let Ok(mut warned) = self.stale_warned.lock() {
+            warned.remove(id);
+        }
         self.active.remove(id)
     }
 
@@ -198,20 +210,55 @@ impl SubagentRegistryHandle {
     }
 }
 
-/// Phase 32.2 Plan 04 (D-11): Recursive depth-first walker that flattens a
-/// `SubagentTreeNode` slice into a `Vec<SubagentTreeEntry>`.
+/// Phase 32.2 Plan 04 (D-11) + Phase 32.3 Plan 02 (D-06): Recursive depth-first
+/// walker that flattens a `SubagentTreeNode` slice into a `Vec<SubagentTreeEntry>`.
 ///
 /// Each node is emitted before its children (pre-order). `depth` tracks the
-/// nesting level (0 = root). `status` is derived from `info.cancel.is_cancelled()`:
-/// cancelled → `"killed"`, otherwise → `"running"`.
+/// nesting level (0 = root). Status derivation order (priority):
+///   1. `"killed"`  — `info.cancel.is_cancelled()`
+///   2. `"stale"`   — `info.activity_last` is Some and elapsed >
+///                    `info.stale_warn_seconds`
+///   3. `"running"` — otherwise
+///
+/// `stale_warned` is the registry's once-per-child dedup set. When a node
+/// first crosses the stale threshold (i.e. derives `"stale"` while NOT in the
+/// set), a `tracing::warn!` is emitted and the id is inserted. Repeated calls
+/// while still stale do NOT re-emit. `unregister_internal` removes the id so
+/// a re-registration starts fresh. This is the D-06 once-per-child contract
+/// and the T-32.3-05 (warn-spam DoS) mitigation.
 fn flatten_tree(
     nodes: &[SubagentTreeNode],
     depth: usize,
     out: &mut Vec<ironhermes_core::commands::context::SubagentTreeEntry>,
+    stale_warned: &std::sync::Mutex<HashSet<SubagentId>>,
 ) {
     for node in nodes {
         let status = if node.info.cancel.is_cancelled() {
             "killed".to_string()
+        } else if let Some(elapsed_secs) = node
+            .info
+            .activity_last
+            .as_ref()
+            .and_then(|al| al.lock().ok().map(|guard| guard.elapsed().as_secs()))
+        {
+            if elapsed_secs > node.info.stale_warn_seconds {
+                // D-06 once-per-child warn gate (T-32.3-05 mitigation).
+                if let Ok(mut warned) = stale_warned.lock() {
+                    if !warned.contains(&node.info.id) {
+                        tracing::warn!(
+                            target: "ironhermes_agent::subagent_registry",
+                            subagent_id = %node.info.id,
+                            idle_secs = elapsed_secs,
+                            stale_warn_seconds = node.info.stale_warn_seconds,
+                            "subagent stale threshold crossed"
+                        );
+                        warned.insert(node.info.id.clone());
+                    }
+                }
+                "stale".to_string()
+            } else {
+                "running".to_string()
+            }
         } else {
             "running".to_string()
         };
@@ -223,7 +270,7 @@ fn flatten_tree(
             parent_id: node.info.parent_id.clone(),
             depth,
         });
-        flatten_tree(&node.children, depth + 1, out);
+        flatten_tree(&node.children, depth + 1, out, stale_warned);
     }
 }
 
@@ -275,7 +322,10 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
                 let guard = self.0.read().await;
                 let tree = guard.build_tree();
                 let mut out = Vec::new();
-                flatten_tree(&tree, 0, &mut out);
+                // Phase 32.3 Plan 02 (D-06): pass the registry's stale_warned
+                // dedup set so the once-per-child warn gate fires here. Wrap
+                // in Mutex (already is) gives interior mutability through &self.
+                flatten_tree(&tree, 0, &mut out, &guard.stale_warned);
                 out
             })
         })
@@ -300,6 +350,9 @@ mod tests {
             cancel: CancellationToken::new(),
             transcript_path: PathBuf::from("/dev/null"),
             activity_last: None,
+            // Phase 32.3 Plan 02 (D-05): default stale threshold; tests that
+            // exercise stale derivation override this explicitly.
+            stale_warn_seconds: 120,
         }
     }
 
@@ -416,6 +469,7 @@ mod tests {
             cancel: child_killed_token,
             transcript_path: PathBuf::from("/dev/null"),
             activity_last: None,
+            stale_warn_seconds: 120,
         };
 
         let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
