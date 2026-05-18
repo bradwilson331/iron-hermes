@@ -771,7 +771,7 @@ Plans:
 **Goal:** Wire 5 stubbed web UI screens (Tools, Agents, Memory, Skills, Models) to real runtime services via `use_server_future` + `#[get]` server fns, replacing `stub_data::*` calls. Office, Soul, Schedules, Providers stay stubbed; Gateway deferred to Discord/Slack phase.
 **Requirements**: 26.7-D-01..D-13 (CONTEXT.md)
 **Depends on:** Phase 26
-**Plans:** 5/5 plans complete
+**Plans:** 5/6 plans complete (Plan 06 added post-UAT to close blocker)
 
 Plans:
 - [x] 26.7-01-tools-screen — wire ScreenTools to existing `api::list_tools` (pattern validation; smallest)
@@ -779,6 +779,7 @@ Plans:
 - [x] 26.7-03-skills-screen — add `SkillInfo` (no version per R-4) + `list_skills` fn; dynamic counts in sub-copy/ALL tab
 - [x] 26.7-04-models-screen — add `ModelInfo` + `list_models` fn; preserve family grouping with owned `String`
 - [x] 26.7-05-agents-screen — add NEW `api_agents_list` + `AgentInfo`; wire kill/interrupt/prune with KILL? 3s inline confirm
+- [ ] 26.7-06 (gap closure) — wrap `api_agents_{kill,interrupt,prune}` in `tokio::task::spawn_blocking` to escape Dioxus per-connection LocalSet (UAT Test 5 blocker: ShrikeService `block_in_place` panics inside LocalSet)
 
 ### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
 
