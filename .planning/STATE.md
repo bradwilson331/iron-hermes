@@ -7,7 +7,7 @@ stopped_at: Phase 26.7 UI-SPEC approved
 last_updated: "2026-05-18T09:50:34.875Z"
 last_activity: 2026-05-18 -- Phase 26.7 execution started
 progress:
-  total_phases: 59
+  total_phases: 60
   completed_phases: 42
   total_plans: 235
   completed_plans: 226
@@ -449,6 +449,7 @@ Recent decisions affecting current work:
 - Phase 32.2 inserted after Phase 32.1: subagent delegation parity (URGENT)
 - Phase 32.3 inserted after Phase 32: delegation agent runaway (URGENT)
 - Phase 26.7 inserted after Phase 26.6: wire up web to real services (URGENT)
+- Phase 26.7.1 inserted after Phase 26.7: Agents page live updates — periodic-poll baseline + TERMINATED-HOLD-N fade (N=5s), then ws-event-driven upgrade for <1s update latency (URGENT)
 
 ### Pending Todos
 
