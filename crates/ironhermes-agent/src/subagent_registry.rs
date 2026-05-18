@@ -67,10 +67,16 @@ pub struct SubagentRegistry {
 /// registry lifetime: if the Arc is gone (session shutdown), Drop is a silent
 /// no-op which is the correct behavior.
 ///
-/// **Constraint:** Drop calls `block_in_place` — only safe on the tokio
-/// multi-thread runtime. Tests that exercise the Drop path must use
-/// `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` or higher
-/// (RESEARCH.md Pitfall 1).
+/// **Constraint (Phase 26.7-07):** Drop dispatches `unregister_internal` to a
+/// fresh OS thread via `std::thread::spawn`, then calls `handle.block_on(...)`
+/// inside that thread. The OS thread has no tokio runtime affiliation, so it
+/// escapes any Dioxus per-connection `LocalSet` the caller might be on —
+/// where the prior `block_in_place + block_on` bridge panicked
+/// (`"can call blocking only when running on the multi-threaded runtime"`,
+/// 26.7-06 UAT). Drop joins the thread, preserving **synchronous** Drop
+/// semantics: the registry write completes before Drop returns. Cost: one
+/// short-lived OS thread per drop. Drops happen at subagent lifecycle
+/// boundaries (not hot-path) so this is acceptable.
 pub struct RegistrationGuard {
     registry: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>>,
     id: SubagentId,
@@ -78,15 +84,36 @@ pub struct RegistrationGuard {
 
 impl Drop for RegistrationGuard {
     fn drop(&mut self) {
+        // Phase 26.7-07 (deviation from plan): we use std::thread::spawn +
+        // handle.block_on instead of tokio::spawn(async ...). Rationale:
+        //   - tokio::spawn(async) introduces eventual-consistency (cleanup runs
+        //     on a future tick), breaking existing tests at this module's `#[cfg(test)]`
+        //     block which assume sync Drop semantics with a single yield_now.
+        //   - std::thread::spawn creates an OS thread with no tokio runtime affiliation,
+        //     so handle.block_on works there without the LocalSet panic that the prior
+        //     block_in_place + block_on path triggered (26.7-06 SUMMARY documents the
+        //     independent panic at subagent_registry.rs:86 fired by ws turn task's
+        //     terminal Future::poll inside Dioxus per-connection LocalSet).
+        //   - join() preserves sync Drop: registry write completes before Drop returns,
+        //     matching the original block_in_place contract that existing tests rely on.
+        // The cost is one OS thread spawn per Drop, which is acceptable because Drops
+        // are infrequent (subagent lifecycle, not hot-path).
         if let Some(arc) = self.registry.upgrade() {
-            let id = self.id.clone();
-            // Same block_in_place + block_on bridge as SubagentRegistryHandle::kill
-            // (lines 187-190). Safe on multi-thread runtime; required because Rust
-            // has no async Drop.
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { arc.write().await.unregister_internal(&id) });
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let id = self.id.clone();
+                if let Ok(thread) = std::thread::Builder::new()
+                    .name("registration-guard-drop".into())
+                    .spawn(move || {
+                        handle.block_on(async move {
+                            arc.write().await.unregister_internal(&id);
+                        });
+                    })
+                {
+                    let _ = thread.join();
+                }
+                // If thread spawn fails (e.g. OS resource exhaustion), silent no-op.
+            }
+            // If no tokio runtime is current (process teardown), silent no-op.
         }
         // If upgrade() is None the registry's Arc has already been dropped
         // (session shutdown). Silent no-op — there is nothing to unregister.
