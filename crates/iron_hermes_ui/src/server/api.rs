@@ -286,29 +286,55 @@ pub async fn create_session() -> Result<String> {
 
 /// Phase 32.3 Plan 04 (D-08): `POST /api/agents/kill` body `{"id": "sub_xxx"}`.
 /// Returns the JSON shape documented in `state::api_agents_kill`.
+/// Phase 26.7 Plan 06 (Gap 1): wrapped in tokio::task::spawn_blocking to escape
+/// Dioxus fullstack per-connection LocalSet — ShrikeService internals use
+/// block_in_place which requires the multi-thread runtime.
 #[post("/api/agents/kill")]
 pub async fn api_agents_kill(id: String) -> Result<serde_json::Value> {
-    let state = crate::server::state::global_app_state();
-    Ok(state.api_agents_kill(serde_json::json!({ "id": id })))
+    let shrike = crate::server::state::global_app_state().shrike.clone();
+    let body = serde_json::json!({ "id": id });
+    let result = tokio::task::spawn_blocking(move || {
+        crate::server::state::api_agents_kill(shrike.as_deref(), body)
+    })
+    .await
+    .map_err(|e| ServerFnError::new(format!("spawn_blocking join error: {e}")))?;
+    Ok(result)
 }
 
 /// Phase 32.3 Plan 04 (D-08): `POST /api/agents/interrupt` body `{"id": "sub_xxx"}`.
+/// Phase 26.7 Plan 06 (Gap 1): wrapped in tokio::task::spawn_blocking to escape
+/// Dioxus fullstack per-connection LocalSet — ShrikeService internals use
+/// block_in_place which requires the multi-thread runtime.
 #[post("/api/agents/interrupt")]
 pub async fn api_agents_interrupt(id: String) -> Result<serde_json::Value> {
-    let state = crate::server::state::global_app_state();
-    Ok(state.api_agents_interrupt(serde_json::json!({ "id": id })))
+    let shrike = crate::server::state::global_app_state().shrike.clone();
+    let body = serde_json::json!({ "id": id });
+    let result = tokio::task::spawn_blocking(move || {
+        crate::server::state::api_agents_interrupt(shrike.as_deref(), body)
+    })
+    .await
+    .map_err(|e| ServerFnError::new(format!("spawn_blocking join error: {e}")))?;
+    Ok(result)
 }
 
 /// Phase 32.3 Plan 04 (D-08): `POST /api/agents/prune` body `{"stale_secs": 120}`
 /// (optional; defaults to 120 to match `SubagentConfig::stale_warn_seconds`).
+/// Phase 26.7 Plan 06 (Gap 1): wrapped in tokio::task::spawn_blocking to escape
+/// Dioxus fullstack per-connection LocalSet — ShrikeService internals use
+/// block_in_place which requires the multi-thread runtime.
 #[post("/api/agents/prune")]
 pub async fn api_agents_prune(stale_secs: Option<u64>) -> Result<serde_json::Value> {
-    let state = crate::server::state::global_app_state();
+    let shrike = crate::server::state::global_app_state().shrike.clone();
     let body = match stale_secs {
         Some(s) => serde_json::json!({ "stale_secs": s }),
         None => serde_json::json!({}),
     };
-    Ok(state.api_agents_prune(body))
+    let result = tokio::task::spawn_blocking(move || {
+        crate::server::state::api_agents_prune(shrike.as_deref(), body)
+    })
+    .await
+    .map_err(|e| ServerFnError::new(format!("spawn_blocking join error: {e}")))?;
+    Ok(result)
 }
 
 /// Phase 32.3 Plan 04 (D-08): `GET /api/agents/status?id=sub_xxx`.
