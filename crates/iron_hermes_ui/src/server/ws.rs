@@ -15,6 +15,35 @@ use tracing::{info, warn};
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
+/// Phase 26.7.1 Plan 02 (D-06 / Path A): RAII guard that clears the per-turn
+/// callback slot on drop. Ensures the slot is reset to None even if
+/// `run_web_turn` panics — the tokio task's drop machinery runs Drop before
+/// the JoinHandle's error propagates.
+#[cfg(feature = "server")]
+struct SubagentCallbackSlotGuard {
+    slot: std::sync::Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>,
+        >,
+    >,
+}
+
+#[cfg(feature = "server")]
+impl Drop for SubagentCallbackSlotGuard {
+    fn drop(&mut self) {
+        // Best-effort clear. Use try_lock since Drop cannot await.
+        // The slot is held only across very short windows; contention is
+        // not expected outside of pathological teardown cases.
+        if let Ok(mut guard) = self.slot.try_lock() {
+            *guard = None;
+        }
+        // If try_lock fails (extremely unlikely — only the callback's
+        // try_lock contends, and it doesn't hold the lock across .send),
+        // we leak a stale Some(tx) until the next turn overwrites it. The
+        // closed channel makes any further send a silent no-op. Acceptable.
+    }
+}
+
 /// Server-side application-level WebSocket keepalive interval.
 ///
 /// Application-level Ping frames keep intermediate proxy idle timers
@@ -208,6 +237,20 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             success,
                                         });
                                     });
+
+                                // Phase 26.7.1 Plan 02 (D-06 / Path A): install this turn's tx into the
+                                // callback slot so the singleton SubagentProgressCallback baked into
+                                // AppRuntimeBundle can forward SubagentEvent {} to this client.
+                                let tx_subagent = tx.clone();
+                                {
+                                    let mut guard = app_state.subagent_callback_slot.lock().await;
+                                    *guard = Some(tx_subagent);
+                                }
+                                let _slot_guard = SubagentCallbackSlotGuard {
+                                    slot: app_state.subagent_callback_slot.clone(),
+                                };
+                                // _slot_guard is dropped at end-of-block (after run_web_turn returns or
+                                // panics), restoring slot to None.
 
                                 let result = app_state
                                     .run_web_turn(
