@@ -113,18 +113,22 @@ gateway:
   # compression_threshold: 0.85
 
   # Platform adapters
-  # The `platforms:` map is empty by default. To enable Telegram, uncomment the
-  # `telegram:` block below AND provide a token (env var or `token:`).
+  # The `platforms:` map is empty by default. Each platform key (telegram,
+  # discord, slack) is independent — missing config sections SILENTLY SKIP at
+  # gateway startup, so existing Telegram-only deployments don't change. For
+  # any platform, both the config section AND a resolved token must be present
+  # for the listener to spawn. See docs/MULTI-PLATFORM-GATEWAY.md for the full
+  # operator guide (token acquisition, intents, Socket Mode setup).
   # platforms:
   #   telegram:
-  #     # Enable Telegram gateway (required to register the platform at all)
+  #     # Enable Telegram gateway (informational; resolved token is the gate)
   #     enabled: true
   #
   #     # Bot token. Prefer the TELEGRAM_BOT_TOKEN env var (in ~/.ironhermes/.env)
   #     # over inlining the secret here. If both are set, env var wins.
   #     # token: "123456:ABC-DEF..."
   #
-  #     # Allowed Telegram chat IDs (integers). Empty list = deny all.
+  #     # Allowed Telegram chat IDs (Vec<i64>). Empty list = deny all.
   #     # Get your chat ID by messaging @userinfobot on Telegram.
   #     whitelist: [123456789]
   #
@@ -132,6 +136,43 @@ gateway:
   #     # session_timeout_hours: 24
   #
   #     # Maximum concurrent agent runs (default: 8)
+  #     # max_concurrent_runs: 8
+  #
+  #   # --- Discord (Phase 34, serenity 0.12.5) ---
+  #   # Requires MESSAGE_CONTENT privileged gateway intent toggled on in the
+  #   # Discord developer portal. Token resolves from inline value OR
+  #   # DISCORD_BOT_TOKEN env var (Discord-specific; never picks up
+  #   # TELEGRAM_BOT_TOKEN).
+  #   discord:
+  #     enabled: true
+  #     # token: "YOUR.DISCORD.BOT.TOKEN"
+  #
+  #     # Allowed Discord user IDs (Vec<i64> snowflakes). Empty = deny all.
+  #     # Enable Developer Mode in Discord settings, right-click a user →
+  #     # "Copy User ID" to find your own snowflake.
+  #     whitelist: [987654321]
+  #
+  #     # session_timeout_hours: 24
+  #     # max_concurrent_runs: 8
+  #
+  #   # --- Slack (Phase 34, slack-morphism 2.22.0 Socket Mode) ---
+  #   # Requires BOTH a bot token (xoxb-...) and an app-level token (xapp-...
+  #   # with `connections:write` scope). The Slack listener silently skips
+  #   # unless both resolve (Pitfall 2). Tokens fall back to SLACK_BOT_TOKEN
+  #   # and SLACK_APP_TOKEN env vars respectively.
+  #   slack:
+  #     enabled: true
+  #     # token: "xoxb-..."        # Bot User OAuth Token
+  #     # app_token: "xapp-..."    # App-Level Token, connections:write scope
+  #
+  #     # NOTE: Slack channel IDs are alphanumeric (C..., D..., U...) but
+  #     # this whitelist is Vec<i64> for now — see the caveat in
+  #     # docs/MULTI-PLATFORM-GATEWAY.md "Slack whitelist caveat".
+  #     # In practice, leave empty (deny-all) until the schema widens to
+  #     # Vec<String>, or run Slack in a private workspace.
+  #     whitelist: []
+  #
+  #     # session_timeout_hours: 24
   #     # max_concurrent_runs: 8
   platforms: {}
 
