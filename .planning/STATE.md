@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 34 Wave 0 complete (paused before Wave 1 dep-add)
-last_updated: "2026-05-19T17:55:00.353Z"
-last_activity: 2026-05-19 -- Phase 34 Wave 0 complete (Plan 34-01)
+stopped_at: Phase 34 Wave 1 complete (deps verified + landed; api list_sessions wired)
+last_updated: "2026-05-19T18:30:00.000Z"
+last_activity: 2026-05-19 -- Phase 34 Wave 1 complete (Plan 34-02)
 progress:
   total_phases: 63
   completed_phases: 46
   total_plans: 243
-  completed_plans: 236
+  completed_plans: 237
   percent: 73
 ---
 
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 34 (webchat-and-multi-platform-gateway) — EXECUTING (Wave 0 complete)
-Plan: 1 of 5 complete
-Plans: 34-01 ✓ invariant scaffolds; 34-02..05 pending
-Status: Wave 0 complete — paused before Wave 1 (Plan 34-02 has human-verify gate for serenity + slack-morphism deps)
-Last activity: 2026-05-19 -- Phase 34 Wave 0 complete (Plan 34-01: INV-33-07/08, invariants_34.rs RED gate, web-session keying lock)
+Phase: 34 (webchat-and-multi-platform-gateway) — EXECUTING (Waves 0-1 complete)
+Plan: 2 of 5 complete
+Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03..05 pending
+Status: Wave 1 complete — paused before Wave 2 (Plan 34-03 DiscordAdapter implementation)
+Last activity: 2026-05-19 -- Phase 34 Wave 1 complete (Plan 34-02: serenity 0.12.5 + slack-morphism 2.22.0 axum feature, app_token, api list_sessions w/ Platform::Web filter)
 
 ## Performance Metrics
 

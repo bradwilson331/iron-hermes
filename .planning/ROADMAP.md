@@ -1328,14 +1328,14 @@ Plans:
   4. `SlackAdapter` implements `PlatformAdapter`; same routing and nudge behaviour as Discord
   5. INV-33-07 static-grep test passes: `AppState::new` calls `build_app_runtime_bundle`, confirming `skill_manage` is registered for web turns
 
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 Plans:
 
 **Wave 1**
 
 - [x] 34-01-PLAN.md — Wave 0 invariant scaffolds (INV-33-07 + INV-34-01/02 + web-session lock)
-- [ ] 34-02-PLAN.md — SessionStore unification (api.rs Platform::Web filter) + Cargo deps (serenity + slack-morphism, gated by human-verify) + PlatformGatewayConfig.app_token
+- [x] 34-02-PLAN.md — SessionStore unification (api.rs Platform::Web filter) + Cargo deps (serenity + slack-morphism, gated by human-verify) + PlatformGatewayConfig.app_token
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
