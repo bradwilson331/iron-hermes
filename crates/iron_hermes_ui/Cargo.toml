@@ -61,6 +61,8 @@ dotenvy = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt", "time"], default-features = false }
 # Phase 32.2-05: CancellationToken needed by subagent_tree_json test in state.rs.
 tokio-util = { workspace = true }
+# Phase 34-02: behavioral test for list_sessions Platform::Web filter.
+tempfile = "3"
 
 [features]
 default = ["web"]

@@ -1,6 +1,7 @@
 //! Server functions for the Dioxus UI.
 
 use dioxus::prelude::*;
+use ironhermes_core::types::Platform;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -90,20 +91,15 @@ pub async fn list_slash_commands() -> Result<Vec<SlashCommandInfo>> {
 #[get("/api/sessions")]
 pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
     let state = crate::server::state::global_app_state();
-    let sessions = state
-        .state_store
-        .lock()
-        .unwrap()
-        // GAP-26.2.1-09 / D-26.2.1-13-A (USER-APPROVED 2026-05-14):
-        // Pass None instead of Some(Platform::Web) so the SESSIONS wedge sources
-        // the full cross-platform on-disk session catalog (~/.ironhermes/sessions/).
-        // See .planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-UAT.md
-        // §"Round-2 D-02 Decision" for the user authorization quote.
-        .list_sessions(
-            None,
-            100,
-        )
-        .map_err(|e| ServerFnError::new(format!("StateStore list sessions failed: {e}")))?;
+    // Phase 34 D-07/D-08: filter by Platform::Web so list_sessions returns only
+    // web chat sessions. Supersedes GAP-26.2.1-09 / D-26.2.1-13-A (None filter)
+    // per Phase 34 Plan 02 session-store unification requirement.
+    let platform_filter = Platform::Web.to_string();
+    let sessions = {
+        let store = state.state_store.lock().unwrap();
+        store.list_sessions(Some(&platform_filter), 100)
+            .map_err(|e| ServerFnError::new(format!("StateStore list sessions failed: {e}")))?
+    };
 
     let out = sessions
         .into_iter()
