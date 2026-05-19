@@ -97,12 +97,30 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     let load_error = matches!(agents_resource(), Some(Err(_)));
 
     // D-13: re-running id wins — drop any recently_terminated entry whose id
-    // reappeared in the live list. Read into bool (Copy) so borrow is released
-    // before the write call on the same signal.
-    for agent in agents_list.iter() {
-        let in_map = recently_terminated.read().contains_key(&agent.id); // bool — borrow ends at ;
-        if in_map {
-            recently_terminated.write().remove(&agent.id);
+    // reappeared in the live list.
+    //
+    // CR-01 fix (Phase 26.7.1 review): collapse N potential per-render writes
+    // into 1 (or 0) writes. Previously this loop called `.write()` every time
+    // a live agent appeared in the HOLD map; in Dioxus 0.7 `.write()` marks the
+    // signal dirty unconditionally and schedules a re-render even when the
+    // post-write state is identical. This drove a gratuitous re-render every
+    // time the "re-running id wins" path fired, interleaving badly with the
+    // poll loop and the push-restart effect. The fix computes the removal set
+    // first (a read-only borrow that ends at the closing `}` of the block),
+    // then issues exactly one `.write()` only when the set is non-empty. The
+    // pattern mirrors the decay sweep at lines 246-263.
+    let to_remove: Vec<String> = {
+        let map = recently_terminated.read();
+        agents_list
+            .iter()
+            .filter(|a| map.contains_key(&a.id))
+            .map(|a| a.id.clone())
+            .collect()
+    }; // borrow ends at }
+    if !to_remove.is_empty() {
+        let mut map = recently_terminated.write();
+        for id in &to_remove {
+            map.remove(id);
         }
     }
 
