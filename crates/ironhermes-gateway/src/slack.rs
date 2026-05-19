@@ -11,6 +11,11 @@
 // T-34-01 mitigation: tokens are NEVER passed to tracing macros.
 // T-34-02 mitigation: canonical whitelist empty = deny-all (mirrors runner.rs:601-611, D-12).
 // T-34-04 mitigation: callback returns Ok(()) immediately; handler dispatched via tokio::spawn.
+//
+// API deviation (WARNING 4 closure — supply-chain confirmed):
+// UserCallbackFunction is a plain fn-pointer type in slack-morphism 2.22.0, NOT a closure type.
+// Captured state is threaded through SlackClientEventsListenerEnvironment::with_user_state<T>()
+// and read from the SlackClientEventsUserState parameter inside the callback.
 
 use crate::adapter::PlatformAdapter;
 use crate::handler::GatewayMessageHandler;
@@ -163,10 +168,121 @@ pub fn slack_event_to_message_event(event: &SlackMessageEvent) -> MessageEvent {
             .unwrap_or_default(),
         attachments: vec![], // Phase 34: text-only; attachment support deferred
         thread_id: event.origin.thread_ts.as_ref().map(|t| t.to_string()),
-        chat_name: None,   // channel name lookup is a separate Web API call — deferred
-        sender_name: None, // user name lookup is a separate Web API call — deferred
+        chat_name: None,     // channel name lookup is a separate Web API call — deferred
+        sender_name: None,   // user name lookup is a separate Web API call — deferred
         replied_to_id: None, // thread parent captured in thread_id above
     }
+}
+
+// =============================================================================
+// SlackAdapterState — shared state threaded through UserState
+// =============================================================================
+
+/// State shared between the Socket Mode callback (fn pointer) and the adapter.
+///
+/// slack-morphism 2.22 `UserCallbackFunction` is a bare fn pointer type — closures
+/// that capture variables cannot be coerced to fn pointers. State is instead stored
+/// in `SlackClientEventsListenerEnvironment::with_user_state<T>()` and retrieved
+/// from the `SlackClientEventsUserState` RwLock in the callback body.
+///
+/// This struct bundles all state that the push-events callback needs.
+struct SlackAdapterState {
+    whitelist: Vec<String>,
+    handler: Arc<GatewayMessageHandler>,
+    cancel: CancellationToken,
+    adapter: Arc<dyn PlatformAdapter>,
+}
+
+/// Socket Mode push-events callback — must be a fn pointer (not a closure).
+///
+/// State (whitelist, handler, cancel, adapter) is retrieved from `state_storage`.
+async fn on_push_event(
+    callback: SlackPushEventCallback,
+    _client: Arc<SlackHyperClient>,
+    state_storage: SlackClientEventsUserState,
+) -> UserCallbackResult<()> {
+    // Extract SlackMessageEvent — skip non-message events with an immediate Ok.
+    let msg_event = match callback.event {
+        SlackEventCallbackBody::Message(ref msg) => msg.clone(),
+        _ => return Ok(()),
+    };
+
+    // Skip bot messages to avoid feedback loops.
+    if msg_event.sender.bot_id.is_some() {
+        return Ok(());
+    }
+
+    // Skip message-changed / message-deleted subtypes — only process new messages.
+    if let Some(ref subtype) = msg_event.subtype {
+        match subtype {
+            SlackMessageEventType::BotMessage
+            | SlackMessageEventType::MessageChanged
+            | SlackMessageEventType::MessageDeleted => return Ok(()),
+            _ => {}
+        }
+    }
+
+    let sender_id = msg_event
+        .sender
+        .user
+        .as_ref()
+        .map(|u| u.to_string())
+        .unwrap_or_default();
+
+    // Read shared state from the RwLock. Read access is non-exclusive and fast.
+    let state_read = state_storage.read().await;
+    let state = match state_read.get_user_state::<SlackAdapterState>() {
+        Some(s) => s,
+        None => {
+            tracing::error!("SlackAdapterState not found in user state — this is a bug");
+            return Ok(());
+        }
+    };
+
+    // CANONICAL whitelist check — mirrors runner.rs:601-611 + config.rs:731 (D-12).
+    // Empty whitelist = deny all messages (D-12).
+    if !state.whitelist.is_empty() {
+        if !state.whitelist.contains(&sender_id) {
+            tracing::warn!(
+                sender_id = %sender_id,
+                "Sender not in whitelist, ignoring"
+            );
+            return Ok(());
+        }
+    } else {
+        tracing::warn!("Whitelist is empty — denying all messages (D-12)");
+        return Ok(());
+    }
+
+    // Build MessageEvent + ProcessedAttachments BEFORE spawning (borrow-checker safe).
+    // This ensures the callback returns Ok(()) within ~3s (T-34-04 ACK timing mitigation).
+    let event_for_handler = slack_event_to_message_event(&msg_event);
+    let processed = ProcessedAttachments { text_prefix: None, image_data_uri: None };
+    let h = state.handler.clone();
+    let a = state.adapter.clone();
+    let c = state.cancel.child_token();
+
+    // Drop the state read guard BEFORE spawning to avoid holding it across task boundaries.
+    drop(state_read);
+
+    // T-34-04: Non-blocking ACK — spawn handler in background, return Ok(()) immediately.
+    tokio::spawn(async move {
+        if let Err(e) = h.handle_with_multimodal(&event_for_handler, a, c, processed).await {
+            tracing::error!("Slack handler error: {e:#}");
+        }
+    });
+
+    Ok(())
+}
+
+/// Socket Mode error handler — must be a fn pointer (not a closure).
+fn on_socket_mode_error(
+    err: Box<dyn std::error::Error + Send + Sync>,
+    _client: Arc<SlackHyperClient>,
+    _state: SlackClientEventsUserState,
+) -> HttpStatusCode {
+    tracing::warn!("Slack socket mode error: {err}");
+    HttpStatusCode::OK
 }
 
 // =============================================================================
@@ -208,99 +324,21 @@ pub async fn run_slack_adapter(
     let adapter: Arc<dyn PlatformAdapter> =
         Arc::new(SlackAdapter::new(client.clone(), bot_token_obj));
 
-    // Capture whitelist and handler in the callback by clone (Arc clones are cheap).
-    let whitelist_cb = whitelist.clone();
-    let handler_cb = handler.clone();
-    let cancel_cb = cancel.clone();
-    let adapter_cb = adapter.clone();
+    let socket_mode_callbacks =
+        SlackSocketModeListenerCallbacks::new().with_push_events(on_push_event);
 
-    let socket_mode_callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(
-        move |event: SlackPushEventCallback,
-              _client: Arc<SlackHyperClient>,
-              _state: SlackClientEventsUserState| {
-            // Clone all captured Arcs/values for this invocation.
-            let whitelist = whitelist_cb.clone();
-            let handler = handler_cb.clone();
-            let cancel = cancel_cb.clone();
-            let adapter = adapter_cb.clone();
-
-            async move {
-                // Extract SlackMessageEvent from the push event — skip non-message events.
-                let msg_event = match event.event {
-                    SlackEventCallbackBody::Message(ref msg) => msg.clone(),
-                    _ => return Ok(()), // non-message events are ACKed immediately
-                };
-
-                // Skip bot messages to avoid feedback loops (T-34-04 bot skip).
-                // event.sender.bot_id is Some for bot-originated messages.
-                if msg_event.sender.bot_id.is_some() {
-                    return Ok(());
-                }
-
-                // Skip message-changed / message-deleted subtypes — only process new messages.
-                if let Some(ref subtype) = msg_event.subtype {
-                    match subtype {
-                        SlackMessageEventType::BotMessage
-                        | SlackMessageEventType::MessageChanged
-                        | SlackMessageEventType::MessageDeleted => return Ok(()),
-                        _ => {}
-                    }
-                }
-
-                let sender_id = msg_event
-                    .sender
-                    .user
-                    .as_ref()
-                    .map(|u| u.to_string())
-                    .unwrap_or_default();
-
-                // CANONICAL whitelist check — mirrors runner.rs:601-611 + config.rs:731 (D-12).
-                // Empty whitelist = deny all messages (D-12).
-                if !whitelist.is_empty() {
-                    if !whitelist.contains(&sender_id) {
-                        tracing::warn!(
-                            sender_id = %sender_id,
-                            "Sender not in whitelist, ignoring"
-                        );
-                        return Ok(());
-                    }
-                } else {
-                    tracing::warn!("Whitelist is empty — denying all messages (D-12)");
-                    return Ok(());
-                }
-
-                // Build MessageEvent + ProcessedAttachments BEFORE spawning (borrow-checker safe).
-                // This ensures callback returns Ok(()) within ~3s (T-34-04 ACK timing mitigation).
-                let event_for_handler = slack_event_to_message_event(&msg_event);
-                let processed = ProcessedAttachments { text_prefix: None, image_data_uri: None };
-                let h = handler.clone();
-                let a = adapter.clone();
-                let c = cancel.child_token();
-
-                // T-34-04: Non-blocking ACK — spawn handler in background, return immediately.
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        h.handle_with_multimodal(&event_for_handler, a, c, processed).await
-                    {
-                        tracing::error!("Slack handler error: {e:#}");
-                    }
-                });
-
-                Ok(())
-            }
-        },
-    );
-
+    // Store shared state in the listener environment's user state store.
+    // This is the only way to thread captured state into fn-pointer callbacks
+    // in slack-morphism 2.22 (UserCallbackFunction is a bare fn pointer type).
     let listener_environment = Arc::new(
-        SlackClientEventsListenerEnvironment::new(client.clone()).with_error_handler(
-            |err: Box<dyn std::error::Error + Send + Sync>,
-             _client: Arc<SlackHyperClient>,
-             _state: SlackClientEventsUserState| {
-                tracing::warn!("Slack socket mode error: {err}");
-                // Return false = do not reconnect on error; CancellationToken handles shutdown.
-                http::StatusCode::OK
-            },
-        ),
+        SlackClientEventsListenerEnvironment::new(client.clone())
+            .with_error_handler(on_socket_mode_error)
+            .with_user_state(SlackAdapterState {
+                whitelist,
+                handler,
+                cancel: cancel.clone(),
+                adapter,
+            }),
     );
 
     let socket_mode_listener = SlackClientSocketModeListener::new(
