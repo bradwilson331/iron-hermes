@@ -724,7 +724,11 @@ impl Default for GatewayConfig {
 #[serde(default)]
 pub struct PlatformGatewayConfig {
     pub enabled: bool,
+    /// Bot token: Telegram (TELEGRAM_BOT_TOKEN), Discord (DISCORD_BOT_TOKEN), or Slack bot token (xoxb-, SLACK_BOT_TOKEN).
     pub token: Option<String>,
+    /// Slack Socket Mode app-level token (xapp-). Telegram/Discord leave this None.
+    #[serde(default)]
+    pub app_token: Option<String>,
     pub api_key: Option<String>,
     /// Telegram user IDs allowed to interact with the bot. Empty = deny all (D-12).
     #[serde(default)]
