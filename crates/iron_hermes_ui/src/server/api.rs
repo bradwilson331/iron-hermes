@@ -323,13 +323,14 @@ pub async fn create_session() -> Result<String> {
 const HISTORY_LIMIT: usize = 50;
 
 /// Phase 26.7.2 (D-10): Last N messages for the Chat screen history load.
-/// Query param style — consistent with all other #[get] routes in this file.
+/// Uses #[server] (POST) rather than #[get] because Dioxus serializes server fn
+/// args as a request body — browsers reject bodies on GET requests (TypeError).
 /// Filters to "user" + "assistant" roles only (tool/system not renderable as
 /// ChatBubble items per RESEARCH Q4). Slices the tail so the last HISTORY_LIMIT
 /// visible messages are returned in chronological order (oldest first).
 /// Filter MUST run before .take(HISTORY_LIMIT) so invisible tool/system rows
 /// do not consume the display cap.
-#[get("/api/session-messages")]
+#[server]
 pub async fn get_session_messages(id: String) -> Result<Vec<ChatMessage>> {
     let state = crate::server::state::global_app_state();
     let all_msgs = state
