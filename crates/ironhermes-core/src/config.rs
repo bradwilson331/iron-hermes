@@ -865,6 +865,12 @@ pub struct SkillsConfig {
     /// Skills Hub settings (Phase 19.1 D-04/D-08).
     #[serde(default)]
     pub hub: HubConfig,
+    /// Phase 26.7.3 D-06: opt-out list of skill names explicitly disabled by the user.
+    /// All skills are on by default (opt-out model); only explicitly disabled names appear here.
+    /// Cross-surface source of truth: readable by web UI, TUI, and gateway on config reload.
+    /// `#[serde(default)]` ensures existing config.yaml files without this key parse cleanly.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SkillsConfig {
@@ -875,6 +881,7 @@ impl Default for SkillsConfig {
             credential_dir: None,
             config: HashMap::new(),
             hub: HubConfig::default(),
+            disabled: Vec::new(),
         }
     }
 }
