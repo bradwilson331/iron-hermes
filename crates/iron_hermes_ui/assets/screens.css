@@ -120,6 +120,15 @@
   background: rgba(57, 197, 207, 0.05);
   box-shadow: 0 0 0 1px var(--teal-dim), 0 0 24px rgba(57,197,207,0.08);
 }
+/* Phase 26.7.1 D-10 / D-14: terminated agent card in HOLD-N state */
+.card.is-ended {
+  opacity: 0.55;
+  transition: opacity 200ms ease-out;
+  pointer-events: none;
+}
+.card.is-ended .card-footer {
+  display: none;
+}
 .card-head {
   display: flex;
   align-items: flex-start;
@@ -209,6 +218,12 @@
 .pill.green { color: var(--green); border-color: rgba(63,185,80,0.45); background: rgba(63,185,80,0.06); }
 .pill.amber { color: var(--amber); border-color: rgba(210,153,34,0.45); background: rgba(210,153,34,0.06); }
 .pill.red { color: var(--red); border-color: rgba(248,81,73,0.45); background: rgba(248,81,73,0.06); }
+/* Phase 26.7.1 D-09 / D-14: neutral gray pill for terminated agents */
+.pill.ended {
+  color: var(--gray);
+  border-color: var(--gray-faint);
+  background: rgba(110, 118, 129, 0.06);
+}
 
 /* Buttons specific to screens */
 .btn.btn--sm { font-size: 10px; padding: 6px 12px; letter-spacing: 0.14em; }
