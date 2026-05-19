@@ -123,6 +123,17 @@ pub fn HermesApp() -> Element {
     let mut session_id = use_signal(|| "pending".to_string());
     let mut tokens = use_signal(|| (0u32, 128_000u32));
 
+    // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08).
+    // subagent_events drives push-restart in Plan 02; is_ws_connected drives
+    // dynamic poll cadence. Both declared with `let mut` so Plan 02 can call
+    // `.set()` from the recv loop. Initial values: counter = 0, connected = false.
+    // `mut` is required for Plan 02's recv-loop .set() calls; suppress unused-mut
+    // warning until Plan 02 wires the mutation sites.
+    #[allow(unused_mut)]
+    let mut subagent_events = use_signal(|| 0u64);
+    #[allow(unused_mut)]
+    let mut is_ws_connected = use_signal(|| false);
+
     // Bootstrap the chat session via the existing server fn from
     // Phase 25.5 (D-02 — no edits to the server file). Mirrors
     // warp_hermes.rs:104-129 adapted for the new bubble shape.
@@ -304,6 +315,9 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| SessionIdContext(session_id));
     use_context_provider(|| tokens);
     use_context_provider(|| send_handler);
+    // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08). subagent_events drives push-restart in Plan 02; is_ws_connected drives dynamic poll cadence.
+    use_context_provider(|| subagent_events);
+    use_context_provider(|| is_ws_connected);
 
     rsx! {
         hud_chrome::HudChrome {}
