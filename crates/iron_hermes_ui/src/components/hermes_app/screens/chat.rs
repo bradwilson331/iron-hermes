@@ -177,9 +177,14 @@ pub fn ScreenChat(is_active: bool) -> Element {
         // Cancel any stale STREAMING indicator from a previous session (Q8 / T-26.7.2-11).
         streaming_id.set(None);
 
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!("[26.7.2] history effect fired — sid={sid:?}").into());
+
         spawn(async move {
-            match crate::server::api::get_session_messages(sid).await {
+            match crate::server::api::get_session_messages(sid.clone()).await {
                 Ok(msgs) if !msgs.is_empty() => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&format!("[26.7.2] got {} msgs for {sid:?}", msgs.len()).into());
                     // Map ChatMessage → ChatBubble. Read next_id as Copy u64
                     // before any .await; borrow ends at ; (CLAUDE.md signal rules).
                     let mut id_val = *next_id.read();
@@ -215,8 +220,13 @@ pub fn ScreenChat(is_active: bool) -> Element {
                     bubbles.write().extend(history);
                     next_id.set(id_val);
                 }
-                _ => {
-                    // D-07: empty or error → empty stream, no indicator, no divider.
+                Ok(_) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&format!("[26.7.2] empty response for {sid:?}").into());
+                }
+                Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&format!("[26.7.2] error for {sid:?}: {e}").into());
                 }
             }
         });
