@@ -115,12 +115,24 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
         // populate. Filtering message_count > 0 yields ONLY sessions the
         // SESSIONS wedge can actually open. See 26.2.1-UAT.md round-3 notes.
         .filter(|s| s.message_count > 0)
-        .map(|session| SessionInfo {
-            id: session.id,
-            title: session.title,
-            created_at: format!("{}", session.started_at as i64),
-            message_count: session.message_count.max(0) as u32,
-            last_message: None, // placeholder — replaced in Phase 26.7.2 Task 3
+        .map(|session| {
+            // Phase 26.7.2 D-04: derive last_message preview per session (N+1 SQLite read).
+            // Acceptable for this phase (50-100 sessions, fast local SQLite) — RESEARCH Pitfall 5.
+            // MutexGuard is scoped to the inner block and drops before SessionInfo is constructed,
+            // so session.id can be moved into the struct literal without a borrow conflict.
+            let last_message = {
+                let store = state.state_store.lock().unwrap();
+                store.get_messages(&session.id).ok().and_then(|msgs| {
+                    extract_last_message_preview(&msgs)
+                })
+            };
+            SessionInfo {
+                id: session.id,
+                title: session.title,
+                created_at: format!("{}", session.started_at as i64),
+                message_count: session.message_count.max(0) as u32,
+                last_message,
+            }
         })
         .collect();
     Ok(out)
@@ -235,6 +247,26 @@ fn format_context_window(ctx: usize) -> String {
     if ctx >= 1_000_000 { format!("{}M", ctx / 1_000_000) }
     else if ctx >= 1_000 { format!("{}k", ctx / 1_000) }
     else { format!("{}", ctx) }
+}
+
+/// Phase 26.7.2 (D-04 / RESEARCH Q6): Extract last message preview for SessionInfo.
+/// Prefers last assistant message with content; falls back to last user message with content.
+/// Skips tool/system roles and None-content entries entirely.
+/// Truncates to 80 chars using chars().take(80) for multi-byte-safe truncation
+/// (direct byte-slice indexing would panic on non-ASCII char boundaries).
+fn extract_last_message_preview(msgs: &[ironhermes_state::StoredMessage]) -> Option<String> {
+    let preview = msgs
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant" && m.content.is_some())
+        .or_else(|| {
+            msgs.iter()
+                .rev()
+                .find(|m| m.role == "user" && m.content.is_some())
+        });
+    preview
+        .and_then(|m| m.content.as_ref())
+        .map(|c| c.chars().take(80).collect::<String>())
 }
 
 /// Phase 26.7 Plan 03 (D-09, R-1, R-4): Read-only catalog of skills from the
