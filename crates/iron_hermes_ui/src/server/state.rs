@@ -48,6 +48,17 @@ pub struct AppState {
     /// `subagent_registry` Arc above (so kill/interrupt/prune/status all
     /// operate on the registry the agent actually writes to).
     pub shrike: Option<Arc<ironhermes_agent::shrike::ShrikeService>>,
+    /// Phase 26.7.1 Plan 02 (D-06 / Path A): per-turn slot for the active ws send
+    /// channel. ws.rs installs `Some(tx.clone())` immediately before `run_web_turn`
+    /// (with a RAII drop guard that clears the slot on return / panic). The
+    /// `progress_callback` baked into `runtime_bundle` at init reads from this slot
+    /// and forwards to whichever sender is current. None when no turn is in flight.
+    ///
+    /// Single-session assumption: events from any in-flight turn route to whichever
+    /// ws is currently registered. Multi-session isolation is explicitly out of
+    /// scope per CONTEXT.md.
+    pub subagent_callback_slot:
+        Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>>>,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -108,6 +119,32 @@ impl AppState {
             ),
         );
 
+        // Phase 26.7.1 Plan 02 (D-06 / Path A): construct the per-turn callback slot.
+        // The singleton progress_callback baked into AppRuntimeBundle reads from this
+        // slot and forwards SubagentEvent {} to whichever ws sender is currently registered.
+        // ws.rs installs the sender immediately before run_web_turn via lock().await, and
+        // clears it via RAII drop guard (SubagentCallbackSlotGuard in ws.rs).
+        let subagent_callback_slot: Arc<
+            tokio::sync::Mutex<
+                Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>,
+            >,
+        > = Arc::new(tokio::sync::Mutex::new(None));
+        let cb_slot = subagent_callback_slot.clone();
+        let progress_callback: ironhermes_tools::delegate_task::SubagentProgressCallback =
+            Arc::new(move |_index: usize,
+                           _event: ironhermes_tools::delegate_task::SubagentProgress| {
+                // D-07: counter-only — no payload forwarded.
+                // Use try_lock to avoid awaiting in a sync `Fn`. If the slot is
+                // momentarily contended (extremely unlikely outside Plan 02
+                // teardown), drop the event silently — the poll loop's safety
+                // net catches missed events.
+                if let Ok(guard) = cb_slot.try_lock() {
+                    if let Some(tx) = guard.as_ref() {
+                        let _ = tx.send(crate::protocol::ChatStreamEvent::SubagentEvent {});
+                    }
+                }
+            });
+
         let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
             config: Arc::new(config.clone()),
             resolver: Arc::new(resolver.clone()),
@@ -121,7 +158,7 @@ impl AppState {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children)),
                 config: config.delegation.clone(),
                 cancel_token: None,
-                progress_callback: None,
+                progress_callback: Some(progress_callback),
             }),
             hooks_config: HooksConfig::load().unwrap_or_default(),
             emit_mcp_startup_logs: false,
@@ -142,6 +179,10 @@ impl AppState {
             // operate on the live registry.
             subagent_registry,
             shrike: Some(shrike),
+            // Phase 26.7.1 Plan 02 (D-06 / Path A): callback slot — ws.rs
+            // installs the per-turn sender before run_web_turn, RAII guard clears
+            // it on return/panic.
+            subagent_callback_slot,
         })
     }
 
