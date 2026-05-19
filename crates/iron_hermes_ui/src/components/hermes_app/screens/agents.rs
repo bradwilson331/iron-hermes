@@ -287,10 +287,41 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // borrow held) and triggers a fresh `agents_resource.restart()`. Same code
     // path as the poll, no divergent diff logic. The poll loop is now the
     // safety net for missed events rather than the primary refresh.
+    //
+    // CR-02 fix (Phase 26.7.1 review): gate restart on strict `cur > prev`
+    // against a `last_seen` signal seeded with the CURRENT value of
+    // `subagent_events()` at mount time. Two defects in the original effect:
+    //
+    //   1. Spurious initial-mount restart. `use_resource` already issues an
+    //      initial fetch on mount; the effect then fired immediately on the
+    //      same mount because `subagent_events()` returned its initial value.
+    //      That second restart cancelled the first and raced the poll loop's
+    //      first tick, producing 2-3 `/api/agents/list` requests in the first
+    //      ~1.5s of mount. Seeding `last_seen` with the current counter value
+    //      and gating on `cur > prev` means the initial render observes
+    //      `cur == prev` and skips — the resource's own initial fetch is the
+    //      only network call.
+    //
+    //   2. No debounce on burst. A turn that spawned N subagents fired N
+    //      events on the chat ws, each incrementing `subagent_events` and
+    //      re-firing this effect. Each `.restart()` cancelled the previous.
+    //      With the strict gate, the first event still restarts once; the
+    //      poll loop is the safety net per the design comment above. A
+    //      debounce timer can be layered on later if cancel-churn shows up
+    //      in WASM CPU profiles — for now correctness > micro-optimisation.
+    //
+    // Signal-borrow discipline: `*last_seen.read()` copies a `u64` and the
+    // borrow ends at `;` before any `.set()` / `.restart()` call. No borrow
+    // is held across the (synchronous) restart.
+    let mut last_seen = use_signal(|| subagent_events());
     let mut agents_resource_for_effect = agents_resource;   // Resource is Copy
     use_effect(move || {
-        let _ = subagent_events();   // subscribe; result discarded
-        agents_resource_for_effect.restart();
+        let cur = subagent_events();        // subscribe; Copy u64 — no borrow
+        let prev = *last_seen.read();       // Copy u64 — borrow ends at ;
+        if cur > prev {
+            last_seen.set(cur);
+            agents_resource_for_effect.restart();
+        }
     });
 
     rsx! {
