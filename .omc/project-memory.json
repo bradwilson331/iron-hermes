@@ -162,20 +162,20 @@
   "hotPaths": [
     {
       "path": ".planning/STATE.md",
-      "accessCount": 50,
-      "lastAccessed": 1779193986888,
-      "type": "file"
-    },
-    {
-      "path": "CLAUDE.md",
-      "accessCount": 33,
-      "lastAccessed": 1778793668702,
+      "accessCount": 59,
+      "lastAccessed": 1779209041623,
       "type": "file"
     },
     {
       "path": ".planning/ROADMAP.md",
-      "accessCount": 33,
-      "lastAccessed": 1779188457079,
+      "accessCount": 43,
+      "lastAccessed": 1779209027769,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 35,
+      "lastAccessed": 1779198557722,
       "type": "file"
     },
     {
@@ -185,27 +185,27 @@
       "type": "file"
     },
     {
+      "path": ".planning/REQUIREMENTS.md",
+      "accessCount": 18,
+      "lastAccessed": 1779197249838,
+      "type": "file"
+    },
+    {
       "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-02-PLAN.md",
       "accessCount": 17,
       "lastAccessed": 1778462840465,
       "type": "file"
     },
     {
-      "path": ".planning/REQUIREMENTS.md",
-      "accessCount": 15,
-      "lastAccessed": 1779151101328,
+      "path": "crates/ironhermes-agent/src/app_runtime_factory.rs",
+      "accessCount": 14,
+      "lastAccessed": 1779196588275,
       "type": "file"
     },
     {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-CONTEXT.md",
       "accessCount": 12,
       "lastAccessed": 1778787297537,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/app_runtime_factory.rs",
-      "accessCount": 12,
-      "lastAccessed": 1778793753915,
       "type": "file"
     },
     {
