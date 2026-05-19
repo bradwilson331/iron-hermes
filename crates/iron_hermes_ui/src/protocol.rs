@@ -27,4 +27,34 @@ pub enum ChatStreamEvent {
     Finished { total_tokens: u32 },
     /// Error during agent execution.
     Error { message: String },
+    /// Phase 26.7.1 Plan 02 (D-07): payload-free subagent-registry-changed signal.
+    ///
+    /// JSON shape (external tagging — no #[serde(...)] attribute on the enum):
+    ///   {"SubagentEvent":{}}
+    ///
+    /// Client increments `subagent_events: Signal<u64>` on receipt and lets
+    /// `ScreenAgents`' use_effect call `agents_resource.restart()` — same code
+    /// path as the periodic poll, no divergent diff logic.
+    SubagentEvent {},
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phase 26.7.1 Plan 02 (Wave 0): D-07 serde shape verification.
+    /// SubagentEvent {} must serialize to {"SubagentEvent":{}} (external tagging).
+    #[test]
+    fn test_subagent_event_json_shape() {
+        let ev = ChatStreamEvent::SubagentEvent {};
+        let json = serde_json::to_string(&ev).expect("serialize SubagentEvent");
+        assert_eq!(json, r#"{"SubagentEvent":{}}"#);
+
+        // Round-trip: deserialize back into the variant.
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(parsed, ChatStreamEvent::SubagentEvent {}),
+            "round-trip must reconstruct SubagentEvent variant"
+        );
+    }
 }
