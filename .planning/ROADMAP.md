@@ -817,13 +817,14 @@ Plans:
 **Goal:** Activate the three currently-inert UI elements on the Skills screen (`crates/iron_hermes_ui/src/components/hermes_app/screens/skills.rs`): (a) tabs (ALL / BUNDLED / INSTALLED / ENABLED) with live counts from `skills_list` and a grayed-disabled UPDATES tab per D-02; (b) client-side search input AND-combined with the active tab; (c) per-skill toggle on the `.tgl` div that persists via a new `toggle_skill` `#[server]` fn writing `SkillsConfig.disabled: Vec<String>` (new opt-out field in `crates/ironhermes-core/src/config.rs`) AND mutating the in-process `runtime_bundle.active_skills` Arc<Mutex<Vec<SkillRecord>>>. Optimistic UI with revert + inline "Toggle failed — try again." on server error, mirroring the agents.rs kill/interrupt pattern. Cross-surface (TUI/gateway) hot-reload is deferred — config field is added now so future phases can read it.
 **Requirements**: (none — D-01..D-10 from 26.7.3-CONTEXT.md are the requirements set)
 **Depends on:** Phase 26.7.2
-**Plans:** 4 plans
+**Status:** Complete
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] 26.7.3-01-PLAN.md — Add `disabled: Vec<String>` opt-out field to `SkillsConfig` + serde round-trip tests
-- [ ] 26.7.3-02-PLAN.md — Implement `toggle_skill` #[server] fn (config write + in-process active_skills mutation + input validation)
-- [ ] 26.7.3-03-PLAN.md — Wire ScreenSkills: tabs (live counts) + search (oninput binding) + optimistic toggle with revert
-- [ ] 26.7.3-04-PLAN.md — Browser UAT for D-02 (UPDATES disabled), D-08 (optimistic revert), D-09 (tab+search AND), live counter update
+- [x] 26.7.3-01-PLAN.md — Add `disabled: Vec<String>` opt-out field to `SkillsConfig` + serde round-trip tests
+- [x] 26.7.3-02-PLAN.md — Implement `toggle_skill` #[server] fn (config write + in-process active_skills mutation + input validation)
+- [x] 26.7.3-03-PLAN.md — Wire ScreenSkills: tabs (live counts) + search (oninput binding) + optimistic toggle with revert
+- [x] 26.7.3-04-PLAN.md — Browser UAT for D-02 (UPDATES disabled), D-08 (optimistic revert), D-09 (tab+search AND), live counter update
 
 ### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
 
