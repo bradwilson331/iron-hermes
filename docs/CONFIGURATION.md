@@ -437,13 +437,44 @@ RUST_LOG=ironhermes_tools::skill_manage=info hermes chat
 | `gateway.compression_threshold` | `0.85` | Compression threshold for gateway (fraction of context_length) |
 | `gateway.platforms` | `{}` | Platform adapters map (empty = no platforms enabled) |
 
+The `gateway.platforms` map currently understands three keys: `telegram`, `discord`, `slack`. Each platform section shares the same `PlatformGatewayConfig` shape; per-platform fields are noted below. Missing or unconfigured sections **silently skip** at gateway startup — existing Telegram-only deployments are unchanged.
+
 **Telegram platform defaults** (under `gateway.platforms.telegram:`):
 
 | Key | Default | Description |
 |---|---|---|
+| `enabled` | `false` | Master toggle (currently informational; presence of resolved token is the actual gate) |
+| `token` | `null` | Bot token. Falls back to `TELEGRAM_BOT_TOKEN` env var |
+| `whitelist` | `[]` | Allowed Telegram chat IDs (`Vec<i64>`). Empty = deny all (D-12) |
 | `session_timeout_hours` | `24` | Session inactivity timeout in hours |
 | `max_concurrent_runs` | `8` | Maximum concurrent agent runs |
-| `whitelist` | `[]` | Allowed Telegram chat IDs (empty = deny all) |
+
+**Discord platform** (under `gateway.platforms.discord:`) — added in Phase 34:
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master toggle |
+| `token` | `null` | Bot token. Falls back to `DISCORD_BOT_TOKEN` env var (Discord-specific — does NOT pick up `TELEGRAM_BOT_TOKEN`) |
+| `whitelist` | `[]` | Allowed Discord user IDs (`Vec<i64>`). Empty = deny all |
+| `session_timeout_hours` | `24` | Session inactivity timeout in hours |
+| `max_concurrent_runs` | `8` | Maximum concurrent agent runs |
+
+Requires the **MESSAGE_CONTENT** privileged gateway intent (toggled in the Discord developer portal — see [MULTI-PLATFORM-GATEWAY.md](MULTI-PLATFORM-GATEWAY.md)). Built on serenity 0.12.5.
+
+**Slack platform** (under `gateway.platforms.slack:`) — added in Phase 34:
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master toggle |
+| `token` | `null` | Bot token `xoxb-…`. Falls back to `SLACK_BOT_TOKEN` env var |
+| `app_token` | `null` | App-level token `xapp-…` for Socket Mode. Falls back to `SLACK_APP_TOKEN` env var. **Slack adapter is silently skipped unless BOTH `app_token` and `token` resolve** (Pitfall 2 — two-token shape) |
+| `whitelist` | `[]` | Allowed Slack channel/user IDs (`Vec<i64>` — see caveat below). Empty = deny all |
+| `session_timeout_hours` | `24` | Session inactivity timeout in hours |
+| `max_concurrent_runs` | `8` | Maximum concurrent agent runs |
+
+Uses slack-morphism 2.22.0 Socket Mode (WebSocket, no public HTTP endpoint required). Built on the `axum` feature flag which transitively activates `hyper-base`/`tokio-tungstenite`.
+
+> **Slack whitelist caveat (deferred):** Slack channel IDs are alphanumeric (`C123ABC`, `D456DEF`) but the shared `PlatformGatewayConfig.whitelist` is typed `Vec<i64>` (Telegram-shaped). The adapter converts via `to_string()` at the boundary, so numeric entries you place in `whitelist` are compared as strings and will not match real Slack IDs. A schema upgrade to `Vec<String>` is tracked as a future config-schema improvement.
 
 ### Cron (`cron:`)
 
