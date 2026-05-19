@@ -32,9 +32,24 @@
 //!   for the same reasons as INV-34-01. Slack and Discord share the same
 //!   multimodal handler contract; both must comply for the Learning Loop to
 //!   cover every platform the gateway serves.
+//!
+//! INV-34-03 — Phase 34 D-10/D-14/D-15: `GatewayRunner::start()` must call
+//!   `run_discord_adapter()` so the Discord adapter is actually spawned when
+//!   the Discord platform section is configured. Without this call site in
+//!   runner.rs, the Discord config section would be silently inert — the adapter
+//!   code would compile and pass INV-34-01 yet never run. This invariant closes
+//!   the D-14/D-15 sequential dependency: Phase 34 Plan 03 (adapter) → Plan 05
+//!   (runner wiring) must both be present for Discord to be a live platform.
+//!
+//! INV-34-04 — Phase 34 D-11/D-14/D-15: `GatewayRunner::start()` must call
+//!   `run_slack_adapter()` for the same reasons as INV-34-03 applied to Slack.
+//!   Together INV-34-03 + INV-34-04 complete the Phase 34 trilogy lock: adapter
+//!   routing (01/02) + runner wiring (03/04) must all be green for the gateway
+//!   to serve Discord and Slack as first-class platforms.
 
 const DISCORD_SOURCE: &str = include_str!("../src/discord.rs");
 const SLACK_SOURCE: &str = include_str!("../src/slack.rs");
+const RUNNER_SOURCE: &str = include_str!("../src/runner.rs");
 
 /// INV-34-01: `handle_with_multimodal` is called in the Discord adapter so
 /// Discord sessions route through the Learning Loop handler.
@@ -62,4 +77,20 @@ fn inv_34_02_slack_routes_through_handle_with_multimodal() {
          GatewayMessageHandler and inherit the Learning Loop. Found {count} \
          occurrences (expected >= 1). See Phase 34 D-11."
     );
+}
+
+/// INV-34-03: GatewayRunner::start spawns run_discord_adapter so Discord
+/// inherits the Learning Loop via handle_with_multimodal (D-10/D-14/D-15).
+#[test]
+fn inv_34_03_runner_spawns_discord() {
+    let count = RUNNER_SOURCE.matches("run_discord_adapter").count();
+    assert!(count >= 1, "INV-34-03: runner.rs must call run_discord_adapter() so Discord inherits the Learning Loop. Found {count}. See Phase 34 D-10/D-14/D-15.");
+}
+
+/// INV-34-04: GatewayRunner::start spawns run_slack_adapter so Slack
+/// inherits the Learning Loop via handle_with_multimodal (D-11/D-14/D-15).
+#[test]
+fn inv_34_04_runner_spawns_slack() {
+    let count = RUNNER_SOURCE.matches("run_slack_adapter").count();
+    assert!(count >= 1, "INV-34-04: runner.rs must call run_slack_adapter() so Slack inherits the Learning Loop. Found {count}. See Phase 34 D-11/D-14/D-15.");
 }

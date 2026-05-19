@@ -555,6 +555,90 @@ impl GatewayRunner {
             }
         });
 
+        // --- 7b. Optional Discord adapter (D-10) ---
+        // Spawns alongside Telegram in the same JoinSet so CancellationToken-driven
+        // shutdown handles all platforms uniformly. Silent skip when config section
+        // is absent or token does not resolve — existing Telegram-only deployments
+        // are unaffected. Empty whitelist is passed through to the adapter, which
+        // enforces canonical deny-all semantics (config.rs:731 + runner.rs:601-611 D-12).
+        let discord_config = self
+            .config
+            .gateway
+            .platforms
+            .get("discord")
+            .cloned()
+            .unwrap_or_default();
+        if let Some(discord_token) = resolve_token_with_env(&discord_config.token, "DISCORD_BOT_TOKEN") {
+            let handler_d = handler.clone();
+            let cancel_d = self.cancel.clone();
+            let whitelist_d: Vec<u64> = discord_config
+                .whitelist
+                .iter()
+                .map(|&v| v as u64)
+                .collect();
+            // Empty whitelist propagates to adapter, which enforces D-12 deny-all
+            // per canonical Telegram semantics (config.rs:731 + runner.rs:601-611).
+            tracing::info!(whitelist_len = whitelist_d.len(), "Discord adapter spawning");
+            join_set.spawn(async move {
+                if let Err(e) = crate::discord::run_discord_adapter(
+                    &discord_token,
+                    whitelist_d,
+                    handler_d,
+                    cancel_d,
+                )
+                .await
+                {
+                    tracing::error!("Discord adapter error: {e:#}");
+                }
+            });
+        } else {
+            tracing::debug!("Discord adapter skipped (no token configured)");
+        }
+
+        // --- 7c. Optional Slack adapter (D-11) ---
+        // Requires BOTH app_token (xapp-...) and bot_token (xoxb-...) per Pitfall 2.
+        // Either token missing → silent skip. Empty whitelist enforced by adapter (D-12).
+        let slack_config = self
+            .config
+            .gateway
+            .platforms
+            .get("slack")
+            .cloned()
+            .unwrap_or_default();
+        if let (Some(slack_app), Some(slack_bot)) = (
+            resolve_token_with_env(&slack_config.app_token, "SLACK_APP_TOKEN"),
+            resolve_token_with_env(&slack_config.token, "SLACK_BOT_TOKEN"),
+        ) {
+            let handler_s = handler.clone();
+            let cancel_s = self.cancel.clone();
+            let whitelist_s: Vec<String> = slack_config
+                .whitelist
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
+            // Empty whitelist propagates to adapter — D-12 deny-all enforced in callback.
+            // Note: Slack-native whitelist uses alphanumeric user IDs (e.g. "U012AB3CD");
+            // operators currently configure i64 values which are converted via to_string().
+            // Migrating to a Vec<String> whitelist in PlatformGatewayConfig is a deferred
+            // config-schema improvement (see SUMMARY.md).
+            tracing::info!(whitelist_len = whitelist_s.len(), "Slack adapter spawning");
+            join_set.spawn(async move {
+                if let Err(e) = crate::slack::run_slack_adapter(
+                    &slack_app,
+                    &slack_bot,
+                    whitelist_s,
+                    handler_s,
+                    cancel_s,
+                )
+                .await
+                {
+                    tracing::error!("Slack adapter error: {e:#}");
+                }
+            });
+        } else {
+            tracing::debug!("Slack adapter skipped (missing app_token or bot_token)");
+        }
+
         // --- 8. Dispatch loop ---
         let dispatch_cancel = self.cancel.clone();
         let handler_dispatch = handler.clone();
@@ -971,6 +1055,22 @@ fn resolve_token(token: &Option<String>) -> Option<String> {
     }
     // Fall back to TELEGRAM_BOT_TOKEN environment variable
     std::env::var("TELEGRAM_BOT_TOKEN").ok()
+}
+
+/// Resolve a token from config value or a named environment variable fallback.
+/// Supports `${ENV_VAR}` syntax. Unlike `resolve_token`, the fallback env var
+/// is caller-specified so Discord/Slack do not accidentally pick up TELEGRAM_BOT_TOKEN.
+fn resolve_token_with_env(token: &Option<String>, env_var: &str) -> Option<String> {
+    if let Some(t) = token {
+        if t.starts_with("${") && t.ends_with('}') {
+            let var_name = &t[2..t.len() - 1];
+            return std::env::var(var_name).ok();
+        }
+        if !t.is_empty() {
+            return Some(t.clone());
+        }
+    }
+    std::env::var(env_var).ok()
 }
 
 #[cfg(test)]
