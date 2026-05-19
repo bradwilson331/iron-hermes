@@ -384,3 +384,58 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
         },
     ))
 }
+
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod plan_26_7_1_02_tests {
+    use super::*;
+    use crate::protocol::ChatStreamEvent;
+    use ironhermes_tools::delegate_task::{SubagentProgress, SubagentProgressCallback};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    /// Phase 26.7.1 Plan 02 (Wave 0): D-06 callback wiring shape.
+    /// Mirrors the callback constructed in state.rs Task 2: lock the slot,
+    /// read Some(tx), send ChatStreamEvent::SubagentEvent {}.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_subagent_callback_emits_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+        let slot: Arc<Mutex<Option<mpsc::UnboundedSender<ChatStreamEvent>>>> =
+            Arc::new(Mutex::new(Some(tx)));
+        let cb_slot = slot.clone();
+        let cb: SubagentProgressCallback = Arc::new(move |_index: usize, _event: SubagentProgress| {
+            if let Ok(guard) = cb_slot.try_lock() {
+                if let Some(s) = guard.as_ref() {
+                    let _ = s.send(ChatStreamEvent::SubagentEvent {});
+                }
+            }
+        });
+
+        // Invoke the callback as the delegate-task runner would.
+        cb(0, SubagentProgress::Completed);
+
+        let received = rx.recv().await.expect("expected SubagentEvent");
+        assert!(
+            matches!(received, ChatStreamEvent::SubagentEvent {}),
+            "callback must send the SubagentEvent variant"
+        );
+
+        // After clearing the slot, the callback becomes a silent no-op.
+        {
+            let mut g = slot.lock().await;
+            *g = None;
+        }
+        cb(1, SubagentProgress::Completed);
+        // Nothing should arrive — give the runtime a moment to surface anything.
+        // Accept either: Err(Elapsed) = timeout (slot None, channel still open),
+        // or Ok(None) = channel closed (all senders dropped when slot cleared).
+        // Both mean no SubagentEvent was sent by the second cb invocation.
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        let no_spurious_event = match timed {
+            Err(_) => true,          // timeout — nothing in channel
+            Ok(None) => true,        // channel closed — all senders dropped
+            Ok(Some(_)) => false,    // unexpected event sent after slot was cleared
+        };
+        assert!(no_spurious_event, "no events should be received after slot is cleared");
+    }
+}
