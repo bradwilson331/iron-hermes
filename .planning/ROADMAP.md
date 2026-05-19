@@ -746,15 +746,15 @@ Plans:
   2. Setting `auxiliary_model` in config.yaml routes compression, vision, and session-search tasks to that model instead of the main conversational model
   3. A named custom provider (e.g., `my-local-llm`) defined in config.yaml is selectable as `--provider my-local-llm` and resolves its base URL, API key, and model correctly
 
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
 
-- [ ] 26-01-PLAN.md — Config schema (ProviderConfig.api_key_env + disabled, AuxiliaryConfig, RoleOverride alias, validate_api_key_env, validate_role_name)
-- [ ] 26-02-PLAN.md — ProviderResolver: D-11 leak fix + D-12/D-13/D-01 deprecation banners + D-02 custom_providers migration + D-14 disabled gate + D-05/D-07 resolve_role cascade
-- [ ] 26-03-PLAN.md — Agent crate wire-through audit + compression cascade regression + greenfield-role TODOs (vision/session_search/skills_hub/mcp_helper per Open Question 1)
-- [ ] 26-04-PLAN.md — hermes provider CLI (list/show/test/enable/disable) + /provider slash + provider_display + cache-break banner + D-20 Tests 1+3 + D-15 + D-12 once-only + T-26-03 slug rejection
-- [ ] 26-05-PLAN.md — hermes setup auxiliary stage (D-19) + apply_auxiliary_answer wizard + D-20 Test 2 (auxiliary_routes_to_separate_model — PROV-06 end-to-end)
+- [x] 26-01-PLAN.md — Config schema (ProviderConfig.api_key_env + disabled, AuxiliaryConfig, RoleOverride alias, validate_api_key_env, validate_role_name)
+- [x] 26-02-PLAN.md — ProviderResolver: D-11 leak fix + D-12/D-13/D-01 deprecation banners + D-02 custom_providers migration + D-14 disabled gate + D-05/D-07 resolve_role cascade
+- [x] 26-03-PLAN.md — Agent crate wire-through audit + compression cascade regression + greenfield-role TODOs (vision/session_search/skills_hub/mcp_helper per Open Question 1)
+- [x] 26-04-PLAN.md — hermes provider CLI (list/show/test/enable/disable) + /provider slash + provider_display + cache-break banner + D-20 Tests 1+3 + D-15 + D-12 once-only + T-26-03 slug rejection
+- [x] 26-05-PLAN.md — hermes setup auxiliary stage (D-19) + apply_auxiliary_answer wizard + D-20 Test 2 (auxiliary_routes_to_separate_model — PROV-06 end-to-end)
 
 **Wave structure:**
 
