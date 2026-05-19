@@ -9,6 +9,19 @@ pub struct SessionInfo {
     pub title: Option<String>,
     pub created_at: String,
     pub message_count: u32,
+    /// Phase 26.7.2 D-04: last message preview (~80 chars, server-truncated)
+    pub last_message: Option<String>,
+}
+
+/// Phase 26.7.2 (D-10): Wire type for the session history endpoint.
+/// Bridges ironhermes-state's server-only StoredMessage and the WASM-side
+/// ChatBubble component. Only "user" and "assistant" roles are included —
+/// "tool" and "system" messages are filtered out server-side because they
+/// are not renderable as ChatBubble items and would waste the HISTORY_LIMIT cap.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ChatMessage {
+    pub role: String,    // "user" | "assistant" — tool/system filtered out server-side
+    pub content: String, // empty string when StoredMessage.content is None
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -107,6 +120,7 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
             title: session.title,
             created_at: format!("{}", session.started_at as i64),
             message_count: session.message_count.max(0) as u32,
+            last_message: None, // placeholder — replaced in Phase 26.7.2 Task 3
         })
         .collect();
     Ok(out)
