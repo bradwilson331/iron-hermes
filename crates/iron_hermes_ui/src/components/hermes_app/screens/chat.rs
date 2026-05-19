@@ -122,11 +122,14 @@ pub struct ChatSendHandler(pub EventHandler<String>);
 pub fn ScreenChat(is_active: bool) -> Element {
     // Context lookups — every read drops its borrow before the rsx tree
     // is constructed (clippy.toml signal-borrow safety).
-    let bubbles = use_context::<Signal<Vec<ChatBubble>>>();
-    let streaming_id = use_context::<Signal<Option<u64>>>();
+    let mut bubbles = use_context::<Signal<Vec<ChatBubble>>>();
+    let mut streaming_id = use_context::<Signal<Option<u64>>>();
     let tokens = use_context::<Signal<(u32, u32)>>();
     let session_id = use_context::<crate::state::SessionIdContext>().0;
     let send = use_context::<ChatSendHandler>();
+    // Phase 26.7.2 D-06: next_id for monotonic bubble ID allocation in history load.
+    // Provided via context by HermesApp so IDs don't collide with the WS receive loop.
+    let mut next_id = use_context::<Signal<u64>>();
 
     // Local composer state — text being typed in the `chat-input-pill`
     // textarea. Cleared on submit (Enter or the SEND button).
@@ -154,6 +157,69 @@ pub fn ScreenChat(is_active: bool) -> Element {
                 let _ = len; // suppress unused-variable on host builds
             }
         }
+    });
+
+    // Phase 26.7.2 D-06: History load — fires on every session_id change.
+    // Signal-borrow discipline (clippy.toml): session_id borrow cloned into
+    // owned String before spawn; no GenerationalRef held across await.
+    // Subscribes only to session_id — writing bubbles/next_id inside spawn
+    // does NOT retrigger this effect (Pitfall 2: no loop).
+    use_effect(move || {
+        // Clone into owned String; borrow ends at ; (RESEARCH Pitfall 1 / Q8).
+        let sid = session_id.read().clone();
+        // D-03/Q3: skip if session bootstrap has not resolved yet.
+        if sid == "pending" {
+            return;
+        }
+
+        // D-08: always clear on session_id change — no stale history leaks.
+        bubbles.write().clear();
+        // Cancel any stale STREAMING indicator from a previous session (Q8 / T-26.7.2-11).
+        streaming_id.set(None);
+
+        spawn(async move {
+            match crate::server::api::get_session_messages(sid).await {
+                Ok(msgs) if !msgs.is_empty() => {
+                    // Map ChatMessage → ChatBubble. Read next_id as Copy u64
+                    // before any .await; borrow ends at ; (CLAUDE.md signal rules).
+                    let mut id_val = *next_id.read();
+                    let mut history: Vec<ChatBubble> = msgs
+                        .into_iter()
+                        .filter_map(|m| match m.role.as_str() {
+                            "user" => {
+                                let b = ChatBubble::user(id_val, m.content);
+                                id_val += 1;
+                                Some(b)
+                            }
+                            "assistant" => {
+                                let b = ChatBubble::assistant(id_val, m.content);
+                                id_val += 1;
+                                Some(b)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+
+                    // D-02 / Pitfall 3: insert divider only when history non-empty.
+                    // Guarded by the outer Ok(msgs) if !msgs.is_empty() arm.
+                    history.push(ChatBubble {
+                        id: id_val,
+                        kind: ChatBubbleKind::Divider,
+                        text: String::new(),
+                        tool_rows: vec![],
+                    });
+                    id_val += 1;
+
+                    // Single write — all history + divider atomically appended.
+                    // WriteLock acquired and released before next .await (none follows).
+                    bubbles.write().extend(history);
+                    next_id.set(id_val);
+                }
+                _ => {
+                    // D-07: empty or error → empty stream, no indicator, no divider.
+                }
+            }
+        });
     });
 
     // Header-bar reads — pull into locals so the rsx tree never holds a

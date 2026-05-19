@@ -326,6 +326,10 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| SessionIdContext(session_id));
     use_context_provider(|| tokens);
     use_context_provider(|| send_handler);
+    // Phase 26.7.2 (D-06): next_id exposed via context so ScreenChat's
+    // history-load use_effect can allocate bubble IDs that don't collide
+    // with IDs already assigned by the WS receive loop.
+    use_context_provider(|| next_id);
     // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08). subagent_events drives push-restart in Plan 02; is_ws_connected drives dynamic poll cadence.
     use_context_provider(|| subagent_events);
     use_context_provider(|| is_ws_connected);
