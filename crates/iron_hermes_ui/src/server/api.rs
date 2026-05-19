@@ -254,6 +254,7 @@ fn format_context_window(ctx: usize) -> String {
 /// Skips tool/system roles and None-content entries entirely.
 /// Truncates to 80 chars using chars().take(80) for multi-byte-safe truncation
 /// (direct byte-slice indexing would panic on non-ASCII char boundaries).
+#[cfg(feature = "server")]
 fn extract_last_message_preview(msgs: &[ironhermes_state::StoredMessage]) -> Option<String> {
     let preview = msgs
         .iter()
@@ -266,7 +267,7 @@ fn extract_last_message_preview(msgs: &[ironhermes_state::StoredMessage]) -> Opt
         });
     preview
         .and_then(|m| m.content.as_ref())
-        .map(|c| c.chars().take(80).collect::<String>())
+        .map(|c: &String| c.chars().take(80).collect::<String>())
 }
 
 /// Phase 26.7 Plan 03 (D-09, R-1, R-4): Read-only catalog of skills from the
