@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is tracked — this is a binary crate workspace, pinning the dep
+# graph stops dx CLI vs dioxus version drift (lesson from phase 26.7.1).
 .env
 *.db
 .claude/worktrees/
