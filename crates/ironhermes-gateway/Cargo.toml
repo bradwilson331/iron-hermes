@@ -36,6 +36,8 @@ pdf-extract = { workspace = true }
 base64 = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 tempfile = "3"
+serenity = { version = "0.12.5", default-features = false, features = ["client", "gateway", "http", "model", "cache", "rustls_backend"] }
+slack-morphism = { version = "2.22.0", features = ["axum"] }
 
 [dev-dependencies]
 # tempfile promoted to [dependencies] — needed at runtime for write_gateway_pid atomic write (Phase 24 D-10)
