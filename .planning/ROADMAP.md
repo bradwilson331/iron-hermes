@@ -1213,6 +1213,16 @@ Plans:
 - [x] 32.3-04-PLAN.md — Three-surface adapters: tui_rata smoke / iron_hermes_ui REST endpoints / gateway with_subagent_registry attach + D-09 confirm-token gate (Wave 4)
 - [x] 32.3-05-PLAN.md — docs/DELEGATION.md sweep (stale_warn_seconds, Shrike Service, gateway confirm token, 6.7-hour ghost) + /help discoverability audit (audit-only per D-12; B3 carve-out delegated to Plan 03) (Wave 4)
 
+### Phase 32.3.1: fix delegate_task kill abort wiring — close shrike handle_map gap (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 32.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 32.3.1 to break down)
+
 ### Phase 32.2: subagent delegation parity (INSERTED)
 
 **Goal:** Close the parity gap between IronHermes's `delegate_task` and the canonical Python hermes-agent delegation: nested orchestration via `role`+`max_spawn_depth`, complete blocked-tools set (`clarify`+`send_message`), batch oversize → tool error (no silent truncation), config rename `subagent:`→`delegation:` with new fields `max_spawn_depth`/`orchestrator_enabled` + per-call `max_iterations` schema, and `/agents` tree view threaded with `parent_id` across tui_rata + gateway + iron_hermes_ui surfaces.

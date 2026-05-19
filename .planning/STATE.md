@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: ready_to_plan
-stopped_at: Phase 26.7.1 complete (2/2) — ready to discuss Phase 27.1
-last_updated: 2026-05-19T10:05:58.612Z
-last_activity: 2026-05-19 -- Phase 26.7.1 execution started
+status: planning
+stopped_at: Phase 26.7.1 planned (2 plans, plan-check passed)
+last_updated: "2026-05-19T10:06:54.458Z"
+last_activity: 2026-05-19
 progress:
-  total_phases: 60
-  completed_phases: 43
+  total_phases: 61
+  completed_phases: 44
   total_plans: 237
-  completed_plans: 327
+  completed_plans: 229
   percent: 72
 ---
 
@@ -451,6 +451,7 @@ Recent decisions affecting current work:
 - Phase 32.3 inserted after Phase 32: delegation agent runaway (URGENT)
 - Phase 26.7 inserted after Phase 26.6: wire up web to real services (URGENT)
 - Phase 26.7.1 inserted after Phase 26.7: Agents page live updates — periodic-poll baseline + TERMINATED-HOLD-N fade (N=5s), then ws-event-driven upgrade for <1s update latency (URGENT)
+- Phase 32.3.1 inserted after Phase 32.3: fix delegate_task kill abort wiring — close shrike handle_map gap (residual bug surfaced during 26.7.1 Wave 2 UAT 2026-05-19) (URGENT)
 
 ### Pending Todos
 
