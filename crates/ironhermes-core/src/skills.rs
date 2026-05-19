@@ -1033,6 +1033,35 @@ fn skill_passes_filter(
 }
 
 // =============================================================================
+// Phase 26.7.3: Pure filter helpers (D-01/D-03/D-04/D-05/D-09/Pitfall 6)
+// =============================================================================
+
+/// Phase 26.7.3 D-01/D-03/Pitfall 6 — pure predicate evaluated by the
+/// Skills screen `use_memo` to decide whether a skill should appear under
+/// the active tab. The `enabled` argument is the server-sourced
+/// `SkillInfo.enabled`, NOT the optimistic UI state.
+pub fn tab_predicate(category: &str, enabled: bool, tab: &str) -> bool {
+    match tab {
+        "bundled" => category == "bundled",
+        "installed" => category != "bundled",
+        "enabled" => enabled,
+        // "all" and any unknown tab → no filtering
+        _ => true,
+    }
+}
+
+/// Phase 26.7.3 D-04/D-05 — case-insensitive substring match against the
+/// skill name OR description. Category is intentionally excluded (tabs
+/// already filter on category). Empty query returns true.
+pub fn search_matches(name: &str, description: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    name.to_lowercase().contains(&q) || description.to_lowercase().contains(&q)
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -3217,5 +3246,105 @@ Body.
         let registry = SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]);
         // Just confirm the already-valid name loads — no normalization expected.
         assert!(registry.find("ascii-art").is_some());
+    }
+}
+
+// =============================================================================
+// Phase 26.7.3 Plan 01: Tab predicate unit tests (D-01/D-03/Pitfall 6)
+// =============================================================================
+
+#[cfg(test)]
+mod tab_filter {
+    use super::*;
+
+    #[test]
+    fn all_tab_matches_every_skill() {
+        // "all" tab shows every skill regardless of category or enabled state
+        assert!(tab_predicate("bundled", true, "all"));
+        assert!(tab_predicate("installed", false, "all"));
+        assert!(tab_predicate("official", true, "all"));
+        assert!(tab_predicate("trusted", false, "all"));
+    }
+
+    #[test]
+    fn bundled_tab_matches_only_bundled() {
+        // D-01: BUNDLED tab shows only category == "bundled"
+        assert!(tab_predicate("bundled", false, "bundled"));
+        assert!(!tab_predicate("installed", false, "bundled"));
+        assert!(!tab_predicate("official", true, "bundled"));
+    }
+
+    #[test]
+    fn installed_tab_excludes_bundled() {
+        // D-01: INSTALLED tab shows everything except category == "bundled"
+        assert!(!tab_predicate("bundled", true, "installed"));
+        assert!(tab_predicate("installed", false, "installed"));
+        assert!(tab_predicate("official", false, "installed"));
+        assert!(tab_predicate("trusted", false, "installed"));
+        assert!(tab_predicate("self-created", false, "installed"));
+    }
+
+    #[test]
+    fn enabled_tab_requires_server_enabled() {
+        // Pitfall 6: ENABLED tab uses server-sourced enabled bool, not optimistic UI state
+        assert!(tab_predicate("bundled", true, "enabled"));
+        assert!(!tab_predicate("bundled", false, "enabled"));
+        assert!(tab_predicate("installed", true, "enabled"));
+        assert!(!tab_predicate("installed", false, "enabled"));
+    }
+
+    #[test]
+    fn unknown_tab_defaults_to_all() {
+        // Graceful default: unrecognised tab string behaves like "all"
+        assert!(tab_predicate("bundled", true, "garbage"));
+        assert!(tab_predicate("installed", false, "garbage"));
+    }
+}
+
+// =============================================================================
+// Phase 26.7.3 Plan 01: Search filter unit tests (D-04/D-05)
+// =============================================================================
+
+#[cfg(test)]
+mod skills_filter {
+    use super::*;
+
+    #[test]
+    fn empty_query_matches_everything() {
+        // Empty query always returns true (no filter applied)
+        assert!(search_matches("Foo", "Bar", ""));
+        assert!(search_matches("", "", ""));
+    }
+
+    #[test]
+    fn name_substring_matches() {
+        // Query substring present in name → match
+        assert!(search_matches("WebFetch", "fetches URLs", "fet"));
+    }
+
+    #[test]
+    fn description_substring_matches() {
+        // Query substring present in description → match
+        assert!(search_matches("FileWriter", "writes files to disk", "disk"));
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        // D-04: matching is case-insensitive for both name and description
+        assert!(search_matches("WebFetch", "URL fetcher", "WEBFETCH"));
+        assert!(search_matches("WebFetch", "URL fetcher", "url"));
+    }
+
+    #[test]
+    fn no_match_returns_false() {
+        // Query not found in name or description → no match
+        assert!(!search_matches("Foo", "Bar", "xyz"));
+    }
+
+    #[test]
+    fn category_not_searched() {
+        // D-05: category is intentionally excluded from search scope
+        // A query matching only the hypothetical category must NOT match
+        assert!(!search_matches("Foo", "Bar", "bundled"));
     }
 }

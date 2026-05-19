@@ -865,6 +865,12 @@ pub struct SkillsConfig {
     /// Skills Hub settings (Phase 19.1 D-04/D-08).
     #[serde(default)]
     pub hub: HubConfig,
+    /// Phase 26.7.3 D-06 — opt-out list; names present here are explicitly
+    /// disabled. All other skills are on by default. Cross-surface: agent
+    /// loop, web UI, and TUI all read this field. `#[serde(default)]`
+    /// ensures existing config.yaml files without this key still parse.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SkillsConfig {
@@ -875,6 +881,7 @@ impl Default for SkillsConfig {
             credential_dir: None,
             config: HashMap::new(),
             hub: HubConfig::default(),
+            disabled: Vec::new(),
         }
     }
 }
@@ -1672,6 +1679,46 @@ skills:
         assert!(cfg.skills.hub.github_token_env.is_none());
         assert!(cfg.skills.hub.extra_taps.is_empty());
         assert!(cfg.skills.hub.well_known_origins.is_empty());
+    }
+
+    // =========================================================================
+    // Phase 26.7.3 Plan 01: SkillsConfig.disabled (D-06) serde tests
+    // =========================================================================
+
+    #[test]
+    fn skills_config_default_has_empty_disabled() {
+        let default = SkillsConfig::default();
+        assert_eq!(
+            default.disabled,
+            Vec::<String>::new(),
+            "disabled must be Vec::new() by default — all skills on by default"
+        );
+    }
+
+    #[test]
+    fn skills_config_disabled_field_round_trip() {
+        let mut cfg = SkillsConfig::default();
+        cfg.disabled = vec!["foo".to_string(), "bar".to_string()];
+        let ser = serde_yaml::to_string(&cfg).expect("serialize");
+        let de: SkillsConfig = serde_yaml::from_str(&ser).expect("deserialize");
+        assert_eq!(
+            de.disabled,
+            vec!["foo".to_string(), "bar".to_string()],
+            "disabled list must round-trip through YAML serde"
+        );
+        assert!(de.enabled, "other fields must be preserved after round-trip");
+    }
+
+    #[test]
+    fn skills_config_missing_disabled_key_defaults_empty() {
+        // Pre-phase config.yaml files have no `disabled:` key.
+        // #[serde(default)] must produce Vec::new() — not an error.
+        let yaml = "enabled: true\nextra_paths: []\n";
+        let cfg: SkillsConfig = serde_yaml::from_str(yaml).expect("must parse without disabled key");
+        assert!(
+            cfg.disabled.is_empty(),
+            "missing disabled key must deserialize to empty Vec via #[serde(default)]"
+        );
     }
 
     // =========================================================================
