@@ -28,6 +28,8 @@ pub enum ChatBubbleKind {
     User,
     Assistant,
     Error,
+    // Phase 26.7.2 D-02: history/live boundary marker — renders as a section-label rule, no avatar, no bubble body
+    Divider,
 }
 
 /// One tool-call progress row inside an assistant bubble.
@@ -213,6 +215,7 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::User      => "chat-msg user",
                                     ChatBubbleKind::Assistant => "chat-msg assistant",
                                     ChatBubbleKind::Error     => "chat-msg error",
+                                    ChatBubbleKind::Divider   => "chat-divider",
                                 },
 
                                 // Avatar — the shield-caduceus PNG for the
@@ -230,43 +233,49 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::Error => rsx! {
                                         div { class: "avatar error", "!" }
                                     },
+                                    ChatBubbleKind::Divider => rsx! {},
                                 }
 
                                 // Bubble body + embedded tool-call progress
                                 // rows for assistant bubbles (D-19).
-                                div { class: "chat-bubble-wrap",
-                                    div {
-                                        class: match b.kind {
-                                            ChatBubbleKind::User      => "chat-bubble is-user",
-                                            ChatBubbleKind::Assistant => "chat-bubble is-assistant",
-                                            ChatBubbleKind::Error     => "chat-bubble is-error",
-                                        },
-                                        // `{b.text}` is rendered as a plain
-                                        // Dioxus text node — auto-escaped,
-                                        // no `dangerous_inner_html` (T-26.2.1-19).
-                                        "{b.text}"
+                                // Phase 26.7.2 D-02: Divider variant renders a
+                                // section-label rule instead of a bubble body.
+                                if b.kind != ChatBubbleKind::Divider {
+                                    div { class: "chat-bubble-wrap",
+                                        div {
+                                            class: match b.kind {
+                                                ChatBubbleKind::User      => "chat-bubble is-user",
+                                                ChatBubbleKind::Assistant => "chat-bubble is-assistant",
+                                                ChatBubbleKind::Error     => "chat-bubble is-error",
+                                                ChatBubbleKind::Divider   => "chat-bubble is-divider",
+                                            },
+                                            // `{b.text}` is rendered as a plain
+                                            // Dioxus text node — auto-escaped,
+                                            // no `dangerous_inner_html` (T-26.2.1-19).
+                                            "{b.text}"
 
-                                        if !b.tool_rows.is_empty() {
-                                            div { class: "chat-progress",
-                                                for tr in b.tool_rows.iter() {
-                                                    {
-                                                        let state_class = if tr.done {
-                                                            if tr.success { "is-done is-success" } else { "is-done is-error" }
-                                                        } else {
-                                                            "is-running"
-                                                        };
-                                                        let icon_class = if tr.done { "icon done" } else { "icon spin" };
-                                                        let icon_glyph = if tr.done { "●" } else { "◐" };
-                                                        rsx! {
-                                                            div {
-                                                                class: "chat-progress-row {state_class}",
-                                                                span {
-                                                                    class: "{icon_class}",
-                                                                    "{icon_glyph}"
-                                                                }
-                                                                span { class: "tp-name", "{tr.name}" }
-                                                                if !tr.args.is_empty() {
-                                                                    span { class: "tp-args", " · {tr.args}" }
+                                            if !b.tool_rows.is_empty() {
+                                                div { class: "chat-progress",
+                                                    for tr in b.tool_rows.iter() {
+                                                        {
+                                                            let state_class = if tr.done {
+                                                                if tr.success { "is-done is-success" } else { "is-done is-error" }
+                                                            } else {
+                                                                "is-running"
+                                                            };
+                                                            let icon_class = if tr.done { "icon done" } else { "icon spin" };
+                                                            let icon_glyph = if tr.done { "●" } else { "◐" };
+                                                            rsx! {
+                                                                div {
+                                                                    class: "chat-progress-row {state_class}",
+                                                                    span {
+                                                                        class: "{icon_class}",
+                                                                        "{icon_glyph}"
+                                                                    }
+                                                                    span { class: "tp-name", "{tr.name}" }
+                                                                    if !tr.args.is_empty() {
+                                                                        span { class: "tp-args", " · {tr.args}" }
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -274,6 +283,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                                 }
                                             }
                                         }
+                                    }
+                                } else {
+                                    // Phase 26.7.2 D-02: history/live boundary marker.
+                                    // Matches the `.section-label` convention from sessions.rs.
+                                    div { class: "chat-divider-label",
+                                        span { class: "section-label", "─── Earlier ───" }
                                     }
                                 }
                             }
