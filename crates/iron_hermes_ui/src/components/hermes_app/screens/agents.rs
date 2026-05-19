@@ -127,9 +127,22 @@ pub fn ScreenAgents(is_active: bool) -> Element {
             );
         }
     }
-    // Only snapshot prev_live when the resource has resolved — otherwise we'd be overwriting
-    // a valid [A] snapshot with the suspended-state [] fallback and losing the diff signal.
-    if resource_resolved {
+    // UAT-3 hotfix: gate prev_live.set() on actual content change, not on every
+    // resolved render. Dioxus 0.7 signals do NOT deduplicate identical writes —
+    // every `.set()` schedules a re-render, which re-runs the diff block, which
+    // calls `.set()` again. UAT-2's swap to `use_resource` removed the suspended-
+    // state pacing that had been masking this infinite-loop bug under
+    // `use_server_future + ?`, so the page froze on UAT-3 with the diff log
+    // firing dozens of times at the same wall-clock timestamp.
+    //
+    // AgentInfo derives PartialEq (verified in src/server/api.rs line 360), so we
+    // can compare prev_snapshot (the owned Vec already cloned at line 112 from
+    // prev_live.read()) against agents_list directly. prev_snapshot is the
+    // CURRENT value of prev_live at the start of this render — comparing against
+    // it is equivalent to checking whether the upcoming .set() would be a no-op.
+    // No additional .read() needed (and importantly: no .read() held across the
+    // .set() call, which would violate signal-borrow discipline).
+    if resource_resolved && prev_snapshot != agents_list {
         prev_live.set(agents_list.clone());
     }
 
