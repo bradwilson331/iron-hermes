@@ -304,6 +304,125 @@ pub async fn list_skills() -> Result<Vec<SkillInfo>> {
     Ok(out)
 }
 
+// =============================================================================
+// Phase 26.7.3 Plan 02: toggle_skill — D-07 write path
+// =============================================================================
+
+/// Phase 26.7.3 D-07: Toggle a skill's disabled state.
+///
+/// Four-step contract:
+///   Step 1 — Input validation: reject unknown skill names BEFORE any disk I/O.
+///             `skill_registry.find(&name)` must return `Some` or the fn returns Err.
+///   Step 2 — Config write-back: load fresh config from disk (NOT the startup Arc<Config>
+///             snapshot), toggle `name` in `skills.disabled`, save back to disk.
+///   Step 3 — Config persistence: `Config::save()` writes to get_hermes_home()/config.yaml.
+///   Step 4 — In-process active_skills mutation: lock the std::sync::Mutex, push or retain
+///             based on the toggle direction. The MutexGuard MUST drop before this fn returns.
+///             Lock discipline: no async suspension occurs while the guard is held.
+///
+/// Behavior (opt-out model — absent from `disabled` means enabled):
+///   - If `name` was enabled (absent from disabled): add to disabled, remove from active_skills.
+///   - If `name` was disabled (present in disabled): remove from disabled, push to active_skills.
+#[server]
+pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
+    let state = crate::server::state::global_app_state();
+
+    // Step 1 — input validation: reject unknown skill names BEFORE any disk I/O (T-26.7.3-02-01)
+    let record = state.runtime_bundle.skill_registry.find(&name).cloned();
+    if record.is_none() {
+        return Err(ServerFnError::new(format!("unknown skill: {name}")));
+    }
+
+    // Step 2 — load fresh config from disk and toggle the disabled list
+    let mut config = ironhermes_core::config::Config::load().unwrap_or_default();
+    let was_disabled = apply_disable_toggle(&mut config, &name);
+
+    // Step 3 — persist config back to disk
+    config.save().map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
+
+    // Step 4 — in-process active_skills mutation (scoped std::sync::Mutex lock).
+    // The MutexGuard is dropped at the closing brace before fn returns; no async
+    // suspension occurs while the lock is held (lock discipline: Behavior 5).
+    // Pattern: api.rs list_skills lines 234–240 (active_skills lock pattern)
+    {
+        let mut skills = state.runtime_bundle.active_skills.lock()
+            .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
+        if was_disabled {
+            // Was disabled → now enabled: push record if not already present
+            if !skills.iter().any(|s| s.name == name) {
+                skills.push(record.unwrap());
+            }
+        } else {
+            // Was enabled → now disabled: remove from active list
+            skills.retain(|s| s.name != name);
+        }
+    } // MutexGuard drops here — lock released before fn returns
+
+    Ok(())
+}
+
+/// Pure helper: toggle `name` in `config.skills.disabled` (opt-out model).
+///
+/// Returns `true` if the name WAS disabled before the toggle (i.e. the name was
+/// removed from the list — re-enable direction). Returns `false` if the name was
+/// not in the list (i.e. the name was added — disable direction).
+///
+/// Extracted as a private fn so both `toggle_skill` (call-site) and the unit
+/// tests in `toggle_skill_tests` can exercise the pure config-mutation logic
+/// without requiring a live `global_app_state()`.
+fn apply_disable_toggle(config: &mut ironhermes_core::config::Config, name: &str) -> bool {
+    let is_disabled = config.skills.disabled.contains(&name.to_string());
+    if is_disabled {
+        config.skills.disabled.retain(|n| n != name);
+    } else {
+        config.skills.disabled.push(name.into());
+    }
+    is_disabled
+}
+
+#[cfg(test)]
+mod toggle_skill_tests {
+    use super::apply_disable_toggle;
+    use ironhermes_core::config::Config;
+
+    fn make_config_with_disabled(names: &[&str]) -> Config {
+        let mut c = Config::default();
+        c.skills.disabled = names.iter().map(|s| s.to_string()).collect();
+        c
+    }
+
+    #[test]
+    fn toggle_enabled_skill_adds_to_disabled() {
+        let mut config = make_config_with_disabled(&[]);
+        let was_disabled = apply_disable_toggle(&mut config, "foo");
+        assert!(!was_disabled, "foo was not disabled before toggle");
+        assert!(config.skills.disabled.contains(&"foo".to_string()),
+            "foo should now be in disabled list");
+    }
+
+    #[test]
+    fn toggle_disabled_skill_removes_from_disabled() {
+        let mut config = make_config_with_disabled(&["bar"]);
+        let was_disabled = apply_disable_toggle(&mut config, "bar");
+        assert!(was_disabled, "bar was disabled before toggle");
+        assert!(!config.skills.disabled.contains(&"bar".to_string()),
+            "bar should no longer be in disabled list");
+    }
+
+    #[test]
+    fn toggle_round_trip_restores_original_state() {
+        let mut config = make_config_with_disabled(&[]);
+        // enable→disable
+        apply_disable_toggle(&mut config, "baz");
+        assert!(config.skills.disabled.contains(&"baz".to_string()),
+            "baz should be disabled after first toggle");
+        // disable→enable
+        apply_disable_toggle(&mut config, "baz");
+        assert!(!config.skills.disabled.contains(&"baz".to_string()),
+            "baz should be re-enabled after second toggle");
+    }
+}
+
 #[post("/api/sessions/create")]
 pub async fn create_session() -> Result<String> {
     let state = crate::server::state::global_app_state();
