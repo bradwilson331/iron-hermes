@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod backoff;
+pub mod discord; // Phase 34 — D-10
 pub mod handler;
 pub mod multimodal;
 pub mod pid;
@@ -11,6 +12,7 @@ pub mod telegram;
 pub mod user_queue;
 
 pub use adapter::{MessageHandler, PlatformAdapter};
+pub use discord::{DiscordAdapter, run_discord_adapter};
 pub use backoff::BackoffState;
 pub use handler::GatewayMessageHandler;
 pub use pid::{
