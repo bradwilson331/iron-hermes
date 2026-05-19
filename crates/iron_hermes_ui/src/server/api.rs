@@ -284,6 +284,48 @@ pub async fn create_session() -> Result<String> {
     Ok(session_key)
 }
 
+/// Phase 26.7.2 (D-10): UI display cap for session history fetch.
+/// This is a UI display cap only — the agent's build_messages_for_turn has
+/// independent context-window management that operates separately from this limit.
+const HISTORY_LIMIT: usize = 50;
+
+/// Phase 26.7.2 (D-10): Last N messages for the Chat screen history load.
+/// Query param style — consistent with all other #[get] routes in this file.
+/// Filters to "user" + "assistant" roles only (tool/system not renderable as
+/// ChatBubble items per RESEARCH Q4). Slices the tail so the last HISTORY_LIMIT
+/// visible messages are returned in chronological order (oldest first).
+/// Filter MUST run before .take(HISTORY_LIMIT) so invisible tool/system rows
+/// do not consume the display cap.
+#[get("/api/session-messages")]
+pub async fn get_session_messages(id: String) -> Result<Vec<ChatMessage>> {
+    let state = crate::server::state::global_app_state();
+    let all_msgs = state
+        .state_store
+        .lock()
+        .unwrap()
+        .get_messages(&id)
+        .map_err(|e| ServerFnError::new(format!("get_messages failed: {e}")))?;
+
+    // Filter MUST run before take so tool/system messages don't consume the cap (RESEARCH Q4).
+    // Collect into a Vec after filter so we have ExactSizeIterator for the .rev().take().rev() slice.
+    let visible: Vec<&ironhermes_state::StoredMessage> = all_msgs
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .collect();
+    let out: Vec<ChatMessage> = visible
+        .iter()
+        .rev()
+        .take(HISTORY_LIMIT)
+        .rev()
+        .map(|m| ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(out)
+}
+
 // =============================================================================
 // Phase 32.3 Plan 04: /api/agents/{kill,interrupt,prune,status} REST endpoints
 // =============================================================================
