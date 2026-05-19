@@ -38,6 +38,19 @@
 //! INV-33-06 — Plan 33-03 adds "learning" to KNOWN_TOOLSETS (CLI validator)
 //!   and to the CLI members_map. ≥2 occurrences catches a refactor that
 //!   leaves the array entry but drops the map insert (or vice versa).
+//!
+//! INV-33-07 — Phase 34 D-05: AppState::init in iron_hermes_ui calls
+//!   `build_app_runtime_bundle` so web turns inherit the full skill_manage
+//!   toolset (Learning Loop) through the shared runtime bundle. Removing the
+//!   call site would silently disconnect every web session from the tool
+//!   registry, causing "unknown tool" errors at runtime with no compile-time
+//!   signal. Locks the Phase 33 Plan 03 carry-over decision.
+//!
+//! INV-33-08 — Phase 32 Plan 03 / Phase 34 Success Criterion 1: run_web_turn
+//!   in iron_hermes_ui fires `spawn_nudge_review` every `nudge_interval`
+//!   successful web turns and maintains a `nudge_turns` counter for keying.
+//!   Without both symbols, the web path has no Learning Loop nudge and web
+//!   sessions never trigger autonomous memory consolidation.
 
 const APP_RUNTIME_FACTORY_SOURCE: &str = include_str!("../src/app_runtime_factory.rs");
 const PROMPT_BUILDER_SOURCE: &str = include_str!("../src/prompt_builder.rs");
@@ -131,5 +144,40 @@ fn inv_33_06_learning_in_known_toolsets() {
          (>= 2 string-literal occurrences). Found {count}. Without both \
          entries, `hermes toolset enable learning` fails with \
          'unknown toolset'. See Phase 33 Plan 03."
+    );
+}
+
+const WEB_STATE_SOURCE: &str = include_str!("../../iron_hermes_ui/src/server/state.rs");
+
+/// INV-33-07: `build_app_runtime_bundle` is called in iron_hermes_ui/src/server/state.rs
+/// so web UI sessions wire the full skill_manage toolset through the shared runtime bundle.
+#[test]
+fn inv_33_07_appstate_calls_build_app_runtime_bundle() {
+    let count = WEB_STATE_SOURCE.matches("build_app_runtime_bundle").count();
+    assert!(
+        count >= 1,
+        "INV-33-07: crates/iron_hermes_ui/src/server/state.rs must call \
+         build_app_runtime_bundle() so web UI sessions wire the Learning Loop \
+         skill_manage toolset through the shared AppRuntimeBundle. Found {count} \
+         occurrences (expected >= 1). See Phase 33 Plan 03 / Phase 34 D-05."
+    );
+}
+
+/// INV-33-08: `spawn_nudge_review` and `nudge_turns` are both present in
+/// iron_hermes_ui/src/server/state.rs, locking the web nudge fire site
+/// shipped by Phase 32 Plan 03 (Success Criterion 1).
+#[test]
+fn inv_33_08_web_nudge_fire_site_exists() {
+    assert!(
+        WEB_STATE_SOURCE.contains("spawn_nudge_review"),
+        "INV-33-08: crates/iron_hermes_ui/src/server/state.rs must call \
+         spawn_nudge_review from run_web_turn so web sessions trigger the \
+         Learning Loop memory nudge. See Phase 32 Plan 03 / Phase 34 Success Criterion 1."
+    );
+    assert!(
+        WEB_STATE_SOURCE.contains("nudge_turns"),
+        "INV-33-08: crates/iron_hermes_ui/src/server/state.rs must maintain \
+         nudge_turns counter for per-session nudge interval tracking. \
+         See Phase 32 Plan 03 / Phase 34 Success Criterion 1."
     );
 }
