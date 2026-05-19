@@ -794,6 +794,24 @@ Plans:
 - [x] 26.7.1-01-PLAN.md — Periodic-poll baseline (1500ms) + client-side TERMINATED-HOLD-N=5s fade + Page Visibility pause + busy-set kill/interrupt pause + diff_terminations pure-fn + .card.is-ended / .pill.ended CSS + HermesApp context slots (subagent_events, is_ws_connected) for Plan 02 prep — installed at `hermes_app/mod.rs` alongside the existing `bubbles`/`streaming_id`/`tokens`/`send_handler` providers
 - [x] 26.7.1-02-PLAN.md — chat-ws SubagentProgressCallback per-turn plumbing through state.rs::run_web_turn + ChatStreamEvent::SubagentEvent {} variant + client counter increment + is_ws_connected lifecycle + ScreenAgents use_effect watcher + dynamic poll cadence (5s when ws connected, 1500ms when disconnected)
 
+### Phase 26.7.2: Sessions load session data (INSERTED)
+
+**Goal:** Make clicking a session row in ScreenSessions load that session's conversation history into the Chat screen. Adds (1) a `GET /api/session-messages?id={sid}` server fn returning the last 50 user+assistant messages, (2) a `use_effect` in ScreenChat that clears bubbles + STREAMING indicator and prepopulates `Signal<Vec<ChatBubble>>` with loaded history followed by a `ChatBubbleKind::Divider` boundary marker, (3) `SessionInfo` enriched with a server-truncated `last_message: Option<String>` preview field, and (4) client-side relative timestamp formatting ("2 days ago" / "just now") in `SessionRow` replacing the raw Unix-seconds string. Loaded sessions are fully continuable (chat-input-pill stays active). `/clear` wipes everything (no historical/live distinction post-population). Out of scope: session deletion server fn, paginated history beyond N=50, session search/filter, `+ NEW SESSION` button wiring, per-session title editing.
+**Requirements**: (none — D-01..D-10 from 26.7.2-CONTEXT.md are the requirements set)
+**Depends on:** Phase 26.7.1
+**Plans:** 2 plans
+
+Plans:
+- [ ] 26.7.2-01-PLAN.md — Wave 1 server-side surface: `ChatMessage { role, content }` wire struct in api.rs, `#[get("/api/session-messages")]` fn returning last-50 user+assistant messages, `last_message: Option<String>` field on `SessionInfo`, `extract_last_message_preview` private helper (assistant-preferred, user fallback, 80-char chars-safe truncation), wired into `list_sessions()`. Touches `crates/iron_hermes_ui/src/server/api.rs` only.
+- [ ] 26.7.2-02-PLAN.md — Wave 2 client-side wiring: `ChatBubbleKind::Divider` variant + both match-site exhaustiveness fixes in chat.rs, `use_effect` on `session_id` in `ScreenChat` (skip "pending", clear bubbles, reset `streaming_id`, spawn fetch, append history + divider), wasm-gated `format_relative` helper in sessions.rs + SessionRow rendering relative timestamp and `last_message` preview. Touches `chat.rs` + `sessions.rs`. Depends on 26.7.2-01.
+
+**Wave structure:**
+
+- Wave 1: 26.7.2-01 (server-side — autonomous)
+- Wave 2: 26.7.2-02 (client-side — depends on 26.7.2-01, autonomous)
+
+**Phase directory:** `.planning/phases/26.7.2-sessions-load-session-data/`
+
 ### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
 
 **Goal:** Build on Phase 26.5's overlay primitive to add the remaining Ink-TUI UX to the in-process ratatui REPL (`crates/ironhermes-cli/src/tui_rata/`): (a) a `tui_rata/thinking_panel.rs` expanded "thinking" widget — tool trail rendered as a `├─`/`└─` tree, per-tool elapsed time, a hand-rolled braille spinner, optional 1-line chain-of-thought preview — fed from the existing stream-event arms, **togglable**, with the current single-row `knight_rider.rs` scanner serving as the collapsed view; (b) a browse-only `Overlay::SkillsHub` (categories → skills → SKILL.md info pane, sourced from `SkillRegistry`; in-TUI *install* is deferred since the install path is the interactive `hermes skills install`); (c) rich `Overlay::Approval` / `Overlay::Secret` / `Overlay::Sudo` prompts — centered overlays replacing the current transcript-line dangerous-command approval, with masked input for secrets — reusing tui_rata's existing `io_gate.rs`/`yolo.rs` plumbing. Telegram/gateway approval UX is explicitly out of scope (own later phase). No new workspace crates; spinners use a small built-in braille table (no `unicode-animations` equivalent dep). Closes with a `checkpoint:human-verify` UAT walking the expanded/collapsed thinking views, the Skills Hub, and each prompt overlay against the hermes-agent Ink reference (`ui-tui/src/components/thinking.tsx`, `skillsHub.tsx`, `prompts.tsx`, `maskedPrompt.tsx`).
