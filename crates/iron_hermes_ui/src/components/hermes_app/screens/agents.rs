@@ -31,10 +31,34 @@ use dioxus::CapturedError;
 /// PRUNE ENDED action.
 #[component]
 pub fn ScreenAgents(is_active: bool) -> Element {
-    // `use_server_future` suspends on first render until the future resolves,
-    // then re-evaluates on `.restart()`.  The `?` operator propagates the
-    // `RenderError` (Dioxus 0.7 — same idiom as sessions.rs:33).
-    let mut agents_resource = use_server_future(crate::server::api::api_agents_list)?;
+    // UAT-2 hotfix: SWAP from `use_server_future(...)?` to `use_resource`.
+    //
+    // Why the `use_server_future(...)?` pattern was broken: the `?` operator
+    // propagates a `RenderError` whenever the resource is in the loading
+    // (`None`) state, causing the component function to return EARLY before
+    // the `use_future` poll loop and decay sweep get a chance to register.
+    // In Dioxus 0.7, hooks must register in the same order on every render.
+    // After every `.restart()` call, the resource re-enters the loading state,
+    // `?` re-fires the early return, and the previously-spawned `use_future`s
+    // are not re-issued because they were never registered in this render's
+    // hook ordering. UAT-2 confirmed: zero `/api/agents/list` fetches over 30s
+    // on a fresh navigation.
+    //
+    // `use_resource` is the same primitive without the SSR-suspension wrapper.
+    // It returns `Resource<Result<T, ServerFnError>>` and its value is read via
+    // `()` returning `Option<Result<T, ServerFnError>>` where `None` = loading.
+    // All hooks below this line now register on every render regardless of
+    // resource state.
+    //
+    // Note: dropping SSR suspension is acceptable here because (a) ScreenAgents
+    // is class-toggle-mounted (always present in DOM, the `is-active` class
+    // gates visibility), so first-paint suspension never blocked the user from
+    // seeing other screens, and (b) the empty-list fallback during the initial
+    // load window is visually indistinguishable from an empty registry — exact
+    // same UI as if no agents exist yet.
+    let mut agents_resource = use_resource(move || async move {
+        crate::server::api::api_agents_list().await
+    });
 
     // Phase 26.7.1 Plan 01 — screen-level signals.
     //
@@ -138,6 +162,10 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // Checks visibility and in-flight RPC count before each restart.
     // Dynamic cadence: 1500 ms while ws disconnected (Plan 01 ships with
     // is_ws_connected = false), 5000 ms while connected (Plan 02 wires .set()).
+    //
+    // UAT-2 instrumentation: per-iteration `[26.7.1-01 poll]` log line so the
+    // UAT operator can confirm in DevTools Console that the loop is alive and
+    // see exactly which gate (hidden / rpc_in_flight) is suppressing fetches.
     use_future(move || async move {
         loop {
             // D-04: skip while tab is hidden. document.hidden() is synchronous
@@ -150,19 +178,33 @@ pub fn ScreenAgents(is_active: bool) -> Element {
             #[cfg(not(target_arch = "wasm32"))]
             let hidden: bool = false;
 
+            // D-05: read in-flight count (Copy — borrow ends at ;).
+            let in_flight: u32 = *rpc_in_flight.read();
+
+            // UAT-2 instrumentation: emit a tick every iteration so we can see
+            // the loop is alive and which gate (if any) is suppressing the
+            // fetch.
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(
+                &format!(
+                    "[26.7.1-01 poll] tick hidden={} in_flight={}",
+                    hidden, in_flight
+                )
+                .into(),
+            );
+
             if hidden {
                 gloo_timers::future::TimeoutFuture::new(500).await;
                 continue;
             }
-
-            // D-05: skip while a kill/interrupt RPC is in flight.
-            let in_flight: u32 = *rpc_in_flight.read(); // Copy — borrow ends at ;
             if in_flight > 0 {
                 gloo_timers::future::TimeoutFuture::new(200).await;
                 continue;
             }
 
             agents_resource.restart();
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&"[26.7.1-01 poll] restart() fired".into());
 
             // D-08: dynamic cadence reads is_ws_connected from context.
             // Plan 01 ships with the initial value (false) giving 1500 ms
