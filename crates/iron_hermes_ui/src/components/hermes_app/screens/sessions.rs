@@ -21,6 +21,32 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
+/// Phase 26.7.2 (D-05): Format a Unix seconds timestamp as relative time.
+/// js_sys::Date::now() returns milliseconds; started_at is seconds (RESEARCH Q7).
+/// Multiply unix_secs by 1000.0 before arithmetic (RESEARCH Pitfall 4 — units).
+/// The #[cfg(not)] stub prevents compile errors on server/native builds.
+#[cfg(target_arch = "wasm32")]
+fn format_relative(unix_secs_str: &str) -> String {
+    let unix_secs: f64 = unix_secs_str.parse().unwrap_or(0.0);
+    let now_ms = js_sys::Date::now();
+    let then_ms = unix_secs * 1000.0;           // seconds → milliseconds (Pitfall 4)
+    let diff_secs = ((now_ms - then_ms) / 1000.0) as i64;
+    match diff_secs {
+        s if s < 5       => "just now".to_string(),
+        s if s < 60      => format!("{}s ago", s),
+        s if s < 3_600   => format!("{}m ago", s / 60),
+        s if s < 86_400  => format!("{}h ago", s / 3_600),
+        s if s < 604_800 => format!("{}d ago", s / 86_400),
+        _                => format!("{}w ago", diff_secs / 604_800),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn format_relative(_: &str) -> String {
+    // Server/native build stub — no js_sys available.
+    "\u{2014}".to_string()
+}
+
 /// Sessions screen — `<section id="screen-sessions">` ported from
 /// `app.html` line 416. Lists sessions via `list_sessions()` and writes
 /// `SessionIdContext` + `active_screen` on row click.
@@ -150,11 +176,18 @@ fn SessionRow(
         let tail = &session.id[session.id.len() - 8..];
         format!("…{tail}")
     };
-    let sub = format!(
-        "{msgs} msg{plural} · session {id_tail}",
-        msgs = session.message_count,
-        plural = if session.message_count == 1 { "" } else { "s" },
-    );
+    // Phase 26.7.2 D-04: prefer last_message preview when available;
+    // fall back to the existing identifier-based sub-text so the row
+    // never looks blank (e.g. zero-message sessions or tool-only history).
+    let preview: Option<String> = session.last_message.clone();
+    let sub = match &preview {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => format!(
+            "{msgs} msg{plural} · session {id_tail}",
+            msgs = session.message_count,
+            plural = if session.message_count == 1 { "" } else { "s" },
+        ),
+    };
 
     rsx! {
         div {
@@ -162,9 +195,18 @@ fn SessionRow(
             class: if is_current { "is-active" },
             style: "grid-template-columns: 1fr auto auto;",
             onclick: move |_| on_select.call(sid_for_select.clone()),
-            div { class: "row-main",
-                span { class: "row-title", "{title}" }
-                span { class: "row-sub", "{sub}" }
+            {
+                // Phase 26.7.2 D-05: compute relative timestamp outside rsx!
+                // macro to keep the borrow-drop discipline clean (no signal
+                // reads inside rsx! — this is a plain &str → String fn call).
+                let ts = format_relative(&session.created_at);
+                rsx! {
+                    div { class: "row-main",
+                        span { class: "row-title", "{title}" }
+                        span { class: "row-sub", "{sub}" }
+                        span { class: "row-sub", style: "opacity:0.5", "{ts}" }
+                    }
+                }
             }
             if is_current {
                 span { class: "pill green", "ACTIVE" }
