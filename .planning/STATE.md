@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 26.7.3 complete
-last_updated: "2026-05-19T17:00:00.000Z"
-last_activity: 2026-05-19 -- Phase 26.7.3 complete (all 4 plans + browser UAT)
+stopped_at: Phase 34 Wave 0 complete (paused before Wave 1 dep-add)
+last_updated: "2026-05-19T17:55:00.353Z"
+last_activity: 2026-05-19 -- Phase 34 Wave 0 complete (Plan 34-01)
 progress:
   total_phases: 63
   completed_phases: 46
   total_plans: 243
-  completed_plans: 235
-  percent: 72
+  completed_plans: 236
+  percent: 73
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 26.7.3 complete — Skills page tab/search/toggle fully activated
+**Current focus:** Phase 34 — webchat-and-multi-platform-gateway
 
 ## Current Position
 
-Phase: 26.7.3
-Plan: 4/4 complete
-Plans: All complete — Plans 01 (SkillsConfig.disabled + pure helpers), 02 (toggle_skill server fn), 03 (ScreenSkills UI wiring), 04 (browser UAT)
-Status: Complete
-Last activity: 2026-05-19 -- Phase 26.7.3 complete (all 4 plans + browser UAT)
+Phase: 34 (webchat-and-multi-platform-gateway) — EXECUTING (Wave 0 complete)
+Plan: 1 of 5 complete
+Plans: 34-01 ✓ invariant scaffolds; 34-02..05 pending
+Status: Wave 0 complete — paused before Wave 1 (Plan 34-02 has human-verify gate for serenity + slack-morphism deps)
+Last activity: 2026-05-19 -- Phase 34 Wave 0 complete (Plan 34-01: INV-33-07/08, invariants_34.rs RED gate, web-session keying lock)
 
 ## Performance Metrics
 
