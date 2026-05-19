@@ -4,9 +4,11 @@
 //! Renders the full SkillRegistry catalog with per-skill enabled state
 //! derived from `runtime_bundle.active_skills`. Dynamic count in sub-copy
 //! and ALL tab. SkillCard reflects enabled state via `.tgl on` class;
-//! no onclick handler (write ops deferred per D-09 + deferred list).
+//! toggle is wired via optimistic HashMap signal (Phase 26.7.3 Plan 03).
 
 use dioxus::prelude::*;
+use std::collections::HashMap;
+use ironhermes_core::skills::{tab_predicate, search_matches};
 
 #[component]
 pub fn ScreenSkills(is_active: bool) -> Element {
@@ -19,8 +21,32 @@ pub fn ScreenSkills(is_active: bool) -> Element {
         _ => Vec::new(),
     };
     let load_error = matches!(skills_resource(), Some(Err(_)));
-    let count = skills_list.len();
-    let enabled_count = skills_list.iter().filter(|s| s.enabled).count();
+
+    // Tab and search signals — let mut so event handlers can .set()
+    let mut active_tab = use_signal(|| "all");
+    let mut search_query = use_signal(|| String::new());
+
+    // Live tab counts — computed from skills_list (server-sourced per Pitfall 6)
+    let count_all = skills_list.len();
+    let count_bundled = skills_list.iter().filter(|s| s.category == "bundled").count();
+    let count_installed = skills_list.iter().filter(|s| s.category != "bundled").count();
+    let count_enabled = skills_list.iter().filter(|s| s.enabled).count();
+
+    // Extract owned values BEFORE rsx! — no GenerationalRef crossing the macro boundary
+    let tab_val = active_tab();     // &'static str — Copy
+    let _query_val = search_query(); // String — Clone (declared for completeness; used via signal in memo)
+
+    // Clone skills_list before use_memo — closure must own its data ('static capture, Pitfall 5)
+    let skills_for_memo = skills_list.clone();
+    let filtered_skills = use_memo(move || {
+        let tab = active_tab();
+        let query = search_query();
+        skills_for_memo
+            .iter()
+            .filter(|s| tab_predicate(&s.category, s.enabled, tab) && search_matches(&s.name, &s.description, &query))
+            .cloned()
+            .collect::<Vec<crate::server::api::SkillInfo>>()
+    });
 
     rsx! {
         section {
@@ -34,7 +60,7 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                     div { class: "screen-tag", "// MODULE 04" }
                     h1 { class: "screen-title", "Skills" }
                     p { class: "screen-sub",
-                        "{count} loaded · {enabled_count} enabled for "
+                        "{count_all} loaded · {count_enabled} enabled for "
                         code { style: "color:var(--teal)", "default" }
                         "."
                     }
@@ -47,15 +73,39 @@ pub fn ScreenSkills(is_active: bool) -> Element {
 
             div { class: "search",
                 span { class: "search-glyph", "⌕" }
-                input { placeholder: "Search skills, tags, capabilities…" }
+                input {
+                    placeholder: "Search skills, tags, capabilities…",
+                    oninput: move |e| search_query.set(e.value()),
+                }
             }
 
             div { class: "tabs",
-                button { class: "tab is-active", "ALL · {count}" }
-                button { class: "tab", "BUNDLED · 87" }
-                button { class: "tab", "INSTALLED · 55" }
-                button { class: "tab", "ENABLED · 57" }
-                button { class: "tab", "UPDATES · 3" }
+                button {
+                    class: if tab_val == "all" { "tab is-active" } else { "tab" },
+                    onclick: move |_| active_tab.set("all"),
+                    "ALL · {count_all}"
+                }
+                button {
+                    class: if tab_val == "bundled" { "tab is-active" } else { "tab" },
+                    onclick: move |_| active_tab.set("bundled"),
+                    "BUNDLED · {count_bundled}"
+                }
+                button {
+                    class: if tab_val == "installed" { "tab is-active" } else { "tab" },
+                    onclick: move |_| active_tab.set("installed"),
+                    "INSTALLED · {count_installed}"
+                }
+                button {
+                    class: if tab_val == "enabled" { "tab is-active" } else { "tab" },
+                    onclick: move |_| active_tab.set("enabled"),
+                    "ENABLED · {count_enabled}"
+                }
+                button {
+                    class: "tab",
+                    style: "opacity:0.5; pointer-events:none;",
+                    disabled: true,
+                    "UPDATES · 0"
+                }
             }
 
             div { class: "grid",
@@ -64,8 +114,13 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                         style: "color:var(--danger);font-size:var(--fs-12);",
                         "Could not load skills — check server connection."
                     }
+                } else if filtered_skills.read().is_empty() && !skills_list.is_empty() {
+                    div {
+                        style: "color:var(--gray);font-size:var(--fs-12);",
+                        "No skills match."
+                    }
                 } else {
-                    for skill in skills_list.iter() {
+                    for skill in filtered_skills.read().iter() {
                         SkillCard { key: "{skill.name}", skill: skill.clone() }
                     }
                 }
@@ -92,7 +147,7 @@ fn SkillCard(skill: crate::server::api::SkillInfo) -> Element {
                 div {
                     class: if skill.enabled { "tgl on" } else { "tgl" },
                     "data-tgl": "true",
-                    // No onclick — write ops out of scope (D-09 + deferred list).
+                    // No onclick — wired in Task 2 (Phase 26.7.3 Plan 03).
                 }
             }
             div { class: "card-body", "{skill.description}" }
