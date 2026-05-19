@@ -7,12 +7,14 @@ pub mod pid;
 pub mod rate_limiter;
 pub mod runner;
 pub mod session;
+pub mod slack; // Phase 34 — D-11
 pub mod stream_consumer;
 pub mod telegram;
 pub mod user_queue;
 
 pub use adapter::{MessageHandler, PlatformAdapter};
 pub use discord::{DiscordAdapter, run_discord_adapter};
+pub use slack::{SlackAdapter, run_slack_adapter};
 pub use backoff::BackoffState;
 pub use handler::GatewayMessageHandler;
 pub use pid::{
