@@ -812,6 +812,19 @@ Plans:
 
 **Phase directory:** `.planning/phases/26.7.2-sessions-load-session-data/`
 
+### Phase 26.7.3: Skills page - enable tab, search and toggle on-off features (INSERTED)
+
+**Goal:** Activate the three currently-inert UI elements on the Skills screen (`crates/iron_hermes_ui/src/components/hermes_app/screens/skills.rs`): (a) tabs (ALL / BUNDLED / INSTALLED / ENABLED) with live counts from `skills_list` and a grayed-disabled UPDATES tab per D-02; (b) client-side search input AND-combined with the active tab; (c) per-skill toggle on the `.tgl` div that persists via a new `toggle_skill` `#[server]` fn writing `SkillsConfig.disabled: Vec<String>` (new opt-out field in `crates/ironhermes-core/src/config.rs`) AND mutating the in-process `runtime_bundle.active_skills` Arc<Mutex<Vec<SkillRecord>>>. Optimistic UI with revert + inline "Toggle failed — try again." on server error, mirroring the agents.rs kill/interrupt pattern. Cross-surface (TUI/gateway) hot-reload is deferred — config field is added now so future phases can read it.
+**Requirements**: (none — D-01..D-10 from 26.7.3-CONTEXT.md are the requirements set)
+**Depends on:** Phase 26.7.2
+**Plans:** 4 plans
+
+Plans:
+- [ ] 26.7.3-01-PLAN.md — Add `disabled: Vec<String>` opt-out field to `SkillsConfig` + serde round-trip tests
+- [ ] 26.7.3-02-PLAN.md — Implement `toggle_skill` #[server] fn (config write + in-process active_skills mutation + input validation)
+- [ ] 26.7.3-03-PLAN.md — Wire ScreenSkills: tabs (live counts) + search (oninput binding) + optimistic toggle with revert
+- [ ] 26.7.3-04-PLAN.md — Browser UAT for D-02 (UPDATES disabled), D-08 (optimistic revert), D-09 (tab+search AND), live counter update
+
 ### Phase 26.6: tui_rata thinking panel, skills hub, and rich prompts (INSERTED)
 
 **Goal:** Build on Phase 26.5's overlay primitive to add the remaining Ink-TUI UX to the in-process ratatui REPL (`crates/ironhermes-cli/src/tui_rata/`): (a) a `tui_rata/thinking_panel.rs` expanded "thinking" widget — tool trail rendered as a `├─`/`└─` tree, per-tool elapsed time, a hand-rolled braille spinner, optional 1-line chain-of-thought preview — fed from the existing stream-event arms, **togglable**, with the current single-row `knight_rider.rs` scanner serving as the collapsed view; (b) a browse-only `Overlay::SkillsHub` (categories → skills → SKILL.md info pane, sourced from `SkillRegistry`; in-TUI *install* is deferred since the install path is the interactive `hermes skills install`); (c) rich `Overlay::Approval` / `Overlay::Secret` / `Overlay::Sudo` prompts — centered overlays replacing the current transcript-line dangerous-command approval, with masked input for secrets — reusing tui_rata's existing `io_gate.rs`/`yolo.rs` plumbing. Telegram/gateway approval UX is explicitly out of scope (own later phase). No new workspace crates; spinners use a small built-in braille table (no `unicode-animations` equivalent dep). Closes with a `checkpoint:human-verify` UAT walking the expanded/collapsed thinking views, the Skills Hub, and each prompt overlay against the hermes-agent Ink reference (`ui-tui/src/components/thinking.tsx`, `skillsHub.tsx`, `prompts.tsx`, `maskedPrompt.tsx`).
