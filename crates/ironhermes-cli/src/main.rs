@@ -742,7 +742,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             .context("building memory manager for single-prompt mode")?;
 
     // Register delegate_task tool (AGENT-01..05)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
     // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
     // transcript scope into the runner so lifecycle events update state.
     let subagent_runner = Arc::new(
@@ -763,7 +763,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         delegate_task: Some(DelegateTaskWiring {
             runner: subagent_runner,
             semaphore: subagent_semaphore,
-            config: config.subagent.clone(),
+            config: config.delegation.clone(),
             cancel_token: None,
             progress_callback: None,
         }),
@@ -991,7 +991,7 @@ fn build_cmd_ctx(
         ))
         .with_budget(Arc::new(budget))
         .with_subagent_semaphore(subagent_semaphore)
-        .with_max_subagents(max_subagents);
+        .with_max_concurrent_children(max_subagents);
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): conditionally attach the
     // live ToolsetSessionHandle so /toolset list/show/enable/disable work in
     // REPL + Telegram. EVERY existing .with_* call above is preserved verbatim.
@@ -1199,7 +1199,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         // denominator from config so the pill renders as "N/M" the moment
         // a subagent registers.
         active_subagents: 0,
-        max_subagents: config.subagent.max_subagents,
+        max_subagents: config.delegation.max_concurrent_children,
     };
     // Phase 22.1: construct TuiHandle with extensions (empty vec for now --
     // no extensions are registered yet, but the hook mechanism is active).
@@ -1217,7 +1217,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             .context("building memory manager for chat mode")?;
 
     // Register delegate_task tool (AGENT-01..05)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
     // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
     // transcript scope into the runner so lifecycle events update state.
     let subagent_runner = Arc::new(
@@ -1336,7 +1336,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         delegate_task: Some(DelegateTaskWiring {
             runner: subagent_runner,
             semaphore: subagent_semaphore.clone(),
-            config: config.subagent.clone(),
+            config: config.delegation.clone(),
             cancel_token: Some(chat_cancel_parent.child_token()),
             progress_callback: Some(subagent_progress),
         }),
@@ -1577,7 +1577,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         process_registry.clone(),
                         budget.clone(),
                         subagent_semaphore.clone(),
-                        config.subagent.max_subagents,
+                        config.delegation.max_concurrent_children,
                         Some(toolset_session.clone()),
                         workspace.clone(),
                         trajectory_writer.clone(),
@@ -1975,7 +1975,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                         process_registry.clone(),
                                         budget.clone(),
                                         subagent_semaphore.clone(),
-                                        config.subagent.max_subagents,
+                                        config.delegation.max_concurrent_children,
                                         Some(toolset_session.clone()),
                                         workspace.clone(),
                                         trajectory_writer.clone(),
@@ -2401,7 +2401,7 @@ async fn run_agent_turn(
         tokens_limit: context_length,
         hint: "ctrl+c cancel · /help commands".to_string(),
         active_subagents: tui.status_snapshot().active_subagents,
-        max_subagents: config.subagent.max_subagents,
+        max_subagents: config.delegation.max_concurrent_children,
     });
 
     // Phase 18-14: persist the post-turn compression_count back into the
@@ -2475,7 +2475,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
 
     // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
     let gateway_client = build_main_client(&resolver)?;
     // Plan 21.7-05 (PROV-09/PROV-10/D-15 + RESEARCH Open Q#4): construct a
     // BudgetHandle at gateway startup seeded from config.agent.max_iterations
@@ -2513,7 +2513,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         delegate_task: Some(DelegateTaskWiring {
             runner: subagent_runner,
             semaphore: subagent_semaphore,
-            config: config.subagent.clone(),
+            config: config.delegation.clone(),
             cancel_token: Some(gateway_cancel_token.clone()),
             progress_callback: None,
         }),
