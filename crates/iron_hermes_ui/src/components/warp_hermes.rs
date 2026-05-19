@@ -360,6 +360,11 @@ pub fn WarpHermes() -> Element {
                                 scanner_active.set(false);
                                 streaming_block_id.set(None);
                             }
+                            crate::protocol::ChatStreamEvent::SubagentEvent {} => {
+                                // Phase 26.7.1 Plan 02 (D-07): legacy shell does not
+                                // render the Agents page — this arm is a silent no-op
+                                // for exhaustive-match compliance only.
+                            }
                         }
                     }
                     Err(err) => {

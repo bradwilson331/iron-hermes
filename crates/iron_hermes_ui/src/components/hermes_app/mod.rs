@@ -124,14 +124,11 @@ pub fn HermesApp() -> Element {
     let mut tokens = use_signal(|| (0u32, 128_000u32));
 
     // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08).
+    // Phase 26.7.1 Plan 02 — recv loop wires .set() calls on both signals.
     // subagent_events drives push-restart in Plan 02; is_ws_connected drives
     // dynamic poll cadence. Both declared with `let mut` so Plan 02 can call
     // `.set()` from the recv loop. Initial values: counter = 0, connected = false.
-    // `mut` is required for Plan 02's recv-loop .set() calls; suppress unused-mut
-    // warning until Plan 02 wires the mutation sites.
-    #[allow(unused_mut)]
     let mut subagent_events = use_signal(|| 0u64);
-    #[allow(unused_mut)]
     let mut is_ws_connected = use_signal(|| false);
 
     // Bootstrap the chat session via the existing server fn from
@@ -169,8 +166,12 @@ pub fn HermesApp() -> Element {
             let _state = ws.connect().await;
             if ws.is_err() {
                 streaming_id.set(None);
+                // Phase 26.7.1 Plan 02 D-08: ws unavailable — poll cadence stays at 1500 ms baseline.
+                is_ws_connected.set(false);
                 continue;
             }
+            // Phase 26.7.1 Plan 02 D-08: ws is up — poll cadence widens to 5000 ms.
+            is_ws_connected.set(true);
 
             loop {
                 match ws.recv_raw().await {
@@ -240,13 +241,23 @@ pub fn HermesApp() -> Element {
                                 bubbles.write().push(ChatBubble::error(id, message));
                                 streaming_id.set(None);
                             }
+                            crate::protocol::ChatStreamEvent::SubagentEvent {} => {
+                                // Phase 26.7.1 Plan 02 D-07: counter-only — read into Copy u64 before set,
+                                // satisfies clippy.toml signal-borrow-across-await rule.
+                                let cur = *subagent_events.read();
+                                subagent_events.set(cur + 1);
+                            }
                         }
                     }
                     Ok(dioxus_fullstack::Message::Close { .. }) => {
                         streaming_id.set(None);
+                        is_ws_connected.set(false);
                         break; // Outer loop will reconnect via with_automatic_reconnect.
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        is_ws_connected.set(false);
+                        break;
+                    }
                     _ => continue, // Skip ping/pong/binary.
                 }
             }
