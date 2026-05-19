@@ -86,7 +86,7 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // Binding here proves the context is resolvable on first render (including
     // SSR), preventing the "Could not find context" panic.
     let ws_connected_ctx = use_context::<Signal<bool>>();      // is_ws_connected
-    let _subagent_events_ctx = use_context::<Signal<u64>>();   // subagent_events — Plan 02 wires use_effect
+    let subagent_events = use_context::<Signal<u64>>();        // D-07 — increments on ws SubagentEvent
 
     // Materialise the list and error flag BEFORE the rsx! block so no
     // GenerationalRef is held across the macro boundary (clippy.toml).
@@ -262,6 +262,17 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                 }
             }
         }
+    });
+
+    // Phase 26.7.1 Plan 02 D-07: any SubagentEvent from the chat ws bumps the
+    // counter; this effect subscribes (call-syntax returns Copy u64 — no
+    // borrow held) and triggers a fresh `agents_resource.restart()`. Same code
+    // path as the poll, no divergent diff logic. The poll loop is now the
+    // safety net for missed events rather than the primary refresh.
+    let mut agents_resource_for_effect = agents_resource;   // Resource is Copy
+    use_effect(move || {
+        let _ = subagent_events();   // subscribe; result discarded
+        agents_resource_for_effect.restart();
     });
 
     rsx! {
