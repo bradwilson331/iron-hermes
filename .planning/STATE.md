@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 34 Wave 1 complete (deps verified + landed; api list_sessions wired)
-last_updated: "2026-05-19T18:30:00.000Z"
-last_activity: 2026-05-19 -- Phase 34 Wave 1 complete (Plan 34-02)
+stopped_at: Phase 34 complete (5/5 plans; INV-34-01..04 all GREEN)
+last_updated: "2026-05-19T19:00:00.000Z"
+last_activity: 2026-05-19 -- Phase 34 complete (Plans 34-01..05; Discord + Slack adapters wired to multi-platform GatewayRunner)
 progress:
   total_phases: 63
-  completed_phases: 46
+  completed_phases: 47
   total_plans: 243
-  completed_plans: 237
+  completed_plans: 240
   percent: 73
 ---
 
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 34 (webchat-and-multi-platform-gateway) — EXECUTING (Waves 0-1 complete)
-Plan: 2 of 5 complete
-Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03..05 pending
-Status: Wave 1 complete — paused before Wave 2 (Plan 34-03 DiscordAdapter implementation)
-Last activity: 2026-05-19 -- Phase 34 Wave 1 complete (Plan 34-02: serenity 0.12.5 + slack-morphism 2.22.0 axum feature, app_token, api list_sessions w/ Platform::Web filter)
+Phase: 34 (webchat-and-multi-platform-gateway) — COMPLETE
+Plan: 5 of 5 complete
+Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
+Status: Phase 34 complete — INV-34-01..04 all GREEN; Telegram-only deployments unchanged (silent-skip for missing Discord/Slack config)
+Last activity: 2026-05-19 -- Phase 34 complete (5/5 plans)
 
 ## Performance Metrics
 

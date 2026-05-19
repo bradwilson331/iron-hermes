@@ -1315,7 +1315,7 @@ Plans:
 
 **Phase directory:** `.planning/phases/33-autonomous-skill-creation/`
 
-### Phase 34: Webchat & Multi-Platform Gateway Chats
+### Phase 34: Webchat & Multi-Platform Gateway Chats ✅ COMPLETE
 
 **Goal:** Complete Learning Loop parity across all agent-execution surfaces. Wire per-session nudge counter into `AppState.run_web_turn` (web UI path). Migrate web chat sessions to the shared SQLite-backed `SessionStore` used by the gateway (Platform::Web, same session infrastructure as Telegram). Implement `DiscordAdapter` and `SlackAdapter` for the `PlatformAdapter` trait; Discord and Slack sessions inherit nudge and skill-create automatically via `handle_with_multimodal`.
 **Depends on:** Phase 32 (nudge infrastructure), Phase 33 (skill_manage tool)
@@ -1328,7 +1328,7 @@ Plans:
   4. `SlackAdapter` implements `PlatformAdapter`; same routing and nudge behaviour as Discord
   5. INV-33-07 static-grep test passes: `AppState::new` calls `build_app_runtime_bundle`, confirming `skill_manage` is registered for web turns
 
-**Plans:** 2/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 
@@ -1339,12 +1339,12 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 34-03-PLAN.md — DiscordAdapter (serenity 0.12.5; PlatformAdapter impl + EventHandler + run_discord_adapter; threat mitigations T-34-01/02/03)
-- [ ] 34-04-PLAN.md — SlackAdapter (slack-morphism 2.22.0 Socket Mode; two-token shape; non-blocking ACK; T-34-04 mitigation)
+- [x] 34-03-PLAN.md — DiscordAdapter (serenity 0.12.5; PlatformAdapter impl + EventHandler + run_discord_adapter; threat mitigations T-34-01/02/03)
+- [x] 34-04-PLAN.md — SlackAdapter (slack-morphism 2.22.0 Socket Mode; two-token shape; non-blocking ACK; T-34-04 mitigation)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 34-05-PLAN.md — Multi-platform GatewayRunner wiring (optional Discord/Slack spawns + INV-34-03/04 lock)
+- [x] 34-05-PLAN.md — Multi-platform GatewayRunner wiring (optional Discord/Slack spawns + INV-34-03/04 lock)
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
 
