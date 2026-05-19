@@ -8,7 +8,23 @@
 
 use dioxus::prelude::*;
 use std::collections::HashMap;
-use ironhermes_core::skills::{tab_predicate, search_matches};
+
+fn tab_predicate(category: &str, enabled: bool, tab: &str) -> bool {
+    match tab {
+        "bundled" => category == "bundled",
+        "installed" => category != "bundled",
+        "enabled" => enabled,
+        _ => true,
+    }
+}
+
+fn search_matches(name: &str, description: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    name.to_lowercase().contains(&q) || description.to_lowercase().contains(&q)
+}
 
 #[component]
 pub fn ScreenSkills(is_active: bool) -> Element {

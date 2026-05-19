@@ -370,6 +370,7 @@ pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
 /// Extracted as a private fn so both `toggle_skill` (call-site) and the unit
 /// tests in `toggle_skill_tests` can exercise the pure config-mutation logic
 /// without requiring a live `global_app_state()`.
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_disable_toggle(config: &mut ironhermes_core::config::Config, name: &str) -> bool {
     let is_disabled = config.skills.disabled.contains(&name.to_string());
     if is_disabled {
@@ -380,7 +381,7 @@ fn apply_disable_toggle(config: &mut ironhermes_core::config::Config, name: &str
     is_disabled
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod toggle_skill_tests {
     use super::apply_disable_toggle;
     use ironhermes_core::config::Config;
