@@ -65,8 +65,15 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // recently_terminated: ids captured from poll diffs, held for 5 s before
     // removal by the decay sweep. Stores the LAST-OBSERVED AgentInfo snapshot
     // (D-11) alongside the Instant at which termination was detected.
+    //
+    // UAT-4 hotfix: web_time::Instant instead of std::time::Instant.
+    // std::time::Instant::now() panics on wasm32 with "time not implemented on
+    // this platform" (rustc's wasm32-unknown-unknown stdlib doesn't have a
+    // monotonic clock). web_time::Instant is API-identical (pub use of
+    // std::time::Instant on native; Performance.now()-backed shim on wasm32)
+    // so .elapsed() and Duration arithmetic in the decay sweep work unchanged.
     let mut recently_terminated = use_signal(||
-        std::collections::HashMap::<String, (crate::server::api::AgentInfo, std::time::Instant)>::new()
+        std::collections::HashMap::<String, (crate::server::api::AgentInfo, web_time::Instant)>::new()
     );
     // prev_live: snapshot of the agent list from the PREVIOUS render, used by
     // diff_terminations to detect newly-absent ids.
@@ -123,7 +130,9 @@ pub fn ScreenAgents(is_active: bool) -> Element {
         if !already {
             recently_terminated.write().insert(
                 old.id.clone(),
-                (old, std::time::Instant::now()),
+                // UAT-4 hotfix: web_time::Instant::now() — see comment at the
+                // signal declaration. std::time::Instant::now() panics on wasm32.
+                (old, web_time::Instant::now()),
             );
         }
     }
