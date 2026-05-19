@@ -9,6 +9,7 @@ pub mod chat;
 pub mod sessions;
 pub mod settings;
 pub mod agents;
+pub mod agents_diff;
 pub mod skills;
 pub mod models;
 pub mod memory;
