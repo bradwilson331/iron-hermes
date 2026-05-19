@@ -76,12 +76,24 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     }
 
     // D-02 + D-11: ids in prev_live absent from agents_list → snapshot into recently_terminated.
+    // FIX (UAT-1 hotfix): only update prev_live when the resource has RESOLVED (i.e. we have a
+    // Some(Ok(...)) value). During the loading/suspended window between `.restart()` and the
+    // new fetch, `agents_resource()` returns `None` and the fallback `Vec::new()` at line 64
+    // would make us snapshot an EMPTY list as "the new state" and immediately overwrite
+    // `prev_live` to []. That causes the eventual real diff to compare [] vs [] → 0
+    // terminations, even though A WAS just removed by kill/interrupt. We must distinguish
+    // "list is genuinely empty" from "list is suspended" — only the former should drive
+    // the diff and prev_live update.
+    let resource_resolved: bool = matches!(agents_resource(), Some(Ok(_)));
     let prev_snapshot: Vec<crate::server::api::AgentInfo> = prev_live.read().clone(); // owned — borrow ends at ;
-    let newly_terminated =
+    let newly_terminated = if resource_resolved {
         crate::components::hermes_app::screens::agents_diff::diff_terminations(
             &prev_snapshot,
             &agents_list,
-        );
+        )
+    } else {
+        Vec::new()
+    };
     for old in newly_terminated.into_iter() {
         let already = recently_terminated.read().contains_key(&old.id); // bool — borrow ends at ;
         if !already {
@@ -91,7 +103,29 @@ pub fn ScreenAgents(is_active: bool) -> Element {
             );
         }
     }
-    prev_live.set(agents_list.clone());
+    // Only snapshot prev_live when the resource has resolved — otherwise we'd be overwriting
+    // a valid [A] snapshot with the suspended-state [] fallback and losing the diff signal.
+    if resource_resolved {
+        prev_live.set(agents_list.clone());
+    }
+
+    // Instrumentation (wasm only): trace diff outcomes to the browser console so the UAT
+    // operator can see exactly what the diff path observes per render. Kept gated to wasm32
+    // so native cargo test stays quiet.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let ended_len = recently_terminated.read().len();
+        web_sys::console::log_1(
+            &format!(
+                "[26.7.1-01 diff] resolved={} prev={} curr={} recently_terminated={}",
+                resource_resolved,
+                prev_snapshot.len(),
+                agents_list.len(),
+                ended_len,
+            )
+            .into(),
+        );
+    }
 
     // Materialise HOLD-card list before rsx! — collect into owned Vec so no
     // GenerationalRef is held during the rsx! macro expansion (clippy.toml).
@@ -319,8 +353,14 @@ fn AgentCard(
                 // CHAT — static visual affordance (deferred per UI-SPEC).
                 button { class: "btn btn--sm", "CHAT" }
 
-                // INTERRUPT — 500 ms visual `...` feedback, no list refresh.
+                // INTERRUPT — 500 ms visual `...` feedback + list refresh.
                 // D-05: increments rpc_in_flight while the RPC is in flight.
+                // UAT-1 hotfix: parity with KILL — interrupt now also calls
+                // agents_resource.restart() so the HOLD card can render via the diff path
+                // without waiting up to 1.5s for the next periodic poll. The restart fires
+                // BEFORE rpc_in_flight decrement so the periodic poll doesn't sneak a
+                // racing restart in between (which would coalesce, but the ordering also
+                // lets us hold rpc_in_flight > 0 until the registry's Drop has run).
                 button {
                     class: "btn btn--sm btn--ghost",
                     style: "color:var(--warning)",
@@ -336,7 +376,12 @@ fn AgentCard(
                             // 500 ms visual hold per UI-SPEC §"Interrupt button".
                             gloo_timers::future::TimeoutFuture::new(500).await;
                             interrupting.set(false);
-                            // Decrement after RPC + visual hold complete.
+                            // UAT-1 hotfix: trigger refresh so the diff path captures the
+                            // termination (server's RegistrationGuard::drop has run by now —
+                            // the 500ms visual hold gave it plenty of time).
+                            agents_resource.restart();
+                            // Decrement AFTER restart is queued so the periodic poll
+                            // doesn't race the restart-driven re-render.
                             let cur2 = *rpc_in_flight.read(); // Copy — borrow ends at ;
                             rpc_in_flight.set(cur2.saturating_sub(1));
                         });
@@ -362,10 +407,20 @@ fn AgentCard(
                             spawn(async move {
                                 let _ = crate::server::api::api_agents_kill(id).await;
                                 killing.set(false);
-                                // Decrement after the kill RPC resolves.
+                                // UAT-1 hotfix: give the server's RegistrationGuard::drop a
+                                // beat to actually remove the agent from the registry before
+                                // we restart() — otherwise the refetch can return the
+                                // still-present-but-doomed agent, and by the time it IS gone
+                                // a subsequent render will have already set prev_live = [A]
+                                // again and the diff signal is lost.
+                                gloo_timers::future::TimeoutFuture::new(100).await;
+                                // Restart BEFORE decrement so the periodic poll doesn't race
+                                // the restart-driven re-render. The restart's refetch will
+                                // produce the new (empty) list, the diff path will capture
+                                // the termination, and the HOLD card will render.
+                                agents_resource.restart();
                                 let cur2 = *rpc_in_flight.read(); // Copy — borrow ends at ;
                                 rpc_in_flight.set(cur2.saturating_sub(1));
-                                agents_resource.restart();
                             });
                         } else {
                             // First click — arm and start 3 s timeout.
