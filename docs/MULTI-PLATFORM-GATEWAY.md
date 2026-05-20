@@ -61,7 +61,22 @@ Built on [serenity 0.12.5](https://crates.io/crates/serenity). Uses long-polling
 
 ### 2. Invite the bot to your server
 
-In the **OAuth2 → URL Generator** tab, select scopes `bot` + `applications.commands` and permissions `Send Messages` + `Read Message History`. Open the generated URL and authorize the bot in your server.
+In the **OAuth2 → URL Generator** tab, select scopes `bot` + `applications.commands` and permissions `View Channels` + `Send Messages` + `Read Message History`. Open the generated URL and authorize the bot in your server.
+
+> **Generator not producing a URL, or "please enter a redirect URL"?** The
+> URL Generator pushes you toward the OAuth2 authorization-code flow when a
+> scope needs a registered redirect URI — irrelevant for a bot invite. Two
+> fixes: (a) set the **Integration Type** dropdown at the top to **"Guild
+> Install"**, then tick `bot`; or (b) skip the generator and build the invite
+> URL manually — you only need the public **Application ID** (Client ID) from
+> **General Information**:
+>
+> ```
+> https://discord.com/api/oauth2/authorize?client_id=<APPLICATION_ID>&permissions=68608&scope=bot%20applications.commands
+> ```
+>
+> `permissions=68608` = View Channels (1024) + Send Messages (2048) + Read
+> Message History (65536). Open the URL, pick your server, click Authorize.
 
 ### 3. Configure and run
 
@@ -75,6 +90,36 @@ hermes gateway run
 ### Whitelist
 
 `gateway.platforms.discord.whitelist` is `Vec<i64>` of Discord user IDs (snowflakes). Empty = deny all. To find your user ID, enable Developer Mode in Discord (Settings → Advanced) and right-click your name → "Copy User ID".
+
+### Local test — resume checklist
+
+A deferred live test. Bot application is already created (Application ID `1506781441290272778`); the OAuth invite URL is ready. To finish a live round-trip:
+
+1. **Confirm the bot is in a server.** Open the invite URL (uses the public Application ID, not the secret token):
+   ```
+   https://discord.com/api/oauth2/authorize?client_id=1506781441290272778&permissions=68608&scope=bot%20applications.commands
+   ```
+   Pick a server you admin → Authorize.
+2. **Confirm MESSAGE CONTENT INTENT is ON** (developer portal → Bot → Privileged Gateway Intents). Without it, message bodies arrive empty.
+3. **Provide the bot token + your Discord user ID.** Put the token in `~/.ironhermes/.env`:
+   ```
+   DISCORD_BOT_TOKEN=<bot token from portal → Bot → Reset Token>
+   ```
+   and add your user ID to the whitelist in `~/.ironhermes/config.yaml`:
+   ```yaml
+   gateway:
+     platforms:
+       discord:
+         enabled: true
+         whitelist: [<your-discord-user-id>]
+   ```
+4. **Start the gateway** and DM/mention the bot from Discord:
+   ```bash
+   RUST_LOG=ironhermes_gateway::discord=debug hermes gateway run
+   ```
+   Expected: serenity logs a successful gateway connect, your message routes through `handle_with_multimodal`, and the agent reply posts back to the Discord channel. Telegram keeps running alongside (silent-skip parity).
+
+If the bot stays offline after start, the token didn't resolve — check `~/.ironhermes/.env` is loaded and the token isn't stale (Reset Token invalidates older copies).
 
 ## Slack setup
 
