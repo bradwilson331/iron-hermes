@@ -1348,6 +1348,35 @@ Plans:
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
 
+### Phase 34a: Read-Side Memory Parity (per-turn semantic recall + streaming scrubber)
+
+**Goal:** Close the read-side parity gap with `hermes-agent/agent/memory_manager.py`. Today the Rust port loads MEMORY.md/USER.md into a frozen system-prompt snapshot at session start (D-12), so "what do you remember about me?" answers only from that snapshot — not from anything the periodic nudge (Phase 32) or the user wrote mid-session. This phase adds the **per-turn semantic recall path**: pre-turn, the agent queries memory providers for context relevant to the user message, wraps it in a fenced `<memory-context>` block, and injects it as a synthetic `role: system` message immediately before the user turn. A `StreamingContextScrubber` filters the fence tags out of the model's response stream so they never reach user-visible scrollback. D-12 (frozen snapshot) is preserved — this is a SEPARATE read path inside the user-turn envelope, not in the system prompt.
+**Depends on:** Phase 32 (nudge write-side), Phase 33 (skill creation), Phase 21.4 (memory manager wiring). Unrelated to gateway Phase 34 — this is the memory/context-parity sub-track.
+**Requirements:** MEM-READ-01 (`prefetch_with_query` trait method + `MemoryManager` proxy), MEM-READ-02 (`memory_context.rs`: `sanitize_context` + `build_memory_context_block`), MEM-READ-03 (pre-turn synthetic-system-message injection in `agent_loop`, ephemeral + non-protected by compression), MEM-READ-04 (`StreamingContextScrubber` state machine), MEM-READ-05 (3-surface scrubber wiring: CLI / gateway / web UI)
+**Success Criteria** (what must be TRUE):
+
+  1. `MemoryProvider::prefetch_with_query(query, session_id) -> Result<String>` exists with a default no-op impl; existing file provider unaffected; semantic providers (grafeo/duckdb) can override
+  2. `crates/ironhermes-agent/src/memory_context.rs` exists with `sanitize_context` + `build_memory_context_block`; 8 unit tests pass (empty, double-wrap strip, partial-tag strip, system-note variants, case-insensitive, multi-block, idempotency)
+  3. Pre-turn injection: before each LLM call in the agent loop (NOT in `prompt_builder.rs` — system prompt stays frozen), recall is fetched, wrapped, and inserted as an ephemeral `role: System` message immediately before the latest user message; prior-turn injections are evicted before re-injecting; these messages are NOT protected by `protect_first_n`/`protect_last_tokens`
+  4. `crates/ironhermes-agent/src/streaming_scrubber.rs` exists with `StreamingContextScrubber` (`feed`/`flush`/`reset`); 6 unit tests pass (full block, split open tag, split close tag, partial-tail, never-closes, back-to-back blocks)
+  5. Scrubber wired into all three streaming output paths (CLI `run_chat`, gateway `handle_with_multimodal`, web UI `run_web_turn`); each surface owns a per-session instance, `reset()` at session start
+  6. Cross-phase regression gates green: Phase 32 `nudge::tests` (6/6), Phase 33 `invariants_33` (6/6), D-12 `test_snapshot_frozen_after_load`
+  7. Live recall demo: with a recall-capable (or stub) provider, a mid-session write surfaces in a later "what do you remember?" answer; no `<memory-context>` tags visible in the response stream
+
+**Plans:** 2 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 34a-01-PLAN.md — `MemoryManager::prefetch_with_query` + `MemoryProvider` trait method + `memory_context.rs` (sanitize + build block, 8 tests)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 34a-02-PLAN.md — pre-turn synthetic-system-message injection in `agent_loop` + `StreamingContextScrubber` (6 tests) + 3-surface scrubber wiring
+
+**Phase directory:** `.planning/phases/34a-read-side-memory-parity/`
+
 ### Phase 34b: Context-System Parity (@-references + ContextEngine lifecycle + Compressor reset)
 
 **Goal:** Close the parity gap with three hermes-agent context-system modules. (1) Port `context_references.py` to a new `crates/ironhermes-agent/src/context_refs.rs` so chat messages with `@file:`, `@folder:`, `@diff`, `@staged`, `@git:N`, or `@url:` tokens are parsed pre-turn and expanded into `--- Attached Context ---` blocks; sensitive-path blocklist + 50% hard / 25% soft token-budget enforced. (2) Add 5 lifecycle hooks to the `ContextEngine` trait (`on_session_start`, `on_session_end`, `on_session_reset`, `update_from_response`, `update_model`, `has_content_to_compress`) as default no-ops; `ContextCompressor` exposes an inherent `reset()`; `PressureTracker` gains `reset_session(&session_id)`; `SummarizingEngine`'s pinned `[CONTEXT HISTORY]` segment and `ContextCompressor::drop_middle_messages` compaction header both gain the memory-authority reminder ("MEMORY.md, USER.md ... ALWAYS authoritative"). (3) Wire all of the above at the three agent surfaces — CLI `run_chat`, gateway `handle_with_multimodal`, web UI `run_web_turn`.
