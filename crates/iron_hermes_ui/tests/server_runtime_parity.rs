@@ -59,3 +59,58 @@ fn startup_state_initializes_shared_runtime_bundle_once() {
         "server main must install startup AppState exactly once"
     );
 }
+
+// =============================================================================
+// Phase 28.1 Plan 03 Task 3: static grep gate — web crate budget invariants
+// =============================================================================
+//
+// Integration test mirrors the position-guard pattern from
+// `crates/ironhermes-cli/tests/invariants_22_4.rs`. Uses `read()` so it sees
+// source text. Comment lines (starting with `//`) and test-block lines are
+// stripped to prevent doc-comment false positives on the forbidden tokens.
+
+/// Strip comment-only lines so doc comments mentioning forbidden tokens don't
+/// self-invalidate the negative assertions.
+fn strip_comment_lines(source: &str) -> String {
+    source
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Phase 28.1 Plan 03 (T-28.1-06): web production code must contain no
+/// `BudgetHandle::new(` — budget lifecycle is owned by `AgentRuntime::run_turn`.
+#[test]
+fn web_state_has_no_budget_handle_new() {
+    let state = strip_comment_lines(&read("src/server/state.rs"));
+    assert!(
+        !state.contains("BudgetHandle::new("),
+        "web server/state.rs must not call BudgetHandle::new( — \
+         budget lifecycle is owned by AgentRuntime::run_turn (Plan 28.1-03, T-28.1-06)"
+    );
+}
+
+/// Phase 28.1 Plan 03 (T-28.1-06): web production code must contain no
+/// `.with_budget(` — budget is installed inside run_turn, not by the caller.
+#[test]
+fn web_state_has_no_with_budget() {
+    let state = strip_comment_lines(&read("src/server/state.rs"));
+    assert!(
+        !state.contains("with_budget("),
+        "web server/state.rs must not call .with_budget( — \
+         budget is installed inside run_turn, not by the caller (Plan 28.1-03, T-28.1-06)"
+    );
+}
+
+/// Phase 28.1 Plan 03 (T-28.1-07): `run_turn(` must appear in web production
+/// code — this gate asserts the migration from build_agent_loop to run_turn landed.
+#[test]
+fn web_state_calls_run_turn() {
+    let state = strip_comment_lines(&read("src/server/state.rs"));
+    assert!(
+        state.contains("run_turn("),
+        "web server/state.rs must call run_turn( — \
+         run_web_turn must delegate to AgentRuntime::run_turn (Plan 28.1-03, T-28.1-07)"
+    );
+}
