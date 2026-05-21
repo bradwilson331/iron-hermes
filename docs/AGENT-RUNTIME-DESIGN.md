@@ -1,7 +1,48 @@
-# AgentRuntime — channel-facing agent API (proposal)
+# AgentRuntime — channel-facing agent API
 
-Status: **DRAFT for review** — no code changes yet.
+Status: **PARTIALLY IMPLEMENTED** — foundation shipped; channel migration pending
+(tracked as a GSD phase).
 Author: pairing session, 2026-05-21.
+
+## 0. Implementation status (2026-05-21)
+
+### Shipped (committed to `develop`)
+
+- **`367eaa79` — gateway budget-latch fix (band-aid).** `BudgetHandle::reset()`
+  added; `handler.rs::run_agent` calls it per top-level turn. This fixes the
+  production bug (agent returning `turns_used=0` after the first
+  budget-exhausting conversation) independent of the refactor. **Removed once the
+  gateway migrates to `run_turn` (§5 stage 2).**
+- **`e4c2ca48` — config collapse.** `config.agent.max_iterations` is now the
+  single canonical per-turn cap (default unified to `DEFAULT_MAX_ITERATIONS`=90);
+  `agent.max_turns` is a deprecated alias folded in by `AgentConfig::normalize()`
+  with a warning. (Decision §6.1.)
+- **`0f8807c6` — `AgentRuntime` built.** New `crates/ironhermes-agent/src/agent_runtime.rs`:
+  owns client/registry/skills/browser/hooks + the shared `BudgetHandle`;
+  `from_config` creates the budget and builds the subagent runner with a clone of
+  it (decision A / §6.2); `run_turn(TurnRequest)` resets the budget at the turn
+  boundary and assembles the loop (budget, hooks, skills, browser, memory,
+  fallback, compression, `attach_context_engine`). Compiles clean; budget-reset
+  semantics unit-tested at the `BudgetHandle` level. **Not yet wired into any
+  channel.**
+
+### Remaining (this phase)
+
+1. **Gateway → `run_turn`** (§5 stage 2): source `GatewayMessageHandler`'s shared
+   Arcs from the runtime, replace `run_agent`'s hand-assembly with a
+   `TurnRequest` + `run_turn`, remove the `budget_handle` field/setter and the
+   `367eaa79` band-aid. Preserve trajectory writer, session-id format, and the
+   LEARN-01 post-turn nudge.
+2. **Web / `run_chat` / `run_single` / TUI → `run_turn`** (§5 stage 3): delete
+   their `BudgetHandle::new` + `.with_budget`; fixes the latent `run_chat`/TUI
+   latches and the web top-level-loop gap.
+3. **Cron distinct runtime** (§6.4): its own `AgentRuntime`/budget.
+4. **Verification:** each channel needs **live** testing (esp. Telegram) — only
+   compile + unit + clippy are available in-session.
+
+---
+
+## Original proposal follows.
 
 ## 1. Problem
 
