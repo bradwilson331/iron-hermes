@@ -6,12 +6,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
-use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::{
-    AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured,
+    AgentRuntime, MemoryManager, PromptBuilder, TurnRequest,
+    build_main_client,
 };
 use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
 use ironhermes_core::commands::{
@@ -97,11 +97,10 @@ pub struct GatewayMessageHandler {
     context_length: usize,
     /// Phase 21.1 Plan 02: unified slash command router.
     command_router: CommandRouter,
-    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): shared BudgetHandle threaded from
-    /// the gateway runner. Per-request AgentLoops call `.with_budget(...)`
-    /// with a clone so parent + delegate_task subagents decrement the same
-    /// counter. None = budget disabled (legacy path).
-    budget_handle: Option<BudgetHandle>,
+    /// Plan 28.1-02: the single AgentRuntime threaded from the gateway runner.
+    /// run_agent builds a TurnRequest and delegates to `runtime.run_turn`,
+    /// which resets the budget, builds the loop from durable Arcs, and runs.
+    agent_runtime: Option<Arc<AgentRuntime>>,
     /// Plan 21.7-06 (D-29, D-24): gateway-scoped ProcessRegistry threaded
     /// from the runner. Per-request handler calls `drain_and_kill_session`
     /// at on_session_end. Gateway registry task_id is a process-wide constant
@@ -196,7 +195,7 @@ impl GatewayMessageHandler {
             gateway_engine: None,
             context_length,
             command_router: CommandRouter::new(build_registry()),
-            budget_handle: None,
+            agent_runtime: None,
             process_registry: None,
             subagent_registry: None,
             browser_session: None,
@@ -235,11 +234,11 @@ impl GatewayMessageHandler {
     // UUID). Configuration goes through `GatewayRunner::set_trajectory_root`
     // -> `SessionStore::set_trajectory_root`.
 
-    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install a shared BudgetHandle.
-    /// Clones are threaded into each per-request `AgentLoop` so parent + any
-    /// `delegate_task` children share the same iteration counter.
-    pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
-        self.budget_handle = Some(handle);
+    /// Plan 28.1-02: install the AgentRuntime so run_agent can delegate every
+    /// top-level turn through `runtime.run_turn`. Caller is
+    /// `GatewayRunner::build_gateway_handler`.
+    pub fn set_agent_runtime(&mut self, runtime: Arc<AgentRuntime>) {
+        self.agent_runtime = Some(runtime);
     }
 
     /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
@@ -955,15 +954,8 @@ impl GatewayMessageHandler {
             }
         });
 
-        // 7. Build AgentLoop via ProviderResolver
-        let max_turns = self.config.agent.max_turns;
-
-        let client = build_main_client(&self.resolver)?;
-        // Phase 32 Plan 02 (LEARN-01): clone the AnyClient for the post-turn
-        // nudge tokio::spawn. AnyClient derives Clone; the next line moves
-        // `client` into AgentLoop::new, so the snapshot must happen first.
-        let nudge_client = client.clone();
-
+        // 7. Run turn via AgentRuntime (Plan 28.1-02).
+        //
         // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
         let scrubber_gw = std::sync::Arc::new(std::sync::Mutex::new(
             ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
@@ -982,47 +974,10 @@ impl GatewayMessageHandler {
             let _ = tool_tx_clone.try_send(name.to_string());
         });
 
-        let mut agent = AgentLoop::new(client, Arc::clone(&self.tool_registry), max_turns)
-            .with_streaming(stream_callback)
-            .with_tool_progress(tool_callback)
-            .with_active_skills(self.active_skills.clone());
-
-        // Plan 21.7-05 (PROV-09/PROV-10/D-15): thread the gateway-scoped
-        // BudgetHandle into the per-request AgentLoop so top-of-turn
-        // consume() fires and pressure-tier advisories inject on crossings.
-        // The same handle is shared with AgentSubagentRunner (see main.rs
-        // run_gateway), giving PROV-10 parent/child shared decrement.
-        if let Some(ref handle) = self.budget_handle {
-            // Refill the budget at the start of each top-level turn. The handle
-            // is gateway-scoped and lives for the whole process; reset() refills
-            // the shared counter in place so this turn (and any subagents it
-            // spawns, which share the same Arc) start full. Without this the
-            // counter latches at Stop100 after the first budget-exhausting
-            // conversation and every later message returns immediately with
-            // turns_used=0. The gateway dispatches messages sequentially, so
-            // concurrent top-level turns do not race this refill.
-            handle.reset();
-            agent = agent.with_budget(handle.clone());
-        }
-
-        // Wire fallback via shared helper (adds warn! on misconfiguration — PROV-07 / phase 27.1.4.1)
-        agent = wire_fallback_if_configured(agent, &self.resolver);
-
-        if let Some(ref registry) = self.hook_registry {
-            agent = agent.with_hook_registry(registry.clone());
-        }
-
-        // GAP-3: wire memory_manager to AgentLoop so queue_prefetch fires after
-        // each natural-end gateway turn. Guard with if-let per T-21.4-04.
-        if let Some(ref mgr) = self.memory_manager {
-            agent = agent.with_memory_manager(mgr.clone());
-        }
-
-        // Phase 25.1 D-17: wire browser session Arc so AgentLoop holds a reference.
-        // This ensures browser process cleanup when the AgentLoop drops (T-25.1-04).
-        if let Some(ref sess) = self.browser_session {
-            agent = agent.with_browser_session(sess.clone());
-        }
+        // Phase 25.3-15 CR-02: the per-message session_id_str (`gw:<chat_id>:<sender_id>`)
+        // feeds hooks / on_session_end and is intentionally distinct from the
+        // canonical SQLite session UUID used for trajectory file paths.
+        let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
 
         // Phase 25.3-15 CR-02 close-out: open (or reuse) a per-session
         // trajectory writer keyed by the canonical SQLite session UUID. The
@@ -1030,12 +985,6 @@ impl GatewayMessageHandler {
         // same chat reuse one file handle (no leak across long-running
         // gateway sessions). Replaces the process-wide handle that was
         // previously attached at GatewayMessageHandler construction.
-        //
-        // `gateway_session.session_id` is the SAME UUID that
-        // `state.create_session(...)` received in `SessionStore::get_or_create`,
-        // so `hermes session export <id>` and `SessionDirectoryExport::write`
-        // can find the trajectory file at the canonical path
-        // `<trajectory_root>/<session_id>/trajectories.jsonl`.
         let canonical_session_id = {
             let store = self.session_store.read().await;
             store
@@ -1043,43 +992,44 @@ impl GatewayMessageHandler {
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default()
         };
-        if !canonical_session_id.is_empty() {
-            let traj_handle = {
-                let mut store = self.session_store.write().await;
-                store.get_or_create_trajectory_writer(&canonical_session_id)
-            };
-            if let Some(tw) = traj_handle {
-                agent = agent.with_trajectory_writer(tw);
-            }
-        }
+        let trajectory_writer = if !canonical_session_id.is_empty() {
+            let mut store = self.session_store.write().await;
+            store.get_or_create_trajectory_writer(&canonical_session_id)
+        } else {
+            None
+        };
 
-        // Phase 18 Plan 09: wire agent-side context compression (honors
-        // config.agent.context_engine + config.agent.compression_threshold).
-        // GAP-2/GAP-3: pass memory_manager so on_pre_compress fires on compression.
-        // Phase 25.3-15 CR-02: AgentLoop telemetry retains the per-message
-        // session_id_str (`gw:<chat_id>:<sender_id>`) — this identifier feeds
-        // hooks / on_session_end and is intentionally distinct from the
-        // canonical SQLite session UUID used for trajectory file paths.
-        let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
-        let context_length = self.resolver.resolve_for_main().context_length();
-        agent = ironhermes_agent::attach_context_engine(
-            agent,
-            &self.config,
-            &self.resolver,
-            &session_id_str,
-            self.hook_registry.clone(),
-            None,           // Phase 18-14: gateway constructs a fresh tracker per request
-            context_length, // Phase 21.3
-            self.memory_manager.clone(), // GAP-2/GAP-3: wire into context engine
-        );
-
-        // 8. Run agent with error recovery (D-18)
-        // Phase 32 Plan 02 (LEARN-01): snapshot the outgoing message vec for
-        // the post-turn nudge. The clone happens BEFORE the move into
-        // agent.run(messages) so the snapshot reflects the exact turn the
-        // model just consumed. Cheap relative to the network round-trip.
+        // Phase 32 Plan 02 (LEARN-01): snapshot messages BEFORE moving into TurnRequest.
         let messages_for_nudge = messages.clone();
-        let agent_result = agent.run(messages).await;
+
+        // Source the nudge client from the runtime (run_turn owns the client).
+        // AnyClient is Clone so this is cheap.
+        let nudge_client = self
+            .agent_runtime
+            .as_ref()
+            .map(|rt| rt.client().clone())
+            .unwrap_or_else(|| build_main_client(&self.resolver).expect("nudge client fallback"));
+
+        // Build TurnRequest and call runtime.run_turn.
+        // budget reset, loop construction, attach_context_engine, and fallback wiring
+        // are all handled inside run_turn — do NOT call them again here.
+        let agent_result = if let Some(ref rt) = self.agent_runtime {
+            let request = TurnRequest {
+                messages,
+                session_id: session_id_str.clone(),
+                cancel_token: None, // gateway has no per-turn cancel today
+                stream: Some(stream_callback),
+                tool_progress: Some(tool_callback),
+                tool_result: None,
+                trajectory_writer,
+                pressure_tracker: None, // run_turn makes a fresh tracker per turn
+                state_store: None,
+                compression_count: 0,
+            };
+            rt.run_turn(request).await
+        } else {
+            Err(anyhow::anyhow!("AgentRuntime not configured in gateway handler"))
+        };
 
         // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
         let tail = scrubber_gw.lock().unwrap().flush();
@@ -1087,8 +1037,8 @@ impl GatewayMessageHandler {
             let _ = stream_tx.try_send(tail);
         }
 
-        // 9. Drop agent first — its callbacks hold cloned channel senders
-        drop(agent);
+        // 9. The callbacks were moved into TurnRequest; drop the channel senders
+        // so the StreamConsumer observes channel close and flushes its final batch.
         drop(stream_tx);
         drop(tool_tx);
         consumer_handle.await.ok();

@@ -2523,73 +2523,51 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
-    let gateway_client = build_main_client(&resolver)?;
-    // Plan 21.7-05 (PROV-09/PROV-10/D-15 + RESEARCH Open Q#4): construct a
-    // BudgetHandle at gateway startup seeded from config.agent.max_iterations
-    // and thread it into the shared AgentSubagentRunner. Per-request handler
-    // code builds its per-message AgentLoop via GatewayMessageHandler::new,
-    // which receives the SAME handle via with_budget (see handler.rs
-    // GatewayMessageHandler::with_budget_handle). All clones share the
-    // underlying counter so parent + subagents decrement together (PROV-10).
-    //
-    // Lifecycle: gateway-scoped (not per-user-session). A true per-session
-    // budget requires plumbing through SessionStore; that's deferred to
-    // Plan 09 (hermes status) where session-scoped budget readouts live.
-    let budget = BudgetHandle::new(config.agent.max_iterations);
-    // Plan 21.7-07 (D-03 / D-04 / D-05): thread the gateway-scoped
-    // SubagentRegistry + HERMES_HOME into the runner. Transcript paths use
-    // a process-wide "gateway" session id — the per-request runtime could
-    // use the per-user session id but that requires a per-request runner,
-    // which would break the shared delegate_task Arc. Gateway-process
-    // scope matches the BudgetHandle + ProcessRegistry Plan 05/06 decision.
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(gateway_client, resolver.clone(), Some(budget.clone()))
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(hermes_home.clone(), "gateway".to_string()),
-    );
     let gateway_cancel_token = CancellationToken::new();
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
-        config: Arc::new(config.clone()),
-        resolver: Arc::new(resolver.clone()),
-        cwd,
-        process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner,
-            semaphore: subagent_semaphore,
-            config: config.delegation.clone(),
-            cancel_token: Some(gateway_cancel_token.clone()),
-            progress_callback: None,
-        }),
-        hooks_config,
-        emit_mcp_startup_logs: true,
-    })
-    .await
-    .context("building shared app runtime bundle for run_gateway")?;
 
-    let registry = runtime_bundle.registry.clone();
-    let hook_registry = runtime_bundle.hook_registry.clone();
-    let mcp_manager = runtime_bundle.mcp_manager.clone();
-    let skill_registry = runtime_bundle.skill_registry.clone();
-    let active_skills = runtime_bundle.active_skills.clone();
-    let browser_session = runtime_bundle.browser_session.clone();
-    let job_store = runtime_bundle.job_store.clone();
+    // Plan 28.1-02: build ONE AgentRuntime from config — replaces the manual
+    // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
+    // from_config creates the shared BudgetHandle, builds the subagent runner
+    // with a clone of it (PROV-10), and assembles the bundle.
+    let runtime = Arc::new(
+        ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
+            config: Arc::new(config.clone()),
+            resolver: Arc::new(resolver.clone()),
+            cwd,
+            process_registry: process_registry.clone(),
+            memory_manager: memory_manager.clone(),
+            hooks_config,
+            emit_mcp_startup_logs: true,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (hermes_home.clone(), "gateway".to_string()),
+            subagent_progress_callback: None,
+            subagent_cancel_token: Some(gateway_cancel_token.clone()),
+        })
+        .await
+        .context("building AgentRuntime for run_gateway")?,
+    );
+
+    // Source the shared Arcs from the runtime accessors so slash/toolset/status
+    // paths and run_turn operate on the same instances (identity-shared).
+    let registry = runtime.registry().clone();
+    let hook_registry = runtime.hook_registry().clone();
+    let mcp_manager = runtime.mcp_manager().cloned();
+    let skill_registry = runtime.skill_registry().clone();
+    let active_skills = runtime.active_skills().clone();
+    let browser_session = runtime.browser_session().clone();
+    let job_store = runtime.job_store().clone();
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
     // run_gateway (Telegram). Reuses the existing Arc<RwLock<ToolRegistry>>
     // — DOES NOT introduce a second Arc layer.
-    // Phase 27.1.1-gap-02: use bundle.merged_tools (not raw config.tools) so
+    // Phase 27.1.1-gap-02: use merged_tools (not raw config.tools) so
     // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            runtime_bundle.merged_tools.clone(),
+            runtime.merged_tools().clone(),
         ));
 
     // Override token if provided via --token flag
@@ -2605,10 +2583,11 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     info!("Starting IronHermes Telegram Gateway");
     let mut runner = GatewayRunner::new(config.clone(), resolver, registry);
-    // Plan 21.7-05: thread the same BudgetHandle constructed above into the
-    // runner so each per-request AgentLoop shares the counter with the
-    // registered AgentSubagentRunner (PROV-10 parent/child shared).
-    runner.set_budget_handle(budget.clone());
+    // Plan 28.1-02: thread the single AgentRuntime into the runner so the
+    // handler delegates every top-level turn through runtime.run_turn.
+    // The runtime owns the BudgetHandle; run_turn resets it at every turn
+    // boundary (permanent Stop100 fix, replaces the 367eaa79 band-aid).
+    runner.set_agent_runtime(runtime.clone());
     // Plan 21.7-06 (D-29, D-24): thread the gateway-scoped ProcessRegistry
     // into the runner so the per-request handler can call
     // drain_and_kill_session at on_session_end (grep-gate satisfied; no-op
@@ -3054,13 +3033,18 @@ mod mcp_wiring_tests {
     #[test]
     fn run_single_wires_mcp_manager() {
         let src = include_str!("main.rs");
-        // Phase 25.6: startup wiring is centralized in build_app_runtime_bundle,
-        // which is called from run_chat, run_single, and run_gateway.
+        // Phase 28.1-02: run_gateway now uses AgentRuntime::from_config (which calls
+        // build_app_runtime_bundle internally). run_chat and run_single still call it directly.
         let count = src.matches("build_app_runtime_bundle").count();
         assert!(
-            count >= 3,
-            "build_app_runtime_bundle must be called in at least 3 run paths (chat, single, gateway), got {}",
+            count >= 2,
+            "build_app_runtime_bundle must be called in at least 2 run paths (chat, single), got {}",
             count
+        );
+        // run_gateway wiring via AgentRuntime::from_config
+        assert!(
+            src.contains("AgentRuntime::from_config"),
+            "run_gateway must use AgentRuntime::from_config"
         );
     }
 
@@ -3110,17 +3094,25 @@ mod mcp_wiring_tests {
 
     /// INV-25.1: browser session wiring preserved in all 3 entry points.
     ///
-    /// - register_browser_tools must appear in run_chat, run_single, AND run_gateway (≥3)
+    /// - build_app_runtime_bundle must appear in run_chat and run_single (≥2)
+    /// - run_gateway uses AgentRuntime::from_config which wraps bundle construction
     /// - with_browser_session must be called on the AgentLoop builder in run_single and run_chat (≥2)
     /// - set_browser_session must be called to wire the runner in run_gateway (≥1)
     #[test]
     fn inv_25_1_browser_session_wired_in_all_entry_points() {
         let source = include_str!("main.rs");
+        // Phase 28.1-02: run_gateway switched to AgentRuntime::from_config.
+        // run_chat + run_single still call build_app_runtime_bundle directly (≥2).
         let reg_count = source.matches("build_app_runtime_bundle(").count();
         assert!(
-            reg_count >= 3,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat, run_single, AND run_gateway; got {} calls",
+            reg_count >= 2,
+            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat and run_single; got {} calls",
             reg_count
+        );
+        // run_gateway wiring via AgentRuntime (bundles browser_session internally).
+        assert!(
+            source.contains("AgentRuntime::from_config"),
+            "Phase 28.1-02: run_gateway must use AgentRuntime::from_config for browser session wiring"
         );
         let with_count = source.matches(".with_browser_session(").count();
         assert!(
@@ -3148,21 +3140,29 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Phase 28.1-02: run_gateway uses AgentRuntime::from_config (not build_app_runtime_bundle
+        // directly). run_chat + run_single still call it directly (≥2).
         let reg_count = non_comment_source
             .matches("build_app_runtime_bundle(")
             .count();
         assert!(
-            reg_count >= 3,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_single, run_chat, and run_gateway; got {} non-comment calls",
+            reg_count >= 2,
+            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_single and run_chat; got {} non-comment calls",
             reg_count
         );
+        assert!(
+            non_comment_source.contains("AgentRuntime::from_config"),
+            "Phase 28.1-02: run_gateway must use AgentRuntime::from_config"
+        );
 
+        // run_chat + run_single pass config via build_app_runtime_bundle;
+        // run_gateway passes config via AgentRuntimeInput — so ≥ 2 + 1 = ≥ 3 total.
         let config_arg_count = non_comment_source
             .matches("config: Arc::new(config.clone())")
             .count();
         assert!(
             config_arg_count >= 3,
-            "Phase 25.6 D-05: each build_app_runtime_bundle call must pass config: Arc::new(config.clone()); got {} occurrences",
+            "Phase 25.6 D-05: each bundle/runtime call must pass config: Arc::new(config.clone()); got {} occurrences",
             config_arg_count
         );
     }
@@ -3178,21 +3178,28 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Phase 28.1-02: run_gateway uses AgentRuntime::from_config (not build_app_runtime_bundle
+        // directly). run_chat + run_single still call it directly (≥2).
         let count = non_comment_source
             .matches("build_app_runtime_bundle(")
             .count();
         assert!(
-            count >= 3,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat, run_single, AND run_gateway; got {} non-comment calls",
+            count >= 2,
+            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat and run_single; got {} non-comment calls",
             count
         );
+        assert!(
+            non_comment_source.contains("AgentRuntime::from_config"),
+            "Phase 28.1-02: run_gateway must use AgentRuntime::from_config"
+        );
 
+        // resolver threaded at all 3 call sites (2× build_app_runtime_bundle + 1× AgentRuntimeInput).
         let handle_count = non_comment_source
             .matches("resolver: Arc::new(resolver.clone())")
             .count();
         assert!(
             handle_count >= 3,
-            "Phase 25.6 D-05: runtime bundle input must thread resolver into all 3 CLI entry points; got {} occurrences",
+            "Phase 25.6 D-05: runtime bundle/runtime input must thread resolver into all 3 CLI entry points; got {} occurrences",
             handle_count
         );
     }

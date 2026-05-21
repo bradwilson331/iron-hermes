@@ -283,6 +283,18 @@ impl AgentRuntime {
     pub fn config(&self) -> &Arc<Config> {
         &self.config
     }
+    /// Returns the MCP manager handle built during `from_config`, if any MCP
+    /// servers were configured. Used by `run_gateway` to wire the shutdown path
+    /// so `ironhermes gateway` exits in bounded time on Ctrl+C.
+    pub fn mcp_manager(&self) -> Option<&Arc<ironhermes_mcp::McpManager>> {
+        self.bundle.mcp_manager.as_ref()
+    }
+    /// Returns the merged `ToolsConfig` (config.tools with ALL_TOOLSETS defaults
+    /// filled in). Needed by run_gateway to construct the `ToolsetSessionHandle`
+    /// from the same baseline the registry filter uses.
+    pub fn merged_tools(&self) -> &ironhermes_core::config::ToolsConfig {
+        &self.bundle.merged_tools
+    }
 }
 
 #[cfg(test)]

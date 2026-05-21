@@ -1,14 +1,12 @@
 use anyhow::{Context, Result};
-use ironhermes_agent::budget::BudgetHandle;
+use ironhermes_agent::AgentRuntime;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
-use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured};
+use ironhermes_agent::MemoryManager;
 use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_core::{
-    ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry,
-};
+use ironhermes_core::{Config, ProviderResolver, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
@@ -49,11 +47,10 @@ pub struct GatewayRunner {
     /// server is connected because the tokio process reaper keeps the
     /// runtime alive until children are reaped.
     mcp_manager: Option<Arc<McpManager>>,
-    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): shared BudgetHandle threaded
-    /// from `run_gateway` at startup. `build_gateway_handler` clones it into
-    /// the handler so per-request AgentLoops share the same counter with the
-    /// AgentSubagentRunner registered on the tool registry.
-    budget_handle: Option<BudgetHandle>,
+    /// Plan 28.1-02: the single AgentRuntime built in run_gateway. Passed into
+    /// GatewayMessageHandler so every top-level turn is routed through
+    /// runtime.run_turn (which resets the budget, builds the loop, and runs).
+    agent_runtime: Option<Arc<AgentRuntime>>,
     /// Plan 21.7-06 (D-29, D-24): gateway-scoped ProcessRegistry for
     /// terminal/execute_code background spawns. Mirrors the BudgetHandle
     /// plumbing pattern. `build_gateway_handler` clones it into the handler
@@ -121,7 +118,7 @@ impl GatewayRunner {
             skill_registry: None,
             active_skills: None,
             mcp_manager: None,       // GAP-8: wired by run_gateway before start()
-            budget_handle: None,     // Plan 21.7-05: wired by run_gateway before start()
+            agent_runtime: None,     // Plan 28.1-02: wired by run_gateway before start()
             process_registry: None,  // Plan 21.7-06: wired by run_gateway before start()
             subagent_registry: None, // Plan 21.7-07: wired by run_gateway before start()
             browser_session: None,   // Phase 25.1: wired by run_gateway before start()
@@ -201,14 +198,11 @@ impl GatewayRunner {
         }
     }
 
-    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install the shared BudgetHandle
-    /// to thread into the handler. Caller (run_gateway in ironhermes-cli)
-    /// constructs one `BudgetHandle::new(config.agent.max_iterations)` at
-    /// startup and passes the same handle here AND into the
-    /// `AgentSubagentRunner` registered on the tool registry, giving
-    /// parent + child subagent loops a shared counter.
-    pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
-        self.budget_handle = Some(handle);
+    /// Plan 28.1-02: install the single AgentRuntime so the handler can route
+    /// every top-level turn through `runtime.run_turn`. Caller is `run_gateway`
+    /// in ironhermes-cli, which builds one runtime via `AgentRuntime::from_config`.
+    pub fn set_agent_runtime(&mut self, runtime: Arc<AgentRuntime>) {
+        self.agent_runtime = Some(runtime);
     }
 
     /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
@@ -318,10 +312,11 @@ impl GatewayRunner {
         if let Some(ref skills) = self.active_skills {
             handler.set_active_skills(skills.clone());
         }
-        // Plan 21.7-05: thread the shared BudgetHandle into the handler so
-        // per-request AgentLoops see the same counter as AgentSubagentRunner.
-        if let Some(ref handle) = self.budget_handle {
-            handler.set_budget_handle(handle.clone());
+        // Plan 28.1-02: thread the AgentRuntime into the handler so every
+        // top-level turn is routed through runtime.run_turn (which resets
+        // the budget and builds the loop from the runtime's durable Arcs).
+        if let Some(ref rt) = self.agent_runtime {
+            handler.set_agent_runtime(rt.clone());
         }
         // Plan 21.7-06 (D-29, D-24): thread the gateway-scoped ProcessRegistry
         // so per-request on_session_end can invoke drain_and_kill_session.
