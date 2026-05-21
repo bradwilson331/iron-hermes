@@ -72,7 +72,7 @@ pub struct SkillInfo {
     /// Derived from SkillSource: Builtin→"bundled", Official→"official",
     /// Trusted→"trusted", Community→"installed", SelfCreated→"self-created".
     pub category: String,
-    /// True if skill.name appears in runtime_bundle.active_skills.
+    /// True if skill.name appears in the runtime's active_skills.
     pub enabled: bool,
 }
 
@@ -156,8 +156,8 @@ pub async fn get_config_summary() -> Result<ConfigSummary> {
 pub async fn list_tools() -> Result<Vec<ToolInfo>> {
     let state = crate::server::state::global_app_state();
     let definitions = state
-        .runtime_bundle
-        .registry
+        .runtime
+        .registry()
         .read()
         .await
         .get_definitions(None);
@@ -278,11 +278,11 @@ fn extract_last_message_preview(msgs: &[ironhermes_state::StoredMessage]) -> Opt
 #[get("/api/skills")]
 pub async fn list_skills() -> Result<Vec<SkillInfo>> {
     let state = crate::server::state::global_app_state();
-    let registry = &state.runtime_bundle.skill_registry;
+    let registry = state.runtime.skill_registry();
 
     // std::sync::Mutex — short-lived lock, no .await inside the held scope.
     let active_names: std::collections::HashSet<String> = {
-        let guard = state.runtime_bundle.active_skills.lock()
+        let guard = state.runtime.active_skills().lock()
             .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
         guard.iter().map(|r| r.name.clone()).collect()
     };
@@ -329,7 +329,7 @@ pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
     let state = crate::server::state::global_app_state();
 
     // Step 1 — input validation: reject unknown skill names BEFORE any disk I/O (T-26.7.3-02-01)
-    let record = state.runtime_bundle.skill_registry.find(&name).cloned();
+    let record = state.runtime.skill_registry().find(&name).cloned();
     if record.is_none() {
         return Err(ServerFnError::new(format!("unknown skill: {name}")));
     }
@@ -346,7 +346,7 @@ pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
     // suspension occurs while the lock is held (lock discipline: Behavior 5).
     // Pattern: api.rs list_skills lines 234–240 (active_skills lock pattern)
     {
-        let mut skills = state.runtime_bundle.active_skills.lock()
+        let mut skills = state.runtime.active_skills().lock()
             .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
         if was_disabled {
             // Was disabled → now enabled: push record if not already present
