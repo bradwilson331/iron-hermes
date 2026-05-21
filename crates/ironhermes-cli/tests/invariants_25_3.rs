@@ -43,6 +43,10 @@ const MAIN_RS: &str = include_str!("../src/main.rs");
 const TUI_COMMANDS: &str = include_str!("../src/tui_rata/commands.rs");
 const GW_HANDLER: &str = include_str!("../../ironhermes-gateway/src/handler.rs");
 const GW_RUNNER: &str = include_str!("../../ironhermes-gateway/src/runner.rs");
+// Phase 28.1-02: the gateway turn no longer assembles its own AgentLoop; it
+// builds a TurnRequest and delegates to AgentRuntime::run_turn, which applies
+// the per-turn wiring (.with_trajectory_writer, .with_memory_manager, etc.).
+const AGENT_RUNTIME: &str = include_str!("../../ironhermes-agent/src/agent_runtime.rs");
 
 // Phase 25.3 GAP-CLOSURE include_str! anchors (Wave 7 — see INV-25.3-07..11 below).
 const TUI_EVENT_LOOP: &str = include_str!("../src/tui_rata/event_loop.rs");
@@ -143,16 +147,30 @@ fn trajectory_writer_wired_in_all_commandcontext_construction_sites() {
 
 #[test]
 fn trajectory_writer_wired_in_gateway_handler() {
-    let no_comments: String = GW_HANDLER
+    let handler_no_comments: String = GW_HANDLER
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    let runtime_no_comments: String = AGENT_RUNTIME
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Phase 28.1-02: the gateway turn delegates to AgentRuntime::run_turn, so the
+    // per-session trajectory writer is sourced in handler.rs and threaded through
+    // TurnRequest.trajectory_writer; run_turn applies it via .with_trajectory_writer.
+    // Telegram is the primary user-facing surface — losing this would starve 25.4 Curator.
     assert!(
-        no_comments.contains(".with_trajectory_writer("),
-        "INV-25.3-05: gateway/handler.rs::handle_slash_command must call \
-         `.with_trajectory_writer(handle)` on the per-message CommandContext. \
-         Telegram is the primary user-facing surface — excluding it would starve 25.4 Curator."
+        handler_no_comments.contains("get_or_create_trajectory_writer")
+            && handler_no_comments.contains("trajectory_writer,"),
+        "INV-25.3-05: gateway/handler.rs must source the per-session trajectory writer \
+         (get_or_create_trajectory_writer) and pass it into TurnRequest.trajectory_writer."
+    );
+    assert!(
+        runtime_no_comments.contains(".with_trajectory_writer("),
+        "INV-25.3-05: AgentRuntime::run_turn must apply `.with_trajectory_writer(...)` so the \
+         trajectory writer threaded by the gateway TurnRequest reaches the AgentLoop."
     );
 }
 

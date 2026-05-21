@@ -8,14 +8,25 @@
 
 const MAIN_RS: &str = include_str!("../src/main.rs");
 
+// Phase 28.1-02: run_gateway no longer constructs the subagent runner inline.
+// It now builds the shared runtime via `AgentRuntime::from_config`, which
+// constructs the runner (and threads the subagent registry) internally. The
+// three logical call sites are therefore split across two files: run_chat +
+// run_single in main.rs, and the gateway/runtime site in agent_runtime.rs.
+const AGENT_RUNTIME_RS: &str =
+    include_str!("../../ironhermes-agent/src/agent_runtime.rs");
+
 #[test]
 fn invariant_21_7_01_three_agent_subagent_runner_new_sites() {
-    let count = MAIN_RS.matches("AgentSubagentRunner::new(").count();
+    let main_sites = MAIN_RS.matches("AgentSubagentRunner::new(").count();
+    let runtime_sites = AGENT_RUNTIME_RS.matches("AgentSubagentRunner::new(").count();
+    let count = main_sites + runtime_sites;
     assert_eq!(
         count, 3,
-        "INV-21.7-01: run_chat, run_single, and run_gateway each construct AgentSubagentRunner::new(. \
-         Expected 3 call sites; found {}. If you added or removed a site, update this test with justification.",
-        count
+        "INV-21.7-01: run_chat + run_single construct AgentSubagentRunner::new( in main.rs \
+         ({main_sites}), and run_gateway's runner is built inside AgentRuntime::from_config \
+         in agent_runtime.rs ({runtime_sites}). Expected 3 logical call sites total; found {count}. \
+         If you added or removed a site, update this test with justification."
     );
 }
 
@@ -124,12 +135,19 @@ fn invariant_21_7_08_subagent_registry_on_context_and_runner_sites() {
     //
     // Expected count: 3 runner sites (run_single, run_chat, run_gateway) +
     // 1 CommandContext site (run_chat) = at least 4.
-    let count = MAIN_RS.matches("with_subagent_registry").count();
+    //
+    // Phase 28.1-02: run_gateway's runner site moved into AgentRuntime::from_config
+    // (agent_runtime.rs), so the threading is now split across two files —
+    // run_single + run_chat runner sites + the run_chat CommandContext site in
+    // main.rs, plus the gateway runner site in agent_runtime.rs.
+    let count = MAIN_RS.matches("with_subagent_registry").count()
+        + AGENT_RUNTIME_RS.matches("with_subagent_registry").count();
     assert!(
         count >= 4,
         "INV-21.7-08 / D-03 / D-04: subagent_registry must be threaded \
-         through 3 AgentSubagentRunner::new sites + CommandContext::new \
-         in run_chat. Found {}.",
+         through 3 AgentSubagentRunner::new sites (run_single + run_chat in main.rs, \
+         run_gateway via AgentRuntime::from_config in agent_runtime.rs) + \
+         CommandContext::new in run_chat. Found {}.",
         count
     );
 }
