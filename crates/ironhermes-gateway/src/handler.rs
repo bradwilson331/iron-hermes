@@ -993,6 +993,15 @@ impl GatewayMessageHandler {
         // The same handle is shared with AgentSubagentRunner (see main.rs
         // run_gateway), giving PROV-10 parent/child shared decrement.
         if let Some(ref handle) = self.budget_handle {
+            // Refill the budget at the start of each top-level turn. The handle
+            // is gateway-scoped and lives for the whole process; reset() refills
+            // the shared counter in place so this turn (and any subagents it
+            // spawns, which share the same Arc) start full. Without this the
+            // counter latches at Stop100 after the first budget-exhausting
+            // conversation and every later message returns immediately with
+            // turns_used=0. The gateway dispatches messages sequentially, so
+            // concurrent top-level turns do not race this refill.
+            handle.reset();
             agent = agent.with_budget(handle.clone());
         }
 

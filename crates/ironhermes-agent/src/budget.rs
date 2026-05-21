@@ -80,6 +80,15 @@ impl BudgetHandle {
         }
     }
 
+    /// Refill the budget to `max` in place. The counter lives behind a shared
+    /// `Arc`, so callers holding a clone (e.g. the subagent runner) observe the
+    /// refill too. Called at the start of each top-level user turn so a
+    /// long-lived gateway does not latch at Stop100 forever after the first
+    /// budget-exhausting conversation.
+    pub fn reset(&self) {
+        self.remaining.store(self.max, Ordering::SeqCst);
+    }
+
     /// Compute the current pressure tier (D-15).
     /// Uses integer arithmetic (floor-division) to avoid float drift.
     /// No transient tier reads during clone/fork — SeqCst load provides a
@@ -170,6 +179,32 @@ mod tests {
         b.consume();
         assert_eq!(b.used(), 3);
         assert_eq!(b.remaining(), 7);
+    }
+
+    #[test]
+    fn reset_refills_to_max_after_exhaustion() {
+        let b = BudgetHandle::new(3);
+        assert_eq!(b.consume(), Some(2));
+        assert_eq!(b.consume(), Some(1));
+        assert_eq!(b.consume(), Some(0));
+        assert_eq!(b.consume(), None, "exhausted → Stop100");
+        b.reset();
+        assert_eq!(b.remaining(), 3, "reset refills to max");
+        assert_eq!(b.pressure(), PressureTier::None);
+        assert_eq!(b.consume(), Some(2), "consume works again after reset");
+    }
+
+    #[test]
+    fn reset_is_visible_through_shared_clone() {
+        // The gateway shares one handle with the subagent runner; reset() on the
+        // parent must refill the clone's view (same Arc) so a new turn starts full.
+        let parent = BudgetHandle::new(2);
+        let child = parent.clone();
+        parent.consume();
+        parent.consume();
+        assert_eq!(child.consume(), None, "shared counter exhausted");
+        parent.reset();
+        assert_eq!(child.remaining(), 2, "clone observes the refill");
     }
 
     #[test]
