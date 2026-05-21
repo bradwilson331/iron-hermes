@@ -148,18 +148,28 @@ fn inv_33_06_learning_in_known_toolsets() {
 }
 
 const WEB_STATE_SOURCE: &str = include_str!("../../iron_hermes_ui/src/server/state.rs");
+const AGENT_RUNTIME_SOURCE: &str = include_str!("../src/agent_runtime.rs");
 
-/// INV-33-07: `build_app_runtime_bundle` is called in iron_hermes_ui/src/server/state.rs
-/// so web UI sessions wire the full skill_manage toolset through the shared runtime bundle.
+/// INV-33-07: web UI sessions wire the full skill_manage toolset through the shared
+/// runtime bundle.
+///
+/// Phase 28.1-03: AppState no longer calls build_app_runtime_bundle directly — it
+/// constructs the shared runtime via AgentRuntime::from_config, which builds the
+/// AppRuntimeBundle internally. The guarantee (web sessions get the full bundle, and
+/// thus the Learning Loop skill_manage toolset) is preserved across the two files.
 #[test]
 fn inv_33_07_appstate_calls_build_app_runtime_bundle() {
-    let count = WEB_STATE_SOURCE.matches("build_app_runtime_bundle").count();
     assert!(
-        count >= 1,
-        "INV-33-07: crates/iron_hermes_ui/src/server/state.rs must call \
-         build_app_runtime_bundle() so web UI sessions wire the Learning Loop \
-         skill_manage toolset through the shared AppRuntimeBundle. Found {count} \
-         occurrences (expected >= 1). See Phase 33 Plan 03 / Phase 34 D-05."
+        WEB_STATE_SOURCE.matches("AgentRuntime::from_config").count() >= 1,
+        "INV-33-07: crates/iron_hermes_ui/src/server/state.rs must build the shared \
+         runtime via AgentRuntime::from_config so web UI sessions wire the full \
+         AppRuntimeBundle (incl. the Learning Loop skill_manage toolset). \
+         See Phase 33 Plan 03 / Phase 34 D-05 / Phase 28.1-03."
+    );
+    assert!(
+        AGENT_RUNTIME_SOURCE.matches("build_app_runtime_bundle").count() >= 1,
+        "INV-33-07: AgentRuntime::from_config must call build_app_runtime_bundle so the \
+         shared runtime used by the web UI assembles the full AppRuntimeBundle."
     );
 }
 
