@@ -1141,6 +1141,16 @@ Plans:
 
 **Phase directory:** `.planning/phases/28-skills-trust-tiers/`
 
+### Phase 28.1: AgentRuntime channel migration (budget/skills/tools ownership) per docs/AGENT-RUNTIME-DESIGN.md (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 28
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 28.1 to break down)
+
 ### Phase 29: Gateway Formal Verification
 
 **Goal:** The existing `ironhermes-gateway` crate has formal test coverage for all architectural contracts: session key construction, two-level message guard, authorization, hook lifecycle events, delivery routing, token locks, and background maintenance — back-filling verification that implementation matches spec.
