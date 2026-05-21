@@ -18,7 +18,7 @@
 - **D-05:** `StreamingContextScrubber` intercepts at the delta-decode layer — each SSE/WebSocket delta passes through `scrubber.feed(delta)` before writing to output.
 - **D-06:** New scrubber per turn — created at agent run start, dropped at stream end. `reset()` kept in API for completeness.
 - **D-07:** All 3 surfaces use the same delta-scrub pattern (CLI, gateway, web UI).
-- **D-08:** When `prefetch_with_query` returns empty (all providers return `""`), skip injection entirely — no `retain()` call, no insert. Explicit acceptance criterion.
+- **D-08 (amended — see CONTEXT.md D-08, 2026-05-20):** When `prefetch_with_query` returns empty, skip the new INSERT (build returns `None`) but ALWAYS evict prior recall via the unconditional `retain` at turn start (no-op on a never-injected session). Gating the retain would cause a stale-recall bug. Explicit acceptance criterion.
 
 ### Claude's Discretion
 
@@ -624,22 +624,25 @@ The OpenAI/Anthropic APIs accept multiple `role: system` messages. The frozen sy
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **regex crate availability in ironhermes-agent**
    - What we know: `regex` is not explicitly imported in agent source files examined.
    - What's unclear: Whether it's already a transitive dep (e.g. via `ironhermes-core` or another crate).
    - Recommendation: Run `cargo tree -p ironhermes-agent | grep "^regex"` before writing the memory_context module. If present: use it. If absent: either add it to `ironhermes-agent/Cargo.toml` or implement `sanitize_context` with `str::find` loops (feasible for 3 simple patterns).
+   - **RESOLVED (2026-05-20):** `regex` IS a direct workspace dep of `ironhermes-agent` (Cargo.toml:38, `regex = { workspace = true }`). Plan 34a-01 `<interfaces>` instructs OnceLock + `regex::Regex`; no new dependency added.
 
 2. **flush() call site for StreamingContextScrubber**
    - What we know: The scrubber is moved into the `stream_callback` closure; `AgentLoop` has no post-stream hook.
    - What's unclear: Whether the planner should specify an `Arc<Mutex<Scrubber>>` shared pattern, or add a `with_stream_end_callback` hook to `AgentLoop`.
    - Recommendation: Use `Arc<std::sync::Mutex<StreamingContextScrubber>>` (std, not tokio — no await in the callback). The closure holds an `Arc::clone`; the call site (after `call_llm_streaming` returns) calls `Arc::lock().unwrap().flush()` and emits if non-empty. This is the cleanest pattern that doesn't require modifying `AgentLoop`'s streaming contract.
+   - **RESOLVED (2026-05-20):** Plan 34a-02 Task 3 adopts the `Arc<std::sync::Mutex<StreamingContextScrubber>>` shared pattern verbatim across all 3 surfaces; `flush()` fires at each surface's post-stream call site. Documented in 34A-PATTERNS.md.
 
 3. **nudge::tests count discrepancy**
    - What we know: The draft says "6/6" but only 2 tests were visible in the 30-line read of the nudge.rs test module.
    - What's unclear: Whether there are more tests after line 183.
    - Recommendation: Run `cargo test -p ironhermes-agent --lib nudge::tests -- --list` to confirm actual count before documenting the acceptance criterion.
+   - **RESOLVED (2026-05-20):** Confirmed via `cargo test -p ironhermes-agent --lib nudge::tests -- --list` = **6 tests**. The "6/6" assertion in 34A-VALIDATION.md and the plan success_criteria is correct.
 
 ---
 

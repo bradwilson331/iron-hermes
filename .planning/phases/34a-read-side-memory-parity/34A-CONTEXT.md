@@ -54,7 +54,8 @@ What this phase delivers:
 
 ### Empty-recall cache guard
 
-- **D-08:** When `prefetch_with_query` returns empty (all providers return `""`), **skip injection entirely** — no `retain()` call, no insert. The message buffer is byte-identical to a pre-34a session. This is an **explicit acceptance criterion** in Plan 34a-02 (not just implicit via `build_memory_context_block` returning `None`). Preserves prompt-prefix cache hits for the common case (no semantic provider configured).
+- **D-08 (amended 2026-05-20):** When `prefetch_with_query` returns empty (all providers return `""`), **skip the new INSERT** — `build_memory_context_block` returns `None`, so no `<memory-context>` system message is added that turn. The prior-turn recall message is **still evicted** via the unconditional `messages.retain(|m| !m.is_recall_context)` at turn start. That retain is a no-op on a session that has never had recall injected (e.g. the file-provider-only common case), so the buffer remains byte-identical to a pre-34a session there. Unconditional eviction is required for correctness: gating it behind non-empty recall would let a turn-1 recall message persist into a later empty-recall turn (stale-recall bug). This is an **explicit acceptance criterion** in Plan 34a-02. For the common case (no semantic provider configured), `prefetch_with_query` returns `""` immediately and the retain is a no-op, preserving prompt-prefix cache hits.
+  - *Original wording said "no `retain()` call" on empty; that conflated "skip injection" (correct) with "skip eviction" (a bug — prior recall must always be evicted). Reconciled per plan-checker finding + user decision on 2026-05-20.*
 
 ### Claude's Discretion
 
