@@ -964,9 +964,17 @@ impl GatewayMessageHandler {
         // `client` into AgentLoop::new, so the snapshot must happen first.
         let nudge_client = client.clone();
 
+        // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
+        let scrubber_gw = std::sync::Arc::new(std::sync::Mutex::new(
+            ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+        ));
+        let scrubber_gw_cb = std::sync::Arc::clone(&scrubber_gw);
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
-            let _ = stream_tx_clone.try_send(delta.to_string());
+            let visible = scrubber_gw_cb.lock().unwrap().feed(delta);
+            if !visible.is_empty() {
+                let _ = stream_tx_clone.try_send(visible);
+            }
         });
 
         let tool_tx_clone = tool_tx.clone();
@@ -1063,6 +1071,12 @@ impl GatewayMessageHandler {
         // model just consumed. Cheap relative to the network round-trip.
         let messages_for_nudge = messages.clone();
         let agent_result = agent.run(messages).await;
+
+        // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
+        let tail = scrubber_gw.lock().unwrap().flush();
+        if !tail.is_empty() {
+            let _ = stream_tx.try_send(tail);
+        }
 
         // 9. Drop agent first — its callbacks hold cloned channel senders
         drop(agent);

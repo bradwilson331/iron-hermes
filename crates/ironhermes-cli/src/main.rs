@@ -814,13 +814,22 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Phase 25 D-16: per-session todo state for todo_write / todo_read intercepts.
     let todo_state_single = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
 
+    // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
+    let scrubber_single = std::sync::Arc::new(std::sync::Mutex::new(
+        ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+    ));
+    let scrubber_single_cb = std::sync::Arc::clone(&scrubber_single);
+
     let mut agent = AgentLoop::new(client, registry.clone(), max_turns)
         .with_budget(budget)
         .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
         .with_compression(context_length, config.agent.context_compression)
-        .with_streaming(Box::new(|delta| {
-            print!("{}", delta);
-            io::stdout().flush().ok();
+        .with_streaming(Box::new(move |delta| {
+            let visible = scrubber_single_cb.lock().unwrap().feed(delta);
+            if !visible.is_empty() {
+                print!("{}", visible);
+                io::stdout().flush().ok();
+            }
         }))
         .with_tool_progress(Box::new(|name, args| {
             eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
@@ -872,6 +881,14 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     );
 
     let result = agent.run(messages).await?;
+
+    // Phase 34a MEM-READ-05: flush scrubber tail (emits held partial-tag if stream ended
+    // mid-tag and it proved to not be a memory-context tag).
+    let tail = scrubber_single.lock().unwrap().flush();
+    if !tail.is_empty() {
+        print!("{}", tail);
+        io::stdout().flush().ok();
+    }
 
     // Plan 21.7-06 (D-24, T-21.7-06-01): drain + kill any background processes
     // tracked by this session's ProcessRegistry before exit. Best-effort —
@@ -2291,6 +2308,12 @@ async fn run_agent_turn(
     let tui_stream = tui.clone();
     let tui_tool = tui.clone();
 
+    // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
+    let scrubber_chat = std::sync::Arc::new(std::sync::Mutex::new(
+        ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+    ));
+    let scrubber_chat_cb = std::sync::Arc::clone(&scrubber_chat);
+
     let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
         .with_budget(budget.clone())
         .with_cancellation_token(cancel_token)
@@ -2298,6 +2321,11 @@ async fn run_agent_turn(
         .with_compression(context_length, config.agent.context_compression)
         .with_compression_count(starting_count)
         .with_streaming(Box::new(move |delta| {
+            // Phase 34a MEM-READ-05: strip memory-context fence tags before display.
+            let visible = scrubber_chat_cb.lock().unwrap().feed(delta);
+            if visible.is_empty() {
+                return;
+            }
             // Phase 22.3 GAP-22.3-01 closure (Plan 22.3-11):
             // Route every streamed token through write_into_scroll_region so
             // the cursor is saved (DECSC), absolutely positioned to the bottom
@@ -2313,7 +2341,7 @@ async fn run_agent_turn(
             // the prompt row, by rustyline). The helper handles both
             // flushing and the non-TTY fallback so log captures and CI
             // runs are unaffected.
-            write_into_scroll_region(delta.as_bytes(), tui_stream.reserved_row_count());
+            write_into_scroll_region(visible.as_bytes(), tui_stream.reserved_row_count());
             // Publish coarse activity state (best-effort; watch coalesces rapid updates).
             tui_stream.set_activity(ActivityState::Streaming);
         }))
@@ -2383,6 +2411,12 @@ async fn run_agent_turn(
 
     // Pass a clone of messages so agent can work with them
     let result = agent.run(messages.clone()).await?;
+
+    // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
+    let tail = scrubber_chat.lock().unwrap().flush();
+    if !tail.is_empty() {
+        write_into_scroll_region(tail.as_bytes(), tui.reserved_row_count());
+    }
 
     // After the turn completes, reset activity to Idle so the scanner hides (D-08).
     tui.set_activity(ActivityState::Idle);

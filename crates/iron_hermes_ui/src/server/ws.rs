@@ -212,12 +212,20 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             let session_id_for_turn = session_id.clone();
                             let message = req.message;
                             let handle = tokio::spawn(async move {
+                                // Phase 34a MEM-READ-05: scrub <memory-context> fence tags.
+                                let scrubber_ws = std::sync::Arc::new(std::sync::Mutex::new(
+                                    ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+                                ));
+                                let scrubber_ws_cb = std::sync::Arc::clone(&scrubber_ws);
                                 let tx_stream = tx.clone();
                                 let stream_callback: ironhermes_agent::agent_loop::StreamCallback =
                                     Box::new(move |delta: &str| {
-                                        let _ = tx_stream.send(ChatStreamEvent::Delta {
-                                            text: delta.to_string(),
-                                        });
+                                        let visible = scrubber_ws_cb.lock().unwrap().feed(delta);
+                                        if !visible.is_empty() {
+                                            let _ = tx_stream.send(ChatStreamEvent::Delta {
+                                                text: visible,
+                                            });
+                                        }
                                     });
 
                                 let tx_tool = tx.clone();
@@ -261,6 +269,12 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         Some(tool_result_callback),
                                     )
                                     .await;
+
+                                // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
+                                let tail = scrubber_ws.lock().unwrap().flush();
+                                if !tail.is_empty() {
+                                    let _ = tx.send(ChatStreamEvent::Delta { text: tail });
+                                }
 
                                 match result {
                                     Ok(agent_result) => {

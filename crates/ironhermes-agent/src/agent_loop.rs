@@ -927,6 +927,49 @@ impl AgentLoop {
                 comp.compress(&mut messages);
             }
 
+            // Phase 34a D-02/D-08: pre-turn recall injection.
+            // Step 1: evict any prior recall injection unconditionally — must run
+            // before insert-index scan so index arithmetic is correct (D-02 / Pitfall 3).
+            messages.retain(|m| !m.is_recall_context);
+
+            // Step 2: fetch query-scoped recall and inject BEFORE the last user
+            // message (only when memory_manager is wired).
+            if let Some(ref mgr) = self.memory_manager {
+                let session_id = self.session_id.as_deref().unwrap_or("");
+                let user_msg_text = messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == ironhermes_core::Role::User)
+                    .and_then(|m| m.content_text().map(|s| s.to_string()))
+                    .unwrap_or_default();
+
+                if !user_msg_text.is_empty() {
+                    // Scoped block drops the MutexGuard before messages.insert() (Pitfall 1).
+                    let raw = {
+                        let guard = mgr.lock().await;
+                        guard.prefetch_with_query(&user_msg_text, session_id).await
+                    };
+                    if let Ok(raw) = raw {
+                        if let Some(block) =
+                            crate::memory_context::build_memory_context_block(&raw)
+                        {
+                            // D-08: insert only when recall is non-empty.
+                            let insert_idx = messages
+                                .iter()
+                                .rposition(|m| m.role == ironhermes_core::Role::User)
+                                .unwrap_or(messages.len());
+                            messages.insert(
+                                insert_idx,
+                                ChatMessage::recall_system(block),
+                            );
+                        }
+                        // D-08: when build returns None (empty recall), do NOT insert.
+                        // The retain above already evicted the prior recall message, so
+                        // a file-provider-only session's buffer is byte-identical to pre-34a.
+                    }
+                }
+            }
+
             turns_used += 1;
             debug!(
                 turn = turns_used,
