@@ -99,7 +99,10 @@ pub fn apply_adaptive_shift(
                 .unwrap_or_else(|| "<unknown>".into());
             let args_full = tc.map(|c| c.function.arguments.clone()).unwrap_or_default();
             let args_preview = if args_full.len() > 80 {
-                format!("{}…", &args_full[..80])
+                format!(
+                    "{}…",
+                    ironhermes_core::truncate_on_char_boundary(&args_full, 80)
+                )
             } else {
                 args_full
             };

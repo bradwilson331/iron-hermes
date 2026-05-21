@@ -145,7 +145,7 @@ impl ContextCompressor {
                 if text.len() > 500 {
                     msg.content = Some(ironhermes_core::MessageContent::Text(format!(
                         "{}... [truncated, {} chars total]",
-                        &text[..200],
+                        ironhermes_core::truncate_on_char_boundary(&text, 200),
                         text.len()
                     )));
                 }

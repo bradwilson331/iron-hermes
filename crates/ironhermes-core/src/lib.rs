@@ -32,7 +32,9 @@ pub use config::{
 };
 pub use config_schema::{ConfigField, MemoryAction, schema as config_schema};
 pub use constants::*;
-pub use context_scanner::{CONTEXT_FILE_MAX_CHARS, scan_context_content, truncate_content};
+pub use context_scanner::{
+    CONTEXT_FILE_MAX_CHARS, scan_context_content, truncate_content, truncate_on_char_boundary,
+};
 pub use error::{HermesError, Result};
 pub use memory_provider::{MemoryEntries, MemoryProvider};
 pub use memory_store::{MemoryStore, MemoryTarget};

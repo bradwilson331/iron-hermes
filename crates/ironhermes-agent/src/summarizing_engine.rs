@@ -9,7 +9,7 @@
 // compression never blocks the agent loop (T-18-03).
 
 use async_trait::async_trait;
-use ironhermes_core::{ChatMessage, MessageContent, Role};
+use ironhermes_core::{ChatMessage, MessageContent, Role, truncate_on_char_boundary};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
@@ -43,21 +43,6 @@ const HISTORY_SUMMARY_MAX_CHARS: usize = 8_000;
 const PRUNED_BLOCK_MAX_CHARS: usize = 4_000;
 /// D-24 runaway loop guard — refuse to compress after this many passes.
 const MAX_COMPRESSION_PASSES: usize = 10;
-
-/// Truncate `s` to at most `max_bytes`, snapping down to the nearest char
-/// boundary. `&s[..max_bytes]` panics when the cap lands inside a multi-byte
-/// UTF-8 sequence (e.g. `█` U+2588 or CJK text in large sessions); this never
-/// does. Returns the whole string when it is already within the cap.
-fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
 
 /// Locate the pinned history segment index if present (D-17).
 pub fn locate_history_segment(messages: &[ChatMessage]) -> Option<usize> {
@@ -658,28 +643,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use tokio::sync::Mutex as AsyncMutex;
-
-    #[test]
-    fn truncate_on_char_boundary_never_splits_multibyte() {
-        // Regression: a body of '█' (U+2588, 3 bytes each) truncated at a byte
-        // cap that lands mid-char used to panic with "byte index N is not a char
-        // boundary". The cap must snap down to the nearest boundary.
-        let body = "█".repeat(2000); // 6000 bytes; cap 4000 lands inside a '█'
-        let t = truncate_on_char_boundary(&body, 4000);
-        assert!(t.len() <= 4000);
-        assert!(body.is_char_boundary(t.len()));
-        assert_eq!(t.len() % 3, 0, "should snap to a whole number of 3-byte glyphs");
-
-        // Mixed ASCII + CJK, cap inside the multi-byte tail.
-        let mixed = format!("{}日本語テスト", "x".repeat(3998));
-        let t2 = truncate_on_char_boundary(&mixed, 4000);
-        assert!(mixed.is_char_boundary(t2.len()));
-
-        // Already-short input is returned whole.
-        assert_eq!(truncate_on_char_boundary("hello", 4000), "hello");
-        // Exact-length input is returned whole.
-        assert_eq!(truncate_on_char_boundary("abcd", 4), "abcd");
-    }
 
     struct MockSummarizer {
         calls: Arc<Mutex<Vec<String>>>,

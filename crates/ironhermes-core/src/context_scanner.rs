@@ -175,9 +175,39 @@ pub fn truncate_content(content: &str, filename: &str, max_chars: usize) -> Stri
     format!("{}{}{}", head, marker, tail)
 }
 
+/// Truncate `s` to at most `max_bytes`, snapping the cut down to the nearest
+/// char boundary. `&s[..max_bytes]` panics when the cap lands inside a multi-byte
+/// UTF-8 sequence (e.g. `█` U+2588 or CJK text); this never does. Returns the
+/// whole string when it is already within the cap.
+pub fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_on_char_boundary_never_splits_multibyte() {
+        let body = "█".repeat(2000); // 6000 bytes; cap 4000 lands inside a '█'
+        let t = truncate_on_char_boundary(&body, 4000);
+        assert!(t.len() <= 4000);
+        assert!(body.is_char_boundary(t.len()));
+        assert_eq!(t.len() % 3, 0);
+
+        let mixed = format!("{}日本語", "x".repeat(199));
+        assert!(mixed.is_char_boundary(truncate_on_char_boundary(&mixed, 200).len()));
+
+        assert_eq!(truncate_on_char_boundary("hello", 4000), "hello");
+        assert_eq!(truncate_on_char_boundary("abcd", 4), "abcd");
+    }
 
     #[test]
     fn test_safe_content_passes_through() {

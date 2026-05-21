@@ -746,7 +746,10 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
                     .map(|s: &str| s.to_string())
                     .unwrap_or_default();
                 let preview = if content_str.len() > 120 {
-                    format!("{}…", &content_str[..120])
+                    format!(
+                        "{}…",
+                        crate::context_scanner::truncate_on_char_boundary(&content_str, 120)
+                    )
                 } else {
                     content_str
                 };
