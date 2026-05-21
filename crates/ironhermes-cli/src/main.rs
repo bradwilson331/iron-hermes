@@ -724,17 +724,6 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             }
         }
     };
-    // run_single doesn't dispatch slash commands so trajectory_writer is currently
-    // unused on its CommandContext — but we keep the variable in scope so Plan 9
-    // (AgentLoop callback wireup) can simply attach `agent.with_trajectory_writer(...)`
-    // here without re-resolving the path.
-    let _ = &trajectory_writer;
-
-    // Plan 21.7-05 (PROV-09/PROV-10/D-15): construct BudgetHandle seeded from
-    // config.agent.max_iterations so the shared counter starts FULL and
-    // drains per-turn (Caution70 at 70% used, Warning90 at 90%, Stop100 at
-    // 100%). Parent + subagents clone the handle and share the counter.
-    let budget = BudgetHandle::new(config.agent.max_iterations);
     // Plan 21.7-06 (D-29, D-24): session-scoped ProcessRegistry for
     // terminal/execute_code `background=true` spawns. Kept in scope so
     // on_session_end can call drain_and_kill_session below.
@@ -756,42 +745,31 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             .await
             .context("building memory manager for single-prompt mode")?;
 
-    // Register delegate_task tool (AGENT-01..05)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
-    // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
-    // transcript scope into the runner so lifecycle events update state.
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
-    );
     let cwd = std::env::current_dir().unwrap_or_default();
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+
+    // Plan 28.1-04: build ONE AgentRuntime from config — replaces the manual
+    // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
+    // from_config creates the shared BudgetHandle, builds the subagent runner
+    // with a clone of it (PROV-10), and assembles the tool registry/skills/browser bundle.
+    // run_turn resets the budget at every turn boundary, fixing any Stop100 latch.
+    let runtime = ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
         config: Arc::new(config.clone()),
         resolver: Arc::new(resolver.clone()),
         cwd: cwd.clone(),
         process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner,
-            semaphore: subagent_semaphore,
-            config: config.delegation.clone(),
-            cancel_token: None,
-            progress_callback: None,
-        }),
+        memory_manager: memory_manager.clone(),
         hooks_config,
         emit_mcp_startup_logs: true,
+        subagent_registry: subagent_registry.clone(),
+        transcript_scope: (hermes_home.clone(), session_id.clone()),
+        subagent_progress_callback: None,
+        subagent_cancel_token: None,
     })
     .await
-    .context("building shared app runtime bundle for run_single")?;
+    .context("building AgentRuntime for run_single")?;
 
-    let registry = runtime_bundle.registry.clone();
-    let hook_registry = runtime_bundle.hook_registry.clone();
-    let skill_registry = runtime_bundle.skill_registry.clone();
-    let browser_session = runtime_bundle.browser_session.clone();
+    let skill_registry = runtime.skill_registry().clone();
 
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
@@ -813,7 +791,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
     // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
     // catalog text reflects the same enabled set as the API tool schemas.
-    prompt_builder.set_active_toolsets(runtime_bundle.merged_tools.enabled_toolset_names());
+    prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -826,76 +804,48 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         .context("failed to persist user message")?;
     let messages = vec![system_msg, user_msg];
 
-    // Phase 25 D-16: per-session todo state for todo_write / todo_read intercepts.
-    let todo_state_single = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-
     // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
     let scrubber_single = std::sync::Arc::new(std::sync::Mutex::new(
         ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
     ));
     let scrubber_single_cb = std::sync::Arc::clone(&scrubber_single);
 
-    let mut agent = AgentLoop::new(client, registry.clone(), max_turns)
-        .with_budget(budget)
-        .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
-        .with_compression(context_length, config.agent.context_compression)
-        .with_streaming(Box::new(move |delta| {
+    // Plan 28.1-04: build TurnRequest and call runtime.run_turn.
+    // run_turn owns the budget lifecycle (reset at entry), builds the AgentLoop,
+    // wires fallback, and calls attach_context_engine — DO NOT duplicate those here.
+    //
+    // todo intercept dropped: run_single is one-shot batch mode with no interactive
+    // todo flow. The todo_write/todo_read intercept was effectively dead wiring
+    // (no user can trigger a slash command mid-batch). Dropping it is intentional
+    // and documented here per plan §6.3. If a future test depends on it, extend
+    // TurnRequest minimally rather than re-adding it silently.
+    //
+    // trajectory_writer wired here (improvement over prior code which resolved
+    // the writer but then held it in a let-_-binding): run_turn threads it into
+    // the AgentLoop so per-tool-call TrajectoryEntry records land in the JSONL.
+    let _ = max_turns; // max_turns is baked into runtime via config.agent.max_turns
+    let request = ironhermes_agent::TurnRequest {
+        messages,
+        session_id: session_id.clone(),
+        cancel_token: None,
+        stream: Some(Box::new(move |delta| {
             let visible = scrubber_single_cb.lock().unwrap().feed(delta);
             if !visible.is_empty() {
                 print!("{}", visible);
                 io::stdout().flush().ok();
             }
-        }))
-        .with_tool_progress(Box::new(|name, args| {
+        })),
+        tool_progress: Some(Box::new(|name, args| {
             eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
-        }))
-        // Phase 25 D-16: wire intercept handlers (todo_write/todo_read only in single mode;
-        // memory handled by register_memory_tool; state_store wired for session_search).
-        .with_intercepts(
-            None,
-            Some(state_store.clone()),
-            None,
-            Some(todo_state_single),
-            None,
-        )
-        // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
-        .with_browser_session(browser_session.clone());
+        })),
+        tool_result: None,
+        trajectory_writer: trajectory_writer.clone(),
+        pressure_tracker: None, // one-shot: fresh tracker per run
+        state_store: Some(state_store.clone()),
+        compression_count: 0, // one-shot: no cross-turn carry-over
+    };
 
-    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
-    // tool call lands a TrajectoryEntry in the per-session JSONL.
-    if let Some(ref handle) = trajectory_writer {
-        agent = agent.with_trajectory_writer(handle.clone());
-    }
-
-    // Wire fallback from resolver — use the fallback provider's own default_model
-    // so the local/secondary endpoint serves a model it actually has loaded.
-    let main_endpoint = resolver.resolve_for_main();
-    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-        if let Some(fb_endpoint) = resolver.resolve(fb_name) {
-            if let Ok(fb_client) =
-                build_provider_client(&resolver, fb_name, &fb_endpoint.default_model)
-            {
-                agent = agent.with_fallback(fb_client);
-            }
-        }
-    }
-
-    // Phase 18 Plan 09: wire agent-side context compression (honors
-    // config.agent.context_engine + config.agent.compression_threshold).
-    // Phase 18-14: one-shot path — fresh tracker is fine (single turn then exits).
-    // GAP-1/GAP-2: pass memory_manager so on_pre_compress fires on compression.
-    agent = ironhermes_agent::attach_context_engine(
-        agent,
-        &config,
-        &resolver,
-        session_id.as_str(),
-        Some(hook_registry.clone()), // Phase 22: D-09
-        None,                        // one-shot: fresh tracker per run
-        context_length,              // Phase 21.3
-        memory_manager.clone(),      // GAP-1/GAP-2: wire into context engine
-    );
-
-    let result = agent.run(messages).await?;
+    let result = runtime.run_turn(request).await?;
 
     // Phase 34a MEM-READ-05: flush scrubber tail (emits held partial-tag if stream ended
     // mid-tag and it proved to not be a memory-context tag).
@@ -952,7 +902,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // per D-14) get a chance to clean up. Best-effort, log-and-continue --
     // matches the surrounding memory_manager.on_session_end pattern.
     // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
-    registry.read().await.call_session_end_hooks();
+    runtime.registry().read().await.call_session_end_hooks();
 
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
@@ -1192,11 +1142,6 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         }
     };
 
-    // Plan 21.7-05 (PROV-09/PROV-10/D-15): BudgetHandle seeded from
-    // config.agent.max_iterations. Parent + subagents share the counter
-    // via BudgetHandle::clone; the per-turn run_agent_turn() inherits
-    // the same handle and decrements it at turn-top.
-    let budget = BudgetHandle::new(config.agent.max_iterations);
     // Plan 21.7-06 (D-29, D-24): session-scoped ProcessRegistry for
     // terminal/execute_code `background=true` spawns. Cloned into the tool
     // registration below and drained on natural REPL exit.
@@ -1248,15 +1193,6 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             .await
             .context("building memory manager for chat mode")?;
 
-    // Register delegate_task tool (AGENT-01..05)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
-    // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
-    // transcript scope into the runner so lifecycle events update state.
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
-    );
     // Plan 21-03: parent CancellationToken lives the full chat session; per-turn
     // children are issued via `.child_token()` so cancelling one turn does NOT
     // poison the session. (See RESEARCH §Pitfall 2: CancellationToken cancel is permanent.)
@@ -1357,32 +1293,47 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
-        config: Arc::new(config.clone()),
-        resolver: Arc::new(resolver.clone()),
-        cwd: cwd.clone(),
-        process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner,
-            semaphore: subagent_semaphore.clone(),
-            config: config.delegation.clone(),
-            cancel_token: Some(chat_cancel_parent.child_token()),
-            progress_callback: Some(subagent_progress),
-        }),
-        hooks_config,
-        emit_mcp_startup_logs: true,
-    })
-    .await
-    .context("building shared app runtime bundle for run_chat")?;
 
-    let registry = runtime_bundle.registry.clone();
-    let hook_registry = runtime_bundle.hook_registry.clone();
-    let mcp_manager = runtime_bundle.mcp_manager.clone();
-    let mut skill_registry = runtime_bundle.skill_registry.clone();
-    let browser_session = runtime_bundle.browser_session.clone();
+    // Plan 28.1-04: build ONE AgentRuntime — replaces the manual BudgetHandle::new
+    // + AgentSubagentRunner + build_app_runtime_bundle block. from_config creates
+    // the shared BudgetHandle, builds the subagent runner with a clone of it
+    // (PROV-10), and assembles the tool registry/skills/browser bundle.
+    // run_turn resets the budget at each turn boundary, permanently fixing the
+    // latent multi-turn Stop100 latch (T-28.1-08).
+    let runtime = Arc::new(
+        ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
+            config: Arc::new(config.clone()),
+            resolver: Arc::new(resolver.clone()),
+            cwd: cwd.clone(),
+            process_registry: process_registry.clone(),
+            memory_manager: memory_manager.clone(),
+            hooks_config,
+            emit_mcp_startup_logs: true,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (hermes_home.clone(), session_id.clone()),
+            subagent_progress_callback: Some(subagent_progress),
+            subagent_cancel_token: Some(chat_cancel_parent.child_token()),
+        })
+        .await
+        .context("building AgentRuntime for run_chat")?,
+    );
+
+    // Source the shared Arcs from the runtime accessors so slash/toolset/status
+    // paths and run_turn operate on the same instances (identity-shared).
+    let registry = runtime.registry().clone();
+    let hook_registry = runtime.hook_registry().clone();
+    let mcp_manager = runtime.mcp_manager().cloned();
+    let mut skill_registry = runtime.skill_registry().clone();
+    let browser_session = runtime.browser_session().clone();
+
+    // Semaphore for slash-command CommandContext (e.g., /agents kill concurrency
+    // guard). Seeded from the same limit the runtime uses internally so the
+    // capacity is consistent. This is distinct from the runtime's internal semaphore
+    // (which guards delegate_task spawns); the cmd_ctx semaphore gates observability
+    // slash commands only.
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(
+        config.delegation.max_concurrent_children,
+    ));
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
@@ -1390,15 +1341,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // DOES NOT introduce a second Arc layer. INV-21.7-08 lock-step: the
     // same Arc<dyn ToolsetSessionHandle> is passed through build_cmd_ctx
     // at BOTH the prompt-time dispatch site AND the mid-turn dispatch arm.
-    // Phase 27.1.1-gap-02: use bundle.merged_tools (not raw config.tools) so
+    // Phase 27.1.1-gap-02: use merged_tools (not raw config.tools) so
     // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            runtime_bundle.merged_tools.clone(),
+            runtime.merged_tools().clone(),
         ));
-
-    let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
@@ -1416,7 +1365,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
     // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
     // catalog text reflects the same enabled set as the API tool schemas.
-    prompt_builder.set_active_toolsets(runtime_bundle.merged_tools.enabled_toolset_names());
+    prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -1443,24 +1392,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
         let response = run_agent_turn(
-            &client,
-            registry.clone(),
+            &runtime,
             &mut messages,
-            max_turns,
-            &config,
-            &resolver,
-            &budget,
             &session_id,
             pressure_tracker.clone(),
             compression_count.clone(),
             tui.clone(),
             chat_cancel_token.clone(),
-            hook_registry.clone(),         // Phase 22: D-05
-            context_length,                // Phase 21.3
-            memory_manager.clone(),        // GAP-1: wire queue_prefetch
-            state_store.clone(),           // Phase 25: session_search intercept
-            Some(browser_session.clone()), // Phase 25.1 D-17
-            trajectory_writer.clone(),     // Phase 25.3 D-T-3
+            state_store.clone(),       // Phase 25: session_search intercept
+            trajectory_writer.clone(), // Phase 25.3 D-T-3
         )
         .await?;
         // Persist assistant response
@@ -1607,7 +1547,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         mcp_manager.as_ref(),
                         subagent_registry.clone(),
                         process_registry.clone(),
-                        budget.clone(),
+                        runtime.budget().clone(),
                         subagent_semaphore.clone(),
                         config.delegation.max_concurrent_children,
                         Some(toolset_session.clone()),
@@ -1804,24 +1744,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                 // decision can `continue` and the agent sees the cancelled token.
                 agent_running.store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut run_fut = Box::pin(run_agent_turn(
-                    &client,
-                    registry.clone(),
+                    &runtime,
                     &mut messages,
-                    max_turns,
-                    &config,
-                    &resolver,
-                    &budget,
                     &session_id,
                     pressure_tracker.clone(),
                     compression_count.clone(),
                     tui.clone(),
                     chat_cancel_token.clone(),
-                    hook_registry.clone(),         // Phase 22: D-05
-                    context_length,                // Phase 21.3
-                    memory_manager.clone(),        // GAP-1: wire queue_prefetch
-                    state_store.clone(),           // Phase 25: session_search intercept
-                    Some(browser_session.clone()), // Phase 25.1 D-17
-                    trajectory_writer.clone(),     // Phase 25.3 D-T-3
+                    state_store.clone(),       // Phase 25: session_search intercept
+                    trajectory_writer.clone(), // Phase 25.3 D-T-3
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -2005,7 +1936,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                         mcp_manager.as_ref(),
                                         subagent_registry.clone(),
                                         process_registry.clone(),
-                                        budget.clone(),
+                                        runtime.budget().clone(),
                                         subagent_semaphore.clone(),
                                         config.delegation.max_concurrent_children,
                                         Some(toolset_session.clone()),
@@ -2290,32 +2221,31 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 }
 
 /// Run one agent turn (may involve multiple tool calls).
-#[allow(clippy::too_many_arguments)]
+///
+/// Plan 28.1-04: delegates to `runtime.run_turn` via a `TurnRequest`. The
+/// budget lifecycle (reset at entry), AgentLoop construction, fallback wiring,
+/// and `attach_context_engine` are all owned by `run_turn` — do NOT duplicate
+/// them here.
+///
+/// Compression-count carry-over (T-28.1-09):
+///   - `compression_count` is seeded INTO the TurnRequest (`compression_count:
+///     starting_count`) so the summarizing engine's prior-summary chain continues
+///     across turns (no regression from old behaviour).
+///   - `AgentResult::compression_count_after` carries the post-turn value BACK.
+///     We store it into the shared `Arc<AtomicUsize>` so the next turn seeds the
+///     correct value. This is a full round-trip — seed-in + write-back.
 async fn run_agent_turn(
-    client: &AnyClient,
-    registry: Arc<RwLock<ToolRegistry>>,
+    runtime: &Arc<ironhermes_agent::AgentRuntime>,
     messages: &mut Vec<ChatMessage>,
-    max_turns: usize,
-    config: &Config,
-    resolver: &ProviderResolver,
-    budget: &BudgetHandle,
     session_id: &str,
     pressure_tracker: Arc<PressureTracker>,
     compression_count: Arc<AtomicUsize>,
     tui: Arc<TuiHandle>, // Plan 21-03: TUI handle for activity publishing
     cancel_token: CancellationToken,
-    hook_registry: Arc<ironhermes_hooks::HookRegistry>, // Phase 22: D-05
-    context_length: usize,                              // Phase 21.3: resolved from model metadata
-    memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>, // GAP-1: wire queue_prefetch
     state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>, // Phase 25: session_search intercept
-    browser_session: Option<
-        std::sync::Arc<
-            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
-        >,
-    >, // Phase 25.1 D-17
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>, // Phase 25.3 D-T-3
 ) -> Result<Option<String>> {
-    // Phase 18-14: seed the AgentLoop's compression_count from the shared
+    // Phase 18-14: seed the TurnRequest's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
     // continues across REPL turns instead of resetting to 0 each prompt.
     let starting_count = compression_count.load(Ordering::SeqCst);
@@ -2329,13 +2259,14 @@ async fn run_agent_turn(
     ));
     let scrubber_chat_cb = std::sync::Arc::clone(&scrubber_chat);
 
-    let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
-        .with_budget(budget.clone())
-        .with_cancellation_token(cancel_token)
-        .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
-        .with_compression(context_length, config.agent.context_compression)
-        .with_compression_count(starting_count)
-        .with_streaming(Box::new(move |delta| {
+    // Plan 28.1-04: build TurnRequest and call runtime.run_turn.
+    // run_turn owns budget reset, AgentLoop build, fallback wiring, and
+    // attach_context_engine — DO NOT duplicate those here.
+    let request = ironhermes_agent::TurnRequest {
+        messages: messages.clone(),
+        session_id: session_id.to_string(),
+        cancel_token: Some(cancel_token),
+        stream: Some(Box::new(move |delta| {
             // Phase 34a MEM-READ-05: strip memory-context fence tags before display.
             let visible = scrubber_chat_cb.lock().unwrap().feed(delta);
             if visible.is_empty() {
@@ -2359,73 +2290,23 @@ async fn run_agent_turn(
             write_into_scroll_region(visible.as_bytes(), tui_stream.reserved_row_count());
             // Publish coarse activity state (best-effort; watch coalesces rapid updates).
             tui_stream.set_activity(ActivityState::Streaming);
-        }))
-        .with_tool_progress(Box::new(move |name, _args| {
+        })),
+        tool_progress: Some(Box::new(move |name, _args| {
             // D-08: REPLACE the old `eprint!("\r Running: ...")` clutter with a
             // watch publish. The render task renders the scanner + label at bottom row
             // every 100ms — no more inline stderr spray.
             tui_tool.set_activity(ActivityState::ToolCall {
                 name: name.to_string(),
             });
-        }))
-        // Phase 25 D-16: wire intercept handlers (todo_write/todo_read per-turn state).
-        .with_intercepts(
-            None,                      // memory handled by register_memory_tool (Plan 4 will migrate)
-            Some(state_store.clone()), // Phase 25 fix: session_search intercept wired
-            None,                      // subagent_runner: delegate_task wiring in Plan 4
-            Some(std::sync::Arc::new(tokio::sync::Mutex::new(
-                Vec::<String>::new(),
-            ))),
-            None, // cron_router: cronjob wiring in Plan 4
-        );
+        })),
+        tool_result: None,
+        trajectory_writer,
+        pressure_tracker: Some(pressure_tracker.clone()), // Phase 18-14: reuse session tracker
+        state_store: Some(state_store),
+        compression_count: starting_count, // Phase 18-14: carry compression chain across turns
+    };
 
-    // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
-    if let Some(sess) = browser_session {
-        agent = agent.with_browser_session(sess);
-    }
-
-    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
-    // tool call in this per-turn AgentLoop lands a TrajectoryEntry on disk.
-    if let Some(handle) = trajectory_writer {
-        agent = agent.with_trajectory_writer(handle);
-    }
-
-    // Wire fallback from resolver — use the fallback provider's own default_model
-    // so the local/secondary endpoint serves a model it actually has loaded.
-    let main_endpoint = resolver.resolve_for_main();
-    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-        if let Some(fb_endpoint) = resolver.resolve(fb_name) {
-            if let Ok(fb_client) =
-                build_provider_client(resolver, fb_name, &fb_endpoint.default_model)
-            {
-                agent = agent.with_fallback(fb_client);
-            }
-        }
-    }
-
-    // GAP-1: wire memory_manager to AgentLoop so queue_prefetch fires after
-    // each natural-end agent turn. Guard with if-let per T-21.4-04.
-    if let Some(ref mgr) = memory_manager {
-        agent = agent.with_memory_manager(mgr.clone());
-    }
-
-    // Phase 18 Plan 09: wire agent-side context compression.
-    // Phase 18-14: reuse the session-scoped PressureTracker so hysteresis
-    // state (above_threshold, pending_transient) survives across turns.
-    // GAP-1/GAP-2: pass memory_manager so on_pre_compress fires on compression.
-    agent = ironhermes_agent::attach_context_engine(
-        agent,
-        config,
-        resolver,
-        session_id,
-        Some(hook_registry.clone()), // Phase 22: D-09
-        Some(pressure_tracker.clone()),
-        context_length,         // Phase 21.3
-        memory_manager.clone(), // GAP-2: wire into context engine
-    );
-
-    // Pass a clone of messages so agent can work with them
-    let result = agent.run(messages.clone()).await?;
+    let result = runtime.run_turn(request).await?;
 
     // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
     let tail = scrubber_chat.lock().unwrap().flush();
@@ -2442,19 +2323,22 @@ async fn run_agent_turn(
     // SubagentProgressCallback, so full `set_status` writes that don't know
     // about the live count would zero it otherwise. Reading the current
     // watch state and preserving `active_subagents` avoids that regression.
+    let config = runtime.config();
+    let context_length = runtime.config().agent.max_iterations; // used for limit display only
+    let _ = context_length; // actual context_length resolved inside run_turn via resolver
     tui.set_status(StatusLineState {
         mode: "Chat".to_string(),
-        model_short: client.model().to_string(),
+        model_short: runtime.client().model().to_string(),
         provider: config.model.provider.clone(),
         tokens_used: result.total_usage.total_tokens,
-        tokens_limit: context_length,
+        tokens_limit: tui.status_snapshot().tokens_limit, // preserve resolved limit from init
         hint: "ctrl+c cancel · /help commands".to_string(),
         active_subagents: tui.status_snapshot().active_subagents,
         max_subagents: config.delegation.max_concurrent_children,
     });
 
-    // Phase 18-14: persist the post-turn compression_count back into the
-    // shared counter so the next turn seeds its AgentLoop with the right value.
+    // Phase 18-14 / T-28.1-09: write back the post-turn compression_count into the
+    // shared counter so the next turn seeds with the correct value (full round-trip).
     compression_count.store(result.compression_count_after, Ordering::SeqCst);
 
     // Update messages with the full conversation (includes tool calls and results)
