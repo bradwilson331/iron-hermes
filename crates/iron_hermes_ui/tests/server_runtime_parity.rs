@@ -43,9 +43,16 @@ fn api_sessions_and_tools_are_backed_by_real_state() {
 fn startup_state_initializes_shared_runtime_bundle_once() {
     let state = read("src/server/state.rs");
     let main = read("src/main.rs");
+    // Phase 28.1 Plan 03: state ctor now builds AgentRuntime::from_config (not
+    // build_app_runtime_bundle directly — that call moved inside from_config).
+    // Assert the new pattern: one AgentRuntime built in init.
     assert!(
-        state.contains("build_app_runtime_bundle("),
-        "AppState::init must build shared runtime bundle"
+        state.contains("AgentRuntime::from_config("),
+        "AppState::init must build shared AgentRuntime via from_config (Phase 28.1-03)"
+    );
+    assert!(
+        state.contains("runtime: Arc::new(runtime),"),
+        "AppState struct must store Arc<AgentRuntime> as 'runtime' field (Phase 28.1-03)"
     );
     assert!(
         main.contains("install_global_app_state(app_state.clone())"),
