@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 34a planned (2 plans, verified — ready to execute)
-last_updated: "2026-05-20T00:00:00.000Z"
-last_activity: 2026-05-20 -- Phase 34a (read-side memory parity) planned + plan-checker passed; Phase 34 gateway shipped prior
+stopped_at: Phase 26.7.3 UI-SPEC approved
+last_updated: "2026-05-21T00:33:43.297Z"
+last_activity: 2026-05-21 -- Phase 34a execution started
 progress:
-  total_phases: 63
+  total_phases: 64
   completed_phases: 47
-  total_plans: 243
+  total_plans: 245
   completed_plans: 240
   percent: 73
 ---
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 34 — webchat-and-multi-platform-gateway
+**Current focus:** Phase 34a — read-side-memory-parity
 
 ## Current Position
 
-Phase: 34 (webchat-and-multi-platform-gateway) — COMPLETE
-Plan: 5 of 5 complete
+Phase: 34a (read-side-memory-parity) — EXECUTING
+Plan: 1 of 2
 Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
-Status: Phase 34 complete — INV-34-01..04 all GREEN; Telegram-only deployments unchanged (silent-skip for missing Discord/Slack config)
-Last activity: 2026-05-19 -- Phase 34 complete (5/5 plans)
+Status: Executing Phase 34a
+Last activity: 2026-05-21 -- Phase 34a execution started
 
 ## Performance Metrics
 
