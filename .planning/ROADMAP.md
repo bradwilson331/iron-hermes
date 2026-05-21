@@ -1358,7 +1358,7 @@ Plans:
 
 **Phase directory:** `.planning/phases/34-webchat-and-multi-platform-gateway/`
 
-### Phase 34a: Read-Side Memory Parity (per-turn semantic recall + streaming scrubber)
+### Phase 34a: Read-Side Memory Parity (per-turn semantic recall + streaming scrubber) ✅ COMPLETE (2026-05-21)
 
 **Goal:** Close the read-side parity gap with `hermes-agent/agent/memory_manager.py`. Today the Rust port loads MEMORY.md/USER.md into a frozen system-prompt snapshot at session start (D-12), so "what do you remember about me?" answers only from that snapshot — not from anything the periodic nudge (Phase 32) or the user wrote mid-session. This phase adds the **per-turn semantic recall path**: pre-turn, the agent queries memory providers for context relevant to the user message, wraps it in a fenced `<memory-context>` block, and injects it as a synthetic `role: system` message immediately before the user turn. A `StreamingContextScrubber` filters the fence tags out of the model's response stream so they never reach user-visible scrollback. D-12 (frozen snapshot) is preserved — this is a SEPARATE read path inside the user-turn envelope, not in the system prompt.
 **Depends on:** Phase 32 (nudge write-side), Phase 33 (skill creation), Phase 21.4 (memory manager wiring). Unrelated to gateway Phase 34 — this is the memory/context-parity sub-track.
