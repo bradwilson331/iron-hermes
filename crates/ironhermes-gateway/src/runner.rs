@@ -4,11 +4,9 @@ use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
-use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured};
+use ironhermes_agent::MemoryManager;
 use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_core::{
-    ChatMessage, Config, MessageContent, ProviderResolver, Role, SkillRecord, SkillRegistry,
-};
+use ironhermes_core::{Config, ProviderResolver, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
