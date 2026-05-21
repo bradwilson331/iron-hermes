@@ -297,6 +297,84 @@ impl AgentRuntime {
     }
 }
 
+impl AgentRuntime {
+    /// Build a minimal `AgentRuntime` for use in unit tests and test fixtures.
+    ///
+    /// Uses a localhost:0 client (no real LLM endpoint needed), default Config,
+    /// and empty registries. `run_turn` will fail to connect if called, but the
+    /// runtime's struct fields (budget, registry, etc.) are fully initialised.
+    /// This is the cleanest path for test fixtures that need an `Arc<AgentRuntime>`
+    /// without a live model endpoint (Phase 28.1-05 D-01).
+    ///
+    /// `JobStore::open` requires a writable directory; we use a temp dir unique to
+    /// the process so parallel test runs don't collide.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests() -> Self {
+        use std::sync::Arc;
+        use ironhermes_core::{Config, ProviderResolver, SkillRegistry};
+        use ironhermes_hooks::HookRegistry;
+        use ironhermes_tools::ToolRegistry;
+        use tokio::sync::RwLock;
+        use crate::app_runtime_factory::AppRuntimeBundle;
+
+        let config = Arc::new(Config::default());
+        let resolver = Arc::new(
+            ProviderResolver::build(&config)
+                .expect("ProviderResolver::build with default Config must succeed in test context"),
+        );
+
+        // Use ChatCompletions client pointing to localhost:0 — it won't connect
+        // but provides a valid AnyClient for struct construction.
+        let client = crate::AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:0",
+            "test-key",
+            "test-model",
+        ));
+
+        let max_iterations = config.agent.max_iterations;
+        let budget = crate::budget::BudgetHandle::new(max_iterations);
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let hook_registry = Arc::new(HookRegistry::new(ironhermes_hooks::HooksConfig::default()));
+        // load_with_paths(&[]) produces an empty SkillRegistry without touching disk.
+        let skill_registry = Arc::new(SkillRegistry::load_with_paths(&[]));
+        let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cron_dir = std::env::temp_dir()
+            .join(format!("ironhermes_test_cron_{}", std::process::id()));
+        let job_store = Arc::new(std::sync::Mutex::new(
+            ironhermes_cron::JobStore::open(cron_dir)
+                .expect("temp-dir JobStore must succeed in test context"),
+        ));
+        let browser_session = Arc::new(tokio::sync::Mutex::new(None));
+
+        let bundle = AppRuntimeBundle {
+            registry,
+            hook_registry,
+            skill_registry,
+            active_skills,
+            job_store,
+            browser_session,
+            mcp_manager: None,
+            merged_tools: ironhermes_core::config::ToolsConfig::default(),
+        };
+
+        let subagent_registry = Arc::new(RwLock::new(
+            crate::subagent_registry::SubagentRegistry::new(),
+        ));
+
+        Self {
+            config,
+            resolver,
+            client,
+            bundle,
+            budget,
+            memory_manager: None,
+            subagent_registry,
+            max_iterations,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

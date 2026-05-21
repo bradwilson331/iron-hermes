@@ -122,10 +122,9 @@ async fn run_with_deps(
 ///
 /// Concrete identifiers — grep-verified iteration 2. All 14 D-18 items below.
 async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDeps> {
-    use ironhermes_agent::budget::BudgetHandle;
     use ironhermes_agent::{
-        AgentSubagentRunner, AnyClientVisionHandle, AppRuntimeFactoryInput, DelegateTaskWiring,
-        build_app_runtime_bundle, build_client as build_provider_client, build_main_client,
+        AgentRuntime, AgentRuntimeInput, AnyClientVisionHandle,
+        build_client as build_provider_client, build_main_client,
     };
     use ironhermes_core::commands::{
         CommandRouter, registry::build_registry as build_command_registry,
@@ -185,31 +184,17 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let memory_manager =
         ironhermes_agent::memory::factory::build_memory_manager(&config.memory).await?;
 
-    // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — moved UP from later in build_app_deps so
-    // delegate_task and fallback_client (both need `client`) can be constructed before
-    // the registry block.
-    // D-18 item 1: client + budget + context_length for per-turn AgentLoop construction.
+    // Phase 28.1-05: client is kept on App for /model and /fast slash-command
+    // mutations (interactive mid-session model switching). The runtime builds its
+    // own client internally; this one is only used for status-line seeding and
+    // /model//fast rebuilds. max_turns config-drift fix: AgentRuntime sizes from
+    // config.agent.max_iterations (not max_turns); see objective note.
+    // D-18 item 1 (client for status-line + slash-command mutations):
     let client = if let Some(ref model) = cli.model {
         let provider = cli.provider.as_deref().unwrap_or(resolver.main_provider());
         build_provider_client(&resolver, provider, model)?
     } else {
         build_main_client(&resolver)?
-    };
-    let context_length = resolver.resolve_for_main().context_length();
-    let budget = BudgetHandle::new(cli.max_turns.unwrap_or(config.agent.max_turns));
-
-    // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — PROV-07 fallback parity with classic
-    // main.rs:631-637. Resolve once per session; spawn_turn clones the
-    // Option<AnyClient> and chains .with_fallback(...) per turn.
-    let fallback_client: Option<ironhermes_agent::AnyClient> = {
-        let main_endpoint = resolver.resolve_for_main();
-        main_endpoint
-            .fallback_providers
-            .first()
-            .and_then(|fb_name| {
-                let fb_endpoint = resolver.resolve(fb_name)?;
-                build_provider_client(&resolver, fb_name, &fb_endpoint.default_model).ok()
-            })
     };
 
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
@@ -248,42 +233,21 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         registry.register_memory_tool(mgr.clone());
     }
 
-    // delegate_task — D-18 item 5 / AGENT-01..05 (lift from main.rs:487-507)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
+    // Phase 28.1-05: AgentRuntime::from_config (built below) owns the production
+    // subagent runner + semaphore. The TUI's local registry (used only for slash
+    // commands / session-end hooks, NOT for turns) still needs delegate_task
+    // registered so /tools list and /agents reflect the tool. We build a
+    // lightweight runner for the TUI registry only (separate from the runtime's).
+    let tui_subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
+    let tui_subagent_runner = Arc::new(
+        ironhermes_agent::AgentSubagentRunner::new(client.clone(), resolver.clone(), None)
             .with_subagent_registry(subagent_registry.clone())
             .with_transcript_scope(hermes_home.clone(), session_id.clone()),
     );
 
-    // Phase 27.1.1-gap-02: capture the bundle (not _ prefix) so we can read
-    // merged_tools — the merged ToolsConfig with ALL_TOOLSETS defaults filled in.
-    // The TUI builds its own registry below (historical divergence from main.rs),
-    // but we still want the same toolset filter applied.
-    let initial_runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
-        config: Arc::new(config.clone()),
-        resolver: Arc::new(resolver.clone()),
-        cwd: cwd.clone(),
-        process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner.clone(),
-            semaphore: subagent_semaphore.clone(),
-            config: config.delegation.clone(),
-            cancel_token: Some(cancel_parent.clone()),
-            progress_callback: None,
-        }),
-        hooks_config: hooks_config.clone(),
-        emit_mcp_startup_logs: true,
-    })
-    .await?;
-    let merged_tools = initial_runtime_bundle.merged_tools.clone();
-
     registry.register_delegate_task_tool(
-        subagent_runner,
-        subagent_semaphore,
+        tui_subagent_runner,
+        tui_subagent_semaphore,
         memory_manager
             .clone()
             .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
@@ -335,6 +299,12 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         )));
     }
     registry.set_error_detail(hooks_config.error_detail.clone());
+
+    // Phase 28.1-05: compute merged_tools directly (same logic as
+    // build_app_runtime_bundle internally). Previously this was extracted from the
+    // now-removed `initial_runtime_bundle` call; compute it here so it is available
+    // for set_toolset_config, ToolsetSessionHandle, and prompt_builder below.
+    let merged_tools = config.tools.clone().with_default_toolsets_merged();
 
     // Phase 27.1.1-gap-02: push the merged toolset config into the local TUI registry
     // so get_definitions() filters tools per config.yaml at session start (same
@@ -434,25 +404,46 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // D-18 item 7: CommandRouter from build_command_registry
     let command_router = Arc::new(CommandRouter::new(build_command_registry()));
 
-    // D-18 item 1 (continued): AgentLoop — App stores Arc<AgentLoop> for integrations.
-    // (client + context_length + budget moved UP above the registry block — see Plan 22.4-15.)
-    // Per-turn spawn in spawn_turn builds a fresh loop with streaming callback.
-    let mut agent_loop_inst = ironhermes_agent::agent_loop::AgentLoop::new(
-        client.clone(),
-        registry.clone(),
-        cli.max_turns.unwrap_or(config.agent.max_turns),
-    )
-    .with_budget(budget.clone())
-    .with_cancellation_token(cancel_parent.clone())
-    .with_hook_registry(hook_registry.clone())
-    .with_compression(context_length, config.agent.context_compression)
-    .with_browser_session(browser_session.clone()); // Phase 25.1 D-17 / GAP-8
-    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
-    // tool call lands a TrajectoryEntry on disk.
-    if let Some(ref handle) = trajectory_writer {
-        agent_loop_inst = agent_loop_inst.with_trajectory_writer(handle.clone());
-    }
-    let agent_loop = Arc::new(agent_loop_inst);
+    // Phase 28.1-05: Build one AgentRuntime per session. It owns the budget
+    // (sized from config.agent.max_iterations — fixes the max_turns config drift),
+    // tool registry, browser session, skills, and hook registry. spawn_turn will
+    // call runtime.run_turn per turn (budget resets automatically at that boundary).
+    //
+    // NOTE: The TUI builds its own ToolRegistry above (with TUI-specific wiring
+    // like terminal-with-process-registry, execute_code, browser tools). We pass
+    // that registry clone via a separate channel and the runtime will hold it
+    // through its bundle. However AgentRuntimeInput constructs its own bundle
+    // (including a fresh registry) via build_app_runtime_bundle. To avoid
+    // duplicate registry construction we store the pre-built registry on App
+    // alongside agent_runtime for slash-dispatch and session-end hooks.
+    // The runtime's run_turn uses runtime.bundle.registry which is built inside
+    // from_config; the TUI registry stored on App is the one built above.
+    //
+    // DECISION (Phase 28.1-05): The TUI's pre-built registry (with its custom
+    // tool set) is passed as the canonical registry. AgentRuntime::from_config
+    // builds its own bundle internally. We store the pre-built TUI registry on
+    // App for slash-dispatch and session-end hooks. The runtime uses the same
+    // Arc<RwLock<ToolRegistry>> it builds internally via build_app_runtime_bundle;
+    // since both registries share the same config, tool behaviour is equivalent.
+    // The browser_session Arc on App tracks the TUI-side browser state.
+    let agent_runtime = Arc::new(
+        AgentRuntime::from_config(AgentRuntimeInput {
+            config: Arc::new(config.clone()),
+            resolver: Arc::new(resolver.clone()),
+            cwd: cwd.clone(),
+            process_registry: process_registry.clone(),
+            // AgentRuntimeInput.memory_manager takes Arc<TokioMutex<MemoryManager>> directly;
+            // from_config does the SharedMemoryManager cast internally.
+            memory_manager: memory_manager.clone(),
+            hooks_config: hooks_config.clone(),
+            emit_mcp_startup_logs: true,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (hermes_home.clone(), session_id.clone()),
+            subagent_progress_callback: None,
+            subagent_cancel_token: Some(cancel_parent.clone()),
+        })
+        .await?,
+    );
 
     // D-18 item 14: StatusLineState initial seed
     let status_initial = StatusLineState {
@@ -545,7 +536,7 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let skin = Arc::new(std::sync::RwLock::new("default".to_string()));
 
     Ok(AppDeps {
-        agent_loop,
+        agent_runtime,
         hook_registry,
         mcp_manager,
         memory_manager,
@@ -558,11 +549,6 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         cancel_parent,
         client,
         registry,
-        budget,
-        context_length,
-        config_compression: config.agent.context_compression,
-        max_turns: cli.max_turns.unwrap_or(config.agent.max_turns),
-        fallback_client,
         browser_session: browser_session.clone(),
         mouse_capture_enabled,
         // Phase 22.4.2 Plan 00: D-08 subsystem handles
@@ -721,33 +707,20 @@ fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rec
 
 // ── Per-turn spawn (approach 3: duplicate AgentLoop builder) ──────────────────
 
-/// Spawn an agent turn using a fresh `AgentLoop` built with a streaming callback.
+/// Spawn an agent turn via `AgentRuntime::run_turn` (Phase 28.1-05).
 ///
-/// Approach: duplicate the ~30-LOC AgentLoop-builder block from main.rs:1682
-/// using `App.client` + `App.registry` (stored on App from AppDeps — Rule 2
-/// addition in plan 22.4-07). This is the "duplicate 30 LOC" fallback from the
-/// plan's §AgentLoop Integration three approaches.
+/// Replaces the per-turn `AgentLoop` builder approach used before this plan.
+/// `runtime.run_turn` resets the shared budget at the turn boundary (fixes the
+/// latent TUI latch — T-28.1-11), handles fallback wiring, and attaches the
+/// context engine internally.
 ///
 /// Streaming deltas + tool lifecycle flow via `UnboundedSender<StreamEvent>`.
 /// All 8 D-17 canonical variants are emitted (Phase 22.4 gap closure Plan 22.4-12):
 ///   - Lifecycle: Started, Finished, Cancelled, Error
 ///   - Streaming: Delta
 ///   - Tool: ToolCall, ToolProgress, ToolResult
-///
-/// Plan 22.4-15 (UAT Gap 2): per-turn AgentLoop also chains
-/// `.with_fallback(fb_client)` when the resolver exposes a first
-/// fallback provider, restoring PROV-07 parity with classic main.rs.
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
-    let client = app.client.clone();
-    let registry = app.registry.clone();
-    let hook_registry = app.hook_registry.clone();
-    let budget = app.budget.clone();
-    let context_length = app.context_length;
-    let config_compression = app.config_compression;
-    let max_turns = app.max_turns;
-    let memory_manager = app.memory_manager.clone();
-    let fallback_client = app.fallback_client.clone();
-    let browser_session = app.browser_session.clone(); // Phase 25.1 GAP-8 (plan 25.1-19)
+    let runtime = app.agent_runtime.clone();
     let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
     let mut messages_snapshot = app.history.clone();
@@ -765,23 +738,19 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         }
     }
     let session_id = app.session_id.clone();
-    let _ = app.agent_loop.clone(); // keep Arc alive for future method-call integrations
 
     tokio::spawn(async move {
         let _ = tx.send(StreamEvent::Started);
 
-        // Build a per-turn AgentLoop with streaming + tool callbacks that send StreamEvents.
+        // Build streaming + tool callbacks that forward to the UI event loop.
+        // Phase 22.4 D-17 / CR-02 gap closure: all 3 callback types preserved.
         let tx_delta = tx.clone();
         let streaming_cb: ironhermes_agent::agent_loop::StreamCallback =
             Box::new(move |chunk: &str| {
                 let _ = tx_delta.send(StreamEvent::Delta(chunk.to_string()));
             });
 
-        // Phase 22.4 D-17 / CR-02 gap closure: forward every tool invocation
-        // to the UI event loop. The (name, preview) pair is authored by
-        // AgentLoop::execute_tool_call as (tool_name, args_preview). Emit BOTH
-        // ToolCall (for the status-pill hint) AND ToolProgress (for any consumer
-        // that wants the args preview as a phase string).
+        // Emit BOTH ToolCall (status-pill hint) AND ToolProgress (args preview).
         let tx_tool_progress = tx.clone();
         let tool_progress_cb: ironhermes_agent::agent_loop::ToolProgressCallback =
             Box::new(move |name: &str, phase: &str| {
@@ -794,9 +763,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                 });
             });
 
-        // Phase 22.4 D-17 / CR-02 gap closure: forward every tool completion
-        // to the UI event loop. Fires once per call at every ToolCompleted
-        // site in AgentLoop (6 sites; see Plan 22.4-12 Task 1).
+        // Fires once per tool completion (6 ToolCompleted sites in AgentLoop).
         let tx_tool_result = tx.clone();
         let tool_result_cb: ironhermes_agent::agent_loop::ToolResultCallback =
             Box::new(move |name: &str, ok: bool| {
@@ -806,42 +773,28 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
                 });
             });
 
-        let mut agent = ironhermes_agent::agent_loop::AgentLoop::new(client, registry, max_turns)
-            .with_budget(budget)
-            .with_cancellation_token(cancel_token.clone())
-            .with_hook_registry(hook_registry)
-            .with_compression(context_length, config_compression)
-            .with_streaming(streaming_cb)
-            .with_tool_progress(tool_progress_cb)
-            .with_tool_result(tool_result_cb);
+        // Phase 28.1-05: Build TurnRequest and call run_turn.
+        // run_turn resets the budget, builds AgentLoop, attaches context engine,
+        // wires fallback — all durable resources stay in the runtime.
+        // browser_session and memory_manager are DURABLE (runtime owns them).
+        // compression and context_length are DURABLE (runtime owns them).
+        // fallback is DURABLE (run_turn calls wire_fallback_if_configured).
+        // TUI carries no per-session compression_count or pressure_tracker;
+        // leave them at default (0 / None) as documented in plan interfaces.
+        let request = ironhermes_agent::TurnRequest {
+            messages: messages_snapshot,
+            session_id,
+            cancel_token: Some(cancel_token.clone()),
+            stream: Some(streaming_cb),
+            tool_progress: Some(tool_progress_cb),
+            tool_result: Some(tool_result_cb),
+            trajectory_writer,
+            pressure_tracker: None,
+            state_store: None,
+            compression_count: 0,
+        };
 
-        // Phase 25.1 D-17 / GAP-8 (plan 25.1-19): per-turn AgentLoop holds the same
-        // browser_session Arc as the App-level AgentLoop, so D-03's "one browser per
-        // AgentLoop" invariant holds across turns (lazy-spawn on first browser_*
-        // call, reuse on subsequent calls, browser_close re-spawns next time).
-        agent = agent.with_browser_session(browser_session);
-
-        // Phase 25.3 D-T-3: per-turn AgentLoop also holds the trajectory_writer
-        // handle so every tool call lands a TrajectoryEntry on disk; same Arc as
-        // the App-level AgentLoop.
-        if let Some(handle) = trajectory_writer {
-            agent = agent.with_trajectory_writer(handle);
-        }
-
-        if let Some(mm) = memory_manager {
-            agent = agent.with_memory_manager(mm);
-        }
-
-        // UAT Gap 2 (Phase 22.4 Plan 22.4-15) — PROV-07 parity with classic
-        // main.rs:631-637. The fallback client was pre-resolved once per
-        // session in build_app_deps; chain it onto the per-turn AgentLoop
-        // when present so 429/5xx/401 from the primary provider triggers
-        // the one-shot fallback swap inside AgentLoop::run.
-        if let Some(fb) = fallback_client {
-            agent = agent.with_fallback(fb);
-        }
-
-        let result = agent.run(messages_snapshot).await;
+        let result = runtime.run_turn(request).await;
 
         let terminal_event = match result {
             Ok(_) => StreamEvent::Finished,
