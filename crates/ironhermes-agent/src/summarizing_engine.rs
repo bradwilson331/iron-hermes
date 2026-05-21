@@ -66,6 +66,7 @@ fn make_history_message(summary_body: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         name: Some(HISTORY_NAME.into()),
+        is_recall_context: false,
     }
 }
 

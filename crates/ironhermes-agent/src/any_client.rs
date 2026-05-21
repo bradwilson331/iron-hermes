@@ -248,6 +248,7 @@ impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHan
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }];
 
         let response = client
@@ -325,6 +326,7 @@ impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                is_recall_context: false,
             },
             ChatMessage {
                 role: Role::User,
@@ -332,6 +334,7 @@ impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                is_recall_context: false,
             },
         ];
 

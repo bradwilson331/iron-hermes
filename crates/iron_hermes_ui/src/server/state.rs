@@ -556,6 +556,7 @@ fn stored_to_chat_message(row: &StoredMessage) -> Option<ChatMessage> {
         tool_calls,
         tool_call_id: row.tool_call_id.clone(),
         name: row.tool_name.clone(),
+        is_recall_context: false,
     })
 }
 

@@ -1574,6 +1574,7 @@ fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> 
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     } else if let Some(prefix) = processed.text_prefix {
         // Document text: prepend extracted content to the user message
@@ -1588,6 +1589,7 @@ fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> 
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     } else {
         // Plain text
@@ -1597,6 +1599,7 @@ fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> 
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     }
 }

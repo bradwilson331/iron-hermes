@@ -1200,6 +1200,7 @@ impl AgentLoop {
             tool_calls,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         };
 
         Ok((message, usage))
