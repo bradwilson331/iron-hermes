@@ -1,6 +1,11 @@
 //! Server functions for the Dioxus UI.
 
 use dioxus::prelude::*;
+// Server-only: `ironhermes_core` is not a wasm dependency, and `Platform` is used
+// only inside server-function bodies (e.g. list_sessions), which the #[get]/#[post]
+// macros compile under `feature = "server"`. An unconditional import breaks the
+// wasm/web build with E0433.
+#[cfg(feature = "server")]
 use ironhermes_core::types::Platform;
 use serde::{Deserialize, Serialize};
 
