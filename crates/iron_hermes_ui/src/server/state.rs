@@ -6,15 +6,13 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback, ToolResultCallback};
-use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::{
-    attach_context_engine, build_app_runtime_bundle, build_main_client, wire_fallback_if_configured,
-    AgentLoop, AgentSubagentRunner, AppRuntimeBundle, AppRuntimeFactoryInput,
-    DelegateTaskWiring, MemoryManager, PressureTracker, PromptBuilder,
+    AgentRuntime, AgentRuntimeInput, MemoryManager, PressureTracker, PromptBuilder, TurnRequest,
 };
 use ironhermes_core::commands::registry::build_registry as build_command_registry;
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::config::Config;
+use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::types::{MessageContent, Platform, Role};
 use ironhermes_core::{ChatMessage, ProviderResolver};
 use ironhermes_exec::process_registry::ProcessRegistry;
@@ -29,7 +27,7 @@ pub struct AppState {
     pub command_router: Arc<CommandRouter>,
     pub state_store: Arc<std::sync::Mutex<StateStore>>,
     pub resolver: Arc<ProviderResolver>,
-    pub runtime_bundle: Arc<AppRuntimeBundle>,
+    pub runtime: Arc<AgentRuntime>,
     pub memory_manager: Option<Arc<tokio::sync::Mutex<MemoryManager>>>,
     /// Per-session nudge turn counter. Arc<Mutex<HashMap>> mirrors the gateway
     /// nudge_turns pattern from Plan 32-02. Interior mutability required: run_web_turn
@@ -39,7 +37,7 @@ pub struct AppState {
     /// (Phase 32 LEARN-01 — web UI nudge wiring)
     pub nudge_turns: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     /// Phase 32.3 Plan 04 (D-08): subagent registry Arc — same handle threaded
-    /// into the AgentSubagentRunner via `with_subagent_registry`. Held on
+    /// into the AgentRuntime via `subagent_registry`. Held on
     /// AppState so the four `/api/agents/*` endpoints can read it for status
     /// / prune (which need the full registry, not just the ShrikeService).
     pub subagent_registry: Arc<RwLock<ironhermes_agent::subagent_registry::SubagentRegistry>>,
@@ -51,7 +49,7 @@ pub struct AppState {
     /// Phase 26.7.1 Plan 02 (D-06 / Path A): per-turn slot for the active ws send
     /// channel. ws.rs installs `Some(tx.clone())` immediately before `run_web_turn`
     /// (with a RAII drop guard that clears the slot on return / panic). The
-    /// `progress_callback` baked into `runtime_bundle` at init reads from this slot
+    /// `progress_callback` baked into `runtime` at init reads from this slot
     /// and forwards to whichever sender is current. None when no turn is in flight.
     ///
     /// Single-session assumption: events from any in-flight turn route to whichever
@@ -92,7 +90,6 @@ impl AppState {
                 .await
                 .context("building memory manager for web UI")?;
 
-        let budget = BudgetHandle::new(config.agent.max_iterations);
         let subagent_registry = Arc::new(RwLock::new(
             ironhermes_agent::subagent_registry::SubagentRegistry::new(),
         ));
@@ -106,21 +103,9 @@ impl AppState {
         let shrike = Arc::new(ironhermes_agent::shrike::ShrikeService::new(
             subagent_registry.clone(),
         ));
-        let subagent_runner = Arc::new(
-            AgentSubagentRunner::new(
-                build_main_client(&resolver)?,
-                resolver.clone(),
-                Some(budget),
-            )
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(
-                ironhermes_core::constants::get_hermes_home(),
-                "web-ui".to_string(),
-            ),
-        );
 
         // Phase 26.7.1 Plan 02 (D-06 / Path A): construct the per-turn callback slot.
-        // The singleton progress_callback baked into AppRuntimeBundle reads from this
+        // The singleton progress_callback baked into AgentRuntime reads from this
         // slot and forwards SubagentEvent {} to whichever ws sender is currently registered.
         // ws.rs installs the sender immediately before run_web_turn via lock().await, and
         // clears it via RAII drop guard (SubagentCallbackSlotGuard in ws.rs).
@@ -145,33 +130,33 @@ impl AppState {
                 }
             });
 
-        let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+        // Phase 28.1 Plan 03: build ONE AgentRuntime — it owns the budget,
+        // the subagent runner (identity-sharing the same subagent_registry Arc),
+        // the tool registry, skills, browser session, and hook registry.
+        // The subagent_progress_callback is passed in so the live ws sender
+        // still receives SubagentEvent forwarding (Path A from Plan 26.7.1-02).
+        let runtime = AgentRuntime::from_config(AgentRuntimeInput {
             config: Arc::new(config.clone()),
             resolver: Arc::new(resolver.clone()),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             process_registry: process_registry.clone(),
-            memory_manager: memory_manager
-                .clone()
-                .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-            delegate_task: Some(DelegateTaskWiring {
-                runner: subagent_runner,
-                semaphore: Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children)),
-                config: config.delegation.clone(),
-                cancel_token: None,
-                progress_callback: Some(progress_callback),
-            }),
+            memory_manager: memory_manager.clone(),
             hooks_config: HooksConfig::load().unwrap_or_default(),
             emit_mcp_startup_logs: false,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (get_hermes_home(), "web-ui".to_string()),
+            subagent_progress_callback: Some(progress_callback),
+            subagent_cancel_token: None,
         })
         .await
-        .context("building shared app runtime bundle for web UI")?;
+        .context("building AgentRuntime for web UI")?;
 
         Ok(Self {
             config: Arc::new(config),
             command_router,
             state_store,
             resolver: Arc::new(resolver),
-            runtime_bundle: Arc::new(runtime_bundle),
+            runtime: Arc::new(runtime),
             memory_manager,
             nudge_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
             // Phase 32.3 Plan 04: subagent_registry + shrike — same Arcs the
@@ -220,11 +205,24 @@ impl AppState {
         // (if it fires) sees the exact turn the model just consumed, not any
         // post-tool-call mutation. Matches the gateway pattern from Plan 32-02.
         let messages_snapshot = messages.clone();
-        let mut agent = self.build_agent_loop(stream_callback, tool_progress_callback)?;
-        if let Some(cb) = tool_result_callback {
-            agent = agent.with_tool_result(cb);
-        }
-        let result = agent.run(messages).await?;
+
+        // Phase 28.1 Plan 03 (Task 2): route through AgentRuntime::run_turn.
+        // - state_store threaded via TurnRequest so session_search intercept fires (T-28.1-07).
+        // - pressure_tracker: fresh per-turn, matching prior build_agent_loop behavior.
+        // - session_id: use the real per-session id (behavior improvement over hardcoded "web-ui").
+        let request = TurnRequest {
+            messages,
+            session_id: session_id.to_string(),
+            stream: Some(stream_callback),
+            tool_progress: tool_progress_callback,
+            tool_result: tool_result_callback,
+            state_store: Some(self.state_store.clone()),
+            pressure_tracker: Some(Arc::new(PressureTracker::new())),
+            trajectory_writer: None,
+            compression_count: 0,
+            cancel_token: None,
+        };
+        let result = self.runtime.run_turn(request).await?;
 
         let mut store = self.state_store.lock().unwrap();
         for msg in &result.appended {
@@ -235,7 +233,7 @@ impl AppState {
         drop(store);
 
         // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
-        // Fires AFTER agent.run() succeeded and AFTER result.appended is persisted.
+        // Fires AFTER run_turn() succeeded and AFTER result.appended is persisted.
         let nudge_interval = self.config.memory.nudge_interval;
         if nudge_interval > 0 && self.config.memory.memory_enabled {
             let should_fire = {
@@ -252,7 +250,8 @@ impl AppState {
             if should_fire {
                 if let Some(ref mgr) = self.memory_manager {
                     let mgr_clone = Arc::clone(mgr);
-                    let client_clone = build_main_client(&self.resolver)?;
+                    // Source the client from the runtime (no new client build needed).
+                    let client_clone = self.runtime.client().clone();
                     let config_clone = (*self.config).clone();
                     tokio::spawn(async move {
                         ironhermes_agent::nudge::spawn_nudge_review(
@@ -270,41 +269,6 @@ impl AppState {
         Ok(result)
     }
 
-    pub fn build_agent_loop(
-        &self,
-        stream_callback: StreamCallback,
-        tool_progress_callback: Option<ToolProgressCallback>,
-    ) -> Result<AgentLoop> {
-        let client = build_main_client(&self.resolver)?;
-        let max_turns = self.config.agent.max_turns;
-        let context_length = self.resolver.resolve_for_main().context_length();
-
-        let mut agent = AgentLoop::new(client, self.runtime_bundle.registry.clone(), max_turns)
-            .with_streaming(stream_callback)
-            .with_hook_registry(self.runtime_bundle.hook_registry.clone())
-            .with_compression(context_length, self.config.agent.context_compression)
-            .with_intercepts(None, Some(self.state_store.clone()), None, None, None)
-            .with_browser_session(self.runtime_bundle.browser_session.clone());
-
-        if let Some(cb) = tool_progress_callback {
-            agent = agent.with_tool_progress(cb);
-        }
-
-        // Wire fallback via shared helper (adds warn! on misconfiguration — PROV-07 / phase 27.1.4.1)
-        agent = wire_fallback_if_configured(agent, &self.resolver);
-
-        Ok(attach_context_engine(
-            agent,
-            &self.config,
-            &self.resolver,
-            "web-ui",
-            Some(self.runtime_bundle.hook_registry.clone()),
-            Some(Arc::new(PressureTracker::new())),
-            context_length,
-            self.memory_manager.clone(),
-        ))
-    }
-
     async fn build_messages_for_turn(
         &self,
         session_id: &str,
@@ -315,7 +279,8 @@ impl AppState {
         let mut prompt_builder = PromptBuilder::new(&self.config.model.default, "web")
             .with_provider(&self.config.model.provider)
             .load_context(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        prompt_builder.set_skill_registry(self.runtime_bundle.skill_registry.clone());
+        // Phase 28.1 Plan 03: source skill_registry and merged_tools from the runtime.
+        prompt_builder.set_skill_registry(self.runtime.skill_registry().clone());
         if let Some(ref manager) = self.memory_manager {
             prompt_builder.set_memory_manager(manager.clone());
         }
@@ -323,7 +288,7 @@ impl AppState {
         // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
         // catalog text reflects the same enabled set as the API tool schemas.
         prompt_builder.set_active_toolsets(
-            self.runtime_bundle.merged_tools.enabled_toolset_names(),
+            self.runtime.merged_tools().enabled_toolset_names(),
         );
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
@@ -408,7 +373,7 @@ impl AppState {
     /// Accepts the subagent registry as a parameter — the caller is responsible
     /// for locking and providing the guard. This avoids borrow-checker issues with
     /// the `Arc<RwLock<SubagentRegistry>>` that lives inside the delegate-task wiring
-    /// and is not re-exposed through `AppRuntimeBundle`.
+    /// and is not re-exposed through `AppRuntimeBundle` (phase 28.1 plan 03: use subagent_registry directly).
     ///
     /// **No HTTP route** — this is a callable method for future API surface use
     /// (RESEARCH confirmed no `/agents` endpoint exists in iron_hermes_ui today).
