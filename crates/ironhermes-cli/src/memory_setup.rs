@@ -302,14 +302,6 @@ pub(crate) fn update_config_yaml_memory_provider(hermes_home: &Path, selected: &
 mod tests {
     use super::*;
 
-    // Process-global mutex guarding env-var mutation in tests. The
-    // IRONHERMES_HOME env var is shared across the whole test binary.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        use std::sync::OnceLock;
-        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[test]
     fn env_var_name_validation() {
         assert!(is_valid_env_var_name("API_KEY"));
@@ -406,7 +398,7 @@ mod tests {
     /// the provider selection line.
     #[tokio::test]
     async fn scripted_wizard_round_trip_file_provider() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -472,7 +464,7 @@ mod tests {
     /// so the wizard is a single-read round-trip.
     #[tokio::test]
     async fn optional_defaults_skipped() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -498,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_is_rejected() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());

@@ -576,15 +576,12 @@ fn open_store() -> Result<JobStore> {
 mod tests_phase_32_1 {
     use super::*;
     use ironhermes_cron::{JobStore, ScheduleParsed};
-    use std::sync::{Mutex as StdMutex, OnceLock};
     use tempfile::TempDir;
 
-    // Serialise env-mutating tests
+    // Serialise env-mutating tests through the shared bin-wide lock so they
+    // don't race other modules' IRONHERMES_HOME mutations.
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| StdMutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env_lock()
     }
 
     fn make_store_with_job(dir: &TempDir) -> (JobStore, ironhermes_cron::CronJob) {

@@ -26,6 +26,20 @@ pub use scanner::scan_cron_prompt;
 pub use store::*;
 pub use tick::*;
 
+/// Process-global serialization lock for tests that mutate shared env vars
+/// (`IRONHERMES_HOME`, `*_HOME_CHANNEL`, ...). Every env-mutating test across all
+/// modules MUST hold this single lock — independent per-module mutexes do NOT
+/// serialize against each other, so concurrent tests in different modules
+/// otherwise stomp each other's env state and produce flaky cross-module failures.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // File-based tick lock
 // ---------------------------------------------------------------------------

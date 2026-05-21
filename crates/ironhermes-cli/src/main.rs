@@ -40,6 +40,21 @@ mod provider_cmd;
 mod setup;
 mod toolset_cmd;
 mod tui;
+
+/// Process-global serialization lock for tests that mutate the shared
+/// `IRONHERMES_HOME` env var. All env-mutating tests across the bin's module
+/// tree (main.rs, cron.rs, memory_setup.rs, ...) MUST hold this single lock —
+/// independent per-module mutexes do NOT serialize against each other, so
+/// concurrent tests in different modules otherwise stomp each other's
+/// `IRONHERMES_HOME` and produce flaky cross-module failures.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 use ironhermes_cli::skills_cmd;
 // Phase 25.3 Plan 11: `hermes session export[-all]` (D-F-1 / D-F-2).
 use ironhermes_cli::session_cmd;
@@ -2952,13 +2967,10 @@ mod tui_extension_wiring_tests {
 #[cfg(test)]
 mod ensure_home_dirs_tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_ensure_home_dirs_creates_all_subdirs() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -2989,7 +3001,7 @@ mod ensure_home_dirs_tests {
     /// checks.
     #[test]
     fn home_dirs_includes_subagent_transcripts() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -3008,7 +3020,7 @@ mod ensure_home_dirs_tests {
     // Phase 26.3 UDD-04: ensure_home_dirs() creates $HERMES_HOME/browser-profile.
     #[test]
     fn home_dirs_includes_browser_profile() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());

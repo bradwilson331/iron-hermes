@@ -387,14 +387,11 @@ mod tests {
     use super::*;
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env_lock()
     }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
@@ -596,14 +593,11 @@ mod multi_target_tests {
     use super::*;
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     /// Serialise all env-mutating tests to avoid races.
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env_lock()
     }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
@@ -912,14 +906,11 @@ mod multi_target_tests {
 #[cfg(test)]
 mod save_job_output_tests_phase_32_1 {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env_lock()
     }
 
     // Test 1: fsync source-grep verified via acceptance criteria; functional regression test
@@ -1012,15 +1003,12 @@ mod telegram_whitelist_fallback_tests {
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
     use std::io::Write;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     /// Serialise all env-mutating tests to avoid races.
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env_lock()
     }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
