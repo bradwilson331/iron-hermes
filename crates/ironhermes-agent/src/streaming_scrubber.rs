@@ -75,8 +75,7 @@ impl StreamingContextScrubber {
             }
 
             if self.in_span {
-                let buf_lower = buf.to_lowercase();
-                match buf_lower.find(CLOSE_TAG) {
+                match Self::find_ascii_ci(&buf, CLOSE_TAG) {
                     None => {
                         // No close tag yet — hold back potential partial close-tag suffix.
                         let held = Self::max_partial_suffix(&buf, CLOSE_TAG);
@@ -94,8 +93,7 @@ impl StreamingContextScrubber {
                     }
                 }
             } else {
-                let buf_lower = buf.to_lowercase();
-                match buf_lower.find(OPEN_TAG) {
+                match Self::find_ascii_ci(&buf, OPEN_TAG) {
                     None => {
                         // No open tag — hold back potential partial open-tag suffix.
                         let held = Self::max_partial_suffix(&buf, OPEN_TAG);
@@ -139,16 +137,35 @@ impl StreamingContextScrubber {
         tail
     }
 
+    /// Find the first ASCII-case-insensitive occurrence of `needle` in `haystack`,
+    /// returning a byte offset valid in `haystack`.
+    ///
+    /// `needle` must be pure ASCII (both tags are). A match window can only equal
+    /// an ASCII needle case-insensitively if every window byte is itself ASCII
+    /// (`< 0x80`), so the returned offset and `offset + needle.len()` are always
+    /// char boundaries — unlike `to_lowercase()`, which is not byte-length-preserving
+    /// and desyncs offsets on non-ASCII input.
+    fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+        let h = haystack.as_bytes();
+        let n = needle.as_bytes();
+        if n.is_empty() || h.len() < n.len() {
+            return None;
+        }
+        (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+    }
+
     /// Return the length of the longest buf-suffix that is a prefix of `tag`.
     ///
-    /// Case-insensitive. Returns 0 if no suffix could start the tag.
+    /// ASCII-case-insensitive over raw bytes. `tag` is pure ASCII, so any matching
+    /// suffix consists entirely of ASCII bytes and `buf.len() - i` is a char boundary.
+    /// Returns 0 if no suffix could start the tag.
     fn max_partial_suffix(buf: &str, tag: &str) -> usize {
-        let tag_lower = tag.to_lowercase();
-        let buf_lower = buf.to_lowercase();
-        let max_check = buf_lower.len().min(tag_lower.len() - 1);
+        let b = buf.as_bytes();
+        let t = tag.as_bytes();
+        let max_check = b.len().min(t.len() - 1);
         for i in (1..=max_check).rev() {
-            let suffix_start = buf_lower.len() - i;
-            if tag_lower.starts_with(&buf_lower[suffix_start..]) {
+            let suffix_start = b.len() - i;
+            if b[suffix_start..].eq_ignore_ascii_case(&t[..i]) {
                 return i;
             }
         }
@@ -230,6 +247,33 @@ mod tests {
         // flush() must discard the unterminated span and return "" (no leak)
         let tail = s.flush();
         assert_eq!(tail, "", "flush of unterminated span must return empty string");
+    }
+
+    #[test]
+    fn non_ascii_before_tag_does_not_panic() {
+        // Regression (CR-01): U+0130 lowercases to 2 bytes -> 3 bytes, so a
+        // to_lowercase()-based offset would desync and slice on a non-char
+        // boundary. Pure-ASCII byte search must stay aligned with the original.
+        let mut s = StreamingContextScrubber::new();
+        let out = s.feed("İİİ <memory-context>secret</memory-context> Привет");
+        assert!(out.contains("İİİ"), "non-ASCII prefix should survive");
+        assert!(out.contains("Привет"), "non-ASCII suffix should survive");
+        assert!(!out.contains("secret"), "span content must be stripped");
+        assert!(!out.contains("memory-context"), "tags must be stripped");
+        assert_eq!(s.flush(), "", "no leak after clean stream");
+    }
+
+    #[test]
+    fn non_ascii_inside_split_close_tag() {
+        // Non-ASCII inside the span, close tag split across deltas.
+        let mut s = StreamingContextScrubber::new();
+        let out1 = s.feed("ä<memory-context>日本語</memory-con");
+        let out2 = s.feed("text>ö");
+        let combined = out1 + &out2;
+        assert!(combined.contains('ä'), "text before span survives");
+        assert!(combined.contains('ö'), "text after span survives");
+        assert!(!combined.contains("日本語"), "span content stripped");
+        assert!(!combined.contains("memory-con"), "no partial tag leak");
     }
 
     #[test]

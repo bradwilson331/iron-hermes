@@ -917,6 +917,16 @@ impl AgentLoop {
                 }
             }
 
+            // Phase 34a D-02/D-03/D-08: evict any prior-turn recall injection
+            // BEFORE compression. Recall is ephemeral and re-fetched fresh each
+            // turn; running this after compression lets a stale <memory-context>
+            // block be folded into the persisted [CONTEXT HISTORY] summary on the
+            // summarizing-engine path (D-03 violation). Evicting first also keeps
+            // the insert-index scan below correct (D-02 / Pitfall 3). The legacy
+            // ContextCompressor still has its own step-0 eviction; this guards the
+            // active context-engine path which has none.
+            messages.retain(|m| !m.is_recall_context);
+
             // Phase 18 Plan 06: pre-chat context engine path (replaces legacy compressor
             // when wired). Drain transient pressure message, then compress at >= threshold
             // or run pressure check only when below.
@@ -927,12 +937,8 @@ impl AgentLoop {
                 comp.compress(&mut messages);
             }
 
-            // Phase 34a D-02/D-08: pre-turn recall injection.
-            // Step 1: evict any prior recall injection unconditionally — must run
-            // before insert-index scan so index arithmetic is correct (D-02 / Pitfall 3).
-            messages.retain(|m| !m.is_recall_context);
-
-            // Step 2: fetch query-scoped recall and inject BEFORE the last user
+            // Phase 34a D-08: pre-turn recall injection.
+            // Fetch query-scoped recall and inject BEFORE the last user
             // message (only when memory_manager is wired).
             if let Some(ref mgr) = self.memory_manager {
                 let session_id = self.session_id.as_deref().unwrap_or("");
@@ -1173,13 +1179,25 @@ impl AgentLoop {
             .await
             .context("LLM call failed")?;
 
-        let choice = response
+        let mut message = response
             .choices
             .into_iter()
             .next()
-            .context("No choices in LLM response")?;
+            .context("No choices in LLM response")?
+            .message;
 
-        Ok((choice.message, response.usage))
+        // Phase 34a CR-02: scrub any model-echoed <memory-context> / [System note]
+        // before the message is returned, persisted, and replayed next turn.
+        if let Some(ironhermes_core::MessageContent::Text(text)) = message.content.as_ref() {
+            let sanitized = crate::memory_context::sanitize_context(text);
+            message.content = if sanitized.is_empty() {
+                None
+            } else {
+                Some(ironhermes_core::MessageContent::Text(sanitized))
+            };
+        }
+
+        Ok((message, response.usage))
     }
 
     /// Call LLM with streaming, forwarding content deltas to the callback.
@@ -1232,6 +1250,14 @@ impl AgentLoop {
                 &tool_call_deltas,
             ))
         };
+
+        // Phase 34a CR-02: the stream callback scrubs only the *displayed* deltas.
+        // The accumulated `content` is the RAW model output and is what gets
+        // persisted + replayed next turn, so a model-echoed <memory-context> /
+        // [System note] block must be stripped here too or it defeats the
+        // recall-boundary guarantee. sanitize_context runs over the full assembled
+        // text (no chunk-boundary concern at this point).
+        let content = crate::memory_context::sanitize_context(&content);
 
         let message = ChatMessage {
             role: ironhermes_core::Role::Assistant,
