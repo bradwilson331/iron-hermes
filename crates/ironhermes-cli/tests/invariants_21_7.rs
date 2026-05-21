@@ -19,32 +19,39 @@ fn invariant_21_7_01_three_agent_subagent_runner_new_sites() {
     );
 }
 
+// Phase 25.6 consolidated all per-path tool registration into the shared
+// runtime factory `ironhermes_agent::app_runtime_factory::build_app_runtime_bundle`,
+// which run_chat / run_single / run_gateway each call (the 3-call-site contract is
+// itself locked by the `build_app_runtime_bundle`-count tests inside main.rs).
+// register_delegate_task_tool / register_execute_code_tool therefore no longer
+// appear inline in main.rs — they live in the factory. INV-21.7-02/-03 are
+// retargeted to assert the registration survives in that single wiring path.
+// Cross-crate `include_str!` precedent: INV-21.7-07 below reads the gateway handler.
+const RUNTIME_FACTORY: &str = include_str!("../../ironhermes-agent/src/app_runtime_factory.rs");
+
 #[test]
-fn invariant_21_7_02_three_register_delegate_task_sites() {
-    let count = MAIN_RS.matches("register_delegate_task_tool(").count();
-    assert_eq!(
-        count, 3,
-        "INV-21.7-02: three register_delegate_task_tool( sites must remain (Phase 22 three-site precedent)."
+fn invariant_21_7_02_delegate_task_registered_in_runtime_factory() {
+    assert!(
+        RUNTIME_FACTORY.contains("register_delegate_task_tool("),
+        "INV-21.7-02: delegate_task must remain wired via the shared runtime factory \
+         (build_app_runtime_bundle, used by run_chat/run_single/run_gateway). If this \
+         fails, the delegate_task registration was dropped from app_runtime_factory.rs."
     );
 }
 
 #[test]
-fn invariant_21_7_03_three_register_execute_code_sites() {
-    // Either the legacy signature OR the new with_process_registry variant —
-    // total across the two spellings must equal 3 after Wave 2 Plan 06 lands
-    // the rename. Today Wave 0 sees 3 legacy / 0 new.
-    let legacy = MAIN_RS
+fn invariant_21_7_03_execute_code_registered_in_runtime_factory() {
+    // Accept either the legacy signature OR the with_process_registry variant.
+    let legacy = RUNTIME_FACTORY
         .matches("register_execute_code_tool_with_active_skills(")
         .count();
-    let new_variant = MAIN_RS
+    let new_variant = RUNTIME_FACTORY
         .matches("register_execute_code_tool_with_process_registry(")
         .count();
-    assert_eq!(
-        legacy + new_variant,
-        3,
-        "INV-21.7-03: execute_code registration must total 3 sites across CLI + gateway. legacy={}, new={}.",
-        legacy,
-        new_variant
+    assert!(
+        legacy + new_variant >= 1,
+        "INV-21.7-03: execute_code must remain wired via the shared runtime factory. \
+         legacy={legacy}, new={new_variant}."
     );
 }
 
