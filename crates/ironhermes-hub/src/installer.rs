@@ -961,6 +961,7 @@ mod tests {
         // Regression test for the macOS false-positive where HERMES_HOME lives
         // outside env::temp_dir(). The fix accepts paths under
         // `<skills_root>/.hub/quarantine/` as a second safe root.
+        let _env_guard = crate::test_env_lock();
         let fake_home = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -1091,7 +1092,12 @@ mod tests {
     /// not match the locally-computed D-13 folder hash. The advisory branch emits
     /// a tracing::warn but MUST NOT cleanup the install dir or return ShaMismatch.
     #[tokio::test]
+    // The env guard is intentionally held across `.await`: it pins the shared
+    // process-global HERMES_HOME for the whole async test. `#[tokio::test]` uses a
+    // current-thread runtime so this cannot deadlock — it just serializes the test.
+    #[allow(clippy::await_holding_lock)]
     async fn post_install_compare_is_advisory_when_hashes_diverge() {
+        let _env_guard = crate::test_env_lock();
         let hermes_home = tempfile::tempdir().unwrap();
         let prev_home = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -1150,7 +1156,10 @@ mod tests {
     /// match the locally-computed D-13 folder hash. The advisory branch emits
     /// a tracing::warn but MUST NOT cleanup resolved_final or return ShaMismatch.
     #[tokio::test]
+    // See sibling test above: the env guard is intentionally held across `.await`.
+    #[allow(clippy::await_holding_lock)]
     async fn update_post_rename_compare_is_advisory_when_hashes_diverge() {
+        let _env_guard = crate::test_env_lock();
         let hermes_home = tempfile::tempdir().unwrap();
         let prev_home = std::env::var("HERMES_HOME").ok();
         unsafe {

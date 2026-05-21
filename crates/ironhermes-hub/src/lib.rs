@@ -20,6 +20,20 @@ pub mod source;
 pub mod tarball;
 pub mod well_known;
 
+/// Process-global serialization lock for tests that mutate the shared
+/// `HERMES_HOME` env var. Every `HERMES_HOME`-touching test across all modules
+/// MUST hold this single lock — independent per-module mutexes do NOT serialize
+/// against each other, so concurrent tests in different modules previously
+/// stomped each other's `HERMES_HOME` and produced flaky cross-module failures.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 pub use audit::{AuditData, PartnerAudit, fetch_audit};
 pub use auth::GitHubAuth;
 pub use blob::{

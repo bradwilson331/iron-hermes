@@ -168,12 +168,9 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(),
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    // SP-7: copy verbatim from manifest.rs:57-74
     fn with_test_hermes_home<F: FnOnce(&Path)>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -474,11 +471,9 @@ mod migration_tests {
     use super::*;
     use chrono::Utc;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-    static ENV_LOCK_MIG: Mutex<()> = Mutex::new(());
 
     fn with_test_hermes_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = ENV_LOCK_MIG.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {
