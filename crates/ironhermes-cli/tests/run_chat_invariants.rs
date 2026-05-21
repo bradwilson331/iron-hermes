@@ -187,15 +187,23 @@ fn gap1_run_agent_turn_accepts_memory_manager_parameter() {
     );
 }
 
-/// GAP-1 regression: run_agent_turn must call agent.with_memory_manager so
-/// queue_prefetch fires in the CLI REPL loop.
+/// GAP-1 regression: run_agent_turn must wire memory_manager so queue_prefetch
+/// fires in the CLI REPL loop.
+///
+/// Phase 28.1-04: run_agent_turn now delegates to runtime.run_turn(request)
+/// which calls agent.with_memory_manager internally (agent_runtime.rs line ~215).
+/// The invariant is preserved via delegation — assert run_turn is called.
 #[test]
 fn gap1_run_agent_turn_wires_memory_manager_to_agent_loop() {
     let src = read("src/main.rs");
     let body = extract_fn_body(&src, "run_agent_turn");
+    // Phase 28.1-04: with_memory_manager is owned by AgentRuntime::run_turn.
+    // run_agent_turn delegates through run_turn, which wires memory_manager
+    // internally — assert delegation is present.
     assert!(
-        body.contains("with_memory_manager"),
-        "GAP-1: run_agent_turn body must call agent.with_memory_manager(...) — not found"
+        body.contains("run_turn("),
+        "GAP-1 (Phase 28.1-04): run_agent_turn must delegate to runtime.run_turn() \
+         which calls agent.with_memory_manager internally. run_turn( not found in body."
     );
 }
 

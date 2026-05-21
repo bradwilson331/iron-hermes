@@ -7,8 +7,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::{
-    AgentLoop, AgentSubagentRunner, AnyClient, AppRuntimeFactoryInput, DelegateTaskWiring,
-    PressureTracker, PromptBuilder, build_app_runtime_bundle,
+    AnyClient, PressureTracker, PromptBuilder,
     build_client as build_provider_client, build_main_client,
 };
 use ironhermes_core::commands::CommandRouter;
@@ -661,7 +660,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     ironhermes_core::init_global_estimator(ironhermes_core::TiktokenEncoding::from_name(
         encoding_name,
     ));
-    let context_length = main_ep.context_length();
+    // Phase 28.1-04: run_single's context_length local is dead now — run_turn
+    // resolves the context length internally via the resolver. (run_chat still
+    // reads main_ep.context_length() for the status-line tokens_limit.)
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
     // (frozen-snapshot pattern — Workspace never changes mid-session).
@@ -1320,11 +1321,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 
     // Source the shared Arcs from the runtime accessors so slash/toolset/status
     // paths and run_turn operate on the same instances (identity-shared).
+    // Phase 28.1-04: hook_registry and browser_session are NOT re-derived here —
+    // run_turn owns that wiring internally (durable, runtime-owned per design §5).
+    // run_chat's slash/toolset/status surfaces only need registry, mcp_manager,
+    // and skill_registry.
     let registry = runtime.registry().clone();
-    let hook_registry = runtime.hook_registry().clone();
     let mcp_manager = runtime.mcp_manager().cloned();
     let mut skill_registry = runtime.skill_registry().clone();
-    let browser_session = runtime.browser_session().clone();
 
     // Semaphore for slash-command CommandContext (e.g., /agents kill concurrency
     // guard). Seeded from the same limit the runtime uses internally so the
@@ -2917,18 +2920,14 @@ mod mcp_wiring_tests {
     #[test]
     fn run_single_wires_mcp_manager() {
         let src = include_str!("main.rs");
-        // Phase 28.1-02: run_gateway now uses AgentRuntime::from_config (which calls
-        // build_app_runtime_bundle internally). run_chat and run_single still call it directly.
-        let count = src.matches("build_app_runtime_bundle").count();
+        // Phase 28.1-04: run_chat and run_single now use AgentRuntime::from_config
+        // (which calls build_app_runtime_bundle internally), matching run_gateway
+        // (Plan 28.1-02). All 3 entry points delegate through AgentRuntime.
+        let count = src.matches("AgentRuntime::from_config").count();
         assert!(
-            count >= 2,
-            "build_app_runtime_bundle must be called in at least 2 run paths (chat, single), got {}",
+            count >= 3,
+            "AgentRuntime::from_config must be called in all 3 run paths (gateway, chat, single), got {}",
             count
-        );
-        // run_gateway wiring via AgentRuntime::from_config
-        assert!(
-            src.contains("AgentRuntime::from_config"),
-            "run_gateway must use AgentRuntime::from_config"
         );
     }
 
@@ -2978,33 +2977,25 @@ mod mcp_wiring_tests {
 
     /// INV-25.1: browser session wiring preserved in all 3 entry points.
     ///
-    /// - build_app_runtime_bundle must appear in run_chat and run_single (≥2)
-    /// - run_gateway uses AgentRuntime::from_config which wraps bundle construction
-    /// - with_browser_session must be called on the AgentLoop builder in run_single and run_chat (≥2)
-    /// - set_browser_session must be called to wire the runner in run_gateway (≥1)
+    /// Phase 28.1-04 update: run_chat and run_single now use AgentRuntime::from_config
+    /// (same as run_gateway since Phase 28.1-02). The browser session is bundled
+    /// inside AgentRuntime — explicit .with_browser_session() calls on AgentLoop are
+    /// no longer needed. set_browser_session on the runner is still needed so
+    /// GatewayRunner's handler arm receives the session handle.
     #[test]
     fn inv_25_1_browser_session_wired_in_all_entry_points() {
         let source = include_str!("main.rs");
-        // Phase 28.1-02: run_gateway switched to AgentRuntime::from_config.
-        // run_chat + run_single still call build_app_runtime_bundle directly (≥2).
-        let reg_count = source.matches("build_app_runtime_bundle(").count();
+        // Phase 28.1-04: all 3 entry points use AgentRuntime::from_config, which
+        // calls build_app_runtime_bundle internally and bundles browser_session.
+        let runtime_count = source.matches("AgentRuntime::from_config").count();
         assert!(
-            reg_count >= 2,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat and run_single; got {} calls",
-            reg_count
+            runtime_count >= 3,
+            "Phase 28.1-04: AgentRuntime::from_config MUST be called in all 3 run paths \
+             (gateway, chat, single); got {} calls",
+            runtime_count
         );
-        // run_gateway wiring via AgentRuntime (bundles browser_session internally).
-        assert!(
-            source.contains("AgentRuntime::from_config"),
-            "Phase 28.1-02: run_gateway must use AgentRuntime::from_config for browser session wiring"
-        );
-        let with_count = source.matches(".with_browser_session(").count();
-        assert!(
-            with_count >= 2,
-            "Phase 25.1 D-17: with_browser_session MUST be on AgentLoop builder chain in run_single and run_chat; \
-             got {} calls (run_gateway uses runner.set_browser_session instead)",
-            with_count
-        );
+        // run_gateway still calls set_browser_session on the runner (GatewayRunner
+        // needs the Arc to thread it into per-message handlers).
         let set_count = source.matches("set_browser_session(").count();
         assert!(
             set_count >= 1,
@@ -3024,29 +3015,26 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Phase 28.1-02: run_gateway uses AgentRuntime::from_config (not build_app_runtime_bundle
-        // directly). run_chat + run_single still call it directly (≥2).
-        let reg_count = non_comment_source
-            .matches("build_app_runtime_bundle(")
+        // Phase 28.1-04: all 3 entry points (gateway, chat, single) now use
+        // AgentRuntime::from_config which calls build_app_runtime_bundle internally.
+        // Direct build_app_runtime_bundle calls are 0; assert ≥3 from_config calls.
+        let runtime_count = non_comment_source
+            .matches("AgentRuntime::from_config")
             .count();
         assert!(
-            reg_count >= 2,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_single and run_chat; got {} non-comment calls",
-            reg_count
-        );
-        assert!(
-            non_comment_source.contains("AgentRuntime::from_config"),
-            "Phase 28.1-02: run_gateway must use AgentRuntime::from_config"
+            runtime_count >= 3,
+            "Phase 28.1-04: AgentRuntime::from_config MUST be called in all 3 run paths \
+             (gateway, chat, single); got {} non-comment calls",
+            runtime_count
         );
 
-        // run_chat + run_single pass config via build_app_runtime_bundle;
-        // run_gateway passes config via AgentRuntimeInput — so ≥ 2 + 1 = ≥ 3 total.
+        // All 3 AgentRuntimeInput sites pass config: Arc::new(config.clone()).
         let config_arg_count = non_comment_source
             .matches("config: Arc::new(config.clone())")
             .count();
         assert!(
             config_arg_count >= 3,
-            "Phase 25.6 D-05: each bundle/runtime call must pass config: Arc::new(config.clone()); got {} occurrences",
+            "Phase 28.1-04: each AgentRuntimeInput must pass config: Arc::new(config.clone()); got {} occurrences",
             config_arg_count
         );
     }
@@ -3062,28 +3050,25 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Phase 28.1-02: run_gateway uses AgentRuntime::from_config (not build_app_runtime_bundle
-        // directly). run_chat + run_single still call it directly (≥2).
+        // Phase 28.1-04: all 3 entry points (gateway, chat, single) now use
+        // AgentRuntime::from_config. Direct build_app_runtime_bundle calls are 0.
         let count = non_comment_source
-            .matches("build_app_runtime_bundle(")
+            .matches("AgentRuntime::from_config")
             .count();
         assert!(
-            count >= 2,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat and run_single; got {} non-comment calls",
+            count >= 3,
+            "Phase 28.1-04: AgentRuntime::from_config MUST be called in all 3 run paths \
+             (gateway, chat, single); got {} non-comment calls",
             count
         );
-        assert!(
-            non_comment_source.contains("AgentRuntime::from_config"),
-            "Phase 28.1-02: run_gateway must use AgentRuntime::from_config"
-        );
 
-        // resolver threaded at all 3 call sites (2× build_app_runtime_bundle + 1× AgentRuntimeInput).
+        // resolver threaded at all 3 AgentRuntimeInput call sites.
         let handle_count = non_comment_source
             .matches("resolver: Arc::new(resolver.clone())")
             .count();
         assert!(
             handle_count >= 3,
-            "Phase 25.6 D-05: runtime bundle/runtime input must thread resolver into all 3 CLI entry points; got {} occurrences",
+            "Phase 25.6 D-05: AgentRuntimeInput must thread resolver into all 3 CLI entry points; got {} occurrences",
             handle_count
         );
     }
@@ -3119,6 +3104,101 @@ mod mcp_wiring_tests {
             "Phase 25.2 Plan 15: build_cmd_ctx call sites MUST pass \
              Some(toolset_session.clone()) at ≥2 sites (prompt-time + mid-turn); found {}",
             pass_count
+        );
+    }
+}
+
+/// Plan 28.1-04 invariant (T-28.1-10): file-wide grep gate for main.rs.
+///
+/// Asserts that no production code (comment-stripped, test-stripped) in main.rs
+/// directly constructs a BudgetHandle or calls AgentLoop.with_budget, and that
+/// all three CLI entry points route through AgentRuntime::run_turn.
+///
+/// This gate is intentionally file-wide so it also covers run_gateway (Plan 02),
+/// run_chat, and run_single (Plan 04) in a single assertion.
+#[cfg(test)]
+mod agent_runtime_migration_gate_28_1_04 {
+    /// T-28.1-10: no BudgetHandle::new in main.rs production code, and no
+    /// AgentLoop-level .with_budget( call (the pattern is `.with_budget(budget`
+    /// passing a BudgetHandle directly to AgentLoop). Note: `build_cmd_ctx`
+    /// legitimately calls `.with_budget(Arc::new(budget))` for CommandContext
+    /// observability — that is NOT the prohibited AgentLoop wiring.
+    ///
+    /// T-28.1-08: all CLI turns route through run_turn (latent latch fix verified).
+    #[test]
+    fn main_rs_has_no_direct_budget_construction_or_with_budget() {
+        let source = include_str!("main.rs");
+
+        // Strip comment-only lines and lines containing string literals (test
+        // assertion strings that mention the patterns by name) to avoid false
+        // positives. Production uses of the forbidden patterns are bare identifiers
+        // on non-quoted lines.
+        let stripped: String = source
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                // Exclude comment lines
+                !t.starts_with("//")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // BudgetHandle::new( must not appear in any non-comment production line.
+        // String-literal occurrences (in test assertion messages) contain a `"`.
+        let budget_new_violations: Vec<&str> = stripped
+            .lines()
+            .filter(|line| {
+                line.contains("BudgetHandle::new(") && !line.contains('"')
+            })
+            .collect();
+
+        assert!(
+            budget_new_violations.is_empty(),
+            "T-28.1-10: main.rs production code must not call BudgetHandle::new( directly \
+             (use AgentRuntime::from_config instead). Offending lines:\n{}",
+            budget_new_violations.join("\n")
+        );
+
+        // AgentLoop-level budget wiring: check for `.with_budget(budget` where
+        // budget is a bare BudgetHandle variable (not Arc::new-wrapped CommandContext
+        // usage at build_cmd_ctx). We distinguish by checking for the bare variable
+        // form (no Arc::new wrapper on the same line).
+        let bare_budget_pattern = ".with_budget(budget";
+        let with_budget_violations: Vec<&str> = stripped
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                // Bare pattern (no Arc::new on same line, not a string literal)
+                t.contains(bare_budget_pattern) && !line.contains('"')
+            })
+            .collect();
+
+        assert!(
+            with_budget_violations.is_empty(),
+            "T-28.1-10: production code must not pass BudgetHandle directly to AgentLoop \
+             (use AgentRuntime::run_turn instead). Offending lines:\n{}",
+            with_budget_violations.join("\n")
+        );
+    }
+
+    /// Positive gate: all three CLI entry points must call run_turn, confirming
+    /// the AgentRuntime migration is complete.
+    #[test]
+    fn main_rs_all_entry_points_use_run_turn() {
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains("run_turn("),
+            "T-28.1-08: main.rs must contain run_turn( — all CLI entry points must \
+             route through AgentRuntime::run_turn"
+        );
+        // run_turn appears in run_single (via runtime.run_turn in the request block),
+        // in run_agent_turn (used by run_chat), and in the gateway handler (Plan 02).
+        // At least 2 distinct call sites.
+        let count = source.matches("run_turn(").count();
+        assert!(
+            count >= 2,
+            "T-28.1-08: expected ≥2 run_turn( call sites (run_single + run_agent_turn); got {}",
+            count
         );
     }
 }
