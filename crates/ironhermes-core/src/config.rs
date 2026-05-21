@@ -525,12 +525,20 @@ impl Default for ModelConfig {
 }
 
 fn default_agent_max_iterations() -> usize {
-    50
+    // Unified per-turn cap (Phase: AgentRuntime). Both the AgentLoop turn cap and
+    // the shared BudgetHandle are sized from this single value; it defaults to the
+    // historical loop default so behavior matches the more permissive of the two
+    // pre-unification knobs.
+    DEFAULT_MAX_ITERATIONS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
+    /// DEPRECATED alias for [`AgentConfig::max_iterations`]. Retained so existing
+    /// config.yaml files that set `max_turns` keep working; `normalize()` folds a
+    /// tuned value into `max_iterations` (the single canonical per-turn cap) and
+    /// warns. Do not read this field — read `max_iterations`.
     pub max_turns: usize,
     pub context_compression: f64,
     pub tool_delay_secs: f64,
@@ -554,6 +562,26 @@ pub struct AgentConfig {
     /// `#[serde(default)]`.
     #[serde(default = "default_agent_max_iterations")]
     pub max_iterations: usize,
+}
+
+impl AgentConfig {
+    /// Collapse the deprecated `max_turns` alias into the canonical
+    /// `max_iterations`. Honors a tuned `max_turns` only when `max_iterations`
+    /// was left at the default (so an explicit `max_iterations` always wins),
+    /// then keeps both fields in sync for any not-yet-migrated reader.
+    pub fn normalize(&mut self) {
+        if self.max_turns != self.max_iterations
+            && self.max_iterations == default_agent_max_iterations()
+        {
+            eprintln!(
+                "[config] agent.max_turns is deprecated; using its value ({}) as \
+                 agent.max_iterations. Set agent.max_iterations instead to silence this.",
+                self.max_turns
+            );
+            self.max_iterations = self.max_turns;
+        }
+        self.max_turns = self.max_iterations;
+    }
 }
 
 impl Default for AgentConfig {
@@ -1102,6 +1130,9 @@ impl Config {
                     );
                 }
             }
+            // Collapse the deprecated agent.max_turns alias into the single
+            // canonical agent.max_iterations cap (AgentRuntime unification).
+            config.agent.normalize();
             Ok(config)
         } else {
             Ok(Config::default())
