@@ -4,7 +4,7 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: completed
 stopped_at: Phase 35 context gathered
-last_updated: "2026-05-21T12:21:11.975Z"
+last_updated: "2026-05-21T13:27:13.373Z"
 last_activity: 2026-05-21
 progress:
   total_phases: 2
@@ -457,6 +457,7 @@ Recent decisions affecting current work:
 - Phase 26.7.2 inserted after Phase 26.7.1: Sessions load session data (URGENT)
 - Phase 26.7.3 inserted after Phase 26.7.2: Skills page - enable tab, search and toggle on-off features (URGENT)
 - Phase 35 added: Cron subagent budget isolation (T-28.1-16) — follow-up from Phase 28.1
+- Phase 35 edited: edited fields: title, goal, requirements — broadened to global per-subagent independent budgets (retire PROV-10); T-28.1-16 now a consequence
 
 ### Pending Todos
 
