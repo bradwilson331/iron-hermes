@@ -18,6 +18,7 @@ pub mod pressure_warning;
 pub mod prompt_builder;
 pub mod session_search;
 pub mod shrike;
+pub mod streaming_scrubber;
 pub mod subagent_registry;
 pub mod subagent_runner;
 pub mod subdir_discovery;
