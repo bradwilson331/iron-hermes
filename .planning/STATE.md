@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: executing
-stopped_at: Phase 34a complete (2/2) — ready to discuss Phase 34b
-last_updated: "2026-05-21T05:03:21.528Z"
+status: milestone_complete
+stopped_at: Milestone complete (Phase 28.1 was final phase)
+last_updated: 2026-05-21T10:31:04.337Z
 last_activity: 2026-05-21 -- Phase 28.1 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 6
-  completed_plans: 0
+  completed_plans: 346
   percent: 0
 ---
 
@@ -21,21 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 28.1 — agentruntime-channel-migration-budget-skills-tools-ownership
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 28.1 (agentruntime-channel-migration-budget-skills-tools-ownership) — EXECUTING
-Plan: 1 of 6
+Phase: 28.1
+Plan: Not started
 Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
-Status: Executing Phase 28.1
-Last activity: 2026-05-21 -- Phase 28.1 execution started
+Status: Milestone complete
+Last activity: 2026-05-21
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 120
+- Total plans completed: 126
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -74,6 +74,7 @@ Last activity: 2026-05-21 -- Phase 28.1 execution started
 | 32.1 | 8 | - | - |
 | 26.7.1 | 2 | - | - |
 | 34a | 2 | - | - |
+| 28.1 | 6 | - | - |
 
 **Recent Trend:**
 
