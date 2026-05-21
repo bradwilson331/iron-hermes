@@ -1363,7 +1363,7 @@ Plans:
   6. Cross-phase regression gates green: Phase 32 `nudge::tests` (6/6), Phase 33 `invariants_33` (6/6), D-12 `test_snapshot_frozen_after_load`
   7. Live recall demo: with a recall-capable (or stub) provider, a mid-session write surfaces in a later "what do you remember?" answer; no `<memory-context>` tags visible in the response stream
 
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 
@@ -1373,7 +1373,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 34a-02-PLAN.md — pre-turn synthetic-system-message injection in `agent_loop` + `StreamingContextScrubber` (6 tests) + 3-surface scrubber wiring
+- [x] 34a-02-PLAN.md — pre-turn synthetic-system-message injection in `agent_loop` + `StreamingContextScrubber` (6 tests) + 3-surface scrubber wiring
 
 **Phase directory:** `.planning/phases/34a-read-side-memory-parity/`
 
