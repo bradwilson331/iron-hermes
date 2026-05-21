@@ -78,6 +78,11 @@ impl ContextCompressor {
     /// This is a local compression that doesn't require an LLM call.
     /// For LLM-based summarization, use `compress_with_summary`.
     pub fn compress(&mut self, messages: &mut Vec<ChatMessage>) -> bool {
+        // Step 0 (Phase 34a D-03): strip ephemeral recall messages before any
+        // token estimation — they are re-derivable next turn and must be freed
+        // first when context is tight.
+        messages.retain(|m| !m.is_recall_context);
+
         if !self.should_compress(messages) {
             return false;
         }
@@ -272,5 +277,27 @@ mod tests {
         let cc = ContextCompressor::new(10_000, 0.5).with_protect(5, 4_000);
         assert_eq!(cc.protect_first_n(), 5);
         assert_eq!(cc.protect_last_tokens(), 4_000);
+    }
+
+    #[test]
+    fn compress_step0_evicts_recall_messages() {
+        // Phase 34a D-03: recall messages must be stripped as step 0, even when
+        // the context is below the compression threshold (no actual compression).
+        let mut compressor = ContextCompressor::new(100_000, 0.9);
+        let recall_msg = ChatMessage::recall_system("Recall: user prefers dark mode.");
+        let normal_system = ChatMessage::system("You are Hermes.");
+        let user_msg = ChatMessage::user("Hello");
+        let mut messages = vec![normal_system, recall_msg, user_msg];
+
+        // Step 0 runs even when should_compress returns false.
+        compressor.compress(&mut messages);
+
+        // No message with is_recall_context == true should remain.
+        assert!(
+            !messages.iter().any(|m| m.is_recall_context),
+            "compressor step 0 must evict all recall messages"
+        );
+        // Normal messages survive.
+        assert_eq!(messages.len(), 2, "normal system + user message should remain");
     }
 }

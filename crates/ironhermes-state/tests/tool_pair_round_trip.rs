@@ -67,6 +67,7 @@ fn stored_to_chat(stored: &StoredMessage) -> ChatMessage {
         tool_calls,
         tool_call_id: stored.tool_call_id.clone(),
         name: stored.tool_name.clone(),
+        is_recall_context: false,
     }
 }
 
