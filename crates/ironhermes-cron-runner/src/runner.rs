@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured};
+use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::{complete_job_run, resolve_delivery_targets, CronJob, JobStore, TgSendApi};
 use ironhermes_hooks::HookRegistry;
@@ -175,6 +176,14 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     let request_id = Uuid::new_v4().to_string();
     let cron_chat_id = format!("cron-{}", job.id);
 
+    // §6.4 Cron-distinct budget: each job run gets a FRESH budget sized from
+    // config.agent.max_iterations, independent of the interactive (gateway)
+    // budget. A fresh handle per job means every scheduled run starts full
+    // regardless of prior job consumption — mirrors the run_turn boundary.
+    // This MUST be a new BudgetHandle (new Arc<AtomicUsize>), NOT a clone of
+    // any gateway AgentRuntime budget. T-28.1-14 mitigation.
+    let cron_budget = BudgetHandle::new(ctx.config.agent.max_iterations);
+
     info!(job_id=%job.id, job_name=%job.name, "cron job starting");
 
     // Fire MessageReceived hook (gateway parity)
@@ -287,6 +296,9 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     };
 
     let mut agent = AgentLoop::new(client, tool_registry_scoped, max_turns);
+    // Install the cron-distinct budget (§6.4). This budget is separate from any
+    // interactive gateway budget — draining it does not affect interactive chat.
+    agent = agent.with_budget(cron_budget);
     agent = wire_fallback_if_configured(agent, &resolver);
     if let Some(registry) = &ctx.hook_registry {
         agent = agent.with_hook_registry(registry.clone());
@@ -606,6 +618,107 @@ mod tests {
         unsafe {
             std::env::remove_var("IRONHERMES_TEST_PARSE_U64");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: cron budget is independent from an interactive budget (§6.4 / T-28.1-14)
+    // -----------------------------------------------------------------------
+
+    /// Prove that cron's BudgetHandle and an interactive BudgetHandle are
+    /// distinct counters (different Arc<AtomicUsize> instances). The test:
+    ///
+    /// 1. Creates a cron context mirroring what run_cron_job would do.
+    /// 2. Creates a separate "interactive" BudgetHandle (simulating what the
+    ///    gateway AgentRuntime owns).
+    /// 3. Drains the cron budget to exhaustion.
+    /// 4. Asserts that the interactive budget's remaining() is UNCHANGED.
+    /// 5. Constructs a second cron budget (simulating a second job run) and
+    ///    asserts it starts full regardless of the first job's consumption.
+    #[test]
+    fn cron_budget_is_independent_from_interactive_budget() {
+        use ironhermes_agent::budget::BudgetHandle;
+        use ironhermes_core::Config;
+
+        let config = Config::default();
+        let max = config.agent.max_iterations;
+
+        // Simulate the interactive budget owned by the gateway AgentRuntime
+        let interactive_budget = BudgetHandle::new(max);
+
+        // Simulate what run_cron_job creates: a fresh handle per job
+        let cron_budget_job1 = BudgetHandle::new(max);
+
+        // The two handles must NOT share the same Arc<AtomicUsize> counter —
+        // consuming cron must not affect interactive.
+        // Verify they are different objects by draining cron and checking interactive.
+        let cron_remaining_before = cron_budget_job1.remaining();
+        let interactive_remaining_before = interactive_budget.remaining();
+        assert_eq!(cron_remaining_before, max);
+        assert_eq!(interactive_remaining_before, max);
+
+        // Drain the cron budget to exhaustion
+        for _ in 0..max {
+            cron_budget_job1.consume();
+        }
+        assert_eq!(
+            cron_budget_job1.remaining(),
+            0,
+            "cron budget should be exhausted after draining"
+        );
+        assert_eq!(
+            cron_budget_job1.consume(),
+            None,
+            "cron budget at Stop100 returns None"
+        );
+
+        // Interactive budget must be completely unaffected
+        assert_eq!(
+            interactive_budget.remaining(),
+            max,
+            "interactive budget must be unchanged after draining cron (T-28.1-14)"
+        );
+
+        // A second job run gets a FRESH budget starting at max, regardless of
+        // the first job's exhaustion — fresh handle per job.
+        let cron_budget_job2 = BudgetHandle::new(max);
+        assert_eq!(
+            cron_budget_job2.remaining(),
+            max,
+            "second cron job starts with a full budget (fresh BudgetHandle per job)"
+        );
+        // Confirm job2 budget also cannot affect interactive
+        cron_budget_job2.consume();
+        assert_eq!(
+            interactive_budget.remaining(),
+            max,
+            "interactive budget still unaffected after second cron job consumes"
+        );
+
+        // Belt-and-braces: verify Arc ptr inequality where accessible.
+        // Since BudgetHandle wraps Arc<AtomicUsize> privately, we use the
+        // behavioral form (drain + compare remaining) proven above. Additionally
+        // verify that a clone of cron_budget shares the SAME counter (expected),
+        // while interactive_budget does NOT share it.
+        let cron_clone = cron_budget_job1.clone();
+        // cron_budget_job1 is at 0; its clone must also see 0.
+        assert_eq!(
+            cron_clone.remaining(),
+            0,
+            "clone of exhausted cron budget shares the same counter"
+        );
+        // Resetting via the original must be visible through the clone.
+        cron_budget_job1.reset();
+        assert_eq!(
+            cron_clone.remaining(),
+            max,
+            "reset is visible through the shared clone"
+        );
+        // But the interactive budget still unaffected after reset.
+        assert_eq!(
+            interactive_budget.remaining(),
+            max,
+            "interactive budget unaffected by cron reset"
+        );
     }
 
     // -----------------------------------------------------------------------
