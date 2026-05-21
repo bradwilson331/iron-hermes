@@ -842,15 +842,31 @@ mod tests {
             cfg_count
         );
 
-        // Both AgentLoop builders MUST chain .with_browser_session(...) — one in build_app_deps,
-        // one in spawn_turn. So we expect at least 2 occurrences.
-        let with_count = non_comment.matches(".with_browser_session(").count();
+        // Phase 28.1-05: spawn_turn no longer hand-builds an AgentLoop — it delegates
+        // to AgentRuntime::run_turn, which chains .with_browser_session(...) on the
+        // per-turn loop. The old "count .with_browser_session( in event_loop.rs >= 2"
+        // assertion became a tautology after the migration (its only matches were this
+        // test's own assertion-string literals, not production code). Verify the real
+        // wiring path instead: (a) spawn_turn delegates to run_turn, and (b) run_turn
+        // wires the browser session onto the agent loop in agent_runtime.rs.
         assert!(
-            with_count >= 2,
-            "Phase 25.1 GAP-8 (plan 25.1-19): BOTH the App-level AgentLoop (build_app_deps) \
-             AND the per-turn AgentLoop (spawn_turn) MUST chain .with_browser_session(); \
-             got {} occurrences",
-            with_count
+            non_comment.contains("run_turn("),
+            "Phase 28.1-05: spawn_turn MUST delegate to AgentRuntime::run_turn so the \
+             per-turn AgentLoop is built (with browser session) by the shared runtime; \
+             `run_turn(` not found in event_loop.rs."
+        );
+        const AGENT_RUNTIME_SRC: &str =
+            include_str!("../../../ironhermes-agent/src/agent_runtime.rs");
+        let runtime_non_comment: String = AGENT_RUNTIME_SRC
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            runtime_non_comment.contains(".with_browser_session("),
+            "Phase 25.1 GAP-8 / 28.1-05: AgentRuntime::run_turn MUST chain \
+             .with_browser_session(...) so the rata chat REPL's browser tools reach \
+             the per-turn agent loop."
         );
     }
 

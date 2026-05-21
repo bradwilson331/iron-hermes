@@ -34,7 +34,7 @@ fn api_sessions_and_tools_are_backed_by_real_state() {
         "list_tools must read tool definitions from runtime registry"
     );
     assert!(
-        !api.contains("Ok(vec![])") || !api.contains("TODO"),
+        !(api.contains("Ok(vec![])") && api.contains("TODO")),
         "list_sessions/list_tools must not remain empty TODO stubs"
     );
 }

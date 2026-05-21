@@ -75,18 +75,25 @@ fn invariant_21_7_03_execute_code_registered_in_runtime_factory() {
 }
 
 #[test]
-fn invariant_21_7_04_budget_handle_threaded_through_all_three_sites() {
-    // Plan 05 (Wave 2): every AgentSubagentRunner::new( call passes a
-    // BudgetHandle. The skip-path has been removed — this is now a strict
-    // regression gate. BudgetHandle must appear in run_chat, run_single,
-    // and run_gateway (and also in at least one shared helper such as
-    // run_agent_turn). Minimum count = 3 across all three sites.
-    let marker = MAIN_RS.matches("BudgetHandle").count();
+fn invariant_21_7_04_budget_owned_by_agent_runtime() {
+    // Phase 28.1 INVERTS the original INV-21.7-04. The budget is no longer constructed
+    // in run_chat/run_single/run_gateway — those sites would create per-channel
+    // BudgetHandles that latch at Stop100 across turns. The shared budget is now created
+    // ONCE inside AgentRuntime::from_config and reset per turn by run_turn. The CLI entry
+    // points thread it through the runtime, never by hand.
+    //
+    // The "main.rs production code must not call BudgetHandle::new(" guard lives in
+    // main.rs's own test module (main_rs_has_no_direct_budget_construction_or_with_budget);
+    // here we assert the positive ownership invariant on the runtime.
     assert!(
-        marker >= 3,
-        "INV-21.7-04 / E-09: BudgetHandle must appear in all 3 registration sites \
-         (run_single, run_chat, run_gateway). Found {}.",
-        marker
+        AGENT_RUNTIME_RS.contains("BudgetHandle::new("),
+        "INV-21.7-04 (Phase 28.1): AgentRuntime::from_config must construct the single shared \
+         BudgetHandle that every channel reuses via run_turn."
+    );
+    assert!(
+        AGENT_RUNTIME_RS.contains("self.budget.reset()"),
+        "INV-21.7-04 (Phase 28.1): AgentRuntime::run_turn must reset the shared budget at the \
+         turn boundary so a long-lived runtime never latches at Stop100."
     );
 }
 

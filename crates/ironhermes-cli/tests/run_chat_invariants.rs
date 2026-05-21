@@ -250,15 +250,18 @@ fn gap3_gateway_handler_wires_memory_manager_to_agent_loop() {
         "GAP-3: AgentRuntime::run_turn must call agent.with_memory_manager(...) so the \
          gateway turn fires queue_prefetch — not found in agent_runtime.rs"
     );
-    // run_gateway is the only AgentRuntime::from_config call site in main.rs (run_chat /
-    // run_single use build_app_runtime_bundle directly). Assert it supplies the real
-    // memory_manager into from_config — not None — so the shared runtime can wire it
+    // Phase 28.1: all three CLI entry points (run_single, run_chat, run_gateway) build the
+    // shared runtime via AgentRuntime::from_config; build_app_runtime_bundle is no longer
+    // called directly by any of them. Scope this gate to the run_gateway body and assert it
+    // threads the REAL memory_manager into from_config (not None), so the runtime wires it
     // onto the agent loop in run_turn.
     let main_rs = read_repo("crates/ironhermes-cli/src/main.rs");
+    let run_gateway = extract_fn_body(&main_rs, "run_gateway");
     assert!(
-        main_rs.contains("AgentRuntime::from_config")
-            && main_rs.contains("memory_manager: memory_manager"),
-        "GAP-3: run_gateway must pass memory_manager into AgentRuntime::from_config so the \
-         shared runtime can wire it onto the agent loop — not found in main.rs."
+        run_gateway.contains("AgentRuntime::from_config")
+            && run_gateway.contains("memory_manager: memory_manager")
+            && !run_gateway.contains("memory_manager: None"),
+        "GAP-3: run_gateway must thread the real memory_manager into AgentRuntime::from_config \
+         (not None) so the shared runtime wires it onto the agent loop in run_turn."
     );
 }
