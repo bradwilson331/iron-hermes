@@ -65,35 +65,38 @@ fn invariant_22_3_08_run_agent_turn_streaming_uses_helper() {
         .nth(1)
         .expect("INV-22.3-08: `async fn run_agent_turn` must exist in main.rs");
 
-    // (a) The streaming callback in run_agent_turn uses the helper.
+    // (a) The streaming callback in run_agent_turn routes tokens through the
+    //     scroll-region helper. Phase 34a (MEM-READ-05) inserted the streaming
+    //     scrubber, so the callback now writes the SCRUBBED `visible` bytes
+    //     rather than the raw `delta`; the streaming-discipline contract
+    //     (write_into_scroll_region, never raw print!) is unchanged.
     assert!(
-        after_header.contains("write_into_scroll_region(delta.as_bytes()"),
+        after_header.contains("write_into_scroll_region(visible.as_bytes()"),
         "INV-22.3-08: run_agent_turn's `with_streaming` callback must call \
-         `write_into_scroll_region(delta.as_bytes(), ...)` — the streaming-discipline fix from Plan 22.3-11. \
-         Reverting to a raw `print!(\"{{}}\", delta)` re-opens GAP-22.3-01 (streaming clobbers prompt)."
+         `write_into_scroll_region(visible.as_bytes(), ...)` (scrubbed deltas, Phase 34a) — \
+         the streaming-discipline fix from Plan 22.3-11. Reverting to a raw `print!` \
+         re-opens GAP-22.3-01 (streaming clobbers prompt)."
     );
 
-    // (b) The legacy raw-print form is GONE from run_agent_turn's body.
-    //     We bound the search to the function body (everything after the
-    //     header). Any occurrence of the exact 4-byte payload `print!("{}", delta)`
-    //     inside this range indicates the regression.
+    // (b) No raw-print form survives in run_agent_turn's body — neither the
+    //     pre-34a `delta` nor the post-34a scrubbed `visible` may be printed
+    //     directly here (run_agent_turn must use write_into_scroll_region).
     assert!(
-        !after_header.contains("print!(\"{}\", delta)"),
-        "INV-22.3-08: run_agent_turn must NOT contain `print!(\"{{}}\", delta)` — the streaming-discipline \
-         fix from Plan 22.3-11 replaced this with `write_into_scroll_region(...)`. If you need to debug \
-         streaming, use `tracing::trace!` or revert before commit."
+        !after_header.contains("print!(\"{}\", delta)")
+            && !after_header.contains("print!(\"{}\", visible)"),
+        "INV-22.3-08: run_agent_turn must NOT raw-print streamed tokens — Plan 22.3-11 \
+         replaced this with `write_into_scroll_region(...)`. Use `tracing::trace!` to debug."
     );
 
-    // (c) Sanity check: run_single's streaming callback at main.rs:528 IS
-    //     still allowed to use the legacy form (CONTEXT D-15 scope — only
-    //     run_chat hosts an interactive REPL, run_single is a one-shot path).
-    //     We assert the legacy form is present somewhere in main.rs to
-    //     prove this invariant is correctly scoped to run_agent_turn only,
-    //     not to all streaming sites.
+    // (c) Sanity check: run_single (the one-shot path, CONTEXT D-15 scope) IS
+    //     still allowed to print streamed tokens directly. Phase 34a routes them
+    //     through the scrubber first, so the literal is now `print!("{}", visible)`.
+    //     Asserting it remains present proves this invariant is scoped to
+    //     run_agent_turn only, not to all streaming sites.
     assert!(
-        MAIN_RS.contains("print!(\"{}\", delta)"),
-        "INV-22.3-08 (scope sanity): main.rs MUST still contain `print!(\"{{}}\", delta)` somewhere — \
-         in `run_single`'s streaming callback (~main.rs:528). If this fails, either run_single's callback \
+        MAIN_RS.contains("print!(\"{}\", visible)"),
+        "INV-22.3-08 (scope sanity): main.rs MUST still contain `print!(\"{{}}\", visible)` — \
+         in `run_single`'s one-shot streaming callback. If this fails, either run_single's callback \
          was accidentally rewritten too (out of scope per CONTEXT D-15) OR run_single was deleted. \
          Investigate before adjusting this invariant."
     );
