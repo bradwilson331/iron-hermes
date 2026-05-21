@@ -144,15 +144,22 @@ fn setup_gateway_section_exits_ok() {
 
 #[test]
 fn setup_tools_section_exits_ok() {
+    // `setup tools` runs the real prerequisite wizard (Phase 25 D-18), not a
+    // stub. Feed newlines so every prereq prompt is deferred (Enter = defer),
+    // making the run non-interactive and deterministic regardless of which tool
+    // prereqs happen to be satisfied on the host. The section prints either
+    // "All tool prerequisites satisfied…" (clean env) or "…unsatisfied required
+    // prerequisite" (dirty env) — both contain the substring "prerequisite".
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
         .unwrap()
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "tools"])
+        .write_stdin("\n".repeat(64))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Phase 25").or(predicate::str::contains("phase 25")));
+        .stdout(predicate::str::contains("prerequisite"));
 }
 
 #[test]
@@ -287,14 +294,18 @@ fn config_subcommand_skips_preflight() {
 
 #[test]
 fn setup_subcommand_skips_preflight() {
-    // setup subcommand must NOT recurse into preflight.
-    // tools section is a stub message — exits 0.
+    // `setup <section>` must dispatch straight to that section and NOT recurse
+    // into the first-run preflight (minimum-viable) flow. `setup tools` runs the
+    // real prereq wizard now (Phase 25 D-18), so feed deferring newlines to keep
+    // it non-interactive; a clean exit proves it reached the tools section
+    // directly rather than engaging preflight.
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
         .unwrap()
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "tools"])
+        .write_stdin("\n".repeat(64))
         .assert()
         .success();
 }

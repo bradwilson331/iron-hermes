@@ -211,19 +211,27 @@ async fn cmd_agents_kill_cancels_registered_subagent() {
         other => panic!("expected Output, got {:?}", other),
     }
 
-    // Give the kill token a tick to propagate (same-task synchronous
-    // propagation is guaranteed by SubagentRegistry::kill's .cancel()
-    // call, but be defensive).
+    // Give the kill token a tick to propagate.
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
         token.is_cancelled(),
         "D-03: /agents kill must cancel the stored CancellationToken"
     );
 
-    // And the entry must be gone from the registry.
+    // Phase 32.3 Plan 03 (D-08): the `/agents kill` cmd path routes through
+    // ShrikeService::kill, which cancels the token and aborts the child's
+    // JoinHandle but DELIBERATELY does not remove the registry entry directly —
+    // eviction happens via RegistrationGuard::drop when the aborted task unwinds,
+    // so the `stale_warned` dedup sweep runs through the canonical path
+    // (see shrike.rs `kill`). This synthetic entry has no backing task and its
+    // guard is `std::mem::forget`'d in `register_for_test`, so guard-driven
+    // removal cannot fire here and active_count stays 1. Direct removal-on-kill
+    // is the separate internal-caller contract, covered by
+    // `subagent_registry_ops::kill_cancels_token_and_removes_entry`.
     let remaining = reg.read().await.active_count();
     assert_eq!(
-        remaining, 0,
-        "D-03: /agents kill must remove the entry from the registry"
+        remaining, 1,
+        "post-32.3 Shrike kill cancels + aborts but does not synchronously evict; \
+         the synthetic forgotten-guard entry is removed only via RegistrationGuard::drop"
     );
 }
