@@ -36,9 +36,14 @@ fn skill_registry_field_present_in_tui_rata_app() {
 #[test]
 fn run_chat_skill_registry_is_mut() {
     let src = include_str!("../src/main.rs");
+    // Phase 28.1-04: run_chat now builds the runtime via AgentRuntime::from_config
+    // and reads skill_registry via runtime.skill_registry(). The `let mut` binding
+    // is preserved so Plan 03 SkillsReload arm can reassign it (D-03 atomic swap).
     assert!(
-        src.contains("let mut skill_registry = runtime_bundle.skill_registry.clone()"),
-        "Phase 21.8.2 Plan 02: run_chat skill_registry local must be `let mut` so Plan 03 reload arm can reassign"
+        src.contains("let mut skill_registry = runtime.skill_registry().clone()"),
+        "Phase 21.8.2 Plan 02 (Phase 28.1-04): run_chat skill_registry local must be \
+         `let mut skill_registry = runtime.skill_registry().clone()` so Plan 03 reload \
+         arm can reassign"
     );
 }
 

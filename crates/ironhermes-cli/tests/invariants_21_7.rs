@@ -18,16 +18,24 @@ const AGENT_RUNTIME_RS: &str =
 
 #[test]
 fn invariant_21_7_01_three_agent_subagent_runner_new_sites() {
+    // Phase 28.1-04: run_chat and run_single no longer construct AgentSubagentRunner::new
+    // directly — they delegate through AgentRuntime::from_config (same as run_gateway
+    // after Phase 28.1-02). All 3 logical entry points now share the single construction
+    // site inside agent_runtime.rs. Expected: 0 in main.rs, 1 in agent_runtime.rs.
     let main_sites = MAIN_RS.matches("AgentSubagentRunner::new(").count();
     let runtime_sites = AGENT_RUNTIME_RS.matches("AgentSubagentRunner::new(").count();
     let count = main_sites + runtime_sites;
     assert_eq!(
-        count, 3,
-        "INV-21.7-01: run_chat + run_single construct AgentSubagentRunner::new( in main.rs \
-         ({main_sites}), and run_gateway's runner is built inside AgentRuntime::from_config \
-         in agent_runtime.rs ({runtime_sites}). Expected 3 logical call sites total; found {count}. \
-         If you added or removed a site, update this test with justification."
+        main_sites, 0,
+        "INV-21.7-01 (Phase 28.1-04): main.rs must have 0 AgentSubagentRunner::new( sites — \
+         all entry points now delegate through AgentRuntime::from_config. Found {main_sites}."
     );
+    assert_eq!(
+        runtime_sites, 1,
+        "INV-21.7-01 (Phase 28.1-04): agent_runtime.rs must have exactly 1 AgentSubagentRunner::new( \
+         site (shared by run_single, run_chat, run_gateway). Found {runtime_sites}."
+    );
+    let _ = count; // suppress unused warning
 }
 
 // Phase 25.6 consolidated all per-path tool registration into the shared
@@ -133,22 +141,32 @@ fn invariant_21_7_08_subagent_registry_on_context_and_runner_sites() {
     // AND the CommandContext::new site in run_chat must also install the
     // registry handle for Plan 08 (/agents list/kill/logs) consumers.
     //
-    // Expected count: 3 runner sites (run_single, run_chat, run_gateway) +
-    // 1 CommandContext site (run_chat) = at least 4.
-    //
-    // Phase 28.1-02: run_gateway's runner site moved into AgentRuntime::from_config
-    // (agent_runtime.rs), so the threading is now split across two files —
-    // run_single + run_chat runner sites + the run_chat CommandContext site in
-    // main.rs, plus the gateway runner site in agent_runtime.rs.
-    let count = MAIN_RS.matches("with_subagent_registry").count()
-        + AGENT_RUNTIME_RS.matches("with_subagent_registry").count();
+    // Phase 28.1-04: run_chat and run_single no longer construct
+    // AgentSubagentRunner::new directly — all 3 entry points now share the
+    // single runner construction inside AgentRuntime::from_config
+    // (agent_runtime.rs). The wiring sites are therefore:
+    //   - 1 runner site in agent_runtime.rs (covers run_single + run_chat + run_gateway)
+    //   - 1 CommandContext site in main.rs (run_chat slash commands)
+    // Expected: main.rs >= 1 (CommandContext), agent_runtime.rs >= 1 (runner).
+    let main_count = MAIN_RS.matches("with_subagent_registry").count();
+    let runtime_count = AGENT_RUNTIME_RS.matches("with_subagent_registry").count();
+    let count = main_count + runtime_count;
     assert!(
-        count >= 4,
-        "INV-21.7-08 / D-03 / D-04: subagent_registry must be threaded \
-         through 3 AgentSubagentRunner::new sites (run_single + run_chat in main.rs, \
-         run_gateway via AgentRuntime::from_config in agent_runtime.rs) + \
-         CommandContext::new in run_chat. Found {}.",
-        count
+        main_count >= 1,
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): main.rs must have >= 1 \
+         with_subagent_registry site (CommandContext::new in run_chat). Found {main_count}."
+    );
+    assert!(
+        runtime_count >= 1,
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): agent_runtime.rs must have >= 1 \
+         with_subagent_registry site (AgentSubagentRunner::new inside from_config). \
+         Found {runtime_count}."
+    );
+    assert!(
+        count >= 2,
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): subagent_registry must be threaded \
+         through the shared AgentRuntime runner site (agent_runtime.rs) + CommandContext \
+         in run_chat (main.rs). Found {count} total."
     );
 }
 
