@@ -136,26 +136,34 @@ fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
 }
 
 #[test]
-fn client_ws_disconnect_notices_are_generic_and_deduplicated_per_disconnect_window() {
-    let ui = read("src/components/warp_hermes.rs");
+fn client_ws_disconnect_resets_streaming_state_and_reconnects() {
+    // Retargeted from legacy warp_hermes.rs to the active HermesApp websocket
+    // client (hoisted to the root component, src/components/hermes_app/mod.rs).
+    // The legacy user-facing disconnect notice (push_disconnect_notice + the
+    // "Connection interrupted..." transcript copy) was intentionally dropped in
+    // the wheel-driven shell: on disconnect it silently clears the streaming
+    // indicator and reconnects, letting the user retry. This test locks that
+    // close/error-boundary contract instead of the removed notice copy.
+    let app = read("src/components/hermes_app/mod.rs");
 
     assert!(
-        ui.contains("fn push_disconnect_notice")
-            || ui.contains("push_disconnect_notice("),
-        "disconnect notice emission should be funneled through a single helper"
+        app.contains("with_automatic_reconnect()"),
+        "client websocket must keep automatic reconnect enabled"
     );
-
     assert!(
-        ui.contains("Connection interrupted. Please retry your message once reconnected."),
-        "disconnect transcript copy must remain generic and user-facing"
+        app.contains("loop {") && app.contains("ws.connect().await"),
+        "client receiver must use an outer reconnect cycle"
     );
-
     assert!(
-        ui.contains("dioxus_fullstack::Message::Close { .. }")
-            && ui.contains("WebSocket closed; reconnecting")
-            && ui.contains("if !disconnect_notified {")
-            && ui.contains("break;"),
-        "close frames should trigger one reconnect boundary, not repeated receive-error churn"
+        app.contains("Ok(dioxus_fullstack::Message::Close { .. }) => {")
+            && app.contains("streaming_id.set(None);")
+            && app.contains("is_ws_connected.set(false);")
+            && app.contains("break;"),
+        "a close frame must clear the streaming indicator, mark ws disconnected, and break to reconnect once"
+    );
+    assert!(
+        app.contains("Err(_) => {"),
+        "the recv error path must be explicitly handled (break + reconnect), not panic"
     );
 }
 
@@ -285,23 +293,30 @@ fn busy_gate_opportunistically_clears_finished_turn() {
 }
 
 #[test]
-fn tab_click_clears_blocks_and_switches_session_id() {
-    let ui = read("src/components/warp_hermes.rs");
+fn session_select_switches_id_and_clears_transcript() {
+    // Retargeted from legacy warp_hermes.rs on_tab_click to the active HermesApp
+    // Sessions + Chat screens. Selecting a session row switches session_id and
+    // routes to the Chat screen (sessions.rs); the Chat screen clears the prior
+    // transcript + streaming indicator on every session_id change (chat.rs).
+    // The legacy mid-stream guard (`scanner_active()` + early `return;`) was
+    // intentionally dropped — the wheel-driven shell allows switching during an
+    // in-flight turn (the orphaned turn is simply discarded).
+    let sessions = read("src/components/hermes_app/screens/sessions.rs");
     assert!(
-        ui.contains("let mut on_tab_click = move |idx: usize|"),
-        "WarpHermes must define on_tab_click closure with usize idx (D-09)"
+        sessions.contains("let on_select = move |sid: String|")
+            && sessions.contains("session_id.set(sid)")
+            && sessions.contains("active_screen.set(crate::state::Screen::Chat)"),
+        "row select must set session_id and route to the Chat screen (D-09)"
+    );
+
+    let chat = read("src/components/hermes_app/screens/chat.rs");
+    assert!(
+        chat.contains("bubbles.write().clear()"),
+        "Chat screen must clear the transcript on session_id change (D-08: no stale history)"
     );
     assert!(
-        ui.contains("scanner_active()") && ui.contains("return;"),
-        "on_tab_click must guard against tab switch during streaming (D-02): expect scanner_active() check + early return"
-    );
-    assert!(
-        ui.contains("blocks.set(Vec::new())"),
-        "tab switch must clear blocks signal (D-01)"
-    );
-    assert!(
-        ui.contains("messages.write().clear()"),
-        "tab switch must clear messages signal (D-01)"
+        chat.contains("streaming_id.set(None)"),
+        "Chat screen must cancel the stale streaming indicator on session switch (D-01)"
     );
 }
 
@@ -327,30 +342,23 @@ fn tab_new_calls_create_session_and_appends_tab() {
 }
 
 #[test]
-fn tab_close_uses_stop_propagation() {
-    let tb = read("src/components/shell/title_bar.rs");
+fn session_delete_button_uses_stop_propagation() {
+    // Retargeted from the legacy shell_legacy/title_bar.rs tab-close button to the
+    // active HermesApp Sessions screen. The wheel-driven shell replaced the tab
+    // strip + TitleBar with a sessions list; the per-row delete button must still
+    // call evt.stop_propagation() so the click does not bubble to the row-select
+    // handler. The legacy TitleBar prop contract (on_tab_click/on_tab_close/
+    // on_tab_new EventHandlers) and the streaming `disabled: bool` +
+    // `pointer-events: none; opacity: 0.5` gate were intentionally dropped in
+    // hermes_app (the UI stays interactive during streaming), so those assertions
+    // are not carried over.
+    let sessions = read("src/components/hermes_app/screens/sessions.rs");
     assert!(
-        tb.contains("evt.stop_propagation()"),
-        "close button must call evt.stop_propagation() to prevent tab click bubbling (CONTEXT Specifics + UI-SPEC Interaction Contract)"
+        sessions.contains("evt.stop_propagation()"),
+        "session delete button must call evt.stop_propagation() so the click does not bubble to row select"
     );
     assert!(
-        tb.contains("on_tab_click: EventHandler<usize>"),
-        "TitleBar must declare on_tab_click EventHandler<usize> prop (D-09)"
-    );
-    assert!(
-        tb.contains("on_tab_close: EventHandler<usize>"),
-        "TitleBar must declare on_tab_close EventHandler<usize> prop (D-09)"
-    );
-    assert!(
-        tb.contains("on_tab_new: EventHandler<()>"),
-        "TitleBar must declare on_tab_new EventHandler<()> prop (D-09)"
-    );
-    assert!(
-        tb.contains("disabled: bool"),
-        "TitleBar must accept a disabled: bool prop for D-02 streaming gate"
-    );
-    assert!(
-        tb.contains("pointer-events: none; opacity: 0.5"),
-        "disabled state must apply pointer-events: none + opacity: 0.5 to .wh-tabs (UI-SPEC Disabled State)"
+        sessions.contains("on_delete.call("),
+        "delete button must invoke the on_delete handler with the session id"
     );
 }
