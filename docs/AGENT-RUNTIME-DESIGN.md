@@ -1,7 +1,8 @@
 # AgentRuntime — channel-facing agent API
 
-Status: **PARTIALLY IMPLEMENTED** — foundation shipped; channel migration pending
-(tracked as a GSD phase).
+Status: **IMPLEMENTED** — foundation + channel migration shipped to `develop`
+(GSD Phase 28.1, completed 2026-05-21). One scoped follow-up remains: cron
+subagent budget isolation (T-28.1-16, see §6.4 / §8).
 Author: pairing session, 2026-05-21.
 
 ## 0. Implementation status (2026-05-21)
@@ -26,19 +27,34 @@ Author: pairing session, 2026-05-21.
   semantics unit-tested at the `BudgetHandle` level. **Not yet wired into any
   channel.**
 
-### Remaining (this phase)
+### Channel migration (GSD Phase 28.1 — completed 2026-05-21)
 
-1. **Gateway → `run_turn`** (§5 stage 2): source `GatewayMessageHandler`'s shared
-   Arcs from the runtime, replace `run_agent`'s hand-assembly with a
-   `TurnRequest` + `run_turn`, remove the `budget_handle` field/setter and the
-   `367eaa79` band-aid. Preserve trajectory writer, session-id format, and the
-   LEARN-01 post-turn nudge.
-2. **Web / `run_chat` / `run_single` / TUI → `run_turn`** (§5 stage 3): delete
-   their `BudgetHandle::new` + `.with_budget`; fixes the latent `run_chat`/TUI
-   latches and the web top-level-loop gap.
-3. **Cron distinct runtime** (§6.4): its own `AgentRuntime`/budget.
-4. **Verification:** each channel needs **live** testing (esp. Telegram) — only
-   compile + unit + clippy are available in-session.
+All four interactive channels and cron now go through `AgentRuntime`. Shipped in
+plans 28.1-01..06 on `develop`:
+
+1. **Gateway → `run_turn`** ✅ (§5 stage 2): `GatewayMessageHandler` sources its
+   shared Arcs from the runtime; `run_agent` builds a `TurnRequest` and calls
+   `run_turn`; the `budget_handle` field/setter and the `367eaa79` band-aid are
+   gone. Trajectory writer, `gw:{chat}:{sender}` session-id format, and the
+   LEARN-01 post-turn nudge are preserved.
+2. **Web / `run_chat` / `run_single` / TUI → `run_turn`** ✅ (§5 stage 3): each
+   builds one `AgentRuntime` and routes turns through `run_turn`; no channel
+   constructs `BudgetHandle::new` or `.with_budget` by hand. Fixes the latent
+   `run_chat`/TUI latches and the web top-level-loop budget gap.
+3. **Cron distinct budget** ✅ (§6.4): `run_cron_job` builds a fresh per-job
+   `BudgetHandle`, independent of any interactive runtime budget.
+4. **Verification:** automated checks 7/7 (workspace tests, `--features server`
+   build, wasm32 build all green); operator live UAT confirmed the Stop100 latch
+   fix on the Telegram gateway (consecutive turns each get a fresh budget).
+
+### Known limitation (open follow-up)
+
+- **T-28.1-16 — cron subagent budget isolation.** Top-level cron turns are
+  budget-isolated, but a cron job that invokes `delegate_task` reaches the
+  interactive runtime's delegate runner via the shared `ToolRegistry`, so its
+  subagents draw on (and can drain) the interactive budget rather than the
+  cron-scoped one. Deferred per the threat model; tracked for a future phase.
+  See §6.4 / §8.
 
 ---
 
@@ -214,6 +230,10 @@ Each stage is independently shippable and leaves the tree green.
    turn to `AgentRuntime::run_turn` instead of assembling an `AgentLoop` itself.
 4. **Cron is a distinct unit.** The cron tick gets its own runtime/budget so
    scheduled turns don't compete with or drain the interactive chat budget.
+   *Shipped at the top-level turn boundary (28.1-06).* **Open (T-28.1-16):** a
+   cron job that calls `delegate_task` still reaches the interactive delegate
+   runner through the shared `ToolRegistry`, so its subagents draw on the
+   interactive budget — see §8.
 5. **All four channels in one pass.** Stages 1–3 below (gateway, web, `run_chat`,
    TUI) land together; stage 4 (skills/tool-registry ownership) is a follow-up.
 
@@ -229,3 +249,38 @@ Each stage is independently shippable and leaves the tree green.
 - **Band-aid removal:** delete `handler.rs::run_agent`'s per-turn
   `BudgetHandle::reset()` (commit `367eaa79`) once `run_turn` owns the reset.
   Keep `BudgetHandle::reset()` itself — `run_turn` calls it.
+
+## 8. Open follow-up — T-28.1-16: cron subagent budget isolation
+
+**Status:** open (deferred per threat model in Phase 28.1; candidate for a new phase).
+
+**What works today (28.1-06):** `run_cron_job` constructs a fresh
+`BudgetHandle::new(config.agent.max_iterations)` per job and installs it on the
+per-job `AgentLoop`. A regression test proves draining the cron budget leaves the
+interactive budget untouched, and vice versa, for **top-level** cron turns.
+
+**The gap:** budget isolation stops at the top-level loop. When a cron job's agent
+calls the `delegate_task` tool, that tool resolves its subagent runner from the
+shared `ToolRegistry` (built by the interactive `AgentRuntime`). The interactive
+runner holds a clone of the **interactive** `BudgetHandle` (the PROV-10
+parent/child sharing arrangement). So cron-spawned subagents charge their
+iterations against the interactive budget instead of the cron-scoped one — a busy
+cron fan-out can drain interactive chat headroom, the exact cross-contamination
+§6.4 set out to prevent.
+
+**Why it was deferred:** top-level cron isolation removes the common-case
+contention; subagent fan-out from cron is a narrower path. Fixing it correctly
+means giving cron its **own** delegate runner bound to the cron budget — i.e.
+cron should build (or be handed) an `AgentRuntime`/registry whose `delegate_task`
+wiring carries the cron `BudgetHandle`, rather than reusing the interactive
+registry.
+
+**Sketch of the fix (for the follow-up phase to refine):**
+- Give the cron runner its own `AgentRuntime` (or a cron-scoped registry) so the
+  `delegate_task` tool's `AgentSubagentRunner` clones the **cron** budget, not the
+  interactive one.
+- Verify with a regression test: a cron job that calls `delegate_task` to
+  exhaustion must leave the interactive budget at full headroom.
+- Watch the shared-Arc identity: the interactive runtime intentionally shares one
+  budget Arc parent↔child (PROV-10); cron must get a *separate* Arc, mirroring the
+  top-level fresh-budget approach already in `run_cron_job`.
