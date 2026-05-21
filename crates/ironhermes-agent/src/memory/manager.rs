@@ -197,6 +197,12 @@ impl MemoryManager {
         p.to_memory_entries()
     }
 
+    // ---- Read paths (primary only per D-26, D-28) — query-scoped recall ----
+    pub async fn prefetch_with_query(&self, query: &str, session_id: &str) -> anyhow::Result<String> {
+        let p = self.primary.lock().await;
+        p.prefetch_with_query(query, session_id).await
+    }
+
     // ---- Post-turn + pre-compress hooks (fire on primary only) ----
     pub async fn queue_prefetch(&self, query: &str) -> anyhow::Result<()> {
         let p = self.primary.lock().await;
@@ -609,6 +615,12 @@ mod tests {
         let _ = mgr.prefetch("sid").await.unwrap();
         let _ = mgr.system_prompt_block().await;
         let _ = mgr.format_for_system_prompt(MemoryTarget::Memory).await;
+
+        // prefetch_with_query must return Ok("") from the file provider (no-op default)
+        // and must NOT fan out to the mirror (D-26/D-28: mirror is write-only).
+        let result = mgr.prefetch_with_query("what is my name?", "sid").await;
+        assert!(result.is_ok(), "prefetch_with_query must succeed on file provider");
+        assert_eq!(result.unwrap(), "", "file provider prefetch_with_query must return empty string");
 
         let reads = recorder_inner.lock().unwrap().read_calls.clone();
         assert!(
