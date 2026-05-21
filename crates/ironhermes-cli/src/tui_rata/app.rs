@@ -29,8 +29,7 @@ use crate::tui_rata::stream_events::StreamEvent;
 
 // Concrete paths — grep-verified iteration 2.
 use ironhermes_agent::AnyClient;
-use ironhermes_agent::agent_loop::AgentLoop;
-use ironhermes_agent::budget::BudgetHandle;
+use ironhermes_agent::AgentRuntime;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::personality::PersonalityRegistry;
@@ -52,7 +51,11 @@ use ironhermes_tools::ToolRegistry;
 /// Keeps the constructor signature stable as the parity list grows.
 /// Plan 22.4-07 constructs this in the event-loop bootstrap.
 pub struct AppDeps {
-    pub agent_loop: Arc<AgentLoop>,
+    /// Phase 28.1-05: AgentRuntime owns the durable agent (budget, registry,
+    /// browser session, skills, hook registry). Replaces the loose
+    /// agent_loop/budget/context_length/config_compression/max_turns/fallback_client
+    /// fields; spawn_turn calls runtime.run_turn per turn.
+    pub agent_runtime: Arc<AgentRuntime>,
     pub hook_registry: Arc<HookRegistry>,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub memory_manager: Option<Arc<Mutex<MemoryManager>>>,
@@ -63,17 +66,19 @@ pub struct AppDeps {
     pub history_path: PathBuf,
     pub status_initial: StatusLineState,
     pub cancel_parent: CancellationToken,
-    // Plan 22.4-07 additions: needed by spawn_turn to build per-turn AgentLoops
+    /// Mutable client for /model and /fast slash commands that rebuild the
+    /// AnyClient mid-session. The runtime owns its own client for turns; this
+    /// field tracks the slash-command-mutated client so spawn_turn can pass it
+    /// to TurnRequest when a model switch is in effect.
+    /// NOTE: Phase 28.1-05 decision — keep client on App because /model and
+    /// /fast mutate it interactively; routing through the runtime would require
+    /// a mutable runtime accessor which is architecturally heavyweight.
     pub client: AnyClient,
+    /// ToolRegistry — kept for session-end hooks (registry.read().await.call_session_end_hooks())
+    /// and for slash-dispatch CommandContext. Runtime also holds this Arc via
+    /// runtime.registry(); App keeps its own clone for the end-hook call site
+    /// in run_with_deps without requiring a runtime borrow.
     pub registry: Arc<RwLock<ToolRegistry>>,
-    pub budget: BudgetHandle,
-    pub context_length: usize,
-    pub config_compression: f64,
-    pub max_turns: usize,
-    /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — pre-resolved fallback client per
-    /// PROV-07 parity with classic main.rs:631-637. spawn_turn clones this and
-    /// chains `.with_fallback(fb)` on the per-turn AgentLoop when present.
-    pub fallback_client: Option<AnyClient>,
     /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
     /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
     /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
@@ -207,22 +212,19 @@ pub struct App {
     pub skin: Arc<std::sync::RwLock<String>>,
 
     // — D-18 parity handles (Arc-held) ───────────────────────────────────────
-    pub agent_loop: Arc<AgentLoop>,
+    /// Phase 28.1-05: durable agent runtime. spawn_turn builds TurnRequest and
+    /// calls runtime.run_turn per turn. Replaces the per-turn AgentLoop builder.
+    pub agent_runtime: Arc<AgentRuntime>,
     pub hook_registry: Arc<HookRegistry>,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub memory_manager: Option<Arc<Mutex<MemoryManager>>>,
     pub subagent_registry: Arc<RwLock<SubagentRegistry>>,
     pub process_registry: Arc<RwLock<ProcessRegistry>>,
     pub command_router: Arc<CommandRouter>,
-    // Plan 22.4-07: spawn_turn needs these to build per-turn AgentLoops
+    /// Mutable client for /model and /fast (see AppDeps.client doc).
     pub client: AnyClient,
+    /// ToolRegistry clone for session-end hooks + slash-dispatch CommandContext.
     pub registry: Arc<RwLock<ToolRegistry>>,
-    pub budget: BudgetHandle,
-    pub context_length: usize,
-    pub config_compression: f64,
-    pub max_turns: usize,
-    /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — see AppDeps.fallback_client.
-    pub fallback_client: Option<AnyClient>,
     /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
     /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
     /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
@@ -322,7 +324,7 @@ impl App {
             debug_enabled: deps.debug_enabled,
             fast_enabled: deps.fast_enabled,
             skin: deps.skin,
-            agent_loop: deps.agent_loop,
+            agent_runtime: deps.agent_runtime,
             hook_registry: deps.hook_registry,
             mcp_manager: deps.mcp_manager,
             memory_manager: deps.memory_manager,
@@ -331,11 +333,6 @@ impl App {
             command_router: deps.command_router,
             client: deps.client,
             registry: deps.registry,
-            budget: deps.budget,
-            context_length: deps.context_length,
-            config_compression: deps.config_compression,
-            max_turns: deps.max_turns,
-            fallback_client: deps.fallback_client,
             browser_session: deps.browser_session,
             mouse_capture_enabled: deps.mouse_capture_enabled,
             // Phase 22.4.2 Plan 00: D-08 subsystem handles
@@ -973,8 +970,7 @@ fn test_message(role: &str, body: &str) -> ChatMessage {
 
 #[cfg(feature = "test-support")]
 fn test_deps() -> AppDeps {
-    use ironhermes_agent::budget::BudgetHandle;
-    use ironhermes_agent::{AnyClient, agent_loop::AgentLoop};
+    use ironhermes_agent::{AnyClient, AgentRuntime};
     use ironhermes_core::commands::registry::build_registry;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_tools::ToolRegistry;
@@ -993,9 +989,12 @@ fn test_deps() -> AppDeps {
         &std::collections::HashMap::new(),
         &ironhermes_core::get_hermes_home(),
     ));
+    // Phase 28.1-05: AgentRuntime::for_tests() builds a minimal runtime backed
+    // by a localhost:0 client so the test fixture doesn't need a live endpoint.
+    let test_runtime = Arc::new(AgentRuntime::for_tests());
 
     AppDeps {
-        agent_loop: Arc::new(AgentLoop::for_tests()),
+        agent_runtime: test_runtime,
         hook_registry: Arc::new(HookRegistry::new(ironhermes_hooks::HooksConfig::default())),
         mcp_manager: None,
         memory_manager: None,
@@ -1011,11 +1010,6 @@ fn test_deps() -> AppDeps {
         cancel_parent: CancellationToken::new(),
         client: test_client,
         registry: test_registry,
-        budget: BudgetHandle::new(10),
-        context_length: 8192,
-        config_compression: 0.8,
-        max_turns: 10,
-        fallback_client: None,
         browser_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         mouse_capture_enabled: Arc::new(AtomicBool::new(true)),
         // Phase 22.4.2 Plan 00: D-08 subsystem handles (None/defaults for tests)

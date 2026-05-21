@@ -252,12 +252,19 @@ impl ContextCompressorHandle for ContextEngineAdapter {
     }
 }
 
-/// Adapter: AgentLoop → AgentLoopHandle for Tier D session control.
-struct AgentLoopAdapter(Arc<ironhermes_agent::agent_loop::AgentLoop>);
-impl AgentLoopHandle for AgentLoopAdapter {
+/// Adapter: AgentRuntime → AgentLoopHandle for Tier D session control.
+///
+/// Phase 28.1-05: the App-level Arc<AgentLoop> is replaced by Arc<AgentRuntime>.
+/// AgentLoopHandle only exposes is_running() → bool; the runtime has no concept
+/// of a "running turn" at the handle level (the cancel_child token on App tracks
+/// that). Conservative false matches the prior AgentLoopAdapter behaviour and
+/// satisfies all existing /status consumers without requiring a live-state probe.
+struct AgentRuntimeAdapter(Arc<ironhermes_agent::AgentRuntime>);
+impl AgentLoopHandle for AgentRuntimeAdapter {
     fn is_running(&self) -> bool {
-        // Conservative: assume running if we have a handle.
-        // Plans 01-04 will wire the actual running-state check.
+        // Conservative: the runtime does not expose a live-turn predicate at the
+        // handle level. Return false so /status shows "idle" consistently; the
+        // status-line agent-running pill (AtomicBool) is the accurate indicator.
         false
     }
 }
@@ -587,7 +594,8 @@ fn build_command_context(app: &App) -> CommandContext {
         ctx = ctx.with_history(snapshot);
     }
     {
-        let handle: Arc<dyn AgentLoopHandle> = Arc::new(AgentLoopAdapter(app.agent_loop.clone()));
+        // Phase 28.1-05: re-pointed at the runtime (App-level AgentLoop removed).
+        let handle: Arc<dyn AgentLoopHandle> = Arc::new(AgentRuntimeAdapter(app.agent_runtime.clone()));
         ctx = ctx.with_agent_loop(handle);
     }
     // Phase 22.4.2.1 Plan 01: wire CronJobReader as 11th with_* call.
