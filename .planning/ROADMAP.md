@@ -14,3 +14,13 @@ Plans:
 - [x] 28.1-06-PLAN.md — Cron distinct runtime/budget (§6.4); preserve per-job overrides
 
 **Note:** Stage 4 (skills + tool-registry ownership fully into AgentRuntime, design §4) is intentionally DEFERRED to a follow-up phase — see planning summary. It would edit the same channel files this phase migrates and is independently shippable per §5.
+
+### Phase 35: Cron subagent budget isolation (T-28.1-16)
+
+**Goal:** Cron's budget isolation extends from the top-level turn down to delegated subagents. Today a cron job that calls `delegate_task` resolves its subagent runner from the shared `ToolRegistry` built by the interactive `AgentRuntime`, so cron-spawned subagents charge iterations against the **interactive** budget (the PROV-10 parent/child shared Arc) instead of the cron-scoped one — a busy cron fan-out can drain interactive chat headroom. After this phase, cron has its own delegate runner bound to the cron `BudgetHandle` (its own Arc, mirroring the fresh per-job budget already in `run_cron_job`), so a cron job that calls `delegate_task` to exhaustion leaves the interactive budget at full headroom.
+**Requirements**: T-28.1-16 (follow-up from Phase 28.1; see docs/AGENT-RUNTIME-DESIGN.md §6.4 / §8)
+**Depends on:** Phase 28.1 (AgentRuntime channel migration — cron distinct top-level budget shipped in 28.1-06)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 35 to break down)

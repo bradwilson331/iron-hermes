@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: milestone_complete
-stopped_at: Milestone complete (Phase 28.1 was final phase)
-last_updated: 2026-05-21T10:31:04.337Z
-last_activity: 2026-05-21 -- Phase 28.1 execution started
+status: completed
+stopped_at: Phase 34a complete (2/2) — ready to discuss Phase 34b
+last_updated: "2026-05-21T10:41:02.065Z"
+last_activity: 2026-05-21
 progress:
-  total_phases: 1
-  completed_phases: 0
+  total_phases: 2
+  completed_phases: 1
   total_plans: 6
-  completed_plans: 346
-  percent: 0
+  completed_plans: 6
+  percent: 50
 ---
 
 # Project State
@@ -456,6 +456,7 @@ Recent decisions affecting current work:
 - Phase 32.3.1 inserted after Phase 32.3: fix delegate_task kill abort wiring — close shrike handle_map gap (residual bug surfaced during 26.7.1 Wave 2 UAT 2026-05-19) (URGENT)
 - Phase 26.7.2 inserted after Phase 26.7.1: Sessions load session data (URGENT)
 - Phase 26.7.3 inserted after Phase 26.7.2: Skills page - enable tab, search and toggle on-off features (URGENT)
+- Phase 35 added: Cron subagent budget isolation (T-28.1-16) — follow-up from Phase 28.1
 
 ### Pending Todos
 
