@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured};
+use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
 use ironhermes_cron::{complete_job_run, resolve_delivery_targets, CronJob, JobStore, TgSendApi};
 use ironhermes_hooks::HookRegistry;
@@ -175,6 +176,14 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     let request_id = Uuid::new_v4().to_string();
     let cron_chat_id = format!("cron-{}", job.id);
 
+    // §6.4 Cron-distinct budget: each job run gets a FRESH budget sized from
+    // config.agent.max_iterations, independent of the interactive (gateway)
+    // budget. A fresh handle per job means every scheduled run starts full
+    // regardless of prior job consumption — mirrors the run_turn boundary.
+    // This MUST be a new BudgetHandle (new Arc<AtomicUsize>), NOT a clone of
+    // any gateway AgentRuntime budget. T-28.1-14 mitigation.
+    let cron_budget = BudgetHandle::new(ctx.config.agent.max_iterations);
+
     info!(job_id=%job.id, job_name=%job.name, "cron job starting");
 
     // Fire MessageReceived hook (gateway parity)
@@ -287,6 +296,9 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     };
 
     let mut agent = AgentLoop::new(client, tool_registry_scoped, max_turns);
+    // Install the cron-distinct budget (§6.4). This budget is separate from any
+    // interactive gateway budget — draining it does not affect interactive chat.
+    agent = agent.with_budget(cron_budget);
     agent = wire_fallback_if_configured(agent, &resolver);
     if let Some(registry) = &ctx.hook_registry {
         agent = agent.with_hook_registry(registry.clone());
