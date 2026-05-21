@@ -410,7 +410,10 @@ async fn cmd_test(name: String) -> anyhow::Result<()> {
             // Format: 2 indent + 30 name + 3 separator + 47 desc = 82 max
             for (tool_name, description) in &tools {
                 let truncated_desc = if description.len() > 47 {
-                    format!("{}\u{2026}", &description[..46])
+                    format!(
+                        "{}\u{2026}",
+                        ironhermes_core::truncate_on_char_boundary(description, 46)
+                    )
                 } else {
                     description.clone()
                 };
