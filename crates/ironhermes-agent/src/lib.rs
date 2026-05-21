@@ -10,6 +10,7 @@ pub mod context_engine;
 pub mod context_loader;
 pub mod engine_factory;
 pub mod memory;
+pub mod memory_context;
 pub mod memory_flush_handler;
 pub mod nudge;
 pub mod personality;
