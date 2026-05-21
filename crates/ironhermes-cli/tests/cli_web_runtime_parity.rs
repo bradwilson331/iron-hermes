@@ -31,13 +31,18 @@ fn cli_entry_points_use_shared_runtime_factory() {
 #[test]
 fn ratatui_build_app_deps_uses_shared_runtime_factory() {
     let source = read_rata_event_loop();
+    // Phase 28.1-05: tui_rata now delegates to AgentRuntime::from_config which
+    // internally calls build_app_runtime_bundle. The direct call to
+    // build_app_runtime_bundle was removed from event_loop.rs; the runtime owns
+    // the bundle. Assert the new durable-assembly boundary is present instead.
     assert!(
-        source.contains("build_app_runtime_bundle("),
-        "tui_rata build_app_deps must call build_app_runtime_bundle"
+        source.contains("AgentRuntime::from_config("),
+        "tui_rata build_app_deps must call AgentRuntime::from_config (Phase 28.1-05 \
+         replaces direct build_app_runtime_bundle call)"
     );
     assert!(
-        source.contains("DelegateTaskWiring"),
-        "tui_rata build_app_deps must pass DelegateTaskWiring"
+        source.contains("AgentRuntimeInput {"),
+        "tui_rata build_app_deps must construct AgentRuntimeInput"
     );
 }
 

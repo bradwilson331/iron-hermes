@@ -86,13 +86,16 @@ fn invariant_22_4_03_is_terminal_gate_both_fds() {
 
 /// [Rule 1 - Bug] Plan spec used `run_agent_turn` but actual impl calls
 /// `agent.run(messages_snapshot)` inside `spawn_turn` using per-turn
-/// `AgentLoop::new`. Updated to check `agent.run` which is present in
-/// event_loop.rs and correctly captures the streaming contract.
+/// `AgentLoop::new`. Phase 28.1-05: migrated to `runtime.run_turn(request)`
+/// via AgentRuntime; updated to accept either form.
 #[test]
 fn invariant_22_4_04_agent_loop_streaming_wired() {
     assert!(
-        TUI_RATA_EVLOOP.contains("agent.run") || TUI_RATA_EVLOOP.contains("run_agent_turn"),
-        "INV-22.4-04: event_loop.rs must call agent.run() or run_agent_turn for per-turn streaming"
+        TUI_RATA_EVLOOP.contains("agent.run")
+            || TUI_RATA_EVLOOP.contains("run_agent_turn")
+            || TUI_RATA_EVLOOP.contains("run_turn("),
+        "INV-22.4-04: event_loop.rs must call agent.run(), run_agent_turn, or \
+         runtime.run_turn(request) for per-turn turn execution (Phase 28.1-05)"
     );
     assert!(
         TUI_RATA_EVLOOP.contains("StreamEvent::Delta"),
@@ -296,35 +299,46 @@ fn invariant_22_4_22_unit_separator_codec_present() {
 // The numbering set is now {00..22, 24..29} — non-contiguous; future plans
 // should pick up at INV-22.4-30, NOT 23.
 
-/// WARNING-NEW-03 (iteration 2): classic registration order preserved.
-/// Uses `.find()` for first-occurrence position comparison.
+/// INV-22.4-24 (Phase 28.1-05 translation): durable wiring built before
+/// AgentRuntime::from_config (new durable-assembly boundary).
+///
+/// After the Phase 28.1-05 migration, production event_loop.rs no longer
+/// contains `AgentLoop::new` (it moved into AgentRuntime). The ordering
+/// invariant is translated: subsystems that must be constructed before
+/// from_config are asserted to appear BEFORE `AgentRuntime::from_config`.
+/// Spirit of the invariant (durable wiring precedes the agent unit) is preserved.
+///
+/// WARNING-NEW-03 (iteration 3): uses `.find()` for first-occurrence comparison.
 #[test]
 fn invariant_22_4_24_registration_order_parity() {
     let find = |needle: &str| TUI_RATA_EVLOOP.find(needle);
 
-    let agent_loop_pos = find("AgentLoop::new")
-        .expect("INV-22.4-24: event_loop.rs must contain AgentLoop::new (D-18 item 1)");
+    // Phase 28.1-05: the assembly boundary is now AgentRuntime::from_config.
+    // Use the actual call site form (with the opening paren + struct) to avoid
+    // matching comment lines that reference the function name as prose.
+    let runtime_pos = find("AgentRuntime::from_config(AgentRuntimeInput")
+        .expect("INV-22.4-24: event_loop.rs must contain AgentRuntime::from_config(AgentRuntimeInput (Phase 28.1-05 D-18 item 1)");
 
     let ordered_before: &[(&str, &str)] = &[
         (
             "HookRegistry::new",
-            "D-18 item 2 — HookRegistry before AgentLoop::new",
+            "D-18 item 2 — HookRegistry before AgentRuntime::from_config",
         ),
         (
             "build_memory_manager",
-            "D-18 item 4 — MemoryManager before AgentLoop::new",
+            "D-18 item 4 — MemoryManager before AgentRuntime::from_config",
         ),
         (
             "build_mcp_manager",
-            "D-18 item 3 — McpManager before AgentLoop::new",
+            "D-18 item 3 — McpManager before AgentRuntime::from_config",
         ),
         (
             "ProcessRegistry::new_for_session",
-            "D-18 item 6 — ProcessRegistry before AgentLoop::new",
+            "D-18 item 6 — ProcessRegistry before AgentRuntime::from_config",
         ),
         (
             "SubagentRegistry::new",
-            "D-18 item 5 — SubagentRegistry before AgentLoop::new",
+            "D-18 item 5 — SubagentRegistry before AgentRuntime::from_config",
         ),
     ];
     for (needle, msg) in ordered_before {
@@ -332,9 +346,9 @@ fn invariant_22_4_24_registration_order_parity() {
             panic!("INV-22.4-24: event_loop.rs must contain `{needle}` ({msg})")
         });
         assert!(
-            pos < agent_loop_pos,
-            "INV-22.4-24: `{needle}` must appear BEFORE `AgentLoop::new` ({msg}). \
-             Found at {pos}; AgentLoop::new at {agent_loop_pos}."
+            pos < runtime_pos,
+            "INV-22.4-24: `{needle}` must appear BEFORE `AgentRuntime::from_config(AgentRuntimeInput` ({msg}). \
+             Found at {pos}; from_config call at {runtime_pos}."
         );
     }
 
@@ -346,6 +360,43 @@ fn invariant_22_4_24_registration_order_parity() {
         status_pos < app_new_pos,
         "INV-22.4-24: StatusLineState seed must appear BEFORE App::new (D-10, D-18 item 14). \
          Status at {status_pos}; App::new at {app_new_pos}."
+    );
+}
+
+/// INV-22.4-30 (Phase 28.1-05): grep-gate — no BudgetHandle::new or with_budget
+/// in event_loop.rs production code; run_turn must be present.
+///
+/// These three conditions together prove the TUI has migrated to AgentRuntime
+/// and the latent Stop100 latch class of bug is removed by construction.
+#[test]
+fn invariant_22_4_30_tui_uses_runtime_not_budget_handle() {
+    // Strip comment lines so self-referential explanatory comments don't trip this gate.
+    let non_comment: String = TUI_RATA_EVLOOP
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let budget_new_count = non_comment.matches("BudgetHandle::new(").count();
+    assert_eq!(
+        budget_new_count, 0,
+        "INV-22.4-30 (Phase 28.1-05): event_loop.rs production code must contain \
+         zero occurrences of BudgetHandle::new( — budget is now owned by AgentRuntime. \
+         Found {budget_new_count} occurrence(s)."
+    );
+
+    let with_budget_count = non_comment.matches("with_budget(").count();
+    assert_eq!(
+        with_budget_count, 0,
+        "INV-22.4-30 (Phase 28.1-05): event_loop.rs production code must contain \
+         zero occurrences of with_budget( — per-turn AgentLoop builder removed. \
+         Found {with_budget_count} occurrence(s)."
+    );
+
+    assert!(
+        non_comment.contains("run_turn("),
+        "INV-22.4-30 (Phase 28.1-05): event_loop.rs must contain run_turn( — \
+         spawn_turn must delegate to AgentRuntime::run_turn."
     );
 }
 
@@ -398,28 +449,36 @@ fn invariant_22_4_25_print_banner_pre_ratatui() {
 }
 
 /// INV-22.4-26 (Phase 22.4 gap closure — D-17 / CR-02): spawn_turn must
-/// chain `.with_tool_progress(...)` and `.with_tool_result(...)` on the
-/// per-turn AgentLoop builder so all 8 D-17 canonical StreamEvent variants
-/// are reachable from production (not just from snapshot tests that directly
-/// inject them via App::handle_stream_event). See 22.4-VERIFICATION.md Gap 2,
-/// 22.4-REVIEW.md CR-02, and Plan 22.4-12 Tasks 1+2 (commits 8a39eed +
-/// 8a9125b). This invariant is the carry-over from Plan 22.4-12 Task 3.
+/// wire tool_progress and tool_result callbacks so all 8 D-17 canonical
+/// StreamEvent variants are reachable from production.
+///
+/// Phase 28.1-05 translation: the per-turn AgentLoop builder was replaced by
+/// AgentRuntime::run_turn + TurnRequest. The callbacks are now passed as
+/// TurnRequest fields (`tool_progress: Some(...)` / `tool_result: Some(...)`)
+/// instead of `.with_tool_progress(...)` / `.with_tool_result(...)` chain calls.
+/// Both old and new forms are accepted so the invariant survives future refactors.
 #[test]
 fn invariant_22_4_26_tool_progress_wired() {
+    // Accept both old AgentLoop chain form and new TurnRequest field form.
+    let has_tool_progress = TUI_RATA_EVLOOP.contains("with_tool_progress(")
+        || TUI_RATA_EVLOOP.contains("tool_progress: Some(");
     assert!(
-        TUI_RATA_EVLOOP.contains("with_tool_progress("),
-        "INV-22.4-26 (D-17 / CR-02): tui_rata/event_loop.rs must call \
-         AgentLoop::with_tool_progress(...) inside spawn_turn so the \
-         tool-progress callback forwards StreamEvent::ToolCall + \
-         StreamEvent::ToolProgress to the UI event loop. See Plan 22.4-12 \
-         Task 2 (commit 8a9125b)."
+        has_tool_progress,
+        "INV-22.4-26 (D-17 / CR-02): tui_rata/event_loop.rs must wire the \
+         tool-progress callback (via AgentLoop::with_tool_progress or \
+         TurnRequest.tool_progress) so StreamEvent::ToolCall + \
+         StreamEvent::ToolProgress reach the UI event loop. See Plan 22.4-12 \
+         Task 2 (commit 8a9125b); Phase 28.1-05 translation."
     );
+    let has_tool_result = TUI_RATA_EVLOOP.contains("with_tool_result(")
+        || TUI_RATA_EVLOOP.contains("tool_result: Some(");
     assert!(
-        TUI_RATA_EVLOOP.contains("with_tool_result("),
-        "INV-22.4-26 (D-17 / CR-02): tui_rata/event_loop.rs must call \
-         AgentLoop::with_tool_result(...) inside spawn_turn so the \
-         tool-completion callback forwards StreamEvent::ToolResult to the \
-         UI event loop. See Plan 22.4-12 Task 1+2 (commits 8a39eed + 8a9125b)."
+        has_tool_result,
+        "INV-22.4-26 (D-17 / CR-02): tui_rata/event_loop.rs must wire the \
+         tool-result callback (via AgentLoop::with_tool_result or \
+         TurnRequest.tool_result) so StreamEvent::ToolResult reaches the UI \
+         event loop. See Plan 22.4-12 Task 1+2 (commits 8a39eed + 8a9125b); \
+         Phase 28.1-05 translation."
     );
 }
 
@@ -511,23 +570,24 @@ fn invariant_22_4_28_tool_registry_parity() {
          receives a real runner (not a stub). Mirrors classic main.rs:491-499."
     );
 
-    // (d) — with_fallback chained in spawn_turn.
+    // (d) — PROV-07 fallback parity (Phase 28.1-05 translation).
+    // Before Phase 28.1-05: `.with_fallback(fb_client)` was chained on the
+    // per-turn AgentLoop builder inside spawn_turn. After: AgentRuntime::run_turn
+    // calls wire_fallback_if_configured internally — fallback is DURABLE, not
+    // per-turn. event_loop.rs no longer constructs fallback_client; the runtime
+    // owns it. Assert that AgentRuntime::from_config is called (the durable
+    // fallback boundary) rather than checking per-turn .with_fallback.
+    //
+    // The spirit of INV-22.4-28(d) — PROV-07 fallback fires on 429/5xx — is
+    // preserved: wire_fallback_if_configured in agent_runtime.rs enforces it for
+    // every run_turn call. The invariant is translated rather than deleted.
     assert!(
-        TUI_RATA_EVLOOP.contains(".with_fallback("),
-        "INV-22.4-28 (d): tui_rata/event_loop.rs must chain \
-         .with_fallback(fb_client) on the per-turn AgentLoop builder inside \
-         spawn_turn so PROV-07 fallback parity with classic main.rs:631-637 \
-         is restored. See 22.4-UAT.md Gap 2 (c)."
-    );
-    // The fallback_client identifier must appear in event_loop.rs in BOTH
-    // build_app_deps (the let binding + AppDeps assignment) AND spawn_turn
-    // (the clone + the if-let guard). Total >= 4 occurrences.
-    let fallback_count = TUI_RATA_EVLOOP.matches("fallback_client").count();
-    assert!(
-        fallback_count >= 4,
-        "INV-22.4-28 (d): the `fallback_client` identifier must appear >= 4 \
-         times in event_loop.rs (build_app_deps let + AppDeps init + \
-         spawn_turn clone + spawn_turn if-let). Found {fallback_count}."
+        TUI_RATA_EVLOOP.contains("AgentRuntime::from_config(AgentRuntimeInput")
+            || TUI_RATA_EVLOOP.contains(".with_fallback("),
+        "INV-22.4-28 (d): tui_rata/event_loop.rs must establish PROV-07 fallback \
+         parity either via AgentRuntime::from_config (Phase 28.1-05 durable path) \
+         or via .with_fallback(fb_client) on the per-turn AgentLoop builder. \
+         See 22.4-UAT.md Gap 2 (c); Phase 28.1-05 translation."
     );
 }
 
