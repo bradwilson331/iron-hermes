@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod agent_runtime;
 pub mod agent_wiring;
 pub mod anthropic_client;
 pub mod any_client;
@@ -27,6 +28,7 @@ pub mod tool_pair;
 pub mod transcript;
 
 pub use agent_loop::{AgentLoop, AgentResult, AggregatedUsage};
+pub use agent_runtime::{AgentRuntime, AgentRuntimeInput, TurnRequest};
 pub use agent_wiring::attach_context_engine;
 pub use anthropic_client::AnthropicClient;
 pub use any_client::{
