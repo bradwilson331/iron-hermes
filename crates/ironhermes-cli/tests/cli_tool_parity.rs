@@ -103,15 +103,19 @@ fn attach_context_engine_receives_hook_registry_not_none() {
 
 #[test]
 fn run_gateway_uses_shared_runtime_active_skills() {
+    // Phase 28.1-02: run_gateway now constructs the shared AgentRuntime via
+    // AgentRuntime::from_config (which builds the AppRuntimeBundle internally and
+    // applies active_skills), then reads active_skills back off the runtime and
+    // forwards them into the GatewayRunner.
     let source = read_main_rs();
     let body = extract_function_body(&source, "run_gateway");
     assert!(
-        body.contains("build_app_runtime_bundle"),
-        "run_gateway must build AppRuntimeBundle"
+        body.contains("AgentRuntime::from_config"),
+        "run_gateway must build the shared runtime via AgentRuntime::from_config"
     );
     assert!(
-        body.contains("runtime_bundle.active_skills"),
-        "run_gateway must use runtime_bundle.active_skills"
+        body.contains("runtime.active_skills()"),
+        "run_gateway must read active_skills from the shared runtime"
     );
     assert!(
         body.contains("runner.set_active_skills(active_skills)"),
