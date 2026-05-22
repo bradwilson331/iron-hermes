@@ -857,6 +857,20 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         io::stdout().flush().ok();
     }
 
+    // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+    // Warnings are NOT embedded in the model-bound message text; each surface renders
+    // them separately so the user sees them without the model echoing them.
+    if !result.context_warnings.is_empty() {
+        let warning_lines: Vec<String> = result
+            .context_warnings
+            .iter()
+            .map(|w| format!("- {}", w))
+            .collect();
+        let block = format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+        print!("{}", block);
+        io::stdout().flush().ok();
+    }
+
     // Plan 21.7-06 (D-24, T-21.7-06-01): drain + kill any background processes
     // tracked by this session's ProcessRegistry before exit. Best-effort —
     // matches the surrounding on_session_end pattern (log-and-continue). If
@@ -2323,6 +2337,19 @@ async fn run_agent_turn(
     let tail = scrubber_chat.lock().unwrap().flush();
     if !tail.is_empty() {
         write_into_scroll_region(tail.as_bytes(), tui.reserved_row_count());
+    }
+
+    // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+    // Written via write_into_scroll_region so it lands in the scroll region like streamed
+    // output — visibly separate from the model response text (no double-render).
+    if !result.context_warnings.is_empty() {
+        let warning_lines: Vec<String> = result
+            .context_warnings
+            .iter()
+            .map(|w| format!("- {}", w))
+            .collect();
+        let block = format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+        write_into_scroll_region(block.as_bytes(), tui.reserved_row_count());
     }
 
     // After the turn completes, reset activity to Idle so the scanner hides (D-08).

@@ -223,10 +223,23 @@ impl AppState {
         // - state_store threaded via TurnRequest so session_search intercept fires (T-28.1-07).
         // - pressure_tracker: fresh per-turn, matching prior build_agent_loop behavior.
         // - session_id: use the real per-session id (behavior improvement over hardcoded "web-ui").
+        //
+        // WR-01 (Phase 34b Plan 03): retain a shared reference to stream_callback so
+        // we can emit context_warnings out-of-band AFTER run_turn returns. StreamCallback
+        // is Box<dyn Fn>, not Clone, so we wrap it in Arc before passing a forwarding Box
+        // into TurnRequest — the Arc clone is used post-turn for the warnings block.
+        let stream_cb_arc: std::sync::Arc<ironhermes_agent::agent_loop::StreamCallback> =
+            std::sync::Arc::new(stream_callback);
+        let cb_for_turn = {
+            let arc = stream_cb_arc.clone();
+            let cb: ironhermes_agent::agent_loop::StreamCallback =
+                Box::new(move |s: &str| (arc)(s));
+            cb
+        };
         let request = TurnRequest {
             messages,
             session_id: session_id.to_string(),
-            stream: Some(stream_callback),
+            stream: Some(cb_for_turn),
             tool_progress: tool_progress_callback,
             tool_result: tool_result_callback,
             state_store: Some(self.state_store.clone()),
@@ -244,6 +257,25 @@ impl AppState {
         // Drop the state_store guard explicitly so we don't hold two locks
         // when we acquire the nudge_turns Mutex below.
         drop(store);
+
+        // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+        // Streamed via the same stream_callback so the web client receives it as a distinct
+        // annotation after the model response. tracing::warn! for server-side visibility.
+        if !result.context_warnings.is_empty() {
+            let warning_lines: Vec<String> = result
+                .context_warnings
+                .iter()
+                .map(|w| format!("- {}", w))
+                .collect();
+            let warnings_block =
+                format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+            tracing::warn!(
+                session_id = session_id,
+                warnings = ?result.context_warnings,
+                "context_warnings surfaced out-of-band (WR-01)"
+            );
+            (stream_cb_arc)(warnings_block.as_str());
+        }
 
         // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
         // Fires AFTER run_turn() succeeded and AFTER result.appended is persisted.
