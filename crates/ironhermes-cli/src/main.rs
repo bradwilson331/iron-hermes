@@ -751,8 +751,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 
     // Plan 28.1-04: build ONE AgentRuntime from config — replaces the manual
     // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
-    // from_config creates the shared BudgetHandle, builds the subagent runner
-    // with a clone of it (PROV-10), and assembles the tool registry/skills/browser bundle.
+    // from_config creates the runtime's top-level BudgetHandle; each child subagent
+    // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the
+    // tool registry/skills/browser bundle.
     // run_turn resets the budget at every turn boundary, fixing any Stop100 latch.
     let runtime = ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
         config: Arc::new(config.clone()),
@@ -1297,8 +1298,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 
     // Plan 28.1-04: build ONE AgentRuntime — replaces the manual BudgetHandle::new
     // + AgentSubagentRunner + build_app_runtime_bundle block. from_config creates
-    // the shared BudgetHandle, builds the subagent runner with a clone of it
-    // (PROV-10), and assembles the tool registry/skills/browser bundle.
+    // the runtime's top-level BudgetHandle; each child subagent gets its own fresh
+    // BudgetHandle (D-01/D-04, Phase 35), and assembles the tool registry/skills/browser bundle.
     // run_turn resets the budget at each turn boundary, permanently fixing the
     // latent multi-turn Stop100 latch (T-28.1-08).
     let runtime = Arc::new(
@@ -2415,8 +2416,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     // Plan 28.1-02: build ONE AgentRuntime from config — replaces the manual
     // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
-    // from_config creates the shared BudgetHandle, builds the subagent runner
-    // with a clone of it (PROV-10), and assembles the bundle.
+    // from_config creates the runtime's top-level BudgetHandle; each child subagent
+    // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the bundle.
     let runtime = Arc::new(
         ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
             config: Arc::new(config.clone()),
