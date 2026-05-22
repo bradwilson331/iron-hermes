@@ -221,10 +221,10 @@ agent = agent.with_budget(BudgetHandle::new(max_iterations));   // fresh Arc<Ato
 | A2 | The reference's `delegate_tool.py:1968-1979` log-and-drop and `:507` DEFAULT=50 are accurate (cited from CONTEXT, not re-read this session) | Live Code Verification | Low — used only to justify Option A fidelity; the IronHermes-side change is independently specified. |
 | A3 | Removing the `AgentSubagentRunner.budget` field is safe (only reader is line 283-284) | Field disposition | Low — verified zero other readers via grep this session; planner should re-grep `AgentSubagentRunner::new(` call sites before committing. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **D-03 policy choice (Option A vs B) — see D-03 Resolution.** Recommendation: Option A for fidelity, but it deletes a shipped Phase 32.2 feature and inverts its test — get explicit user sign-off (this is the only non-mechanical decision in the phase).
-2. **Should the `max_iterations` schema property be removed entirely or kept as advisory-only?** If Option A, removing it from the schema (lines 677, 695-698) is cleaner but changes the tool's public JSON contract; keeping it but dropping the value is less disruptive. Planner's call; lean toward removing the per-task one and documenting the top-level one as advisory.
+1. **D-03 policy choice (Option A vs B) — RESOLVED 2026-05-21 → Option B (CLAMP TO CEILING).** User chose to keep the Phase 32.2 per-call override but treat `config.delegation.max_iterations` as a hard ceiling: requests ≤ ceiling are honored, requests > ceiling are clamped down (+`tracing::warn!`). See CONTEXT.md D-03 (RESOLVED) and 35-VALIDATION.md.
+2. **Should the `max_iterations` schema property be removed entirely or kept as advisory-only? — RESOLVED → KEEP BOTH.** Under Option B both `max_iterations` schema properties (single `:695-698` + per-task `:677`) stay, retain `"minimum": 1`, and gain descriptions documenting the config ceiling. No public JSON contract change.
 
 ## Environment Availability
 

@@ -99,7 +99,7 @@ touch interactive headroom because *no* subagent shares its parent's counter.
   posture).
 
 ### Scope / framing
-- **D-06:** [informational] **Keep Phase 35; broaden its goal.** The ROADMAP Phase 35
+- **D-06 [informational]:** **Keep Phase 35; broaden its goal.** The ROADMAP Phase 35
   goal/title should be updated to reflect the global model change
   ("per-subagent independent iteration budgets matching the hermes-agent
   reference; retire PROV-10 shared counter; T-28.1-16 resolved as a

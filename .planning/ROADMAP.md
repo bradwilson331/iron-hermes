@@ -6,6 +6,7 @@
 **Plans:** 6/6 plans complete
 
 Plans:
+
 - [x] 28.1-01-PLAN.md — AgentRuntime budget-reset regression test (foundational proof; agent crate)
 - [x] 28.1-02-PLAN.md — Gateway → run_turn; remove 367eaa79 band-aid (highest value)
 - [x] 28.1-03-PLAN.md — Web UI → run_turn; close top-level-loop budget gap
@@ -23,6 +24,11 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 35-01-PLAN.md — Clamp delegate_task max_iterations to the config ceiling (D-03 Option B) + rewrite override test
 - [ ] 35-02-PLAN.md — Fresh per-child BudgetHandle at the runner change site; retire PROV-10 parent↔child counter; D-07.1 independence test
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 35-03-PLAN.md — Subagent-layer cron independence test (T-28.1-16 acceptance); amend AGENT-RUNTIME-DESIGN.md §6.4/§8 + threat model
