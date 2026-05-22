@@ -874,14 +874,14 @@ pub async fn preprocess_context_references_async(
     }
 
     // Assemble final message.
+    // NOTE (WR-01): the --- Context Warnings --- block is intentionally NOT embedded here.
+    // Warnings are surfaced exclusively via ContextReferenceResult.warnings, which flows
+    // to AgentResult.context_warnings for each surface (CLI, gateway, web) to render
+    // out-of-band after run_turn returns. Embedding them here would inject operational
+    // metadata into the model-bound message text, wasting prompt tokens and risking
+    // double-render if the surface also reads context_warnings.
     let stripped = remove_reference_tokens(message, &refs);
     let mut final_msg = stripped.clone();
-
-    if !warnings.is_empty() {
-        let warning_lines: Vec<String> = warnings.iter().map(|w| format!("- {}", w)).collect();
-        final_msg.push_str("\n\n--- Context Warnings ---\n");
-        final_msg.push_str(&warning_lines.join("\n"));
-    }
 
     if !blocks.is_empty() {
         final_msg.push_str("\n\n--- Attached Context ---\n\n");

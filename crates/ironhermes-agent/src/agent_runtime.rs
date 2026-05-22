@@ -366,8 +366,10 @@ impl AgentRuntime {
             );
         }
 
-        // D-11: attach context_warnings from @-ref expansion onto the AgentResult
-        // so all 3 surfaces (CLI, gateway, web) can render --- Context Warnings ---.
+        // D-11 / WR-01: attach context_warnings from @-ref expansion onto AgentResult.
+        // Each surface (CLI, gateway, web) reads this field after run_turn returns and
+        // renders the --- Context Warnings --- block out-of-band (not embedded in the
+        // model-bound message text — that embedding was removed in Phase 34b Plan 03).
         let mut out = agent.run(req.messages).await?;
 
         // Phase 34b Plan 02 (D-09): post-run per-turn usage hook. MUST appear

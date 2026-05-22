@@ -68,11 +68,15 @@ pub struct AgentResult {
     /// Legacy callers that don't inspect this field continue to work — the
     /// default for pre-21.7 paths is `Natural` or `MaxIterations` as before.
     pub stop_reason: StopReason,
-    /// Phase 34b Plan 01 (D-11): warnings produced by `@`-reference expansion in
-    /// `run_turn`. Populated by `AgentRuntime::run_turn` after
-    /// `preprocess_context_references_async` runs (before `attach_context_engine`).
-    /// Surfaces to all three channels (CLI, gateway, web) without per-surface
-    /// preprocessing — the centralization invariant tested in `invariants_34b`.
+    /// Phase 34b Plan 03 (WR-01): out-of-band warnings produced by `@`-reference
+    /// expansion in `run_turn`. Populated by `AgentRuntime::run_turn` after
+    /// `preprocess_context_references_async` runs. Each surface (CLI `run_single` +
+    /// `run_chat_turn`, gateway `run_agent`, web `run_web_turn`) reads this field
+    /// after `run_turn` returns and renders the `--- Context Warnings ---` block
+    /// separately from the model response text. The warnings are NOT embedded in the
+    /// message text sent to the model — `preprocess_context_references_async` populates
+    /// only `ContextReferenceResult.warnings`; the surface rendering is done here.
+    /// Invariant locked in `invariants_34b::surfaces_consume_context_warnings`.
     pub context_warnings: Vec<String>,
 }
 
