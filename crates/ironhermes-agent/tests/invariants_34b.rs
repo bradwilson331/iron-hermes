@@ -105,6 +105,56 @@ fn update_from_response_after_agent_run_in_run_turn() {
     );
 }
 
+// ── Phase 34b Plan 03 (Task 3): WR-01 source guards ─────────────────────────
+
+const CONTEXT_REFS_SOURCE: &str = include_str!("../src/context_refs.rs");
+
+/// (f) WR-01 surface guard: each of the three production surface files must
+/// reference `context_warnings` — proving CLI, gateway, and web all read the
+/// out-of-band warnings field after `run_turn` returns.
+#[test]
+fn surfaces_consume_context_warnings() {
+    let token = "context_warnings";
+    assert!(
+        MAIN_SOURCE.contains(token),
+        "WR-01: main.rs (CLI surface) must reference `context_warnings` — \
+         run_single and run_chat_turn must render warnings out-of-band"
+    );
+    assert!(
+        HANDLER_SOURCE.contains(token),
+        "WR-01: handler.rs (gateway surface) must reference `context_warnings` — \
+         run_agent Ok arm must render warnings out-of-band"
+    );
+    assert!(
+        STATE_SOURCE.contains(token),
+        "WR-01: state.rs (web surface) must reference `context_warnings` — \
+         run_web_turn must render warnings out-of-band"
+    );
+}
+
+/// (g) WR-01 no-double-render guard: `context_refs.rs` must NOT push the
+/// `--- Context Warnings ---` block into `final_msg` (the model-bound message text).
+/// The `--- Attached Context ---` block MUST still be embedded (model needs it).
+#[test]
+fn warnings_not_embedded_in_message_text() {
+    let embedding_marker =
+        "final_msg.push_str(\"\\n\\n--- Context Warnings ---";
+
+    assert!(
+        !CONTEXT_REFS_SOURCE.contains(embedding_marker),
+        "WR-01 no-double-render: context_refs.rs must NOT embed '--- Context Warnings ---' \
+         into final_msg (the model-bound message text). Warnings must flow exclusively \
+         through ContextReferenceResult.warnings → AgentResult.context_warnings for \
+         out-of-band surface rendering."
+    );
+
+    assert!(
+        CONTEXT_REFS_SOURCE.contains("--- Attached Context ---"),
+        "WR-01: context_refs.rs must still embed '--- Attached Context ---' in the \
+         message text (the model needs injected context content)"
+    );
+}
+
 /// (e) CLI `/new` (ClearSession arm) resets the durable per-session
 /// compression_count Arc<AtomicUsize> to 0 (D-09/D-10 surface reset locus).
 #[test]

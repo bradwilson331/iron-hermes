@@ -1126,6 +1126,23 @@ impl GatewayMessageHandler {
                     }
                 }
 
+                // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band.
+                // Sent as a SEPARATE message so it is visibly distinct from the agent
+                // response — mirrors the Err arm's error_suffix pattern (a distinct
+                // send_message call, not appended to the streamed response).
+                if !result.context_warnings.is_empty() {
+                    let warning_lines: Vec<String> = result
+                        .context_warnings
+                        .iter()
+                        .map(|w| format!("- {}", w))
+                        .collect();
+                    let warnings_block =
+                        format!("--- Context Warnings ---\n{}", warning_lines.join("\n"));
+                    let _ = adapter
+                        .send_message(&event.chat_id, &warnings_block, None)
+                        .await;
+                }
+
                 // 11. Update session with agent's response messages (write-through to SQLite).
                 //
                 // Phase 25.1 GAP-7 follow-up: persist `result.appended` directly. The
