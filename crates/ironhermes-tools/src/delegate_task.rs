@@ -2061,7 +2061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_per_call_max_iterations_overrides_config() {
+    async fn test_per_call_max_iterations_clamps_to_ceiling() {
         use std::sync::Mutex;
 
         struct IterCapture {
@@ -2085,10 +2085,35 @@ mod tests {
             }
         }
 
-        let captured = Arc::new(Mutex::new(None));
-        let tool = DelegateTaskTool::new(
+        // Case (a): config ceiling = 5, request 99 → clamped to 5.
+        let captured_a = Arc::new(Mutex::new(None::<usize>));
+        let tool_a = DelegateTaskTool::new(
             Arc::new(IterCapture {
-                captured: captured.clone(),
+                captured: captured_a.clone(),
+            }),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig {
+                max_iterations: 5,
+                ..SubagentConfig::default()
+            },
+            None,
+        );
+        let _result_a = tool_a
+            .execute(json!({"task": "test task", "max_iterations": 99}))
+            .await
+            .unwrap();
+        let seen_a = captured_a.lock().unwrap().expect("runner was called (case a)");
+        assert_eq!(
+            seen_a, 5,
+            "per-call max_iterations=99 exceeds ceiling=5 and must be clamped to 5"
+        );
+
+        // Case (b): config ceiling = 99, request 3 → honored verbatim (3).
+        let captured_b = Arc::new(Mutex::new(None::<usize>));
+        let tool_b = DelegateTaskTool::new(
+            Arc::new(IterCapture {
+                captured: captured_b.clone(),
             }),
             Arc::new(Semaphore::new(3)),
             None,
@@ -2098,16 +2123,14 @@ mod tests {
             },
             None,
         );
-
-        let _result = tool
+        let _result_b = tool_b
             .execute(json!({"task": "test task", "max_iterations": 3}))
             .await
             .unwrap();
-
-        let seen = captured.lock().unwrap().expect("runner was called");
+        let seen_b = captured_b.lock().unwrap().expect("runner was called (case b)");
         assert_eq!(
-            seen, 3,
-            "per-call max_iterations=3 should override config max_iterations=99"
+            seen_b, 3,
+            "per-call max_iterations=3 is at or below ceiling=99 and must be honored verbatim"
         );
     }
 
