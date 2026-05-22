@@ -1232,6 +1232,62 @@ mod tests {
         assert!(result.expanded, "File expand should mark expanded=true");
     }
 
+    /// WR-01 / Task 1: warnings must NOT be embedded in message text; they must appear
+    /// only on result.warnings (out-of-band channel). The --- Attached Context --- block
+    /// MUST still appear in the message when a file is successfully expanded.
+    #[tokio::test]
+    async fn test_warnings_not_in_message_text_but_on_warnings_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write ~200 chars → ~50 tokens; with context_length=160 soft_limit=40, hard_limit=80.
+        // Ensures injected_tokens > soft_limit → a warning is generated.
+        let content = "hello world ".repeat(20); // ~240 chars
+        std::fs::write(dir.path().join("mid2.txt"), &content).unwrap();
+
+        let msg = "@file:mid2.txt";
+        // context_length=160 → soft_limit=40, hard_limit=80.
+        // ~240 chars / 4 ≈ 60 tokens > soft_limit(40), so a soft-limit warning fires.
+        let result = preprocess_context_references_async(msg, dir.path(), 160, None, None).await;
+
+        // The file must have been expanded (not blocked by hard limit with this window size).
+        // If somehow hard-blocked, skip the warnings check (the file content is too large).
+        if result.blocked {
+            // At this context_length the content might exceed hard limit too; just verify
+            // that warnings are populated and message still equals original.
+            assert!(!result.warnings.is_empty(), "Blocked result must still have warnings");
+            assert_eq!(result.message, result.original_message, "Blocked: message must equal original");
+            assert!(
+                !result.message.contains("--- Context Warnings ---"),
+                "WR-01: blocked result message must NOT contain '--- Context Warnings ---'; found in message text"
+            );
+            return;
+        }
+
+        // Non-blocked path: if a soft-limit warning was generated, it must NOT appear in
+        // message text — only on the warnings Vec.
+        if result.injected_tokens > 40 {
+            assert!(
+                !result.warnings.is_empty(),
+                "Expected soft-limit warning on warnings Vec, got empty warnings (injected={})",
+                result.injected_tokens
+            );
+            assert!(
+                !result.message.contains("--- Context Warnings ---"),
+                "WR-01: warnings block must NOT be embedded in message text (no-double-render contract)"
+            );
+            assert!(
+                result.warnings.iter().any(|w| w.contains("soft limit") || w.contains("exceeds")),
+                "Soft-limit warning must appear on result.warnings: {:?}",
+                result.warnings
+            );
+        }
+
+        // The --- Attached Context --- block must still appear in the message (file was expanded).
+        assert!(
+            result.message.contains("--- Attached Context ---"),
+            "Attached context block must remain in message text"
+        );
+    }
+
     /// @git:N validation: out-of-range values [0, 11] are rejected with a warning.
     /// In-range value 3 maps to argv args ["log", "-3", "-p"] (no shell string).
     #[tokio::test]
