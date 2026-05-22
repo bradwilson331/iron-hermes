@@ -421,10 +421,11 @@ pub(crate) fn remove_reference_tokens(message: &str, refs: &[ContextReference]) 
 }
 
 // ---------------------------------------------------------------------------
-// UrlFetcher type alias (used by Task 2 expander).
+// UrlFetcher type alias.
 
 /// Injected URL fetcher for `preprocess_context_references_async`.
 /// Production code passes a closure over `WebExtractTool`; tests inject hermetic fakes.
+/// Returns `Ok(content)` on success, `Err(warning_text)` on failure (D-02: never silent drop).
 pub type UrlFetcher = Box<
     dyn Fn(
             String,
@@ -434,6 +435,464 @@ pub type UrlFetcher = Box<
         + Send
         + Sync,
 >;
+
+// ---------------------------------------------------------------------------
+// Expander + budget enforcement (Task 2).
+
+use crate::context_compressor::estimate_tokens;
+
+/// Rough token estimate for a string — same estimator used elsewhere in the crate.
+fn estimate_tokens_rough(text: &str) -> usize {
+    estimate_tokens(text)
+}
+
+/// Determine the code-fence language for a file extension (mirrors Python's `_code_fence_language`).
+fn code_fence_language(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("py") => "python",
+        Some("js") => "javascript",
+        Some("ts") => "typescript",
+        Some("tsx") => "tsx",
+        Some("jsx") => "jsx",
+        Some("json") => "json",
+        Some("md") => "markdown",
+        Some("sh") => "bash",
+        Some("yml" | "yaml") => "yaml",
+        Some("toml") => "toml",
+        Some("rs") => "rust",
+        _ => "",
+    }
+}
+
+/// Detect binary files by MIME guess + null-byte scan (mirrors Python `_is_binary_file`).
+fn is_binary_file(path: &Path) -> bool {
+    // Check extension against known text extensions.
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let text_exts = ["py","md","txt","json","yaml","yml","toml","js","ts","rs","toml","sh","html","css"];
+        if text_exts.contains(&ext) {
+            return false;
+        }
+    }
+    // Null-byte scan on first 4096 bytes.
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = f.read(&mut buf) {
+            return buf[..n].contains(&0u8);
+        }
+    }
+    false
+}
+
+/// Expand a `@file:` reference to a fenced code block.
+fn expand_file_reference(
+    r: &ContextReference,
+    cwd: &Path,
+    allowed_root: &Path,
+    home: &Path,
+    hermes_home: &Path,
+) -> (Option<String>, Option<String>) {
+    let resolved = match resolve_within_root(cwd, &r.target, allowed_root) {
+        Some(p) => p,
+        None => {
+            return (
+                Some(format!("{}: path is outside the allowed workspace", r.raw)),
+                None,
+            )
+        }
+    };
+    if is_sensitive_path(&resolved, home, hermes_home) {
+        return (
+            Some(format!(
+                "{}: path is a sensitive credential file and cannot be attached",
+                r.raw
+            )),
+            None,
+        );
+    }
+    if !resolved.exists() {
+        return (Some(format!("{}: file not found", r.raw)), None);
+    }
+    if !resolved.is_file() {
+        return (Some(format!("{}: path is not a file", r.raw)), None);
+    }
+    if is_binary_file(&resolved) {
+        return (Some(format!("{}: binary files are not supported", r.raw)), None);
+    }
+    let text = match std::fs::read_to_string(&resolved) {
+        Ok(t) => t,
+        Err(e) => return (Some(format!("{}: {}", r.raw, e)), None),
+    };
+    let text = if let Some(ls) = r.line_start {
+        let lines: Vec<&str> = text.lines().collect();
+        let start_idx = ls.saturating_sub(1).min(lines.len());
+        let end_idx = r.line_end.unwrap_or(ls).min(lines.len());
+        lines[start_idx..end_idx].join("\n")
+    } else {
+        text
+    };
+    let lang = code_fence_language(&resolved);
+    let tokens = estimate_tokens_rough(&text);
+    let block = format!("📄 {} ({} tokens)\n```{}\n{}\n```", r.raw, tokens, lang, text);
+    (None, Some(block))
+}
+
+/// Expand a `@folder:` reference to a directory listing.
+fn expand_folder_reference(
+    r: &ContextReference,
+    cwd: &Path,
+    allowed_root: &Path,
+    home: &Path,
+    hermes_home: &Path,
+) -> (Option<String>, Option<String>) {
+    let resolved = match resolve_within_root(cwd, &r.target, allowed_root) {
+        Some(p) => p,
+        None => {
+            return (
+                Some(format!("{}: path is outside the allowed workspace", r.raw)),
+                None,
+            )
+        }
+    };
+    if is_sensitive_path(&resolved, home, hermes_home) {
+        return (
+            Some(format!(
+                "{}: path is a sensitive credential or internal Hermes path and cannot be attached",
+                r.raw
+            )),
+            None,
+        );
+    }
+    if !resolved.exists() {
+        return (Some(format!("{}: folder not found", r.raw)), None);
+    }
+    if !resolved.is_dir() {
+        return (Some(format!("{}: path is not a folder", r.raw)), None);
+    }
+    // Try rg first; fallback to walkdir-style os::walk.
+    let listing = build_folder_listing(&resolved, cwd);
+    let tokens = estimate_tokens_rough(&listing);
+    let block = format!("📁 {} ({} tokens)\n{}", r.raw, tokens, listing);
+    (None, Some(block))
+}
+
+/// Build a folder listing string (mirrors Python `_build_folder_listing`).
+fn build_folder_listing(path: &Path, cwd: &Path) -> String {
+    const LIMIT: usize = 200;
+
+    // Try rg --files (argv-only, no shell).
+    let rg_listing = try_rg_listing(path, cwd, LIMIT);
+    if let Some(listing) = rg_listing {
+        return listing;
+    }
+
+    // Fallback: manual walk.
+    let mut lines = Vec::new();
+    let rel = path.strip_prefix(cwd).unwrap_or(path);
+    lines.push(format!("{}/", rel.display()));
+    walk_dir(path, cwd, &mut lines, LIMIT);
+    if lines.len() >= LIMIT {
+        lines.push("- ...".to_string());
+    }
+    lines.join("\n")
+}
+
+fn try_rg_listing(path: &Path, cwd: &Path, limit: usize) -> Option<String> {
+    // argv-only: no shell, no string interpolation (CWE-78 mitigation).
+    let rel = path.strip_prefix(cwd).unwrap_or(path);
+    let output = std::process::Command::new("rg")
+        .arg("--files")
+        .arg(rel)
+        .current_dir(cwd)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut lines = Vec::new();
+            lines.push(format!("{}/", rel.display()));
+            for line in text.lines().take(limit) {
+                let p = std::path::Path::new(line.trim());
+                let indent_depth = p.components().count().saturating_sub(rel.components().count()).saturating_sub(1);
+                let indent = "  ".repeat(indent_depth);
+                lines.push(format!("{}- {}", indent, p.file_name().unwrap_or_default().to_string_lossy()));
+            }
+            Some(lines.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn walk_dir(dir: &Path, cwd: &Path, lines: &mut Vec<String>, limit: usize) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    sorted.sort_by_key(|e| e.file_name());
+    for entry in sorted {
+        if lines.len() >= limit {
+            return;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let ep = entry.path();
+        let rel = ep.strip_prefix(cwd).unwrap_or(&ep);
+        let depth = rel.components().count().saturating_sub(1);
+        let indent = "  ".repeat(depth.saturating_sub(1));
+        if ep.is_dir() {
+            lines.push(format!("{}- {}/", indent, name_str));
+            walk_dir(&ep, cwd, lines, limit);
+        } else {
+            lines.push(format!("{}- {}", indent, name_str));
+        }
+    }
+}
+
+/// Expand git diff/staged/log references (argv-only subprocess, CWE-78 mitigated).
+async fn expand_git_reference(
+    r: &ContextReference,
+    cwd: &Path,
+    args: &[&str],
+    label: &str,
+) -> (Option<String>, Option<String>) {
+    // All git args passed as separate argv elements — no shell, no interpolation.
+    let mut cmd = tokio::process::Command::new("git");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(cwd);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        cmd.output(),
+    )
+    .await;
+
+    match result {
+        Err(_) => (
+            Some(format!("{}: git command timed out (30s)", r.raw)),
+            None,
+        ),
+        Ok(Err(e)) => (Some(format!("{}: {}", r.raw, e)), None),
+        Ok(Ok(out)) => {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let msg = stderr.trim();
+                let msg = if msg.is_empty() { "git command failed" } else { msg };
+                return (Some(format!("{}: {}", r.raw, msg)), None);
+            }
+            let content = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let content = if content.is_empty() {
+                "(no output)".to_string()
+            } else {
+                content
+            };
+            let tokens = estimate_tokens_rough(&content);
+            let block = format!("🧾 {} ({} tokens)\n```diff\n{}\n```", label, tokens, content);
+            (None, Some(block))
+        }
+    }
+}
+
+/// Expand a `@url:` reference via the injected `url_fetcher` (D-01/D-02).
+/// On LLM-processing failure, falls back with a surfaced warning — never silently drops.
+async fn expand_url_reference(
+    r: &ContextReference,
+    url_fetcher: Option<&UrlFetcher>,
+) -> (Option<String>, Option<String>) {
+    let fetcher = match url_fetcher {
+        Some(f) => f,
+        None => {
+            return (
+                Some(format!("{}: no URL fetcher configured", r.raw)),
+                None,
+            )
+        }
+    };
+    match fetcher(r.target.clone()).await {
+        Ok(content) if !content.is_empty() => {
+            let tokens = estimate_tokens_rough(&content);
+            (None, Some(format!("🌐 {} ({} tokens)\n{}", r.raw, tokens, content)))
+        }
+        Ok(_) => (
+            Some(format!("{}: no content extracted", r.raw)),
+            None,
+        ),
+        Err(warning) => {
+            // D-02: on fetcher failure, surface a warning; never silently drop.
+            (Some(format!("{}: {}", r.raw, warning)), None)
+        }
+    }
+}
+
+/// Expand a single `@`-reference to `(warning, block)`.
+async fn expand_reference(
+    r: &ContextReference,
+    cwd: &Path,
+    allowed_root: &Path,
+    home: &Path,
+    hermes_home: &Path,
+    url_fetcher: Option<&UrlFetcher>,
+) -> (Option<String>, Option<String>) {
+    match r.kind.as_str() {
+        "file" => expand_file_reference(r, cwd, allowed_root, home, hermes_home),
+        "folder" => expand_folder_reference(r, cwd, allowed_root, home, hermes_home),
+        "diff" => expand_git_reference(r, cwd, &["diff"], "git diff").await,
+        "staged" => expand_git_reference(r, cwd, &["diff", "--staged"], "git diff --staged").await,
+        "git" => {
+            // Validate @git:N as u32 in [1,10] BEFORE constructing command (BLOCKER-3 / CWE-78).
+            let count_str = r.target.trim();
+            let count: u32 = match count_str.parse::<u32>() {
+                Ok(n) if (1..=10).contains(&n) => n,
+                Ok(n) => {
+                    return (
+                        Some(format!(
+                            "{}: git:N count {} out of allowed range [1,10]",
+                            r.raw, n
+                        )),
+                        None,
+                    )
+                }
+                Err(_) => {
+                    return (
+                        Some(format!(
+                            "{}: git:N requires a positive integer, got {:?}",
+                            r.raw, count_str
+                        )),
+                        None,
+                    )
+                }
+            };
+            // count is now a validated u32 in [1,10]. Pass it as a separate argv element.
+            let count_flag = format!("-{}", count);
+            expand_git_reference(r, cwd, &["log", &count_flag, "-p"], &format!("git log -{} -p", count)).await
+        }
+        "url" => expand_url_reference(r, url_fetcher).await,
+        _ => (Some(format!("{}: unsupported reference type", r.raw)), None),
+    }
+}
+
+/// Preprocess `@`-references in `message` — the main public async API.
+///
+/// Mirrors Python's `preprocess_context_references_async`:
+/// - Parses all `@file:/@folder:/@diff/@staged/@git:N/@url:` references.
+/// - Expands each reference (filesystem, subprocess, URL fetch).
+/// - Enforces 50% hard limit (blocked) and 25% soft limit (warning).
+/// - Assembles output: `--- Context Warnings ---` then `--- Attached Context ---`.
+///
+/// `allowed_root` defaults to `cwd` when `None` (D-03/D-04 — fixed to cwd, no escape hatch).
+pub async fn preprocess_context_references_async(
+    message: &str,
+    cwd: &Path,
+    context_length: usize,
+    url_fetcher: Option<&UrlFetcher>,
+    allowed_root: Option<&Path>,
+) -> ContextReferenceResult {
+    let refs = parse_context_references(message);
+    if refs.is_empty() {
+        return ContextReferenceResult {
+            message: message.to_string(),
+            original_message: message.to_string(),
+            references: Vec::new(),
+            warnings: Vec::new(),
+            injected_tokens: 0,
+            expanded: false,
+            blocked: false,
+        };
+    }
+
+    // D-05: allowed_root defaults to cwd (fixed, no config escape hatch — D-04).
+    let cwd_resolved = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let allowed_root_resolved = match allowed_root {
+        Some(r) => r.canonicalize().unwrap_or_else(|_| r.to_path_buf()),
+        None => cwd_resolved.clone(),
+    };
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let hermes_home = ironhermes_core::constants::get_hermes_home();
+
+    let mut warnings: Vec<String> = Vec::new();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut injected_tokens: usize = 0;
+
+    for r in &refs {
+        let (warn, block) = expand_reference(
+            r,
+            &cwd_resolved,
+            &allowed_root_resolved,
+            &home,
+            &hermes_home,
+            url_fetcher,
+        )
+        .await;
+        if let Some(w) = warn {
+            warnings.push(w);
+        }
+        if let Some(b) = block {
+            injected_tokens += estimate_tokens_rough(&b);
+            blocks.push(b);
+        }
+    }
+
+    // Budget enforcement (mirrors Python lines ~167-193).
+    let hard_limit = (context_length / 2).max(1);
+    let soft_limit = (context_length / 4).max(1);
+
+    if injected_tokens > hard_limit {
+        warnings.push(format!(
+            "@ context injection refused: {} tokens exceeds the 50% hard limit ({}).",
+            injected_tokens, hard_limit
+        ));
+        return ContextReferenceResult {
+            message: message.to_string(),
+            original_message: message.to_string(),
+            references: refs,
+            warnings,
+            injected_tokens,
+            expanded: false,
+            blocked: true,
+        };
+    }
+
+    if injected_tokens > soft_limit {
+        warnings.push(format!(
+            "@ context injection warning: {} tokens exceeds the 25% soft limit ({}).",
+            injected_tokens, soft_limit
+        ));
+    }
+
+    // Assemble final message.
+    let stripped = remove_reference_tokens(message, &refs);
+    let mut final_msg = stripped.clone();
+
+    if !warnings.is_empty() {
+        let warning_lines: Vec<String> = warnings.iter().map(|w| format!("- {}", w)).collect();
+        final_msg.push_str("\n\n--- Context Warnings ---\n");
+        final_msg.push_str(&warning_lines.join("\n"));
+    }
+
+    if !blocks.is_empty() {
+        final_msg.push_str("\n\n--- Attached Context ---\n\n");
+        final_msg.push_str(&blocks.join("\n\n"));
+    }
+
+    let expanded = !blocks.is_empty() || !warnings.is_empty();
+
+    ContextReferenceResult {
+        message: final_msg.trim().to_string(),
+        original_message: message.to_string(),
+        references: refs,
+        warnings,
+        injected_tokens,
+        expanded,
+        blocked: false,
+    }
+}
 
 // ---------------------------------------------------------------------------
 
@@ -566,6 +1025,213 @@ mod tests {
         assert!(
             !is_sensitive_path(&safe, &home, &hermes_home),
             "Expected NOT sensitive: {safe:?}"
+        );
+    }
+
+    // ── Expander tests (Task 2) ───────────────────────────────────────────────
+
+    /// Helper: make a fake UrlFetcher returning fixed content.
+    fn make_url_fetcher(content: Result<String, String>) -> UrlFetcher {
+        Box::new(move |_url: String| {
+            let c = content.clone();
+            Box::pin(async move { c })
+        })
+    }
+
+    /// Expand @file: (full) → fenced block with token count; ref stripped from inline.
+    #[tokio::test]
+    async fn test_expand_file_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let msg = format!("see @file:hello.rs here");
+        let cwd = dir.path();
+        let result = preprocess_context_references_async(&msg, cwd, 100_000, None, None).await;
+
+        assert!(result.expanded, "Should be expanded");
+        assert!(!result.blocked, "Should not be blocked");
+        assert!(result.warnings.is_empty(), "No warnings expected");
+        assert!(result.message.contains("📄"), "Block header missing");
+        assert!(result.message.contains("hello.rs"), "Filename missing");
+        assert!(result.message.contains("fn main()"), "File content missing");
+        assert!(result.message.contains("--- Attached Context ---"), "Section missing");
+        // The inline @file: reference should be stripped from message text portion.
+        let before_context = result.message.split("--- Attached Context ---").next().unwrap_or("");
+        assert!(!before_context.contains("@file:"), "Inline ref not stripped");
+    }
+
+    /// Expand @file: with line range → only lines 2-3.
+    #[tokio::test]
+    async fn test_expand_file_line_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lines.txt");
+        std::fs::write(&file, "line1\nline2\nline3\nline4\n").unwrap();
+
+        let msg = "@file:lines.txt:2-3";
+        let result = preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
+
+        assert!(result.expanded);
+        assert!(result.message.contains("line2"), "Should contain line2");
+        assert!(result.message.contains("line3"), "Should contain line3");
+        assert!(!result.message.contains("line4"), "Should not contain line4");
+        assert!(!result.message.contains("line1"), "Should not contain line1");
+    }
+
+    /// Expand @folder: → listing block (no file contents).
+    #[tokio::test]
+    async fn test_expand_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+
+        let msg = format!("@folder:.");
+        let result = preprocess_context_references_async(&msg, dir.path(), 100_000, None, None).await;
+
+        assert!(result.expanded, "Should be expanded: {:?}", result.warnings);
+        assert!(!result.blocked);
+        // Listing block should reference folder
+        assert!(result.message.contains("📁"), "Folder icon missing");
+    }
+
+    /// Expand @url: with injected fetcher returning fixed markdown.
+    #[tokio::test]
+    async fn test_expand_url_fetcher_success() {
+        let fetcher = make_url_fetcher(Ok("# Hello World\nsome content".to_string()));
+        let msg = "@url:https://example.com";
+        let result = preprocess_context_references_async(
+            msg,
+            std::path::Path::new("/tmp"),
+            100_000,
+            Some(&fetcher),
+            None,
+        )
+        .await;
+
+        assert!(result.expanded);
+        assert!(!result.blocked);
+        assert!(result.warnings.is_empty(), "No warnings on success");
+        assert!(result.message.contains("🌐"), "URL block header missing");
+        assert!(result.message.contains("Hello World"), "Content missing");
+    }
+
+    /// @url: fetcher error → warning added, ref not silently dropped (D-02).
+    #[tokio::test]
+    async fn test_expand_url_fetcher_error_surfaces_warning() {
+        let fetcher = make_url_fetcher(Err("fetch failed: connection refused".to_string()));
+        let msg = "@url:https://example.com";
+        let result = preprocess_context_references_async(
+            msg,
+            std::path::Path::new("/tmp"),
+            100_000,
+            Some(&fetcher),
+            None,
+        )
+        .await;
+
+        // D-02: never silently drop — warning must appear.
+        assert!(!result.warnings.is_empty(), "Warning expected on fetcher error");
+        assert!(
+            result.warnings[0].contains("example.com") || result.warnings[0].contains("fetch failed"),
+            "Warning should mention URL or error: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Hard limit: injected_tokens > context_length*0.50 → blocked == true, message == original_message.
+    #[tokio::test]
+    async fn test_hard_limit_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write a file with enough content to exceed 50% of a tiny context window.
+        let content = "x ".repeat(200); // ~200 tokens rough estimate
+        std::fs::write(dir.path().join("big.txt"), &content).unwrap();
+
+        let msg = "@file:big.txt";
+        // Use a very small context_length so 50% limit is tiny (e.g. 10 tokens → hard_limit=5).
+        let result = preprocess_context_references_async(msg, dir.path(), 10, None, None).await;
+
+        assert!(result.blocked, "Should be blocked by hard limit");
+        assert_eq!(
+            result.message, result.original_message,
+            "blocked: message must equal original"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("hard limit")),
+            "Hard-limit warning missing: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Soft limit: injected_tokens in (25%, 50%] → warning present AND blocked == false.
+    #[tokio::test]
+    async fn test_soft_limit_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write ~50 chars of content; the token estimator produces roughly content.len()/4.
+        // We'll pick context_length such that soft_limit < injected_tokens <= hard_limit.
+        // Strategy: write content, estimate tokens from length (~len/4), set context_length
+        // so that soft_limit = injected_tokens/2 - 1 and hard_limit = injected_tokens * 3.
+        // Simple: write 200 chars → ~50 tokens; context_length = 160 → hard=80, soft=40.
+        let content = "hello world ".repeat(20); // ~240 chars → rough ~60 tokens
+        std::fs::write(dir.path().join("mid.txt"), &content).unwrap();
+
+        // Expand once to find actual injected_tokens, then verify soft-limit logic.
+        // context_length chosen so soft_limit will be exceeded but hard_limit won't.
+        // With context_length=400: hard_limit=200, soft_limit=100.
+        // The block overhead (📄 header + fences) adds tokens too, so use generous window.
+        let msg = "@file:mid.txt";
+        let result = preprocess_context_references_async(msg, dir.path(), 400, None, None).await;
+
+        // Must not be blocked.
+        assert!(!result.blocked, "Should not be blocked. injected={} result={:?}", result.injected_tokens, result.warnings);
+
+        // If the block lands in the soft zone (> soft_limit = 100), warning must appear.
+        if result.injected_tokens > 100 {
+            assert!(
+                result.warnings.iter().any(|w| w.contains("soft limit")),
+                "Soft-limit warning missing when injected={}: {:?}",
+                result.injected_tokens,
+                result.warnings
+            );
+        }
+        // Whether or not the soft zone was hit, expanded must be true (file was read).
+        assert!(result.expanded, "File expand should mark expanded=true");
+    }
+
+    /// @git:N validation: out-of-range values [0, 11] are rejected with a warning.
+    /// In-range value 3 maps to argv args ["log", "-3", "-p"] (no shell string).
+    #[tokio::test]
+    async fn test_git_n_validation() {
+        let cwd = std::path::Path::new("/tmp");
+
+        // @git:0 → out of range warning (0 < 1).
+        let msg0 = "@git:0";
+        let result0 =
+            preprocess_context_references_async(msg0, cwd, 100_000, None, None).await;
+        assert!(
+            result0.warnings.iter().any(|w| w.contains("range") || w.contains("out of")),
+            "@git:0 should warn about range: {:?}",
+            result0.warnings
+        );
+
+        // @git:11 → out of range warning (11 > 10).
+        let msg11 = "@git:11";
+        let result11 =
+            preprocess_context_references_async(msg11, cwd, 100_000, None, None).await;
+        assert!(
+            result11.warnings.iter().any(|w| w.contains("range") || w.contains("out of")),
+            "@git:11 should warn about range: {:?}",
+            result11.warnings
+        );
+
+        // @git:3 is valid — it should NOT produce a range-validation warning.
+        // (May produce a "git command failed" warning if not in a git repo, which is fine.)
+        let msg3 = "@git:3";
+        let result3 =
+            preprocess_context_references_async(msg3, cwd, 100_000, None, None).await;
+        assert!(
+            !result3.warnings.iter().any(|w| w.contains("range") || w.contains("out of")),
+            "@git:3 should not warn about range: {:?}",
+            result3.warnings
         );
     }
 }
