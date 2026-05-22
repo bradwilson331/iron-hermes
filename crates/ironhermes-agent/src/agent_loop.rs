@@ -144,12 +144,12 @@ pub struct AgentLoop {
     activity_last: Arc<std::sync::Mutex<std::time::Instant>>,
     activity_kind: Arc<std::sync::Mutex<ActivityKind>>,
     current_tool: Arc<std::sync::Mutex<Option<String>>>,
-    /// Shared iteration budget handle (PROV-09, PROV-10, D-15).
-    /// Tracks total turns across parent + child agents and exposes the
-    /// pressure-tier ladder (None / Caution70 / Warning90 / Stop100) via
-    /// `BudgetHandle::pressure()`. Plan 21.7-05 replaced the bare
-    /// `Arc<AtomicUsize>` with the handle so parent + child decrement the
-    /// same counter and tier transitions are observed consistently.
+    /// This agent's OWN iteration budget handle (PROV-09, D-15).
+    /// Tracks turns consumed by THIS loop and exposes the pressure-tier ladder
+    /// (None / Caution70 / Warning90 / Stop100) via `BudgetHandle::pressure()`.
+    /// Plan 21.7-05 replaced the bare `Arc<AtomicUsize>` with the handle.
+    /// Plan 35-02 (D-01/D-04): each agent loop owns its own counter; the
+    /// `budget()` getter is no longer used to hand a shared handle to children.
     /// None = use local `max_iterations` only (backward compat).
     budget: Option<BudgetHandle>,
     /// Plan 21.7-05: last pressure tier injected as an advisory system
@@ -549,18 +549,25 @@ impl AgentLoop {
         self
     }
 
-    /// Set a shared iteration budget handle (PROV-09, PROV-10, D-15).
+    /// Set this agent loop's own iteration budget handle (PROV-09, D-15).
     ///
     /// Plan 21.7-05: accepts [`BudgetHandle`] rather than a bare
     /// `Arc<AtomicUsize>`. The handle's `consume()` is called at the top of
     /// every turn (Stop100 → clean-stop via `AgentResult::budget_exhausted`);
     /// `pressure()` drives the advisory-injection ladder (Caution70/Warning90).
+    ///
+    /// Plan 35-02 (D-01/D-04): each call to `run_child` now passes a FRESH
+    /// `BudgetHandle::new(max_iterations)` — not a clone of the parent handle.
     pub fn with_budget(mut self, budget: BudgetHandle) -> Self {
         self.budget = Some(budget);
         self
     }
 
-    /// Get the budget handle for sharing with child agents (PROV-10).
+    /// Get this agent's own budget handle (PROV-09, D-15).
+    ///
+    /// Note: since Plan 35-02 (D-01/D-04), this getter is no longer used to
+    /// hand a shared handle to child agents — each child receives a fresh
+    /// `BudgetHandle::new(max_iterations)` from `run_child` directly.
     pub fn budget(&self) -> Option<BudgetHandle> {
         self.budget.clone()
     }
@@ -2417,7 +2424,8 @@ mod budget_tests {
 
     #[test]
     fn test_shared_budget_increment() {
-        // Parent + child share the same underlying counter via BudgetHandle::clone.
+        // BudgetHandle::clone shares the same underlying counter (Arc<AtomicUsize>).
+        // This is still used by gateway/CommandContext and reset() visibility.
         let parent = BudgetHandle::new(10);
         let child = parent.clone();
         for _ in 0..5 {
@@ -2427,7 +2435,41 @@ mod budget_tests {
             child.consume();
         }
         assert_eq!(parent.used(), 8);
-        assert_eq!(child.used(), 8, "clones share the same counter (PROV-10)");
+        assert_eq!(child.used(), 8, "clones share the same counter");
+    }
+
+    /// D-07.1 independence regression test (Plan 35-02).
+    ///
+    /// Two distinct `BudgetHandle::new(max)` instances do NOT share a counter.
+    /// This models the parent agent loop's budget and the fresh per-child budget
+    /// produced by `AgentSubagentRunner::run_child` (which now calls
+    /// `BudgetHandle::new(max_iterations)` rather than cloning the parent handle).
+    ///
+    /// Draining the child to exhaustion must leave the parent budget unchanged.
+    /// This is the inversion of the old PROV-10 shared-counter assumption.
+    #[test]
+    fn test_independent_budget_child_drain_does_not_affect_parent() {
+        let max = 10;
+        // Two separate handles — two distinct Arc<AtomicUsize> instances.
+        let parent = BudgetHandle::new(max);
+        let child = BudgetHandle::new(max);
+
+        // Both start full.
+        assert_eq!(parent.remaining(), max, "parent starts at max");
+        assert_eq!(child.remaining(), max, "child starts at max");
+
+        // Drain the child to exhaustion.
+        for _ in 0..max {
+            child.consume();
+        }
+        assert_eq!(child.remaining(), 0, "child is fully drained");
+
+        // Independence guarantee: the parent's counter is untouched.
+        assert_eq!(
+            parent.remaining(),
+            max,
+            "child drain must not affect parent remaining() — independence guarantee (D-07.1)"
+        );
     }
 
     #[test]

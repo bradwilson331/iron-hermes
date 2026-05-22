@@ -18,12 +18,18 @@
 //! for every channel and removes four copies of the same wiring. See
 //! `docs/AGENT-RUNTIME-DESIGN.md`.
 //!
-//! ## Budget sharing (PROV-10)
+//! ## Budget (top-level / interactive, D-15)
 //!
-//! `from_config` creates the `BudgetHandle` and builds the `AgentSubagentRunner`
-//! with a clone of it, so a parent turn and the subagents it spawns share one
-//! counter (a runaway delegation tree is bounded together). `run_turn` resets
-//! that shared counter before each top-level turn.
+//! `from_config` creates the `BudgetHandle` for the TOP-LEVEL interactive
+//! agent loop and passes a clone to `AgentSubagentRunner::new` for storage.
+//! `run_turn` resets that handle before each user turn so a long-lived runtime
+//! never latches at Stop100.
+//!
+//! Plan 35-02 (D-01/D-04): PROV-10 shared parent↔child counter is RETIRED.
+//! `AgentSubagentRunner::run_child` now gives each child its own fresh
+//! `BudgetHandle::new(max_iterations)` — children no longer clone the stored
+//! runner budget. The stored field is retained for the `new` signature and grep
+//! invariants (see `AgentSubagentRunner` field doc).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,7 +149,9 @@ impl AgentRuntime {
 
         let client = build_main_client(&resolver)?;
 
-        // Build the subagent runner with a clone of the SHARED budget (PROV-10).
+        // Build the subagent runner, passing the budget clone for storage (field-kept
+        // per Plan 35-02 field-disposition). Children no longer clone this stored
+        // budget; each child gets a fresh BudgetHandle::new(max_iterations) in run_child.
         let (transcript_home, transcript_scope_label) = transcript_scope;
         let subagent_runner = Arc::new(
             AgentSubagentRunner::new(client.clone(), (*resolver).clone(), Some(budget.clone()))
@@ -190,9 +198,10 @@ impl AgentRuntime {
     }
 
     /// Run one top-level agent turn. This is the budget lifecycle boundary:
-    /// the shared `BudgetHandle` is reset to full here so a long-lived runtime
-    /// never latches at `Stop100`. Subagents spawned during the turn share the
-    /// just-reset counter via the runner's `Arc`.
+    /// the top-level `BudgetHandle` is reset to full here so a long-lived runtime
+    /// never latches at `Stop100`. Plan 35-02 (D-01/D-04): subagents spawned
+    /// during the turn each receive their own fresh `BudgetHandle::new(max_iterations)`
+    /// in `run_child`; they no longer decrement the top-level counter.
     pub async fn run_turn(&self, req: TurnRequest) -> Result<AgentResult> {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
@@ -444,34 +453,36 @@ mod tests {
         );
     }
 
-    /// Regression gate: `from_config` MUST pass a clone of the shared budget
-    /// to `AgentSubagentRunner::new` (PROV-10 — parent and subagents share one
-    /// counter). This source-include guard fails if the wiring is dropped or
-    /// broken by a future refactor.
+    /// Regression gate: `from_config` wires the top-level budget into
+    /// `AgentSubagentRunner::new` for storage, and `run_child` gives each child
+    /// a FRESH `BudgetHandle::new(max_iterations)` — not a clone of the stored
+    /// runner budget. PROV-10 shared parent↔child counter is RETIRED (Plan 35-02
+    /// D-04); this test documents the new independence contract.
     ///
     /// Form chosen: source-include guard. Building a full `AgentRuntime` via
     /// `from_config` in a unit test is impractical (it requires a reachable
-    /// model endpoint and assembles the MCP/tool bundle); the Arc-identity
-    /// invariant is fully captured by asserting the source contains the exact
-    /// clone-pass pattern and that `budget` is stored in `Self`. The behavioral
-    /// Arc-sharing is already covered by `budget.rs::reset_is_visible_through_shared_clone`.
+    /// model endpoint and assembles the MCP/tool bundle). The storage wiring
+    /// (field-kept per Plan 35-02 field-disposition) is verified by asserting
+    /// the exact source patterns; the independence behavior is proven by the
+    /// D-07.1 test in `agent_loop.rs::budget_tests`.
     #[test]
-    fn runner_shares_budget_arc() {
-        // Assert from_config clones the shared budget into the subagent runner.
+    fn runner_stores_budget_field_children_get_fresh_handle() {
+        // Assert from_config still passes the budget clone for storage in the runner
+        // (field-kept so new() signature and grep invariants stay intact).
         assert!(
             SOURCE.contains("Some(budget.clone())"),
             "from_config must pass `Some(budget.clone())` to AgentSubagentRunner::new \
-             (PROV-10 parent/child budget sharing) — source guard failed"
+             (field-kept per Plan 35-02) — source guard failed"
         );
 
-        // Assert the same budget is stored on Self (not a separately-created one).
+        // Assert the top-level budget is stored on Self so run_turn can reset it.
         assert!(
             SOURCE.contains("budget,"),
             "AgentRuntime struct initializer must include `budget,` field — source guard failed; \
-             the shared BudgetHandle must be stored on Self so run_turn can reset it"
+             the top-level BudgetHandle must be stored on Self so run_turn can reset it"
         );
 
-        // Assert the runner is built with the cloned budget before Self is returned.
+        // Assert the runner is built before Self is returned.
         let runner_pos = SOURCE
             .find("Some(budget.clone())")
             .expect("Some(budget.clone()) must be present in agent_runtime.rs");
@@ -481,8 +492,21 @@ mod tests {
         assert!(
             runner_pos < self_ok_pos,
             "Some(budget.clone()) (at byte {runner_pos}) must appear BEFORE \
-             Ok(Self {{ (at byte {self_ok_pos})) — runner must be wired with the \
-             budget before Self is constructed"
+             Ok(Self {{ (at byte {self_ok_pos})) — runner must be wired before Self is constructed"
+        );
+
+        // Assert run_child gives each child a FRESH budget (independence — D-01/D-04).
+        // Use include_str! on subagent_runner.rs to verify the change site.
+        let runner_src = include_str!("subagent_runner.rs");
+        assert!(
+            runner_src.contains("BudgetHandle::new(max_iterations)"),
+            "subagent_runner.rs run_child must use BudgetHandle::new(max_iterations) \
+             to give each child a fresh independent budget (D-01/D-04) — source guard failed"
+        );
+        assert!(
+            !runner_src.contains("agent = agent.with_budget(budget.clone())"),
+            "subagent_runner.rs run_child must NOT clone the parent budget into children \
+             (PROV-10 retired, D-04) — source guard failed"
         );
     }
 }
