@@ -2417,7 +2417,8 @@ mod budget_tests {
 
     #[test]
     fn test_shared_budget_increment() {
-        // Parent + child share the same underlying counter via BudgetHandle::clone.
+        // BudgetHandle::clone shares the same underlying counter (Arc<AtomicUsize>).
+        // This is still used by gateway/CommandContext and reset() visibility.
         let parent = BudgetHandle::new(10);
         let child = parent.clone();
         for _ in 0..5 {
@@ -2427,7 +2428,41 @@ mod budget_tests {
             child.consume();
         }
         assert_eq!(parent.used(), 8);
-        assert_eq!(child.used(), 8, "clones share the same counter (PROV-10)");
+        assert_eq!(child.used(), 8, "clones share the same counter");
+    }
+
+    /// D-07.1 independence regression test (Plan 35-02).
+    ///
+    /// Two distinct `BudgetHandle::new(max)` instances do NOT share a counter.
+    /// This models the parent agent loop's budget and the fresh per-child budget
+    /// produced by `AgentSubagentRunner::run_child` (which now calls
+    /// `BudgetHandle::new(max_iterations)` rather than cloning the parent handle).
+    ///
+    /// Draining the child to exhaustion must leave the parent budget unchanged.
+    /// This is the inversion of the old PROV-10 shared-counter assumption.
+    #[test]
+    fn test_independent_budget_child_drain_does_not_affect_parent() {
+        let max = 10;
+        // Two separate handles — two distinct Arc<AtomicUsize> instances.
+        let parent = BudgetHandle::new(max);
+        let child = BudgetHandle::new(max);
+
+        // Both start full.
+        assert_eq!(parent.remaining(), max, "parent starts at max");
+        assert_eq!(child.remaining(), max, "child starts at max");
+
+        // Drain the child to exhaustion.
+        for _ in 0..max {
+            child.consume();
+        }
+        assert_eq!(child.remaining(), 0, "child is fully drained");
+
+        // Independence guarantee: the parent's counter is untouched.
+        assert_eq!(
+            parent.remaining(),
+            max,
+            "child drain must not affect parent remaining() — independence guarantee (D-07.1)"
+        );
     }
 
     #[test]
