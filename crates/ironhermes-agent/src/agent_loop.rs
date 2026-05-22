@@ -68,6 +68,12 @@ pub struct AgentResult {
     /// Legacy callers that don't inspect this field continue to work — the
     /// default for pre-21.7 paths is `Natural` or `MaxIterations` as before.
     pub stop_reason: StopReason,
+    /// Phase 34b Plan 01 (D-11): warnings produced by `@`-reference expansion in
+    /// `run_turn`. Populated by `AgentRuntime::run_turn` after
+    /// `preprocess_context_references_async` runs (before `attach_context_engine`).
+    /// Surfaces to all three channels (CLI, gateway, web) without per-surface
+    /// preprocessing — the centralization invariant tested in `invariants_34b`.
+    pub context_warnings: Vec<String>,
 }
 
 impl AgentResult {
@@ -86,6 +92,7 @@ impl AgentResult {
             final_response: None,
             total_usage: AggregatedUsage::default(),
             compression_count_after: 0,
+            context_warnings: Vec::new(),
             stop_reason: StopReason::BudgetExhausted,
         }
     }
@@ -891,6 +898,7 @@ impl AgentLoop {
                         total_usage,
                         compression_count_after: self.compression_count,
                         stop_reason: StopReason::Cancelled,
+                        context_warnings: Vec::new(),
                     });
                 }
             }
@@ -920,6 +928,7 @@ impl AgentLoop {
                         total_usage,
                         compression_count_after: self.compression_count,
                         stop_reason: StopReason::BudgetExhausted,
+                        context_warnings: Vec::new(),
                     });
                 }
             }
@@ -1038,6 +1047,7 @@ impl AgentLoop {
                                 total_usage,
                                 compression_count_after: self.compression_count,
                                 stop_reason: StopReason::Cancelled,
+                                context_warnings: Vec::new(),
                             });
                         }
                     }
@@ -1171,6 +1181,7 @@ impl AgentLoop {
             total_usage,
             compression_count_after: self.compression_count,
             stop_reason,
+            context_warnings: Vec::new(),
         })
     }
 

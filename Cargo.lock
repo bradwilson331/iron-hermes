@@ -4534,6 +4534,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dirs",
  "futures",
  "insta",
  "ironhermes-core",
