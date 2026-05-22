@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: ready_to_plan
-stopped_at: Phase 34b complete (4/4) — ready to discuss Phase 35
-last_updated: 2026-05-22T14:23:51.416Z
-last_activity: 2026-05-22 -- Phase 34b execution started
+status: planning
+stopped_at: Phase 35.1 context gathered
+last_updated: "2026-05-22T23:20:53.836Z"
+last_activity: 2026-05-22
 progress:
-  total_phases: 3
-  completed_phases: 2
+  total_phases: 4
+  completed_phases: 3
   total_plans: 13
-  completed_plans: 353
-  percent: 67
+  completed_plans: 13
+  percent: 75
 ---
 
 # Project State
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 35
+Phase: 35.1
 Plan: Not started
 Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
 Status: Ready to plan
@@ -459,6 +459,7 @@ Recent decisions affecting current work:
 - Phase 26.7.3 inserted after Phase 26.7.2: Skills page - enable tab, search and toggle on-off features (URGENT)
 - Phase 35 added: Cron subagent budget isolation (T-28.1-16) — follow-up from Phase 28.1
 - Phase 35 edited: edited fields: title, goal, requirements — broadened to global per-subagent independent budgets (retire PROV-10); T-28.1-16 now a consequence
+- Phase 35.1 inserted after Phase 35: hermes-agent install and setup parity (URGENT)
 
 ### Pending Todos
 
@@ -482,6 +483,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-22T05:04:53.586Z
-Stopped at: Phase 34b context re-audited (needs replan)
-Resume file: .planning/phases/34b-context-system-parity/34B-CONTEXT.md
+Last session: 2026-05-22T23:20:53.831Z
+Stopped at: Phase 35.1 context gathered
+Resume file: .planning/phases/35.1-hermes-agent-install-and-setup-parity/35.1-CONTEXT.md
