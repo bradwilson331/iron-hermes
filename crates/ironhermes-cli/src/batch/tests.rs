@@ -124,6 +124,7 @@ fn mock_agent_result(messages: Vec<ChatMessage>, final_response: Option<String>)
         // Plan 21.7-05: new required field; batch filter tests are
         // structural — a natural-completion stop reason is correct.
         stop_reason: StopReason::Natural,
+        context_warnings: Vec::new(),
     }
 }
 
