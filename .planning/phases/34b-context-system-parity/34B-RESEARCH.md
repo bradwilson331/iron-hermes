@@ -669,27 +669,25 @@ Step 2.6: No external dependencies beyond the Rust workspace itself. The `rg` (r
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Where is `HERMES_HOME` resolved in Rust?**
-   - What we know: Python uses `from hermes_constants import get_hermes_home()`
-   - What's unclear: Rust equivalent — is it `std::env::var("HERMES_HOME")` or a crate function?
-   - Recommendation: `grep -r "HERMES_HOME\|hermes_home" crates/` before implementing
+> Resolved 2026-05-22 against live post-28.1 code during the replan. All four now have concrete answers folded into the plans.
 
-2. **Does `PressureTracker` have a `reset_session` method?**
-   - What we know: `PressureTracker` stores `HashMap<String, SessionState>`; no `remove` or `reset` method found
-   - What's unclear: Whether adding `fn reset_session(&self, session_id: &str)` is the right API
-   - Recommendation: Add the method in 34b-02 as part of `on_session_reset` implementation
+1. **Where is `HERMES_HOME` resolved in Rust?** — RESOLVED.
+   - Answer: `ironhermes_core::constants::get_hermes_home()` (crates/ironhermes-core/src/constants.rs:61). It reads the `IRONHERMES_HOME` env var if set and non-empty, otherwise `dirs::home_dir().join(".ironhermes")`. (Note the env var is `IRONHERMES_HOME`, not `HERMES_HOME`.)
+   - Impact: Plan 01 Task 1 uses `get_hermes_home()` as the `$HERMES_HOME` base for the `$HERMES_HOME/.env` and `$HERMES_HOME/skills/.hub/` blocklist entries; `dirs::home_dir()` is the base for the `.ssh`/`.aws`/dotfile entries. Wired in `is_sensitive_path(resolved, home, hermes_home)`.
 
-3. **Web UI new-chat trigger for `on_session_reset`**
-   - What we know: `ensure_web_session` creates sessions; `POST /api/sessions/create` is the entry point
-   - What's unclear: Whether the web UI exposes a "new conversation" button that should trigger reset
-   - Recommendation: Check ws.rs for a `new_chat` or `reset` WebSocket message type; scope accordingly
+2. **Does `PressureTracker` have a `reset_session` method?** — RESOLVED.
+   - Answer: No. `PressureTracker` (crates/ironhermes-agent/src/pressure_warning.rs) exposes only `new`, `take_transient`, `was_warned`, `warn_count` — there is no `reset`/`reset_session`. Adding a new public reset API is out of scope and unnecessary.
+   - Impact: Plan 02 Task 1 has `ContextCompressor::on_session_reset` zero its OWN counter fields directly (interior-mutable AtomicUsize/Mutex). It does NOT delegate to a PressureTracker reset that does not exist. (Under D-10 the engine is rebuilt fresh per turn anyway, so the durable per-session counter is the surface-owned `compression_count` Arc<AtomicUsize>, reset at CLI /new.)
 
-4. **`update_model` call site in CLI `run_chat`**
-   - What we know: `update_model` should fire when the user switches models
-   - What's unclear: Where exactly model switches happen in `run_chat` (model-switch slash command?)
-   - Recommendation: `grep -n "model\|switch\|\"model\"" main.rs` to find the exact handler
+3. **Web UI new-chat trigger for `on_session_reset`** — RESOLVED.
+   - Answer: No web new-chat / reset trigger exists. `crates/iron_hermes_ui/src/server/ws.rs` has no `new_chat`/`reset` WebSocket message type, and `ensure_web_session` only creates-on-first-use. Accepted scope for this phase = a documented `pub fn reset_web_session(&self, session_id: &str)` stub in state.rs that logs and would call `on_session_reset` once a trigger lands (CONTEXT Open Question 1).
+   - Impact: Plan 02 Task 3 adds the `reset_web_session` stub; VALIDATION.md Manual-Only row marks full web lifecycle verification deferred.
+
+4. **`update_model` call site (run_turn, per post-28.1 architecture)** — RESOLVED.
+   - Answer: Per D-09 the per-turn hooks centralize in `AgentRuntime::run_turn`, not in a CLI model-switch handler. The model identity is fully resolvable there via `self.resolver.resolve_for_main()` — the SAME call already used for `context_length` at agent_runtime.rs:209 — which returns a `&ResolvedEndpoint` (crates/ironhermes-core/src/provider.rs:43) exposing `default_model: String`, `base_url: String`, and `context_length()`.
+   - Impact: Plan 02 Task 3 calls `engine.update_model(endpoint.default_model.as_str(), context_length, Some(endpoint.base_url.as_str()))` once in run_turn (D-07 — wired this phase, no hedge); `update_from_response(&result.total_usage)` is called once after `agent.run`. invariants_34b asserts `update_model` is present in agent_runtime.rs.
 
 ---
 

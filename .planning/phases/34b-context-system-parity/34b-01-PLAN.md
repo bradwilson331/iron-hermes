@@ -18,9 +18,10 @@ must_haves:
     - "Sensitive credential paths (.ssh/, .aws/, .env, etc.) are rejected with a structured warning; original message preserved when ALL refs blocked"
     - "Injected tokens > 50% context_length blocks all expansion; > 25% warns but expands"
     - "Expansion warnings reach all 3 surfaces via AgentResult.context_warnings so the `--- Context Warnings ---` block can render"
+    - "git/rg subprocesses for @diff/@staged/@git:N/@folder: are invoked argv-style (Command::arg) with no shell and no string interpolation; @git:N validated as u32 in [1,10]"
   artifacts:
     - path: crates/ironhermes-agent/src/context_refs.rs
-      provides: "Parser + expander + sensitive-path blocklist + budget enforcement + 14 unit tests"
+      provides: "Parser + expander + sensitive-path blocklist + budget enforcement + argv-only subprocess expansion + 14 unit tests"
       exports: ["parse_context_references", "preprocess_context_references_async", "ContextReference", "ContextReferenceResult"]
       min_lines: 300
     - path: crates/ironhermes-agent/src/agent_runtime.rs
@@ -56,7 +57,8 @@ field to `AgentResult` (the carrier, per D-11) AND logs them centrally. Surfaces
 read `result.context_warnings` to render the `--- Context Warnings ---` block.
 
 Purpose: users get `@file:/@folder:/@diff/@staged/@git:N/@url:` expansion with a
-sensitive-path blocklist and 50%/25% token budget — a security-relevant module.
+sensitive-path blocklist and 50%/25% token budget — a security-relevant module
+that runs git/rg subprocesses on user-supplied values (argv-only, no shell).
 Output: new `context_refs.rs` (~14 unit tests), run_turn wiring, AgentResult carrier.
 </objective>
 
@@ -91,6 +93,13 @@ pub async fn run_turn(&self, req: TurnRequest) -> Result<AgentResult> {
 Note: `self.config` is `Arc<Config>`; `config.agent` carries `TerminalConfig`-style
 cwd config — confirm the exact path to the agent cwd in config.rs at implementation time (D-05).
 
+HERMES_HOME resolution (resolves the RESEARCH Open Question): use
+`ironhermes_core::constants::get_hermes_home()` — reads `IRONHERMES_HOME` env if
+set and non-empty, else `dirs::home_dir().join(".ironhermes")`. This is the
+`$HERMES_HOME` base for the `$HERMES_HOME/.env` and `$HERMES_HOME/skills/.hub/`
+blocklist entries; the user's `$HOME` (dirs::home_dir()) is the base for the
+`.ssh`/`.aws`/dotfile entries.
+
 From crates/ironhermes-agent/src/agent_loop.rs — the result type to extend:
 ```rust
 pub struct AgentResult {
@@ -112,6 +121,14 @@ agent_loop.rs (run() returns AgentResult at ~:885, ~:914, ~:1032, ~:1165).
 From crates/ironhermes-tools/src/web_extract.rs — `WebExtractTool` with
 `use_llm_processing: bool` (call `true` for @url:, retry `false` on LLM failure, D-01/D-02).
 
+Subprocess discipline (BLOCKER-3 / CWE-78): @diff/@staged/@git:N use `git`, and
+@folder: listing uses `rg`/directory walk. ALL such calls MUST use
+`tokio::process::Command::new("git")` (or `rg`) with `.arg(...)` per argument —
+never `sh -c`, never a shell, never an interpolated command string. @git:N is
+parsed and validated as a `u32` in `[1,10]` BEFORE being formatted into a `-N`
+arg. @folder:/@file: targets are passed as their own `.arg(path)` (the path is a
+separate argv element, not interpolated into a flag string).
+
 From ../hermes-agent/agent/context_references.py — the canonical port target:
 - `REFERENCE_PATTERN` regex (line ~16), `TRAILING_PUNCTUATION` (~19)
 - `_SENSITIVE_HOME_DIRS`/`_SENSITIVE_HOME_FILES`/`_SENSITIVE_HERMES_DIRS` (~21-37)
@@ -130,6 +147,7 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
   <read_first>
     - crates/ironhermes-agent/src/context_refs.rs (the Wave-0 stub being grown in place)
     - ../hermes-agent/agent/context_references.py (REFERENCE_PATTERN, TRAILING_PUNCTUATION, the three _SENSITIVE_* tuples, parse_context_references, _strip_trailing_punctuation, _strip_reference_wrappers, _parse_file_reference_value, _resolve_path)
+    - crates/ironhermes-core/src/constants.rs (get_hermes_home — the $HERMES_HOME base for the two HERMES blocklist entries)
     - crates/ironhermes-agent/src/context_loader.rs (existing module idioms in this crate)
   </read_first>
   <behavior>
@@ -154,7 +172,8 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
     stripping, quoted-value unwrapping (backtick/double/single), and
     file-reference `:start[-end]` parsing — byte-for-byte with Python. Add the
     three sensitive-path constant lists and a `fn is_sensitive_path(resolved:
-    &Path, home: &Path, hermes_home: &Path) -> bool` predicate plus a
+    &Path, home: &Path, hermes_home: &Path) -> bool` predicate (use
+    get_hermes_home() for the HERMES base) plus a
     `fn resolve_within_root(cwd, target, allowed_root) -> Option<PathBuf>`
     helper enforcing `allowed_root` containment (D-03/D-04 — fixed to cwd, no
     escape hatch). Implement the 6 parser unit tests + the 1 parameterised
@@ -175,7 +194,7 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
 </task>
 
 <task type="auto" tdd="true">
-  <name>Task 2: Expander + budget enforcement + preprocess_context_references_async</name>
+  <name>Task 2: Expander + budget enforcement + preprocess_context_references_async (argv-only subprocesses)</name>
   <files>crates/ironhermes-agent/src/context_refs.rs</files>
   <read_first>
     - crates/ironhermes-agent/src/context_refs.rs (Task-1 parser layer to build on)
@@ -191,6 +210,7 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
     - Test url stub: @url: with an injected `url_fetcher` returning fixed markdown → "🌐 @url:<url> (N tokens)" block; on fetcher error, a warning is added and content still attached if a raw fallback is provided (D-02), else ref dropped with warning (no silent drop).
     - Test hard limit: injected_tokens > context_length*0.50 → result.blocked == true, result.message == result.original_message, single warning "@ context injection refused: N tokens exceeds the 50% hard limit (M).".
     - Test soft limit: injected_tokens in (25%, 50%] → warning "@ context injection warning: N tokens exceeds the 25% soft limit (M)." AND expansions still applied (blocked == false).
+    - Test git:N validation: @git:0 and @git:11 (out of [1,10]) are rejected/clamped with a warning; @git:3 maps to a `git log -3`-style argv with "3" as a separate validated arg (assert via the injected command runner that args are passed argv-style, no shell string).
   </behavior>
   <action>
     Implement `pub async fn preprocess_context_references_async(message: &str,
@@ -198,31 +218,39 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
     allowed_root: Option<&Path>) -> ContextReferenceResult` (define `UrlFetcher`
     as a boxed async fn type or a small trait). Expand each kind: file (with
     optional line range + sensitive-path rejection), folder (listing), diff,
-    staged, git:N (1–10 commits — clamp/validate), url (via injected
-    url_fetcher; production wires `WebExtractTool` with `use_llm_processing:
-    true`, falling back to raw on failure per D-02 with a surfaced warning).
-    Compute `injected_tokens` using the crate's existing token estimator.
-    Enforce `hard_limit = context_length * 0.50` (exceeded → blocked, all
-    expansions stripped, message reverts to original, single warning) and
-    `soft_limit = context_length * 0.25` (exceeded → warning, expansions
-    applied). Assemble output exactly as Python: strip refs from inline text,
-    prepend `--- Context Warnings ---\n- {w}` lines, append `--- Attached
-    Context ---\n\n{blocks}`. Implement the 5 expander tests + hard-limit +
-    soft-limit tests from <behavior> (use injected fakes for git/url so tests
-    are hermetic). Total `context_refs::tests` must reach >= 14.
+    staged, git:N, url (via injected url_fetcher; production wires
+    `WebExtractTool` with `use_llm_processing: true`, falling back to raw on
+    failure per D-02 with a surfaced warning). SUBPROCESS DISCIPLINE (CWE-78,
+    BLOCKER-3): all git/rg invocations use `tokio::process::Command::new("git"|"rg")`
+    with one `.arg(...)` per argument — NEVER `sh -c`, NEVER a shell, NEVER an
+    interpolated command string. Parse @git:N into a `u32` and validate it is in
+    `[1,10]` BEFORE constructing the command (out-of-range → warning, no
+    command run); pass the validated count and any @folder:/@file: path as their
+    own separate `.arg()` elements. Compute `injected_tokens` using the crate's
+    existing token estimator. Enforce `hard_limit = context_length * 0.50`
+    (exceeded → blocked, all expansions stripped, message reverts to original,
+    single warning) and `soft_limit = context_length * 0.25` (exceeded →
+    warning, expansions applied). Assemble output exactly as Python: strip refs
+    from inline text, prepend `--- Context Warnings ---\n- {w}` lines, append
+    `--- Attached Context ---\n\n{blocks}`. Implement the 5 expander tests +
+    hard-limit + soft-limit + git:N-validation tests from <behavior> (use
+    injected fakes for git/url so tests are hermetic). Total
+    `context_refs::tests` must reach >= 14.
   </action>
   <verify>
     <automated>cargo test -p ironhermes-agent --lib context_refs::tests 2>&1 | tail -20</automated>
   </verify>
   <acceptance_criteria>
     - `preprocess_context_references_async` is `pub` and exported.
-    - `context_refs::tests` has >= 14 passing tests (6 parser + 5 expander + hard + soft + blocklist).
+    - `context_refs::tests` has >= 14 passing tests (6 parser + 5 expander + hard + soft + blocklist + git:N validation).
     - Hard-limit test asserts `blocked == true` AND `message == original_message`.
     - Soft-limit test asserts a warning is present AND `blocked == false`.
     - @url: fetcher-error path adds a warning and never silently drops the ref.
+    - NO-SHELL gate (CWE-78): the expansion module contains no `sh -c`, no `.sh(`, and no shell invocation — `grep -nE 'sh -c|/bin/sh|Command::new\("sh"\)|Command::new\("bash"\)' crates/ironhermes-agent/src/context_refs.rs` returns 0 matches; AND `grep -c '\.arg(' crates/ironhermes-agent/src/context_refs.rs` returns >= 1 (argv-style invocation present).
+    - @git:N is validated as u32 in [1,10] before command construction (git:N-validation test green).
     - `grep -c 'pub async fn preprocess_context_references_async' crates/ironhermes-agent/src/context_refs.rs` returns 1.
   </acceptance_criteria>
-  <done>Expander + budget enforcement complete; 14+ tests green; output format mirrors Python.</done>
+  <done>Expander + budget + argv-only subprocesses complete; 14+ tests green; no shell invocation in the expansion path; output format mirrors Python.</done>
 </task>
 
 <task type="auto">
@@ -281,6 +309,7 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
 |----------|-------------|
 | user message text → @-ref expander | Untrusted chat input selects filesystem paths, git ranges, and URLs to read and inject into the model context. |
 | @file:/@folder: target → local filesystem | Path traversal could exfiltrate credentials outside the workspace. |
+| @diff/@staged/@git:N/@folder: target → git/rg subprocess | User-supplied values become subprocess arguments; shell interpolation would allow command injection (CWE-78). |
 | @url: target → remote host | SSRF + remote content injection into the prompt. |
 | expanded blocks → context window | Token-budget DoS (oversized injection crowding out real context). |
 
@@ -290,6 +319,7 @@ From ../hermes-agent/agent/context_references.py — the canonical port target:
 |-----------|----------|-----------|-------------|-----------------|
 | T-34b-01-PATH | Information Disclosure | `@file:`/`@folder:` path resolution in context_refs.rs | mitigate | `resolve_within_root` enforces `allowed_root` (fixed to cwd, no escape hatch, D-03/D-04); references resolving outside cwd are rejected with a warning. |
 | T-34b-01-SC | Information Disclosure | sensitive-path blocklist | mitigate | `is_sensitive_path` rejects every entry in the three _SENSITIVE_* lists (.ssh/.aws/.env/etc.); parameterised blocklist test covers all entries; original message preserved when ALL refs blocked. |
+| T-34b-01-SHELL | Elevation of Privilege / Tampering (CWE-78 command injection) | git/rg subprocess invocation for @diff/@staged/@git:N/@folder: | mitigate | ALL subprocess calls use `tokio::process::Command::new("git"\|"rg")` with `.arg()` per argument — no `sh -c`, no shell, no interpolated command string. @git:N validated as a u32 in [1,10] before command construction; @folder:/@file: paths passed as separate argv elements. NO-SHELL grep gate in Task 2 acceptance asserts the module contains no shell invocation and uses `.arg(`. This is a HIGH-severity ASVS-L1 gate. |
 | T-34b-01-SSRF | Spoofing/Tampering | `@url:` fetch via WebExtractTool | mitigate | URL fetch goes through the existing WebExtractTool (which carries the project's URL-fetch policy); on LLM-processing failure fall back to raw with a surfaced warning (D-02) — never silently drop, never bypass the tool. |
 | T-34b-01-DOS | Denial of Service | injected-token budget | mitigate | hard_limit = 50% context_length → blocked, all expansion stripped, message reverts to original; soft_limit = 25% → warning. Budget computed with the crate's token estimator. |
 | T-34b-01-INJECT | Tampering | expanded blocks become model context | accept | Attached content is fenced and labeled `--- Attached Context ---`; the model treats it as reference. Per-content sanitization beyond fencing is out of scope for L1 and matches Python parity. |
@@ -303,6 +333,8 @@ cargo test -p ironhermes-agent --lib context_refs::tests 2>&1 | tail -20   # 14+
 cargo test -p ironhermes-agent --test invariants_34b 2>&1 | tail -10
 # Centralization invariant — must sum to 0:
 grep -c preprocess_context_references_async crates/ironhermes-cli/src/main.rs crates/ironhermes-gateway/src/handler.rs crates/iron_hermes_ui/src/server/state.rs
+# CWE-78 no-shell gate — must be 0 matches:
+grep -nE 'sh -c|/bin/sh|Command::new\("sh"\)|Command::new\("bash"\)' crates/ironhermes-agent/src/context_refs.rs
 # Regression gates:
 cargo test -p ironhermes-agent --lib memory_context::tests streaming_scrubber::tests
 cargo test -p ironhermes-agent --test invariants_33
@@ -314,6 +346,7 @@ cargo test -p ironhermes-agent --test invariants_33
 - @-ref preprocessing runs ONCE inside run_turn before attach_context_engine (not per-surface).
 - AgentResult.context_warnings carries expansion warnings to all 3 surfaces.
 - Sensitive paths rejected; 50% hard / 25% soft budget enforced; @url via WebExtractTool with raw fallback.
+- git/rg subprocesses are argv-only (no shell, CWE-78 mitigated); @git:N validated u32 in [1,10].
 - invariants_34b proves centralization and run_turn ordering.
 </success_criteria>
 

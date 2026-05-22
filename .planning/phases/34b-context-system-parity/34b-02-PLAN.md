@@ -20,7 +20,7 @@ must_haves:
     - "ContextEngine trait exposes 5 lifecycle hooks (on_session_start, on_session_reset, update_from_response, update_model, has_content_to_compress) as default no-ops; existing implementors compile unchanged"
     - "ContextCompressor::on_session_reset zeroes compression_count and all token counters; a unit test proves it"
     - "The compaction history-segment header contains the memory-authority reminder (MEMORY.md + ALWAYS authoritative); a unit test proves it"
-    - "Per-turn hooks (update_from_response, update_model) are invoked ONCE centrally in run_turn — not per-surface (D-09)"
+    - "Per-turn hooks (update_from_response AND update_model) are invoked ONCE centrally in run_turn — not per-surface (D-09); update_model is wired definitely this phase (D-07), not conditionally"
     - "Per-session reset is wired at the surfaces where the durable per-session counter lives: CLI /new (ClearSession arm) resets compression_count; gateway /new (NewSession arm); web reset_web_session documented stub (D-09/D-10)"
   artifacts:
     - path: crates/ironhermes-agent/src/context_engine.rs
@@ -33,13 +33,13 @@ must_haves:
       provides: "memory-authority reminder embedded in the pinned history-segment header"
       contains: "ALWAYS authoritative"
     - path: crates/ironhermes-agent/src/agent_runtime.rs
-      provides: "central per-turn update_from_response invocation in run_turn"
+      provides: "central per-turn update_from_response + update_model invocation in run_turn"
       contains: "update_from_response"
   key_links:
     - from: crates/ironhermes-agent/src/agent_runtime.rs
       to: crates/ironhermes-agent/src/context_engine.rs
-      via: "engine.update_from_response(&usage) called once in run_turn after agent.run"
-      pattern: "update_from_response"
+      via: "engine.update_from_response(&usage) + engine.update_model(...) called once in run_turn"
+      pattern: "update_from_response|update_model"
     - from: crates/ironhermes-cli/src/main.rs
       to: crates/ironhermes-agent/src/context_engine.rs
       via: "on_session_reset at /new (ClearSession arm) + compression_count reset"
@@ -108,12 +108,31 @@ From crates/ironhermes-agent/src/summarizing_engine.rs:
 From ../hermes-agent/agent/context_compressor.py — SUMMARY_PREFIX (~:37-46), the exact reminder text (line 45-46):
 "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note."
 
-From crates/ironhermes-agent/src/agent_runtime.rs — run_turn (~:205): after `agent.run(req.messages).await` returns the AgentResult with total_usage, call the engine's per-turn hook(s) once. The engine is attached at ~:249 (attach_context_engine returns the AgentLoop holding the Arc<dyn ContextEngine>); confirm the accessor to reach the engine from the loop, or invoke the hook inside attach/run path.
+From crates/ironhermes-agent/src/agent_runtime.rs — run_turn (~:205): the model
+identity for the turn is fully resolvable here from
+`self.resolver.resolve_for_main()` (the SAME accessor run_turn already uses at
+~:209 for `context_length`). It returns a `&ResolvedEndpoint`
+(crates/ironhermes-core/src/provider.rs:43) exposing `pub default_model: String`,
+`pub base_url: String`, and `.context_length() -> usize`. So
+`engine.update_model(endpoint.default_model.as_str(), context_length,
+Some(endpoint.base_url.as_str()))` is wireable with NO hedge (resolves the
+RESEARCH Open Question on the update_model call site). After
+`agent.run(req.messages).await` returns the AgentResult with `total_usage`, call
+`engine.update_from_response(&result.total_usage)`. The engine is attached at
+~:249 (attach_context_engine returns the AgentLoop holding the
+Arc<dyn ContextEngine>); add a minimal AgentLoop accessor to reach the engine for
+the hook calls if one is not already present.
+
+NOTE (resolves RESEARCH Open Question on PressureTracker): `PressureTracker`
+(crates/ironhermes-agent/src/pressure_warning.rs) has NO `reset_session`/`reset`
+method — only `new`, `take_transient`, `was_warned`, `warn_count`. The compressor
+reset therefore zeroes its OWN fields directly; it does not delegate to a
+PressureTracker reset that does not exist.
 
 Surface session-reset loci (D-09 — per-session hooks STAY at surfaces):
 - CLI: crates/ironhermes-cli/src/main.rs — `compression_count: Arc<AtomicUsize>` created ~:1166; `CommandResult::ClearSession(output)` arm ~:1573 (`messages.truncate(1)`) is the /new reset point.
 - Gateway: crates/ironhermes-gateway/src/handler.rs — `CoreCommandResult::NewSession` arm ~:506 (session_store.remove).
-- Web: crates/iron_hermes_ui/src/server/state.rs — `ensure_web_session` ~:174; no new-chat reset trigger exists yet → documented `reset_web_session` stub (CONTEXT Open Question 1 / VALIDATION manual note).
+- Web: crates/iron_hermes_ui/src/server/state.rs — `ensure_web_session` ~:174; no new-chat reset trigger exists yet → documented `reset_web_session` stub (CONTEXT Open Question 1 / VALIDATION manual note). This stub is the accepted scope for this phase.
 </interfaces>
 </context>
 
@@ -150,7 +169,9 @@ Surface session-reset loci (D-09 — per-session hooks STAY at surfaces):
     or a Mutex) so the trait's `&self` `on_session_reset` can zero them, and
     implement the `on_session_reset` override that sets them all to 0. Preserve
     the existing `compression_count()` accessor and the `+= 1` increment
-    semantics (read-modify-write on the atomic). Un-ignore and implement
+    semantics (read-modify-write on the atomic). The compressor zeroes its OWN
+    fields directly — PressureTracker has no reset method to delegate to (see
+    <interfaces> note). Un-ignore and implement
     `test_context_compressor_reset_zeroes_counter` per <behavior>; add the
     has_content_to_compress default test.
   </action>
@@ -210,54 +231,60 @@ Surface session-reset loci (D-09 — per-session hooks STAY at surfaces):
 </task>
 
 <task type="auto">
-  <name>Task 3: Central per-turn hook in run_turn + surface-level session-reset wiring (D-09/D-10)</name>
+  <name>Task 3: Central per-turn hooks in run_turn + surface-level session-reset wiring (D-07/D-09/D-10)</name>
   <files>crates/ironhermes-agent/src/agent_runtime.rs, crates/ironhermes-cli/src/main.rs, crates/ironhermes-gateway/src/handler.rs, crates/iron_hermes_ui/src/server/state.rs, crates/ironhermes-agent/tests/invariants_34b.rs</files>
   <read_first>
-    - crates/ironhermes-agent/src/agent_runtime.rs (run_turn ~:205; agent.run at ~:260; attach_context_engine ~:249 — find the accessor to reach the Arc<dyn ContextEngine> held by the loop, or invoke update_from_response on the engine handle right after agent.run returns total_usage)
-    - crates/ironhermes-agent/src/agent_loop.rs (how the loop stores the context engine + whether it exposes the engine for the post-run hook call; AgentResult.total_usage feeds update_from_response)
+    - crates/ironhermes-agent/src/agent_runtime.rs (run_turn ~:205; context_length resolved via `self.resolver.resolve_for_main().context_length()` ~:209; agent.run at ~:260; attach_context_engine ~:249 — find the accessor to reach the Arc<dyn ContextEngine> held by the loop)
+    - crates/ironhermes-core/src/provider.rs (ResolvedEndpoint ~:43: `default_model`, `base_url`, `context_length()` — the model accessor for update_model)
+    - crates/ironhermes-agent/src/agent_loop.rs (how the loop stores the context engine + whether it exposes the engine for the hook calls; AgentResult.total_usage feeds update_from_response)
     - crates/ironhermes-cli/src/main.rs (compression_count Arc<AtomicUsize> ~:1166; ClearSession(output) arm ~:1573 = /new reset; on_session_end pattern ~:2206 for the log-and-continue idiom)
     - crates/ironhermes-gateway/src/handler.rs (NewSession arm ~:506; ClearSession arm ~:539)
     - crates/iron_hermes_ui/src/server/state.rs (ensure_web_session ~:174 — add reset_web_session stub)
     - crates/ironhermes-agent/tests/invariants_34b.rs (extend the centralization source guard from Plan 01)
   </read_first>
   <action>
-    In `run_turn`, AFTER `agent.run(req.messages).await` returns, invoke the
-    engine's per-turn hook(s) ONCE centrally (D-09): call
-    `engine.update_from_response(&result.total_usage)` (and
-    `engine.update_model(model, context_length, base_url)` if the model is
-    resolvable here) on the engine handle. If the engine is not directly
-    reachable post-run, add a minimal accessor on AgentLoop to expose the
-    `Arc<dyn ContextEngine>` so run_turn can call the hook — do NOT move the
-    call into a surface. These are no-ops on shipped engines but establish the
-    single per-turn locus. For per-SESSION reset (hooks that STAY at surfaces,
-    D-09): in CLI `main.rs` ClearSession arm (~:1573, the /new path), reset the
-    session-owned durable counter `compression_count.store(0, Ordering::SeqCst)`
-    (this is the real durable per-session state under the fresh-engine model,
-    D-10); in gateway `handler.rs` NewSession arm (~:506), document that session
-    removal already discards per-session state and add the engine
+    Wire BOTH per-turn hooks ONCE centrally in `run_turn` (D-07 + D-09 — both
+    wired THIS phase, NO conditional hedge). The model identity is fully
+    resolvable here: bind `let endpoint = self.resolver.resolve_for_main();`
+    (the same call already used at ~:209 for context_length) and call
+    `engine.update_model(endpoint.default_model.as_str(), context_length,
+    Some(endpoint.base_url.as_str()))` before `agent.run` (per-turn model
+    identity). AFTER `agent.run(req.messages).await` returns, call
+    `engine.update_from_response(&result.total_usage)` (per-turn usage). If the
+    engine is not directly reachable, add a minimal accessor on AgentLoop to
+    expose the `Arc<dyn ContextEngine>` so run_turn can call both hooks — do NOT
+    move either call into a surface. Both are no-ops on the shipped engines but
+    establish the single per-turn locus. For per-SESSION reset (hooks that STAY
+    at surfaces, D-09): in CLI `main.rs` ClearSession arm (~:1573, the /new
+    path), reset the session-owned durable counter `compression_count.store(0,
+    Ordering::SeqCst)` (the real durable per-session state under the fresh-engine
+    model, D-10); in gateway `handler.rs` NewSession arm (~:506), document that
+    session removal already discards per-session state and add the engine
     `on_session_reset()` call if a session-scoped engine handle is reachable, else
     a tracing note; in web `state.rs`, add a `pub fn reset_web_session(&self,
     session_id: &str)` stub that logs `tracing::debug!` "reset_web_session: no
     new-chat trigger wired yet (Phase 34b stub, CONTEXT Open Q1)" and would call
-    on_session_reset when a trigger lands. Extend `invariants_34b.rs` with a
-    source guard asserting `agent_runtime.rs` contains `update_from_response`
-    AFTER `agent.run` (per-turn hook locus) AND that CLI main.rs ClearSession
-    handling resets compression_count (grep the store(0 pattern near the /new
-    path).
+    on_session_reset when a trigger lands (accepted scope this phase). Extend
+    `invariants_34b.rs` with source guards asserting (a) `agent_runtime.rs`
+    contains `update_from_response` AFTER `agent.run` (post-run usage hook
+    locus), (b) `agent_runtime.rs` contains `update_model` (model hook present),
+    and (c) CLI main.rs ClearSession handling resets compression_count (grep the
+    store(0 pattern near the /new path).
   </action>
   <verify>
     <automated>cargo build --workspace && cargo test -p ironhermes-agent --test invariants_34b 2>&1 | tail -12</automated>
   </verify>
   <acceptance_criteria>
     - `cargo build --workspace` succeeds.
-    - `grep -c update_from_response crates/ironhermes-agent/src/agent_runtime.rs` returns >= 1 (central per-turn locus).
+    - `grep -c update_from_response crates/ironhermes-agent/src/agent_runtime.rs` returns >= 1 (central per-turn usage locus).
+    - `grep -c update_model crates/ironhermes-agent/src/agent_runtime.rs` returns >= 1 (update_model wired this phase, D-07 — no hedge).
     - In agent_runtime.rs source the `update_from_response` call's byte offset is GREATER than `agent.run(` (post-run hook), asserted in invariants_34b.
-    - CLI ClearSession (/new) path resets the compression_count Arc<AtomicUsize> to 0 (`grep -c 'compression_count' near the ClearSession arm > 0` and a store(0...) reset present).
+    - CLI ClearSession (/new) path resets the compression_count Arc<AtomicUsize> to 0 (a `store(0` reset present near the ClearSession arm).
     - `reset_web_session` stub exists in state.rs (`grep -c 'fn reset_web_session' crates/iron_hermes_ui/src/server/state.rs` returns 1).
-    - invariants_34b passes (centralization + per-turn locus + CLI reset guards).
+    - invariants_34b passes (centralization + per-turn loci for both hooks + CLI reset guards).
     - Regression gates green: `cargo test -p ironhermes-agent --lib nudge::tests memory_context::tests streaming_scrubber::tests` and `cargo test -p ironhermes-core --lib test_snapshot_frozen_after_load`.
   </acceptance_criteria>
-  <done>update_from_response called once in run_turn post-run; session reset wired at surfaces (CLI counter reset, gateway note, web stub); invariants_34b proves the loci.</done>
+  <done>update_from_response + update_model called once in run_turn (D-07/D-09); session reset wired at surfaces (CLI counter reset, gateway note, web stub); invariants_34b proves the loci.</done>
 </task>
 
 </tasks>
@@ -285,8 +312,9 @@ Surface session-reset loci (D-09 — per-session hooks STAY at surfaces):
 cargo build --workspace
 cargo test -p ironhermes-agent --lib context_engine::tests context_compressor::tests summarizing_engine::tests 2>&1 | tail -20
 cargo test -p ironhermes-agent --test invariants_34b 2>&1 | tail -12
-# Per-turn locus + centralization (must NOT regress Plan 01's sum-to-0):
+# Per-turn loci (both hooks) + centralization (must NOT regress Plan 01's sum-to-0):
 grep -c update_from_response crates/ironhermes-agent/src/agent_runtime.rs
+grep -c update_model crates/ironhermes-agent/src/agent_runtime.rs
 # Regression gates:
 cargo test -p ironhermes-agent --lib nudge::tests memory_context::tests streaming_scrubber::tests
 cargo test -p ironhermes-agent --test invariants_33
@@ -298,7 +326,7 @@ cargo test -p ironhermes-core --lib test_snapshot_frozen_after_load
 - ContextEngine trait gains 5 default-no-op lifecycle hooks; existing engines compile unchanged.
 - ContextCompressor::on_session_reset zeroes compression_count + token counters (proven by test).
 - Compaction header carries the memory-authority reminder (proven by test).
-- update_from_response invoked once centrally in run_turn post-run (D-09 per-turn locus).
+- update_from_response AND update_model invoked once centrally in run_turn (D-07/D-09 per-turn loci, no hedge).
 - Session reset wired at surfaces: CLI /new resets compression_count, gateway /new note, web reset_web_session stub (D-09/D-10).
 - All cross-phase regression gates stay green.
 </success_criteria>
