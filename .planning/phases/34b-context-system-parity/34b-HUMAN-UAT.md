@@ -1,9 +1,9 @@
 ---
 status: partial
 phase: 34b-context-system-parity
-source: [34b-VERIFICATION.md, 34b-REVIEW.md]
+source: [34b-VERIFICATION.md]
 started: 2026-05-22T12:30:00Z
-updated: 2026-05-22T12:30:00Z
+updated: 2026-05-22T13:55:00Z
 ---
 
 ## Current Test
@@ -12,24 +12,31 @@ updated: 2026-05-22T12:30:00Z
 
 ## Tests
 
-### 1. context_warnings surface rendering (WR-01)
-expected: When a user sends a message containing a blocked or budget-exceeding `@`-reference (e.g. `@file:~/.ssh/id_rsa`), the resulting `--- Context Warnings ---` block is visible to the user in the response.
-result: issue — decision made: wire surfaces to consume AgentResult.context_warnings for out-of-band rendering (routed to gap closure)
-note: Functionally the warning DOES reach the user — `preprocess_context_references_async` embeds the `--- Context Warnings ---` block directly into the message text. However, `AgentResult.context_warnings` is populated by `run_turn` but read by NO production surface (CLI / gateway / web). The doc comments promise out-of-band rendering from that field, which does not exist. Decision needed: (a) accept in-message delivery and update the doc comments to match, or (b) wire each surface to consume `AgentResult.context_warnings` for out-of-band rendering. Does not block functionality.
+### 1. CLI scroll region visual separation
+expected: The `--- Context Warnings ---` block appears visually separate from the model's response text in the TUI scroll region (not embedded in model output). Reproduce by sending `@file:~/.ssh/id_rsa` (a blocklisted path) in a REPL session.
+result: [pending]
+
+### 2. Gateway distinct message
+expected: Warnings arrive as a separate adapter message (not appended to the streamed response). Test via Telegram or another gateway adapter by sending a message containing a blocked/budget-exceeding `@`-reference.
+result: [pending]
+
+### 3. Web stream_callback annotation
+expected: The `Arc<StreamCallback>` post-turn invocation delivers the warnings block as a distinct streamed annotation after the model response in the web UI.
+result: [pending]
 
 ## Summary
 
-total: 1
+total: 3
 passed: 0
-issues: 1
-pending: 0
+issues: 0
+pending: 3
 skipped: 0
 blocked: 0
 
 ## Gaps
 
 ### WR-01: context_warnings not consumed by any surface
-status: failed
+status: resolved
 source: 34b-VERIFICATION.md, 34b-REVIEW.md
-detail: `AgentResult.context_warnings` is populated in `run_turn` but no production surface (CLI `run_chat`, gateway `run_agent`, web `run_web_turn`) reads it. Context-expansion warnings reach users only via the in-message `--- Context Warnings ---` block embedded by `preprocess_context_references_async`. The doc comment on the field promises out-of-band rendering that does not exist.
-resolution: Wire each surface to consume `AgentResult.context_warnings` and render the `--- Context Warnings ---` block out-of-band. Route via `/gsd:plan-phase 34b --gaps`.
+detail: `AgentResult.context_warnings` was populated in `run_turn` but no production surface read it; warnings reached users only via in-message embedding by `preprocess_context_references_async`.
+resolution: Closed by plan 34b-03 — removed the in-message `--- Context Warnings ---` embedding; CLI (run_single + run_chat_turn), gateway (run_agent), and web (run_web_turn) now read `result.context_warnings` and render the block out-of-band, guarded by `is_empty()`. Doc comments corrected; two invariants_34b source-guard tests pin the contract.
