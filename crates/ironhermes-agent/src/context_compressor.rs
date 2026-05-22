@@ -300,4 +300,12 @@ mod tests {
         // Normal messages survive.
         assert_eq!(messages.len(), 2, "normal system + user message should remain");
     }
+
+    #[test]
+    #[ignore]
+    fn test_context_compressor_reset_zeroes_counter() {
+        // Wave 2 (Plan 02 Task 1) un-ignores: build a ContextCompressor, drive
+        // compression_count up, call on_session_reset(), assert all token counters +
+        // compression_count are zero.
+    }
 }

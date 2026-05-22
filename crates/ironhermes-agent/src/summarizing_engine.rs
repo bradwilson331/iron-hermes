@@ -2277,4 +2277,11 @@ mod tests {
             "tracker.was_warned must be true after pressure check fires"
         );
     }
+
+    #[test]
+    #[ignore]
+    fn test_memory_authority_header() {
+        // Wave 2 (Plan 02 Task 2) un-ignores: assert the compaction
+        // history-segment header contains "MEMORY.md" and "ALWAYS authoritative".
+    }
 }
