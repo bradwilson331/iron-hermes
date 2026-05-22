@@ -19,6 +19,11 @@ must_haves:
     - "Injected tokens > 50% context_length blocks all expansion; > 25% warns but expands"
     - "Expansion warnings reach all 3 surfaces via AgentResult.context_warnings so the `--- Context Warnings ---` block can render"
     - "git/rg subprocesses for @diff/@staged/@git:N/@folder: are invoked argv-style (Command::arg) with no shell and no string interpolation; @git:N validated as u32 in [1,10]"
+    - "D-01: @url: expansion uses LLM-processed output — production UrlFetcher calls WebExtractTool with use_llm_processing:true (Task 2/Task 3)"
+    - "D-02: on @url: LLM-processing failure, fall back to raw HTTP content and surface a warning in the --- Context Warnings --- block; never silently drop the reference (Task 2)"
+    - "D-03: allowed_root defaults to cwd — @file:/@folder: references cannot escape the workspace root (Task 1 resolve_within_root)"
+    - "D-04: allowed_root is fixed to cwd with NO config escape hatch; the sensitive-path blocklist is the second independent defense layer (Task 1)"
+    - "D-05: allowed_root resolves to TerminalConfig.cwd if set, else std::env::current_dir() at startup (Task 3 wiring in run_turn)"
   artifacts:
     - path: crates/ironhermes-agent/src/context_refs.rs
       provides: "Parser + expander + sensitive-path blocklist + budget enforcement + argv-only subprocess expansion + 14 unit tests"

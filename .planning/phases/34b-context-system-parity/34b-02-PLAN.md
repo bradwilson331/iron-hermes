@@ -17,11 +17,12 @@ autonomous: true
 requirements: [CTX-ENG-01, CTX-ENG-02, CTX-ENG-03, CTX-ENG-04]
 must_haves:
   truths:
-    - "ContextEngine trait exposes 5 lifecycle hooks (on_session_start, on_session_reset, update_from_response, update_model, has_content_to_compress) as default no-ops; existing implementors compile unchanged"
+    - "D-06: the 5 lifecycle hooks (on_session_start, on_session_reset, update_from_response, update_model, has_content_to_compress) are ADDITIVE default-no-op impls on the EXISTING ContextEngine trait (Task 1); existing implementors (LocalPruningEngine, SummarizingEngine) inherit the no-ops and compile unchanged"
     - "ContextCompressor::on_session_reset zeroes compression_count and all token counters; a unit test proves it"
     - "The compaction history-segment header contains the memory-authority reminder (MEMORY.md + ALWAYS authoritative); a unit test proves it"
     - "Per-turn hooks (update_from_response AND update_model) are invoked ONCE centrally in run_turn — not per-surface (D-09); update_model is wired definitely this phase (D-07), not conditionally"
     - "Per-session reset is wired at the surfaces where the durable per-session counter lives: CLI /new (ClearSession arm) resets compression_count; gateway /new (NewSession arm); web reset_web_session documented stub (D-09/D-10)"
+    - "D-08: no-op for 34b — the is_recall_context / recall-message compression interaction is already handled by Phase 34a compressor step 0 (messages.retain(|m| !m.is_recall_context)); this phase adds NO additional recall-stripping work"
   artifacts:
     - path: crates/ironhermes-agent/src/context_engine.rs
       provides: "5 default-no-op lifecycle hooks on the ContextEngine trait"
