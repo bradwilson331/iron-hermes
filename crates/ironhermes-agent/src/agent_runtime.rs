@@ -49,6 +49,7 @@ use ironhermes_tools::memory_tool::SharedMemoryManager;
 
 use crate::agent_wiring::attach_context_engine;
 use crate::any_client::{build_main_client, wire_fallback_if_configured};
+use crate::context_refs::preprocess_context_references_async;
 use crate::app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,
 };
@@ -122,6 +123,9 @@ pub struct AgentRuntime {
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     subagent_registry: Arc<RwLock<SubagentRegistry>>,
     max_iterations: usize,
+    /// Working directory for `@`-ref expansion (D-05: fixed to cwd at startup,
+    /// used as both `cwd` and `allowed_root` in `preprocess_context_references_async`).
+    cwd: PathBuf,
 }
 
 impl AgentRuntime {
@@ -167,6 +171,7 @@ impl AgentRuntime {
             .clone()
             .map(|m| m as SharedMemoryManager);
 
+        let cwd_stored = cwd.clone();
         let bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
             config: config.clone(),
             resolver: resolver.clone(),
@@ -194,6 +199,7 @@ impl AgentRuntime {
             memory_manager,
             subagent_registry,
             max_iterations,
+            cwd: cwd_stored,
         })
     }
 
@@ -202,11 +208,96 @@ impl AgentRuntime {
     /// never latches at `Stop100`. Plan 35-02 (D-01/D-04): subagents spawned
     /// during the turn each receive their own fresh `BudgetHandle::new(max_iterations)`
     /// in `run_child`; they no longer decrement the top-level counter.
-    pub async fn run_turn(&self, req: TurnRequest) -> Result<AgentResult> {
+    pub async fn run_turn(&self, mut req: TurnRequest) -> Result<AgentResult> {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
 
         let context_length = self.resolver.resolve_for_main().context_length();
+
+        // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
+        // Runs ONCE here, BEFORE attach_context_engine/agent.run, over the
+        // latest user message. Never called per-surface (centralization invariant).
+        // D-05: allowed_root = cwd (fixed at startup, no config escape hatch — D-04).
+        let context_warnings: Vec<String> = {
+            // Find the latest user-role message index.
+            let last_user_idx = req
+                .messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| m.role == ironhermes_core::Role::User)
+                .map(|(i, _)| i);
+
+            if let Some(idx) = last_user_idx {
+                if let Some(text) = req.messages[idx].content_text().map(|s| s.to_string()) {
+                    // Production UrlFetcher: WebExtractTool with use_llm_processing:true (D-01).
+                    // Raw fallback on LLM failure is handled inside the fetcher closure (D-02).
+                    let url_fetcher: crate::context_refs::UrlFetcher = {
+                        let registry = self.bundle.registry.clone();
+                        Box::new(move |url: String| {
+                            let registry = registry.clone();
+                            Box::pin(async move {
+                                // Call web_extract tool via the registry with use_llm_processing:true.
+                                let args = serde_json::json!({
+                                    "urls": [url],
+                                    "use_llm_processing": true,
+                                });
+                                let reg = registry.read().await;
+                                match reg.execute_tool("web_extract", args).await {
+                                    Ok(result_str) => {
+                                        // Parse ExtractionResult array from web_extract output.
+                                        if let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&result_str) {
+                                            if let Some(first) = results.first() {
+                                                if let Some(content) = first.get("content").and_then(|v| v.as_str()) {
+                                                    if !content.is_empty() {
+                                                        return Ok(content.to_string());
+                                                    }
+                                                }
+                                                // D-02: fall back to raw content on LLM-processing failure.
+                                                if let Some(err) = first.get("error").and_then(|v| v.as_str()) {
+                                                    return Err(format!("web_extract error: {}", err));
+                                                }
+                                            }
+                                        }
+                                        Err("web_extract returned no content".to_string())
+                                    }
+                                    Err(e) => Err(format!("web_extract failed: {}", e)),
+                                }
+                            })
+                        })
+                    };
+
+                    let ctx_result = preprocess_context_references_async(
+                        &text,
+                        &self.cwd,
+                        context_length,
+                        Some(&url_fetcher),
+                        None, // allowed_root defaults to cwd (D-04/D-05)
+                    )
+                    .await;
+
+                    // Replace the latest user message text with the expanded version.
+                    if ctx_result.expanded || ctx_result.blocked {
+                        if let Some(msg) = req.messages.get_mut(idx) {
+                            msg.content = Some(ironhermes_core::MessageContent::Text(
+                                ctx_result.message.clone(),
+                            ));
+                        }
+                    }
+
+                    // Log warnings centrally (D-11 carrier).
+                    for w in &ctx_result.warnings {
+                        tracing::warn!(target: "ironhermes_agent::context_refs", warning = %w, "@ context expansion warning");
+                    }
+
+                    ctx_result.warnings
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
 
         let mut agent = AgentLoop::new(
             self.client.clone(),
@@ -257,7 +348,11 @@ impl AgentRuntime {
             self.memory_manager.clone(),
         );
 
-        agent.run(req.messages).await
+        // D-11: attach context_warnings from @-ref expansion onto the AgentResult
+        // so all 3 surfaces (CLI, gateway, web) can render --- Context Warnings ---.
+        let mut out = agent.run(req.messages).await?;
+        out.context_warnings = context_warnings;
+        Ok(out)
     }
 
     // ── accessors for channel-specific surfaces (slash dispatch, /agents,
@@ -380,6 +475,7 @@ impl AgentRuntime {
             memory_manager: None,
             subagent_registry,
             max_iterations,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         }
     }
 }
