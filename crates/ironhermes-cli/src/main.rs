@@ -1572,6 +1572,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         }
                         CommandResult::ClearSession(output) => {
                             messages.truncate(1); // Keep system message
+                            // Phase 34b Plan 02 (D-09/D-10): /new is the durable
+                            // per-session reset locus. Under the fresh-per-turn
+                            // engine model the real durable counter is this
+                            // surface-owned Arc<AtomicUsize>, so zero it here so
+                            // the next conversation does not inherit a stale
+                            // compression_count / prior-summary chain.
+                            compression_count.store(0, Ordering::SeqCst);
                             println!("{}", output.dimmed());
                             continue;
                         }

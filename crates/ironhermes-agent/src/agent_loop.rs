@@ -356,6 +356,15 @@ impl AgentLoop {
         self.context_engine.as_ref().map(|e| e.threshold())
     }
 
+    /// Phase 34b Plan 02 (D-09): expose the attached context engine so
+    /// `AgentRuntime::run_turn` can invoke the per-turn lifecycle hooks
+    /// (`update_model` before the run, `update_from_response` after) at the
+    /// single central locus. Returns a cloned `Arc` so the caller holds its own
+    /// handle without borrowing the loop across the `run` boundary.
+    pub fn context_engine(&self) -> Option<Arc<dyn ContextEngine>> {
+        self.context_engine.clone()
+    }
+
     /// Set a cancellation token for cooperative shutdown (D-21).
     /// When the token is cancelled, the agent loop returns early.
     pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {

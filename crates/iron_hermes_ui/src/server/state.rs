@@ -192,6 +192,19 @@ impl AppState {
         Ok(())
     }
 
+    /// Phase 34b Plan 02 (D-09/D-10, CONTEXT Open Q1): per-session reset stub for
+    /// the web surface. No new-chat / `/new` trigger is wired in the web UI yet,
+    /// so there is no call site today. When such a trigger lands, this is the
+    /// locus that would discard the session's durable per-session state (and call
+    /// the engine's `on_session_reset`) the same way CLI `/new` and gateway `/new`
+    /// do. Documented stub is the accepted scope for this phase.
+    pub fn reset_web_session(&self, session_id: &str) {
+        tracing::debug!(
+            session = %session_id,
+            "reset_web_session: no new-chat trigger wired yet (Phase 34b stub, CONTEXT Open Q1)"
+        );
+    }
+
     pub async fn run_web_turn(
         &self,
         session_id: &str,
