@@ -9,6 +9,7 @@ pub mod client;
 pub mod context_compressor;
 pub mod context_engine;
 pub mod context_loader;
+pub mod context_refs;
 pub mod engine_factory;
 pub mod memory;
 pub mod memory_context;
