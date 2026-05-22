@@ -64,12 +64,24 @@ touch interactive headroom because *no* subagent shares its parent's counter.
   user-chosen wider scope.
 - **D-03:** The per-subagent cap source is **`delegation.max_iterations`**, which
   **already exists** in `SubagentConfig` (`crates/ironhermes-core/src/config.rs:982-983`,
-  default `50`). No new config field is required — only the wiring changes. The
-  cap must remain **authoritative**: a model- or caller-supplied `max_iterations`
-  must not silently shrink/expand it (mirror the reference's log-and-drop at
-  `delegate_tool.py:1968-1979`). Verify whether IronHermes' `delegate_task` tool
-  schema currently exposes a per-call `max_iterations` and, if so, ensure config
-  wins.
+  default `50`). No new config field is required — only the wiring changes.
+  **RESOLVED 2026-05-21 (user decision, RESEARCH D-03 Option B — CLAMP TO CEILING):**
+  IronHermes' `delegate_task` tool *does* currently expose and honor a per-call /
+  per-task `max_iterations` override (shipped Phase 32.2 / D-08, PROV-09; schema at
+  `delegate_task.rs:677` + `:695-698`, honored at `:886-891` / `:308-313`, test
+  `test_per_call_max_iterations_overrides_config` at `:2064`). We are **NOT** doing
+  the reference's pure log-and-drop. Instead, **`config.delegation.max_iterations`
+  is a hard CEILING**: a caller/model may request a *smaller* per-call budget
+  (honored), but any value *exceeding* the config ceiling is clamped down to the
+  ceiling (with a `tracing::warn!` recording the clamp). The fresh per-child
+  `BudgetHandle` is sized from this clamped value. This preserves the 32.2 feature
+  for shrinking while capping the DoS exposure. Enforcement is UPSTREAM in
+  `delegate_task.rs::execute` and `::execute_batch` (both `effective_max_iterations`
+  / `per_task_max_iterations` resolution sites), because `run_child` has no access
+  to `config.delegation`. The existing override-wins test at `:2064` must be
+  REWRITTEN to assert clamping (request > ceiling → clamped; request ≤ ceiling →
+  honored). The `"minimum": 1` schema bound stays; document the ceiling behavior in
+  the `max_iterations` property descriptions (keep both schema properties).
 
 ### PROV-10 retirement + DoS containment
 - **D-04:** **Retire the PROV-10 shared parent↔child counter.** The doc-comment
@@ -104,8 +116,10 @@ touch interactive headroom because *no* subagent shares its parent's counter.
      budget stays at full headroom (the original T-28.1-16 acceptance from
      `AGENT-RUNTIME-DESIGN.md §8`). Mirror the existing independence test at
      `crates/ironhermes-cron-runner/src/runner.rs:638`.
-  3. A model/caller-supplied `max_iterations` cannot override the authoritative
-     `delegation.max_iterations` (D-03).
+  3. Clamp-to-ceiling (D-03 Option B): a caller-supplied `max_iterations`
+     *exceeding* `delegation.max_iterations` is clamped down to the ceiling (and a
+     warn is logged); a caller-supplied value *at or below* the ceiling is honored
+     verbatim. (Rewrite of the old override-wins test at `delegate_task.rs:2064`.)
 
 ### Claude's Discretion
 - Exact module/seam for constructing the fresh child `BudgetHandle` (inside
