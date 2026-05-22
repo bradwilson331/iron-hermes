@@ -69,3 +69,59 @@ fn preprocess_not_called_in_surfaces() {
         token
     );
 }
+
+// ── Phase 34b Plan 02 (Task 3): per-turn hook loci + CLI session reset ───────
+
+/// (c) `update_model` is wired in run_turn this phase (D-07, no hedge).
+#[test]
+fn update_model_present_in_run_turn() {
+    assert!(
+        RUNTIME_SOURCE.contains("update_model"),
+        "agent_runtime.rs must call engine.update_model (D-07 per-turn model hook)"
+    );
+}
+
+/// (d) `update_from_response` is the POST-run per-turn usage locus: its byte
+/// offset MUST be greater than `agent.run(` so the hook sees the turn's usage.
+#[test]
+fn update_from_response_after_agent_run_in_run_turn() {
+    let run_pos = RUNTIME_SOURCE
+        .find("agent.run(")
+        .expect("agent.run( must appear in agent_runtime.rs");
+
+    // The post-run hook call site: search after the run position.
+    let update_pos = RUNTIME_SOURCE
+        .match_indices("update_from_response")
+        .map(|(i, _)| i)
+        .find(|&i| i > run_pos)
+        .expect("update_from_response must appear AFTER agent.run( in agent_runtime.rs");
+
+    assert!(
+        update_pos > run_pos,
+        "update_from_response (offset {}) must appear AFTER agent.run( (offset {}) \
+         so the post-run usage hook fires on the turn's total_usage",
+        update_pos,
+        run_pos
+    );
+}
+
+/// (e) CLI `/new` (ClearSession arm) resets the durable per-session
+/// compression_count Arc<AtomicUsize> to 0 (D-09/D-10 surface reset locus).
+#[test]
+fn cli_clear_session_resets_compression_count() {
+    // The ClearSession arm must contain a `compression_count.store(0` reset.
+    let clear_pos = MAIN_SOURCE
+        .find("ClearSession(output)")
+        .expect("ClearSession(output) arm must appear in main.rs");
+
+    let tail = &MAIN_SOURCE[clear_pos..];
+    // Bound the search to a window after the arm to keep it local to /new.
+    let window_end = tail.len().min(800);
+    let window = &tail[..window_end];
+
+    assert!(
+        window.contains("compression_count.store(0"),
+        "CLI ClearSession (/new) arm must reset compression_count.store(0, ...) \
+         (Phase 34b D-09/D-10 surface session-reset locus)"
+    );
+}

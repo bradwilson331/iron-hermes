@@ -348,9 +348,34 @@ impl AgentRuntime {
             self.memory_manager.clone(),
         );
 
+        // ── Phase 34b Plan 02 (D-07/D-09): central per-turn engine hooks ─────
+        // Invoked ONCE here — the single per-turn locus — never per-surface.
+        // Grab a handle to the attached engine (None on surfaces that disable
+        // compression). The shipped engines treat both as no-ops; an engine
+        // holding durable state can react. update_model is wired definitely
+        // this phase (D-07), NOT conditionally.
+        let engine_handle = agent.context_engine();
+        if let Some(ref engine) = engine_handle {
+            // Per-turn model identity: fully resolvable from the same accessor
+            // run_turn already used for context_length above (no hedge — D-07).
+            let endpoint = self.resolver.resolve_for_main();
+            engine.update_model(
+                endpoint.default_model.as_str(),
+                context_length,
+                Some(endpoint.base_url.as_str()),
+            );
+        }
+
         // D-11: attach context_warnings from @-ref expansion onto the AgentResult
         // so all 3 surfaces (CLI, gateway, web) can render --- Context Warnings ---.
         let mut out = agent.run(req.messages).await?;
+
+        // Phase 34b Plan 02 (D-09): post-run per-turn usage hook. MUST appear
+        // AFTER agent.run (asserted in invariants_34b).
+        if let Some(ref engine) = engine_handle {
+            engine.update_from_response(&out.total_usage);
+        }
+
         out.context_warnings = context_warnings;
         Ok(out)
     }

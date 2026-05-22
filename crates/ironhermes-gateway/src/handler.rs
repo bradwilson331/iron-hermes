@@ -523,7 +523,19 @@ impl GatewayMessageHandler {
                                 .run_agent(&intro_event, adapter, cancel, no_attachments)
                                 .await;
                         }
-                        // /new: clear entire session history
+                        // /new: clear entire session history.
+                        // Phase 34b Plan 02 (D-09/D-10): removing the session from
+                        // the store discards ALL per-session state — including the
+                        // compression_count carried in the SessionStore entry — so
+                        // the next turn rebuilds a fresh ContextEngine with a zeroed
+                        // counter. No separate engine.on_session_reset() call is
+                        // needed here because the gateway holds no long-lived,
+                        // session-scoped engine handle (the engine is rebuilt fresh
+                        // per turn in run_turn).
+                        tracing::debug!(
+                            session = ?session_key,
+                            "gateway /new: session removed; per-session compression state discarded (34b D-10)"
+                        );
                         let had_session = {
                             let mut store = self.session_store.write().await;
                             store.remove(&session_key).is_some()
