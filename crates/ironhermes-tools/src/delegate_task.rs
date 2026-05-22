@@ -306,10 +306,24 @@ impl DelegateTaskTool {
                 .unwrap_or(config.child_timeout_seconds);
 
             // D-08 Phase 32.2: per-task max_iterations override; falls back to config default.
+            // D-03 Phase 35 (Option B — clamp-to-ceiling): a caller/model-supplied value above
+            // config.max_iterations is clamped DOWN to the ceiling; values at or below are honored
+            // verbatim.  Enforcement is UPSTREAM here (not in run_child) because run_child has no
+            // access to config.delegation.
             let per_task_max_iterations = task_obj
                 .get("max_iterations")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
+                .map(|v| {
+                    let requested = v as usize;
+                    if requested > config.max_iterations {
+                        tracing::warn!(
+                            requested_max_iterations = requested,
+                            ceiling = config.max_iterations,
+                            "per-task max_iterations exceeds delegation.max_iterations ceiling; clamping to ceiling"
+                        );
+                    }
+                    requested.min(config.max_iterations)
+                })
                 .unwrap_or(config.max_iterations);
 
             // Phase 32.3 Plan 02 (D-05): per-task stale_warn_seconds override;
@@ -674,7 +688,7 @@ impl Tool for DelegateTaskTool {
                                 "context": { "type": "string", "description": "Additional context for the child agent." },
                                 "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." },
                                 "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-task timeout override in seconds." },
-                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config." },
+                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config. Values above delegation.max_iterations are clamped down to the ceiling (D-03 Option B)." },
                                 "stale_warn_seconds": { "type": "integer", "minimum": 1, "description": "Seconds of inactivity before this subagent is flagged Stale. Default: 120 (or delegation.stale_warn_seconds from config). Soft warn threshold only; hard-kill ceiling stays at timeout_seconds." },
                                 "role": { "type": "string", "enum": ["leaf", "orchestrator"], "default": "leaf", "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth." }
                             },
@@ -695,7 +709,7 @@ impl Tool for DelegateTaskTool {
                     "max_iterations": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config."
+                        "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config. Values above delegation.max_iterations are clamped down to the ceiling (D-03 Option B)."
                     },
                     "stale_warn_seconds": {
                         "type": "integer",
@@ -884,10 +898,24 @@ impl Tool for DelegateTaskTool {
             .unwrap_or(self.config.child_timeout_seconds);
 
         // D-08 Phase 32.2: per-call max_iterations override; falls back to config default.
+        // D-03 Phase 35 (Option B — clamp-to-ceiling): a caller/model-supplied value above
+        // config.max_iterations is clamped DOWN to the ceiling; values at or below are honored
+        // verbatim.  Enforcement is UPSTREAM here (not in run_child) because run_child has no
+        // access to config.delegation.
         let effective_max_iterations = args
             .get("max_iterations")
             .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
+            .map(|v| {
+                let requested = v as usize;
+                if requested > self.config.max_iterations {
+                    tracing::warn!(
+                        requested_max_iterations = requested,
+                        ceiling = self.config.max_iterations,
+                        "per-call max_iterations exceeds delegation.max_iterations ceiling; clamping to ceiling"
+                    );
+                }
+                requested.min(self.config.max_iterations)
+            })
             .unwrap_or(self.config.max_iterations);
 
         // Phase 32.3 Plan 02 (D-05): per-call stale_warn_seconds override;
