@@ -392,10 +392,10 @@ fn parse_file_reference_value(value: &str) -> (String, Option<usize>, Option<usi
         let path = cap.name("path").unwrap().as_str().to_string();
         let line_start = cap
             .name("start")
-            .map(|m| m.as_str().parse::<usize>().unwrap());
+            .and_then(|m| m.as_str().parse::<usize>().ok());
         let line_end = cap
             .name("end")
-            .map(|m| m.as_str().parse::<usize>().unwrap())
+            .and_then(|m| m.as_str().parse::<usize>().ok())
             .or(line_start);
         return (path, line_start, line_end);
     }
@@ -526,7 +526,9 @@ fn expand_file_reference(
     let text = if let Some(ls) = r.line_start {
         let lines: Vec<&str> = text.lines().collect();
         let start_idx = ls.saturating_sub(1).min(lines.len());
-        let end_idx = r.line_end.unwrap_or(ls).min(lines.len());
+        // Clamp end below start (e.g. reversed range `@file:f:20-10`) to avoid a
+        // slice-bounds panic; a degenerate range yields an empty selection.
+        let end_idx = r.line_end.unwrap_or(ls).min(lines.len()).max(start_idx);
         lines[start_idx..end_idx].join("\n")
     } else {
         text
@@ -813,8 +815,13 @@ pub async fn preprocess_context_references_async(
         None => cwd_resolved.clone(),
     };
 
+    // Canonicalize so the sensitive-path blocklist compares like-for-like against
+    // the canonicalized `resolved` target — otherwise a symlinked home (the normal
+    // macOS layout) silently bypasses the blocklist.
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = home.canonicalize().unwrap_or(home);
     let hermes_home = ironhermes_core::constants::get_hermes_home();
+    let hermes_home = hermes_home.canonicalize().unwrap_or(hermes_home);
 
     let mut warnings: Vec<String> = Vec::new();
     let mut blocks: Vec<String> = Vec::new();
@@ -1076,6 +1083,34 @@ mod tests {
         assert!(result.message.contains("line3"), "Should contain line3");
         assert!(!result.message.contains("line4"), "Should not contain line4");
         assert!(!result.message.contains("line1"), "Should not contain line1");
+    }
+
+    /// CR-01 regression: a reversed line range must not panic on the slice bounds.
+    #[tokio::test]
+    async fn test_expand_file_reversed_range_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lines.txt"), "line1\nline2\nline3\nline4\n").unwrap();
+
+        let msg = "@file:lines.txt:20-10";
+        let result = preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
+
+        // No panic; degenerate range yields an empty selection rather than crashing.
+        assert!(result.expanded);
+        assert!(!result.message.contains("line2"));
+    }
+
+    /// CR-02 regression: an overflowing line number must not panic (parse falls back to None).
+    #[tokio::test]
+    async fn test_expand_file_overflow_line_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lines.txt"), "line1\nline2\n").unwrap();
+
+        let msg = "@file:lines.txt:99999999999999999999999999";
+        let result = preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
+
+        // No panic; an unparseable line number is ignored and the whole file is attached.
+        assert!(result.expanded);
+        assert!(result.message.contains("line1"));
     }
 
     /// Expand @folder: → listing block (no file contents).
