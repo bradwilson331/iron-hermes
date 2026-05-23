@@ -86,6 +86,104 @@ fn provider_env_var_name(provider: &str) -> String {
     format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
 }
 
+/// Phase 35.1 Plan-05 (Gap-B): Locate the project source root that contains
+/// the bundled skill library.
+///
+/// Detection order:
+/// 1. `IRONHERMES_SOURCE` env var — if set and non-empty, use it directly.
+/// 2. Walk up from `std::env::current_exe()` up to 10 levels, find the first
+///    directory containing both `Cargo.toml` and a `skills/` subdirectory.
+///    This detects dev-build installs where the binary lives inside the
+///    project workspace (e.g. `target/debug/hermes`).
+/// 3. Return `None` — graceful degradation for production installs where the
+///    skill library is expected to have been installed by another mechanism.
+fn find_project_skills_source() -> Option<std::path::PathBuf> {
+    // 1. Explicit override via env var.
+    if let Ok(s) = std::env::var("IRONHERMES_SOURCE") {
+        if !s.is_empty() {
+            return Some(std::path::PathBuf::from(s));
+        }
+    }
+    // 2. Dev-build detection: walk up from the binary location.
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..10 {
+        if dir.join("Cargo.toml").exists() && dir.join("skills").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+/// Phase 35.1 Plan-05 (Gap-B): Copy skills from a project source root into
+/// `hermes_home/skills/`.
+///
+/// Iterates over `skills/` and `optional-skills/` inside `source_root`.
+/// For each category subdirectory found, creates the matching destination
+/// category dir under `hermes_home/skills/{category}/` and copies every
+/// regular file into it. Existing destination files are preserved (skip-if-exists).
+///
+/// Non-directory entries at the category level (e.g. `DESCRIPTION.md`) and
+/// non-file entries inside category dirs (nested subdirs) are silently skipped.
+/// Missing source subdirs (`optional-skills/` may not exist) are also skipped.
+fn install_skills_from_source(
+    source_root: &std::path::Path,
+    hermes_home: &std::path::Path,
+) -> Result<()> {
+    for subdir in &["skills", "optional-skills"] {
+        let src_dir = source_root.join(subdir);
+        if !src_dir.exists() {
+            continue;
+        }
+        for category_entry in std::fs::read_dir(&src_dir)
+            .with_context(|| format!("reading source dir {}", src_dir.display()))?
+        {
+            let category_path = category_entry
+                .with_context(|| format!("reading entry in {}", src_dir.display()))?
+                .path();
+            if !category_path.is_dir() {
+                // Skip files at the category level (e.g. DESCRIPTION.md).
+                continue;
+            }
+            let category_name = match category_path.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dest_category = hermes_home.join("skills").join(category_name);
+            std::fs::create_dir_all(&dest_category).with_context(|| {
+                format!("creating dest category dir {}", dest_category.display())
+            })?;
+            for skill_entry in std::fs::read_dir(&category_path)
+                .with_context(|| format!("reading category dir {}", category_path.display()))?
+            {
+                let skill_path = skill_entry
+                    .with_context(|| format!("reading entry in {}", category_path.display()))?
+                    .path();
+                if !skill_path.is_file() {
+                    // Skip nested subdirs inside category dirs.
+                    continue;
+                }
+                let skill_name = match skill_path.file_name() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let dest_skill = dest_category.join(skill_name);
+                if !dest_skill.exists() {
+                    std::fs::copy(&skill_path, &dest_skill).with_context(|| {
+                        format!(
+                            "copying {} -> {}",
+                            skill_path.display(),
+                            dest_skill.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Phase 35.1 Gap-A: silently backfill `providers.{provider}.api_key_env` for
 /// existing configs that pre-date the canonical providers map.
 ///
@@ -731,12 +829,16 @@ pub async fn run_skills_section(
 ) -> Result<()> {
     use ironhermes_core::SkillRegistry;
 
-    let skills_dir = hermes_home.join("skills");
-    if !skills_dir.exists() {
-        println!("No skills installed — nothing to configure.");
-        return Ok(());
+    // Phase 35.1 Plan-05 (Gap-B): Ensure skills dir exists, then install from
+    // project source (dev-build or IRONHERMES_SOURCE override) before scanning
+    // for prereqs. Gracefully skipped when no source is found (production installs).
+    std::fs::create_dir_all(hermes_home.join("skills"))
+        .context("creating hermes_home/skills directory")?;
+    if let Some(source_root) = find_project_skills_source() {
+        install_skills_from_source(&source_root, hermes_home)?;
     }
 
+    let skills_dir = hermes_home.join("skills");
     let registry = SkillRegistry::load_with_paths(&[skills_dir]);
     let mut had_any = false;
 
