@@ -62,18 +62,18 @@ Plans:
 **Goal:** Make `ironhermes setup` result in a fully working agent — matching the hermes-agent end-to-end setup experience. Close the six actual gaps in the existing wizard/preflight code (CFG-02 and CFG-03 already shipped in `config_cli.rs` and are NOT re-implemented): (1) replace the `bail!("section deferred to Phase 28")` at `setup.rs:122` with a real `run_skills_section` mirroring `run_tools_section` (D-01); (2) add a `run_terminal_section` that prompts for `cwd` only (D-02); (3) add a "Quick vs Full" choice prompt at wizard entry (D-11) so the fast path is the default; (4) call `doctor::run_doctor_check()` automatically at wizard exit as the final preflight gate (D-03), extracting `cmd_doctor` from `main.rs` into a new `src/doctor.rs` module; (5) print a completion summary with configured provider, model, enabled platforms, and a next-step hint (D-12); (6) add D-07/D-08 first-run LLM detection to `preflight.rs` — auto-launch wizard when no API key (OPENROUTER/ANTHROPIC/OPENAI) is set AND no localhost/127.0.0.1 base_url is configured, with `l.len() > key.len()` guard against empty-value bypass (T-35.1-01). The Phase 23 preflight outer gate condition (`Chat | Gateway | None`) stays byte-for-byte LOCKED — D-08 is added inside the existing valid-config branch only.
 **Requirements**: CFG-01 (active wizard work), CFG-02 (already satisfied in `config_cli.rs::cmd_config_set/get/show`), CFG-03 (already satisfied in `config_cli.rs::cmd_config_migrate`)
 **Depends on:** Phase 35
-**Plans:** 4 plans
+**Plans:** 5/6 plans executed
 
 Plans:
 **Wave 0**
 
-- [ ] 35.1-00-PLAN.md — Extract `cmd_doctor` to `src/doctor.rs` module + create Wave 0 test scaffolds (`tests/setup_wizard.rs` with 6 #[ignore] stubs; extend `tests/doctor_integration.rs` with d07_d08 stub)
+- [x] 35.1-00-PLAN.md — Extract `cmd_doctor` to `src/doctor.rs` module + create Wave 0 test scaffolds (`tests/setup_wizard.rs` with 6 #[ignore] stubs; extend `tests/doctor_integration.rs` with d07_d08 stub)
 
 **Wave 1** *(depends on Wave 0)*
 
-- [ ] 35.1-01-PLAN.md — Implement `run_skills_section` (D-01) + `run_terminal_section` (D-02) + `apply_skills_prereq_answers` testability seam; replace the bail line at setup.rs:122; un-ignore D-01 and D-02 tests
+- [x] 35.1-01-PLAN.md — Implement `run_skills_section` (D-01) + `run_terminal_section` (D-02) + `apply_skills_prereq_answers` testability seam; replace the bail line at setup.rs:122; un-ignore D-01 and D-02 tests
 
 **Wave 2** *(parallel: 02 and 03 have zero `files_modified` overlap — 02 touches setup.rs + tests/setup_wizard.rs; 03 touches preflight.rs + tests/doctor_integration.rs)*
 
-- [ ] 35.1-02-PLAN.md — Wire D-11 fast/full choice + D-03 in-process doctor call + D-12 completion summary into `run_setup` None arm; un-ignore d11/d03/d12 source-text invariant tests
-- [ ] 35.1-03-PLAN.md — Implement `has_runnable_llm` helper (env-vars → raw .env → local base_url ordering) + integrate into `preflight.rs` Ok(config) arm (D-07/D-08); un-ignore d07_d08 integration tests; verify main.rs Phase 23 gate stays byte-for-byte unchanged
+- [x] 35.1-02-PLAN.md — Wire D-11 fast/full choice + D-03 in-process doctor call + D-12 completion summary into `run_setup` None arm; un-ignore d11/d03/d12 source-text invariant tests
+- [x] 35.1-03-PLAN.md — Implement `has_runnable_llm` helper (env-vars → raw .env → local base_url ordering) + integrate into `preflight.rs` Ok(config) arm (D-07/D-08); un-ignore d07_d08 integration tests; verify main.rs Phase 23 gate stays byte-for-byte unchanged

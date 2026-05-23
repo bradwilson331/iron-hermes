@@ -4,13 +4,13 @@ milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
 stopped_at: Phase 35.1 context gathered
-last_updated: "2026-05-22T23:52:21.065Z"
-last_activity: 2026-05-22 -- Phase 35.1 planning complete
+last_updated: "2026-05-23T11:22:19.492Z"
+last_activity: 2026-05-23
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 17
-  completed_plans: 13
+  total_plans: 19
+  completed_plans: 18
   percent: 75
 ---
 
@@ -21,15 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 35 — cron subagent budget isolation give cron its own delegate ta
+**Current focus:** Phase 35.1 — hermes-agent-install-and-setup-parity
 
 ## Current Position
 
-Phase: 35.1
-Plan: Not started
+Phase: 35.1 (hermes-agent-install-and-setup-parity) — EXECUTING
+Plan: 2 of 4
 Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
 Status: Ready to execute
-Last activity: 2026-05-22 -- Phase 35.1 planning complete
+Last activity: 2026-05-23
 
 ## Performance Metrics
 
@@ -403,6 +403,8 @@ Recent decisions affecting current work:
 - [Phase 32.2-subagent-delegation-parity]: ChildRole defaults to Leaf on all parse failures — least privilege per T-32.2-10
 - [Phase 32.2-subagent-delegation-parity]: effective_tools pre-pass adds delegate_task BEFORE the match loop — never after (RESEARCH Pitfall 1)
 - [Phase 32.2-subagent-delegation-parity]: Depth threading via AgentSubagentRunner struct fields — SubagentRunner trait signature unchanged (RESEARCH Pitfall 6)
+- [Phase 35.1-05]: run_skills_section early-return guard removed — create_dir_all guarantees dir exists; SkillRegistry handles empty dir gracefully
+- [Phase 35.1-05]: find_project_skills_source checks IRONHERMES_SOURCE env var first, then walks current_exe() up to 10 levels — graceful None for production installs
 
 ### Roadmap Evolution
 
@@ -483,6 +485,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-22T23:20:53.831Z
+Last session: 2026-05-23T11:22:19.488Z
 Stopped at: Phase 35.1 context gathered
-Resume file: .planning/phases/35.1-hermes-agent-install-and-setup-parity/35.1-CONTEXT.md
+Resume file: None
