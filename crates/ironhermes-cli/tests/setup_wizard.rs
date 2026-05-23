@@ -339,9 +339,30 @@ fn d01_run_skills_section_prompts_for_each_unconfigured_skill_prereq() {
 }
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-02"]
 fn d02_run_terminal_section_prompts_for_cwd_and_writes_config() {
-    // Wave 0 stub — Wave 1 Task 2 removes #[ignore] and replaces body.
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Use apply_terminal_answer testability seam (bypasses rustyline).
+    ironhermes_cli::setup::apply_terminal_answer(tmp.path(), "/some/dir")
+        .expect("apply_terminal_answer must succeed");
+
+    // Round-trip: load config and verify terminal.cwd == "/some/dir"
+    let config =
+        ironhermes_core::config::Config::load_from(&tmp.path().join("config.yaml"))
+            .expect("config.yaml must be readable after apply_terminal_answer");
+    assert_eq!(
+        config.terminal.cwd, "/some/dir",
+        "terminal.cwd must round-trip through config.yaml; got: {}",
+        config.terminal.cwd
+    );
+
+    // Verify backend is NOT touched (D-02: cwd only)
+    assert_eq!(
+        config.terminal.backend, "local",
+        "terminal.backend must remain 'local' (D-02 says cwd only); got: {}",
+        config.terminal.backend
+    );
 }
 
 #[test]
