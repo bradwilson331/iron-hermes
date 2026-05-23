@@ -273,6 +273,47 @@ fn config_get_missing_key_silent() {
 }
 
 // ============================================================================
+// Wave 0 stubs: Phase 35.1 Plan 00 — test scaffolds for D-01/D-02/D-03/D-11/D-12
+// Wave 1 (Plan 01) and Wave 2 (Plan 02) will remove #[ignore] and fill assertions.
+// ============================================================================
+
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-01"]
+fn d01_run_skills_section_no_skills_dir_returns_ok() {
+    // Wave 0 stub — Wave 1 Task 1 removes #[ignore] and replaces body.
+}
+
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-01"]
+fn d01_run_skills_section_prompts_for_each_unconfigured_skill_prereq() {
+    // Wave 0 stub — Wave 1 Task 1 removes #[ignore] and replaces body.
+}
+
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-02"]
+fn d02_run_terminal_section_prompts_for_cwd_and_writes_config() {
+    // Wave 0 stub — Wave 1 Task 2 removes #[ignore] and replaces body.
+}
+
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 02"]
+fn d11_fast_full_choice_prompt_present_in_setup_rs() {
+    // Wave 0 stub — Wave 2 Plan 02 removes #[ignore] and replaces body.
+}
+
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 02"]
+fn d03_doctor_call_present_at_wizard_exit() {
+    // Wave 0 stub — Wave 2 Plan 02 removes #[ignore] and replaces body.
+}
+
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 02"]
+fn d12_completion_summary_present_in_setup_rs() {
+    // Wave 0 stub — Wave 2 Plan 02 removes #[ignore] and replaces body.
+}
+
+// ============================================================================
 // Task 7: Preflight middleware skip-list tests
 // ============================================================================
 
