@@ -1243,6 +1243,143 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 35.1-04: backfill_providers_api_key_env tests (TDD RED)
+    // -----------------------------------------------------------------------
+
+    /// Test 1: backfill writes providers.{provider}.api_key_env when absent and
+    /// .env has the env var.
+    #[test]
+    fn backfill_writes_api_key_env_when_absent_and_dotenv_has_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Write minimal config.yaml with model.provider=openrouter, empty providers map.
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: ''\nproviders: {}\n",
+        )
+        .unwrap();
+        // Write .env with OPENROUTER_API_KEY set.
+        std::fs::write(hermes_home.join(".env"), "OPENROUTER_API_KEY=sk-test\n").unwrap();
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        backfill_providers_api_key_env(&config, hermes_home).expect("backfill should succeed");
+
+        let result = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            result,
+            Some("OPENROUTER_API_KEY".to_string()),
+            "backfill must write providers.openrouter.api_key_env = OPENROUTER_API_KEY"
+        );
+    }
+
+    /// Test 2: backfill is idempotent — skips when key already set.
+    #[test]
+    fn backfill_skips_when_key_already_set() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Pre-write providers.openrouter.api_key_env.
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: ''\nproviders:\n  openrouter:\n    api_key_env: OPENROUTER_API_KEY\n",
+        )
+        .unwrap();
+        std::fs::write(hermes_home.join(".env"), "OPENROUTER_API_KEY=sk-test\n").unwrap();
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        backfill_providers_api_key_env(&config, hermes_home).expect("backfill should succeed");
+
+        // Value must still be set (idempotent — no double-write, no error).
+        let result = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            result,
+            Some("OPENROUTER_API_KEY".to_string()),
+            "backfill must leave existing value unchanged"
+        );
+    }
+
+    /// Test 3: backfill skips when no env var found (no .env file, no process env).
+    #[test]
+    fn backfill_skips_when_no_env_var_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Use a fake provider name unlikely to be in any env.
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: fakeprovider_zzz999\n  default: ''\nproviders: {}\n",
+        )
+        .unwrap();
+        // No .env file. FAKEPROVIDER_ZZZ999_API_KEY is not in any real env.
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        backfill_providers_api_key_env(&config, hermes_home).expect("backfill should succeed");
+
+        let result = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.fakeprovider_zzz999.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            result, None,
+            "backfill must NOT write api_key_env when env var is absent"
+        );
+    }
+
+    /// Test 4: backfill uses process env when .env file is absent.
+    #[test]
+    fn backfill_uses_process_env_when_dotenv_absent() {
+        use std::sync::Mutex;
+        use std::sync::OnceLock;
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: ''\nproviders: {}\n",
+        )
+        .unwrap();
+        // No .env file.
+
+        std::env::set_var("OPENROUTER_API_KEY", "sk-from-env");
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        let result = backfill_providers_api_key_env(&config, hermes_home);
+
+        // Clean up process env before any assert.
+        std::env::remove_var("OPENROUTER_API_KEY");
+
+        result.expect("backfill should succeed");
+
+        let value = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            value,
+            Some("OPENROUTER_API_KEY".to_string()),
+            "backfill must write providers.openrouter.api_key_env when env var is in process env"
+        );
+    }
+
     /// CFG-01 Test 4: source-text invariant — run_minimum_viable_flow must NOT
     /// call apply_api_key_answer(config, ...) anywhere in its body.
     #[test]
