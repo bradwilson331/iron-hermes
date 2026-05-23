@@ -179,7 +179,9 @@ fn setup_agent_section_succeeds_with_phase26_implementation() {
 }
 
 #[test]
-fn setup_skills_section_errors_with_deferred_message() {
+fn setup_skills_section_succeeds_with_no_skills_installed() {
+    // Phase 35.1 D-01: skills section is now implemented (bail! removed).
+    // With no skills/ directory, the section exits 0 with a "nothing to configure" message.
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
@@ -187,8 +189,12 @@ fn setup_skills_section_errors_with_deferred_message() {
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "skills"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Phase 28").or(predicate::str::contains("phase 28")));
+        .success()
+        .stdout(
+            predicate::str::contains("No skills installed")
+                .or(predicate::str::contains("nothing to configure"))
+                .or(predicate::str::contains("prerequisites satisfied")),
+        );
 }
 
 #[test]
@@ -278,21 +284,91 @@ fn config_get_missing_key_silent() {
 // ============================================================================
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-01"]
 fn d01_run_skills_section_no_skills_dir_returns_ok() {
-    // Wave 0 stub — Wave 1 Task 1 removes #[ignore] and replaces body.
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    // No skills/ subdirectory — function must return Ok(()) without panic.
+    let result = ironhermes_cli::setup::apply_skills_prereq_answers(tmp.path(), &[]);
+    assert!(
+        result.is_ok(),
+        "apply_skills_prereq_answers with empty answers must return Ok(())"
+    );
 }
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-01"]
 fn d01_run_skills_section_prompts_for_each_unconfigured_skill_prereq() {
-    // Wave 0 stub — Wave 1 Task 1 removes #[ignore] and replaces body.
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Apply env_var answer: FAKE_KEY -> secret123
+    ironhermes_cli::setup::apply_skills_prereq_answers(
+        tmp.path(),
+        &[
+            ("fake-skill", "env_var", "FAKE_KEY", "secret123"),
+            ("fake-skill", "config_field", "skills.fake.timeout", "30"),
+        ],
+    )
+    .expect("apply_skills_prereq_answers must succeed");
+
+    // Verify FAKE_KEY=secret123 is in .env
+    let env_path = tmp.path().join(".env");
+    assert!(env_path.exists(), ".env file must exist after env_var write");
+    let env_contents = std::fs::read_to_string(&env_path).unwrap();
+    assert!(
+        env_contents.contains("FAKE_KEY=secret123"),
+        ".env must contain FAKE_KEY=secret123; got: {}",
+        env_contents
+    );
+
+    // Verify .env has 0600 permissions (T-35.1-03)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&env_path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            ".env mode must be 0600 (T-35.1-03), got {:o}",
+            mode & 0o777
+        );
+    }
+
+    // Verify skills.fake.timeout: 30 is in config.yaml via config_setter
+    let config_val =
+        ironhermes_core::config_setter::config_get(tmp.path(), "skills.fake.timeout").unwrap();
+    assert_eq!(
+        config_val.as_deref(),
+        Some("30"),
+        "skills.fake.timeout must be '30' in config.yaml; got: {:?}",
+        config_val
+    );
 }
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 01-02"]
 fn d02_run_terminal_section_prompts_for_cwd_and_writes_config() {
-    // Wave 0 stub — Wave 1 Task 2 removes #[ignore] and replaces body.
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Use apply_terminal_answer testability seam (bypasses rustyline).
+    ironhermes_cli::setup::apply_terminal_answer(tmp.path(), "/some/dir")
+        .expect("apply_terminal_answer must succeed");
+
+    // Round-trip: load config and verify terminal.cwd == "/some/dir"
+    let config =
+        ironhermes_core::config::Config::load_from(&tmp.path().join("config.yaml"))
+            .expect("config.yaml must be readable after apply_terminal_answer");
+    assert_eq!(
+        config.terminal.cwd, "/some/dir",
+        "terminal.cwd must round-trip through config.yaml; got: {}",
+        config.terminal.cwd
+    );
+
+    // Verify backend is NOT touched (D-02: cwd only)
+    assert_eq!(
+        config.terminal.backend, "local",
+        "terminal.backend must remain 'local' (D-02 says cwd only); got: {}",
+        config.terminal.backend
+    );
 }
 
 #[test]
