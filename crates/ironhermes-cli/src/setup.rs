@@ -113,7 +113,34 @@ pub async fn run_setup(section: Option<&str>, mode: WizardMode) -> Result<()> {
     let mut rl = make_wizard_editor()?;
 
     match section {
-        None => run_minimum_viable_flow(&mut config, &hermes_home, &mut rl, mode).await?,
+        None => {
+            // D-11: Ask fast/full choice at wizard start. Default = quick (N).
+            let full_setup = prompt_yes_no(
+                &mut rl,
+                "Full setup (all sections)? [y = full, N = quick provider+model only]",
+                false,
+            )?;
+
+            // Both paths always run minimum viable flow (provider + model mandatory).
+            run_minimum_viable_flow(&mut config, &hermes_home, &mut rl, mode).await?;
+
+            // D-11: Full path runs all additional sections in order.
+            if full_setup {
+                run_skills_section(&mut rl, &hermes_home).await?;
+                run_terminal_section(&mut config, &hermes_home, &mut rl).await?;
+                run_tools_section(&mut rl, &hermes_home).await?;
+                run_memory_section(&mut config, &hermes_home, &mut rl).await?;
+                run_gateway_section(&mut config, &mut rl).await?;
+                run_agent_section(&mut config, &mut rl).await?;
+            }
+
+            // D-03: Doctor check fires after ALL sections (quick OR full), before summary.
+            println!("\nRunning doctor check...\n");
+            run_doctor_check()?;
+
+            // D-12: Completion summary — configured provider, model, platforms, next step.
+            print_setup_completion_summary(&config, &hermes_home);
+        }
         Some("model") => run_model_section(&mut config, &mut rl).await?,
         Some("memory") => run_memory_section(&mut config, &hermes_home, &mut rl).await?,
         Some("gateway") => run_gateway_section(&mut config, &mut rl).await?,
@@ -1238,6 +1265,110 @@ mod tests {
              that writes the deprecated model.api_key field. Body was:\n{}",
             body
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-03: Doctor check at wizard exit (lib-safe inline version)
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-03: Run a health check at wizard exit.
+///
+/// This is a lib-safe inline version of the doctor check, callable from
+/// setup.rs (which compiles as part of the lib crate). The full
+/// `ironhermes doctor` command dispatches through main.rs → doctor::run_doctor_check()
+/// which adds the profile line; the wizard exit version is equivalent but
+/// omits the profile context (not yet loaded in first-run flows).
+///
+/// Always returns `Ok(())` — issues are shown as MISSING lines, not errors.
+fn run_doctor_check() -> Result<()> {
+    use colored::Colorize;
+
+    println!("{}", "IronHermes Doctor".bold().cyan());
+    println!("{}", "─".repeat(40));
+
+    let home = get_hermes_home();
+    let ok_icon = |ok: bool| if ok { "OK".green() } else { "MISSING".yellow() };
+
+    println!("  [{}] Home directory", ok_icon(home.exists()));
+
+    let config_path = ironhermes_core::config::Config::config_path();
+    println!("  [{}] Config file", ok_icon(config_path.exists()));
+
+    let env_path = ironhermes_core::config::Config::env_path();
+    println!("  [{}] .env file", ok_icon(env_path.exists()));
+
+    println!(
+        "  [{}] OpenRouter API key",
+        ok_icon(std::env::var("OPENROUTER_API_KEY").map(|v| !v.is_empty()).unwrap_or(false))
+    );
+    println!(
+        "  [{}] Anthropic API key",
+        ok_icon(std::env::var("ANTHROPIC_API_KEY").map(|v| !v.is_empty()).unwrap_or(false))
+    );
+
+    let db_path = home.join("state.db");
+    println!("  [{}] State database", ok_icon(db_path.exists()));
+
+    let pid_path = home.join("gateway.pid");
+    if pid_path.exists() {
+        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
+            .ok()
+            .flatten()
+            .map(|r| {
+                matches!(
+                    ironhermes_gateway::pid::is_pid_alive(r.pid),
+                    ironhermes_gateway::pid::PidLiveness::Live
+                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
+                )
+            })
+            .unwrap_or(false);
+        println!(
+            "  [{}] Gateway PID (gateway.pid → live process)",
+            ok_icon(pid_ok)
+        );
+    } else {
+        println!("  [{}] Gateway PID (not running)", ok_icon(true));
+    }
+
+    println!();
+    println!("{}", "Run `ironhermes status` for more details.".dimmed());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-12: Setup completion summary
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-12: Print a completion summary after wizard + doctor have run.
+///
+/// Shows the configured provider, model, which gateway platforms are enabled,
+/// and a next-step hint. Returns `()` — pure stdout printing, no I/O errors
+/// propagated (doctor already covered failures; this is best-effort UX).
+fn print_setup_completion_summary(config: &Config, _hermes_home: &Path) {
+    use colored::Colorize;
+    println!();
+    println!("{}", "Setup complete!".bold().green());
+    println!("  Provider: {}", config.model.provider);
+    println!("  Model:    {}", config.model.default);
+
+    // Determine telegram-enabled status via typed config access (D-12).
+    let telegram_enabled = config
+        .gateway
+        .platforms
+        .get("telegram")
+        .map(|p| p.enabled)
+        .unwrap_or(false);
+
+    if telegram_enabled {
+        println!("  Telegram: enabled");
+    }
+    println!();
+    if telegram_enabled {
+        println!("  Run `ironhermes gateway` to start the Telegram bot.");
+    } else {
+        println!("  Run `ironhermes` to start chatting.");
     }
 }
 
