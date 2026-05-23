@@ -41,6 +41,14 @@ fn profile_doctor() {
     );
 }
 
+/// Wave 0 stub — Phase 35.1 Plan 03 Task 01 removes #[ignore] and fills assertions.
+/// D-07/D-08: first-run auto-detection triggers setup when no API key and no local endpoint.
+#[test]
+#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 03-01"]
+fn d07_d08_first_run_triggers_setup_when_no_api_key_and_no_local_endpoint() {
+    // Wave 0 stub — Wave 2 Plan 03 removes #[ignore] and replaces body.
+}
+
 /// Companion: doctor with no gateway.pid present reports the absent-file
 /// branch (D-16 healthy state — no gateway running).
 #[test]
