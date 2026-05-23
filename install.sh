@@ -73,7 +73,7 @@ resolve_version() {
     if [ "$VERSION" = "latest" ]; then
         local latest
         latest=$(curl -fsSL "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" 2>/dev/null \
-            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/') || true
         if [ -n "$latest" ]; then
             VERSION="$latest"
             log_info "Latest version: $VERSION"
