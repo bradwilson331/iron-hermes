@@ -13,3 +13,4 @@ node_modules/
 package-lock.json
 install-gitea.sh
 projects/
+/crates/iron_hermes_ui/filestoimport/ironhermes-design-system
