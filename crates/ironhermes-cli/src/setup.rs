@@ -119,9 +119,10 @@ pub async fn run_setup(section: Option<&str>, mode: WizardMode) -> Result<()> {
         Some("gateway") => run_gateway_section(&mut config, &mut rl).await?,
         Some("tools") => run_tools_section(&mut rl, &hermes_home).await?,
         Some("agent") => run_agent_section(&mut config, &mut rl).await?,
-        Some("skills") => anyhow::bail!("section deferred to Phase 28"),
+        Some("skills") => run_skills_section(&mut rl, &hermes_home).await?,
+        Some("terminal") => run_terminal_section(&mut config, &hermes_home, &mut rl).await?,
         Some(other) => anyhow::bail!(
-            "unknown setup section: {} (valid: model, memory, gateway, tools)",
+            "unknown setup section: {} (valid: model, memory, gateway, tools, skills, terminal)",
             other
         ),
     }
@@ -626,6 +627,187 @@ pub fn apply_tool_prereq_answers(
     for (_tool, prereq_name, value) in answers {
         write_env_var_to_dotenv(hermes_home, prereq_name, value)?;
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-01: skills prerequisite wizard section
+// ---------------------------------------------------------------------------
+
+/// Check whether `var` has a non-empty assignment line in the `.env` file at `env_path`.
+/// Returns `false` if the file does not exist. Mirrors `config_cli::env_var_exists_in_dotenv`
+/// (inlined here because config_cli is a binary-only module not accessible from lib context).
+fn env_var_exists_in_dotenv_setup(env_path: &Path, var: &str) -> Result<bool> {
+    if !env_path.exists() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(env_path)?;
+    Ok(text.lines().any(|l| {
+        let trimmed = l.trim_start();
+        trimmed.starts_with(&format!("{}=", var))
+    }))
+}
+
+/// Phase 35.1 D-01: Walk every installed skill's prerequisites and prompt the
+/// operator for missing required env vars and config fields.
+///
+/// Mirrors `run_tools_section` exactly but sources prereqs from `SkillRegistry`
+/// instead of `ToolRegistry`. Uses the same two-write-path contract (RESEARCH Pitfall 7):
+/// - `required_environment_variables` → `write_env_var_to_dotenv` (secrets masked via `is_secret_prereq_name`)
+/// - `config` fields → `ironhermes_core::config_setter::config_set`
+///
+/// Single-path scan of hermes_home/skills/ only (RESEARCH Pitfall 5; optional-skills/ is Phase 25.7).
+pub async fn run_skills_section(
+    rl: &mut rustyline::DefaultEditor,
+    hermes_home: &Path,
+) -> Result<()> {
+    use ironhermes_core::SkillRegistry;
+
+    let skills_dir = hermes_home.join("skills");
+    if !skills_dir.exists() {
+        println!("No skills installed — nothing to configure.");
+        return Ok(());
+    }
+
+    let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+    let mut had_any = false;
+
+    for skill in registry.list() {
+        if let Some(hm) = &skill.hermes_metadata {
+            // env var gaps: check .env, prompt if missing
+            for env_entry in &hm.required_environment_variables {
+                let env_path = hermes_home.join(".env");
+                let already_set = env_var_exists_in_dotenv_setup(&env_path, &env_entry.name)
+                    .unwrap_or(false);
+                if already_set {
+                    continue;
+                }
+                had_any = true;
+                println!();
+                println!("Skill: {}", skill.name);
+                // Build a Prerequisite so we can reuse prompt_for_prereq_value (masking etc.)
+                let prereq = ironhermes_tools::Prerequisite {
+                    kind: "env_var".to_string(),
+                    name: env_entry.name.clone(),
+                    description: env_entry
+                        .help
+                        .clone()
+                        .or_else(|| env_entry.prompt.clone())
+                        .unwrap_or_else(|| format!("required by skill '{}'", skill.name)),
+                    required: env_entry.required_for.is_some(),
+                };
+                let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
+                match answer {
+                    PrereqAnswer::Value(v) => write_env_var_to_dotenv(hermes_home, &prereq.name, &v)?,
+                    PrereqAnswer::Skip | PrereqAnswer::Defer => continue,
+                }
+            }
+
+            // config field gaps: check config.yaml, prompt if missing
+            for cfg_field in &hm.config {
+                let already_set =
+                    ironhermes_core::config_setter::config_get(hermes_home, &cfg_field.key)
+                        .unwrap_or(None)
+                        .is_some();
+                if already_set {
+                    continue;
+                }
+                had_any = true;
+                println!();
+                println!("Skill: {}", skill.name);
+                let prereq = ironhermes_tools::Prerequisite {
+                    kind: "config_field".to_string(),
+                    name: cfg_field.key.clone(),
+                    description: cfg_field
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| format!("config field for skill '{}'", skill.name)),
+                    required: false,
+                };
+                let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
+                match answer {
+                    PrereqAnswer::Value(v) => {
+                        ironhermes_core::config_setter::config_set(hermes_home, &prereq.name, &v)
+                            .with_context(|| format!("failed to set config field {}", prereq.name))?;
+                    }
+                    PrereqAnswer::Skip | PrereqAnswer::Defer => continue,
+                }
+            }
+        }
+    }
+
+    if !had_any {
+        println!("All skill prerequisites satisfied — nothing to configure.");
+    }
+    Ok(())
+}
+
+/// Testability seam for skills prereq answers — mirrors `apply_tool_prereq_answers`.
+/// Bypasses rustyline for tests. Tuple shape: `(skill_name, kind, prereq_name, value)`.
+/// `kind` is `"env_var"` → writes to `.env` via `write_env_var_to_dotenv`.
+/// `kind` is `"config_field"` → writes to `config.yaml` via `config_setter::config_set`.
+pub fn apply_skills_prereq_answers(
+    hermes_home: &Path,
+    answers: &[(&str, &str, &str, &str)], // (skill_name, kind, prereq_name, value)
+) -> Result<()> {
+    for (_skill_name, kind, prereq_name, value) in answers {
+        match *kind {
+            "env_var" => write_env_var_to_dotenv(hermes_home, prereq_name, value)?,
+            "config_field" => {
+                ironhermes_core::config_setter::config_set(hermes_home, prereq_name, value)
+                    .with_context(|| format!("failed to set config field {}", prereq_name))?;
+            }
+            other => anyhow::bail!("unknown skills prereq kind '{}'", other),
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-02: terminal configuration section
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-02: Prompt the operator for the default working directory (`cwd`).
+/// `config.terminal.backend` is NOT prompted (D-02: cwd only).
+/// After collecting input, saves config to `config.yaml` exactly once.
+pub async fn run_terminal_section(
+    config: &mut Config,
+    hermes_home: &Path,
+    rl: &mut rustyline::DefaultEditor,
+) -> Result<()> {
+    println!("\nTerminal configuration.\n");
+    let current_cwd = if config.terminal.cwd.is_empty() {
+        "."
+    } else {
+        &config.terminal.cwd
+    };
+    let answer = prompt_with_default(rl, "Default working directory for agent", current_cwd)?;
+    config.terminal.cwd = if answer.trim().is_empty() {
+        ".".to_string()
+    } else {
+        answer.trim().to_string()
+    };
+    config
+        .save_to(&hermes_home.join("config.yaml"))
+        .context("writing config.yaml")?;
+    Ok(())
+}
+
+/// Testability seam for terminal section — sets terminal.cwd and saves config.
+/// Bypasses rustyline for tests. Analogous to `apply_skills_prereq_answers`.
+pub fn apply_terminal_answer(hermes_home: &Path, cwd: &str) -> Result<()> {
+    let config_path = hermes_home.join("config.yaml");
+    let mut config = if config_path.exists() {
+        Config::load_from(&config_path)?
+    } else {
+        Config::default()
+    };
+    config.terminal.cwd = if cwd.trim().is_empty() {
+        ".".to_string()
+    } else {
+        cwd.trim().to_string()
+    };
+    config.save_to(&config_path).context("writing config.yaml")?;
     Ok(())
 }
 
