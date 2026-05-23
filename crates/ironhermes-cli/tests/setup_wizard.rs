@@ -372,21 +372,94 @@ fn d02_run_terminal_section_prompts_for_cwd_and_writes_config() {
 }
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 02"]
 fn d11_fast_full_choice_prompt_present_in_setup_rs() {
-    // Wave 0 stub — Wave 2 Plan 02 removes #[ignore] and replaces body.
+    let source = include_str!("../src/setup.rs");
+
+    // D-11: "Full setup" prompt string must be present in setup.rs.
+    assert!(
+        source.contains("Full setup"),
+        "D-11: 'Full setup' prompt text must be present in setup.rs"
+    );
+
+    // D-11: full_setup binding used to branch the full-path sections.
+    assert!(
+        source.contains("if full_setup"),
+        "D-11: 'if full_setup' branching must be present in setup.rs"
+    );
+
+    // D-11: minimum viable flow is called unconditionally.
+    assert!(
+        source.contains("run_minimum_viable_flow"),
+        "D-11: run_minimum_viable_flow must be called in setup.rs"
+    );
+
+    // D-11: full path must include run_skills_section.
+    assert!(
+        source.contains("run_skills_section"),
+        "D-11: run_skills_section must appear in setup.rs full path"
+    );
+
+    // D-11: full path must include run_terminal_section.
+    assert!(
+        source.contains("run_terminal_section"),
+        "D-11: run_terminal_section must appear in setup.rs full path"
+    );
 }
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 02"]
 fn d03_doctor_call_present_at_wizard_exit() {
-    // Wave 0 stub — Wave 2 Plan 02 removes #[ignore] and replaces body.
+    let source = include_str!("../src/setup.rs");
+
+    // D-03: doctor::run_doctor_check must be called from setup.rs.
+    assert!(
+        source.contains("run_doctor_check"),
+        "D-03: run_doctor_check must be called from setup.rs (wizard exit)"
+    );
+
+    // D-03: ordering invariant — run_doctor_check must appear AFTER run_minimum_viable_flow
+    // in the source file (doctor fires after sections complete, not before).
+    let mvf_pos = source
+        .find("run_minimum_viable_flow")
+        .expect("run_minimum_viable_flow must be present in setup.rs");
+    let doctor_pos = source
+        .find("run_doctor_check")
+        .expect("run_doctor_check must be present in setup.rs");
+    assert!(
+        doctor_pos > mvf_pos,
+        "D-03: run_doctor_check (offset {}) must appear AFTER run_minimum_viable_flow (offset {}) \
+         in setup.rs — doctor fires after all sections complete",
+        doctor_pos,
+        mvf_pos
+    );
 }
 
 #[test]
-#[ignore = "Wave 0 stub — pending Phase 35.1 Plan 02"]
 fn d12_completion_summary_present_in_setup_rs() {
-    // Wave 0 stub — Wave 2 Plan 02 removes #[ignore] and replaces body.
+    let source = include_str!("../src/setup.rs");
+
+    // D-12: completion summary function definition must be present.
+    assert!(
+        source.contains("fn print_setup_completion_summary"),
+        "D-12: print_setup_completion_summary function must be defined in setup.rs"
+    );
+
+    // D-12: "Setup complete" header must be in the source.
+    assert!(
+        source.contains("Setup complete"),
+        "D-12: 'Setup complete' header text must be present in setup.rs"
+    );
+
+    // D-12: next-step hint for non-gateway users must be present.
+    assert!(
+        source.contains("start chatting") || source.contains("Run `ironhermes`"),
+        "D-12: 'start chatting' or 'Run `ironhermes`' next-step hint must be present in setup.rs"
+    );
+
+    // D-12: next-step hint for Telegram bot users must be present.
+    assert!(
+        source.contains("Telegram bot") || source.contains("ironhermes gateway"),
+        "D-12: 'Telegram bot' or 'ironhermes gateway' next-step hint must be present in setup.rs"
+    );
 }
 
 // ============================================================================
