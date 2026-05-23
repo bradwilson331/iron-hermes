@@ -89,6 +89,7 @@ Environment variables live in `~/.ironhermes/.env` (or the `IRONHERMES_HOME`-sco
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `IRONHERMES_HOME` | Optional | `~/.ironhermes` | Override the default data and config directory |
+| `IRONHERMES_SOURCE` | Optional | — | Path to the IronHermes project root. When set, `hermes setup` (full) copies skill files from `$IRONHERMES_SOURCE/skills/` and `$IRONHERMES_SOURCE/optional-skills/` into `$IRONHERMES_HOME/skills/`. Auto-detected in dev builds via binary path walk. |
 
 ### Debug Flags
 
@@ -151,7 +152,7 @@ The following settings cause startup validation to fail and re-launch the setup 
 
 | Setting | Validation Rule |
 |---|---|
-| `providers.<main-provider>.api_key_env` | Required — must reference a non-empty env var name matching `[A-Z][A-Z0-9_]*` |
+| `providers.<main-provider>.api_key_env` | Required — must reference a non-empty env var name matching `[A-Z][A-Z0-9_]*`. **Auto-backfilled by `hermes setup`** when the matching env var exists in `.env` or process env but the config entry is absent. |
 | `model.default` | Required — must be a non-empty model identifier string |
 | `model.provider` | Required — must be a non-empty provider name (e.g., `openrouter`, `anthropic`) |
 | `memory.provider` | Required (when `memory.memory_enabled: true`) — must be one of: `file`, `sqlite`, `grafeo`, `duckdb` |

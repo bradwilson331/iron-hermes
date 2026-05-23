@@ -75,6 +75,9 @@ The following top-level categories are present in the bundled library:
 | `social-media` | Social media automation |
 | `smart-home` | Home automation skills |
 
+
+**Automatic installation during setup.** When you run `hermes setup` and choose the full setup option, IronHermes copies the bundled `skills/` and `optional-skills/` directories from the project source into `~/.ironhermes/skills/` automatically. Existing skill files are not overwritten. Set `IRONHERMES_SOURCE` to the project root path to enable this in dev builds or custom install locations; the setup wizard also auto-detects the source by walking up from the binary location.
+
 ---
 
 ## SKILL.md File Format
