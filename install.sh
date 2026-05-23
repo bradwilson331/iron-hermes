@@ -2,7 +2,7 @@
 # =============================================================================
 # IronHermes Installer
 # =============================================================================
-# Usage: curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.sh | bash
 #
 # Installs IronHermes by:
 # 1. Detecting OS and architecture
@@ -15,7 +15,7 @@ set -euo pipefail
 
 # --- Constants ---
 REPO_OWNER="bradwilson331"
-REPO_NAME="ironhermes"
+REPO_NAME="iron-hermes"
 INSTALL_DIR="$HOME/.local/bin"
 IRONHERMES_HOME="${IRONHERMES_HOME:-$HOME/.ironhermes}"
 VERSION="${IRONHERMES_VERSION:-latest}"
@@ -124,7 +124,7 @@ cargo_install() {
     fi
 
     log_info "Building from source via cargo install (this may take several minutes)..."
-    cargo install ironhermes
+    cargo install --git "https://github.com/${REPO_OWNER}/${REPO_NAME}" --bin ironhermes ironhermes-cli
     log_ok "Installed via cargo install"
 }
 

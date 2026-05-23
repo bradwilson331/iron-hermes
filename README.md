@@ -20,7 +20,7 @@ The system accepts prompts through three entry points: an interactive CLI REPL, 
 Downloads a prebuilt binary, scaffolds `~/.ironhermes/`, copies config templates, and adds the binary to `~/.local/bin`. Falls back to `cargo install` if no prebuilt binary is available for your platform.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.sh | bash
 ```
 
 Reload your shell after install:
@@ -35,7 +35,7 @@ source ~/.zshrc    # zsh
 Requires a stable Rust toolchain (2024 edition). Install via [rustup.rs](https://rustup.rs) if needed.
 
 ```bash
-git clone https://github.com/bradwilson331/ironhermes
+git clone https://github.com/bradwilson331/iron-hermes
 cd ironhermes
 cargo build --release
 # Binary: target/release/ironhermes
