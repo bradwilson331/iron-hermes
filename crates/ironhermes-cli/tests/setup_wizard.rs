@@ -179,7 +179,9 @@ fn setup_agent_section_succeeds_with_phase26_implementation() {
 }
 
 #[test]
-fn setup_skills_section_errors_with_deferred_message() {
+fn setup_skills_section_succeeds_with_no_skills_installed() {
+    // Phase 35.1 D-01: skills section is now implemented (bail! removed).
+    // With no skills/ directory, the section exits 0 with a "nothing to configure" message.
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
@@ -187,8 +189,12 @@ fn setup_skills_section_errors_with_deferred_message() {
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "skills"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Phase 28").or(predicate::str::contains("phase 28")));
+        .success()
+        .stdout(
+            predicate::str::contains("No skills installed")
+                .or(predicate::str::contains("nothing to configure"))
+                .or(predicate::str::contains("prerequisites satisfied")),
+        );
 }
 
 #[test]
