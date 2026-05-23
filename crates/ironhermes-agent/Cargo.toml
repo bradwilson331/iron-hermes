@@ -21,6 +21,7 @@ ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-mcp = { path = "../ironhermes-mcp" }
 ironhermes-trajectory = { path = "../ironhermes-trajectory" }
+dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

@@ -324,12 +324,16 @@ fn handle_deactivate(
 // ---------------------------------------------------------------------------
 
 /// Map SkillSource to its string representation (D-13 trust_level field).
+/// Phase 33 LEARN-04: `SelfCreated` renders as "self-created" (kebab-case to
+/// match the existing lowercase trust_level convention; the YAML frontmatter
+/// form is the hyphenated "Self-created" enforced by the serde rename).
 fn trust_level_str(s: ironhermes_core::SkillSource) -> &'static str {
     match s {
         ironhermes_core::SkillSource::Builtin => "builtin",
         ironhermes_core::SkillSource::Official => "official",
         ironhermes_core::SkillSource::Trusted => "trusted",
         ironhermes_core::SkillSource::Community => "community",
+        ironhermes_core::SkillSource::SelfCreated => "self-created",
     }
 }
 

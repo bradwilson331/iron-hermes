@@ -552,6 +552,7 @@ async fn auxiliary_routes_to_separate_model() {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        is_recall_context: false,
     }];
     let resp = client
         .chat_completion(&messages, None, None, Some(10), None, None)

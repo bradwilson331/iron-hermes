@@ -29,8 +29,7 @@ use crate::tui_rata::stream_events::StreamEvent;
 
 // Concrete paths — grep-verified iteration 2.
 use ironhermes_agent::AnyClient;
-use ironhermes_agent::agent_loop::AgentLoop;
-use ironhermes_agent::budget::BudgetHandle;
+use ironhermes_agent::AgentRuntime;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::personality::PersonalityRegistry;
@@ -52,7 +51,11 @@ use ironhermes_tools::ToolRegistry;
 /// Keeps the constructor signature stable as the parity list grows.
 /// Plan 22.4-07 constructs this in the event-loop bootstrap.
 pub struct AppDeps {
-    pub agent_loop: Arc<AgentLoop>,
+    /// Phase 28.1-05: AgentRuntime owns the durable agent (budget, registry,
+    /// browser session, skills, hook registry). Replaces the loose
+    /// agent_loop/budget/context_length/config_compression/max_turns/fallback_client
+    /// fields; spawn_turn calls runtime.run_turn per turn.
+    pub agent_runtime: Arc<AgentRuntime>,
     pub hook_registry: Arc<HookRegistry>,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub memory_manager: Option<Arc<Mutex<MemoryManager>>>,
@@ -63,17 +66,19 @@ pub struct AppDeps {
     pub history_path: PathBuf,
     pub status_initial: StatusLineState,
     pub cancel_parent: CancellationToken,
-    // Plan 22.4-07 additions: needed by spawn_turn to build per-turn AgentLoops
+    /// Mutable client for /model and /fast slash commands that rebuild the
+    /// AnyClient mid-session. The runtime owns its own client for turns; this
+    /// field tracks the slash-command-mutated client so spawn_turn can pass it
+    /// to TurnRequest when a model switch is in effect.
+    /// NOTE: Phase 28.1-05 decision — keep client on App because /model and
+    /// /fast mutate it interactively; routing through the runtime would require
+    /// a mutable runtime accessor which is architecturally heavyweight.
     pub client: AnyClient,
+    /// ToolRegistry — kept for session-end hooks (registry.read().await.call_session_end_hooks())
+    /// and for slash-dispatch CommandContext. Runtime also holds this Arc via
+    /// runtime.registry(); App keeps its own clone for the end-hook call site
+    /// in run_with_deps without requiring a runtime borrow.
     pub registry: Arc<RwLock<ToolRegistry>>,
-    pub budget: BudgetHandle,
-    pub context_length: usize,
-    pub config_compression: f64,
-    pub max_turns: usize,
-    /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — pre-resolved fallback client per
-    /// PROV-07 parity with classic main.rs:631-637. spawn_turn clones this and
-    /// chains `.with_fallback(fb)` on the per-turn AgentLoop when present.
-    pub fallback_client: Option<AnyClient>,
     /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
     /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
     /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
@@ -142,6 +147,19 @@ pub struct AppDeps {
     /// Without this seed, the LLM sees no system prompt and [Workspace: <root>]
     /// is invisible on the default `hermes chat` surface.
     pub system_message: Option<ChatMessage>,
+
+    /// Phase 21.8.2: skill registry for `/skills` slash command + SKILL-13 fallback.
+    pub skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
+
+    /// Phase 21.8.2 Plan 03 D-02 / D-Plan03-06: SkillsConfig used by the
+    /// SkillsReload event-loop arm to call `SkillRegistry::load_with_config`.
+    /// Populated by `build_app_deps` from `config.skills.clone()`.
+    pub skills_config: ironhermes_core::config::SkillsConfig,
+
+    /// Phase 21.8.2 Plan 03 D-07 (TUI delivery): pending activated-skill
+    /// overlays. The SkillActivated event-loop arm pushes (name, body) here;
+    /// the next turn's per-turn prompt_builder assembly reads + drains them.
+    pub pending_skill_overlays: Vec<(String, String)>,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -194,22 +212,19 @@ pub struct App {
     pub skin: Arc<std::sync::RwLock<String>>,
 
     // — D-18 parity handles (Arc-held) ───────────────────────────────────────
-    pub agent_loop: Arc<AgentLoop>,
+    /// Phase 28.1-05: durable agent runtime. spawn_turn builds TurnRequest and
+    /// calls runtime.run_turn per turn. Replaces the per-turn AgentLoop builder.
+    pub agent_runtime: Arc<AgentRuntime>,
     pub hook_registry: Arc<HookRegistry>,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub memory_manager: Option<Arc<Mutex<MemoryManager>>>,
     pub subagent_registry: Arc<RwLock<SubagentRegistry>>,
     pub process_registry: Arc<RwLock<ProcessRegistry>>,
     pub command_router: Arc<CommandRouter>,
-    // Plan 22.4-07: spawn_turn needs these to build per-turn AgentLoops
+    /// Mutable client for /model and /fast (see AppDeps.client doc).
     pub client: AnyClient,
+    /// ToolRegistry clone for session-end hooks + slash-dispatch CommandContext.
     pub registry: Arc<RwLock<ToolRegistry>>,
-    pub budget: BudgetHandle,
-    pub context_length: usize,
-    pub config_compression: f64,
-    pub max_turns: usize,
-    /// UAT Gap 2 (Phase 22.4 Plan 22.4-15) — see AppDeps.fallback_client.
-    pub fallback_client: Option<AnyClient>,
     /// Phase 25.1 GAP-8 closure (plan 25.1-19): shared browser session Arc.
     /// Mirrors `run_chat` (main.rs:1173-1176): one Arc per AgentLoop instance,
     /// lazy-spawned on first browser_* call (D-03), cloned into the App-level
@@ -230,10 +245,10 @@ pub struct App {
     pub context_compressor: Option<Arc<dyn ContextEngine>>,
     /// PersonalityRegistry for `/personality` (Phase 15 PRMT-06/PRMT-07).
     pub personality_overlay: Arc<PersonalityRegistry>,
-    /// Pending personality overlay text to inject as system-prompt on next spawn_turn.
-    /// Set by tui_rata post-router hook `handle_subsystem_mutator` on `/personality <name>`.
-    /// Consumed (and cleared) by spawn_turn bootstrap (Plan 03 scope: set only; consume deferred).
-    pub next_turn_personality_overlay: Option<String>,
+    /// Active personality overlay text. Injected into per-turn messages_snapshot[0].content
+    /// by spawn_turn. Persists across turns; None = default identity.
+    /// Set by handle_subsystem_mutator on /personality <name>; cleared by /personality clear.
+    pub active_personality_overlay: Option<String>,
 
     // ── Phase 22.4.2.1 Plan 01: CronJobReader wiring ────────────────────────
     /// JobStore handle for `/cron` slash UI. None by default (deferred runtime
@@ -249,6 +264,16 @@ pub struct App {
     /// Phase 25.3 D-T-3: TrajectoryWriter handle — see `AppDeps.trajectory_writer` doc.
     pub trajectory_writer:
         Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+
+    /// Phase 21.8.2: skill registry for `/skills` slash command + SKILL-13 fallback.
+    /// Wired into CommandContext via `build_command_context` in tui_rata/commands.rs.
+    pub skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
+
+    /// Phase 21.8.2 Plan 03 D-02 / D-Plan03-06: see AppDeps doc above.
+    pub skills_config: ironhermes_core::config::SkillsConfig,
+
+    /// Phase 21.8.2 Plan 03 D-07 (TUI delivery): see AppDeps doc above.
+    pub pending_skill_overlays: Vec<(String, String)>,
 }
 
 impl App {
@@ -299,7 +324,7 @@ impl App {
             debug_enabled: deps.debug_enabled,
             fast_enabled: deps.fast_enabled,
             skin: deps.skin,
-            agent_loop: deps.agent_loop,
+            agent_runtime: deps.agent_runtime,
             hook_registry: deps.hook_registry,
             mcp_manager: deps.mcp_manager,
             memory_manager: deps.memory_manager,
@@ -308,11 +333,6 @@ impl App {
             command_router: deps.command_router,
             client: deps.client,
             registry: deps.registry,
-            budget: deps.budget,
-            context_length: deps.context_length,
-            config_compression: deps.config_compression,
-            max_turns: deps.max_turns,
-            fallback_client: deps.fallback_client,
             browser_session: deps.browser_session,
             mouse_capture_enabled: deps.mouse_capture_enabled,
             // Phase 22.4.2 Plan 00: D-08 subsystem handles
@@ -320,8 +340,8 @@ impl App {
             resolver: deps.resolver,
             context_compressor: deps.context_compressor,
             personality_overlay: deps.personality_overlay,
-            // Phase 22.4.2 Plan 03: pending personality overlay for next spawn_turn
-            next_turn_personality_overlay: None,
+            // Phase 21.8.3.1 D-02: renamed to active_personality_overlay (session-persistent)
+            active_personality_overlay: None,
             // Phase 22.4.2.1 Plan 01: cron store — None by default (gateway is primary cron host)
             cron_store: None,
             // Phase 25.2 Plan 15 follow-up: toolset session handle for /toolset slash UI
@@ -329,6 +349,11 @@ impl App {
             // Phase 25.3 D-W-2 / D-T-3: Workspace + TrajectoryWriter for slash dispatch
             workspace: deps.workspace,
             trajectory_writer: deps.trajectory_writer,
+            // Phase 21.8.2: forward skill_registry from deps.
+            skill_registry: deps.skill_registry,
+            // Phase 21.8.2 Plan 03: forward new fields.
+            skills_config: deps.skills_config,
+            pending_skill_overlays: Vec::new(),
         }
     }
 
@@ -351,12 +376,33 @@ impl App {
         self.transcript_scroll = 0;
     }
 
+    /// Re-engage auto-follow so the viewport snaps to the newest line on
+    /// the next render tick. Symmetric counterpart of `scroll_to_top`.
+    ///
+    /// Used by `apply_slash_outcome` so System-role messages produced by
+    /// slash commands (notably `/skills reload` and SKILL-13 fallback) are
+    /// visible on the same render tick. Mirrors the agent-turn reference
+    /// behavior in `submit()` (sets `auto_follow = true`); also resets
+    /// `transcript_scroll` to 0 for symmetry with `scroll_to_top`.
+    /// `reconcile_scroll` (called next render from `ui.rs`) will clamp
+    /// `transcript_scroll` to `max` because `auto_follow == true`.
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_follow = true;
+        self.transcript_scroll = 0;
+    }
+
     /// Human-readable scroll indicator for the border title.
     pub fn scroll_indicator(&self, area: Rect) -> String {
+        let max = self.transcript_max_scroll(area);
         if self.auto_follow {
             "live".to_string()
+        } else if self.pending_rx.is_some() || self.assistant_buffer.is_some() {
+            // D-11: paused indicator — derived from existing state (Option B per RESEARCH §Pattern 5).
+            // n = unseen scroll units below current viewport. Resets on resize because max changes
+            // with area height, which is acceptable per Claude's discretion.
+            let n = max.saturating_sub(self.transcript_scroll);
+            format!("paused ({n} new lines below)")
         } else {
-            let max = self.transcript_max_scroll(area);
             format!("scroll {}/{}", self.transcript_scroll, max)
         }
     }
@@ -374,23 +420,62 @@ impl App {
 
     /// Maximum scroll offset for the given viewport.
     pub fn transcript_max_scroll(&self, area: Rect) -> u16 {
-        let total = self.transcript_line_count(area.width as usize) as u32;
+        // Pass the inner width (excluding the 1-char border on each side) so that
+        // transcript_line_count wraps at the same column ratatui's Paragraph does.
+        let inner_width = (area.width as usize).saturating_sub(2);
+        let total = self.transcript_line_count(inner_width) as u32;
         let visible = area.height.saturating_sub(2) as u32;
         total.saturating_sub(visible).min(u16::MAX as u32) as u16
     }
 
     /// Total wrapped-line count across all history entries + streaming buffer.
+    ///
+    /// `width` must be the **inner** render width (border excluded, i.e.
+    /// `area.width - 2`) so the count matches what ratatui's Paragraph widget
+    /// actually wraps at. Callers that pass the outer area width will get a
+    /// count that is slightly too low, causing auto-follow to stop short of the
+    /// true visual bottom.
+    ///
+    /// For line `i == 0` of each message the role prefix ("You: " / "Hermes: "
+    /// etc.) shares the first row, so the row count is
+    /// `ceil((prefix_len + body_chars) / width)` — not `ceil(body / (width -
+    /// prefix))`. The two formulas diverge at certain line lengths. See D-06/D-07
+    /// in `.planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/`.
     pub fn transcript_line_count(&self, width: usize) -> usize {
         let mut total = 0usize;
         for msg in &self.history {
+            let (role_label, color) = role_style(msg);
+            // Mirror transcript_text() (line 785) — skip messages whose role_style returns None.
+            // No role currently returns None post-22.4-17; this is a structural guard for future
+            // Role variants. See .planning/phases/21.8.3.../21.8.3-RESEARCH.md Pitfall 1.
+            let Some(_color) = color else { continue };
+            let prefix_len = role_label.len() + 2; // ": " separator
             let body = render_message_body(msg);
-            for line in body.lines() {
-                total = total.saturating_add(wrapped_line_count(line, width));
+            for (i, line) in body.lines().enumerate() {
+                let rows = if i == 0 {
+                    // First row: prefix + body share the same terminal row.
+                    // ceil((prefix + body) / width), minimum 1.
+                    let body_chars = line.chars().count();
+                    let total_chars = prefix_len + body_chars;
+                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
+                } else {
+                    wrapped_line_count(line, width)
+                };
+                total = total.saturating_add(rows);
             }
         }
         if let Some(buf) = &self.assistant_buffer {
-            for line in buf.lines() {
-                total = total.saturating_add(wrapped_line_count(line, width));
+            // assistant_buffer renders with "Hermes: " prefix on line 0 (transcript_text:807-819)
+            let prefix_len = "Hermes".len() + 2; // 8
+            for (i, line) in buf.lines().enumerate() {
+                let rows = if i == 0 {
+                    let body_chars = line.chars().count();
+                    let total_chars = prefix_len + body_chars;
+                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
+                } else {
+                    wrapped_line_count(line, width)
+                };
+                total = total.saturating_add(rows);
             }
         }
         total
@@ -449,6 +534,9 @@ impl App {
             // Scroll (D-05 / tmon parity)
             (KeyCode::PageUp, _) => self.scroll_up(10),
             (KeyCode::PageDown, _) => self.scroll_down(10),
+
+            // Jump to bottom (D-10) — single arm catches plain End and Ctrl+End via wildcard modifiers.
+            (KeyCode::End, _) => self.scroll_to_bottom(),
 
             // Esc — clear textarea
             (KeyCode::Esc, _) => self.clear_textarea(),
@@ -518,13 +606,17 @@ impl App {
     ///
     /// System messages are pushed with `Role::System` — slash output NEVER
     /// appears as `Role::User` (T-22.4-05-10).
-    fn apply_slash_outcome(&mut self, outcome: crate::tui_rata::commands::SlashOutcome) {
+    ///
+    /// Visibility widened to `pub(super)` for unit-test access from
+    /// `mod scroll_tests` — Phase 21.8.2 G-01 closure. Still crate-private.
+    pub(super) fn apply_slash_outcome(&mut self, outcome: crate::tui_rata::commands::SlashOutcome) {
         use crate::tui_rata::commands::SlashOutcome;
         match outcome {
             SlashOutcome::Handled(text) => {
                 let mut msg = ChatMessage::user(&text);
                 msg.role = Role::System;
                 self.history.push(msg);
+                self.scroll_to_bottom();
             }
             SlashOutcome::Silent => {}
             SlashOutcome::Quit => {
@@ -532,18 +624,35 @@ impl App {
             }
             SlashOutcome::ResetTerminal => {}
             SlashOutcome::McpReload => {}
+            SlashOutcome::SkillsReload(msg) => {
+                let mut system = ChatMessage::user(&msg);
+                system.role = Role::System;
+                self.history.push(system);
+                self.scroll_to_bottom();
+            }
+            SlashOutcome::SkillActivated { name, body } => {
+                self.pending_skill_overlays.push((name.clone(), body));
+                let msg = format!("Skill '{}' activated for this turn.", name);
+                let mut system = ChatMessage::user(&msg);
+                system.role = Role::System;
+                self.history.push(system);
+                self.scroll_to_bottom();
+            }
             SlashOutcome::ClearSession(text) => {
                 self.history.clear();
+                self.active_personality_overlay = None;
                 self.assistant_buffer = None;
                 let mut system = ChatMessage::user(&text);
                 system.role = Role::System;
                 self.history.push(system);
+                self.scroll_to_bottom();
             }
             SlashOutcome::Unknown { input: _, hint } => {
                 let mut system = ChatMessage::user(&hint);
                 system.role = Role::System;
                 self.history.push(system);
                 self.status.hint = hint;
+                self.scroll_to_bottom();
             }
             SlashOutcome::Error(err) => {
                 let body = format!("error: {err}");
@@ -551,6 +660,7 @@ impl App {
                 system.role = Role::System;
                 self.history.push(system);
                 self.status.hint = format!("error: {err}");
+                self.scroll_to_bottom();
             }
         }
     }
@@ -612,6 +722,11 @@ impl App {
             }
             StreamEvent::Finished => {
                 self.commit_assistant_buffer();
+                // D-08: snap-to-bottom safety net — defense-in-depth against future
+                // line-count drift. Cheap because reconcile_scroll runs every render tick anyway.
+                if self.auto_follow {
+                    self.scroll_to_bottom();
+                }
                 self.pending_rx = None;
                 self.cancel_child = None;
                 self.status.hint = String::new();
@@ -675,7 +790,7 @@ impl App {
         self.pending_rx = Some(rx);
         self.pending_tx = Some(tx);
         self.cancel_child = Some(self.cancel_parent.child_token());
-        self.auto_follow = true;
+        self.scroll_to_bottom();
         self.assistant_buffer = None;
     }
 
@@ -855,8 +970,7 @@ fn test_message(role: &str, body: &str) -> ChatMessage {
 
 #[cfg(feature = "test-support")]
 fn test_deps() -> AppDeps {
-    use ironhermes_agent::budget::BudgetHandle;
-    use ironhermes_agent::{AnyClient, agent_loop::AgentLoop};
+    use ironhermes_agent::{AnyClient, AgentRuntime};
     use ironhermes_core::commands::registry::build_registry;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_tools::ToolRegistry;
@@ -875,9 +989,12 @@ fn test_deps() -> AppDeps {
         &std::collections::HashMap::new(),
         &ironhermes_core::get_hermes_home(),
     ));
+    // Phase 28.1-05: AgentRuntime::for_tests() builds a minimal runtime backed
+    // by a localhost:0 client so the test fixture doesn't need a live endpoint.
+    let test_runtime = Arc::new(AgentRuntime::for_tests());
 
     AppDeps {
-        agent_loop: Arc::new(AgentLoop::for_tests()),
+        agent_runtime: test_runtime,
         hook_registry: Arc::new(HookRegistry::new(ironhermes_hooks::HooksConfig::default())),
         mcp_manager: None,
         memory_manager: None,
@@ -893,11 +1010,6 @@ fn test_deps() -> AppDeps {
         cancel_parent: CancellationToken::new(),
         client: test_client,
         registry: test_registry,
-        budget: BudgetHandle::new(10),
-        context_length: 8192,
-        config_compression: 0.8,
-        max_turns: 10,
-        fallback_client: None,
         browser_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         mouse_capture_enabled: Arc::new(AtomicBool::new(true)),
         // Phase 22.4.2 Plan 00: D-08 subsystem handles (None/defaults for tests)
@@ -919,6 +1031,11 @@ fn test_deps() -> AppDeps {
         trajectory_writer: None,
         // Phase 25.3-13 CR-04: tests don't exercise the seeded system message
         system_message: None,
+        // Phase 21.8.2: no skill registry in tests
+        skill_registry: None,
+        // Phase 21.8.2 Plan 03: default skills config + empty overlays buffer
+        skills_config: ironhermes_core::config::SkillsConfig::default(),
+        pending_skill_overlays: Vec::new(),
     }
 }
 
@@ -939,11 +1056,25 @@ mod inv_tests {
             .collect::<Vec<_>>()
             .join("\n");
         // The field MUST appear in BOTH AppDeps and App (2 struct definitions).
-        let count = non_comment.matches("browser_session: std::sync::Arc<tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>>").count();
+        // rustfmt may wrap the full type signature across several lines, so match
+        // on the stable `pub browser_session:` field-declaration prefix instead of
+        // the single-line type string (which only the AppDeps/App struct fields
+        // carry — App::new's forwarding line and the test helper's `Arc::new(...)`
+        // initializer are not `pub` and won't match).
+        let field_decls = non_comment.matches("pub browser_session:").count();
         assert!(
-            count >= 2,
-            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST carry the browser_session field; got {} occurrences in non-comment source",
-            count
+            field_decls >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): both AppDeps and App MUST declare the browser_session field; got {} declaration(s) in non-comment source",
+            field_decls
+        );
+        // ...and the verified BrowserSession type must back those declarations.
+        let type_refs = non_comment
+            .matches("ironhermes_tools::browser_session::BrowserSession")
+            .count();
+        assert!(
+            type_refs >= 2,
+            "Phase 25.1 GAP-8 (plan 25.1-19): browser_session field MUST use the ironhermes_tools::browser_session::BrowserSession type in both structs; got {} reference(s)",
+            type_refs
         );
         // App::new MUST forward the field from deps.
         assert!(
@@ -1203,5 +1334,234 @@ mod scroll_tests {
         assert_eq!(app.knight_rider_tick, 1);
         app.on_tick();
         assert_eq!(app.knight_rider_tick, 2);
+    }
+
+    // — apply_slash_outcome scroll re-engagement (Phase 21.8.2 Plan 04, G-01) ──
+
+    #[test]
+    fn apply_slash_outcome_skills_reload_re_engages_auto_follow() {
+        // Phase 21.8.2 Plan 04 G-01 closure (RED):
+        // SkillsReload must call scroll_to_bottom() so the diff line is
+        // visible on the same render tick. Reference: submit() at app.rs:718.
+        let mut app = App::new_test_empty();
+        // Simulate user having scrolled up before issuing /skills reload.
+        app.scroll_up(5);
+        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        let prev_len = app.history.len();
+
+        let outcome = crate::tui_rata::commands::SlashOutcome::SkillsReload(
+            "Skills reloaded: 1 added (test-skill), 0 removed. Total: 5 skills.".to_string(),
+        );
+        app.apply_slash_outcome(outcome);
+
+        // Bug fix assertion: auto_follow must be re-engaged so the next
+        // render tick clamps transcript_scroll to bottom (via reconcile_scroll).
+        assert!(
+            app.auto_follow,
+            "SkillsReload arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
+        );
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "SkillsReload arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
+        );
+        // Sanity: the diff line was actually appended as a System message.
+        assert_eq!(
+            app.history.len(),
+            prev_len + 1,
+            "SkillsReload arm must push exactly one message",
+        );
+        assert_eq!(
+            app.history.last().expect("last history entry").role,
+            Role::System,
+            "SkillsReload arm must push the diff as a Role::System message",
+        );
+    }
+
+    #[test]
+    fn apply_slash_outcome_skill_activated_re_engages_auto_follow() {
+        // Phase 21.8.2 Plan 04 G-01 closure (RED):
+        // SkillActivated must call scroll_to_bottom() so the
+        // "Skill '<name>' activated for this turn." line is visible on
+        // the same render tick. Reference: submit() at app.rs:718.
+        let mut app = App::new_test_empty();
+        app.scroll_up(5);
+        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        let prev_len = app.history.len();
+
+        let outcome = crate::tui_rata::commands::SlashOutcome::SkillActivated {
+            name: "test-skill".to_string(),
+            body: "test body".to_string(),
+        };
+        app.apply_slash_outcome(outcome);
+
+        assert!(
+            app.auto_follow,
+            "SkillActivated arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
+        );
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "SkillActivated arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
+        );
+        // Sanity: the activation confirmation was appended as a System message.
+        assert_eq!(
+            app.history.len(),
+            prev_len + 1,
+            "SkillActivated arm must push exactly one message",
+        );
+        assert_eq!(
+            app.history.last().expect("last history entry").role,
+            Role::System,
+            "SkillActivated arm must push the activation confirmation as a Role::System message",
+        );
+        // Sanity: the body was buffered for the next turn.
+        assert_eq!(
+            app.pending_skill_overlays.len(),
+            1,
+            "SkillActivated arm must continue to buffer (name, body) into pending_skill_overlays",
+        );
+    }
+
+    // — Phase 21.8.3 RED tests — line-count parity, snap-on-Finished, submit helper, End key ──
+
+    #[test]
+    fn transcript_line_count_accounts_for_role_prefix() {
+        // D-06: "You: " prefix (5 chars) on line 0 reduces effective width.
+        // With width=80 and a body of 80 'x' chars:
+        //   current (buggy): effective_width=80 → ceil(80/80)=1
+        //   fixed:           effective_width=80-5=75 → ceil(80/75)=2
+        let body: &'static str = Box::leak("x".repeat(80).into_boxed_str());
+        let app = App::new_test_with_messages(vec![("user", body)]);
+        assert_eq!(
+            app.transcript_line_count(80),
+            2,
+            "80-char user message at width=80 must count 2 wrapped rows (prefix reduces effective width to 75)"
+        );
+    }
+
+    #[test]
+    fn system_message_counted_in_line_count() {
+        // D-07: System messages are NOW rendered (role_style returns Some(DarkGray)
+        // post-22.4-17). transcript_line_count must include them with "System: "
+        // prefix (8 chars). With width=80 and body of 80 'y' chars:
+        //   current (buggy): counts without prefix → ceil(80/80)=1
+        //   fixed:           effective_width=80-8=72 → ceil(80/72)=2
+        let body: &'static str = Box::leak("y".repeat(80).into_boxed_str());
+        let app = App::new_test_with_messages(vec![("system", body)]);
+        assert_eq!(
+            app.transcript_line_count(80),
+            2,
+            "80-char system message at width=80 must count 2 wrapped rows (System: prefix reduces effective width to 72)"
+        );
+    }
+
+    #[test]
+    fn stream_finished_snaps_to_bottom() {
+        // D-08: StreamEvent::Finished must call scroll_to_bottom() when auto_follow is true.
+        // Pre-fix: Finished arm only commits buffer and clears pending_rx;
+        //          transcript_scroll stays at whatever it was → test fails.
+        let mut app = App::new_test_empty();
+        app.auto_follow = false;
+        app.transcript_scroll = 5;
+        app.handle_stream_event(StreamEvent::Started);
+        app.handle_stream_event(StreamEvent::Delta("some text".to_string()));
+        // Simulate user re-engaging auto_follow before stream finishes
+        app.auto_follow = true;
+        app.handle_stream_event(StreamEvent::Finished);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "Finished with auto_follow=true must call scroll_to_bottom() which zeros transcript_scroll"
+        );
+        assert!(
+            app.auto_follow,
+            "auto_follow must remain true after Finished snap"
+        );
+    }
+
+    #[test]
+    fn submit_calls_scroll_to_bottom() {
+        // D-09: submit() must call scroll_to_bottom() instead of bare auto_follow=true.
+        // Pre-fix: submit() only sets auto_follow=true at line 742;
+        //          transcript_scroll stays at 7 → test fails.
+        let mut app = App::new_test_empty();
+        app.transcript_scroll = 7;
+        app.auto_follow = false;
+        app.textarea.insert_str("hello world");
+        app.submit();
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "submit() must call scroll_to_bottom() which zeros transcript_scroll"
+        );
+        assert!(
+            app.auto_follow,
+            "submit() must re-engage auto_follow via scroll_to_bottom()"
+        );
+    }
+
+    #[test]
+    fn end_key_calls_scroll_to_bottom() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        // D-10: End key (plain) must call scroll_to_bottom().
+        // Pre-fix: End falls through to textarea catch-all → transcript_scroll stays at 9.
+        let mut app = App::new_test_empty();
+        app.transcript_scroll = 9;
+        app.auto_follow = false;
+        let end_key = KeyEvent {
+            code: KeyCode::End,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(end_key);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "End key must call scroll_to_bottom() which zeros transcript_scroll"
+        );
+        assert!(
+            app.auto_follow,
+            "End key must re-engage auto_follow via scroll_to_bottom()"
+        );
+
+        // Also verify Ctrl+End (same arm via wildcard modifiers)
+        app.transcript_scroll = 9;
+        app.auto_follow = false;
+        let ctrl_end = KeyEvent {
+            code: KeyCode::End,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(ctrl_end);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "Ctrl+End must also call scroll_to_bottom()"
+        );
+        assert!(
+            app.auto_follow,
+            "Ctrl+End must re-engage auto_follow via scroll_to_bottom()"
+        );
+    }
+
+    #[test]
+    fn auto_follow_tracks_buffer_growth() {
+        // D-13c: With auto_follow=true, reconcile_scroll must snap transcript_scroll
+        // to the actual rendered bottom when assistant_buffer has grown.
+        // Pre-fix: transcript_line_count under-counts (ignores prefix) so max < real
+        //          total → reconcile_scroll clamps short of the actual bottom.
+        let mut app = App::new_test_empty();
+        let a = area(80, 24);
+        // Empty history: reconcile_scroll → transcript_scroll == 0
+        app.reconcile_scroll(a);
+        assert_eq!(app.transcript_scroll, 0);
+
+        // Push a large assistant_buffer (200 lines)
+        app.assistant_buffer = Some("x\n".repeat(200));
+        app.auto_follow = true;
+        app.reconcile_scroll(a);
+
+        let max = app.transcript_max_scroll(a);
+        assert_eq!(
+            app.transcript_scroll, max,
+            "reconcile_scroll with auto_follow=true must snap transcript_scroll to transcript_max_scroll (post-fix the max is correct)"
+        );
     }
 }

@@ -9,7 +9,7 @@
 // compression never blocks the agent loop (T-18-03).
 
 use async_trait::async_trait;
-use ironhermes_core::{ChatMessage, MessageContent, Role};
+use ironhermes_core::{ChatMessage, MessageContent, Role, truncate_on_char_boundary};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
@@ -37,6 +37,13 @@ pub const HISTORY_NAME: &str = "context_history";
 pub const COMPLETED_TOOLS_SENTINEL: &str =
     "Tool executions already completed; do NOT re-call unless the user explicitly asks again.";
 
+/// Phase 34b Plan 02 (T-34b-02-DRIFT): memory-authority reminder embedded in
+/// the pinned `[CONTEXT HISTORY]` block so the model never lets compacted
+/// context outweigh live MEMORY.md / USER.md. Exact wording ported from
+/// `hermes-agent/agent/context_compressor.py` SUMMARY_PREFIX. Pinned by a
+/// constant-literal test so the wording cannot silently drift.
+pub const MEMORY_AUTHORITY_REMINDER: &str = "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note.";
+
 /// Hard cap on summary content to bound prompt-injection surface (T-18-01).
 const HISTORY_SUMMARY_MAX_CHARS: usize = 8_000;
 /// Per-pruned-block character truncation before concatenation into prompt.
@@ -52,20 +59,22 @@ pub fn locate_history_segment(messages: &[ChatMessage]) -> Option<usize> {
 }
 
 fn make_history_message(summary_body: &str) -> ChatMessage {
-    let truncated = if summary_body.len() > HISTORY_SUMMARY_MAX_CHARS {
-        &summary_body[..HISTORY_SUMMARY_MAX_CHARS]
-    } else {
-        summary_body
-    };
+    let truncated = truncate_on_char_boundary(summary_body, HISTORY_SUMMARY_MAX_CHARS);
+    // Phase 34b Plan 02 (T-34b-02-DRIFT): the memory-authority reminder is placed
+    // AFTER the sentinel (so HISTORY_SENTINEL still prefixes the block for
+    // locate/strip logic) and BEFORE the summary body. `prior_summary_text`
+    // strips both the sentinel and this reminder so iterative re-compression
+    // does not accrete the reminder into the summary.
     ChatMessage {
         role: Role::System,
         content: Some(MessageContent::Text(format!(
-            "{}\n{}",
-            HISTORY_SENTINEL, truncated
+            "{}\n{}\n{}",
+            HISTORY_SENTINEL, MEMORY_AUTHORITY_REMINDER, truncated
         ))),
         tool_calls: None,
         tool_call_id: None,
         name: Some(HISTORY_NAME.into()),
+        is_recall_context: false,
     }
 }
 
@@ -213,11 +222,7 @@ impl SummarizingEngine {
                 Role::Tool => "tool",
             };
             let body = msg.content_text().unwrap_or("");
-            let truncated = if body.len() > PRUNED_BLOCK_MAX_CHARS {
-                &body[..PRUNED_BLOCK_MAX_CHARS]
-            } else {
-                body
-            };
+            let truncated = truncate_on_char_boundary(body, PRUNED_BLOCK_MAX_CHARS);
             out.push_str(role);
             out.push_str(": ");
             out.push_str(truncated);
@@ -386,6 +391,11 @@ impl ContextEngine for SummarizingEngine {
             messages[i]
                 .content_text()
                 .and_then(|t| t.strip_prefix(HISTORY_SENTINEL))
+                .map(|s| s.trim_start_matches('\n'))
+                // Phase 34b Plan 02: strip the memory-authority reminder line so
+                // it is not re-fed into the summarizer (and re-prepended) every
+                // iterative re-compression pass.
+                .map(|s| s.strip_prefix(MEMORY_AUTHORITY_REMINDER).unwrap_or(s))
                 .map(|s| s.trim_start_matches('\n').to_string())
         });
 
@@ -780,7 +790,7 @@ mod tests {
             .expect("pin exists");
         assert_eq!(
             pin.content_text().unwrap(),
-            "[CONTEXT HISTORY]\nMock summary body"
+            format!("[CONTEXT HISTORY]\n{MEMORY_AUTHORITY_REMINDER}\nMock summary body")
         );
     }
 
@@ -799,7 +809,10 @@ mod tests {
             .iter()
             .find(|m| m.name.as_deref() == Some("context_history"))
             .expect("pin1");
-        assert_eq!(pin1.content_text().unwrap(), "[CONTEXT HISTORY]\nSummary1");
+        assert_eq!(
+            pin1.content_text().unwrap(),
+            format!("[CONTEXT HISTORY]\n{MEMORY_AUTHORITY_REMINDER}\nSummary1")
+        );
 
         // Grow the list again to trigger a second compression pass.
         msgs.extend(build_large(30));
@@ -815,9 +828,11 @@ mod tests {
             .filter(|m| m.name.as_deref() == Some("context_history"))
             .collect();
         assert_eq!(pins.len(), 1, "single pin after iterative compression");
+        // The second-pass pin carries the reminder exactly once — confirming the
+        // prior-summary extraction strips the previous reminder (no accretion).
         assert_eq!(
             pins[0].content_text().unwrap(),
-            "[CONTEXT HISTORY]\nSummary2"
+            format!("[CONTEXT HISTORY]\n{MEMORY_AUTHORITY_REMINDER}\nSummary2")
         );
 
         let recorded = calls.lock().unwrap().clone();
@@ -2282,6 +2297,42 @@ mod tests {
         assert!(
             tracker.was_warned("sess-sum-test-1"),
             "tracker.was_warned must be true after pressure check fires"
+        );
+    }
+
+    #[test]
+    fn test_memory_authority_header() {
+        // Wave 2 (Plan 02 Task 2): the pinned history-segment block produced by
+        // make_history_message must carry the memory-authority reminder.
+        let msg = make_history_message("conversation summary goes here");
+        let body = msg.content_text().expect("history message has text body");
+
+        assert!(
+            body.contains("MEMORY.md"),
+            "history header must mention MEMORY.md, got:\n{body}"
+        );
+        assert!(
+            body.contains("ALWAYS authoritative"),
+            "history header must contain 'ALWAYS authoritative', got:\n{body}"
+        );
+        // Sentinel must still prefix the block so locate/strip logic is intact.
+        assert!(
+            body.starts_with(HISTORY_SENTINEL),
+            "history block must still start with HISTORY_SENTINEL, got:\n{body}"
+        );
+        // The summary body must still be present.
+        assert!(
+            body.contains("conversation summary goes here"),
+            "summary body must be preserved, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn test_memory_authority_reminder_constant_text() {
+        // Pin the exact wording so it cannot silently drift (T-34b-02-DRIFT).
+        assert_eq!(
+            MEMORY_AUTHORITY_REMINDER,
+            "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note."
         );
     }
 }

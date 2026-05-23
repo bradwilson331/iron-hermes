@@ -65,11 +65,8 @@ impl HubManifest {
 mod tests {
     use super::*;
 
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_test_hermes_home<F: FnOnce()>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {

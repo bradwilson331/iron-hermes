@@ -12,7 +12,7 @@
 use clap::{Subcommand, ValueEnum};
 use ironhermes_core::Config;
 use ironhermes_hub::{
-    CoreSkillScanner, GitHubAuth, GitHubSource, GitHubTap, HubSource, SkillLock,
+    CoreSkillScanner, GitHubAuth, GitHubSource, GitHubTap, HubSource, LocalDirSource, SkillLock,
     SkillsShBlobSource, WellKnownSkillSource, install as hub_install, migrate_from_hub_manifest,
     strip_terminal_escapes, uninstall as hub_uninstall, update as hub_update,
 };
@@ -69,6 +69,12 @@ pub enum SkillsAction {
         #[command(subcommand)]
         action: TrustAction,
     },
+    /// Hot-reload the skill registry from the configured search paths.
+    ///
+    /// Equivalent to the `/skills reload` slash command inside a running REPL.
+    /// Prints a diff summary (added/removed/unchanged) and reports any SKILL.md
+    /// directories that were skipped due to validation errors.
+    Reload,
 }
 
 #[derive(Subcommand, Debug)]
@@ -147,7 +153,12 @@ async fn build_sources(cfg: &Config) -> Vec<Box<dyn HubSource + Send + Sync>> {
     let wk = WellKnownSkillSource::new(cfg.skills.hub.well_known_origins.clone());
     let sh = SkillsShBlobSource::new(gh.clone());
 
-    vec![Box::new(SharedGitHubSource(gh)), Box::new(wk), Box::new(sh)]
+    vec![
+        Box::new(SharedGitHubSource(gh)),
+        Box::new(wk),
+        Box::new(sh),
+        Box::new(LocalDirSource), // Phase 21.8.1: stateless unit struct, no config needed
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +204,8 @@ pub fn trust_level_str(s: ironhermes_core::SkillSource) -> &'static str {
         ironhermes_core::SkillSource::Official => "official",
         ironhermes_core::SkillSource::Trusted => "trusted",
         ironhermes_core::SkillSource::Community => "community",
+        // Phase 33 LEARN-04: agent-authored skills via `skill_manage`.
+        ironhermes_core::SkillSource::SelfCreated => "self-created",
     }
 }
 
@@ -223,6 +236,8 @@ fn recompute_trust_str(
         }
     } else if source == "well-known" || source == "skills-sh" {
         "community"
+    } else if source == "local-dir" {
+        "trusted" // D-B2: local installs are always Trusted
     } else {
         "builtin"
     }
@@ -252,12 +267,47 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     std::fs::create_dir_all(&skills_root)?;
 
     // D-21 line 1: Resolving.
-    println!(
-        "Resolving skills.sh/{}...",
-        strip_terminal_escapes(identifier)
-    );
+    // Phase 21.8.1 RULE 5 option (b): skip the generic pre-dispatch line for
+    // `local:` identifiers — the `local:` arm emits its own corrected line
+    // ("Resolving local:<canonical>...") to avoid "Resolving skills.sh/local:...".
+    if !identifier.starts_with("local:") {
+        println!(
+            "Resolving skills.sh/{}...",
+            strip_terminal_escapes(identifier)
+        );
+    }
 
     let sources = build_sources(cfg).await;
+
+    // D-D1 (Phase 21.8.1): pre-dispatch path-shape probe.
+    // Fire ONLY when no recognized prefix matched. The hint never re-routes to
+    // a source — it surfaces the user-facing fix and exits 1. False positive
+    // for owner/repo identifiers that happen to also exist as a directory in
+    // the user's CWD is accepted per CONTEXT.md D-D1.
+    let has_known_prefix = identifier.starts_with("well-known:")
+        || identifier.starts_with("skills-sh:")
+        || identifier.starts_with("local:");
+    if !has_known_prefix {
+        let looks_like_path = looks_like_local_path_with_probe(identifier, |id| {
+            std::fs::metadata(id).map(|m| m.is_dir()).unwrap_or(false)
+        });
+        if looks_like_path {
+            // D-16 carry-forward: even our own strings traverse the print boundary
+            // through strip_terminal_escapes so the contract is structural.
+            eprintln!(
+                "error: {} looks like a local path — did you mean 'hermes skills install local:{}'?",
+                strip_terminal_escapes(identifier),
+                strip_terminal_escapes(identifier),
+            );
+            return Ok(1);
+        }
+    }
+
+    // Phase 21.8.1: stash canonical path so hub_install receives it instead of
+    // the raw "local:<path>" identifier (RULE 3: CLI layer canonicalizes, adapter
+    // receives the canonical absolute path string).
+    let mut canonical_local_identifier: Option<String> = None;
+
     let source: &(dyn HubSource + Send + Sync) = if identifier.starts_with("well-known:") {
         // find the WellKnownSkillSource box
         sources
@@ -271,6 +321,48 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
             .find(|s| s.source_id() == "skills-sh")
             .map(|s| s.as_ref())
             .ok_or_else(|| anyhow::anyhow!("skills-sh source not available"))?
+    } else if identifier.starts_with("local:") {
+        // Phase 21.8.1 — D-A2: tilde expansion + relative resolution + canonicalize.
+        let raw_path = identifier.trim_start_matches("local:");
+        let expanded = match expand_path(raw_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {}", strip_terminal_escapes(&e.to_string()));
+                return Ok(1);
+            }
+        };
+        let canonical = match std::fs::canonicalize(&expanded) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "error: cannot resolve local path '{}': {} — does it exist?",
+                    strip_terminal_escapes(raw_path),
+                    strip_terminal_escapes(&e.to_string()),
+                );
+                return Ok(1);
+            }
+        };
+        if !canonical.is_dir() {
+            eprintln!(
+                "error: local path '{}' is not a directory",
+                strip_terminal_escapes(&canonical.display().to_string()),
+            );
+            return Ok(1);
+        }
+        // Pitfall 6 / RULE 5 option (b): emit corrected D-21 line 1 INSIDE the arm
+        // so it says "Resolving local:<canonical>..." not "Resolving skills.sh/local:...".
+        println!(
+            "Resolving local:{}...",
+            strip_terminal_escapes(&canonical.display().to_string()),
+        );
+        // Stash the canonical path string — hub_install receives it as the identifier
+        // passed to LocalDirSource::fetch (NOT the raw "local:<path>" string).
+        canonical_local_identifier = Some(canonical.to_string_lossy().into_owned());
+        sources
+            .iter()
+            .find(|s| s.source_id() == "local-dir")
+            .map(|s| s.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("local-dir source not available"))?
     } else if identifier.contains('/') {
         // GitHub: owner/repo/... format
         sources
@@ -307,7 +399,10 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     println!("Scanning for threats...");
 
     let scanner = CoreSkillScanner;
-    match hub_install(source, identifier, &scanner, &skills_root, skip_audit).await {
+    // Phase 21.8.1: for local: installs, pass the canonical absolute path as the
+    // identifier to LocalDirSource::fetch — NOT the raw "local:<path>" string.
+    let install_identifier = canonical_local_identifier.as_deref().unwrap_or(identifier);
+    match hub_install(source, install_identifier, &scanner, &skills_root, skip_audit).await {
         Ok(outcome) => {
             // D-21 line 5: final install line (trust + 12-char hash prefix).
             let name = strip_terminal_escapes(&outcome.name);
@@ -600,10 +695,17 @@ pub fn cmd_list_impl(cfg: &Config, format: Format) -> String {
                 .map(|r| {
                     let snap = r["snapshot_hash"].as_str().unwrap_or("");
                     let snap_short: &str = snap.get(..12).unwrap_or(snap);
+                    // Phase 21.8.1: local-dir entries get an extra [local] annotation
+                    // so users can distinguish local installs from remote-trusted installs.
+                    let source_tag = match r["source"].as_str().unwrap_or("") {
+                        "local-dir" => " [local]",
+                        _ => "",
+                    };
                     format!(
-                        "{} [{}] ({}) — hash: {}",
+                        "{} [{}]{} ({}) — hash: {}",
                         r["name"].as_str().unwrap_or(""),
                         r["trust_level"].as_str().unwrap_or(""),
+                        source_tag,
                         r["source"].as_str().unwrap_or(""),
                         snap_short,
                     )
@@ -665,6 +767,95 @@ pub fn cmd_trust_list_impl(cfg: &Config, format: Format) -> String {
 // Top-level dispatch (called from main.rs)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// D-A2 tilde expansion + relative path resolution helper (Phase 21.8.1)
+// ---------------------------------------------------------------------------
+
+/// Phase 21.8.1: D-A2 — resolve a `local:<path>` raw input.
+///
+/// Tilde expanded via `dirs::home_dir()`; relative paths resolved against
+/// the process CWD; absolute paths returned as-is. Final canonicalization
+/// happens at the call site after this helper returns.
+fn expand_path(raw: &str) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand ~: home directory not available"))?;
+        Ok(home.join(rest))
+    } else if raw == "~" {
+        dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot expand ~: home directory not available"))
+    } else if std::path::Path::new(raw).is_relative() {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cannot resolve relative path: {e}"))?;
+        Ok(cwd.join(raw))
+    } else {
+        Ok(std::path::PathBuf::from(raw))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D-D1 path-shape probe helper (Phase 21.8.1)
+// ---------------------------------------------------------------------------
+
+/// Determine whether an identifier looks like a local filesystem path.
+///
+/// Uses a `dir_probe` closure instead of calling `fs::metadata` directly so
+/// the function is pure-testable without env mutation. The production call
+/// site in `cmd_install` passes `|id| fs::metadata(id).map(|m| m.is_dir()).unwrap_or(false)`.
+///
+/// The five D-D1 trigger shapes are: leading `/`, `./`, `../`, `~/`, or
+/// the identifier resolving to an existing directory on disk (the metadata probe).
+fn looks_like_local_path_with_probe<F>(identifier: &str, dir_probe: F) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    identifier.starts_with('/')
+        || identifier.starts_with("./")
+        || identifier.starts_with("../")
+        || identifier.starts_with("~/")
+        || dir_probe(identifier)
+}
+
+/// Hot-reload the skill registry from disk and print a diff summary.
+///
+/// Phase 21.8.2 Task 3: `hermes skills reload` CLI subcommand.
+/// Calls `SkillRegistry::load_with_config` synchronously, diffs against the
+/// previously loaded registry (always empty at CLI invocation time — shows all
+/// currently installed skills as "loaded"), and reports invalid_skipped count.
+pub fn cmd_reload(cfg: &Config) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
+
+    let registry = ironhermes_core::SkillRegistry::load_with_config(&cwd, &cfg.skills);
+    let loaded: Vec<String> = registry.list().iter().map(|r| r.name.clone()).collect();
+    let loaded_count = loaded.len();
+
+    // Count SKILL.md dirs that were scanned but not loaded (invalid skipped).
+    let invalid_skipped = ironhermes_core::build_skill_search_paths(&cwd, &cfg.skills)
+        .into_iter()
+        .filter_map(|p| std::fs::read_dir(p).ok())
+        .flat_map(|entries| entries.filter_map(|e| e.ok()))
+        .filter(|entry| {
+            let skill_md = entry.path().join("SKILL.md");
+            skill_md.exists()
+        })
+        .count()
+        .saturating_sub(loaded_count);
+
+    if loaded_count == 0 {
+        println!("Skills reloaded: 0 loaded, {} invalid skipped.", invalid_skipped);
+    } else {
+        println!(
+            "Skills reloaded: {} loaded, {} invalid skipped.",
+            loaded_count, invalid_skipped
+        );
+        for name in &loaded {
+            println!("  + {}", name);
+        }
+    }
+    Ok(0)
+}
+
 pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> anyhow::Result<i32> {
     let mut cfg = load_config(config_path)?;
     match action {
@@ -687,6 +878,7 @@ pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> an
             Ok(code)
         }
         SkillsAction::List { format } => cmd_list(&cfg, format),
+        SkillsAction::Reload => cmd_reload(&cfg),
         SkillsAction::Trust { action } => match action {
             TrustAction::Add { repo } => {
                 cmd_trust_add_impl(&mut cfg, config_path, &repo)?;
@@ -701,5 +893,84 @@ pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> an
                 Ok(0)
             }
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (Phase 21.8.1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test 7 from plan: recompute_trust_str returns "trusted" for "local-dir"
+    // and does not regress the "github" → "community" arm.
+    #[test]
+    fn recompute_trust_str_returns_trusted_for_local_dir() {
+        let empty_trusted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert_eq!(
+            recompute_trust_str("local-dir", "/some/path", &empty_trusted),
+            "trusted",
+            "local-dir source must map to trusted (D-B2)"
+        );
+        // Regression guard: existing github arm still returns "community" for untrusted repos.
+        assert_eq!(
+            recompute_trust_str("github", "owner/repo", &empty_trusted),
+            "community",
+            "github arm regression: untrusted repo must still return community"
+        );
+    }
+
+    // D-D1 path-shape tests using the pure helper (no env mutation).
+
+    #[test]
+    fn local_dir_hint_absolute_path() {
+        assert!(
+            looks_like_local_path_with_probe("/tmp/foo", |_| false),
+            "absolute path starting with / must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_relative_dot_slash() {
+        assert!(
+            looks_like_local_path_with_probe("./skill", |_| false),
+            "./ relative path must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_dotdot() {
+        assert!(
+            looks_like_local_path_with_probe("../skill", |_| false),
+            "../ relative path must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_tilde() {
+        assert!(
+            looks_like_local_path_with_probe("~/skill", |_| false),
+            "~/ tilde path must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_existing_dir_via_probe() {
+        // Simulate the metadata probe returning true (as if a dir with that name exists in CWD).
+        assert!(
+            looks_like_local_path_with_probe("bradwilson/download/ascii-art/", |_| true),
+            "metadata probe returning true must trigger hint"
+        );
+    }
+
+    #[test]
+    fn local_dir_hint_no_false_positive_github_id() {
+        // When the dir does NOT exist in CWD, a bare owner/repo identifier must NOT trigger.
+        assert!(
+            !looks_like_local_path_with_probe("anthropic-ai/something-not-a-dir", |_| false),
+            "non-path owner/repo with no matching dir must NOT trigger hint"
+        );
     }
 }

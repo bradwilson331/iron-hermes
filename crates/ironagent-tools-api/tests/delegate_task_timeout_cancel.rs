@@ -44,6 +44,7 @@ impl SubagentRunner for DetachedSleepRunner {
         _model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
         _tool_progress: Option<ChildToolProgressCallback>,
+        _stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>> {
         let observed = self.observed_cancelled.clone();
         let cancel = cancel_token.expect(
@@ -196,6 +197,7 @@ async fn schema_exposes_timeout_seconds_field() {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             Ok(None)
         }

@@ -130,6 +130,10 @@ pub enum ResolveResult<'a> {
 pub enum CommandResult {
     /// Display this text to the user
     Output(String),
+    /// Personality preset successfully applied — carries the overlay text.
+    /// Surface handlers (TUI, gateway) store this in their active_personality_overlay;
+    /// generic Output paths never receive personality overlay text (WR-04).
+    PersonalityApplied(String),
     /// Command handled silently (no output needed)
     Handled,
     /// Error message to display
@@ -153,6 +157,21 @@ pub enum CommandResult {
     /// per UI-SPEC. Returned when `ctx.mcp_reloader` is Some; the handler
     /// returns `Output("MCP not configured.")` when it is None.
     McpReload,
+
+    /// Phase 21.8.2: request the caller to reload the skill registry (synchronous operation).
+    /// The caller (REPL loop / gateway handler) calls `SkillRegistry::load_with_config`,
+    /// computes the diff of added/removed skill names, swaps the local Arc, and formats
+    /// the D-04 diff output. Returned by `cmd_skills` when args[0] == "reload" and
+    /// `ctx.skill_registry` is Some; otherwise the handler returns
+    /// `Output("Skills not configured.")`.
+    SkillsReload,
+
+    /// Phase 21.8.2 SKILL-13: a dynamic skill was activated via the CommandRouter
+    /// fallback at the dispatch call site. The caller prepends `body` to the system
+    /// prompt for the next LLM turn (D-07). `name` is the normalized skill name
+    /// (kebab-case); `body` is the full SKILL.md body text returned by
+    /// `SkillRegistry::read_content`.
+    SkillActivated { name: String, body: String },
 }
 
 // =============================================================================
@@ -777,5 +796,30 @@ mod tests {
             }
             other => panic!("Unexpected result for 'com' on gateway: {:?}", other),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 21.8.2: SkillsReload + SkillActivated variant tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn command_result_skillsreload_variant_exists() {
+        let r = CommandResult::SkillsReload;
+        assert_eq!(r, CommandResult::SkillsReload);
+    }
+
+    #[test]
+    fn command_result_skillactivated_variant_exists() {
+        let r = CommandResult::SkillActivated {
+            name: "ascii-art".to_string(),
+            body: "skill body".to_string(),
+        };
+        assert_eq!(
+            r,
+            CommandResult::SkillActivated {
+                name: "ascii-art".to_string(),
+                body: "skill body".to_string(),
+            }
+        );
     }
 }

@@ -144,15 +144,22 @@ fn setup_gateway_section_exits_ok() {
 
 #[test]
 fn setup_tools_section_exits_ok() {
+    // `setup tools` runs the real prerequisite wizard (Phase 25 D-18), not a
+    // stub. Feed newlines so every prereq prompt is deferred (Enter = defer),
+    // making the run non-interactive and deterministic regardless of which tool
+    // prereqs happen to be satisfied on the host. The section prints either
+    // "All tool prerequisites satisfied…" (clean env) or "…unsatisfied required
+    // prerequisite" (dirty env) — both contain the substring "prerequisite".
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
         .unwrap()
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "tools"])
+        .write_stdin("\n".repeat(64))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Phase 25").or(predicate::str::contains("phase 25")));
+        .stdout(predicate::str::contains("prerequisite"));
 }
 
 #[test]
@@ -172,7 +179,9 @@ fn setup_agent_section_succeeds_with_phase26_implementation() {
 }
 
 #[test]
-fn setup_skills_section_errors_with_deferred_message() {
+fn setup_skills_section_succeeds_with_no_skills_installed() {
+    // Phase 35.1 D-01: skills section is now implemented (bail! removed).
+    // With no skills/ directory, the section exits 0 with a "nothing to configure" message.
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
@@ -180,8 +189,12 @@ fn setup_skills_section_errors_with_deferred_message() {
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "skills"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Phase 28").or(predicate::str::contains("phase 28")));
+        .success()
+        .stdout(
+            predicate::str::contains("No skills installed")
+                .or(predicate::str::contains("nothing to configure"))
+                .or(predicate::str::contains("prerequisites satisfied")),
+        );
 }
 
 #[test]
@@ -266,6 +279,190 @@ fn config_get_missing_key_silent() {
 }
 
 // ============================================================================
+// Wave 0 stubs: Phase 35.1 Plan 00 — test scaffolds for D-01/D-02/D-03/D-11/D-12
+// Wave 1 (Plan 01) and Wave 2 (Plan 02) will remove #[ignore] and fill assertions.
+// ============================================================================
+
+#[test]
+fn d01_run_skills_section_no_skills_dir_returns_ok() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    // No skills/ subdirectory — function must return Ok(()) without panic.
+    let result = ironhermes_cli::setup::apply_skills_prereq_answers(tmp.path(), &[]);
+    assert!(
+        result.is_ok(),
+        "apply_skills_prereq_answers with empty answers must return Ok(())"
+    );
+}
+
+#[test]
+fn d01_run_skills_section_prompts_for_each_unconfigured_skill_prereq() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Apply env_var answer: FAKE_KEY -> secret123
+    ironhermes_cli::setup::apply_skills_prereq_answers(
+        tmp.path(),
+        &[
+            ("fake-skill", "env_var", "FAKE_KEY", "secret123"),
+            ("fake-skill", "config_field", "skills.fake.timeout", "30"),
+        ],
+    )
+    .expect("apply_skills_prereq_answers must succeed");
+
+    // Verify FAKE_KEY=secret123 is in .env
+    let env_path = tmp.path().join(".env");
+    assert!(env_path.exists(), ".env file must exist after env_var write");
+    let env_contents = std::fs::read_to_string(&env_path).unwrap();
+    assert!(
+        env_contents.contains("FAKE_KEY=secret123"),
+        ".env must contain FAKE_KEY=secret123; got: {}",
+        env_contents
+    );
+
+    // Verify .env has 0600 permissions (T-35.1-03)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&env_path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            ".env mode must be 0600 (T-35.1-03), got {:o}",
+            mode & 0o777
+        );
+    }
+
+    // Verify skills.fake.timeout: 30 is in config.yaml via config_setter
+    let config_val =
+        ironhermes_core::config_setter::config_get(tmp.path(), "skills.fake.timeout").unwrap();
+    assert_eq!(
+        config_val.as_deref(),
+        Some("30"),
+        "skills.fake.timeout must be '30' in config.yaml; got: {:?}",
+        config_val
+    );
+}
+
+#[test]
+fn d02_run_terminal_section_prompts_for_cwd_and_writes_config() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Use apply_terminal_answer testability seam (bypasses rustyline).
+    ironhermes_cli::setup::apply_terminal_answer(tmp.path(), "/some/dir")
+        .expect("apply_terminal_answer must succeed");
+
+    // Round-trip: load config and verify terminal.cwd == "/some/dir"
+    let config =
+        ironhermes_core::config::Config::load_from(&tmp.path().join("config.yaml"))
+            .expect("config.yaml must be readable after apply_terminal_answer");
+    assert_eq!(
+        config.terminal.cwd, "/some/dir",
+        "terminal.cwd must round-trip through config.yaml; got: {}",
+        config.terminal.cwd
+    );
+
+    // Verify backend is NOT touched (D-02: cwd only)
+    assert_eq!(
+        config.terminal.backend, "local",
+        "terminal.backend must remain 'local' (D-02 says cwd only); got: {}",
+        config.terminal.backend
+    );
+}
+
+#[test]
+fn d11_fast_full_choice_prompt_present_in_setup_rs() {
+    let source = include_str!("../src/setup.rs");
+
+    // D-11: "Full setup" prompt string must be present in setup.rs.
+    assert!(
+        source.contains("Full setup"),
+        "D-11: 'Full setup' prompt text must be present in setup.rs"
+    );
+
+    // D-11: full_setup binding used to branch the full-path sections.
+    assert!(
+        source.contains("if full_setup"),
+        "D-11: 'if full_setup' branching must be present in setup.rs"
+    );
+
+    // D-11: minimum viable flow is called unconditionally.
+    assert!(
+        source.contains("run_minimum_viable_flow"),
+        "D-11: run_minimum_viable_flow must be called in setup.rs"
+    );
+
+    // D-11: full path must include run_skills_section.
+    assert!(
+        source.contains("run_skills_section"),
+        "D-11: run_skills_section must appear in setup.rs full path"
+    );
+
+    // D-11: full path must include run_terminal_section.
+    assert!(
+        source.contains("run_terminal_section"),
+        "D-11: run_terminal_section must appear in setup.rs full path"
+    );
+}
+
+#[test]
+fn d03_doctor_call_present_at_wizard_exit() {
+    let source = include_str!("../src/setup.rs");
+
+    // D-03: doctor::run_doctor_check must be called from setup.rs.
+    assert!(
+        source.contains("run_doctor_check"),
+        "D-03: run_doctor_check must be called from setup.rs (wizard exit)"
+    );
+
+    // D-03: ordering invariant — run_doctor_check must appear AFTER run_minimum_viable_flow
+    // in the source file (doctor fires after sections complete, not before).
+    let mvf_pos = source
+        .find("run_minimum_viable_flow")
+        .expect("run_minimum_viable_flow must be present in setup.rs");
+    let doctor_pos = source
+        .find("run_doctor_check")
+        .expect("run_doctor_check must be present in setup.rs");
+    assert!(
+        doctor_pos > mvf_pos,
+        "D-03: run_doctor_check (offset {}) must appear AFTER run_minimum_viable_flow (offset {}) \
+         in setup.rs — doctor fires after all sections complete",
+        doctor_pos,
+        mvf_pos
+    );
+}
+
+#[test]
+fn d12_completion_summary_present_in_setup_rs() {
+    let source = include_str!("../src/setup.rs");
+
+    // D-12: completion summary function definition must be present.
+    assert!(
+        source.contains("fn print_setup_completion_summary"),
+        "D-12: print_setup_completion_summary function must be defined in setup.rs"
+    );
+
+    // D-12: "Setup complete" header must be in the source.
+    assert!(
+        source.contains("Setup complete"),
+        "D-12: 'Setup complete' header text must be present in setup.rs"
+    );
+
+    // D-12: next-step hint for non-gateway users must be present.
+    assert!(
+        source.contains("start chatting") || source.contains("Run `ironhermes`"),
+        "D-12: 'start chatting' or 'Run `ironhermes`' next-step hint must be present in setup.rs"
+    );
+
+    // D-12: next-step hint for Telegram bot users must be present.
+    assert!(
+        source.contains("Telegram bot") || source.contains("ironhermes gateway"),
+        "D-12: 'Telegram bot' or 'ironhermes gateway' next-step hint must be present in setup.rs"
+    );
+}
+
+// ============================================================================
 // Task 7: Preflight middleware skip-list tests
 // ============================================================================
 
@@ -287,14 +484,18 @@ fn config_subcommand_skips_preflight() {
 
 #[test]
 fn setup_subcommand_skips_preflight() {
-    // setup subcommand must NOT recurse into preflight.
-    // tools section is a stub message — exits 0.
+    // `setup <section>` must dispatch straight to that section and NOT recurse
+    // into the first-run preflight (minimum-viable) flow. `setup tools` runs the
+    // real prereq wizard now (Phase 25 D-18), so feed deferring newlines to keep
+    // it non-interactive; a clean exit proves it reached the tools section
+    // directly rather than engaging preflight.
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")
         .unwrap()
         .env("IRONHERMES_HOME", tmp.path())
         .args(["setup", "tools"])
+        .write_stdin("\n".repeat(64))
         .assert()
         .success();
 }

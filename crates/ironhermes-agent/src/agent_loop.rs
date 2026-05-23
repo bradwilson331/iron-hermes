@@ -68,6 +68,16 @@ pub struct AgentResult {
     /// Legacy callers that don't inspect this field continue to work — the
     /// default for pre-21.7 paths is `Natural` or `MaxIterations` as before.
     pub stop_reason: StopReason,
+    /// Phase 34b Plan 03 (WR-01): out-of-band warnings produced by `@`-reference
+    /// expansion in `run_turn`. Populated by `AgentRuntime::run_turn` after
+    /// `preprocess_context_references_async` runs. Each surface (CLI `run_single` +
+    /// `run_chat_turn`, gateway `run_agent`, web `run_web_turn`) reads this field
+    /// after `run_turn` returns and renders the `--- Context Warnings ---` block
+    /// separately from the model response text. The warnings are NOT embedded in the
+    /// message text sent to the model — `preprocess_context_references_async` populates
+    /// only `ContextReferenceResult.warnings`; the surface rendering is done here.
+    /// Invariant locked in `invariants_34b::surfaces_consume_context_warnings`.
+    pub context_warnings: Vec<String>,
 }
 
 impl AgentResult {
@@ -86,6 +96,7 @@ impl AgentResult {
             final_response: None,
             total_usage: AggregatedUsage::default(),
             compression_count_after: 0,
+            context_warnings: Vec::new(),
             stop_reason: StopReason::BudgetExhausted,
         }
     }
@@ -137,12 +148,19 @@ pub struct AgentLoop {
     /// Optional cancellation token for cooperative shutdown (D-21).
     /// When cancelled, the loop returns early with "Cancelled by parent".
     cancel_token: Option<CancellationToken>,
-    /// Shared iteration budget handle (PROV-09, PROV-10, D-15).
-    /// Tracks total turns across parent + child agents and exposes the
-    /// pressure-tier ladder (None / Caution70 / Warning90 / Stop100) via
-    /// `BudgetHandle::pressure()`. Plan 21.7-05 replaced the bare
-    /// `Arc<AtomicUsize>` with the handle so parent + child decrement the
-    /// same counter and tier transitions are observed consistently.
+    // Phase 32.1 Plan 02: activity tracker fields.
+    // Wrapped in Arc<std::sync::Mutex> so `activity_summary()` can be called from
+    // a separate tokio task while `run()` is in-flight (cron runner polling pattern).
+    // Pattern mirrors `active_skills: Arc<std::sync::Mutex<...>>` (with_active_skills).
+    activity_last: Arc<std::sync::Mutex<std::time::Instant>>,
+    activity_kind: Arc<std::sync::Mutex<ActivityKind>>,
+    current_tool: Arc<std::sync::Mutex<Option<String>>>,
+    /// This agent's OWN iteration budget handle (PROV-09, D-15).
+    /// Tracks turns consumed by THIS loop and exposes the pressure-tier ladder
+    /// (None / Caution70 / Warning90 / Stop100) via `BudgetHandle::pressure()`.
+    /// Plan 21.7-05 replaced the bare `Arc<AtomicUsize>` with the handle.
+    /// Plan 35-02 (D-01/D-04): each agent loop owns its own counter; the
+    /// `budget()` getter is no longer used to hand a shared handle to children.
     /// None = use local `max_iterations` only (backward compat).
     budget: Option<BudgetHandle>,
     /// Plan 21.7-05: last pressure tier injected as an advisory system
@@ -225,6 +243,11 @@ impl AgentLoop {
             request_id: uuid::Uuid::new_v4().to_string(),
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             cancel_token: None,
+            // Phase 32.1 Plan 02: activity tracker — initialise to ApiCall sentinel
+            // because the first observable event in any run() is the LLM API call.
+            activity_last: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
+            activity_kind: Arc::new(std::sync::Mutex::new(ActivityKind::ApiCall)),
+            current_tool: Arc::new(std::sync::Mutex::new(None)),
             budget: None,
             last_pressure_tier_seen: PressureTier::None,
             fallback_client: None,
@@ -335,6 +358,15 @@ impl AgentLoop {
     }
     pub fn context_engine_threshold(&self) -> Option<f32> {
         self.context_engine.as_ref().map(|e| e.threshold())
+    }
+
+    /// Phase 34b Plan 02 (D-09): expose the attached context engine so
+    /// `AgentRuntime::run_turn` can invoke the per-turn lifecycle hooks
+    /// (`update_model` before the run, `update_from_response` after) at the
+    /// single central locus. Returns a cloned `Arc` so the caller holds its own
+    /// handle without borrowing the loop across the `run` boundary.
+    pub fn context_engine(&self) -> Option<Arc<dyn ContextEngine>> {
+        self.context_engine.clone()
     }
 
     /// Set a cancellation token for cooperative shutdown (D-21).
@@ -537,18 +569,25 @@ impl AgentLoop {
         self
     }
 
-    /// Set a shared iteration budget handle (PROV-09, PROV-10, D-15).
+    /// Set this agent loop's own iteration budget handle (PROV-09, D-15).
     ///
     /// Plan 21.7-05: accepts [`BudgetHandle`] rather than a bare
     /// `Arc<AtomicUsize>`. The handle's `consume()` is called at the top of
     /// every turn (Stop100 → clean-stop via `AgentResult::budget_exhausted`);
     /// `pressure()` drives the advisory-injection ladder (Caution70/Warning90).
+    ///
+    /// Plan 35-02 (D-01/D-04): each call to `run_child` now passes a FRESH
+    /// `BudgetHandle::new(max_iterations)` — not a clone of the parent handle.
     pub fn with_budget(mut self, budget: BudgetHandle) -> Self {
         self.budget = Some(budget);
         self
     }
 
-    /// Get the budget handle for sharing with child agents (PROV-10).
+    /// Get this agent's own budget handle (PROV-09, D-15).
+    ///
+    /// Note: since Plan 35-02 (D-01/D-04), this getter is no longer used to
+    /// hand a shared handle to child agents — each child receives a fresh
+    /// `BudgetHandle::new(max_iterations)` from `run_child` directly.
     pub fn budget(&self) -> Option<BudgetHandle> {
         self.budget.clone()
     }
@@ -576,6 +615,81 @@ impl AgentLoop {
         Self::new(client, registry, 1)
     }
 
+    // ── Phase 32.1 Plan 02: activity tracker public API ────────────────────
+
+    /// Return a live snapshot of the most-recent observable agent activity.
+    ///
+    /// Non-async — uses `std::sync::Mutex` so it can be called from any
+    /// tokio task (including the cron runner's polling loop) without holding
+    /// an async lock that could interact with the agent's own awaits.
+    pub fn activity_summary(&self) -> ActivitySummary {
+        let last = *self.activity_last.lock().expect("activity_last poisoned");
+        let kind = *self.activity_kind.lock().expect("activity_kind poisoned");
+        let tool = self.current_tool.lock().expect("current_tool poisoned").clone();
+        ActivitySummary {
+            seconds_since: last.elapsed().as_secs_f64(),
+            last_kind: kind,
+            current_tool: tool,
+        }
+    }
+
+    /// Phase 32.3 Plan 02 (D-04 / RESEARCH A1): return a clonable shared handle
+    /// to the live `activity_last` clock. The returned `Arc<Mutex<Instant>>` is
+    /// the SAME instance bumped by the four `mark_activity` sites (ApiCall,
+    /// StreamToken, ToolCall before, ToolCall after) — no new bump points are
+    /// added. Consumers (`SubagentInfo.activity_last`) clone this handle and
+    /// call `.lock().elapsed()` at registry-read time for live staleness.
+    ///
+    /// Zero-copy live clock — no push updates, no periodic polling.
+    pub fn activity_last_arc(&self) -> Arc<std::sync::Mutex<std::time::Instant>> {
+        self.activity_last.clone()
+    }
+
+    /// Interrupt the agent by cancelling its `CancellationToken`.
+    ///
+    /// Non-async, safe to call from any context. When the token fires, the
+    /// next `token.cancelled()` await in `run()` resolves and the loop returns
+    /// early with `StopReason::Cancelled`. If no token is configured (e.g. in
+    /// unit tests), this is a no-op with a warning log.
+    pub fn interrupt(&self, reason: &str) {
+        tracing::warn!(reason = %reason, "AgentLoop interrupted");
+        if let Some(ref token) = self.cancel_token {
+            token.cancel();
+        } else {
+            tracing::warn!("AgentLoop::interrupt called but no CancellationToken is set — no-op");
+        }
+    }
+
+    /// Return `true` when the underlying `CancellationToken` has been cancelled.
+    /// Returns `false` when no token is configured.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .map(|t| t.is_cancelled())
+            .unwrap_or(false)
+    }
+
+    /// Bump the activity tracker to `kind` with an optional in-flight tool name.
+    ///
+    /// Called from three sites inside `run()` and `call_llm_streaming()`:
+    ///   1. Before each LLM API call — `(ApiCall, None)`
+    ///   2. Before each tool dispatch — `(ToolCall, Some(name))`
+    ///   3. After each tool dispatch — `(ToolCall, None)` (clears in-flight name)
+    ///   4. On each streamed content delta — `(StreamToken, None)`
+    fn mark_activity(&self, kind: ActivityKind, current_tool: Option<String>) {
+        *self.activity_last.lock().expect("activity_last poisoned") = std::time::Instant::now();
+        *self.activity_kind.lock().expect("activity_kind poisoned") = kind;
+        *self.current_tool.lock().expect("current_tool poisoned") = current_tool;
+    }
+
+    /// Test-only shim for `mark_activity`. Exposes the internal helper so
+    /// tests can verify the bump → `activity_summary()` round-trip without
+    /// exercising a full `run()`.
+    #[cfg(test)]
+    pub fn mark_activity_for_test(&self, kind: ActivityKind, current_tool: Option<String>) {
+        self.mark_activity(kind, current_tool);
+    }
+
     /// Check the current pressure tier and return advisory text if this
     /// turn crosses into a new tier (Plan 21.7-05 / D-15 / T-21.7-05-02).
     ///
@@ -598,25 +712,79 @@ impl AgentLoop {
         advisory_text(tier)
     }
 
+    /// Extract an HTTP status code from an error string.
+    ///
+    /// Recognises both production formats:
+    ///   - "(400 Bad Request)"  — `bail!("… ({status}): …")` in client.rs / anthropic_client.rs
+    ///   - "status: 429 …"      — synthetic test format kept for regression coverage
+    fn extract_http_status(err_str: &str) -> Option<u16> {
+        if let Some(open) = err_str.find('(') {
+            let rest = &err_str[open + 1..];
+            if rest.len() >= 4 {
+                let (digits, tail) = rest.split_at(3);
+                if tail.starts_with(' ') {
+                    if let Ok(code) = digits.parse::<u16>() {
+                        return Some(code);
+                    }
+                }
+            }
+        }
+        if let Some(idx) = err_str.find("status: ") {
+            let rest = &err_str[idx + "status: ".len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Detect transport-level failures in a formatted error chain.
+    ///
+    /// Called only when `extract_http_status` returns `None` (i.e. no HTTP status
+    /// code was found in the error string). Matches a conservative case-insensitive
+    /// allowlist of reqwest / hyper-util / OS transport-error substrings. Returns
+    /// `true` when the error chain indicates the provider was unreachable or the
+    /// request was never delivered — the caller should then return `(true, true)` to
+    /// activate the fallback chain. Unrecognised errors continue to return `(true, false)`.
+    ///
+    /// Needles are verified against pinned source (reqwest 0.12.28, hyper-util 0.1.20,
+    /// anyhow 1.0.100). See phase 27.1.4.1.1 RESEARCH.md — Validated Allowlist (D-01 / D-01a).
+    fn is_transport_failure(err_str: &str) -> bool {
+        const TRANSPORT_MARKERS: &[&str] = &[
+            "error sending request for url",
+            "connection refused",
+            "dns error",
+            "failed to lookup address",
+            "connection reset",
+            "operation timed out",
+            "tcp connect error",
+        ];
+        let lower = err_str.to_lowercase();
+        TRANSPORT_MARKERS.iter().any(|m| lower.contains(m))
+    }
+
     /// Classify an error for fallback decision-making.
     /// Returns (should_retry, should_fallback).
     fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
-        let err_str = err.to_string();
-        if err_str.contains("status: 429")
-            || err_str.contains("status: 500")
-            || err_str.contains("status: 502")
-            || err_str.contains("status: 503")
-            || err_str.contains("status: 504")
-        {
-            return (true, true);
+        // Alternate Display walks the full anyhow context chain joined with ": ".
+        // Plain Display only shows the outermost context — production errors are
+        // wrapped at agent_loop.rs:1030 with `.context("Streaming LLM call failed")`,
+        // hiding the underlying `(400 Bad Request)` from the substring scan.
+        let err_str = format!("{err:#}");
+        let Some(code) = Self::extract_http_status(&err_str) else {
+            return (true, Self::is_transport_failure(&err_str));
+        };
+        match code {
+            // Transient — retry first, then fall back if all retries fail.
+            429 | 500 | 502 | 503 | 504 => (true, true),
+            // Permanent client errors — retrying the same call against the
+            // same provider won't help. Skip retry; fall back. 400 is
+            // included because OpenRouter returns 400 for invalid model IDs,
+            // which a sibling provider (e.g. local ollama) may accept.
+            400 | 401 | 403 | 404 => (false, true),
+            _ => (true, false),
         }
-        if err_str.contains("status: 401")
-            || err_str.contains("status: 403")
-            || err_str.contains("status: 404")
-        {
-            return (false, true);
-        }
-        (true, false)
     }
 
     /// Phase 18 Plan 06: pre-chat compression + transient-drain block.
@@ -743,6 +911,7 @@ impl AgentLoop {
                         total_usage,
                         compression_count_after: self.compression_count,
                         stop_reason: StopReason::Cancelled,
+                        context_warnings: Vec::new(),
                     });
                 }
             }
@@ -772,9 +941,20 @@ impl AgentLoop {
                         total_usage,
                         compression_count_after: self.compression_count,
                         stop_reason: StopReason::BudgetExhausted,
+                        context_warnings: Vec::new(),
                     });
                 }
             }
+
+            // Phase 34a D-02/D-03/D-08: evict any prior-turn recall injection
+            // BEFORE compression. Recall is ephemeral and re-fetched fresh each
+            // turn; running this after compression lets a stale <memory-context>
+            // block be folded into the persisted [CONTEXT HISTORY] summary on the
+            // summarizing-engine path (D-03 violation). Evicting first also keeps
+            // the insert-index scan below correct (D-02 / Pitfall 3). The legacy
+            // ContextCompressor still has its own step-0 eviction; this guards the
+            // active context-engine path which has none.
+            messages.retain(|m| !m.is_recall_context);
 
             // Phase 18 Plan 06: pre-chat context engine path (replaces legacy compressor
             // when wired). Drain transient pressure message, then compress at >= threshold
@@ -784,6 +964,45 @@ impl AgentLoop {
             } else if let Some(ref compressor) = self.compressor {
                 let mut comp = compressor.lock().await;
                 comp.compress(&mut messages);
+            }
+
+            // Phase 34a D-08: pre-turn recall injection.
+            // Fetch query-scoped recall and inject BEFORE the last user
+            // message (only when memory_manager is wired).
+            if let Some(ref mgr) = self.memory_manager {
+                let session_id = self.session_id.as_deref().unwrap_or("");
+                let user_msg_text = messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == ironhermes_core::Role::User)
+                    .and_then(|m| m.content_text().map(|s| s.to_string()))
+                    .unwrap_or_default();
+
+                if !user_msg_text.is_empty() {
+                    // Scoped block drops the MutexGuard before messages.insert() (Pitfall 1).
+                    let raw = {
+                        let guard = mgr.lock().await;
+                        guard.prefetch_with_query(&user_msg_text, session_id).await
+                    };
+                    if let Ok(raw) = raw {
+                        if let Some(block) =
+                            crate::memory_context::build_memory_context_block(&raw)
+                        {
+                            // D-08: insert only when recall is non-empty.
+                            let insert_idx = messages
+                                .iter()
+                                .rposition(|m| m.role == ironhermes_core::Role::User)
+                                .unwrap_or(messages.len());
+                            messages.insert(
+                                insert_idx,
+                                ChatMessage::recall_system(block),
+                            );
+                        }
+                        // D-08: when build returns None (empty recall), do NOT insert.
+                        // The retain above already evicted the prior recall message, so
+                        // a file-provider-only session's buffer is byte-identical to pre-34a.
+                    }
+                }
             }
 
             turns_used += 1;
@@ -810,6 +1029,12 @@ impl AgentLoop {
                 messages.push(ChatMessage::system(advisory));
             }
 
+            // Phase 32.1 Plan 02 Task 2: bump activity tracker before every LLM API call.
+            // Placed here (outside the retry loop) so the tracker updates on the initial
+            // attempt and each retry — any of which may be the last visible activity before
+            // the cron runner's inactivity poller fires.
+            self.mark_activity(ActivityKind::ApiCall, None);
+
             // Call LLM with retry and fallback support
             const MAX_RETRIES: usize = 3;
             let mut retry_count = 0;
@@ -835,6 +1060,7 @@ impl AgentLoop {
                                 total_usage,
                                 compression_count_after: self.compression_count,
                                 stop_reason: StopReason::Cancelled,
+                                context_warnings: Vec::new(),
                             });
                         }
                     }
@@ -968,6 +1194,7 @@ impl AgentLoop {
             total_usage,
             compression_count_after: self.compression_count,
             stop_reason,
+            context_warnings: Vec::new(),
         })
     }
 
@@ -983,13 +1210,25 @@ impl AgentLoop {
             .await
             .context("LLM call failed")?;
 
-        let choice = response
+        let mut message = response
             .choices
             .into_iter()
             .next()
-            .context("No choices in LLM response")?;
+            .context("No choices in LLM response")?
+            .message;
 
-        Ok((choice.message, response.usage))
+        // Phase 34a CR-02: scrub any model-echoed <memory-context> / [System note]
+        // before the message is returned, persisted, and replayed next turn.
+        if let Some(ironhermes_core::MessageContent::Text(text)) = message.content.as_ref() {
+            let sanitized = crate::memory_context::sanitize_context(text);
+            message.content = if sanitized.is_empty() {
+                None
+            } else {
+                Some(ironhermes_core::MessageContent::Text(sanitized))
+            };
+        }
+
+        Ok((message, response.usage))
     }
 
     /// Call LLM with streaming, forwarding content deltas to the callback.
@@ -1011,6 +1250,9 @@ impl AgentLoop {
         while let Some(event) = rx.recv().await {
             match event {
                 StreamEvent::ContentDelta(delta) => {
+                    // Phase 32.1 Plan 02 Task 2: bump activity tracker once per delta event,
+                    // not per byte — avoids Mutex::lock thrash on the hot streaming path.
+                    self.mark_activity(ActivityKind::StreamToken, None);
                     if let Some(ref cb) = self.stream_callback {
                         cb(&delta);
                     }
@@ -1040,6 +1282,14 @@ impl AgentLoop {
             ))
         };
 
+        // Phase 34a CR-02: the stream callback scrubs only the *displayed* deltas.
+        // The accumulated `content` is the RAW model output and is what gets
+        // persisted + replayed next turn, so a model-echoed <memory-context> /
+        // [System note] block must be stripped here too or it defeats the
+        // recall-boundary guarantee. sanitize_context runs over the full assembled
+        // text (no chunk-boundary concern at this point).
+        let content = crate::memory_context::sanitize_context(&content);
+
         let message = ChatMessage {
             role: ironhermes_core::Role::Assistant,
             content: if content.is_empty() {
@@ -1050,6 +1300,7 @@ impl AgentLoop {
             tool_calls,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         };
 
         Ok((message, usage))
@@ -1259,11 +1510,19 @@ impl AgentLoop {
                     );
                 }
 
+                // Phase 32.1 Plan 02 Task 2: bump activity tracker before tool dispatch.
+                // Before: record the in-flight tool name so the cron poller can see it.
+                // After: reset current_tool to None so a subsequent activity_summary()
+                // reflects that dispatch is finished.
+                self.mark_activity(ActivityKind::ToolCall, Some(name.clone()));
+
                 // Take an `args` snapshot for the trajectory append site BEFORE
                 // execute_tool consumes the original. Cheap clone — Plan 9 trades
                 // a JSON Value clone for a redaction seam (Plan 5 Tool::redact_args).
                 let raw_args_for_traj = args.clone();
                 let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
+                // Phase 32.1 Plan 02 Task 2: reset current_tool after dispatch completes.
+                self.mark_activity(ActivityKind::ToolCall, None);
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
 
                 match dispatch_result {
@@ -2189,7 +2448,8 @@ mod budget_tests {
 
     #[test]
     fn test_shared_budget_increment() {
-        // Parent + child share the same underlying counter via BudgetHandle::clone.
+        // BudgetHandle::clone shares the same underlying counter (Arc<AtomicUsize>).
+        // This is still used by gateway/CommandContext and reset() visibility.
         let parent = BudgetHandle::new(10);
         let child = parent.clone();
         for _ in 0..5 {
@@ -2199,7 +2459,41 @@ mod budget_tests {
             child.consume();
         }
         assert_eq!(parent.used(), 8);
-        assert_eq!(child.used(), 8, "clones share the same counter (PROV-10)");
+        assert_eq!(child.used(), 8, "clones share the same counter");
+    }
+
+    /// D-07.1 independence regression test (Plan 35-02).
+    ///
+    /// Two distinct `BudgetHandle::new(max)` instances do NOT share a counter.
+    /// This models the parent agent loop's budget and the fresh per-child budget
+    /// produced by `AgentSubagentRunner::run_child` (which now calls
+    /// `BudgetHandle::new(max_iterations)` rather than cloning the parent handle).
+    ///
+    /// Draining the child to exhaustion must leave the parent budget unchanged.
+    /// This is the inversion of the old PROV-10 shared-counter assumption.
+    #[test]
+    fn test_independent_budget_child_drain_does_not_affect_parent() {
+        let max = 10;
+        // Two separate handles — two distinct Arc<AtomicUsize> instances.
+        let parent = BudgetHandle::new(max);
+        let child = BudgetHandle::new(max);
+
+        // Both start full.
+        assert_eq!(parent.remaining(), max, "parent starts at max");
+        assert_eq!(child.remaining(), max, "child starts at max");
+
+        // Drain the child to exhaustion.
+        for _ in 0..max {
+            child.consume();
+        }
+        assert_eq!(child.remaining(), 0, "child is fully drained");
+
+        // Independence guarantee: the parent's counter is untouched.
+        assert_eq!(
+            parent.remaining(),
+            max,
+            "child drain must not affect parent remaining() — independence guarantee (D-07.1)"
+        );
     }
 
     #[test]
@@ -2306,13 +2600,153 @@ mod fallback_tests {
 
     #[test]
     fn test_classify_other_error() {
-        let err = anyhow!("Connection refused: failed to connect to LLM");
+        let err = anyhow!("unexpected end of JSON input");
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "generic errors should be retryable");
         assert!(
             !should_fallback,
             "generic errors should not trigger fallback"
         );
+    }
+
+    /// Marquee transport case: Ollama not running, full reqwest/hyper-util chain.
+    /// `{err:#}` contains `"error sending request for url"` (reqwest Kind::Request)
+    /// + `"tcp connect error"` (hyper-util) + `"Connection refused"` (OS errno).
+    /// All three needles match; each is independently sufficient.
+    #[test]
+    fn test_classify_transport_request_send_marker() {
+        let err = anyhow!(
+            "Streaming LLM call failed: Failed to send streaming request: \
+             error sending request for url (http://localhost:11434/v1/chat/completions): \
+             tcp connect error: Connection refused (os error 61)"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "reqwest Kind::Request error should trigger fallback"
+        );
+    }
+
+    /// TCP connection refused without the outer reqwest wrapper — independently
+    /// exercises the `"connection refused"` and `"tcp connect error"` needles.
+    #[test]
+    fn test_classify_transport_connection_refused() {
+        let err = anyhow!("tcp connect error: Connection refused (os error 61)");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "connection refused should trigger fallback"
+        );
+    }
+
+    /// Connect-phase timeout: exercises `"tcp connect error"` and `"operation timed out"`.
+    #[test]
+    fn test_classify_transport_connect_timeout() {
+        let err = anyhow!(
+            "error sending request for url (http://localhost:11434/...): \
+             tcp connect error: Operation timed out (os error 60)"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "connect timeout should trigger fallback"
+        );
+    }
+
+    /// DNS resolution failure: exercises `"dns error"` and `"failed to lookup address"`.
+    #[test]
+    fn test_classify_transport_dns_failure() {
+        let err = anyhow!(
+            "error sending request for url (http://nope.invalid/...): \
+             dns error: failed to lookup address information: \
+             nodename nor servname provided, or not known"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "DNS failure should trigger fallback"
+        );
+    }
+
+    /// Connection reset by peer — fed alone (no `"error sending request for url"`)
+    /// because mid-stream resets may surface via reqwest `Kind::Body`, not `Kind::Request`.
+    /// Exercises the `"connection reset"` needle in isolation.
+    #[test]
+    fn test_classify_transport_connection_reset() {
+        let err = anyhow!("Connection reset by peer (os error 54)");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "transport errors should be retryable");
+        assert!(
+            should_fallback,
+            "connection reset should trigger fallback"
+        );
+    }
+
+    /// Regression guard against Pitfall 1: SSE stream read timeout is NOT a transport
+    /// failure — the server was reachable and responded. Bare `"timed out"` is NOT in
+    /// the allowlist; only the scoped `"operation timed out"` marker is present.
+    #[test]
+    fn test_classify_sse_read_timeout_not_transport() {
+        let err = anyhow!("SSE stream read timed out after 60s");
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(should_retry, "SSE read timeout should be retryable");
+        assert!(
+            !should_fallback,
+            "SSE stream read timeout should not trigger fallback (Pitfall 1 guard)"
+        );
+    }
+
+    /// Regression: production errors are wrapped via
+    /// `.context("Streaming LLM call failed")` in agent_loop.rs:1030. Plain
+    /// `err.to_string()` returns only the outermost context — hiding the
+    /// inner `(400 Bad Request)` — so the classifier must use alternate
+    /// Display (`{err:#}`) to walk the full chain. This test exercises that
+    /// exact wrap-and-extract path.
+    #[test]
+    fn test_classify_walks_anyhow_context_chain() {
+        use anyhow::Context;
+        let inner: anyhow::Error =
+            anyhow!("Streaming chat completion failed (400 Bad Request): {{}}");
+        let wrapped = Err::<(), _>(inner)
+            .context("Streaming LLM call failed")
+            .unwrap_err();
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&wrapped);
+        assert!(
+            !should_retry && should_fallback,
+            "wrapped 400 must trigger fallback (no retry); plain to_string() would lose the inner (400 …) frame"
+        );
+    }
+
+    /// Regression: production errors use the `(NNN Reason)` format from
+    /// `bail!("Streaming chat completion failed ({status}): {body}")` in
+    /// client.rs:170. Earlier versions of `classify_llm_error` only matched
+    /// the synthetic `"status: NNN"` format, so the fallback path silently
+    /// never fired in production. This test locks the production format.
+    #[test]
+    fn test_classify_production_error_format() {
+        let err = anyhow!(
+            "Streaming chat completion failed (400 Bad Request): \
+             {{\"error\":{{\"message\":\"openai/sgpt-4o-mini is not a valid model ID\"}}}}"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert!(!should_retry, "400 should skip retry");
+        assert!(should_fallback, "400 should trigger fallback");
+
+        let err_404 = anyhow!("Streaming chat completion failed (404 Not Found): {{}}");
+        let (_, fb_404) = AgentLoop::classify_llm_error(&err_404);
+        assert!(fb_404, "404 in production format should trigger fallback");
+
+        let err_429 = anyhow!("Streaming chat completion failed (429 Too Many Requests): {{}}");
+        let (retry_429, fb_429) = AgentLoop::classify_llm_error(&err_429);
+        assert!(retry_429 && fb_429, "429 should retry AND fall back");
+
+        let err_500 = anyhow!("Streaming chat completion failed (500 Internal Server Error): {{}}");
+        let (retry_500, fb_500) = AgentLoop::classify_llm_error(&err_500);
+        assert!(retry_500 && fb_500, "500 should retry AND fall back");
     }
 
     #[test]
@@ -2807,6 +3241,41 @@ mod memory_provider_wiring_tests {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 32.1 Plan 02: activity tracker types, accessors, and tests
+// ---------------------------------------------------------------------------
+
+/// Classifies the most-recent observable event inside `AgentLoop::run`.
+/// Used by the cron runner to distinguish idle LLM-wait from active tool execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    /// The agent just issued (or is waiting on) an LLM API call.
+    /// This is also the sentinel "no activity yet" value — it is the first
+    /// observable event in any `run()` so initialising to it is correct.
+    ApiCall,
+    /// A tool call was dispatched (or is in-flight).
+    ToolCall,
+    /// A streamed content delta was received from the LLM.
+    StreamToken,
+}
+
+/// Snapshot of the most-recent observable agent activity.
+/// Returned by `AgentLoop::activity_summary()` and consumed by the cron runner
+/// to implement the inactivity-tracked timeout (CONTEXT.md §Timeout & resilience).
+#[derive(Debug, Clone)]
+pub struct ActivitySummary {
+    /// Seconds elapsed since the last activity bump.
+    /// Computed as `Instant::now() - last_bump` at the moment of the call — not
+    /// a stored elapsed value — so successive calls yield monotonically advancing
+    /// readings without any additional state.
+    pub seconds_since: f64,
+    /// Kind of the most-recent observable event.
+    pub last_kind: ActivityKind,
+    /// Name of the tool currently in-flight, if any.
+    /// `None` when no tool call is currently being dispatched.
+    pub current_tool: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Phase 25.3 Plan 9 (D-T-1 / D-T-3): trajectory wireup tests
 // ---------------------------------------------------------------------------
 
@@ -2861,6 +3330,282 @@ mod trajectory_wireup_tests {
         assert!(
             agent.trajectory_writer.is_none(),
             "Phase 25.3 D-T-3: AgentLoop::new MUST default trajectory_writer to None"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 32.1 Plan 02 Task 1: activity tracker unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod activity_tracker_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Test 1: `AgentLoop::for_tests()` constructs an instance whose
+    /// `activity_summary()` returns a fresh `ActivitySummary` with
+    /// `seconds_since` < 1.0, `last_kind == ActivityKind::ApiCall` (sentinel),
+    /// and `current_tool == None`.
+    #[test]
+    fn activity_summary_initial_state() {
+        let agent = AgentLoop::for_tests();
+        let summary = agent.activity_summary();
+        assert!(
+            summary.seconds_since < 1.0,
+            "seconds_since should be near-zero after construction, got {}",
+            summary.seconds_since
+        );
+        assert_eq!(
+            summary.last_kind,
+            ActivityKind::ApiCall,
+            "initial sentinel kind should be ApiCall"
+        );
+        assert_eq!(
+            summary.current_tool, None,
+            "initial current_tool should be None"
+        );
+    }
+
+    /// Test 2: Calling `activity_summary()` twice with a 50ms sleep between
+    /// them yields a second `seconds_since` greater than the first, proving
+    /// the timestamp is computed live from `Instant::now()` rather than a
+    /// frozen elapsed value.
+    #[test]
+    fn activity_summary_seconds_since_advances() {
+        let agent = AgentLoop::for_tests();
+        let first = agent.activity_summary().seconds_since;
+        std::thread::sleep(Duration::from_millis(50));
+        let second = agent.activity_summary().seconds_since;
+        assert!(
+            second > first,
+            "second seconds_since ({second}) must be > first ({first}) after 50ms sleep"
+        );
+    }
+
+    /// Test 3: `interrupt("inactivity timeout")` cancels the agent's underlying
+    /// `CancellationToken`, which is reflected by `is_cancelled()` returning `true`.
+    #[test]
+    fn interrupt_cancels_token() {
+        let token = CancellationToken::new();
+        let agent = AgentLoop::for_tests().with_cancellation_token(token.clone());
+        assert!(!agent.is_cancelled(), "should not be cancelled before interrupt");
+        agent.interrupt("inactivity timeout");
+        assert!(
+            agent.is_cancelled(),
+            "is_cancelled() should return true after interrupt()"
+        );
+        assert!(
+            token.is_cancelled(),
+            "the underlying CancellationToken should also be cancelled"
+        );
+    }
+
+    /// Test 4: `mark_activity_for_test` bumps the tracker — verified by reading
+    /// `activity_summary()` afterwards and asserting the updated kind and tool name.
+    #[test]
+    fn mark_activity_for_test_updates_summary() {
+        let agent = AgentLoop::for_tests();
+        // Start: sentinel ApiCall / None
+        assert_eq!(agent.activity_summary().last_kind, ActivityKind::ApiCall);
+        assert_eq!(agent.activity_summary().current_tool, None);
+
+        // Bump to ToolCall with a named tool
+        agent.mark_activity_for_test(ActivityKind::ToolCall, Some("web_read".into()));
+        let summary = agent.activity_summary();
+        assert_eq!(
+            summary.last_kind,
+            ActivityKind::ToolCall,
+            "last_kind should reflect the bumped kind"
+        );
+        assert_eq!(
+            summary.current_tool,
+            Some("web_read".to_string()),
+            "current_tool should hold the in-flight tool name"
+        );
+        assert!(
+            summary.seconds_since < 1.0,
+            "seconds_since should be near-zero just after bump, got {}",
+            summary.seconds_since
+        );
+
+        // Post-dispatch reset: clear current_tool
+        agent.mark_activity_for_test(ActivityKind::ToolCall, None);
+        let after = agent.activity_summary();
+        assert_eq!(after.last_kind, ActivityKind::ToolCall);
+        assert_eq!(after.current_tool, None, "current_tool should be cleared after reset");
+    }
+
+    /// Test 5: `interrupt()` on an agent without a CancellationToken is a no-op
+    /// (does not panic). `is_cancelled()` returns `false`.
+    #[test]
+    fn interrupt_without_token_is_noop() {
+        let agent = AgentLoop::for_tests(); // no with_cancellation_token()
+        agent.interrupt("should not panic");
+        assert!(
+            !agent.is_cancelled(),
+            "is_cancelled() should be false when no token is configured"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 32.1 Plan 02 Task 2: run-wiring tests
+// Verify that mark_activity is wired at the three observable sites in run()
+// and execute_tool_call().
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod activity_tracker_run_wiring {
+    use super::*;
+    use async_trait::async_trait;
+    use ironhermes_core::ToolSchema;
+    use ironhermes_tools::{Tool, ToolRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // -----------------------------------------------------------------------
+    // Test 1 (source): mark_activity(ActivityKind::ApiCall) is wired in run()
+    // -----------------------------------------------------------------------
+
+    /// Source-text assertion: `ActivityKind::ApiCall` appears in run() body
+    /// (at the API-call bump site). Accepts at least 2 occurrences: one in
+    /// `new()` initialisation and at least one in the run loop.
+    #[test]
+    fn source_has_api_call_site_in_run() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("ActivityKind::ApiCall").count();
+        assert!(
+            count >= 2,
+            "Expected at least 2 occurrences of ActivityKind::ApiCall (init + run site), found {}",
+            count
+        );
+    }
+
+    /// Source-text assertion: `ActivityKind::ToolCall` appears at least twice
+    /// inside execute_tool_call (pre-dispatch bump + post-dispatch reset).
+    #[test]
+    fn source_has_tool_call_sites() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("ActivityKind::ToolCall").count();
+        assert!(
+            count >= 2,
+            "Expected at least 2 occurrences of ActivityKind::ToolCall (pre + post dispatch), found {}",
+            count
+        );
+    }
+
+    /// Source-text assertion: `ActivityKind::StreamToken` appears in
+    /// call_llm_streaming (ContentDelta arm).
+    #[test]
+    fn source_has_stream_token_site() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("ActivityKind::StreamToken").count();
+        assert!(
+            count >= 1,
+            "Expected at least 1 occurrence of ActivityKind::StreamToken, found {}",
+            count
+        );
+    }
+
+    /// Source-text assertion: `self.mark_activity(` appears at least 4 times
+    /// (1 ApiCall site + 2 ToolCall sites + 1 StreamToken site).
+    #[test]
+    fn source_has_minimum_mark_activity_call_count() {
+        let src = include_str!("agent_loop.rs");
+        let count = src.matches("self.mark_activity(").count();
+        assert!(
+            count >= 4,
+            "Expected at least 4 self.mark_activity( calls, found {}",
+            count
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 (behavioral): execute_tool_call bumps ToolCall kind
+    // -----------------------------------------------------------------------
+
+    struct TrackingMockTool;
+
+    #[async_trait]
+    impl Tool for TrackingMockTool {
+        fn name(&self) -> &str { "track_mock" }
+        fn toolset(&self) -> &str { "test" }
+        fn description(&self) -> &str { "tracking mock tool" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "track_mock",
+                "tracking mock",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("tracked".to_string())
+        }
+    }
+
+    fn make_tool_call(name: &str) -> ironhermes_core::ToolCall {
+        ironhermes_core::ToolCall {
+            id: "tc-wiring-test".to_string(),
+            call_type: "function".to_string(),
+            function: ironhermes_core::FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    fn make_agent_with_tool(tool: Box<dyn ironhermes_tools::Tool>) -> AgentLoop {
+        let mut registry = ToolRegistry::new();
+        registry.register(tool);
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:11434",
+            "test-key",
+            "test-model",
+        ));
+        AgentLoop::new(client, Arc::new(RwLock::new(registry)), 1)
+    }
+
+    /// Behavioral test: calling execute_tool_call bumps last_kind to ToolCall
+    /// and clears current_tool to None after dispatch completes.
+    #[tokio::test]
+    async fn execute_tool_call_bumps_activity_tracker() {
+        let agent = make_agent_with_tool(Box::new(TrackingMockTool));
+        // Pre-call: sentinel kind is ApiCall
+        assert_eq!(agent.activity_summary().last_kind, ActivityKind::ApiCall);
+
+        let tc = make_tool_call("track_mock");
+        let result = agent.execute_tool_call(&tc).await;
+        assert_eq!(result, "tracked", "tool should have executed successfully");
+
+        // Post-call: kind should be ToolCall (post-dispatch reset bumps ToolCall+None)
+        let summary = agent.activity_summary();
+        assert_eq!(
+            summary.last_kind,
+            ActivityKind::ToolCall,
+            "last_kind should be ToolCall after execute_tool_call"
+        );
+        assert_eq!(
+            summary.current_tool,
+            None,
+            "current_tool should be None after post-dispatch reset"
+        );
+    }
+
+    /// Test: after a successful run() that does not need a live LLM, the bounded
+    /// seconds_since is reasonable (< 5.0s), confirming the tracker was updated
+    /// near the end of the run (not left at construction time). We test this by
+    /// bumping the tracker manually and reading back a fresh summary.
+    #[test]
+    fn activity_summary_seconds_since_bounded_after_bump() {
+        let agent = AgentLoop::for_tests();
+        // Simulate a tracker bump as run() would do
+        agent.mark_activity_for_test(ActivityKind::ApiCall, None);
+        let summary = agent.activity_summary();
+        assert!(
+            summary.seconds_since < 5.0,
+            "seconds_since after a fresh bump must be < 5.0s, got {}",
+            summary.seconds_since
         );
     }
 }

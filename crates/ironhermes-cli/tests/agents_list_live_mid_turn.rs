@@ -63,7 +63,24 @@ fn fake_info(id: &str, summary: &str) -> SubagentInfo {
         started_at: Instant::now(),
         cancel: CancellationToken::new(),
         transcript_path: PathBuf::from(format!("/tmp/transcript-{}.jsonl", id)),
+        // Phase 32.3 Plan 01 (D-04 reservation): wired by Plan 02.
+        activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default; this test asserts tree shape only.
+        stale_warn_seconds: 120,
     }
+}
+
+/// Phase 32.3 Plan 01: register_guarded with the live Arc's Weak. The guard
+/// is detached (`std::mem::forget`) so these tests retain their original
+/// "registered until kill or test end" semantics. Lifecycle coverage is in
+/// `ironhermes-agent/tests/registration_guard.rs`.
+async fn register_for_test(
+    reg: &Arc<RwLock<SubagentRegistry>>,
+    info: SubagentInfo,
+) {
+    let weak = Arc::downgrade(reg);
+    let guard = reg.write().await.register_guarded(info, weak);
+    std::mem::forget(guard);
 }
 
 // =========================================================================
@@ -86,10 +103,11 @@ async fn cmd_agents_list_returns_active_subagents_when_registry_populated() {
     // production SubagentRegistryHandle trait-object, and install on
     // CommandContext via the real with_subagent_registry builder.
     let reg = Arc::new(RwLock::new(SubagentRegistry::new()));
-    reg.write().await.register(fake_info(
-        "sub_deadbeefcafe",
-        "research LoRA training corpora",
-    ));
+    register_for_test(
+        &reg,
+        fake_info("sub_deadbeefcafe", "research LoRA training corpora"),
+    )
+    .await;
 
     let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);
@@ -167,8 +185,12 @@ async fn cmd_agents_kill_cancels_registered_subagent() {
         started_at: Instant::now(),
         cancel: token.clone(),
         transcript_path: PathBuf::from("/tmp/transcript-killme.jsonl"),
+        // Phase 32.3 Plan 01 (D-04 reservation): wired by Plan 02.
+        activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default; this test asserts kill path only.
+        stale_warn_seconds: 120,
     };
-    reg.write().await.register(info);
+    register_for_test(&reg, info).await;
 
     let handle: Arc<dyn SubagentListSnapshot> = Arc::new(SubagentRegistryHandle::new(reg.clone()));
     let ctx = base_ctx().with_subagent_registry(handle);
@@ -189,19 +211,27 @@ async fn cmd_agents_kill_cancels_registered_subagent() {
         other => panic!("expected Output, got {:?}", other),
     }
 
-    // Give the kill token a tick to propagate (same-task synchronous
-    // propagation is guaranteed by SubagentRegistry::kill's .cancel()
-    // call, but be defensive).
+    // Give the kill token a tick to propagate.
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
         token.is_cancelled(),
         "D-03: /agents kill must cancel the stored CancellationToken"
     );
 
-    // And the entry must be gone from the registry.
+    // Phase 32.3 Plan 03 (D-08): the `/agents kill` cmd path routes through
+    // ShrikeService::kill, which cancels the token and aborts the child's
+    // JoinHandle but DELIBERATELY does not remove the registry entry directly —
+    // eviction happens via RegistrationGuard::drop when the aborted task unwinds,
+    // so the `stale_warned` dedup sweep runs through the canonical path
+    // (see shrike.rs `kill`). This synthetic entry has no backing task and its
+    // guard is `std::mem::forget`'d in `register_for_test`, so guard-driven
+    // removal cannot fire here and active_count stays 1. Direct removal-on-kill
+    // is the separate internal-caller contract, covered by
+    // `subagent_registry_ops::kill_cancels_token_and_removes_entry`.
     let remaining = reg.read().await.active_count();
     assert_eq!(
-        remaining, 0,
-        "D-03: /agents kill must remove the entry from the registry"
+        remaining, 1,
+        "post-32.3 Shrike kill cancels + aborts but does not synchronously evict; \
+         the synthetic forgotten-guard entry is removed only via RegistrationGuard::drop"
     );
 }

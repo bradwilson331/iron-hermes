@@ -149,6 +149,9 @@ pub trait MemoryProvider: Send + Sync + 'static {
     async fn queue_prefetch(&self, _query: &str) -> anyhow::Result<()> {
         Ok(())
     }
+    async fn prefetch_with_query(&self, _query: &str, _session_id: &str) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
     async fn on_pre_compress(&self, _messages: &[ChatMessage]) -> anyhow::Result<()> {
         Ok(())
     }
@@ -400,6 +403,11 @@ mod tests {
 
         // Default async hooks succeed
         p.queue_prefetch("q").await.unwrap();
+        assert_eq!(
+            p.prefetch_with_query("q", "sid").await.unwrap(),
+            "",
+            "default prefetch_with_query must return empty string"
+        );
         p.on_pre_compress(&[]).await.unwrap();
         p.on_memory_write(MemoryAction::Add, MemoryTarget::Memory, "x")
             .await

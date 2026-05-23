@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
-status: idle
-stopped_at: Phase 26.1 complete — all 3 plans done, UAT passed
-last_updated: "2026-05-04T20:40:00.000Z"
-last_activity: 2026-05-04 -- Phase 26.1 completed (WebSocket chat end-to-end fix)
+status: executing
+stopped_at: Phase 35.1 context gathered
+last_updated: "2026-05-23T11:22:19.492Z"
+last_activity: 2026-05-23
 progress:
-  total_phases: 20
-  completed_phases: 20
-  total_plans: 106
-  completed_plans: 106
-  percent: 100
+  total_phases: 4
+  completed_phases: 3
+  total_plans: 19
+  completed_plans: 18
+  percent: 75
 ---
 
 # Project State
@@ -21,20 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 26.1 — COMPLETE
+**Current focus:** Phase 35.1 — hermes-agent-install-and-setup-parity
 
 ## Current Position
 
-Phase: 26.1 (fix-websocket-error-for-chat) — COMPLETE
-Plan: 3 of 3
-Status: All plans complete, UAT passed 2026-05-04
-Last activity: 2026-05-04 -- Phase 26.1 execution started
+Phase: 35.1 (hermes-agent-install-and-setup-parity) — EXECUTING
+Plan: 2 of 4
+Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
+Status: Ready to execute
+Last activity: 2026-05-23
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 90
+- Total plans completed: 130
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -61,6 +62,20 @@ Last activity: 2026-05-04 -- Phase 26.1 execution started
 | 22.4.2.3 | 1 | - | - |
 | 25.3 | 18 | - | - |
 | 25.6 | 3 | - | - |
+| 26.3 | 1 | - | - |
+| 21.8.3.1 | 2 | - | - |
+| 27.1.1 | 7 | - | - |
+| 27.1.2 | 1 | - | - |
+| 27.1.3 | 2 | - | - |
+| 27.1.4.1 | 2 | - | - |
+| 27.1.4.1.1 | 1 | - | - |
+| 26.3.2 | 1 | - | - |
+| 27.1.4.2 | 1 | - | - |
+| 32.1 | 8 | - | - |
+| 26.7.1 | 2 | - | - |
+| 34a | 2 | - | - |
+| 28.1 | 6 | - | - |
+| 34b | 4 | - | - |
 
 **Recent Trend:**
 
@@ -155,6 +170,10 @@ Last activity: 2026-05-04 -- Phase 26.1 execution started
 | Phase 25.2 P13 | 108 | 3 tasks | 5 files |
 | Phase 25.2 P14 | 25 | 3 tasks | 5 files |
 | Phase 25.5 P05 | 2min | 1 tasks | 3 files |
+| Phase 27.1 P03 | 1 | 2 tasks | 1 files |
+| Phase 26.2.1 P14 | 35min | 4 tasks | 5 files |
+| Phase 32.2 P02 | 18 | 2 tasks | 2 files |
+| Phase 32.2-subagent-delegation-parity P03 | 1105 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -373,6 +392,19 @@ Recent decisions affecting current work:
 - [Phase 25.2]: Plan 12 [Rule 1 fix]: Replaced .entered() with async-block + .instrument(span) in tiers.rs/chunked.rs — Plan 11's EnteredSpan was held across await and broke tokio::spawn Send bound
 - [Phase 25.2]: Plan 14: AnyClientSummarizationHandle is verbatim port of AnyClientVisionHandle (any_client.rs:158-238); register_web_extract_tool wired in run_chat/run_single/run_gateway with parity guard test; smoke test uses ToolSchema 2-level shape (d.function.name, not d.name)
 - [Phase 25.5]: Replaced mock STATUS_TEXT with dynamic config_summary data for /status handler — real model/provider/context displayed
+- [Phase ?]: FROZEN.md committed in source Hexapod repo at 7ba53c1 — freeze is git-recorded per Claude's Discretion bullet 2
+- [Phase ?]: Plan 26.2.1-14: GAP-07-R3 closed via Branch (c) live-DOM-diagnostic-driven CSS triple-guard (html-prefix specificity 0,2,1->0,2,2 + visibility/opacity !important); D-26.2.1-14-C diagnostic-first GAP closure pattern established
+- [Phase ?]: Plan 26.2.1-14: GAP-09-R3 partially closed via .filter(|s| s.message_count > 0) post-filter in api.rs (D-26.2.1-14-B option i); D-26.2.1-14-D user-approved residual deferred to phase 26.2.12 (foreign-format directories with non-zero msg_count still leak)
+- [Phase ?]: Plan 26.2.1-15 (round-4): scanlines feature removal across 7 source files; removal-guard test `scanlines_feature_is_fully_removed` added; legacy serde migration via default tolerant posture; D-26.2.1-15-A/B/C established
+- [Phase ?]: Plan 26.2.1-15 (round-5): synonym closure — `.scan-bar` overlay (Plan 03 HudChrome) deleted from site.css + hud_chrome.rs; removal-guard test extended with 3 new asserts (`.scan-bar`, `scan-bar-move`, `class: "scan-bar"`); D-26.2.1-15-D in-place amendment / D-26.2.1-15-E textual-pattern guard preserved; lesson: textual-grep removal guards cannot catch synonyms — future feature removals should consider structural CSS pattern matching or wasm-bindgen-test runtime assertions
+- [Phase ?]: D-05 Phase 32.2: clarify and send_message silently excluded from build_child_registry for ALL children
+- [Phase ?]: D-06 Phase 32.2: execute_batch returns Err immediately on oversize batch, citing delegation.max_concurrent_children
+- [Phase ?]: D-08 Phase 32.2: max_iterations per-call override wired in both execute paths; no upper cap per PROV-09
+- [Phase 32.2-subagent-delegation-parity]: ChildRole defaults to Leaf on all parse failures — least privilege per T-32.2-10
+- [Phase 32.2-subagent-delegation-parity]: effective_tools pre-pass adds delegate_task BEFORE the match loop — never after (RESEARCH Pitfall 1)
+- [Phase 32.2-subagent-delegation-parity]: Depth threading via AgentSubagentRunner struct fields — SubagentRunner trait signature unchanged (RESEARCH Pitfall 6)
+- [Phase 35.1-05]: run_skills_section early-return guard removed — create_dir_all guarantees dir exists; SkillRegistry handles empty dir gracefully
+- [Phase 35.1-05]: find_project_skills_source checks IRONHERMES_SOURCE env var first, then walks current_exe() up to 10 levels — graceful None for production installs
 
 ### Roadmap Evolution
 
@@ -398,6 +430,38 @@ Recent decisions affecting current work:
 - Phase 25.5 inserted after Phase 25: iron_hermes_ui (URGENT)
 - Phase 25.6 inserted after Phase 25: replicate CLI web wiring (URGENT)
 - Phase 26.1 inserted after Phase 26: Fix websocket error for chat (URGENT)
+- Phase 26.2 inserted after Phase 26: Fix Dioxus ui session tabs (URGENT)
+- Phase 26.3 inserted after Phase 26: chromiumoxide user-data-dir (URGENT)
+- Phase 26.4 inserted after Phase 26.3: web ui side tabs panel (URGENT)
+- Phase 26.4.1 inserted after Phase 26.4: config fix (URGENT)
+- Phase 25.7 inserted after Phase 25: registering all skills in .ironhermes/skills and .ironhermes/optional-skills on install or commandline skills --scan <PATH> option (URGENT)
+- Phase 21.8.1 inserted after Phase 21.8: local-dir-install bug — installer rejects dir path identifiers (USERNAME/download/<skill>/) and requires a tarball; bug surfaced in 21.8 post-completion UAT (URGENT)
+- Phase 21.8.2 inserted after Phase 21.8.1: skills hot reload command (URGENT)
+- Phase 21.8.3 inserted after Phase 21.8.2: tui-streaming-scroll-fix-and-scrollbar (URGENT)
+- Phase 21.8.3.1 inserted after Phase 21.8.3: personality applied doesn't chage the llm responses (URGENT)
+- Phase 27.1 inserted after Phase 27: Import Free_Hexapod gsd planning (URGENT)
+- Phase 27.1.1 inserted after Phase 27.1: Safe Foundation — hexapod walk/stop/sensors (INSERTED)
+- Phase 27.1.2 inserted after Phase 27.1.1: Navigation — rotate/head/buzzer (INSERTED)
+- Phase 27.1.3 inserted after Phase 27.1.2: Expression + Skill Doc — LEDs + protocol reference (INSERTED)
+- Phase 27.1.4 inserted after Phase 27.1.3: hexapod video and sonic stream capture for navigation (URGENT)
+- Phase 27.1.4.1 inserted after Phase 27.1.4: gateway fallback gap (URGENT)
+- Phase 27.1.4.1.1 inserted after Phase 27.1.4.1: fallback on transport errors not just HTTP status — classify_llm_error only falls back on HTTP-status errors, not Connection refused / connect timeout / DNS (URGENT)
+- Phase 26.3.2 inserted after Phase 26.3: Chrome singleton user browser-profile (URGENT)
+- Phase 26.5 inserted after Phase 26: tui_rata overlay layer + theming — modal-overlay primitive, Skin model (3 built-ins) + /skin wiring, session picker + model picker overlays; ports Ink-TUI UX into the in-process ratatui REPL (URGENT)
+- Phase 26.6 inserted after Phase 26: tui_rata thinking panel + Skills Hub + rich prompts — togglable expanded thinking panel (knight-rider = collapsed view), browse-only Skills Hub overlay, rich approval/secret/sudo overlays; depends on 26.5 (URGENT)
+- Phase 26.2.1 inserted after Phase 26.2: new web ui with wheel menu (URGENT)
+- Phase 27.1.4.2 inserted after Phase 27.1.4.1.1: hexapod led_off fails (URGENT)
+- Phase 32.1 inserted after Phase 32: Agent cron execution (URGENT)
+- Phase 32.2 inserted after Phase 32.1: subagent delegation parity (URGENT)
+- Phase 32.3 inserted after Phase 32: delegation agent runaway (URGENT)
+- Phase 26.7 inserted after Phase 26.6: wire up web to real services (URGENT)
+- Phase 26.7.1 inserted after Phase 26.7: Agents page live updates — periodic-poll baseline + TERMINATED-HOLD-N fade (N=5s), then ws-event-driven upgrade for <1s update latency (URGENT)
+- Phase 32.3.1 inserted after Phase 32.3: fix delegate_task kill abort wiring — close shrike handle_map gap (residual bug surfaced during 26.7.1 Wave 2 UAT 2026-05-19) (URGENT)
+- Phase 26.7.2 inserted after Phase 26.7.1: Sessions load session data (URGENT)
+- Phase 26.7.3 inserted after Phase 26.7.2: Skills page - enable tab, search and toggle on-off features (URGENT)
+- Phase 35 added: Cron subagent budget isolation (T-28.1-16) — follow-up from Phase 28.1
+- Phase 35 edited: edited fields: title, goal, requirements — broadened to global per-subagent independent budgets (retire PROV-10); T-28.1-16 now a consequence
+- Phase 35.1 inserted after Phase 35: hermes-agent install and setup parity (URGENT)
 
 ### Pending Todos
 
@@ -413,8 +477,14 @@ Recent decisions affecting current work:
 - **Default config deadlock (18-11 scope):** With `compression.protect_first_n=3` (documented default) and a [sys, user, asst-tool_use, tool_result] shape, the two-direction guard correctly collapses the prune range to zero — compression cannot fire. UAT only passed after lowering to 2. Fix: auto-extend/auto-shrink `protect_first_n` around tool-pair boundaries.
 - **Post-compression retry loop (18-12 scope):** Live UAT saw the agent re-call `web_read` on every turn for 10 consecutive turns (hit MAX_COMPRESSION_PASSES), never returning a summary. `[CONTEXT HISTORY]` summary content does not convey tool-call completion, so the model treats every turn as a fresh request.
 
+## Quick Tasks Completed
+
+| Date       | Slug                       | Outcome                                                                                                  |
+|------------|----------------------------|----------------------------------------------------------------------------------------------------------|
+| 2026-05-17 | transparent-logo-asset     | Restored true PNG alpha on `crates/iron_hermes_ui/assets/i_hermes_logo.png` (removed baked-in checkerboard via 18%-fuzz floodfill). |
+
 ## Session Continuity
 
-Last session: 2026-05-04T
-Stopped at: Phase 26.1 complete — browser chat end-to-end working, UAT passed
-Resume file: none
+Last session: 2026-05-23T11:22:19.488Z
+Stopped at: Phase 35.1 context gathered
+Resume file: None

@@ -33,6 +33,28 @@ const TOOL_USE_GUIDANCE: &str = r#"When you need to use tools:
 4. Chain tool calls when needed for multi-step tasks
 5. Report results clearly to the user"#;
 
+/// Phase 33 LEARN-04 / RESEARCH.md Pattern 6: behavioral guidance that fires the
+/// agent's judgment to write a SKILL.md via `skill_manage` after task completion.
+/// Injected into the ToolGuidance slot only when `skill_manage` is in the active
+/// tool set AND `skill_creation_guidance` is true (default).
+///
+/// The four trigger conditions are kept verbatim — the invariant tests in this
+/// crate (see `test_skill_creation_guidance_present_when_skill_manage_active`)
+/// grep for each phrase. Rewording any of these will break that gate, which is
+/// intentional: the wording is the contract Plan 02's `skill_manage` tool
+/// description references.
+const SKILL_CREATION_GUIDANCE: &str = r#"## Skill Creation (Learning Loop)
+
+After completing a task, evaluate whether the approach is worth documenting. Write a SKILL.md if ANY of these conditions is true:
+- You made 5 or more tool calls to complete the task
+- You recovered from a tool error or unexpected result during the task
+- The user corrected your approach mid-task
+- You discovered a non-obvious workflow that worked well
+
+When creating a skill, call skill_manage(action="create", ...). For subsequent improvements to an existing skill, prefer skill_manage(action="patch", ...) — pass only the changed substring, not the full file. Full rewrites use action="edit".
+
+Self-created skills appear in your skill index next session. Choose a descriptive category (e.g. "development", "automation", "data", "research") and a kebab-case name."#;
+
 /// Ordered slots for the 9-layer prompt assembly model.
 /// BTreeMap ordering uses the discriminant values (1-10).
 /// Slots 1-6 are durable (stable across turns, cacheable).
@@ -81,15 +103,27 @@ pub struct PromptBuilder {
     /// optional mirror and owns the hook-ordering contract.
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     skill_registry: Option<Arc<SkillRegistry>>,
+    /// Phase 21.8.2 D-07: skill overlays activated mid-session via the SKILL-13
+    /// CommandRouter fallback. Each (name, body) pair is prepended to the system
+    /// slot of `build_system_message`. Cleared on /clear via clear_skill_overlays().
+    skill_overlays: Vec<(String, String)>,
     /// Snapshot of active toolsets used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
-    /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
+    /// Captured at session-freeze time. Phase 27.1.1-gap-02: populated from
+    /// config.tools.with_default_toolsets_merged() at construction in main.rs
+    /// (run_chat/run_single), event_loop.rs (TUI), and iron_hermes_ui state.rs.
     active_toolsets: HashSet<String>,
     /// Snapshot of active tools used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
-    /// Captured at session-freeze time; empty by default (Phase 20 wires real toolset state).
+    /// Captured at session-freeze time. Phase 27.1.1-gap-02: populated from merged toolset config.
     active_tools: HashSet<String>,
     /// GAP-4 / D-08: when false, load_memory skips the USER.md block.
     /// Mirrors config.memory.user_profile_enabled. Default: true.
     user_profile_enabled: bool,
+    /// Phase 33 LEARN-04: when true (default), the "Skill Creation (Learning
+    /// Loop)" trigger guidance block is appended to the ToolGuidance slot
+    /// whenever the `skill_manage` tool is in `active_tools`. Mirrors
+    /// `config.memory.skill_creation_guidance`; production callers set it
+    /// at session freeze via `set_skill_creation_guidance`.
+    skill_creation_guidance: bool,
 }
 
 impl PromptBuilder {
@@ -106,22 +140,27 @@ impl PromptBuilder {
             slots: BTreeMap::new(),
             memory_manager: None,
             skill_registry: None,
+            skill_overlays: Vec::new(),
             active_toolsets: HashSet::new(),
             active_tools: HashSet::new(),
             user_profile_enabled: true,
+            // Phase 33 LEARN-04: default-on to match `MemoryConfig::default()`.
+            // Production callers re-assert via set_skill_creation_guidance.
+            skill_creation_guidance: true,
         }
     }
 
     /// Set the active toolset snapshot for the catalog-render filter (Phase 19 Plan 02).
     /// Called at session-freeze time so slot 4 (Skills) reflects the live toolset state.
-    /// Phase 19 ships with empty snapshots; Phase 20 wires real toolset state.
+    /// Phase 27.1.1-gap-02: wired at all production construction sites (run_chat, run_single,
+    /// TUI event_loop, iron_hermes_ui state.rs) via merged_tools.enabled_toolset_names().
     pub fn set_active_toolsets(&mut self, toolsets: HashSet<String>) {
         self.active_toolsets = toolsets;
     }
 
     /// Set the active tool snapshot for the catalog-render filter (Phase 19 Plan 02).
     /// Called at session-freeze time so slot 4 (Skills) reflects the live tool state.
-    /// Phase 19 ships with empty snapshots; Phase 20 wires real toolset state.
+    /// Phase 27.1.1-gap-02: populated from merged toolset config enabled set.
     pub fn set_active_tools(&mut self, tools: HashSet<String>) {
         self.active_tools = tools;
     }
@@ -181,9 +220,32 @@ impl PromptBuilder {
         self.user_profile_enabled = enabled;
     }
 
+    /// Phase 33 LEARN-04: toggle the "Skill Creation (Learning Loop)" trigger
+    /// guidance block. When true (default), the block is appended to the
+    /// ToolGuidance slot whenever `skill_manage` is in the active tool set.
+    /// Mirrors `config.memory.skill_creation_guidance` — Plan 33-03 wires the
+    /// config flag through at session freeze time.
+    pub fn set_skill_creation_guidance(&mut self, enabled: bool) {
+        self.skill_creation_guidance = enabled;
+    }
+
     /// Set the skill registry for catalog injection into the system prompt.
     pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
         self.skill_registry = Some(registry);
+    }
+
+    /// Phase 21.8.2 D-07: activate a skill by appending its body to the active
+    /// overlays. The next call to `build_system_message` prepends every
+    /// (name, body) pair to the system slot. Called by the SKILL-13 fallback in
+    /// the REPL loop / gateway / TUI when a slash command resolves to a skill
+    /// rather than a registered command.
+    pub fn activate_skill(&mut self, name: &str, body: &str) {
+        self.skill_overlays.push((name.to_string(), body.to_string()));
+    }
+
+    /// Phase 21.8.2: clear all activated-skill overlays.
+    pub fn clear_skill_overlays(&mut self) {
+        self.skill_overlays.clear();
     }
 
     /// Phase 25.3 D-W-2: append `[Workspace: <root>]` to the Identity slot for
@@ -573,6 +635,13 @@ impl PromptBuilder {
         let mut durable = Vec::new();
         let mut ephemeral = Vec::new();
 
+        // Phase 21.8.2 D-07: prepend activated skill overlays as ephemeral content.
+        // Each overlay is injected before the main slot assembly so the model sees
+        // all activated skill bodies regardless of skip_context_files mode.
+        for (name, body) in &self.skill_overlays {
+            ephemeral.push(format!("# Activated Skill: {}\n\n{}", name, body));
+        }
+
         for (slot, content) in &slots {
             if *slot == PromptSlot::UserMessage {
                 continue; // UserMessage slot not managed by PromptBuilder
@@ -606,6 +675,12 @@ impl PromptBuilder {
     }
 
     /// Build ToolGuidance slot content (slot 2). Includes model/provider context. Per D-14.
+    ///
+    /// Phase 33 LEARN-04: when `skill_manage` is in the active tool set AND
+    /// `skill_creation_guidance` is true, the "Skill Creation (Learning Loop)"
+    /// guidance block is appended (separated by a blank line so it reads as a
+    /// distinct section, not a continuation of the bulleted tool-use list).
+    /// Living in this slot keeps it durable (cache-stable per D-04).
     fn build_tool_guidance(&self) -> String {
         let mut parts = vec![TOOL_USE_GUIDANCE.to_string()];
         if !self.model.is_empty() {
@@ -617,7 +692,12 @@ impl PromptBuilder {
         if let Some(ctx_len) = self.context_length {
             parts.push(format!("Context window: {} tokens", ctx_len));
         }
-        parts.join("\n")
+        let mut out = parts.join("\n");
+        if self.skill_creation_guidance && self.active_tools.contains("skill_manage") {
+            out.push_str("\n\n");
+            out.push_str(SKILL_CREATION_GUIDANCE);
+        }
+        out
     }
 
     /// Build Timestamp slot content (slot 6). Regenerated per turn. Per D-12.
@@ -674,6 +754,82 @@ mod tests {
         let output = builder.build();
         assert!(output.contains("IronHermes"));
         assert!(output.contains("Nous Research"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 33 Plan 01: Skill Creation trigger guidance (LEARN-03/04)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_skill_creation_guidance_present_when_skill_manage_active() {
+        // LEARN-03/04: when skill_manage is in the active tool set AND the
+        // guidance flag is enabled (default true), the system prompt must
+        // contain the "Skill Creation" section header and all four trigger
+        // conditions verbatim per RESEARCH.md Pattern 6.
+        let mut tools: HashSet<String> = HashSet::new();
+        tools.insert("skill_manage".to_string());
+
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(tools);
+
+        let output = builder.build();
+        assert!(
+            output.contains("Skill Creation"),
+            "guidance section header must appear when skill_manage is active"
+        );
+        assert!(
+            output.contains("skill_manage"),
+            "guidance must reference the skill_manage tool name"
+        );
+        assert!(
+            output.contains("5 or more tool calls"),
+            "trigger condition (a) missing"
+        );
+        assert!(
+            output.contains("tool error"),
+            "trigger condition (b) missing"
+        );
+        assert!(
+            output.contains("corrected"),
+            "trigger condition (c) missing"
+        );
+        assert!(
+            output.contains("non-obvious workflow"),
+            "trigger condition (d) missing"
+        );
+    }
+
+    #[test]
+    fn test_skill_creation_guidance_absent_when_flag_disabled() {
+        // LEARN-04: when skill_creation_guidance is explicitly disabled,
+        // the section must NOT appear even when skill_manage is active.
+        let mut tools: HashSet<String> = HashSet::new();
+        tools.insert("skill_manage".to_string());
+
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(tools);
+        builder.set_skill_creation_guidance(false);
+
+        let output = builder.build();
+        assert!(
+            !output.contains("Skill Creation"),
+            "guidance must be suppressed when flag is false"
+        );
+    }
+
+    #[test]
+    fn test_skill_creation_guidance_absent_when_tool_not_registered() {
+        // LEARN-04: with the default flag (true) but no skill_manage tool in
+        // the active set, the guidance must NOT appear — injecting the section
+        // when the agent cannot act on it would be wasted tokens.
+        let mut builder = PromptBuilder::new("test-model", "cli").skip_context_files();
+        builder.set_active_tools(HashSet::new());
+
+        let output = builder.build();
+        assert!(
+            !output.contains("Skill Creation"),
+            "guidance must be absent when skill_manage is not in the active tool set"
+        );
     }
 
     #[test]
@@ -1444,6 +1600,70 @@ mod tests {
     }
 
     // ====================================================================
+    // Phase 27.1.1-gap-02: active_toolsets from merged config test
+    // ====================================================================
+
+    /// Test that set_active_toolsets with a realistic merged-config set (robotics
+    /// enabled, web disabled) causes skill catalog text to show a skill requiring
+    /// "robotics" but hide a skill requiring "web".
+    ///
+    /// This mirrors the production wiring added in gap-02: the PromptBuilder
+    /// receives merged_tools.enabled_toolset_names() at construction time so the
+    /// Skills slot (catalog text in the system prompt) reflects the same enabled set
+    /// as the API tool schemas.
+    #[test]
+    fn test_active_toolsets_from_merged_config() {
+        use ironhermes_core::SkillRegistry;
+        use std::fs;
+        use std::sync::Arc;
+
+        let dir = make_temp_dir();
+
+        // Skill requiring "robotics" toolset → must appear when robotics is active.
+        let robotics_dir = dir.path().join("hexapod-skill");
+        fs::create_dir_all(&robotics_dir).unwrap();
+        fs::write(
+            robotics_dir.join("SKILL.md"),
+            "---\nname: hexapod-skill\ndescription: Robot control\nmetadata:\n  hermes:\n    requires_toolsets:\n      - robotics\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // Skill requiring "web" toolset → must be hidden when web is inactive.
+        let web_dir = dir.path().join("web-skill");
+        fs::create_dir_all(&web_dir).unwrap();
+        fs::write(
+            web_dir.join("SKILL.md"),
+            "---\nname: web-skill\ndescription: Web search helper\nmetadata:\n  hermes:\n    requires_toolsets:\n      - web\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let registry = Arc::new(SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]));
+        assert_eq!(registry.list().len(), 2, "both skills should load");
+
+        // Simulate merged config: robotics enabled, web disabled.
+        let mut active: HashSet<String> = HashSet::new();
+        active.insert("robotics".to_string());
+        // "web" intentionally omitted (disabled in config).
+
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_skill_registry(registry);
+        // Phase 27.1.1-gap-02 wiring: set active toolsets from merged config enabled set.
+        builder.set_active_toolsets(active);
+        builder.set_active_tools(HashSet::new());
+
+        let output = builder.build();
+
+        assert!(
+            output.contains("hexapod-skill"),
+            "hexapod-skill (requires robotics which is active) must appear in catalog text: {output}"
+        );
+        assert!(
+            !output.contains("web-skill"),
+            "web-skill (requires web which is inactive) must be hidden in catalog text: {output}"
+        );
+    }
+
+    // ====================================================================
     // Phase 25.3 D-W-2: with_workspace_root tests (Pitfall 2 cache stability)
     // ====================================================================
 
@@ -1549,5 +1769,52 @@ mod tests {
             PromptSlot::Identity,
             "Workspace line should specifically be in Identity slot per CONTEXT.md Discretion + RESEARCH.md recommendation"
         );
+    }
+
+    // ====================================================================
+    // Phase 21.8.2 Plan 03 D-07: activate_skill / clear_skill_overlays tests
+    // ====================================================================
+
+    #[test]
+    fn activate_skill_appends_to_overlays() {
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.activate_skill("ascii-art", "Skill body text");
+        let msg = pb.build_system_message();
+        let serialized = format!("{:?}", msg);
+        assert!(
+            serialized.contains("Skill body text"),
+            "activate_skill body must appear in build_system_message; got: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn activate_skill_multiple_concatenate() {
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.activate_skill("first-skill", "First body");
+        pb.activate_skill("second-skill", "Second body");
+        let serialized = format!("{:?}", pb.build_system_message());
+        assert!(serialized.contains("First body"));
+        assert!(serialized.contains("Second body"));
+        // Activation order preserved.
+        assert!(
+            serialized.find("First body").unwrap() < serialized.find("Second body").unwrap()
+        );
+    }
+
+    #[test]
+    fn clear_skill_overlays_removes_bodies() {
+        let mut pb = PromptBuilder::new("test-model", "cli");
+        pb.activate_skill("foo", "Foo body");
+        pb.clear_skill_overlays();
+        let serialized = format!("{:?}", pb.build_system_message());
+        assert!(!serialized.contains("Foo body"));
+    }
+
+    #[test]
+    fn no_overlays_no_skill_section_added() {
+        let pb = PromptBuilder::new("test-model", "cli");
+        let serialized = format!("{:?}", pb.build_system_message());
+        assert!(!serialized.contains("Activated Skill"));
     }
 }

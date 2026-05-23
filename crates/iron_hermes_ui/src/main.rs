@@ -1,12 +1,12 @@
 mod app;
 mod components;
 mod fonts;
-#[cfg(any(test, feature = "demo"))]
 mod mocks;
 mod platform;
 mod protocol;
 mod server;
 mod state;
+mod ui_prefs;
 
 use app::App;
 

@@ -6,12 +6,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
-use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::{
-    AgentLoop, MemoryManager, PromptBuilder, build_client as build_provider_client,
+    AgentRuntime, MemoryManager, PromptBuilder, TurnRequest,
     build_main_client,
 };
 use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
@@ -67,7 +66,27 @@ pub struct GatewayMessageHandler {
     tool_registry: Arc<RwLock<ToolRegistry>>,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
-    skill_registry: Option<Arc<SkillRegistry>>,
+    /// Phase 21.8.2 D-03 / D-Plan03-01 UPDATED: interior-mutable Arc-of-Arc so
+    /// the `/skills reload` arm can atomically swap the inner Arc without
+    /// requiring &mut self. Outer Arc: shared ownership across handler clones.
+    /// Mutex: synchronous lock for the brief swap window (load_with_config is
+    /// sync; lock held only for the swap, not for the load). Inner Arc: the
+    /// actual `SkillRegistry` snapshot used by build_command_context calls.
+    skill_registry: Arc<std::sync::Mutex<Option<Arc<SkillRegistry>>>>,
+
+    /// Phase 21.8.2 D-Plan03-05 / D-07 (gateway delivery): per-session activated
+    /// skill overlays. The SkillActivated arm and the SKILL-13 fallback push
+    /// (name, body) for the current session key. The AgentLoop call site reads
+    /// the overlay vector for the session and prepends each body to the system
+    /// prompt before the agent runs (same semantics as hermes-agent's
+    /// per-session skill injection). Cleared on session-end / `/clear` (out of
+    /// scope for this phase — matches /personality overlay semantics).
+    skill_overlays: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, Vec<(String, String)>>>>,
+
+    /// Phase 21.8.2 D-02 / D-05: SkillsConfig used by the SkillsReload arm to
+    /// re-invoke load_with_config. Set via `set_skills_config` after construction.
+    skills_config: Option<ironhermes_core::config::SkillsConfig>,
+
     active_skills: Arc<std::sync::Mutex<Vec<ironhermes_core::SkillRecord>>>,
     rate_limiter: PerUserRateLimiter,
     /// Phase 18 Plan 06: per-turn hygiene compression engine (runs at
@@ -78,11 +97,10 @@ pub struct GatewayMessageHandler {
     context_length: usize,
     /// Phase 21.1 Plan 02: unified slash command router.
     command_router: CommandRouter,
-    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): shared BudgetHandle threaded from
-    /// the gateway runner. Per-request AgentLoops call `.with_budget(...)`
-    /// with a clone so parent + delegate_task subagents decrement the same
-    /// counter. None = budget disabled (legacy path).
-    budget_handle: Option<BudgetHandle>,
+    /// Plan 28.1-02: the single AgentRuntime threaded from the gateway runner.
+    /// run_agent builds a TurnRequest and delegates to `runtime.run_turn`,
+    /// which resets the budget, builds the loop from durable Arcs, and runs.
+    agent_runtime: Option<Arc<AgentRuntime>>,
     /// Plan 21.7-06 (D-29, D-24): gateway-scoped ProcessRegistry threaded
     /// from the runner. Per-request handler calls `drain_and_kill_session`
     /// at on_session_end. Gateway registry task_id is a process-wide constant
@@ -126,6 +144,27 @@ pub struct GatewayMessageHandler {
     // (and lazily opened) by `SessionStore`, keyed by the canonical SQLite
     // session UUID. `run_agent` reaches them via
     // `self.session_store.write().await.get_or_create_trajectory_writer(...)`.
+    /// Phase 21.8.3.1 D-07: active personality overlay per session.
+    /// Set by command dispatch when /personality <name> succeeds (D-08).
+    /// Cleared by /personality clear (CONTEXT D-05 gateway analog, pre-dispatch).
+    /// Re-applied to PromptBuilder slot 8 every turn (D-09).
+    /// Uses interior mutability (Arc<Mutex<HashMap<SessionKey, String>>>) mirroring
+    /// skill_overlays — handle_slash_command takes &self, not &mut self (deviation from
+    /// plan assumption; auto-fixed Rule 1). Per-session keying prevents cross-user bleed.
+    active_personality_overlay: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, String>>>,
+
+    /// Phase 32 Plan 02 (LEARN-01): per-session nudge turn counter.
+    ///
+    /// Arc<Mutex<HashMap>> mirrors the `skill_overlays` / `active_personality_overlay`
+    /// interior-mutability pattern — `run_agent` takes `&self`, so we cannot mutate a
+    /// plain field. The std::sync::Mutex is intentional: the guard is taken in a small
+    /// synchronous block, the should_fire bool is extracted, and the guard is dropped
+    /// BEFORE any `tokio::spawn` / `.await` (T-32-07 mitigation; clippy `await_holding_lock`).
+    ///
+    /// Key: SessionKey (cloned from `key` in `run_agent`). Value: u32 turn count.
+    /// Reset to 0 on fire; entries removed via session_store eviction is best-effort
+    /// (T-32-06 accepted — one u32 per active session is negligible memory).
+    nudge_turns: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, u32>>>,
 }
 
 impl GatewayMessageHandler {
@@ -148,13 +187,15 @@ impl GatewayMessageHandler {
             tool_registry,
             memory_manager: None,
             hook_registry: None,
-            skill_registry: None,
+            skill_registry: Arc::new(std::sync::Mutex::new(None)),
+            skill_overlays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            skills_config: None,
             active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
             rate_limiter,
             gateway_engine: None,
             context_length,
             command_router: CommandRouter::new(build_registry()),
-            budget_handle: None,
+            agent_runtime: None,
             process_registry: None,
             subagent_registry: None,
             browser_session: None,
@@ -162,6 +203,12 @@ impl GatewayMessageHandler {
             workspace: None, // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
                              // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
                              // writers live in SessionStore, looked up by canonical session UUID.
+            // Phase 21.8.3.1 D-07: no personality active until /personality <name> sets it.
+            // Arc<Mutex<HashMap>> mirrors skill_overlays — &self constraint requires interior mutability.
+            active_personality_overlay: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // Phase 32 Plan 02 (LEARN-01): per-session nudge counter starts empty;
+            // entries created lazily on first turn per session in run_agent's fire site.
+            nudge_turns: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -187,11 +234,11 @@ impl GatewayMessageHandler {
     // UUID). Configuration goes through `GatewayRunner::set_trajectory_root`
     // -> `SessionStore::set_trajectory_root`.
 
-    /// Plan 21.7-05 (PROV-09/PROV-10/D-15): install a shared BudgetHandle.
-    /// Clones are threaded into each per-request `AgentLoop` so parent + any
-    /// `delegate_task` children share the same iteration counter.
-    pub fn set_budget_handle(&mut self, handle: BudgetHandle) {
-        self.budget_handle = Some(handle);
+    /// Plan 28.1-02: install the AgentRuntime so run_agent can delegate every
+    /// top-level turn through `runtime.run_turn`. Caller is
+    /// `GatewayRunner::build_gateway_handler`.
+    pub fn set_agent_runtime(&mut self, runtime: Arc<AgentRuntime>) {
+        self.agent_runtime = Some(runtime);
     }
 
     /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
@@ -284,8 +331,19 @@ impl GatewayMessageHandler {
     }
 
     /// Set the skill registry for catalog injection into the system prompt.
+    /// Phase 21.8.2 D-03: stores inside the interior-mutable Mutex so
+    /// `/skills reload` can atomically swap without &mut self.
     pub fn set_skill_registry(&mut self, registry: Arc<SkillRegistry>) {
-        self.skill_registry = Some(registry);
+        if let Ok(mut guard) = self.skill_registry.lock() {
+            *guard = Some(registry);
+        }
+    }
+
+    /// Phase 21.8.2 D-02: store the SkillsConfig so the SkillsReload arm can
+    /// call `load_with_config` on demand. Called from runner.build_gateway_handler
+    /// after `set_skill_registry`.
+    pub fn set_skills_config(&mut self, cfg: ironhermes_core::config::SkillsConfig) {
+        self.skills_config = Some(cfg);
     }
 
     /// Set the shared active skills tracker. Must be the same Arc given to SkillsTool
@@ -335,6 +393,34 @@ impl GatewayMessageHandler {
         } else {
             ctx
         };
+        // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in gateway.
+        // D-03: read via lock so we always see the latest atomic swap.
+        let ctx = {
+            let snapshot: Option<Arc<SkillRegistry>> =
+                self.skill_registry.lock().ok().and_then(|g| g.clone());
+            if let Some(sr) = snapshot {
+                ctx.with_skill_registry(sr)
+            } else {
+                ctx
+            }
+        };
+        // Phase 32.3 Plan 04 (D-08 / RESEARCH Pitfall 3): attach the
+        // subagent_registry so /agents list|kill|interrupt|prune|status
+        // actually reach cmd_agents instead of hitting the "subagent registry
+        // not wired" fallback. The gateway has had `self.subagent_registry`
+        // since Plan 21.7-07 but `handle_slash_command` never called
+        // `with_subagent_registry` — this fixes the pre-existing wiring gap
+        // identified in 32.3-RESEARCH.md Pitfall 3 (lines 336-355) and
+        // confirmed at handler.rs:386-406 before this change.
+        let ctx = if let Some(ref reg) = self.subagent_registry {
+            use ironhermes_agent::subagent_registry::SubagentRegistryHandle;
+            use ironhermes_core::commands::context::SubagentListSnapshot;
+            let handle: Arc<dyn SubagentListSnapshot> =
+                Arc::new(SubagentRegistryHandle::new(reg.clone()));
+            ctx.with_subagent_registry(handle)
+        } else {
+            ctx
+        };
         // Phase 25.3-15 CR-02 close-out: slash-dispatch CommandContext no longer
         // attaches a trajectory writer. The previous implementation attached a
         // process-wide handle that was unreachable from `hermes session export`.
@@ -353,6 +439,44 @@ impl GatewayMessageHandler {
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                // Phase 21.8.3.1 D-05 gateway analog (RESEARCH Open Question 1, Option B):
+                // Intercept /personality clear BEFORE core dispatch. Core's cmd_personality
+                // has no "clear" case — it would return Error("Unknown personality: clear")
+                // and we'd send that confusing error to the user. Mirrors TUI handle_subsystem_mutator.
+                if def.name == "personality" && args.first() == Some(&"clear") {
+                    if let Ok(mut overlays) = self.active_personality_overlay.lock() {
+                        overlays.remove(&session_key);
+                    }
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, "Personality cleared.", None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
+                // Phase 32.3 Plan 04 (D-09 / T-32.3-01 mitigation): gateway-only
+                // confirm-token gate for destructive `/agents` subcommands.
+                // Telegram messages can be spoofed via edit-replay; requiring
+                // the operator to re-type `confirm` as an extra arg means a
+                // replayed original message (which lacks `confirm`) is refused.
+                // TUI and iron_hermes_ui surfaces do NOT require this token
+                // (they have synchronous user presence). Only `kill` and `prune`
+                // are destructive; `interrupt` and `status` are not gated.
+                if def.name == "agents"
+                    && !args.is_empty()
+                    && requires_confirm(args[0], &args[1..])
+                {
+                    let refusal = format!(
+                        "Destructive op `/agents {}`. Re-run as:\n  `/agents {} {}confirm`",
+                        args[0],
+                        args[0],
+                        if args.len() > 1 { format!("{} ", args[1]) } else { String::new() },
+                    );
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, &refusal, None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
                 let core_result = ironhermes_core::commands::handlers::dispatch(
                     def,
                     &args,
@@ -360,9 +484,24 @@ impl GatewayMessageHandler {
                     &self.command_router,
                 );
                 match core_result {
+                    CoreCommandResult::PersonalityApplied(text) => {
+                        if let Ok(mut overlays) = self.active_personality_overlay.lock() {
+                            overlays.insert(session_key.clone(), text.clone());
+                        }
+                        let confirm = format!(
+                            "Personality applied ({} chars). Active for this session.",
+                            text.len()
+                        );
+                        with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &confirm, None)
+                        })
+                        .await?;
+                    }
                     CoreCommandResult::Output(text) => {
-                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &text, None))
-                            .await?;
+                        with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &text, None)
+                        })
+                        .await?;
                     }
                     CoreCommandResult::NewSession { .. } => {
                         // /start special handling: reset session then LLM greeting.
@@ -384,7 +523,19 @@ impl GatewayMessageHandler {
                                 .run_agent(&intro_event, adapter, cancel, no_attachments)
                                 .await;
                         }
-                        // /new: clear entire session history
+                        // /new: clear entire session history.
+                        // Phase 34b Plan 02 (D-09/D-10): removing the session from
+                        // the store discards ALL per-session state — including the
+                        // compression_count carried in the SessionStore entry — so
+                        // the next turn rebuilds a fresh ContextEngine with a zeroed
+                        // counter. No separate engine.on_session_reset() call is
+                        // needed here because the gateway holds no long-lived,
+                        // session-scoped engine handle (the engine is rebuilt fresh
+                        // per turn in run_turn).
+                        tracing::debug!(
+                            session = ?session_key,
+                            "gateway /new: session removed; per-session compression state discarded (34b D-10)"
+                        );
                         let had_session = {
                             let mut store = self.session_store.write().await;
                             store.remove(&session_key).is_some()
@@ -447,6 +598,125 @@ impl GatewayMessageHandler {
                         // Phase 22.3 D-06: TTY visual reset — not meaningful on the
                         // gateway (no TTY). Ignore silently. Added for exhaustiveness.
                     }
+                    ironhermes_core::commands::CommandResult::SkillsReload => {
+                        // Phase 21.8.2 D-01..D-05: synchronous reload + D-03 atomic inner-Arc swap.
+                        use std::collections::HashSet;
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        let cfg = match &self.skills_config {
+                            Some(c) => c.clone(),
+                            None => {
+                                let _ = with_rate_limit_retry(|| adapter.send_message(
+                                    &event.chat_id,
+                                    "Skills reload unavailable: skills_config not set on gateway handler.",
+                                    None,
+                                )).await;
+                                return Ok(());
+                            }
+                        };
+                        // Acquire current snapshot for diff computation.
+                        let old_snapshot: Option<Arc<SkillRegistry>> =
+                            self.skill_registry.lock().ok().and_then(|g| g.clone());
+                        let new_inner = Arc::new(
+                            SkillRegistry::load_with_config(&cwd, &cfg),
+                        );
+                        let old_names: HashSet<String> = old_snapshot
+                            .as_ref()
+                            .map(|r| r.list().iter().map(|s| s.name.clone()).collect())
+                            .unwrap_or_default();
+                        let new_names: HashSet<String> = new_inner
+                            .list()
+                            .iter()
+                            .map(|s| s.name.clone())
+                            .collect();
+                        let mut added: Vec<&String> = new_names.difference(&old_names).collect();
+                        let mut removed: Vec<&String> = old_names.difference(&new_names).collect();
+                        added.sort();
+                        removed.sort();
+                        let added_str = if added.is_empty() {
+                            "0 added".to_string()
+                        } else {
+                            format!(
+                                "{} added ({})",
+                                added.len(),
+                                added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                            )
+                        };
+                        let removed_str = if removed.is_empty() {
+                            "0 removed".to_string()
+                        } else {
+                            format!(
+                                "{} removed ({})",
+                                removed.len(),
+                                removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                            )
+                        };
+                        // Phase 21.8.2 D-05: count parse-failures (files scanned vs loaded).
+                        let invalid_skipped = {
+                            let search_paths =
+                                ironhermes_core::build_skill_search_paths(&cwd, &cfg);
+                            let mut files_scanned: usize = 0;
+                            for root in &search_paths {
+                                if let Ok(entries) = std::fs::read_dir(root) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if !path.is_dir() {
+                                            continue;
+                                        }
+                                        if path
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .map(|n| n.starts_with('.'))
+                                            .unwrap_or(false)
+                                        {
+                                            continue;
+                                        }
+                                        if path.join("SKILL.md").is_file() {
+                                            files_scanned += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            files_scanned.saturating_sub(new_inner.list().len())
+                        };
+                        let invalid_clause = if invalid_skipped > 0 {
+                            format!(" ({} invalid skipped — see logs)", invalid_skipped)
+                        } else {
+                            String::new()
+                        };
+                        let diff_text = format!(
+                            "Skills reloaded: {}. {}. Total: {} skills.{}",
+                            added_str,
+                            removed_str,
+                            new_inner.list().len(),
+                            invalid_clause
+                        );
+                        // D-03 / D-Plan03-01 UPDATED: atomic swap of the inner Arc.
+                        if let Ok(mut guard) = self.skill_registry.lock() {
+                            *guard = Some(new_inner);
+                        }
+                        let _ = with_rate_limit_retry(|| adapter.send_message(
+                            &event.chat_id, &diff_text, None,
+                        )).await;
+                        return Ok(());
+                    }
+                    ironhermes_core::commands::CommandResult::SkillActivated { name, body } => {
+                        // Phase 21.8.2 D-Plan03-05 / D-07: store in per-session overlay so
+                        // the next AgentLoop call site reads + prepends body to system prompt.
+                        if let Ok(mut overlays) = self.skill_overlays.lock() {
+                            overlays
+                                .entry(session_key.clone())
+                                .or_insert_with(Vec::new)
+                                .push((name.clone(), body));
+                        }
+                        let activation_msg = format!("Skill '{}' activated for this turn.", name);
+                        let _ = with_rate_limit_retry(|| adapter.send_message(
+                            &event.chat_id,
+                            &activation_msg,
+                            None,
+                        )).await;
+                        return Ok(());
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {
@@ -463,6 +733,41 @@ impl GatewayMessageHandler {
                 with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None)).await?;
             }
             ResolveResult::NotFound => {
+                // Phase 21.8.2 D-06/D-08: SKILL-13 dynamic fallback before agent passthrough.
+                // Registered commands win because 3-stage resolution ran first.
+                let cmd_token = command_input
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !cmd_token.is_empty() {
+                    let snapshot: Option<Arc<SkillRegistry>> =
+                        self.skill_registry.lock().ok().and_then(|g| g.clone());
+                    if let Some(registry) = snapshot {
+                        if let Some(record) = registry.find(cmd_token) {
+                            if let Some(body) = registry.read_content(&record.name) {
+                                // D-Plan03-05 / D-07: store in per-session overlay so
+                                // the NEXT agent turn picks it up via the run_agent
+                                // skill_overlays read site.
+                                if let Ok(mut overlays) = self.skill_overlays.lock() {
+                                    overlays
+                                        .entry(session_key.clone())
+                                        .or_insert_with(Vec::new)
+                                        .push((record.name.clone(), body));
+                                }
+                                let skill13_msg = format!(
+                                    "Skill '{}' activated for this turn.", record.name
+                                );
+                                let _ = with_rate_limit_retry(|| adapter.send_message(
+                                    &event.chat_id,
+                                    &skill13_msg,
+                                    None,
+                                )).await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 // D-08: Unknown commands pass through to agent as normal message, preserving attachments
                 return self.run_agent(event, adapter, cancel, processed).await;
             }
@@ -571,11 +876,32 @@ impl GatewayMessageHandler {
         if let Some(ref mgr) = self.memory_manager {
             prompt_builder.set_memory_manager(mgr.clone());
         }
-        if let Some(ref registry) = self.skill_registry {
-            prompt_builder.set_skill_registry(registry.clone());
+        // Phase 21.8.2 D-03: read via lock to always see the latest atomic swap.
+        let registry_snapshot: Option<Arc<SkillRegistry>> =
+            self.skill_registry.lock().ok().and_then(|g| g.clone());
+        if let Some(registry) = registry_snapshot {
+            prompt_builder.set_skill_registry(registry);
         }
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
+        // Phase 21.8.2 D-Plan03-05 / D-07 (gateway delivery): read activated overlays
+        // for this session and inject before the agent turn so the model sees the skill body.
+        if let Ok(overlays) = self.skill_overlays.lock() {
+            if let Some(session_overlays) = overlays.get(&key) {
+                for (name, body) in session_overlays {
+                    prompt_builder.activate_skill(name, body);
+                }
+            }
+        }
+        // Phase 21.8.3.1 D-09: inject active personality overlay into PromptBuilder slot 8
+        // (SessionOverlay, ephemeral). Re-applied every turn from self.active_personality_overlay;
+        // never explicitly cleared between turns (entry absent when no personality is active).
+        // Order: AFTER load_skills + skill_overlays loop, BEFORE build_system_message.
+        if let Ok(overlays) = self.active_personality_overlay.lock() {
+            if let Some(overlay_text) = overlays.get(&key) {
+                prompt_builder.set_overlay(overlay_text.clone());
+            }
+        }
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message
         let mut messages = vec![system_msg];
@@ -640,14 +966,19 @@ impl GatewayMessageHandler {
             }
         });
 
-        // 7. Build AgentLoop via ProviderResolver
-        let max_turns = self.config.agent.max_turns;
-
-        let client = build_main_client(&self.resolver)?;
-
+        // 7. Run turn via AgentRuntime (Plan 28.1-02).
+        //
+        // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
+        let scrubber_gw = std::sync::Arc::new(std::sync::Mutex::new(
+            ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+        ));
+        let scrubber_gw_cb = std::sync::Arc::clone(&scrubber_gw);
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
-            let _ = stream_tx_clone.try_send(delta.to_string());
+            let visible = scrubber_gw_cb.lock().unwrap().feed(delta);
+            if !visible.is_empty() {
+                let _ = stream_tx_clone.try_send(visible);
+            }
         });
 
         let tool_tx_clone = tool_tx.clone();
@@ -655,45 +986,10 @@ impl GatewayMessageHandler {
             let _ = tool_tx_clone.try_send(name.to_string());
         });
 
-        let mut agent = AgentLoop::new(client, Arc::clone(&self.tool_registry), max_turns)
-            .with_streaming(stream_callback)
-            .with_tool_progress(tool_callback)
-            .with_active_skills(self.active_skills.clone());
-
-        // Plan 21.7-05 (PROV-09/PROV-10/D-15): thread the gateway-scoped
-        // BudgetHandle into the per-request AgentLoop so top-of-turn
-        // consume() fires and pressure-tier advisories inject on crossings.
-        // The same handle is shared with AgentSubagentRunner (see main.rs
-        // run_gateway), giving PROV-10 parent/child shared decrement.
-        if let Some(ref handle) = self.budget_handle {
-            agent = agent.with_budget(handle.clone());
-        }
-
-        // Wire fallback for main agent path
-        let main_endpoint = self.resolver.resolve_for_main();
-        if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-            if let Ok(fb_client) =
-                build_provider_client(&self.resolver, fb_name, &main_endpoint.default_model)
-            {
-                agent = agent.with_fallback(fb_client);
-            }
-        }
-
-        if let Some(ref registry) = self.hook_registry {
-            agent = agent.with_hook_registry(registry.clone());
-        }
-
-        // GAP-3: wire memory_manager to AgentLoop so queue_prefetch fires after
-        // each natural-end gateway turn. Guard with if-let per T-21.4-04.
-        if let Some(ref mgr) = self.memory_manager {
-            agent = agent.with_memory_manager(mgr.clone());
-        }
-
-        // Phase 25.1 D-17: wire browser session Arc so AgentLoop holds a reference.
-        // This ensures browser process cleanup when the AgentLoop drops (T-25.1-04).
-        if let Some(ref sess) = self.browser_session {
-            agent = agent.with_browser_session(sess.clone());
-        }
+        // Phase 25.3-15 CR-02: the per-message session_id_str (`gw:<chat_id>:<sender_id>`)
+        // feeds hooks / on_session_end and is intentionally distinct from the
+        // canonical SQLite session UUID used for trajectory file paths.
+        let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
 
         // Phase 25.3-15 CR-02 close-out: open (or reuse) a per-session
         // trajectory writer keyed by the canonical SQLite session UUID. The
@@ -701,12 +997,6 @@ impl GatewayMessageHandler {
         // same chat reuse one file handle (no leak across long-running
         // gateway sessions). Replaces the process-wide handle that was
         // previously attached at GatewayMessageHandler construction.
-        //
-        // `gateway_session.session_id` is the SAME UUID that
-        // `state.create_session(...)` received in `SessionStore::get_or_create`,
-        // so `hermes session export <id>` and `SessionDirectoryExport::write`
-        // can find the trajectory file at the canonical path
-        // `<trajectory_root>/<session_id>/trajectories.jsonl`.
         let canonical_session_id = {
             let store = self.session_store.read().await;
             store
@@ -714,41 +1004,53 @@ impl GatewayMessageHandler {
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default()
         };
-        if !canonical_session_id.is_empty() {
-            let traj_handle = {
-                let mut store = self.session_store.write().await;
-                store.get_or_create_trajectory_writer(&canonical_session_id)
+        let trajectory_writer = if !canonical_session_id.is_empty() {
+            let mut store = self.session_store.write().await;
+            store.get_or_create_trajectory_writer(&canonical_session_id)
+        } else {
+            None
+        };
+
+        // Phase 32 Plan 02 (LEARN-01): snapshot messages BEFORE moving into TurnRequest.
+        let messages_for_nudge = messages.clone();
+
+        // Source the nudge client from the runtime (run_turn owns the client).
+        // AnyClient is Clone so this is cheap.
+        let nudge_client = self
+            .agent_runtime
+            .as_ref()
+            .map(|rt| rt.client().clone())
+            .unwrap_or_else(|| build_main_client(&self.resolver).expect("nudge client fallback"));
+
+        // Build TurnRequest and call runtime.run_turn.
+        // budget reset, loop construction, attach_context_engine, and fallback wiring
+        // are all handled inside run_turn — do NOT call them again here.
+        let agent_result = if let Some(ref rt) = self.agent_runtime {
+            let request = TurnRequest {
+                messages,
+                session_id: session_id_str.clone(),
+                cancel_token: None, // gateway has no per-turn cancel today
+                stream: Some(stream_callback),
+                tool_progress: Some(tool_callback),
+                tool_result: None,
+                trajectory_writer,
+                pressure_tracker: None, // run_turn makes a fresh tracker per turn
+                state_store: None,
+                compression_count: 0,
             };
-            if let Some(tw) = traj_handle {
-                agent = agent.with_trajectory_writer(tw);
-            }
+            rt.run_turn(request).await
+        } else {
+            Err(anyhow::anyhow!("AgentRuntime not configured in gateway handler"))
+        };
+
+        // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
+        let tail = scrubber_gw.lock().unwrap().flush();
+        if !tail.is_empty() {
+            let _ = stream_tx.try_send(tail);
         }
 
-        // Phase 18 Plan 09: wire agent-side context compression (honors
-        // config.agent.context_engine + config.agent.compression_threshold).
-        // GAP-2/GAP-3: pass memory_manager so on_pre_compress fires on compression.
-        // Phase 25.3-15 CR-02: AgentLoop telemetry retains the per-message
-        // session_id_str (`gw:<chat_id>:<sender_id>`) — this identifier feeds
-        // hooks / on_session_end and is intentionally distinct from the
-        // canonical SQLite session UUID used for trajectory file paths.
-        let session_id_str = format!("gw:{}:{}", event.chat_id, event.sender_id);
-        let context_length = self.resolver.resolve_for_main().context_length();
-        agent = ironhermes_agent::attach_context_engine(
-            agent,
-            &self.config,
-            &self.resolver,
-            &session_id_str,
-            self.hook_registry.clone(),
-            None,           // Phase 18-14: gateway constructs a fresh tracker per request
-            context_length, // Phase 21.3
-            self.memory_manager.clone(), // GAP-2/GAP-3: wire into context engine
-        );
-
-        // 8. Run agent with error recovery (D-18)
-        let agent_result = agent.run(messages).await;
-
-        // 9. Drop agent first — its callbacks hold cloned channel senders
-        drop(agent);
+        // 9. The callbacks were moved into TurnRequest; drop the channel senders
+        // so the StreamConsumer observes channel close and flushes its final batch.
         drop(stream_tx);
         drop(tool_tx);
         consumer_handle.await.ok();
@@ -774,6 +1076,71 @@ impl GatewayMessageHandler {
                         },
                     );
                     registry.fire(hook_event);
+                }
+
+                // Phase 32 Plan 02 (LEARN-01): periodic memory-review nudge.
+                //
+                // Per-session counter `nudge_turns` is incremented inside a small
+                // synchronous std::sync::Mutex critical section; the `should_fire`
+                // bool is extracted and the guard is dropped BEFORE any
+                // `tokio::spawn` / `.await` (T-32-07 mitigation; clippy
+                // `await_holding_lock`).
+                //
+                // Gate: only when memory.nudge_interval > 0 (disable sentinel),
+                // memory.memory_enabled is true, AND we have a MemoryManager
+                // configured. spawn_nudge_review is fire-and-forget so the
+                // gateway response is not blocked on nudge completion (T-32-05).
+                let nudge_interval = self.config.memory.nudge_interval;
+                if nudge_interval > 0 && self.config.memory.memory_enabled {
+                    let should_fire = {
+                        let mut map = self
+                            .nudge_turns
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let count = map.entry(key.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= nudge_interval {
+                            *count = 0;
+                            true
+                        } else {
+                            false
+                        }
+                    }; // std::sync::MutexGuard dropped here — before any .await / tokio::spawn
+
+                    if should_fire {
+                        if let Some(ref mgr) = self.memory_manager {
+                            let mgr_clone = Arc::clone(mgr);
+                            let client_clone = nudge_client.clone();
+                            let messages_snapshot = messages_for_nudge.clone();
+                            let config_clone = self.config.clone();
+                            tokio::spawn(async move {
+                                ironhermes_agent::nudge::spawn_nudge_review(
+                                    messages_snapshot,
+                                    mgr_clone,
+                                    client_clone,
+                                    &config_clone,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                }
+
+                // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band.
+                // Sent as a SEPARATE message so it is visibly distinct from the agent
+                // response — mirrors the Err arm's error_suffix pattern (a distinct
+                // send_message call, not appended to the streamed response).
+                if !result.context_warnings.is_empty() {
+                    let warning_lines: Vec<String> = result
+                        .context_warnings
+                        .iter()
+                        .map(|w| format!("- {}", w))
+                        .collect();
+                    let warnings_block =
+                        format!("--- Context Warnings ---\n{}", warning_lines.join("\n"));
+                    let _ = adapter
+                        .send_message(&event.chat_id, &warnings_block, None)
+                        .await;
                 }
 
                 // 11. Update session with agent's response messages (write-through to SQLite).
@@ -1164,6 +1531,29 @@ mod tests {
 /// - If there is an image_data_uri: creates a multipart message with text + image.
 /// - If there is a text_prefix (document): prepends it to the message content.
 /// - Otherwise: plain text message.
+/// Phase 32.3 Plan 04 (D-09 / T-32.3-01): pure predicate — does this `/agents`
+/// subcommand require a `confirm` token to proceed on the gateway?
+///
+/// - `"kill"` and `"prune"` are destructive — must have `"confirm"` somewhere
+///   in `args` (tolerant position so operators can type
+///   `/agents kill sub_xxx confirm` OR `/agents kill confirm sub_xxx`).
+/// - `"interrupt"` and `"status"` are NOT destructive — never require confirm.
+/// - Any other subcommand (`"list"`, `"logs"`, unknown) — never require confirm.
+///
+/// Returns `true` when the subcommand IS destructive AND the confirm token
+/// is missing — i.e. the gateway should refuse to dispatch.
+///
+/// Extracted as a free fn so tests can exercise the D-09 contract directly
+/// without constructing a full GatewayMessageHandler + adapter pipeline.
+pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
+    let is_destructive = matches!(subcommand, "kill" | "prune");
+    if !is_destructive {
+        return false;
+    }
+    // Tolerant position: any arg after the subcommand may be "confirm".
+    !args.iter().any(|a| *a == "confirm")
+}
+
 fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> ChatMessage {
     if let Some(data_uri) = processed.image_data_uri {
         // Vision input: multipart message with optional caption + image
@@ -1186,6 +1576,7 @@ fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> 
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     } else if let Some(prefix) = processed.text_prefix {
         // Document text: prepend extracted content to the user message
@@ -1200,6 +1591,7 @@ fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> 
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     } else {
         // Plain text
@@ -1209,6 +1601,7 @@ fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> 
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     }
 }

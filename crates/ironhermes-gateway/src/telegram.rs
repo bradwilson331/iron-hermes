@@ -2,29 +2,11 @@ use crate::adapter::PlatformAdapter;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
+// TgSendApi trait now lives in ironhermes-cron::adapter (Phase 32.1 Plan 06)
+pub use ironhermes_cron::TgSendApi;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// TgSendApi — testable seam for cron delivery dispatch (Phase 22.4.2.1 Plan 02)
-// ---------------------------------------------------------------------------
-
-/// Minimal send trait used by `execute_cron_job` so tests can inject a
-/// `FakeTgClient` without a live HTTP connection.
-///
-/// Defined in `ironhermes-gateway::telegram` to keep it alongside
-/// `TelegramAdapter` while allowing `Option<Arc<dyn TgSendApi>>` as a
-/// parameter type in `runner.rs`. Implemented by `TelegramAdapter` (production)
-/// and `FakeTgClient` (tests).
-#[async_trait]
-pub trait TgSendApi: Send + Sync {
-    async fn send_message(
-        &self,
-        chat_id: &str,
-        content: &str,
-        thread_id: Option<&str>,
-    ) -> anyhow::Result<()>;
-}
+use std::path::Path;
 
 #[async_trait]
 impl TgSendApi for TelegramAdapter {
@@ -38,6 +20,42 @@ impl TgSendApi for TelegramAdapter {
         <Self as PlatformAdapter>::send_message(self, chat_id, content, thread_id)
             .await
             .map(|_| ())
+    }
+
+    async fn send_voice(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_file_multipart("sendVoice", "voice", chat_id, path, thread_id).await
+    }
+
+    async fn send_image_file(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_file_multipart("sendPhoto", "photo", chat_id, path, thread_id).await
+    }
+
+    async fn send_video(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_file_multipart("sendVideo", "video", chat_id, path, thread_id).await
+    }
+
+    async fn send_document(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.send_file_multipart("sendDocument", "document", chat_id, path, thread_id).await
     }
 }
 
@@ -130,6 +148,64 @@ impl TelegramAdapter {
             params["offset"] = serde_json::Value::Number(serde_json::Number::from(off));
         }
         self.api_call("getUpdates", &params).await
+    }
+
+    /// Upload a file to Telegram using multipart/form-data.
+    ///
+    /// `method`     — Telegram Bot API method name (e.g. "sendPhoto")
+    /// `field_name` — multipart field name for the file (e.g. "photo")
+    async fn send_file_multipart(
+        &self,
+        method: &str,
+        field_name: &str,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
+        let file_bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("Failed to read media file: {}", path.display()))?;
+
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        let part = reqwest::multipart::Part::bytes(file_bytes).file_name(filename);
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part(field_name.to_string(), part);
+
+        if let Some(tid) = thread_id {
+            form = form.text("message_thread_id", tid.to_string());
+        }
+
+        let url = self.api_url(method);
+        let response = self
+            .http
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .with_context(|| format!("Telegram {} request failed", method))?;
+
+        let status = response.status();
+        let body: TelegramResponse<serde_json::Value> = response
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse Telegram {} response", method))?;
+
+        if !body.ok {
+            anyhow::bail!(
+                "Telegram {} error ({}): {}",
+                method,
+                body.error_code.unwrap_or(status.as_u16() as i32),
+                body.description.unwrap_or_default()
+            );
+        }
+
+        Ok(())
     }
 }
 

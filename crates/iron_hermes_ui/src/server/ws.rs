@@ -15,6 +15,35 @@ use tracing::{info, warn};
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
+/// Phase 26.7.1 Plan 02 (D-06 / Path A): RAII guard that clears the per-turn
+/// callback slot on drop. Ensures the slot is reset to None even if
+/// `run_web_turn` panics — the tokio task's drop machinery runs Drop before
+/// the JoinHandle's error propagates.
+#[cfg(feature = "server")]
+struct SubagentCallbackSlotGuard {
+    slot: std::sync::Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>,
+        >,
+    >,
+}
+
+#[cfg(feature = "server")]
+impl Drop for SubagentCallbackSlotGuard {
+    fn drop(&mut self) {
+        // Best-effort clear. Use try_lock since Drop cannot await.
+        // The slot is held only across very short windows; contention is
+        // not expected outside of pathological teardown cases.
+        if let Ok(mut guard) = self.slot.try_lock() {
+            *guard = None;
+        }
+        // If try_lock fails (extremely unlikely — only the callback's
+        // try_lock contends, and it doesn't hold the lock across .send),
+        // we leak a stale Some(tx) until the next turn overwrites it. The
+        // closed channel makes any further send a silent no-op. Acceptable.
+    }
+}
+
 /// Server-side application-level WebSocket keepalive interval.
 ///
 /// Application-level Ping frames keep intermediate proxy idle timers
@@ -156,6 +185,15 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 }
                             };
 
+                            // WR-02: clear finished turn handle before busy-gate check
+                            // to avoid false rejection when a frame arrives just after
+                            // the prior turn's task has completed but before its tear-down.
+                            if let Some(turn) = in_flight_turn.as_ref() {
+                                if turn.handle.is_finished() {
+                                    in_flight_turn = None;
+                                }
+                            }
+
                             if in_flight_turn.is_some() {
                                 let busy = ChatStreamEvent::Error {
                                     message: "Another request is already in progress".to_string(),
@@ -174,12 +212,20 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             let session_id_for_turn = session_id.clone();
                             let message = req.message;
                             let handle = tokio::spawn(async move {
+                                // Phase 34a MEM-READ-05: scrub <memory-context> fence tags.
+                                let scrubber_ws = std::sync::Arc::new(std::sync::Mutex::new(
+                                    ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+                                ));
+                                let scrubber_ws_cb = std::sync::Arc::clone(&scrubber_ws);
                                 let tx_stream = tx.clone();
                                 let stream_callback: ironhermes_agent::agent_loop::StreamCallback =
                                     Box::new(move |delta: &str| {
-                                        let _ = tx_stream.send(ChatStreamEvent::Delta {
-                                            text: delta.to_string(),
-                                        });
+                                        let visible = scrubber_ws_cb.lock().unwrap().feed(delta);
+                                        if !visible.is_empty() {
+                                            let _ = tx_stream.send(ChatStreamEvent::Delta {
+                                                text: visible,
+                                            });
+                                        }
                                     });
 
                                 let tx_tool = tx.clone();
@@ -200,6 +246,20 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         });
                                     });
 
+                                // Phase 26.7.1 Plan 02 (D-06 / Path A): install this turn's tx into the
+                                // callback slot so the singleton SubagentProgressCallback baked into
+                                // AppRuntimeBundle can forward SubagentEvent {} to this client.
+                                let tx_subagent = tx.clone();
+                                {
+                                    let mut guard = app_state.subagent_callback_slot.lock().await;
+                                    *guard = Some(tx_subagent);
+                                }
+                                let _slot_guard = SubagentCallbackSlotGuard {
+                                    slot: app_state.subagent_callback_slot.clone(),
+                                };
+                                // _slot_guard is dropped at end-of-block (after run_web_turn returns or
+                                // panics), restoring slot to None.
+
                                 let result = app_state
                                     .run_web_turn(
                                         &session_id_for_turn,
@@ -209,6 +269,12 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         Some(tool_result_callback),
                                     )
                                     .await;
+
+                                // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
+                                let tail = scrubber_ws.lock().unwrap().flush();
+                                if !tail.is_empty() {
+                                    let _ = tx.send(ChatStreamEvent::Delta { text: tail });
+                                }
 
                                 match result {
                                     Ok(agent_result) => {
@@ -331,4 +397,59 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
             }
         },
     ))
+}
+
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod plan_26_7_1_02_tests {
+    use super::*;
+    use crate::protocol::ChatStreamEvent;
+    use ironhermes_tools::delegate_task::{SubagentProgress, SubagentProgressCallback};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    /// Phase 26.7.1 Plan 02 (Wave 0): D-06 callback wiring shape.
+    /// Mirrors the callback constructed in state.rs Task 2: lock the slot,
+    /// read Some(tx), send ChatStreamEvent::SubagentEvent {}.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_subagent_callback_emits_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+        let slot: Arc<Mutex<Option<mpsc::UnboundedSender<ChatStreamEvent>>>> =
+            Arc::new(Mutex::new(Some(tx)));
+        let cb_slot = slot.clone();
+        let cb: SubagentProgressCallback = Arc::new(move |_index: usize, _event: SubagentProgress| {
+            if let Ok(guard) = cb_slot.try_lock() {
+                if let Some(s) = guard.as_ref() {
+                    let _ = s.send(ChatStreamEvent::SubagentEvent {});
+                }
+            }
+        });
+
+        // Invoke the callback as the delegate-task runner would.
+        cb(0, SubagentProgress::Completed);
+
+        let received = rx.recv().await.expect("expected SubagentEvent");
+        assert!(
+            matches!(received, ChatStreamEvent::SubagentEvent {}),
+            "callback must send the SubagentEvent variant"
+        );
+
+        // After clearing the slot, the callback becomes a silent no-op.
+        {
+            let mut g = slot.lock().await;
+            *g = None;
+        }
+        cb(1, SubagentProgress::Completed);
+        // Nothing should arrive — give the runtime a moment to surface anything.
+        // Accept either: Err(Elapsed) = timeout (slot None, channel still open),
+        // or Ok(None) = channel closed (all senders dropped when slot cleared).
+        // Both mean no SubagentEvent was sent by the second cb invocation.
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        let no_spurious_event = match timed {
+            Err(_) => true,          // timeout — nothing in channel
+            Ok(None) => true,        // channel closed — all senders dropped
+            Ok(Some(_)) => false,    // unexpected event sent after slot was cleared
+        };
+        assert!(no_spurious_event, "no events should be received after slot is cleared");
+    }
 }

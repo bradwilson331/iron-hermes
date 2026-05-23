@@ -16,9 +16,9 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::AgentLoop;
-use crate::any_client::AnyClient;
+use crate::any_client::{AnyClient, wire_fallback_if_configured};
 use crate::budget::BudgetHandle;
-use crate::subagent_registry::{SubagentInfo, SubagentRegistry};
+use crate::subagent_registry::{RegistrationGuard, SubagentInfo, SubagentRegistry};
 use crate::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
 
 /// Concrete `SubagentRunner` that spawns child `AgentLoop` instances.
@@ -31,11 +31,20 @@ pub struct AgentSubagentRunner {
     client: AnyClient,
     /// Provider resolver for constructing override clients.
     resolver: ProviderResolver,
-    /// Optional shared iteration budget handle (PROV-10 / D-15).
-    /// Plan 21.7-05 switched this from `Arc<AtomicUsize>` to [`BudgetHandle`];
-    /// clones of the handle share the underlying counter so parent + child
-    /// subagent loops decrement the SAME budget and observe the same
-    /// pressure-tier ladder.
+    /// Retained budget field (D-04 / Plan 35-02 field-kept decision).
+    ///
+    /// Each child loop is given a FRESH `BudgetHandle::new(max_iterations)` —
+    /// an independent per-child counter — in `run_child`. PROV-10's shared
+    /// parent↔child counter is RETIRED (D-04): children no longer clone this
+    /// field, so the parent budget is not decremented by its children.
+    ///
+    /// The field (and the `Option<BudgetHandle>` param on `new`) are KEPT
+    /// rather than removed because `AgentSubagentRunner::new` is consumed at
+    /// two production sites (`agent_runtime.rs:149` and `tui_rata/event_loop.rs`)
+    /// and is grep-locked by invariant tests (`invariants_21_7.rs`,
+    /// `invariants_22_4.rs`). Removing the param would be more invasive than
+    /// warranted; keeping it written-but-unread-by-children is the blessed choice.
+    #[allow(dead_code)] // retained for new() signature / grep invariants; no longer read by run_child
     budget: Option<BudgetHandle>,
     /// Plan 21.7-07 (D-03 / D-04): shared SubagentRegistry. Each `run_child`
     /// call registers its subagent on entry and unregisters on exit so the
@@ -46,6 +55,16 @@ pub struct AgentSubagentRunner {
     hermes_home: Option<PathBuf>,
     /// Plan 21.7-07 (D-05): session id used in the transcript path.
     session_id: Option<String>,
+    /// Phase 32.2 D-04: current depth in the spawn tree.
+    /// 0 = root caller (the runner attached to the top-level DelegateTaskTool);
+    /// children spawned by an orchestrator child at depth N run at depth N+1.
+    /// Depth threading is internal to AgentSubagentRunner state — the
+    /// SubagentRunner trait signature is NOT changed (per RESEARCH Pitfall 6).
+    pub current_depth: u32,
+    /// Phase 32.2 D-10: the subagent_id of the runner's parent caller.
+    /// None = root (this runner is attached to the top-level parent agent).
+    /// Populated via `with_caller_id`; Plan 04 wires it into SubagentInfo.parent_id.
+    pub caller_subagent_id: Option<String>,
 }
 
 impl AgentSubagentRunner {
@@ -61,6 +80,8 @@ impl AgentSubagentRunner {
             subagent_registry: None,
             hermes_home: None,
             session_id: None,
+            current_depth: 0,
+            caller_subagent_id: None,
         }
     }
 
@@ -79,6 +100,71 @@ impl AgentSubagentRunner {
         self.hermes_home = Some(hermes_home);
         self.session_id = Some(session_id);
         self
+    }
+
+    /// Phase 32.2 D-04: set the current depth in the spawn tree.
+    /// Root caller is depth 0; children of an orchestrator at depth N run at depth N+1.
+    /// Use this builder when constructing a runner for an orchestrator child's DelegateTaskTool
+    /// so that `build_child_registry` receives the correct depth for gating further nesting.
+    pub fn with_current_depth(mut self, depth: u32) -> Self {
+        self.current_depth = depth;
+        self
+    }
+
+    /// Phase 32.2 D-10: set the caller's subagent_id for parent-child tracing.
+    /// Plan 04 wires this into `SubagentInfo.parent_id` for the `/agents` tree view.
+    pub fn with_caller_id(mut self, id: String) -> Self {
+        self.caller_subagent_id = Some(id);
+        self
+    }
+
+    /// Test-only constructor that creates a runner with dummy client state.
+    /// Used to test field initialization and builder methods without network calls.
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        use crate::client::LlmClient;
+        let dummy_client = AnyClient::ChatCompletions(LlmClient::new(
+            "http://localhost:9999",
+            "dummy-key",
+            "dummy-model",
+        ));
+        // SAFETY: ProviderResolver is only used in run_child, which is not called
+        // in field-inspection tests. We build a real resolver from a minimal Config.
+        let config = ironhermes_core::Config::default();
+        let resolver = ironhermes_core::ProviderResolver::build(&config)
+            .expect("default Config should produce a valid resolver");
+        Self::new(dummy_client, resolver, None)
+    }
+}
+
+/// Phase 32.2 Plan 04 (D-10): Build a `SubagentInfo` from the components
+/// available at registration time inside `run_child`.
+///
+/// Extracted as a pure helper so the parent_id wiring can be unit-tested
+/// without driving the full async `run_child` path (which requires live
+/// clients, AgentLoop, etc.). Production code calls this; tests call it directly.
+pub(crate) fn build_subagent_info(
+    subagent_id: String,
+    task_summary: String,
+    caller_subagent_id: Option<String>,
+    cancel: tokio_util::sync::CancellationToken,
+    transcript_path: std::path::PathBuf,
+) -> SubagentInfo {
+    SubagentInfo {
+        id: subagent_id,
+        task_summary,
+        parent_id: caller_subagent_id,
+        started_at: std::time::Instant::now(),
+        cancel,
+        transcript_path,
+        // Phase 32.3 Plan 01 (D-04 reservation): live activity clock
+        // reservation — Plan 02 wires the real Arc<Mutex<Instant>> from the
+        // child AgentLoop. Initialise None here.
+        activity_last: None,
+        // Phase 32.3 Plan 02 (D-05): default stale threshold for callers of
+        // this pure helper. The real production path in `run_child` constructs
+        // SubagentInfo directly with the resolved per-call value (see below).
+        stale_warn_seconds: 120,
     }
 }
 
@@ -122,6 +208,7 @@ impl SubagentRunner for AgentSubagentRunner {
         model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
         tool_progress: Option<ironhermes_tools::delegate_task::ChildToolProgressCallback>,
+        stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>> {
         // D-23/D-24: construct child client with model override if specified
         let child_client = if let Some(model) = model_override {
@@ -167,26 +254,6 @@ impl SubagentRunner for AgentSubagentRunner {
                 _ => None,
             };
 
-        // Register in the SubagentRegistry, if attached. The D-03/D-04 pill
-        // refresh in main.rs reads `active_count()` after this registration
-        // lands. Errors here are NOT possible — `register` is infallible.
-        if let Some(ref reg) = self.subagent_registry {
-            // Compose path for SubagentInfo even if we didn't open a writer.
-            let path_for_info = transcript_writer
-                .as_ref()
-                .map(|w| w.path().to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("/dev/null"));
-            let info = SubagentInfo {
-                id: subagent_id.clone(),
-                task_summary: task_summary.clone(),
-                parent_id: None, // v2.1+ will thread parent id
-                started_at: Instant::now(),
-                cancel: cancel_for_info,
-                transcript_path: path_for_info,
-            };
-            reg.write().await.register(info);
-        }
-
         // Wrap the caller's tool_progress callback so every tool event also
         // appends a TranscriptLine (D-05: per-turn writes).
         let tool_progress_wrapped: Option<
@@ -205,7 +272,14 @@ impl SubagentRunner for AgentSubagentRunner {
             tool_progress
         };
 
+        // Phase 32.3 Plan 02 (D-04): construct AgentLoop FIRST so we can grab
+        // a clone of its live activity_last Arc before registering. The
+        // returned Arc is the same instance bumped by the four mark_activity
+        // sites; the registry reads it via SubagentInfo.activity_last for live
+        // staleness derivation (no push updates, no periodic polling).
         let mut agent = AgentLoop::new(child_client, registry, max_iterations);
+        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1)
+        agent = wire_fallback_if_configured(agent, &self.resolver); // chains .with_fallback() via the shared helper — PROV-07
         // D-21: Forward cancel token to child AgentLoop
         if let Some(ref token) = cancel_token {
             agent = agent.with_cancellation_token(token.clone());
@@ -214,10 +288,49 @@ impl SubagentRunner for AgentSubagentRunner {
         if let Some(cb) = tool_progress_wrapped {
             agent = agent.with_tool_progress(cb);
         }
-        // Wire budget if available
-        if let Some(ref budget) = self.budget {
-            agent = agent.with_budget(budget.clone());
-        }
+        // D-01 / Plan 35-02: give each child its own independent budget.
+        // PROV-10 (shared parent↔child counter) is retired. Each call into
+        // run_child produces a distinct Arc<AtomicUsize> via BudgetHandle::new;
+        // the parent's counter is never cloned into a child.
+        agent = agent.with_budget(BudgetHandle::new(max_iterations));
+
+        // Phase 32.3 Plan 02 (D-04): live activity clock — clone the Arc from
+        // the constructed AgentLoop. SAFE to grab before `agent.run` because
+        // the Arc is shared between the AgentLoop's internal `mark_activity`
+        // sites and the SubagentInfo stored in the registry.
+        let activity_last_arc = agent.activity_last_arc();
+
+        // Phase 32.3 Plan 01 (D-01 / D-02 / D-03): register via the RAII guard.
+        // `_guard` is bound for the entire remaining body of `run_child`; its
+        // Drop calls `unregister_internal` synchronously on every exit path
+        // (natural return, error, tokio::time::timeout future-drop, panic,
+        // cancel). The D-03/D-04 pill refresh in main.rs reads `active_count()`
+        // after this registration lands. `register_guarded` is infallible.
+        let _guard: Option<RegistrationGuard> = if let Some(ref reg) = self.subagent_registry {
+            // Compose path for SubagentInfo even if we didn't open a writer.
+            let path_for_info = transcript_writer
+                .as_ref()
+                .map(|w| w.path().to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("/dev/null"));
+            let info = SubagentInfo {
+                id: subagent_id.clone(),
+                task_summary: task_summary.clone(),
+                parent_id: self.caller_subagent_id.clone(), // Phase 32.2 Plan 04 D-10: populated
+                started_at: Instant::now(),
+                cancel: cancel_for_info,
+                transcript_path: path_for_info,
+                // Phase 32.3 Plan 02 (D-04): live Arc<Mutex<Instant>> cloned
+                // from `AgentLoop::activity_last_arc()`. Registry reads call
+                // `.lock().elapsed()` for live staleness derivation.
+                activity_last: Some(activity_last_arc.clone()),
+                // Phase 32.3 Plan 02 (D-05): resolved per-call threshold.
+                stale_warn_seconds,
+            };
+            let weak = Arc::downgrade(reg);
+            Some(reg.write().await.register_guarded(info, weak))
+        } else {
+            None
+        };
 
         let messages = vec![
             ChatMessage::system(&system_prompt),
@@ -254,11 +367,13 @@ impl SubagentRunner for AgentSubagentRunner {
             }
         }
 
-        // Unregister AFTER the terminal line lands so the pill drops to N-1
-        // only once the transcript file has seen its marker.
-        if let Some(ref reg) = self.subagent_registry {
-            reg.write().await.unregister(&subagent_id);
-        }
+        // D-01: RegistrationGuard drop handles deregistration on all exit paths
+        // (natural / error / tokio::time::timeout / panic / cancel). The
+        // explicit unregister call that used to live here was the 6.7-hour
+        // ghost bug site: sub_20667cb71808 stayed Active for 24,150s because
+        // tokio::time::timeout dropped the run_child future before reaching
+        // this line. The `_guard` binding above covers the entire function
+        // body so Drop fires on every exit path — no manual cleanup needed.
 
         match outcome {
             Ok(()) => Ok(final_response),
@@ -277,6 +392,94 @@ fn derive_task_summary(system_prompt: &str) -> String {
     // Take up through the first blank line (goal is separated from context by \n\n)
     let goal = tail.split("\n\n").next().unwrap_or(tail);
     truncate_summary(goal, 80)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `AgentSubagentRunner` for field-inspection tests.
+    fn make_runner() -> AgentSubagentRunner {
+        AgentSubagentRunner::new_for_test()
+    }
+
+    #[test]
+    fn test_default_current_depth_is_zero() {
+        // Phase 32.2 D-04: new() must initialise current_depth=0 (root caller)
+        // and caller_subagent_id=None (no parent).
+        let runner = make_runner();
+        assert_eq!(
+            runner.current_depth, 0,
+            "default current_depth must be 0 (root caller)"
+        );
+        assert!(
+            runner.caller_subagent_id.is_none(),
+            "default caller_subagent_id must be None (root)"
+        );
+    }
+
+    #[test]
+    fn test_with_current_depth_sets_field() {
+        // Phase 32.2 D-04: with_current_depth(N) must set current_depth to N.
+        let runner = make_runner().with_current_depth(2);
+        assert_eq!(
+            runner.current_depth, 2,
+            "with_current_depth(2) must set field to 2"
+        );
+    }
+
+    #[test]
+    fn test_with_caller_id_sets_field() {
+        // Phase 32.2 D-10: with_caller_id(id) must set caller_subagent_id to Some(id).
+        let runner = make_runner().with_caller_id("sub_abc123".to_string());
+        assert_eq!(
+            runner.caller_subagent_id,
+            Some("sub_abc123".to_string()),
+            "with_caller_id must set caller_subagent_id to Some(id)"
+        );
+    }
+
+    #[test]
+    fn test_run_child_propagates_caller_id_to_subagent_info() {
+        // Phase 32.2 Plan 04 D-10: verify that build_subagent_info wires
+        // caller_subagent_id → SubagentInfo.parent_id correctly.
+        //
+        // We test the extracted pure helper directly rather than driving the
+        // full async run_child path (which requires a live client + AgentLoop).
+        // This matches the plan's "extract a fn build_subagent_info(...) pure
+        // helper and test it directly" guidance.
+        let caller_id = "parent_sub_abc".to_string();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let info = build_subagent_info(
+            "sub_child001".to_string(),
+            "do the child task".to_string(),
+            Some(caller_id.clone()),
+            cancel,
+            std::path::PathBuf::from("/dev/null"),
+        );
+
+        assert_eq!(
+            info.parent_id,
+            Some(caller_id),
+            "build_subagent_info must wire caller_subagent_id into SubagentInfo.parent_id"
+        );
+        assert_eq!(info.id, "sub_child001");
+        assert_eq!(info.task_summary, "do the child task");
+
+        // Also verify None propagates correctly (root runner case)
+        let cancel2 = tokio_util::sync::CancellationToken::new();
+        let root_info = build_subagent_info(
+            "sub_root".to_string(),
+            "root task".to_string(),
+            None,
+            cancel2,
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(
+            root_info.parent_id.is_none(),
+            "root runner (caller_subagent_id=None) must produce SubagentInfo.parent_id=None"
+        );
+    }
 }
 
 #[cfg(test)]

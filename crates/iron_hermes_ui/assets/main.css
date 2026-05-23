@@ -10,3 +10,60 @@ html, body {
   padding: 0;
   min-height: 100vh;
 }
+
+/* ── Palette navigation hint ── */
+.wh-pal-footer {
+  padding: 6px 14px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  border-top: 1px solid var(--w-border);
+  letter-spacing: .04em;
+  flex-shrink: 0;
+}
+
+/* ── Tab label: truncate long session titles ── */
+.wh-tab {
+  max-width: 200px;
+  min-width: 0;
+}
+.wh-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Command line token span: allow shrink below content width ── */
+.wh-cmd-tokens {
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ── Status bar pills: cap width so long model/provider names don't push hint off screen ── */
+.wh-status .wh-pill {
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Input: cap textarea growth so the shell chrome stays stable ── */
+.wh-textarea {
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* ── Empty stream placeholder ── */
+.wh-stream-empty {
+  color: var(--fg-dim);
+  font-size: 12px;
+  padding: 8px 0;
+  text-align: center;
+}
+
+/* ── Reduced motion: disable block entry animations ── */
+@media (prefers-reduced-motion: reduce) {
+  .wh-block.is-new, .wh-msg.is-new {
+    animation: none;
+  }
+}

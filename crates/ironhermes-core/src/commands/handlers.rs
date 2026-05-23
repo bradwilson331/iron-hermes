@@ -66,7 +66,7 @@ pub fn dispatch(
         "models" => cmd_models(args, ctx),
         "help" => cmd_help(ctx, router),
         "commands" => cmd_commands(args, ctx, router),
-        "skills" => cmd_skills(ctx),
+        "skills" => cmd_skills(args, ctx),
         "cron" => cmd_cron(args, ctx),
 
         // -------------------------------------------------------------------
@@ -172,27 +172,13 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
     };
     match args.first().copied() {
         None | Some("list") => {
-            let entries = reg.list_summary();
+            let entries = reg.tree_summary();
             if entries.is_empty() {
                 return CommandResult::Output("No active subagents.".to_string());
             }
-            // Post-UAT fix: show the 1-indexed alias (subagent-N) alongside
-            // the full registry id so users know which labels /agents kill
-            // accepts. The alias is the ticker's visible label.
-            let body = entries
-                .iter()
-                .enumerate()
-                .map(|(idx, (id, summary, uptime))| {
-                    format!(
-                        "- subagent-{} ({}) ({}) \u{2014} {}s",
-                        idx + 1,
-                        id,
-                        truncate_ellipsis(summary, 80),
-                        uptime.as_secs()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            // Phase 32.2 D-12: render as indented ASCII tree when nesting exists;
+            // fall back to legacy flat-list format when all nodes are parentless.
+            let body = render_agent_tree(&entries);
             CommandResult::Output(format!("Active subagents:\n{}", body))
         }
         Some("kill") => {
@@ -256,16 +242,141 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 Err(e) => CommandResult::Error(format!("Cannot read transcript: {}", e)),
             }
         }
+        // Phase 32.3 Plan 03 (D-08): soft-cancel one subagent. Cancels the
+        // CancellationToken only (no JoinHandle::abort) — the child gets to
+        // finalize its current iteration before the cancel-check exits.
+        Some("interrupt") => {
+            let token = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/agents interrupt <id>: missing id".to_string(),
+                    );
+                }
+            };
+            let entries = reg.list_summary();
+            match resolve_subagent_id(token, &entries) {
+                Resolve::Exact(id) => {
+                    if reg.interrupt(&id) {
+                        CommandResult::Output(format!(
+                            "Interrupted {} \u{2014} finalizing...",
+                            id
+                        ))
+                    } else {
+                        CommandResult::Output(format!("No active subagent with id {}.", id))
+                    }
+                }
+                Resolve::None => {
+                    CommandResult::Output(format!("No active subagent with id {}.", token))
+                }
+                Resolve::Ambiguous(candidates) => CommandResult::Error(format!(
+                    "Ambiguous id '{}'; matches: {}",
+                    token,
+                    candidates.join(", ")
+                )),
+            }
+        }
+        // Phase 32.3 Plan 03 (D-08): sweep stale registry entries.
+        // No id arg. `stale_secs` defaults to 120 (matches
+        // SubagentConfig::stale_warn_seconds default in Plan 01); a future
+        // patch may surface a config accessor on CommandContext to thread
+        // a session-configured value through. The plan accepts the 120s
+        // fallback today (D-05 default).
+        Some("prune") => {
+            const PRUNE_DEFAULT_STALE_SECS: u64 = 120;
+            let ids = reg.prune(PRUNE_DEFAULT_STALE_SECS);
+            if ids.is_empty() {
+                CommandResult::Output("No stale entries to prune.".to_string())
+            } else {
+                CommandResult::Output(format!(
+                    "Pruned {} stale entries: [{}]",
+                    ids.len(),
+                    ids.join(", ")
+                ))
+            }
+        }
+        // Phase 32.3 Plan 03 (D-08): diagnostic snapshot for one subagent.
+        // Renders a key/value block via `render_status_kv`. None → standard
+        // "no active subagent" output.
+        Some("status") => {
+            let token = match args.get(1) {
+                Some(s) => *s,
+                None => {
+                    return CommandResult::Error(
+                        "/agents status <id>: missing id".to_string(),
+                    );
+                }
+            };
+            let entries = reg.list_summary();
+            match resolve_subagent_id(token, &entries) {
+                Resolve::Exact(id) => match reg.status(&id) {
+                    Some(info) => CommandResult::Output(render_status_kv(&info)),
+                    None => {
+                        CommandResult::Output(format!("No active subagent with id {}.", id))
+                    }
+                },
+                Resolve::None => {
+                    CommandResult::Output(format!("No active subagent with id {}.", token))
+                }
+                Resolve::Ambiguous(candidates) => CommandResult::Error(format!(
+                    "Ambiguous id '{}'; matches: {}",
+                    token,
+                    candidates.join(", ")
+                )),
+            }
+        }
         Some(other) => {
             // Phase 22.3 D-10 / UI-SPEC TYPO-3: append Levenshtein-2 suggestion
             // when a known subcommand is close. Candidates locked by UI-SPEC.
-            let candidates: &[&str] = &["list", "kill", "logs"];
+            // Phase 32.3 Plan 03 (D-08 / B3): interrupt|prune|status added.
+            let candidates: &[&str] = &["list", "kill", "interrupt", "prune", "status", "logs"];
             let suffix = suggest_typo(other, candidates)
                 .map(|s| format!(" {}", s))
                 .unwrap_or_default();
             CommandResult::Error(format!("Unknown /agents subcommand: {}{}", other, suffix))
         }
     }
+}
+
+/// Phase 32.3 Plan 03 (D-08): render a `SubagentStatusInfo` as a TUI/gateway
+/// key/value block. Web surface (Plan 04) consumes the struct directly via
+/// JSON serialization; this renderer is for human-readable terminal output.
+///
+/// Format mirrors the bullet-list shape used elsewhere in the slash output
+/// (one field per line, `field: value`). Missing optional fields render as
+/// `n/a` rather than being elided — surfacing the structural absence is
+/// useful operator information.
+fn render_status_kv(info: &crate::commands::context::SubagentStatusInfo) -> String {
+    let role = info.role.clone().unwrap_or_else(|| "n/a".to_string());
+    let depth = info
+        .depth
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let parent = info
+        .parent_id
+        .clone()
+        .unwrap_or_else(|| "(root)".to_string());
+    let last_activity = info
+        .last_activity_secs
+        .map(|s| format!("{}s ago", s))
+        .unwrap_or_else(|| "n/a".to_string());
+    let turns = info
+        .turns_used
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "id: {}\nparent: {}\ntask: {}\nrole: {}\ndepth: {}\nuptime: {}s\nlast_activity: {}\nturns: {}\ntranscript: {}\nstatus: {}",
+        info.id,
+        parent,
+        info.task_summary,
+        role,
+        depth,
+        info.uptime_secs,
+        last_activity,
+        turns,
+        info.transcript_path,
+        info.status,
+    )
 }
 
 /// Char-boundary-safe truncate with a trailing ellipsis when truncated.
@@ -280,6 +391,98 @@ fn truncate_ellipsis(s: &str, max: usize) -> String {
         idx -= 1;
     }
     format!("{}\u{2026}", &s[..idx])
+}
+
+/// Phase 32.2 D-12: Render a flat `Vec<SubagentTreeEntry>` as an indented ASCII tree.
+///
+/// **Flat-list fallback:** if every entry has `parent_id = None`, the output
+/// uses the legacy `- subagent-N (id) (summary) — uptimes` format (no connectors,
+/// no status pill) so existing behaviour is preserved for non-orchestrated sessions.
+///
+/// **Tree mode:** when any nesting exists, `render_nodes_recursive` is called to
+/// emit `├── ` / `└── ` connectors with `│   ` / `    ` continuation prefixes.
+fn render_agent_tree(entries: &[crate::commands::context::SubagentTreeEntry]) -> String {
+    // Flat-list fallback: all entries are root-level (no parent).
+    //
+    // Phase 32.3 Plan 02 (D-06): append `[{status}]` pill when status is NOT
+    // `"running"` (i.e. `"stale"` or `"killed"`). The "running" case stays
+    // pill-less to preserve byte-identical legacy output for the dominant
+    // non-orchestrated session pattern. Tree mode always renders the pill
+    // verbatim per Phase 32.2 Plan 04 D-12.
+    if entries.iter().all(|e| e.parent_id.is_none()) {
+        return entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| {
+                let pill = if e.status == "running" {
+                    String::new()
+                } else {
+                    format!("  [{}]", e.status)
+                };
+                format!(
+                    "- subagent-{} ({}) ({}) \u{2014} {}s{}",
+                    idx + 1,
+                    e.id,
+                    truncate_ellipsis(&e.task_summary, 80),
+                    e.uptime.as_secs(),
+                    pill,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    // Tree mode: recurse from root nodes (parent_id = None).
+    let mut lines = Vec::new();
+    render_nodes_recursive(entries, None, "", &mut lines);
+    lines.join("\n")
+}
+
+/// Depth-first recursive renderer for the subagent tree.
+///
+/// `parent_id` — the parent whose children to render at this level (None = roots).
+/// `prefix`    — the inherited indentation string from ancestor levels.
+///
+/// Unicode box-drawing characters used as escaped codepoints to avoid any
+/// source-encoding ambiguity:
+/// - `\u{251C}\u{2500}\u{2500} ` → `├── ` (non-last child connector)
+/// - `\u{2514}\u{2500}\u{2500} ` → `└── ` (last child connector)
+/// - `\u{2502}   `               → `│   ` (continuation prefix for non-last ancestors)
+/// - `    `                      → `    ` (continuation prefix for last ancestors)
+fn render_nodes_recursive(
+    entries: &[crate::commands::context::SubagentTreeEntry],
+    parent_id: Option<&str>,
+    prefix: &str,
+    lines: &mut Vec<String>,
+) {
+    let children: Vec<_> = entries
+        .iter()
+        .filter(|e| e.parent_id.as_deref() == parent_id)
+        .collect();
+    let count = children.len();
+    for (i, entry) in children.iter().enumerate() {
+        let is_last = i == count - 1;
+        let connector = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251C}\u{2500}\u{2500} "
+        };
+        let child_prefix = if is_last {
+            format!("{}    ", prefix)
+        } else {
+            format!("{}\u{2502}   ", prefix)
+        };
+        let id_short = &entry.id[..entry.id.len().min(8)];
+        lines.push(format!(
+            "{}{}{}  {}  {}s  [{}]",
+            prefix,
+            connector,
+            id_short,
+            truncate_ellipsis(&entry.task_summary, 80),
+            entry.uptime.as_secs(),
+            entry.status,
+        ));
+        render_nodes_recursive(entries, Some(&entry.id), &child_prefix, lines);
+    }
 }
 
 /// Post-UAT helper: what a user-supplied `/agents kill|logs <token>`
@@ -543,7 +746,10 @@ fn cmd_history(args: &[&str], ctx: &CommandContext) -> CommandResult {
                     .map(|s: &str| s.to_string())
                     .unwrap_or_default();
                 let preview = if content_str.len() > 120 {
-                    format!("{}…", &content_str[..120])
+                    format!(
+                        "{}…",
+                        crate::context_scanner::truncate_on_char_boundary(&content_str, 120)
+                    )
                 } else {
                     content_str
                 };
@@ -604,7 +810,7 @@ fn cmd_personality(args: &[&str], ctx: &CommandContext) -> CommandResult {
         // Apply mode — return overlay text; tui_rata post-router hook applies as system-prompt injection.
         let name = args[0];
         match registry.get_preset(name) {
-            Some(text) => CommandResult::Output(text),
+            Some(text) => CommandResult::PersonalityApplied(text),
             None => CommandResult::Error(format!("Unknown personality: {name}")),
         }
     }
@@ -729,10 +935,23 @@ fn cmd_reasoning(args: &[&str], _ctx: &CommandContext) -> CommandResult {
     CommandResult::Output(format!("Reasoning: {}", level))
 }
 
-fn cmd_skills(ctx: &CommandContext) -> CommandResult {
-    match &ctx.skill_registry {
-        Some(registry) => CommandResult::Output(registry.catalog_text()),
-        None => CommandResult::Output("No skills loaded.".to_string()),
+fn cmd_skills(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    match args.first().copied() {
+        // Phase 21.8.2 D-01: `/skills reload` returns the SkillsReload signal so
+        // the REPL loop / gateway handler performs the synchronous reload + diff.
+        Some("reload") => {
+            if ctx.skill_registry.is_some() {
+                CommandResult::SkillsReload
+            } else {
+                CommandResult::Output("Skills not configured.".to_string())
+            }
+        }
+        // No args, "list", or any other token preserves the existing list-catalog
+        // behavior. Future subcommands (e.g. `/skills status`) can branch here.
+        None | Some("list") | Some(_) => match &ctx.skill_registry {
+            Some(registry) => CommandResult::Output(registry.catalog_text()),
+            None => CommandResult::Output("No skills loaded.".to_string()),
+        },
     }
 }
 
@@ -1633,7 +1852,7 @@ mod tests {
             "prompt",
             "tools",
             // "toolsets" removed — replaced by `/toolset` (Phase 25 Plan 04, D-06)
-            "cron",
+            // "cron" removed — now has real handler (Phase 32.1 Plan 07)
             // "reload-mcp" and "reload" removed — now have real handlers (Phase 21.2 Plan 04)
             "browser",
             "plugins",
@@ -2291,6 +2510,224 @@ mod tests {
             matches!(result, ResolveResult::Exact(c) if c.name == "export-session"),
             "expected /export-session Exact match, got: {:?}",
             result
+        );
+    }
+}
+
+// =============================================================================
+// Phase 21.8.2: cmd_skills reload tests
+// =============================================================================
+
+#[cfg(test)]
+mod skills_reload_tests {
+    use super::*;
+    use crate::commands::context::CommandContext;
+    use crate::commands::Platform;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn empty_ctx() -> CommandContext {
+        CommandContext::new(
+            Platform::Local,
+            "test-session".to_string(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn cmd_skills_no_args_returns_no_skills_loaded_when_registry_none() {
+        let ctx = empty_ctx();
+        let result = cmd_skills(&[], &ctx);
+        assert_eq!(result, CommandResult::Output("No skills loaded.".to_string()));
+    }
+
+    #[test]
+    fn cmd_skills_reload_arg_returns_skills_not_configured_when_registry_none() {
+        let ctx = empty_ctx();
+        let result = cmd_skills(&["reload"], &ctx);
+        assert_eq!(result, CommandResult::Output("Skills not configured.".to_string()));
+    }
+
+    #[test]
+    fn cmd_skills_reload_arg_returns_skillsreload_when_registry_set() {
+        // Empty SkillRegistry — `is_some()` guard does not require non-empty.
+        let registry = Arc::new(crate::SkillRegistry::load_with_paths(&[]));
+        let ctx = empty_ctx().with_skill_registry(registry);
+        let result = cmd_skills(&["reload"], &ctx);
+        assert_eq!(result, CommandResult::SkillsReload);
+    }
+
+    #[test]
+    fn cmd_skills_no_args_returns_output_when_registry_set() {
+        let registry = Arc::new(crate::SkillRegistry::load_with_paths(&[]));
+        let ctx = empty_ctx().with_skill_registry(registry);
+        let result = cmd_skills(&[], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)));
+    }
+}
+
+// =============================================================================
+// Phase 32.2 Plan 05: cmd_agents tree render tests
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_agents_tree_tests {
+    use super::*;
+    use crate::commands::context::{CommandContext, SubagentListSnapshot, SubagentTreeEntry};
+    use crate::commands::{CommandResult, Platform};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    fn empty_ctx() -> CommandContext {
+        CommandContext::new(
+            Platform::Local,
+            "test-session".to_string(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Fake registry that returns a configurable list of tree entries.
+    struct FakeListWithTree {
+        entries: Vec<SubagentTreeEntry>,
+    }
+
+    impl SubagentListSnapshot for FakeListWithTree {
+        fn active_count(&self) -> usize {
+            self.entries.len()
+        }
+        fn list_summary(&self) -> Vec<(String, String, Duration)> {
+            self.entries
+                .iter()
+                .map(|e| (e.id.clone(), e.task_summary.clone(), e.uptime))
+                .collect()
+        }
+        fn kill(&self, _id: &str) -> bool {
+            false
+        }
+        fn transcript_path(&self, _id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn tree_summary(&self) -> Vec<SubagentTreeEntry> {
+            self.entries.clone()
+        }
+    }
+
+    fn make_entry(id: &str, summary: &str, parent_id: Option<&str>, depth: usize) -> SubagentTreeEntry {
+        SubagentTreeEntry {
+            id: id.to_string(),
+            task_summary: summary.to_string(),
+            uptime: Duration::from_secs(10),
+            status: "running".to_string(),
+            parent_id: parent_id.map(|s| s.to_string()),
+            depth,
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 1: empty registry → "No active subagents."
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_cmd_agents_empty_registry() {
+        let fake = Arc::new(FakeListWithTree { entries: vec![] });
+        let ctx = empty_ctx().with_subagent_registry(fake);
+        let result = cmd_agents(&[], &ctx);
+        assert_eq!(
+            result,
+            CommandResult::Output("No active subagents.".to_string()),
+            "empty registry should return 'No active subagents.'"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 2: 3 parentless subagents → legacy flat-list format (no connectors)
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_cmd_agents_flat_list_unchanged() {
+        let entries = vec![
+            make_entry("sub_aabbcc", "task A", None, 0),
+            make_entry("sub_112233", "task B", None, 0),
+            make_entry("sub_xxyyzz", "task C", None, 0),
+        ];
+        let fake = Arc::new(FakeListWithTree { entries });
+        let ctx = empty_ctx().with_subagent_registry(fake);
+        let result = cmd_agents(&[], &ctx);
+        let output = match result {
+            CommandResult::Output(s) => s,
+            other => panic!("expected Output, got {:?}", other),
+        };
+        // Legacy flat-list format: "- subagent-N (id) (summary) — uptimes"
+        assert!(output.contains("subagent-1"), "should contain subagent-1 alias");
+        assert!(output.contains("subagent-2"), "should contain subagent-2 alias");
+        assert!(output.contains("subagent-3"), "should contain subagent-3 alias");
+        assert!(output.contains("task A"), "should contain task A summary");
+        // No tree connectors in flat mode
+        assert!(!output.contains("\u{2514}\u{2500}\u{2500}"), "flat mode should not have └── connector");
+        assert!(!output.contains("\u{251C}\u{2500}\u{2500}"), "flat mode should not have ├── connector");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 3: root + 2 children → tree with ├── and └── connectors and [running] pills
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_cmd_agents_renders_tree_when_nested() {
+        let entries = vec![
+            make_entry("sub_root1234", "orchestrate pipeline", None, 0),
+            make_entry("sub_child_aa", "fetch data", Some("sub_root1234"), 1),
+            make_entry("sub_child_bb", "write output", Some("sub_root1234"), 1),
+        ];
+        let fake = Arc::new(FakeListWithTree { entries });
+        let ctx = empty_ctx().with_subagent_registry(fake);
+        let result = cmd_agents(&[], &ctx);
+        let output = match result {
+            CommandResult::Output(s) => s,
+            other => panic!("expected Output, got {:?}", other),
+        };
+        // Should contain tree connectors
+        assert!(
+            output.contains("\u{251C}\u{2500}\u{2500}") || output.contains("\u{2514}\u{2500}\u{2500}"),
+            "nested tree should contain ├── or └── connector; got:\n{}",
+            output
+        );
+        // Last child gets └──
+        assert!(output.contains("\u{2514}\u{2500}\u{2500}"), "last child should have └── connector");
+        // Status pills
+        assert!(output.contains("[running]"), "should contain [running] status pill");
+        // Summaries present
+        assert!(output.contains("fetch data"), "should contain child_a summary");
+        assert!(output.contains("write output"), "should contain child_b summary");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 4: 3-level tree → correct │   continuation prefixes
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_render_agent_tree_three_levels() {
+        let entries = vec![
+            make_entry("sub_root0000", "root task", None, 0),
+            make_entry("sub_mid11111", "mid task", Some("sub_root0000"), 1),
+            make_entry("sub_leaf2222", "leaf task", Some("sub_mid11111"), 2),
+        ];
+        let output = render_agent_tree(&entries);
+        // root level: no prefix, gets connector
+        assert!(
+            output.contains("\u{2514}\u{2500}\u{2500}") || output.contains("\u{251C}\u{2500}\u{2500}"),
+            "should contain tree connector at root; got:\n{}",
+            output
+        );
+        // The mid level should have a continuation prefix (root is last, so "    ")
+        // and the leaf should be nested deeper.
+        assert!(output.contains("leaf task"), "leaf task should appear in output");
+        assert!(output.contains("mid task"), "mid task should appear in output");
+        assert!(output.contains("root task"), "root task should appear in output");
+        // 3-level: ensure leaf line contains two connector-depth's worth of prefix
+        let leaf_line = output.lines().find(|l| l.contains("leaf task"))
+            .expect("leaf task line should exist");
+        // At depth 2, leaf_line should have at least 4 spaces of indentation prefix before connector
+        assert!(
+            leaf_line.starts_with("    ") || leaf_line.starts_with("\u{2502}"),
+            "leaf line should have indentation; got: {:?}",
+            leaf_line
         );
     }
 }

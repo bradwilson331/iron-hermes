@@ -21,6 +21,7 @@
 pub mod agent_steps;
 pub mod personalities;
 pub mod shell_outputs;
+pub mod stub_data;
 
 pub use agent_steps::run_agent_steps;
 

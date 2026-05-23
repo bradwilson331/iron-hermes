@@ -44,6 +44,7 @@ impl SubagentRunner for DetachedSleepRunner {
         _model_override: Option<&str>,
         cancel_token: Option<CancellationToken>,
         _tool_progress: Option<ChildToolProgressCallback>,
+        _stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>> {
         let observed = self.observed_cancelled.clone();
         let cancel = cancel_token.expect(
@@ -88,9 +89,9 @@ async fn timeout_arm_hard_cancels_child_token_within_grace() {
         Arc::new(Semaphore::new(1)),
         None, // memory_manager
         SubagentConfig {
-            timeout_secs: 60, // fallback if per-call override is absent
+            child_timeout_seconds: 60, // fallback if per-call override is absent
             max_iterations: 5,
-            max_subagents: 2,
+            max_concurrent_children: 2,
             ..SubagentConfig::default()
         },
         Some(parent_cancel),
@@ -156,9 +157,9 @@ async fn timeout_seconds_per_call_overrides_config_default() {
         SubagentConfig {
             // Config default is huge; only the per-call override can
             // cut it down to 1s.
-            timeout_secs: 3600,
+            child_timeout_seconds: 3600,
             max_iterations: 5,
-            max_subagents: 2,
+            max_concurrent_children: 2,
             ..SubagentConfig::default()
         },
         Some(parent_cancel),
@@ -196,6 +197,7 @@ async fn schema_exposes_timeout_seconds_field() {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             Ok(None)
         }

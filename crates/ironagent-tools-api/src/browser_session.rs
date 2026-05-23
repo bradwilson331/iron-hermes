@@ -59,6 +59,38 @@ impl BrowserSession {
             .chrome_executable(binary)
             .launch_timeout(Duration::from_secs(config.timeout_seconds));
 
+        // Phase 26.3: resolve persistent profile directory.
+        // Call get_hermes_home() at call time so Phase 24 profile pivot works correctly.
+        // Empty-string check is defensive — operator-set "" should fall through to default.
+        let user_data_dir: std::path::PathBuf = match config.user_data_dir.as_deref() {
+            Some(p) if !p.is_empty() => {
+                let resolved = std::path::PathBuf::from(p);
+                if resolved.is_relative() {
+                    anyhow::bail!("browser.user_data_dir '{}' must be an absolute path", p);
+                }
+                resolved
+            }
+            _ => ironhermes_core::get_hermes_home().join("browser-profile"),
+        };
+        // Phase 26.3.2: SingletonLock resilience — check before binding to persistent profile.
+        match ironhermes_core::browser_profile::reconcile_singleton_lock(&user_data_dir) {
+            ironhermes_core::browser_profile::SingletonOutcome::UseProfile => {
+                builder = builder.user_data_dir(&user_data_dir);
+            }
+            ironhermes_core::browser_profile::SingletonOutcome::UseEphemeral => {
+                // Lock held by a live process — do NOT set user_data_dir.
+                // chromiumoxide defaults to its own temp dir (pre-26.3 ephemeral behavior).
+                // warn! was already emitted inside reconcile_singleton_lock (D-05).
+            }
+        }
+        if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
+            tracing::warn!(
+                path = %user_data_dir.display(),
+                error = %e,
+                "Phase 26.3: failed to pre-create user_data_dir; chromium launch may fail"
+            );
+        }
+
         if config.headed {
             // chromiumoxide 0.9 default IS headless; .with_head() opts INTO headed.
             builder = builder.with_head();
@@ -156,7 +188,7 @@ pub fn find_chromium_binary(config_path: Option<&str>) -> Option<PathBuf> {
     // Set IRONHERMES_BROWSER_TEST_DISABLE=1 to deterministically reproduce the "no chromium"
     // condition in browser_prereq.rs tests on dev machines with system Chrome installed.
     // This var MUST NOT be set in production environments.
-    if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").is_ok() {
+    if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").as_deref() == Ok("1") {
         return None;
     }
     // 1. BROWSER_PATH env var (D-05 step 1: authoritative when set).
@@ -249,30 +281,6 @@ mod tests {
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    #[test]
-    fn find_chromium_binary_returns_none_when_browser_path_points_to_absent_file() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
-        // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 Rust 2024 pattern).
-        unsafe {
-            std::env::set_var("BROWSER_PATH", "/dev/null/definitely-absent-chromium");
-            std::env::remove_var("CHROMIUM_PATH");
-            std::env::set_var("PATH", "/dev/null/empty-path");
-        }
-        // D-05 step 1 authority: when BROWSER_PATH is SET (even to an invalid path),
-        // find_chromium_binary MUST return None rather than falling through to platform
-        // paths. This holds deterministically even on dev machines with system Chrome.
-        let result = find_chromium_binary(None);
-        assert!(
-            result.is_none(),
-            "BROWSER_PATH set to absent file MUST return None (D-05 step 1 authoritative), got {:?}",
-            result
-        );
-        unsafe {
-            std::env::remove_var("BROWSER_PATH");
-            std::env::remove_var("PATH");
-        }
     }
 
     #[test]

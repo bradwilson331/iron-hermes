@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::{Config, ProviderResolver, SkillRecord, SkillRegistry, SubagentConfig};
+use ironhermes_core::config::ToolsConfig;
 use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::{
@@ -50,11 +51,22 @@ pub struct AppRuntimeBundle {
     pub active_skills: Arc<std::sync::Mutex<Vec<SkillRecord>>>,
     pub browser_session: Arc<tokio::sync::Mutex<Option<BrowserSession>>>,
     pub job_store: Arc<Mutex<JobStore>>,
+    /// Phase 27.1.1-gap-02: the merged ToolsConfig (config.tools with ALL_TOOLSETS
+    /// defaults filled in). Pass to RegistryToolsetSession::new and PromptBuilder
+    /// construction sites instead of the raw config.tools so /toolset enable|disable
+    /// mutates from the same baseline as the registry filter.
+    pub merged_tools: ToolsConfig,
 }
 
 pub async fn build_app_runtime_bundle(
     input: AppRuntimeFactoryInput,
 ) -> anyhow::Result<AppRuntimeBundle> {
+    // Phase 27.1.1-gap-02: compute the merged config once at bundle construction.
+    // with_default_toolsets_merged() fills absent toolset entries with enabled=true
+    // (back-compat: old configs that predate a toolset keep full access), while
+    // preserving any explicit enabled:false entries from the user's config.yaml.
+    let merged_tools = input.config.tools.clone().with_default_toolsets_merged();
+
     let mut registry = build_registry_with_process_registry(input.process_registry.clone());
 
     if let Some(ref manager) = input.memory_manager {
@@ -101,6 +113,14 @@ pub async fn build_app_runtime_bundle(
         HashMap::new(),
     );
 
+    // Phase 33 LEARN-04 / LEARN-05: skill_manage backs the 'learning' toolset
+    // (autonomous skill authoring). Stateless tool — registers unconditionally;
+    // visibility to the LLM is controlled by set_toolset_config below, which
+    // filters tools whose toolset (`learning` here) is disabled in the merged
+    // ToolsConfig. This mirrors register_skills_tool's pattern (always register;
+    // toolset filter hides the schema).
+    registry.register_skill_manage_tool();
+
     let summarization_handle = Arc::new(AnyClientSummarizationHandle::new(input.resolver.clone()));
     registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
 
@@ -119,6 +139,13 @@ pub async fn build_app_runtime_bundle(
     }
     registry.set_error_detail(input.hooks_config.error_detail.clone());
 
+    // Phase 27.1.1-gap-02: push the merged toolset config into the registry AFTER
+    // all register_* calls so get_definitions() filters against the full tool set.
+    // Before this call, toolset_config is None → every toolset passes (no-op filter).
+    // After this call, any toolset with enabled:false in the user's config.yaml is
+    // hidden from the LLM's tool schema without requiring a /toolset command.
+    registry.set_toolset_config(Some(merged_tools.clone()));
+
     let registry = Arc::new(RwLock::new(registry));
     let mcp_manager = build_mcp_manager(
         input.config.as_ref(),
@@ -136,29 +163,39 @@ pub async fn build_app_runtime_bundle(
         active_skills,
         browser_session,
         job_store,
+        merged_tools,
     })
 }
 
+/// Build the main tool registry for all production entry points (CLI REPL, CLI batch,
+/// ratatui TUI, iron_hermes_ui, gateway). Delegates to the canonical entry point
+/// `ToolRegistry::register_defaults_except` — adding a new tool to that method
+/// makes it visible here automatically with zero additional edits.
 fn build_registry_with_process_registry(
     process_registry: Arc<RwLock<ProcessRegistry>>,
 ) -> ToolRegistry {
-    use ironhermes_tools::file_tools::{
-        PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
-    };
-    use ironhermes_tools::web_read::WebReadTool;
-    use ironhermes_tools::web_search::WebSearchTool;
-
     let mut registry = ToolRegistry::new();
+    // Skip the plain TerminalTool; add the process-registry-wired variant below
+    // so background terminal spawns flow through drain_and_kill_session.
+    registry.register_defaults_except(&["terminal"]);
     registry.register_terminal_tool_with_process_registry(process_registry);
-    registry.register(Box::new(ReadFileTool));
-    registry.register(Box::new(WriteFileTool));
-    registry.register(Box::new(PatchFileTool));
-    registry.register(Box::new(SearchFilesTool));
-    registry.register(Box::new(WebSearchTool));
-    registry.register(Box::new(WebReadTool));
     registry
 }
 
+/// Build the RPC sub-registry handed to execute_code's nested calls.
+///
+/// SAFETY: this sub-registry intentionally does NOT inherit from register_defaults().
+/// execute_code runs agent-generated code in a sandboxed context and must NOT gain
+/// new capabilities silently when tools are added to the default set. In particular:
+///   - terminal: excluded — nested shell execution from within execute_code is not permitted.
+///   - execute_code: excluded — recursive execute_code is not permitted.
+///   - hexapod_tcp: excluded — hexapod hardware control must not be accessible from
+///     within the execute_code sandbox. Hardware commands require explicit top-level
+///     tool calls so the user sees them in the trajectory.
+///
+/// When a new default tool is added and you believe it belongs in the RPC sandbox,
+/// add it here explicitly with a rationale comment. Do not switch this to delegating
+/// register_defaults_except() without a security review.
 fn build_rpc_registry(memory_manager: Option<SharedMemoryManager>) -> Arc<ToolRegistry> {
     use ironhermes_tools::file_tools::{
         PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
@@ -349,6 +386,7 @@ mod tests {
             _model_override: Option<&str>,
             _cancel_token: Option<CancellationToken>,
             _tool_progress: Option<ChildToolProgressCallback>,
+            _stale_warn_seconds: u64,
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("ok".to_string()))
         }
@@ -361,7 +399,7 @@ mod tests {
         input.delegate_task = Some(DelegateTaskWiring {
             runner: Arc::new(NoopRunner),
             semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-            config: config.subagent.clone(),
+            config: config.delegation.clone(),
             cancel_token: None,
             progress_callback: None,
         });
@@ -453,6 +491,189 @@ mod tests {
         assert!(
             first_index < second_index,
             "marker order mismatch: '{first}' must appear before '{second}'"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 27.1.1-gap-02: toolset_config startup wiring tests
+    // -------------------------------------------------------------------------
+
+    /// Test that a config with `web: { enabled: false }` causes build_app_runtime_bundle
+    /// to produce a registry where web_search / web_read / web_extract are absent from
+    /// get_definitions(None), while non-web tools (read_file, terminal) remain.
+    #[tokio::test]
+    async fn test_toolset_config_filters_disabled_web() {
+        use ironhermes_core::config::{ToolsConfig, ToolsetEntry};
+        let mut config = Config::default();
+        // Explicitly disable the web toolset.
+        config.tools.toolsets.insert("web".to_string(), ToolsetEntry { enabled: false });
+
+        let resolver = ProviderResolver::build(&config).expect("resolver should build");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let input = AppRuntimeFactoryInput {
+            config: Arc::new(config),
+            resolver: Arc::new(resolver),
+            cwd,
+            process_registry: Arc::new(RwLock::new(ProcessRegistry::new_for_session(
+                "test-web-filter".to_string(),
+            ))),
+            memory_manager: None,
+            delegate_task: None,
+            hooks_config: HooksConfig::default(),
+            emit_mcp_startup_logs: false,
+        };
+
+        let bundle = build_app_runtime_bundle(input)
+            .await
+            .expect("factory bundle should build");
+
+        let defs = bundle.registry.read().await.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+
+        assert!(
+            !names.contains(&"web_search".to_string()),
+            "web_search must be hidden when web toolset is disabled; got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"web_read".to_string()),
+            "web_read must be hidden when web toolset is disabled"
+        );
+        assert!(
+            !names.contains(&"web_extract".to_string()),
+            "web_extract must be hidden when web toolset is disabled"
+        );
+        // A tool from an enabled toolset must still appear. "skills" is in DEFAULT_TOOLSETS
+        // (enabled by default) and has no external prereqs — it must survive the web filter.
+        assert!(
+            names.contains(&"skills".to_string()),
+            "skills must still appear when web toolset is disabled; got: {:?}",
+            names
+        );
+    }
+
+    /// Test that a config with NO `robotics` entry (typical pre-gap-02 config) still
+    /// exposes `hexapod_tcp` in get_definitions when HEXAPOD_IP is set, because
+    /// with_default_toolsets_merged() adds robotics→enabled=true for absent entries.
+    #[tokio::test]
+    async fn test_toolset_config_robotics_default_enabled() {
+        // Temporarily set HEXAPOD_IP so is_available() on HexapodTcpTool returns true.
+        // Safety: env mutation is serialised by single-threaded test.
+        let prev = std::env::var("HEXAPOD_IP").ok();
+        unsafe {
+            std::env::set_var("HEXAPOD_IP", "192.168.1.100");
+        }
+
+        let mut config = Config::default();
+        // Remove any robotics entry — simulate pre-gap-02 config.
+        config.tools.toolsets.remove("robotics");
+
+        let resolver = ProviderResolver::build(&config).expect("resolver should build");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let input = AppRuntimeFactoryInput {
+            config: Arc::new(config),
+            resolver: Arc::new(resolver),
+            cwd,
+            process_registry: Arc::new(RwLock::new(ProcessRegistry::new_for_session(
+                "test-robotics-default".to_string(),
+            ))),
+            memory_manager: None,
+            delegate_task: None,
+            hooks_config: HooksConfig::default(),
+            emit_mcp_startup_logs: false,
+        };
+
+        let bundle = build_app_runtime_bundle(input)
+            .await
+            .expect("factory bundle should build");
+
+        let defs = bundle.registry.read().await.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+
+        // Restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HEXAPOD_IP", v),
+                None => std::env::remove_var("HEXAPOD_IP"),
+            }
+        }
+
+        assert!(
+            names.contains(&"hexapod_tcp".to_string()),
+            "hexapod_tcp must be visible when HEXAPOD_IP is set and robotics not explicitly disabled; got: {:?}",
+            names
+        );
+    }
+
+    /// Test that a config with `robotics: { enabled: false }` hides `hexapod_tcp`
+    /// even when HEXAPOD_IP is set.
+    #[tokio::test]
+    async fn test_toolset_config_robotics_explicitly_disabled() {
+        use ironhermes_core::config::ToolsetEntry;
+
+        let prev = std::env::var("HEXAPOD_IP").ok();
+        unsafe {
+            std::env::set_var("HEXAPOD_IP", "192.168.1.100");
+        }
+
+        let mut config = Config::default();
+        config.tools.toolsets.insert("robotics".to_string(), ToolsetEntry { enabled: false });
+
+        let resolver = ProviderResolver::build(&config).expect("resolver should build");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let input = AppRuntimeFactoryInput {
+            config: Arc::new(config),
+            resolver: Arc::new(resolver),
+            cwd,
+            process_registry: Arc::new(RwLock::new(ProcessRegistry::new_for_session(
+                "test-robotics-disabled".to_string(),
+            ))),
+            memory_manager: None,
+            delegate_task: None,
+            hooks_config: HooksConfig::default(),
+            emit_mcp_startup_logs: false,
+        };
+
+        let bundle = build_app_runtime_bundle(input)
+            .await
+            .expect("factory bundle should build");
+
+        let defs = bundle.registry.read().await.get_definitions(None);
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+
+        // Restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HEXAPOD_IP", v),
+                None => std::env::remove_var("HEXAPOD_IP"),
+            }
+        }
+
+        assert!(
+            !names.contains(&"hexapod_tcp".to_string()),
+            "hexapod_tcp must be hidden when robotics is explicitly disabled; got: {:?}",
+            names
+        );
+    }
+
+    /// Regression guard: set_toolset_config must be called AFTER the last register_*
+    /// call (structural ordering). Source text check locks this ordering.
+    #[test]
+    fn source_locks_set_toolset_config_after_register_calls() {
+        let source = include_str!("app_runtime_factory.rs");
+        assert!(
+            source.contains("set_toolset_config(Some(merged_tools"),
+            "set_toolset_config(Some(merged_tools...) must appear in build_app_runtime_bundle"
+        );
+        assert_in_order(
+            source,
+            "register_execute_code_tool_with_process_registry(",
+            "set_toolset_config(Some(merged_tools",
+        );
+        assert_in_order(
+            source,
+            "set_toolset_config(Some(merged_tools",
+            "Arc::new(RwLock::new(registry))",
         );
     }
 }

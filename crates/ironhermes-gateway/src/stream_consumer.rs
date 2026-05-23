@@ -151,7 +151,7 @@ fn find_split_point(text: &str, max_len: usize) -> usize {
         return text.len();
     }
 
-    let slice = &text[..max_len];
+    let slice = ironhermes_core::truncate_on_char_boundary(text, max_len);
 
     // Try last double newline (paragraph boundary)
     if let Some(pos) = slice.rfind("\n\n") {

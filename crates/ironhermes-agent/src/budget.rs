@@ -1,7 +1,16 @@
-//! Shared parent/child iteration-budget handle (PROV-10, D-10/D-15/D-16/D-17).
+//! Per-agent iteration-budget handle (D-10/D-15/D-16/D-17).
 //!
-//! Wave-0 SHELL — concrete impl lands in Wave 1 Plan 02.
-//! AI-SPEC Pitfall 9 (E-05): use SeqCst ordering only on this shared counter.
+//! Each agent loop (top-level or child subagent) receives its OWN
+//! `BudgetHandle::new(max)` — a distinct `Arc<AtomicUsize>` — so budgets are
+//! independent. Plan 35-02 (D-01/D-04) retired the PROV-10 shared parent↔child
+//! counter; children no longer clone the parent handle.
+//!
+//! `BudgetHandle::clone` STILL shares one counter (the `Arc` is cloned), and
+//! this is still used by gateway/CommandContext reset visibility and the
+//! `reset_is_visible_through_shared_clone` test. The clone-sharing API is
+//! preserved — it is simply no longer used for parent↔child subagent sharing.
+//!
+//! AI-SPEC Pitfall 9 (E-05): use SeqCst ordering only on this counter.
 //! The lax Relaxed variant is forbidden here because the pressure-tier
 //! transitions must be observed in a consistent total order across threads.
 //! The budget_ordering_grep static-grep test enforces this at CI time.
@@ -9,9 +18,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Shared iteration budget handle. Clones share the same underlying counter
-/// via [`Arc`], so parent and child subagent loops can see each other's
-/// deductions without duplicated bookkeeping.
+/// Per-agent iteration budget handle. Clones share the same underlying counter
+/// via [`Arc`] — useful for gateway/CommandContext reset visibility and the
+/// `reset_is_visible_through_shared_clone` test. Each agent loop is given its
+/// OWN fresh handle via `BudgetHandle::new`; cloning for parent↔child subagent
+/// sharing (PROV-10) is retired as of Plan 35-02 (D-04).
 #[derive(Clone)]
 pub struct BudgetHandle {
     remaining: Arc<AtomicUsize>,
@@ -78,6 +89,15 @@ impl BudgetHandle {
         } else {
             Some(prev - 1)
         }
+    }
+
+    /// Refill the budget to `max` in place. The counter lives behind a shared
+    /// `Arc`, so callers holding a clone (e.g. the subagent runner) observe the
+    /// refill too. Called at the start of each top-level user turn so a
+    /// long-lived gateway does not latch at Stop100 forever after the first
+    /// budget-exhausting conversation.
+    pub fn reset(&self) {
+        self.remaining.store(self.max, Ordering::SeqCst);
     }
 
     /// Compute the current pressure tier (D-15).
@@ -170,6 +190,32 @@ mod tests {
         b.consume();
         assert_eq!(b.used(), 3);
         assert_eq!(b.remaining(), 7);
+    }
+
+    #[test]
+    fn reset_refills_to_max_after_exhaustion() {
+        let b = BudgetHandle::new(3);
+        assert_eq!(b.consume(), Some(2));
+        assert_eq!(b.consume(), Some(1));
+        assert_eq!(b.consume(), Some(0));
+        assert_eq!(b.consume(), None, "exhausted → Stop100");
+        b.reset();
+        assert_eq!(b.remaining(), 3, "reset refills to max");
+        assert_eq!(b.pressure(), PressureTier::None);
+        assert_eq!(b.consume(), Some(2), "consume works again after reset");
+    }
+
+    #[test]
+    fn reset_is_visible_through_shared_clone() {
+        // The gateway shares one handle with the subagent runner; reset() on the
+        // parent must refill the clone's view (same Arc) so a new turn starts full.
+        let parent = BudgetHandle::new(2);
+        let child = parent.clone();
+        parent.consume();
+        parent.consume();
+        assert_eq!(child.consume(), None, "shared counter exhausted");
+        parent.reset();
+        assert_eq!(child.remaining(), 2, "clone observes the refill");
     }
 
     #[test]

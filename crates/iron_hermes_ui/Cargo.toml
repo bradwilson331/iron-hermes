@@ -7,7 +7,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-dioxus = { version = "0.7", features = ["fullstack"] }
+dioxus = { version = "=0.7.1", features = ["fullstack"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -16,6 +16,11 @@ tokio = { version = "1", features = ["time"], default-features = false }
 
 # Client-only deps (WASM)
 gloo-timers = { version = "0.3", features = ["futures"] }
+# Phase 26.7.1 Plan 01 (UAT-4 hotfix): std::time::Instant panics on wasm32
+# ("time not implemented on this platform"). web_time::Instant is a drop-in
+# replacement: pub use std::time::Instant on native, Performance.now()-backed
+# shim on wasm32. Same API, no API divergence.
+web-time = "1.1"
 web-sys = { version = "0.3", features = [
     "Window",
     "Element",
@@ -24,6 +29,12 @@ web-sys = { version = "0.3", features = [
     "Clipboard",
     "EventTarget",
     "KeyboardEvent",
+    "Storage",
+    "HtmlElement",
+    "DomTokenList",
+    "CssStyleDeclaration",
+    "DomRect",
+    "PointerEvent",
 ] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -48,6 +59,10 @@ dotenvy = { workspace = true }
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
 tokio = { version = "1", features = ["macros", "rt", "time"], default-features = false }
+# Phase 32.2-05: CancellationToken needed by subagent_tree_json test in state.rs.
+tokio-util = { workspace = true }
+# Phase 34-02: behavioral test for list_sessions Platform::Web filter.
+tempfile = "3"
 
 [features]
 default = ["web"]
@@ -56,3 +71,7 @@ desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
 server = ["dioxus/server", "dep:axum", "tokio/full"]
 demo = []
+# Phase 26.2.1: Gate the legacy Warp-style shell behind an opt-in feature.
+# Default builds mount the new wheel-driven `HermesApp`; enable `legacy-shell`
+# to mount `WarpHermes` instead (kept compiling as a UAT fallback).
+legacy-shell = []

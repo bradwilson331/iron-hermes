@@ -7,7 +7,7 @@
 
 **Goal:** Close all v2.0 deferred requirements (29 carry-overs across 7 categories) **AND** land the Learning Loop foundation (5 new reqs in 2 phases) — the periodic nudge + autonomous skill creation that makes IronHermes self-improving rather than just feature-complete (per hermes-agent design philosophy).
 
-**Active scope (34 reqs across 8 categories):**
+**Active scope (50 reqs across 9 categories):**
 
 | Category | Reqs in v2.1 |
 |----------|--------------|
@@ -19,6 +19,7 @@
 | Gateway formal verification | GW-01, GW-02, GW-03, GW-04, GW-06, GW-07, GW-09, GW-10 |
 | Configuration / setup wizard | CFG-01, CFG-02, CFG-03, CFG-04 |
 | **Learning Loop (NEW for v2.1)** | **LEARN-01, LEARN-02, LEARN-03, LEARN-04, LEARN-05** |
+| Hexapod Integration | HXP-TOOL-01..06, HXP-LOCO-01..05, HXP-NAV-01..04, HXP-DOC-01 |
 
 ### v2.1 Architectural Principles (carried through every phase)
 
@@ -178,6 +179,25 @@ The Learning Loop is the unifying philosophy of v2.1 — Skills + Memory + Sessi
 - [ ] **LEARN-03**: Autonomous skill creation triggers — at task completion, agent evaluates whether the path is worth documenting using a heuristic: (a) 5+ tool calls, (b) recovery from error, (c) user correction, (d) non-obvious workflow that worked. Any trigger fires → write a SKILL.md.
 - [ ] **LEARN-04**: SKILL.md auto-creation format — written to `~/.hermes/skills/` (under a category subdirectory chosen by the agent) following the agentskills.io standard. Frontmatter: `name`, `description`, `version`, `platforms`, `metadata.hermes.{tags, category, fallback_for_toolsets, requires_toolsets}`. Default trust tier on creation: `Self-created` (a new tier added by Phase 28 SKILL-09 work — coordinates with that phase).
 - [ ] **LEARN-05**: `skill_manage` tool with 6 actions — `create`, `patch`, `edit`, `delete`, `write_file`, `remove_file`. Agent defaults to `patch` for updates (passes only `old_string` + `new_string`, mirroring the existing memory tool's substring matching pattern from MEM-03). Token-efficient incremental updates; full rewrites reserved for `edit` action only. Coordinates with Phase 25 toolset registry (registers `skill_manage` as a new toolset entry).
+
+### Hexapod Integration
+
+- [x] **HXP-TOOL-01**: `hexapod_tcp` tool registered in IronHermes ToolRegistry that sends commands to the robot and returns a result
+- [x] **HXP-TOOL-02**: Allowlist + per-command argument bounds validation (compile-time exhaustive match; blocked commands return Ok("Action '...' is blocked"))
+- [x] **HXP-TOOL-03**: Fresh TCP connection to `HEXAPOD_IP:5002` per call (stateless; no persistent socket)
+- [x] **HXP-TOOL-04**: Semantic JSON schema → wire protocol translation in Rust (action enum → CMD_* strings with correct field layout)
+- [x] **HXP-TOOL-05**: Parsed human-readable response for sensor commands (CMD_POWER, CMD_SONIC) with 3s read timeout
+- [x] **HXP-TOOL-06**: Send stop + relax on IronHermes session end via `on_session_end` Tool trait hook
+- [x] **HXP-LOCO-01**: Walk forward/backward/left/right at configurable speed 2–10
+- [x] **HXP-LOCO-02**: Stop and return to neutral stance (CMD_MOVE mode=0)
+- [x] **HXP-LOCO-03**: Read battery voltage with low-battery alert (< 5.5V or < 6.0V threshold)
+- [x] **HXP-LOCO-04**: Read ultrasonic distance in centimeters
+- [x] **HXP-LOCO-05**: Relax servos for safe idle (CMD_RELAX)
+- [x] **HXP-NAV-01**: Rotate in place by degrees (positive = right, negative = left)
+- [x] **HXP-NAV-02**: Set all LEDs to RGB color (0–255 per channel) or turn off
+- [x] **HXP-NAV-03**: Control head pan (50–180°) and tilt (0–180°) independently
+- [x] **HXP-NAV-04**: Buzzer on/off
+- [x] **HXP-DOC-01**: Skill doc at `skills/hexapod/DESCRIPTION.md` with full protocol reference (all CMD_* strings, wire format, action list, blocked commands)
 
 ## Future Requirements
 
@@ -359,6 +379,22 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LEARN-03 | Phase 33 | Pending |
 | LEARN-04 | Phase 33 | Pending |
 | LEARN-05 | Phase 33 | Pending |
+| HXP-TOOL-01 | Phase 27.1.1 | Complete |
+| HXP-TOOL-02 | Phase 27.1.1 | Complete |
+| HXP-TOOL-03 | Phase 27.1.1 | Complete |
+| HXP-TOOL-04 | Phase 27.1.1 | Complete |
+| HXP-TOOL-05 | Phase 27.1.1 | Complete |
+| HXP-TOOL-06 | Phase 27.1.1 | Complete |
+| HXP-LOCO-01 | Phase 27.1.1 | Complete |
+| HXP-LOCO-02 | Phase 27.1.1 | Complete |
+| HXP-LOCO-03 | Phase 27.1.1 | Complete |
+| HXP-LOCO-04 | Phase 27.1.1 | Complete |
+| HXP-LOCO-05 | Phase 27.1.1 | Complete |
+| HXP-NAV-01 | Phase 27.1.2 | Complete |
+| HXP-NAV-02 | Phase 27.1.3 | Complete |
+| HXP-NAV-03 | Phase 27.1.2 | Complete |
+| HXP-NAV-04 | Phase 27.1.2 | Complete |
+| HXP-DOC-01 | Phase 27.1.3 | Complete |
 
 **Coverage:**
 - v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)
@@ -371,4 +407,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-04-11*
-*Last updated: 2026-04-27 — v2.1 expanded scope: + 5 Learning Loop reqs (LEARN-01..05) + 2 phases (32 + 33). Total: 34 reqs across 11 phases.*
+*Last updated: 2026-05-10 — Phase 27.1 import: + 16 Hexapod Integration reqs (HXP-TOOL-01..06, HXP-LOCO-01..05, HXP-NAV-01..04, HXP-DOC-01) across Phases 27.1.1/.2/.3. Total active: 50 reqs across 9 categories.*

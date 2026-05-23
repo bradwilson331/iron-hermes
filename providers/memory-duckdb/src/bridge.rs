@@ -451,7 +451,10 @@ fn handle_recall(conn: &duckdb::Connection, query: &str, limit: u32) -> Result<S
             let target: String = row.get(1)?;
             let relevance_score: f64 = row.get(3)?;
             let snippet = if content.len() > 100 {
-                format!("{}...", &content[..100])
+                format!(
+                    "{}...",
+                    ironhermes_core::truncate_on_char_boundary(&content, 100)
+                )
             } else {
                 content.clone()
             };

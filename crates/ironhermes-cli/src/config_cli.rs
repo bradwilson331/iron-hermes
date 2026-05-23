@@ -75,7 +75,10 @@ fn mask_secret(value: &str) -> String {
         return String::new();
     }
     let prefix_len = value.len().min(6).max(4).min(value.len());
-    format!("{}***", &value[..prefix_len])
+    format!(
+        "{}***",
+        ironhermes_core::truncate_on_char_boundary(value, prefix_len)
+    )
 }
 
 /// Walk a serde_yaml::Value, masking the leaf at every dotted-path that

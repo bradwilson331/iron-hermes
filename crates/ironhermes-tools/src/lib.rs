@@ -15,9 +15,12 @@ pub mod cronjob_tool;
 pub mod delegate_task;
 pub mod execute_code;
 pub mod file_tools;
+pub mod hexapod_tcp; // Phase 27.1.1 — registration in Plan 04 register_defaults
+pub mod hexapod_video; // Phase 27.1.4 — stateless single-frame JPEG capture via port 8002
 pub mod memory_manager_handle;
 pub mod memory_tool;
 pub mod registry;
+pub mod skill_manage; // Phase 33 — learning toolset (LEARN-04, LEARN-05)
 pub mod skills_tool;
 pub mod terminal;
 pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
@@ -32,3 +35,15 @@ pub use registry::{
 };
 pub use toolset_session::RegistryToolsetSession;
 pub use web_extract::WebExtractTool;
+
+// ---------------------------------------------------------------------------
+// Crate-level test utilities
+// ---------------------------------------------------------------------------
+
+/// Shared env-var serialization lock for all hexapod test modules.
+///
+/// Replaces the per-module `static ENV_LOCK` in `hexapod_tcp::tests` and
+/// `hexapod_video::tests`, which raced on `HEXAPOD_IP` across modules.
+/// All call sites use: `ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())`
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

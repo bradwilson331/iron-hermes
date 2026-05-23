@@ -168,12 +168,9 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(),
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    // SP-7: copy verbatim from manifest.rs:57-74
     fn with_test_hermes_home<F: FnOnce(&Path)>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -261,6 +258,24 @@ mod tests {
         );
         let back = serde_json::to_string(&e).unwrap();
         assert!(back.contains("unknownField"));
+    }
+
+    #[test]
+    fn lock_entry_with_local_dir_source_round_trips() {
+        let json = r#"{"name":"my-skill","source":"local-dir",
+            "identifier":"/home/user/my-skill","repoPath":"SKILL.md",
+            "snapshotHash":"","computedHash":"abc123",
+            "installedAt":"2026-05-08T00:00:00Z"}"#;
+        let e: SkillLockEntry = serde_json::from_str(json)
+            .expect("local-dir source must deserialize without error");
+        assert_eq!(e.source, "local-dir");
+        assert_eq!(e.snapshot_hash, "");
+        assert_eq!(e.identifier, "/home/user/my-skill");
+        assert_eq!(e.repo_path, "SKILL.md");
+        assert_eq!(e.computed_hash, "abc123");
+        let back = serde_json::to_string(&e).unwrap();
+        assert!(back.contains(r#""source":"local-dir""#));
+        assert!(back.contains(r#""snapshotHash":"""#));
     }
 
     #[test]
@@ -456,11 +471,9 @@ mod migration_tests {
     use super::*;
     use chrono::Utc;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-    static ENV_LOCK_MIG: Mutex<()> = Mutex::new(());
 
     fn with_test_hermes_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = ENV_LOCK_MIG.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {

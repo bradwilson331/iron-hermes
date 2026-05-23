@@ -8,6 +8,7 @@ use ironhermes_cron::{
 use std::fmt::Write as FmtWrite;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
+use tracing::error;
 
 // ---------------------------------------------------------------------------
 // CronCommands
@@ -87,8 +88,15 @@ pub enum CronCommands {
     },
     /// Show cron system status
     Status,
-    /// Manually trigger a tick check
+    /// Manually trigger a tick check (single-shot one tick cycle, then exit)
     Tick,
+    /// Trigger a job immediately (sets next_run_at = now, fires on next tick)
+    Trigger {
+        /// Job ID or name (case-insensitive)
+        job_id: String,
+    },
+    /// Run as a long-lived cron daemon (ticks every 60s without gateway)
+    Daemon,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +128,8 @@ pub async fn handle_cron_command(cmd: CronCommands) -> Result<()> {
         CronCommands::Remove { job_id, force } => cmd_remove(job_id, force),
         CronCommands::Status => cmd_status(),
         CronCommands::Tick => cmd_tick().await,
+        CronCommands::Trigger { job_id } => cmd_trigger(job_id),
+        CronCommands::Daemon => cmd_daemon().await,
     }
 }
 
@@ -440,58 +450,110 @@ fn cmd_status() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// cmd_tick
+// cmd_tick  (single-shot: acquire lock, scan due jobs, run each, exit)
 // ---------------------------------------------------------------------------
 
 async fn cmd_tick() -> Result<()> {
-    let store = Arc::new(Mutex::new(open_store()?));
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    let ctx = build_cron_runner_ctx(&config).await?;
 
-    let total = store
-        .lock()
-        .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?
-        .list_jobs()
-        .len();
-    println!("{}", format!("Tick: checking {} jobs...", total).dimmed());
+    // run_tick_check acquires the tick file-lock internally; acquiring it
+    // here too would deadlock against ourselves because .tick.lock is an
+    // O_CREAT|O_EXCL file lock with no same-process re-entry (the PID-alive
+    // check sees our own PID and returns None).
+    let (due_jobs, tick_result, _lock) =
+        ironhermes_cron::run_tick_check(&ctx.job_store).await?;
 
-    let (due_jobs, result, _lock_guard) = run_tick_check(&store).await?;
+    if _lock.is_none() {
+        println!("Another tick is already running. Exiting.");
+        return Ok(());
+    }
 
     for job in &due_jobs {
-        println!("  {}", format!("Running job: {}", job.name).yellow());
-
-        // Complete the run with placeholder (full agent execution via gateway)
-        match ironhermes_cron::complete_job_run(
-            &store,
-            job,
-            "[CLI tick: agent execution runs via gateway]",
-            true,
-        )
-        .await
-        {
-            Ok(delivery_target) => {
-                let target_str = delivery_target
-                    .map(|t| format!("{} ({})", t.platform, t.chat_id))
-                    .unwrap_or_else(|| "local file".to_string());
-                println!(
-                    "  {}",
-                    format!("Job complete: {} --- delivered to {}", job.name, target_str).dimmed()
-                );
-            }
-            Err(e) => {
-                eprintln!("  {}: {} — {}", "Error".red(), job.name, e);
-            }
+        if let Err(e) = ironhermes_cron_runner::run_cron_job(job, &ctx).await {
+            error!(job_id=%job.id, "tick: job failed: {}", e);
         }
     }
 
     println!(
-        "{}",
-        format!(
-            "Tick complete. {} job(s) ran, {} skipped.",
-            result.jobs_run, result.jobs_skipped
-        )
-        .dimmed()
+        "Tick complete. {} due, {} ran, {} idle.",
+        due_jobs.len(),
+        tick_result.jobs_run,
+        tick_result.jobs_idle,
     );
-
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cmd_trigger  (synchronous — mirrors cmd_pause style)
+// ---------------------------------------------------------------------------
+
+fn cmd_trigger(job_id: String) -> Result<()> {
+    let mut store = ironhermes_cron::JobStore::new()?;
+    store.trigger_job(&job_id)?;
+    let resolved = store
+        .get_job(&job_id)
+        .map(|j| j.id.clone())
+        .unwrap_or_else(|| job_id.clone());
+    println!("Triggered job {}", resolved);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cmd_daemon  (long-running tick loop, terminable by Ctrl+C)
+// ---------------------------------------------------------------------------
+
+async fn cmd_daemon() -> Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_for_signal = cancel.clone();
+
+    // Spawn ctrl-c watcher
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Received Ctrl+C, cancelling cron daemon...");
+        cancel_for_signal.cancel();
+    });
+
+    println!("Cron daemon running. Press Ctrl+C to stop.");
+    cmd_daemon_with_cancel(cancel).await?;
+    println!("Cron daemon stopped.");
+    Ok(())
+}
+
+/// Testable inner daemon runner. Accepts a pre-constructed cancel token so
+/// tests can pass a pre-cancelled token and assert the daemon exits promptly.
+async fn cmd_daemon_with_cancel(cancel: tokio_util::sync::CancellationToken) -> Result<()> {
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    let ctx = Arc::new(build_cron_runner_ctx(&config).await?);
+    ironhermes_cron_runner::run_tick_loop(ctx, cancel).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// build_cron_runner_ctx  (shared by cmd_tick and cmd_daemon)
+// ---------------------------------------------------------------------------
+
+async fn build_cron_runner_ctx(
+    config: &ironhermes_core::config::Config,
+) -> Result<ironhermes_cron_runner::CronRunnerContext> {
+    use tokio::sync::RwLock;
+
+    let job_store = Arc::new(Mutex::new(ironhermes_cron::JobStore::new()?));
+
+    // ToolRegistry: CLI cron path uses an empty registry (no gateway tools).
+    // TODO: wire skills/memory for CLI cron path in a future phase.
+    let tool_registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
+
+    Ok(ironhermes_cron_runner::CronRunnerContext {
+        job_store,
+        skill_registry: None,   // TODO: load SkillRegistry from HERMES_HOME for CLI cron
+        tool_registry,
+        memory_manager: None,   // TODO: wire MemoryManager for CLI cron
+        hook_registry: None,    // TODO: wire HookRegistry for CLI cron
+        config: config.clone(),
+        mcp_manager: None,      // TODO: wire McpManager for CLI cron
+        tg_client: None,        // CLI path is always standalone (no live TG adapter)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +567,164 @@ fn open_store() -> Result<JobStore> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Phase 32.1-07 tests (TDD RED — new CLI subcommands)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests_phase_32_1 {
+    use super::*;
+    use ironhermes_cron::{JobStore, ScheduleParsed};
+    use tempfile::TempDir;
+
+    // Serialise env-mutating tests through the shared bin-wide lock so they
+    // don't race other modules' IRONHERMES_HOME mutations.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_env_lock()
+    }
+
+    fn make_store_with_job(dir: &TempDir) -> (JobStore, ironhermes_cron::CronJob) {
+        let cron_dir = dir.path().join("cron");
+        let mut store = JobStore::open(cron_dir).expect("open store");
+        let job = store
+            .add_job(
+                "daily-sync",
+                "do something",
+                ScheduleParsed::Interval {
+                    minutes: 60,
+                    display: "every 60m".to_string(),
+                },
+                "every 60m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add job");
+        store.save().expect("save");
+        (store, job)
+    }
+
+    // Test 1: Trigger by id sets next_run_at
+    #[test]
+    fn test1_trigger_by_id_sets_next_run_at() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        let (_store, job) = make_store_with_job(&dir);
+
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        let result = cmd_trigger(job.id.clone());
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_ok(), "cmd_trigger by id should succeed: {:?}", result);
+
+        // Reload and check next_run_at is set close to now
+        let cron_dir = dir.path().join("cron");
+        let reloaded = JobStore::open(cron_dir).expect("reload");
+        let j = reloaded.get_job(&job.id).expect("job present");
+        let nra = j.next_run_at.expect("next_run_at should be set");
+        let diff = (chrono::Utc::now() - nra).abs();
+        assert!(
+            diff < chrono::Duration::seconds(5),
+            "next_run_at should be within 5s of now, got diff={}s",
+            diff.num_seconds()
+        );
+    }
+
+    // Test 2: Trigger by name sets next_run_at
+    #[test]
+    fn test2_trigger_by_name_sets_next_run_at() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        let (_store, job) = make_store_with_job(&dir);
+
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        let result = cmd_trigger("daily-sync".to_string());
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_ok(), "cmd_trigger by name should succeed: {:?}", result);
+
+        let cron_dir = dir.path().join("cron");
+        let reloaded = JobStore::open(cron_dir).expect("reload");
+        let j = reloaded.get_job(&job.id).expect("job present");
+        let nra = j.next_run_at.expect("next_run_at set");
+        let diff = (chrono::Utc::now() - nra).abs();
+        assert!(diff < chrono::Duration::seconds(5));
+    }
+
+    // Test 3: Trigger nonexistent returns Err with "job not found"
+    #[test]
+    fn test3_trigger_nonexistent_returns_err() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        let cron_dir = dir.path().join("cron");
+        JobStore::open(cron_dir).expect("open empty store");
+
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        let result = cmd_trigger("nope".to_string());
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_err(), "should fail for nonexistent job");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.to_lowercase().contains("not found") || err_msg.to_lowercase().contains("no job"),
+            "error should mention not found: {}",
+            err_msg
+        );
+    }
+
+    // Test 4: TickOnce exits (cmd_tick returns)
+    #[tokio::test]
+    async fn test4_tick_once_exits() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+
+        // Use a short timeout to verify it doesn't hang
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            handle_cron_command(CronCommands::Tick),
+        )
+        .await;
+
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_ok(), "cmd_tick should exit within 10s");
+    }
+
+    // Test 5: Daemon with pre-cancelled token exits promptly
+    #[tokio::test]
+    async fn test5_daemon_with_precancelled_token_exits() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel(); // pre-cancel so daemon exits immediately
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            cmd_daemon_with_cancel(cancel),
+        )
+        .await;
+
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_ok(), "cmd_daemon_with_cancel should exit within 3s when pre-cancelled");
+        assert!(result.unwrap().is_ok(), "cmd_daemon_with_cancel should return Ok");
+    }
+
+    // Test 6: tg_client = None in build_cron_runner_ctx (source assertion)
+    // Verified via source grep in acceptance criteria, not as a runtime test.
+    // This test just confirms cmd_tick uses the runner crate.
+    #[test]
+    fn test6_cron_commands_enum_has_trigger_and_daemon() {
+        // Verify the enum variants exist by constructing them
+        let _trigger = CronCommands::Trigger { job_id: "test".to_string() };
+        let _daemon = CronCommands::Daemon;
+        // If these compile, the variants exist
+    }
+}
 
 #[cfg(test)]
 mod tests {

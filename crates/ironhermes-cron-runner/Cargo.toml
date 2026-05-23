@@ -1,0 +1,27 @@
+[package]
+name = "ironhermes-cron-runner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Agent execution runner for IronHermes cron jobs"
+
+[dependencies]
+ironhermes-core  = { path = "../ironhermes-core" }
+ironhermes-agent = { path = "../ironhermes-agent" }
+ironhermes-tools = { path = "../ironhermes-tools" }
+ironhermes-hooks = { path = "../ironhermes-hooks" }
+ironhermes-cron  = { path = "../ironhermes-cron" }
+ironhermes-mcp   = { path = "../ironhermes-mcp" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tempfile = { workspace = true }

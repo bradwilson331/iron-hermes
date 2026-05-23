@@ -11,9 +11,10 @@ use ironhermes_core::{DEFAULT_TOOLSETS, ToolsConfig, config_setter, profile};
 use ironhermes_tools::ToolRegistry;
 use std::path::Path;
 
-/// D-01/D-04: The seven concrete toolsets shipped in v2.1 (browser added in Phase 25.1).
+/// D-01/D-04: The eight concrete toolsets shipped — browser added in Phase 25.1,
+/// learning added in Phase 33 (autonomous skill creation, LEARN-03..05).
 const KNOWN_TOOLSETS: &[&str] = &[
-    "web", "code", "memory", "agent", "skills", "session", "browser",
+    "web", "code", "memory", "agent", "skills", "session", "browser", "learning",
 ];
 
 #[derive(Subcommand)]
@@ -251,6 +252,8 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
     m.insert("agent", &["delegate_task", "cronjob"]);
     m.insert("skills", &["skills"]);
     m.insert("session", &["session_search"]);
+    // Phase 33: learning toolset — agent autonomously authors SKILL.md via skill_manage.
+    m.insert("learning", &["skill_manage"]);
     m.insert(
         "browser",
         &[
@@ -477,8 +480,8 @@ mod tests {
         );
         assert_eq!(
             KNOWN_TOOLSETS.len(),
-            7,
-            "KNOWN_TOOLSETS must have exactly 7 entries after Phase 25.1 extension"
+            8,
+            "KNOWN_TOOLSETS must have exactly 8 entries after Phase 33 addition of learning toolset"
         );
     }
 

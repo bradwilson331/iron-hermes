@@ -252,12 +252,19 @@ impl ContextCompressorHandle for ContextEngineAdapter {
     }
 }
 
-/// Adapter: AgentLoop → AgentLoopHandle for Tier D session control.
-struct AgentLoopAdapter(Arc<ironhermes_agent::agent_loop::AgentLoop>);
-impl AgentLoopHandle for AgentLoopAdapter {
+/// Adapter: AgentRuntime → AgentLoopHandle for Tier D session control.
+///
+/// Phase 28.1-05: the App-level Arc<AgentLoop> is replaced by Arc<AgentRuntime>.
+/// AgentLoopHandle only exposes is_running() → bool; the runtime has no concept
+/// of a "running turn" at the handle level (the cancel_child token on App tracks
+/// that). Conservative false matches the prior AgentLoopAdapter behaviour and
+/// satisfies all existing /status consumers without requiring a live-state probe.
+struct AgentRuntimeAdapter(Arc<ironhermes_agent::AgentRuntime>);
+impl AgentLoopHandle for AgentRuntimeAdapter {
     fn is_running(&self) -> bool {
-        // Conservative: assume running if we have a handle.
-        // Plans 01-04 will wire the actual running-state check.
+        // Conservative: the runtime does not expose a live-turn predicate at the
+        // handle level. Return false so /status shows "idle" consistently; the
+        // status-line agent-running pill (AtomicBool) is the accurate indicator.
         false
     }
 }
@@ -282,6 +289,10 @@ pub enum SlashOutcome {
     McpReload,
     /// Session cleared; string is the "session cleared" confirmation message.
     ClearSession(String),
+    /// Skills registry reloaded; string is the diff/summary message.
+    SkillsReload(String),
+    /// A skill was activated via SKILL-13 fallback; inject into next turn.
+    SkillActivated { name: String, body: String },
     /// Input started with `/` but matched no command. `hint` may contain a
     /// "Did you mean `/X`?" suggestion from `suggest_typo`.
     Unknown { input: String, hint: String },
@@ -360,15 +371,26 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
             }
         }
         ResolveResult::NotFound => {
-            // D-18 item 8 — typo suggester integration point.
-            let known = collect_known_command_names(&app.command_router);
-            let stripped = input
+            // SKILL-13 fallback: check skill registry before typo-hint.
+            let cmd_token = input
                 .trim_start_matches('/')
                 .split_whitespace()
                 .next()
                 .unwrap_or("");
+            if let Some(registry) = &app.skill_registry {
+                if let Some(record) = registry.find(cmd_token) {
+                    if let Some(body) = registry.read_content(&record.name) {
+                        return SlashOutcome::SkillActivated {
+                            name: record.name.clone(),
+                            body,
+                        };
+                    }
+                }
+            }
+            // D-18 item 8 — typo suggester integration point.
+            let known = collect_known_command_names(&app.command_router);
             let known_refs: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
-            let hint = match suggest_typo(stripped, &known_refs) {
+            let hint = match suggest_typo(cmd_token, &known_refs) {
                 Some(candidate) => format!("Did you mean `/{candidate}`?"),
                 None => "Type /help for the list of commands.".to_string(),
             };
@@ -572,7 +594,8 @@ fn build_command_context(app: &App) -> CommandContext {
         ctx = ctx.with_history(snapshot);
     }
     {
-        let handle: Arc<dyn AgentLoopHandle> = Arc::new(AgentLoopAdapter(app.agent_loop.clone()));
+        // Phase 28.1-05: re-pointed at the runtime (App-level AgentLoop removed).
+        let handle: Arc<dyn AgentLoopHandle> = Arc::new(AgentRuntimeAdapter(app.agent_runtime.clone()));
         ctx = ctx.with_agent_loop(handle);
     }
     // Phase 22.4.2.1 Plan 01: wire CronJobReader as 11th with_* call.
@@ -596,6 +619,10 @@ fn build_command_context(app: &App) -> CommandContext {
     // Phase 25.3 D-T-3: attach TrajectoryWriter for slash-dispatch context.
     if let Some(tw) = &app.trajectory_writer {
         ctx = ctx.with_trajectory_writer(tw.clone());
+    }
+    // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in TUI.
+    if let Some(sr) = &app.skill_registry {
+        ctx = ctx.with_skill_registry(sr.clone());
     }
     ctx
 }
@@ -1003,25 +1030,25 @@ async fn handle_subsystem_mutator(
             }
         }
         "personality" => {
-            // Core returned Output(overlay_text) for a named preset; apply to next turn.
-            // For list mode or "not configured" case, pass through.
-            match core_result {
-                CommandResult::Output(text)
-                    if !text.starts_with("Available")
-                        && !text.starts_with("Personality registry")
-                        && !text.starts_with("No personalities") =>
-                {
-                    // Apply overlay as system-prompt injection for next turn.
-                    // App.next_turn_personality_overlay: Option<String> stores pending injection.
-                    app.next_turn_personality_overlay = Some(text.clone());
-                    SlashOutcome::Handled(format!(
-                        "Personality applied ({} chars). Active next turn.",
-                        text.len()
-                    ))
+                // Phase 21.8.3.1 D-05: "clear" is intercepted before any registry/output
+                // matching. Sets active_personality_overlay = None and returns immediately.
+                // Core handler has no "clear" case — without this pre-check, "clear" would
+                // be looked up as a preset name and return Error("Unknown personality: clear").
+                if args.first().map(|s| *s) == Some("clear") {
+                    app.active_personality_overlay = None;
+                    return SlashOutcome::Handled("Personality cleared.".to_string());
                 }
-                _ => map_core_to_slash_outcome(core_result.clone()),
+                match core_result {
+                    CommandResult::PersonalityApplied(text) => {
+                        app.active_personality_overlay = Some(text.clone());
+                        SlashOutcome::Handled(format!(
+                            "Personality applied ({} chars). Active next turn.",
+                            text.len()
+                        ))
+                    }
+                    _ => map_core_to_slash_outcome(core_result.clone()),
+                }
             }
-        }
         "compress" => {
             // Core returned informational text per Task 1 deferral note.
             // Future: trigger actual compression hook here on demand.
@@ -1048,5 +1075,10 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
             hint: "Unknown command. Type /help for the list.".to_string(),
         },
         CommandResult::McpReload => SlashOutcome::McpReload,
+        CommandResult::SkillsReload => SlashOutcome::SkillsReload(
+            "Skills reloaded.".to_string(),
+        ),
+        CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
+        CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
     }
 }

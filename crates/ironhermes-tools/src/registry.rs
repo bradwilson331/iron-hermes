@@ -67,6 +67,15 @@ pub trait Tool: Send + Sync {
         raw.clone()
     }
 
+    /// D-13 (Phase 27.1.1): called on REPL/CLI/TUI session end so tools
+    /// can fire a final cleanup. Default is a synchronous no-op — all
+    /// 25 existing `impl Tool` blocks get this for free (zero breaking
+    /// changes). Override to run fire-and-forget cleanup; per D-14 the
+    /// override uses `tokio::spawn(async move { ... })` internally so
+    /// the trait method itself stays `fn` (not `async fn`) and the
+    /// trait remains object-safe for `Box<dyn Tool>`.
+    fn on_session_end(&self) {}
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
 }
 
@@ -85,7 +94,11 @@ pub type InterceptHandler = std::sync::Arc<
 >;
 
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    /// Phase 32.1-06: changed from `Box<dyn Tool>` to `Arc<dyn Tool>` to enable
+    /// `scope_to()` (which constructs a filtered clone without a Clone bound on dyn Tool).
+    /// The public `register` / `register_dynamic` API still accepts `Box<dyn Tool>`;
+    /// we convert to Arc on insert so all existing callers are unchanged.
+    tools: HashMap<String, Arc<dyn Tool>>,
     guardrails: Vec<Box<dyn ironhermes_hooks::GuardrailHook>>,
     error_detail: ironhermes_hooks::ErrorDetailLevel,
     /// D-14 (Phase 25): intercepted tools stored separately from regular tools.
@@ -121,7 +134,7 @@ impl ToolRegistry {
             "register: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
             name,
         );
-        self.tools.insert(name, tool);
+        self.tools.insert(name, Arc::from(tool));
     }
 
     /// Register a tool dynamically (e.g., from MCP discovery). Per D-10.
@@ -135,7 +148,7 @@ impl ToolRegistry {
             "register_dynamic: name '{}' already registered as an intercepted tool — schema duplication blocked at registry build (D-15)",
             name,
         );
-        self.tools.insert(name, tool);
+        self.tools.insert(name, Arc::from(tool));
     }
 
     /// Register an intercepted tool by name, schema, and async handler (D-12 / D-14, Phase 25).
@@ -213,6 +226,33 @@ impl ToolRegistry {
 
     /// Unique set of toolset() values across all currently-registered tools, sorted alphabetically.
     /// Per D-03: membership is read at runtime from the trait, no separate table.
+    /// Return a new `ToolRegistry` that contains only the tools whose
+    /// `toolset()` value is listed in `toolset_names`.
+    ///
+    /// Added in Phase 32.1 Plan 06 to implement
+    /// D-CONTEXT §Per-job runtime overrides: "enabled_toolsets ⇒ scoped tool registry".
+    /// The original `Arc<RwLock<ToolRegistry>>` is NOT mutated — callers get an
+    /// independent view. Guardrails, intercepts, and `toolset_config` are NOT
+    /// carried over (the scoped registry is lightweight; callers may re-apply
+    /// them if needed).
+    pub fn scope_to(&self, toolset_names: &[String]) -> Self {
+        let allowed: std::collections::HashSet<&str> =
+            toolset_names.iter().map(|s| s.as_str()).collect();
+        let tools = self
+            .tools
+            .iter()
+            .filter(|(_, t)| allowed.contains(t.toolset()))
+            .map(|(k, t)| (k.clone(), t.clone()))
+            .collect();
+        Self {
+            tools,
+            guardrails: Vec::new(),
+            error_detail: self.error_detail.clone(),
+            intercepts: HashMap::new(),
+            toolset_config: None,
+        }
+    }
+
     /// Only includes regular tools (from the `tools` map); intercepted tools have no Tool::toolset()
     /// method. Plan 4's `hermes toolset list` presents intercepted-only names through a separate path.
     pub fn list_toolsets(&self) -> Vec<String> {
@@ -474,19 +514,74 @@ impl ToolRegistry {
         names
     }
 
+    /// D-15 (Phase 27.1.1): call `on_session_end` on every registered tool.
+    /// Sync method — returns immediately. Fire-and-forget overrides (e.g.,
+    /// `HexapodTcpTool::on_session_end` per D-14) internally `tokio::spawn`
+    /// an async task; this method does not await those tasks.
+    ///
+    /// Call site contract: invoke AFTER any registry write lock is dropped
+    /// (use `registry.read().await.call_session_end_hooks()`) — see Pitfall 6
+    /// in 27.1.1-RESEARCH.md. CLI/TUI shutdown paths wire this in Plan 04.
+    pub fn call_session_end_hooks(&self) {
+        for tool in self.tools.values() {
+            tool.on_session_end();
+        }
+    }
+
+    /// MUST be the single source of truth for default tool registration.
+    ///
+    /// Do NOT hand-roll duplicate tool lists in production paths — add new tools
+    /// here and they will automatically appear in every IronHermes entry point
+    /// (CLI REPL, CLI batch, ratatui TUI, iron_hermes_ui, gateway).
+    ///
+    /// To substitute a custom terminal (e.g., one wired to a ProcessRegistry),
+    /// call `register_defaults_except(&["terminal"])` then register your custom
+    /// terminal variant afterwards.
+    ///
+    /// Current default tool set (Phase 27.1.4):
+    ///   terminal, read_file, write_file, patch_file, search_files,
+    ///   web_search, web_read, hexapod_tcp, hexapod_video
     pub fn register_defaults(&mut self) {
+        self.register_defaults_except(&[]);
+    }
+
+    /// Register all default tools except those whose `name()` is in `skip`.
+    ///
+    /// MUST be the single source of truth for default tool registration.
+    /// Do NOT hand-roll duplicate tool lists in production paths.
+    ///
+    /// Production paths that need a process-registry-wired terminal call:
+    /// ```rust,ignore
+    /// registry.register_defaults_except(&["terminal"]);
+    /// registry.register_terminal_tool_with_process_registry(process_registry);
+    /// ```
+    pub fn register_defaults_except(&mut self, skip: &[&str]) {
         use crate::file_tools::{PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+        use crate::hexapod_tcp::HexapodTcpTool;
+        use crate::hexapod_video::HexapodVideoTool; // Phase 27.1.4
         use crate::terminal::TerminalTool;
         use crate::web_read::WebReadTool;
         use crate::web_search::WebSearchTool;
 
-        self.register(Box::new(TerminalTool::new()));
-        self.register(Box::new(ReadFileTool));
-        self.register(Box::new(WriteFileTool));
-        self.register(Box::new(PatchFileTool));
-        self.register(Box::new(SearchFilesTool));
-        self.register(Box::new(WebSearchTool));
-        self.register(Box::new(WebReadTool));
+        macro_rules! register_unless_skipped {
+            ($tool:expr, $name:expr) => {
+                if !skip.contains(&$name) {
+                    self.register($tool);
+                }
+            };
+        }
+
+        register_unless_skipped!(Box::new(TerminalTool::new()), "terminal");
+        register_unless_skipped!(Box::new(ReadFileTool), "read_file");
+        register_unless_skipped!(Box::new(WriteFileTool), "write_file");
+        register_unless_skipped!(Box::new(PatchFileTool), "patch"); // PatchFileTool::name() returns "patch"
+        register_unless_skipped!(Box::new(SearchFilesTool), "search_files");
+        register_unless_skipped!(Box::new(WebSearchTool), "web_search");
+        register_unless_skipped!(Box::new(WebReadTool), "web_read");
+        // HXP-TOOL-01 (Phase 27.1.1): hexapod TCP tool — is_available() hides this when HEXAPOD_IP is unset.
+        register_unless_skipped!(Box::new(HexapodTcpTool), "hexapod_tcp");
+        // Phase 27.1.4: hexapod video tool — is_available() hides this when HEXAPOD_IP is unset.
+        register_unless_skipped!(Box::new(HexapodVideoTool), "hexapod_video");
     }
 
     /// Register the memory tool with a shared `MemoryManager` handle (Plan 20-02).
@@ -497,6 +592,18 @@ impl ToolRegistry {
     pub fn register_memory_tool(&mut self, manager: SharedMemoryManager) {
         use crate::memory_tool::MemoryTool;
         self.register(Box::new(MemoryTool::new(manager)));
+    }
+
+    /// Register the skill_manage tool for the 'learning' toolset (Phase 33).
+    ///
+    /// No constructor args — `SkillManageTool` is stateless and uses
+    /// `get_hermes_home()` internally for path resolution. Callers invoke
+    /// this when the 'learning' toolset is enabled (Plan 33-03 wires the
+    /// entry points). Not added to `register_defaults_except` — same gating
+    /// pattern as `register_memory_tool` ('memory' toolset opt-in).
+    pub fn register_skill_manage_tool(&mut self) {
+        use crate::skill_manage::SkillManageTool;
+        self.register(Box::new(SkillManageTool::new()));
     }
 
     /// Register the cronjob tool with a shared JobStore.
@@ -2388,6 +2495,114 @@ mod tests {
             navigate.toolset(),
             navigate.is_available(),
             navigate.prerequisites().len()
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 27.1.1 gap-01: canonical entry-point regression tests
+    //
+    // These tests are the structural guard against tool-registration drift.
+    // If a new tool is added to register_defaults_except() but bypassed by a
+    // production entry point, the cross-check tests below catch it at CI time.
+    // ---------------------------------------------------------------------------
+
+    /// Regression test for HXP-TOOL-01 (Phase 27.1.1 UAT failure root cause).
+    ///
+    /// register_defaults() MUST include hexapod_tcp. The first UAT attempt failed
+    /// because production paths bypassed register_defaults() and hand-rolled their
+    /// own lists without hexapod_tcp. This test ensures the canonical entry point
+    /// always includes it, so any path that delegates to register_defaults[_except]
+    /// inherits hexapod_tcp automatically.
+    #[test]
+    fn test_register_defaults_includes_hexapod_tcp() {
+        // HEXAPOD_IP may not be set in CI — we check tool registration, not availability.
+        // get_definitions(None) returns ALL registered tools regardless of is_available().
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        let names = registry.list_tools();
+        assert!(
+            names.contains(&"hexapod_tcp"),
+            "register_defaults() MUST register hexapod_tcp; \
+             missing = tool-registration drift that caused Phase 27.1.1 UAT failure. \
+             All tools registered: {:?}",
+            names
+        );
+    }
+
+    /// register_defaults() MUST include hexapod_video (Phase 27.1.4).
+    #[test]
+    fn test_register_defaults_includes_hexapod_video() {
+        // HEXAPOD_IP may not be set in CI — we check tool registration, not availability.
+        // list_tools() returns ALL registered tools regardless of is_available().
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        let names = registry.list_tools();
+        assert!(
+            names.contains(&"hexapod_video"),
+            "register_defaults() MUST register hexapod_video; \
+             all tools registered: {:?}",
+            names
+        );
+    }
+
+    /// register_defaults_except(&["terminal"]) MUST skip terminal and register everything else.
+    ///
+    /// This is the canonical call pattern for production paths that supply their own
+    /// process-registry-wired terminal (app_runtime_factory, event_loop).
+    #[test]
+    fn test_register_defaults_except_terminal_skips_terminal_only() {
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults_except(&["terminal"]);
+        let names = registry.list_tools();
+
+        assert!(
+            !names.contains(&"terminal"),
+            "register_defaults_except(&[\"terminal\"]) must NOT register the plain terminal; \
+             got tools: {:?}",
+            names
+        );
+
+        // All other defaults must still be present.
+        // Note: PatchFileTool::name() returns "patch" (not "patch_file").
+        for expected in &[
+            "read_file",
+            "write_file",
+            "patch",
+            "search_files",
+            "web_search",
+            "web_read",
+            "hexapod_tcp",
+            "hexapod_video",
+        ] {
+            assert!(
+                names.contains(expected),
+                "register_defaults_except(&[\"terminal\"]) must still register '{}'; \
+                 got tools: {:?}",
+                expected,
+                names
+            );
+        }
+    }
+
+    /// register_defaults() and register_defaults_except(&[]) must produce the same tool set.
+    ///
+    /// Cross-check: if these diverge, one or more tool registrations in
+    /// register_defaults_except are gated incorrectly.
+    #[test]
+    fn test_register_defaults_and_except_empty_produce_same_set() {
+        let mut reg_a = ToolRegistry::new();
+        reg_a.register_defaults();
+        let mut names_a = reg_a.list_tools();
+        names_a.sort();
+
+        let mut reg_b = ToolRegistry::new();
+        reg_b.register_defaults_except(&[]);
+        let mut names_b = reg_b.list_tools();
+        names_b.sort();
+
+        assert_eq!(
+            names_a, names_b,
+            "register_defaults() and register_defaults_except(&[]) must register identical tool sets"
         );
     }
 }

@@ -505,6 +505,7 @@ pub fn parse_anthropic_response(response: &AnthropicResponse) -> (ChatResponse, 
         tool_calls: tool_calls_opt,
         tool_call_id: None,
         name: None,
+        is_recall_context: false,
     };
 
     let finish_reason = response
@@ -925,6 +926,7 @@ mod tests {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }];
 
         let (_, msgs) = adapt_messages(&messages);
@@ -1153,6 +1155,7 @@ mod tests {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }];
 
         let (_, msgs) = adapt_messages(&messages);
@@ -1186,6 +1189,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         };
         let (_sys, msgs) = adapt_messages(&[user]);
         assert_eq!(msgs.len(), 1);
@@ -1243,6 +1247,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         };
         let (_sys, msgs) = adapt_messages(&[user]);
         let json = serde_json::to_string(&msgs[0]).unwrap();

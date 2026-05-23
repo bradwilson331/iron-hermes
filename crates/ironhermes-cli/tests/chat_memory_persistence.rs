@@ -125,16 +125,33 @@ fn run_chat_and_run_single_both_wire_memory_manager() {
     .expect("read main.rs");
 
     let build_manager_count = main_src.matches("build_memory_manager").count();
-    let register_count = main_src.matches("register_memory_tool").count();
+    let memory_manager_input_count = main_src.matches("memory_manager:").count();
     let set_manager_count = main_src.matches("set_memory_manager").count();
 
     assert!(
         build_manager_count >= 3,
         "expected >=3 build_memory_manager calls (run_gateway + run_chat + run_single), got {build_manager_count}"
     );
+    // Phase 25.6 moved the actual `register_memory_tool` call into the shared
+    // runtime factory (build_app_runtime_bundle). main.rs no longer registers the
+    // tool inline; it builds the manager per run path and threads it into the
+    // factory via the AppRuntimeFactoryInput `memory_manager:` field. Assert both
+    // halves of that contract: the factory registers the tool, and main.rs feeds
+    // the manager into the factory at every run path.
+    let factory_src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ironhermes-agent/src/app_runtime_factory.rs"),
+    )
+    .expect("read app_runtime_factory.rs");
     assert!(
-        register_count >= 3,
-        "expected >=3 register_memory_tool calls (gateway rpc + gateway main + chat + single); got {register_count}"
+        factory_src.contains("register_memory_tool("),
+        "Fix 2 regression: the shared runtime factory must call register_memory_tool() — \
+         memory wiring moved here in Phase 25.6"
+    );
+    assert!(
+        memory_manager_input_count >= 3,
+        "expected >=3 `memory_manager:` factory-input fields (gateway + chat + single threading \
+         the manager into build_app_runtime_bundle); got {memory_manager_input_count}"
     );
     assert!(
         set_manager_count >= 3,

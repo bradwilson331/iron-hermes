@@ -149,6 +149,9 @@ pub struct PaletteItem {
 pub struct Tab {
     pub label: String,
     pub live: bool,
+    /// Session key used by `WarpHermes::on_tab_click` to switch the active session.
+    /// Populated from the server-returned session ID (Phase 26.2 D-09).
+    pub session_id: String,
 }
 
 /// One side-panel message (`who: "user" | "hermes"`). When `tool` is `Some`,
@@ -166,6 +169,24 @@ pub struct Message {
 pub struct TokenBudget {
     pub used: u32,
     pub max: u32,
+}
+
+/// Compact per-session summary rendered as a memory card in the side panel.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct SessionMemory {
+    pub session_id: String,
+    pub label: String,
+    pub is_live: bool,
+    pub first_time: String,
+    pub last_time: String,
+    /// Number of user turns in this session.
+    pub exchange_count: u32,
+    /// Last known token usage.
+    pub token_count: u32,
+    /// Personality slug active in this session.
+    pub personality: String,
+    /// Last user message, truncated to ≤160 chars.
+    pub last_input: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -528,14 +549,414 @@ pub fn demo_tabs() -> Vec<Tab> {
         Tab {
             label: "ironhermes chat".into(),
             live: true,
+            session_id: "demo-0".to_string(),
         },
         Tab {
             label: "cargo watch".into(),
             live: true,
+            session_id: "demo-1".to_string(),
         },
         Tab {
             label: "agent · scratch".into(),
             live: false,
+            session_id: "demo-2".to_string(),
         },
     ]
+}
+
+// ===========================================================================
+// Phase 26.2.1 — Wheel-menu UI primitives (Plan 02)
+// ===========================================================================
+//
+// Canonical 10-wedge order from wheel-v2.js DEFAULT_SECTIONS lines 11-22
+// (CONTEXT D-10): chat, agents, models, tools, skills, memory, sessions,
+// providers, gateway, settings. Soul / Schedules / Office are Screen
+// variants but NOT wheel wedges — they are reachable via Settings sub-nav
+// (Plan 07's SettingsScreenLink).
+//
+// All types except the newtypes derive Serialize / Deserialize so they
+// round-trip through `serde_json` into localStorage (RESEARCH Pattern 5).
+// Per D-26 these types are shared across both shells — no
+// `#[cfg(feature = "legacy-shell")]` gating.
+
+use serde::{Deserialize, Serialize};
+
+/// Top-level screens addressable by the wheel + Settings sub-nav.
+///
+/// 13 variants. The 10 wedge-reachable screens correspond 1-to-1 with
+/// `WheelWedge`; `Soul`, `Schedules`, `Office` are reachable via the
+/// Settings screen's "Other Screens" sub-nav (Plan 07's
+/// `SettingsScreenLink`) — they are not wheel wedges per CONTEXT D-10.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Screen {
+    #[default]
+    Chat,
+    Sessions,
+    Agents,
+    Skills,
+    Models,
+    Memory,
+    Soul,
+    Tools,
+    Schedules,
+    Gateway,
+    Office,
+    Settings,
+    Providers,
+}
+
+/// The 10 wheel wedges in CONTEXT D-10 canonical order:
+/// `chat, agents, models, tools, skills, memory, sessions, providers,
+/// gateway, settings` — sourced verbatim from `wheel-v2.js`
+/// `DEFAULT_SECTIONS` lines 11-22.
+///
+/// Note: this is **not** the app.html visual ordering — the JS file is
+/// the wheel's source of truth (per D-10), and the `WheelWedge::label`
+/// / `sub` / `glyph` helpers below emit the exact strings from those
+/// 12 JS lines so the wheel SVG matches the prototype byte-for-byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum WheelWedge {
+    #[default]
+    Chat,
+    Agents,
+    Models,
+    Tools,
+    Skills,
+    Memory,
+    Sessions,
+    Providers,
+    Gateway,
+    Settings,
+}
+
+impl WheelWedge {
+    /// Wedge index in CONTEXT D-10 order (0..=9).
+    pub fn index(self) -> usize {
+        match self {
+            WheelWedge::Chat => 0,
+            WheelWedge::Agents => 1,
+            WheelWedge::Models => 2,
+            WheelWedge::Tools => 3,
+            WheelWedge::Skills => 4,
+            WheelWedge::Memory => 5,
+            WheelWedge::Sessions => 6,
+            WheelWedge::Providers => 7,
+            WheelWedge::Gateway => 8,
+            WheelWedge::Settings => 9,
+        }
+    }
+
+    /// Wrap `i` modulo 10 and return the matching wedge. Used by the wheel
+    /// rim hit-test (Plan 04) and by keyboard nav. Never panics — wraps
+    /// safely via `rem_euclid` on the signed-cast value so even
+    /// `usize::MAX` yields a valid variant.
+    pub fn from_index(i: usize) -> Self {
+        let n = ((i as i64).rem_euclid(10)) as usize;
+        match n {
+            0 => WheelWedge::Chat,
+            1 => WheelWedge::Agents,
+            2 => WheelWedge::Models,
+            3 => WheelWedge::Tools,
+            4 => WheelWedge::Skills,
+            5 => WheelWedge::Memory,
+            6 => WheelWedge::Sessions,
+            7 => WheelWedge::Providers,
+            8 => WheelWedge::Gateway,
+            9 => WheelWedge::Settings,
+            _ => WheelWedge::Settings,
+        }
+    }
+
+    /// Wedge label per `wheel-v2.js` DEFAULT_SECTIONS `label` field.
+    /// Note: `Providers` reads `"PROVIDER"` (singular) — that's the
+    /// prototype's value, not a typo here.
+    pub fn label(self) -> &'static str {
+        match self {
+            WheelWedge::Chat => "CHAT",
+            WheelWedge::Agents => "AGENTS",
+            WheelWedge::Models => "MODELS",
+            WheelWedge::Tools => "TOOLS",
+            WheelWedge::Skills => "SKILLS",
+            WheelWedge::Memory => "MEMORY",
+            WheelWedge::Sessions => "SESSIONS",
+            WheelWedge::Providers => "PROVIDER",
+            WheelWedge::Gateway => "GATEWAY",
+            WheelWedge::Settings => "SYSTEM",
+        }
+    }
+
+    /// Wedge sublabel per `wheel-v2.js` DEFAULT_SECTIONS `sub` field.
+    pub fn sub(self) -> &'static str {
+        match self {
+            WheelWedge::Chat => "INTELLIGENCE CONSOLE",
+            WheelWedge::Agents => "AUTONOMOUS WORKERS",
+            WheelWedge::Models => "LANGUAGE CORES",
+            WheelWedge::Tools => "INSTRUMENT BAY",
+            WheelWedge::Skills => "CAPABILITY LATTICE",
+            WheelWedge::Memory => "PERSISTENT CONTEXT",
+            WheelWedge::Sessions => "ACTIVE TRANSCRIPTS",
+            WheelWedge::Providers => "INFERENCE GATEWAYS",
+            WheelWedge::Gateway => "NETWORK BRIDGE",
+            WheelWedge::Settings => "CONFIGURATION",
+        }
+    }
+
+    /// Wedge glyph per `wheel-v2.js` DEFAULT_SECTIONS `glyph` field.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            WheelWedge::Chat => "▓",
+            WheelWedge::Agents => "◆",
+            WheelWedge::Models => "◇",
+            WheelWedge::Tools => "◈",
+            WheelWedge::Skills => "✦",
+            WheelWedge::Memory => "⬢",
+            WheelWedge::Sessions => "▣",
+            WheelWedge::Providers => "◉",
+            WheelWedge::Gateway => "⌬",
+            WheelWedge::Settings => "⚙",
+        }
+    }
+
+    /// 1:1 mapping from wheel wedge to screen target. The three
+    /// off-wheel screens (`Screen::Soul`, `Screen::Schedules`,
+    /// `Screen::Office`) are deliberately unreachable from this
+    /// function — they are visited via the Settings sub-nav per D-10.
+    pub fn to_screen(self) -> Screen {
+        match self {
+            WheelWedge::Chat => Screen::Chat,
+            WheelWedge::Agents => Screen::Agents,
+            WheelWedge::Models => Screen::Models,
+            WheelWedge::Tools => Screen::Tools,
+            WheelWedge::Skills => Screen::Skills,
+            WheelWedge::Memory => Screen::Memory,
+            WheelWedge::Sessions => Screen::Sessions,
+            WheelWedge::Providers => Screen::Providers,
+            WheelWedge::Gateway => Screen::Gateway,
+            WheelWedge::Settings => Screen::Settings,
+        }
+    }
+}
+
+/// Wheel position + size + currently-active wedge.
+///
+/// Default geometry `(24.0, 24.0)` / `240.0` matches the prototype's
+/// initial mount and avoids the RESEARCH Pitfall 4 first-resize jump
+/// (the JS prototype reads from `--wheel-size: 240px` in `tokens.css`).
+/// `Copy` is intentionally NOT derived — the tuple position field plus
+/// future drag-velocity extensions are cheaper to share by reference.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct WheelState {
+    pub position: (f64, f64),
+    pub size: f64,
+    pub active_wedge: WheelWedge,
+}
+
+impl Default for WheelState {
+    fn default() -> Self {
+        Self {
+            position: (24.0, 24.0),
+            size: 240.0,
+            active_wedge: WheelWedge::Chat,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-03 newtype wrappers — disambiguate the two Signal<String> providers
+// ---------------------------------------------------------------------------
+//
+// Plan 03 publishes a theme signal as `Signal<String>` via
+// `use_context_provider`; Plan 06 publishes a session-id signal also as
+// `Signal<String>`. Without newtypes, `use_context::<Signal<String>>()`
+// would be ambiguous at compile time and resolve to whichever provider
+// the runtime saw last. The two newtypes below force disambiguation —
+// consumers read via `use_context::<ThemeContext>().0` or
+// `use_context::<SessionIdContext>().0` instead.
+//
+// Per D-26 these are NOT feature-gated. Only `Clone, Copy` are derived
+// because `Signal` already provides interior mutability and identity
+// equality from Dioxus — no `PartialEq`/`Debug`/`Default`/`Serialize`.
+// (The `Signal` import lives at the top of this file alongside the
+// `ShellSettings` use.)
+
+#[derive(Clone, Copy)]
+pub struct ThemeContext(pub Signal<String>);
+
+#[derive(Clone, Copy)]
+pub struct SessionIdContext(pub Signal<String>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_default_is_chat() {
+        assert_eq!(Screen::default(), Screen::Chat);
+    }
+
+    #[test]
+    fn wheel_wedge_default_is_chat() {
+        assert_eq!(WheelWedge::default(), WheelWedge::Chat);
+        assert_eq!(WheelWedge::Chat.index(), 0);
+    }
+
+    #[test]
+    fn wheel_wedge_from_index_round_trips_all_indices() {
+        for i in 0..10 {
+            assert_eq!(WheelWedge::from_index(i).index(), i, "wedge {} mismatch", i);
+        }
+    }
+
+    #[test]
+    fn wheel_wedge_from_index_wraps_modulo_ten() {
+        assert_eq!(WheelWedge::from_index(10), WheelWedge::Chat);
+        assert_eq!(WheelWedge::from_index(11), WheelWedge::Agents);
+        assert_eq!(WheelWedge::from_index(19), WheelWedge::Settings);
+        assert_eq!(WheelWedge::from_index(20), WheelWedge::Chat);
+    }
+
+    #[test]
+    fn wheel_wedge_from_index_handles_extreme_value() {
+        // Should not panic; result is a valid variant.
+        let w = WheelWedge::from_index(usize::MAX);
+        // Round-trip via index() must be ≤ 9.
+        assert!(w.index() < 10);
+    }
+
+    #[test]
+    fn wheel_wedge_labels_match_wheel_v2_js() {
+        assert_eq!(WheelWedge::Chat.label(), "CHAT");
+        assert_eq!(WheelWedge::Agents.label(), "AGENTS");
+        assert_eq!(WheelWedge::Models.label(), "MODELS");
+        assert_eq!(WheelWedge::Tools.label(), "TOOLS");
+        assert_eq!(WheelWedge::Skills.label(), "SKILLS");
+        assert_eq!(WheelWedge::Memory.label(), "MEMORY");
+        assert_eq!(WheelWedge::Sessions.label(), "SESSIONS");
+        assert_eq!(WheelWedge::Providers.label(), "PROVIDER");
+        assert_eq!(WheelWedge::Gateway.label(), "GATEWAY");
+        assert_eq!(WheelWedge::Settings.label(), "SYSTEM");
+    }
+
+    #[test]
+    fn wheel_wedge_subs_match_wheel_v2_js() {
+        assert_eq!(WheelWedge::Chat.sub(), "INTELLIGENCE CONSOLE");
+        assert_eq!(WheelWedge::Agents.sub(), "AUTONOMOUS WORKERS");
+        assert_eq!(WheelWedge::Models.sub(), "LANGUAGE CORES");
+        assert_eq!(WheelWedge::Tools.sub(), "INSTRUMENT BAY");
+        assert_eq!(WheelWedge::Skills.sub(), "CAPABILITY LATTICE");
+        assert_eq!(WheelWedge::Memory.sub(), "PERSISTENT CONTEXT");
+        assert_eq!(WheelWedge::Sessions.sub(), "ACTIVE TRANSCRIPTS");
+        assert_eq!(WheelWedge::Providers.sub(), "INFERENCE GATEWAYS");
+        assert_eq!(WheelWedge::Gateway.sub(), "NETWORK BRIDGE");
+        assert_eq!(WheelWedge::Settings.sub(), "CONFIGURATION");
+    }
+
+    #[test]
+    fn wheel_wedge_glyphs_match_wheel_v2_js() {
+        assert_eq!(WheelWedge::Chat.glyph(), "▓");
+        assert_eq!(WheelWedge::Agents.glyph(), "◆");
+        assert_eq!(WheelWedge::Models.glyph(), "◇");
+        assert_eq!(WheelWedge::Tools.glyph(), "◈");
+        assert_eq!(WheelWedge::Skills.glyph(), "✦");
+        assert_eq!(WheelWedge::Memory.glyph(), "⬢");
+        assert_eq!(WheelWedge::Sessions.glyph(), "▣");
+        assert_eq!(WheelWedge::Providers.glyph(), "◉");
+        assert_eq!(WheelWedge::Gateway.glyph(), "⌬");
+        assert_eq!(WheelWedge::Settings.glyph(), "⚙");
+    }
+
+    #[test]
+    fn wheel_wedge_to_screen_one_to_one() {
+        assert_eq!(WheelWedge::Chat.to_screen(), Screen::Chat);
+        assert_eq!(WheelWedge::Agents.to_screen(), Screen::Agents);
+        assert_eq!(WheelWedge::Models.to_screen(), Screen::Models);
+        assert_eq!(WheelWedge::Tools.to_screen(), Screen::Tools);
+        assert_eq!(WheelWedge::Skills.to_screen(), Screen::Skills);
+        assert_eq!(WheelWedge::Memory.to_screen(), Screen::Memory);
+        assert_eq!(WheelWedge::Sessions.to_screen(), Screen::Sessions);
+        assert_eq!(WheelWedge::Providers.to_screen(), Screen::Providers);
+        assert_eq!(WheelWedge::Gateway.to_screen(), Screen::Gateway);
+        assert_eq!(WheelWedge::Settings.to_screen(), Screen::Settings);
+    }
+
+    #[test]
+    fn wheel_state_default_uses_research_pitfall4_geometry() {
+        let w = WheelState::default();
+        assert_eq!(w.position, (24.0, 24.0));
+        assert_eq!(w.size, 240.0);
+        assert_eq!(w.active_wedge, WheelWedge::Chat);
+    }
+
+    #[test]
+    fn wheel_state_round_trips_through_json() {
+        let original = WheelState::default();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: WheelState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn wheel_wedge_round_trips_through_json() {
+        for i in 0..10 {
+            let w = WheelWedge::from_index(i);
+            let json = serde_json::to_string(&w).expect("serialize");
+            let parsed: WheelWedge = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, w);
+        }
+    }
+
+    #[test]
+    fn screen_round_trip_via_serde_json() {
+        // Plan 09 Wave-0 contract: every Screen variant survives a
+        // serialise → deserialise cycle. Test name is grep-locked by
+        // VALIDATION.md Per-Task Verification Map.
+        use crate::state::Screen;
+        const ALL: [Screen; 13] = [
+            Screen::Chat,
+            Screen::Sessions,
+            Screen::Agents,
+            Screen::Skills,
+            Screen::Models,
+            Screen::Memory,
+            Screen::Soul,
+            Screen::Tools,
+            Screen::Schedules,
+            Screen::Gateway,
+            Screen::Office,
+            Screen::Settings,
+            Screen::Providers,
+        ];
+        for s in ALL.iter() {
+            let json = serde_json::to_string(s).expect("Screen serializes");
+            let back: Screen = serde_json::from_str(&json).expect("Screen deserializes");
+            assert_eq!(*s, back, "Screen variant did not round-trip via serde_json");
+        }
+    }
+
+    #[test]
+    fn wheel_wedge_variant_order_matches_d10() {
+        // CONTEXT D-10 / wheel-v2.js DEFAULT_SECTIONS lines 11-22 lock the
+        // canonical 10-tuple wedge order. If a future planner adds or
+        // removes a wedge, this test must be updated in lockstep with
+        // CONTEXT.md D-10 — the test is the source-grep-traceable lock.
+        const EXPECTED: [crate::state::WheelWedge; 10] = [
+            crate::state::WheelWedge::Chat,
+            crate::state::WheelWedge::Agents,
+            crate::state::WheelWedge::Models,
+            crate::state::WheelWedge::Tools,
+            crate::state::WheelWedge::Skills,
+            crate::state::WheelWedge::Memory,
+            crate::state::WheelWedge::Sessions,
+            crate::state::WheelWedge::Providers,
+            crate::state::WheelWedge::Gateway,
+            crate::state::WheelWedge::Settings,
+        ];
+        for (i, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                crate::state::WheelWedge::from_index(i),
+                *expected,
+                "wedge at index {i} does not match D-10 / wheel-v2.js DEFAULT_SECTIONS"
+            );
+        }
+    }
 }

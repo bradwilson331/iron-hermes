@@ -7,8 +7,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::{
-    AgentLoop, AgentSubagentRunner, AnyClient, AppRuntimeFactoryInput, DelegateTaskWiring,
-    PressureTracker, PromptBuilder, build_app_runtime_bundle,
+    AnyClient, PressureTracker, PromptBuilder,
     build_client as build_provider_client, build_main_client,
 };
 use ironhermes_core::commands::CommandRouter;
@@ -31,6 +30,7 @@ use tracing::info;
 mod batch;
 mod config_cli;
 mod cron;
+mod doctor;
 mod mcp_config;
 mod memory_cmd;
 mod memory_setup;
@@ -40,6 +40,21 @@ mod provider_cmd;
 mod setup;
 mod toolset_cmd;
 mod tui;
+
+/// Process-global serialization lock for tests that mutate the shared
+/// `IRONHERMES_HOME` env var. All env-mutating tests across the bin's module
+/// tree (main.rs, cron.rs, memory_setup.rs, ...) MUST hold this single lock —
+/// independent per-module mutexes do NOT serialize against each other, so
+/// concurrent tests in different modules otherwise stomp each other's
+/// `IRONHERMES_HOME` and produce flaky cross-module failures.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 use ironhermes_cli::skills_cmd;
 // Phase 25.3 Plan 11: `hermes session export[-all]` (D-F-1 / D-F-2).
 use ironhermes_cli::session_cmd;
@@ -289,8 +304,27 @@ async fn main() -> Result<()> {
     //
     // Phase 24 must NOT widen the gate condition. PROF-01..N (full lifecycle)
     // is deferred to v2.2 per REQUIREMENTS.md.
-    let run_preflight =
-        matches!(cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
+    //
+    // Phase 26.4.1 (CFG-03) AMENDMENT:
+    // The variant list for `run_preflight` is widened to include
+    // `Some(Commands::Gateway { .. })`. Reason: a missing or invalid
+    // config.yaml today causes `hermes gateway` to crash deep in
+    // GatewayRunner::new with an unhelpful error; the canonical
+    // operator onboarding flow is `ironhermes gateway` to start the
+    // Telegram bot, so gateway needs the same first-run/fix-mode auto-
+    // launch that chat and bare invocation already get. The Phase 23
+    // invariant ("non-interactive subcommands and -e MUST NOT trigger
+    // the wizard") is preserved: skills/mcp/cron/memory/doctor/etc. are
+    // still excluded, and `cli.execute.is_some()` still suppresses the
+    // gate. The two SIBLING gates (`is_interactive_repl`,
+    // `is_chat_or_bare`) DO NOT widen to Gateway — gateway is a long-
+    // running daemon, not an interactive REPL, and must keep the
+    // `ironhermes=info` log filter (otherwise startup diagnostics get
+    // suppressed for operators following the canonical onboarding).
+    let run_preflight = matches!(
+        cli.command,
+        Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None
+    ) && cli.execute.is_none();
     if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
@@ -331,7 +365,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
-        Some(Commands::Doctor) => cmd_doctor(),
+        Some(Commands::Doctor) => doctor::run_doctor_check(),
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat {
             ref message,
@@ -529,6 +563,7 @@ fn ensure_home_dirs() -> Result<()> {
         "skills",
         "workspace",
         "subagent-transcripts", // D-05 (Phase 21.7): JSONL transcript store for subagent runs.
+        "browser-profile", // Phase 26.3 UDD-04: persistent chromium profile (cookies, localStorage).
     ] {
         std::fs::create_dir_all(home.join(sub))
             .with_context(|| format!("Failed to create {}/{}", home.display(), sub))?;
@@ -541,70 +576,6 @@ fn ensure_home_dirs() -> Result<()> {
 // full D-18..D-22 status surface (provider, memory, gateway, subagents,
 // processes, MCP, yolo) and supports `--all`, `--deep`, `--json` flags.
 // The dispatch arm in `main()` calls `run_status(args).await`.
-
-fn cmd_doctor() -> Result<()> {
-    println!("{}", "IronHermes Doctor".bold().cyan());
-    // Phase 24 D-16: show which profile this doctor run is inspecting.
-    println!("Profile: {}", ironhermes_cli::status_cmd::current_profile());
-    println!("{}", "─".repeat(40));
-
-    // Check home directory
-    let home = ironhermes_core::get_hermes_home();
-    print_check("Home directory", home.exists());
-
-    // Check config
-    let config_path = Config::config_path();
-    print_check("Config file", config_path.exists());
-
-    // Check .env
-    let env_path = Config::env_path();
-    print_check(".env file", env_path.exists());
-
-    // Check API keys
-    print_check(
-        "OpenRouter API key",
-        std::env::var("OPENROUTER_API_KEY").is_ok(),
-    );
-    print_check(
-        "Anthropic API key",
-        std::env::var("ANTHROPIC_API_KEY").is_ok(),
-    );
-
-    // Check state database
-    let db_path = home.join("state.db");
-    print_check("State database", db_path.exists());
-
-    // Phase 24 D-16: gateway.pid liveness check (active profile only — no
-    // cross-profile sweep per the deferred-ideas list).
-    let pid_path = home.join("gateway.pid");
-    if pid_path.exists() {
-        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
-            .ok()
-            .flatten()
-            .map(|r| {
-                matches!(
-                    ironhermes_gateway::pid::is_pid_alive(r.pid),
-                    ironhermes_gateway::pid::PidLiveness::Live
-                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
-                )
-            })
-            .unwrap_or(false);
-        print_check("Gateway PID (gateway.pid → live process)", pid_ok);
-    } else {
-        // Absent file = healthy (no gateway running). Use the "OK" branch.
-        print_check("Gateway PID (not running)", true);
-    }
-
-    println!();
-    println!("{}", "Run `ironhermes status` for more details.".dimmed());
-
-    Ok(())
-}
-
-fn print_check(name: &str, ok: bool) {
-    let icon = if ok { "OK".green() } else { "MISSING".yellow() };
-    println!("  [{icon}] {name}");
-}
 
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
@@ -626,7 +597,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     ironhermes_core::init_global_estimator(ironhermes_core::TiktokenEncoding::from_name(
         encoding_name,
     ));
-    let context_length = main_ep.context_length();
+    // Phase 28.1-04: run_single's context_length local is dead now — run_turn
+    // resolves the context length internally via the resolver. (run_chat still
+    // reads main_ep.context_length() for the status-line tokens_limit.)
 
     // Phase 25.3 D-W-1 / D-W-2: resolve workspace from cwd at session start
     // (frozen-snapshot pattern — Workspace never changes mid-session).
@@ -689,17 +662,6 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             }
         }
     };
-    // run_single doesn't dispatch slash commands so trajectory_writer is currently
-    // unused on its CommandContext — but we keep the variable in scope so Plan 9
-    // (AgentLoop callback wireup) can simply attach `agent.with_trajectory_writer(...)`
-    // here without re-resolving the path.
-    let _ = &trajectory_writer;
-
-    // Plan 21.7-05 (PROV-09/PROV-10/D-15): construct BudgetHandle seeded from
-    // config.agent.max_iterations so the shared counter starts FULL and
-    // drains per-turn (Caution70 at 70% used, Warning90 at 90%, Stop100 at
-    // 100%). Parent + subagents clone the handle and share the counter.
-    let budget = BudgetHandle::new(config.agent.max_iterations);
     // Plan 21.7-06 (D-29, D-24): session-scoped ProcessRegistry for
     // terminal/execute_code `background=true` spawns. Kept in scope so
     // on_session_end can call drain_and_kill_session below.
@@ -721,42 +683,32 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             .await
             .context("building memory manager for single-prompt mode")?;
 
-    // Register delegate_task tool (AGENT-01..05)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
-    // transcript scope into the runner so lifecycle events update state.
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
-    );
     let cwd = std::env::current_dir().unwrap_or_default();
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
+
+    // Plan 28.1-04: build ONE AgentRuntime from config — replaces the manual
+    // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
+    // from_config creates the runtime's top-level BudgetHandle; each child subagent
+    // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the
+    // tool registry/skills/browser bundle.
+    // run_turn resets the budget at every turn boundary, fixing any Stop100 latch.
+    let runtime = ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
         config: Arc::new(config.clone()),
         resolver: Arc::new(resolver.clone()),
         cwd: cwd.clone(),
         process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner,
-            semaphore: subagent_semaphore,
-            config: config.subagent.clone(),
-            cancel_token: None,
-            progress_callback: None,
-        }),
+        memory_manager: memory_manager.clone(),
         hooks_config,
         emit_mcp_startup_logs: true,
+        subagent_registry: subagent_registry.clone(),
+        transcript_scope: (hermes_home.clone(), session_id.clone()),
+        subagent_progress_callback: None,
+        subagent_cancel_token: None,
     })
     .await
-    .context("building shared app runtime bundle for run_single")?;
+    .context("building AgentRuntime for run_single")?;
 
-    let registry = runtime_bundle.registry.clone();
-    let hook_registry = runtime_bundle.hook_registry.clone();
-    let skill_registry = runtime_bundle.skill_registry.clone();
-    let browser_session = runtime_bundle.browser_session.clone();
+    let skill_registry = runtime.skill_registry().clone();
 
     let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
@@ -776,6 +728,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         prompt_builder.set_memory_manager(mgr.clone());
     }
     prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+    // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
+    // catalog text reflects the same enabled set as the API tool schemas.
+    prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -788,64 +743,70 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         .context("failed to persist user message")?;
     let messages = vec![system_msg, user_msg];
 
-    // Phase 25 D-16: per-session todo state for todo_write / todo_read intercepts.
-    let todo_state_single = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
+    let scrubber_single = std::sync::Arc::new(std::sync::Mutex::new(
+        ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+    ));
+    let scrubber_single_cb = std::sync::Arc::clone(&scrubber_single);
 
-    let mut agent = AgentLoop::new(client, registry, max_turns)
-        .with_budget(budget)
-        .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
-        .with_compression(context_length, config.agent.context_compression)
-        .with_streaming(Box::new(|delta| {
-            print!("{}", delta);
-            io::stdout().flush().ok();
-        }))
-        .with_tool_progress(Box::new(|name, args| {
+    // Plan 28.1-04: build TurnRequest and call runtime.run_turn.
+    // run_turn owns the budget lifecycle (reset at entry), builds the AgentLoop,
+    // wires fallback, and calls attach_context_engine — DO NOT duplicate those here.
+    //
+    // todo intercept dropped: run_single is one-shot batch mode with no interactive
+    // todo flow. The todo_write/todo_read intercept was effectively dead wiring
+    // (no user can trigger a slash command mid-batch). Dropping it is intentional
+    // and documented here per plan §6.3. If a future test depends on it, extend
+    // TurnRequest minimally rather than re-adding it silently.
+    //
+    // trajectory_writer wired here (improvement over prior code which resolved
+    // the writer but then held it in a let-_-binding): run_turn threads it into
+    // the AgentLoop so per-tool-call TrajectoryEntry records land in the JSONL.
+    let _ = max_turns; // max_turns is baked into runtime via config.agent.max_turns
+    let request = ironhermes_agent::TurnRequest {
+        messages,
+        session_id: session_id.clone(),
+        cancel_token: None,
+        stream: Some(Box::new(move |delta| {
+            let visible = scrubber_single_cb.lock().unwrap().feed(delta);
+            if !visible.is_empty() {
+                print!("{}", visible);
+                io::stdout().flush().ok();
+            }
+        })),
+        tool_progress: Some(Box::new(|name, args| {
             eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
-        }))
-        // Phase 25 D-16: wire intercept handlers (todo_write/todo_read only in single mode;
-        // memory handled by register_memory_tool; state_store wired for session_search).
-        .with_intercepts(
-            None,
-            Some(state_store.clone()),
-            None,
-            Some(todo_state_single),
-            None,
-        )
-        // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
-        .with_browser_session(browser_session.clone());
+        })),
+        tool_result: None,
+        trajectory_writer: trajectory_writer.clone(),
+        pressure_tracker: None, // one-shot: fresh tracker per run
+        state_store: Some(state_store.clone()),
+        compression_count: 0, // one-shot: no cross-turn carry-over
+    };
 
-    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
-    // tool call lands a TrajectoryEntry in the per-session JSONL.
-    if let Some(ref handle) = trajectory_writer {
-        agent = agent.with_trajectory_writer(handle.clone());
+    let result = runtime.run_turn(request).await?;
+
+    // Phase 34a MEM-READ-05: flush scrubber tail (emits held partial-tag if stream ended
+    // mid-tag and it proved to not be a memory-context tag).
+    let tail = scrubber_single.lock().unwrap().flush();
+    if !tail.is_empty() {
+        print!("{}", tail);
+        io::stdout().flush().ok();
     }
 
-    // Wire fallback from resolver
-    let main_endpoint = resolver.resolve_for_main();
-    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-        if let Ok(fb_client) =
-            build_provider_client(&resolver, fb_name, &main_endpoint.default_model)
-        {
-            agent = agent.with_fallback(fb_client);
-        }
+    // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+    // Warnings are NOT embedded in the model-bound message text; each surface renders
+    // them separately so the user sees them without the model echoing them.
+    if !result.context_warnings.is_empty() {
+        let warning_lines: Vec<String> = result
+            .context_warnings
+            .iter()
+            .map(|w| format!("- {}", w))
+            .collect();
+        let block = format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+        print!("{}", block);
+        io::stdout().flush().ok();
     }
-
-    // Phase 18 Plan 09: wire agent-side context compression (honors
-    // config.agent.context_engine + config.agent.compression_threshold).
-    // Phase 18-14: one-shot path — fresh tracker is fine (single turn then exits).
-    // GAP-1/GAP-2: pass memory_manager so on_pre_compress fires on compression.
-    agent = ironhermes_agent::attach_context_engine(
-        agent,
-        &config,
-        &resolver,
-        session_id.as_str(),
-        Some(hook_registry.clone()), // Phase 22: D-09
-        None,                        // one-shot: fresh tracker per run
-        context_length,              // Phase 21.3
-        memory_manager.clone(),      // GAP-1/GAP-2: wire into context engine
-    );
-
-    let result = agent.run(messages).await?;
 
     // Plan 21.7-06 (D-24, T-21.7-06-01): drain + kill any background processes
     // tracked by this session's ProcessRegistry before exit. Best-effort —
@@ -888,6 +849,13 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             tracing::debug!(error = %e, "on_session_end failed in run_single (best-effort)");
         }
     }
+
+    // D-15 (Phase 27.1.1): fire on_session_end on every registered tool so
+    // tools that override it (e.g., HexapodTcpTool, which sends stop + relax
+    // per D-14) get a chance to clean up. Best-effort, log-and-continue --
+    // matches the surrounding memory_manager.on_session_end pattern.
+    // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
+    runtime.registry().read().await.call_session_end_hooks();
 
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
@@ -940,6 +908,8 @@ fn build_cmd_ctx(
     // built by run_chat / run_single / run_gateway via this single helper.
     workspace: Option<Arc<ironhermes_core::workspace::Workspace>>,
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    // Phase 21.8.2: skill_registry so /skills list shows catalog and /skills reload works.
+    skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
 ) -> CommandContext {
     let base = CommandContext::new(Platform::Local, session_id.to_string(), agent_running);
     let base = if let Some(mgr) = mcp_manager {
@@ -956,7 +926,7 @@ fn build_cmd_ctx(
         ))
         .with_budget(Arc::new(budget))
         .with_subagent_semaphore(subagent_semaphore)
-        .with_max_subagents(max_subagents);
+        .with_max_concurrent_children(max_subagents);
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): conditionally attach the
     // live ToolsetSessionHandle so /toolset list/show/enable/disable work in
     // REPL + Telegram. EVERY existing .with_* call above is preserved verbatim.
@@ -974,11 +944,61 @@ fn build_cmd_ctx(
     };
     // Phase 25.3 D-T-3: attach the per-session TrajectoryWriter handle so
     // slash dispatch sees the same writer that AgentLoop (Plan 9) consumes.
-    if let Some(handle) = trajectory_writer {
+    let ctx = if let Some(handle) = trajectory_writer {
         ctx.with_trajectory_writer(handle)
     } else {
         ctx
+    };
+    // Phase 21.8.2: wire skill_registry so /skills list shows catalog and
+    // /skills reload returns SkillsReload for the REPL loop to process.
+    if let Some(sr) = skill_registry {
+        ctx.with_skill_registry(sr)
+    } else {
+        ctx
     }
+}
+
+/// Phase 21.8.2 D-05 / D-Plan03-06: count SKILL.md files in the configured
+/// search paths that were SCANNED but failed to load (i.e. parse errors logged
+/// via `tracing::warn` from inside `load_with_config`). Returns
+/// `files_scanned - loaded_count`. Used by `/skills reload` arms to surface
+/// "(W invalid skipped — see logs)" in the diff output.
+///
+/// Re-walks `build_skill_search_paths(cwd, cfg)` and counts subdirectories
+/// that contain a `SKILL.md` file. Hidden directories (leading `.`) are
+/// skipped to match `load_with_config` internal behavior.
+fn count_invalid_skipped(
+    cwd: &std::path::Path,
+    cfg: &ironhermes_core::config::SkillsConfig,
+    loaded_count: usize,
+) -> usize {
+    let search_paths = ironhermes_core::build_skill_search_paths(cwd, cfg);
+    let mut files_scanned: usize = 0;
+    for root in &search_paths {
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip hidden directories starting with '.' (matches load_with_paths behavior).
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if path.join("SKILL.md").is_file() {
+                files_scanned += 1;
+            }
+        }
+    }
+    files_scanned.saturating_sub(loaded_count)
 }
 
 /// Run interactive chat mode.
@@ -1075,11 +1095,6 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         }
     };
 
-    // Plan 21.7-05 (PROV-09/PROV-10/D-15): BudgetHandle seeded from
-    // config.agent.max_iterations. Parent + subagents share the counter
-    // via BudgetHandle::clone; the per-turn run_agent_turn() inherits
-    // the same handle and decrements it at turn-top.
-    let budget = BudgetHandle::new(config.agent.max_iterations);
     // Plan 21.7-06 (D-29, D-24): session-scoped ProcessRegistry for
     // terminal/execute_code `background=true` spawns. Cloned into the tool
     // registration below and drained on natural REPL exit.
@@ -1114,7 +1129,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         // denominator from config so the pill renders as "N/M" the moment
         // a subagent registers.
         active_subagents: 0,
-        max_subagents: config.subagent.max_subagents,
+        max_subagents: config.delegation.max_concurrent_children,
     };
     // Phase 22.1: construct TuiHandle with extensions (empty vec for now --
     // no extensions are registered yet, but the hook mechanism is active).
@@ -1131,15 +1146,6 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             .await
             .context("building memory manager for chat mode")?;
 
-    // Register delegate_task tool (AGENT-01..05)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    // Plan 21.7-07 (D-03 / D-04 / D-05): thread SubagentRegistry +
-    // transcript scope into the runner so lifecycle events update state.
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(client.clone(), resolver.clone(), Some(budget.clone()))
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(hermes_home.clone(), session_id.clone()),
-    );
     // Plan 21-03: parent CancellationToken lives the full chat session; per-turn
     // children are issued via `.child_token()` so cancelling one turn does NOT
     // poison the session. (See RESEARCH §Pitfall 2: CancellationToken cancel is permanent.)
@@ -1240,32 +1246,49 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
-        config: Arc::new(config.clone()),
-        resolver: Arc::new(resolver.clone()),
-        cwd: cwd.clone(),
-        process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner,
-            semaphore: subagent_semaphore.clone(),
-            config: config.subagent.clone(),
-            cancel_token: Some(chat_cancel_parent.child_token()),
-            progress_callback: Some(subagent_progress),
-        }),
-        hooks_config,
-        emit_mcp_startup_logs: true,
-    })
-    .await
-    .context("building shared app runtime bundle for run_chat")?;
 
-    let registry = runtime_bundle.registry.clone();
-    let hook_registry = runtime_bundle.hook_registry.clone();
-    let mcp_manager = runtime_bundle.mcp_manager.clone();
-    let skill_registry = runtime_bundle.skill_registry.clone();
-    let browser_session = runtime_bundle.browser_session.clone();
+    // Plan 28.1-04: build ONE AgentRuntime — replaces the manual BudgetHandle::new
+    // + AgentSubagentRunner + build_app_runtime_bundle block. from_config creates
+    // the runtime's top-level BudgetHandle; each child subagent gets its own fresh
+    // BudgetHandle (D-01/D-04, Phase 35), and assembles the tool registry/skills/browser bundle.
+    // run_turn resets the budget at each turn boundary, permanently fixing the
+    // latent multi-turn Stop100 latch (T-28.1-08).
+    let runtime = Arc::new(
+        ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
+            config: Arc::new(config.clone()),
+            resolver: Arc::new(resolver.clone()),
+            cwd: cwd.clone(),
+            process_registry: process_registry.clone(),
+            memory_manager: memory_manager.clone(),
+            hooks_config,
+            emit_mcp_startup_logs: true,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (hermes_home.clone(), session_id.clone()),
+            subagent_progress_callback: Some(subagent_progress),
+            subagent_cancel_token: Some(chat_cancel_parent.child_token()),
+        })
+        .await
+        .context("building AgentRuntime for run_chat")?,
+    );
+
+    // Source the shared Arcs from the runtime accessors so slash/toolset/status
+    // paths and run_turn operate on the same instances (identity-shared).
+    // Phase 28.1-04: hook_registry and browser_session are NOT re-derived here —
+    // run_turn owns that wiring internally (durable, runtime-owned per design §5).
+    // run_chat's slash/toolset/status surfaces only need registry, mcp_manager,
+    // and skill_registry.
+    let registry = runtime.registry().clone();
+    let mcp_manager = runtime.mcp_manager().cloned();
+    let mut skill_registry = runtime.skill_registry().clone();
+
+    // Semaphore for slash-command CommandContext (e.g., /agents kill concurrency
+    // guard). Seeded from the same limit the runtime uses internally so the
+    // capacity is consistent. This is distinct from the runtime's internal semaphore
+    // (which guards delegate_task spawns); the cmd_ctx semaphore gates observability
+    // slash commands only.
+    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(
+        config.delegation.max_concurrent_children,
+    ));
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
@@ -1273,13 +1296,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // DOES NOT introduce a second Arc layer. INV-21.7-08 lock-step: the
     // same Arc<dyn ToolsetSessionHandle> is passed through build_cmd_ctx
     // at BOTH the prompt-time dispatch site AND the mid-turn dispatch arm.
+    // Phase 27.1.1-gap-02: use merged_tools (not raw config.tools) so
+    // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            config.tools.clone(),
+            runtime.merged_tools().clone(),
         ));
-
-    let max_turns = cli.max_turns.unwrap_or(config.agent.max_turns);
 
     let mut prompt_builder = PromptBuilder::new(client.model(), "cli")
         .with_provider(&config.model.provider)
@@ -1289,12 +1312,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     if let Some(ref ws) = workspace {
         prompt_builder = prompt_builder.with_workspace_root(&ws.root);
     }
-    prompt_builder.set_skill_registry(skill_registry);
+    prompt_builder.set_skill_registry(skill_registry.clone());
     // Plan 20-03 Fix 2 / GAP-4: inject manager (when Some) before load_memory.
     if let Some(ref mgr) = memory_manager {
         prompt_builder.set_memory_manager(mgr.clone());
     }
     prompt_builder.set_user_profile_enabled(config.memory.user_profile_enabled);
+    // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
+    // catalog text reflects the same enabled set as the API tool schemas.
+    prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     let system_msg = prompt_builder.build_system_message();
@@ -1321,24 +1347,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         messages.push(user_msg);
         println!("{} {}", "You:".bold().green(), msg);
         let response = run_agent_turn(
-            &client,
-            registry.clone(),
+            &runtime,
             &mut messages,
-            max_turns,
-            &config,
-            &resolver,
-            &budget,
             &session_id,
             pressure_tracker.clone(),
             compression_count.clone(),
             tui.clone(),
             chat_cancel_token.clone(),
-            hook_registry.clone(),         // Phase 22: D-05
-            context_length,                // Phase 21.3
-            memory_manager.clone(),        // GAP-1: wire queue_prefetch
-            state_store.clone(),           // Phase 25: session_search intercept
-            Some(browser_session.clone()), // Phase 25.1 D-17
-            trajectory_writer.clone(),     // Phase 25.3 D-T-3
+            state_store.clone(),       // Phase 25: session_search intercept
+            trajectory_writer.clone(), // Phase 25.3 D-T-3
         )
         .await?;
         // Persist assistant response
@@ -1372,6 +1389,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // the user sees the prompt line rather than waiting on a keystroke.
     io::stdout().flush().ok();
     io::stderr().flush().ok();
+
+    // Phase 32 Plan 01 (LEARN-01): periodic memory nudge — turn counter lives
+    // in the outer REPL loop (not in AgentLoop, which is constructed per
+    // turn). When `turns_since_nudge` reaches `nudge_interval`, the post-turn
+    // fire site below tokio::spawns `spawn_nudge_review` (fire-and-forget so
+    // the REPL is not blocked). `nudge_interval == 0` disables the feature.
+    // See `ironhermes_agent::nudge` module docs for the tool-surface narrowing
+    // (T-32-01 mitigation) and the frozen-snapshot invariant (PRMT-06).
+    let nudge_interval = config.memory.nudge_interval;
+    let mut turns_since_nudge: u32 = 0;
+
     loop {
         // Phase 22.1 D-05: pre-readline keybinding check for Idle/Always bindings.
         // Uses non-blocking poll(Duration::ZERO) so we only consume events that are
@@ -1467,18 +1495,20 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     // identical registry handle identity across dispatch
                     // sites (INV-21.7-08 / D-03 / D-04). Phase 25.3 Plan 8
                     // appends workspace + trajectory_writer for D-W-2 / D-T-3.
+                    // Phase 21.8.2: skill_registry threaded through so /skills works.
                     let cmd_ctx = build_cmd_ctx(
                         &session_id,
                         agent_running.clone(),
                         mcp_manager.as_ref(),
                         subagent_registry.clone(),
                         process_registry.clone(),
-                        budget.clone(),
+                        runtime.budget().clone(),
                         subagent_semaphore.clone(),
-                        config.subagent.max_subagents,
+                        config.delegation.max_concurrent_children,
                         Some(toolset_session.clone()),
                         workspace.clone(),
                         trajectory_writer.clone(),
+                        Some(skill_registry.clone()),
                     );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -1493,6 +1523,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         }
                         CommandResult::ClearSession(output) => {
                             messages.truncate(1); // Keep system message
+                            // Phase 34b Plan 02 (D-09/D-10): /new is the durable
+                            // per-session reset locus. Under the fresh-per-turn
+                            // engine model the real durable counter is this
+                            // surface-owned Arc<AtomicUsize>, so zero it here so
+                            // the next conversation does not inherit a stale
+                            // compression_count / prior-summary chain.
+                            compression_count.store(0, Ordering::SeqCst);
                             println!("{}", output.dimmed());
                             continue;
                         }
@@ -1567,6 +1604,88 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                             // (else: mcp_reloader is None, cmd_reload_mcp returned Output already)
                             continue;
                         }
+                        // Phase 21.8.2 D-01..D-05: synchronous skill registry hot-reload.
+                        CommandResult::SkillsReload => {
+                            use std::collections::HashSet;
+                            let cwd = std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                            let new_registry = std::sync::Arc::new(
+                                ironhermes_core::SkillRegistry::load_with_config(
+                                    &cwd,
+                                    &config.skills,
+                                ),
+                            );
+                            let old_names: HashSet<String> = skill_registry
+                                .list()
+                                .iter()
+                                .map(|s| s.name.clone())
+                                .collect();
+                            let new_names: HashSet<String> = new_registry
+                                .list()
+                                .iter()
+                                .map(|s| s.name.clone())
+                                .collect();
+                            let mut added: Vec<&String> =
+                                new_names.difference(&old_names).collect();
+                            let mut removed: Vec<&String> =
+                                old_names.difference(&new_names).collect();
+                            added.sort();
+                            removed.sort();
+                            let added_str = if added.is_empty() {
+                                "0 added".to_string()
+                            } else {
+                                format!(
+                                    "{} added ({})",
+                                    added.len(),
+                                    added
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            };
+                            let removed_str = if removed.is_empty() {
+                                "0 removed".to_string()
+                            } else {
+                                format!(
+                                    "{} removed ({})",
+                                    removed.len(),
+                                    removed
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            };
+                            // Phase 21.8.2 D-05 / D-Plan03-06: WARN-BUT-LOAD reporting.
+                            let invalid_skipped = count_invalid_skipped(
+                                &cwd,
+                                &config.skills,
+                                new_registry.list().len(),
+                            );
+                            let invalid_clause = if invalid_skipped > 0 {
+                                format!(" ({} invalid skipped — see logs)", invalid_skipped)
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "Skills reloaded: {}. {}. Total: {} skills.{}",
+                                added_str,
+                                removed_str,
+                                new_registry.list().len(),
+                                invalid_clause
+                            );
+                            // D-03: atomic swap. skill_registry is `let mut` (Plan 02 Edit 1b).
+                            skill_registry = new_registry.clone();
+                            prompt_builder.set_skill_registry(new_registry);
+                            continue;
+                        }
+                        // Phase 21.8.2 D-07: SKILL-13 dynamic skill activation.
+                        CommandResult::SkillActivated { name, body } => {
+                            prompt_builder.activate_skill(&name, &body);
+                            println!("Skill '{}' activated for this turn.", name);
+                            continue;
+                        }
                     }
                 }
 
@@ -1587,24 +1706,15 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                 // decision can `continue` and the agent sees the cancelled token.
                 agent_running.store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut run_fut = Box::pin(run_agent_turn(
-                    &client,
-                    registry.clone(),
+                    &runtime,
                     &mut messages,
-                    max_turns,
-                    &config,
-                    &resolver,
-                    &budget,
                     &session_id,
                     pressure_tracker.clone(),
                     compression_count.clone(),
                     tui.clone(),
                     chat_cancel_token.clone(),
-                    hook_registry.clone(),         // Phase 22: D-05
-                    context_length,                // Phase 21.3
-                    memory_manager.clone(),        // GAP-1: wire queue_prefetch
-                    state_store.clone(),           // Phase 25: session_search intercept
-                    Some(browser_session.clone()), // Phase 25.1 D-17
-                    trajectory_writer.clone(),     // Phase 25.3 D-T-3
+                    state_store.clone(),       // Phase 25: session_search intercept
+                    trajectory_writer.clone(), // Phase 25.3 D-T-3
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -1781,18 +1891,20 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                     let args = &parts[1..];
                                     // Phase 25.3 Plan 8: workspace + trajectory_writer threaded
                                     // through the mid-turn slash dispatch site (D-W-2 / D-T-3).
+                                    // Phase 21.8.2: skill_registry threaded through so /skills works.
                                     let cmd_ctx = build_cmd_ctx(
                                         &session_id,
                                         agent_running.clone(),
                                         mcp_manager.as_ref(),
                                         subagent_registry.clone(),
                                         process_registry.clone(),
-                                        budget.clone(),
+                                        runtime.budget().clone(),
                                         subagent_semaphore.clone(),
-                                        config.subagent.max_subagents,
+                                        config.delegation.max_concurrent_children,
                                         Some(toolset_session.clone()),
                                         workspace.clone(),
                                         trajectory_writer.clone(),
+                                        Some(skill_registry.clone()),
                                     );
                                     match dispatch_command(
                                         tui.extensions(),
@@ -1859,6 +1971,22 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                                     .dimmed()
                                             );
                                         }
+                                        CommandResult::SkillsReload => {
+                                            // Mid-turn skills reload is deferred — too disruptive while the agent
+                                            // is mid-call. Mirrors the mid-turn McpReload + ClearSession pattern.
+                                            println!(
+                                                "{}",
+                                                "/skills reload ignored mid-turn — retry after the turn ends".dimmed()
+                                            );
+                                        }
+                                        CommandResult::SkillActivated { .. } => {
+                                            // Mid-turn skill activation is deferred — body injection mid-stream
+                                            // would race the in-flight agent's system-prompt assembly.
+                                            println!(
+                                                "{}",
+                                                "/<skill> activation ignored mid-turn — retry after the turn ends".dimmed()
+                                            );
+                                        }
                                     }
                                 }
                             } else {
@@ -1881,6 +2009,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         r = &mut run_fut => { break 'turn r?; }
                     }
                 };
+
+                // Phase 32 LEARN-01 (Rule 3 auto-fix): explicitly drop the
+                // pinned `run_fut` so its mutable borrow of `messages` is
+                // released. The post-turn nudge fire site below clones
+                // `messages` to build the snapshot for `spawn_nudge_review`;
+                // the borrow checker rejects that clone while `run_fut` is
+                // still in scope because its destructor runs at end-of-arm.
+                // The future has already resolved at this point (either via
+                // `&mut run_fut => break 'turn r?` or `break 'turn None`),
+                // so dropping it is a no-op against an exhausted future.
+                drop(run_fut);
 
                 agent_running.store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -1911,6 +2050,40 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     println!();
                 }
                 println!();
+
+                // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
+                // Increment the counter only when an actual agent turn produced a
+                // response (cancelled / quit paths return None and must not
+                // advance the counter). When the threshold is reached, fire the
+                // nudge as a tokio::spawn fire-and-forget — the REPL must NOT
+                // block on nudge completion (T-32-05 availability mitigation).
+                // The narrow tool-surface (T-32-01) is enforced inside
+                // `ironhermes_agent::nudge::spawn_nudge_review` itself.
+                if response.is_some() && nudge_interval > 0 && config.memory.memory_enabled {
+                    turns_since_nudge += 1;
+                    if turns_since_nudge >= nudge_interval {
+                        turns_since_nudge = 0;
+                        if let Some(ref mgr) = memory_manager {
+                            let mgr_clone = Arc::clone(mgr);
+                            let client_clone = client.clone();
+                            // `messages` already contains the freshly-pushed
+                            // assistant response (AgentLoop appends inside
+                            // `run_agent_turn`), so the snapshot captures the
+                            // full turn.
+                            let messages_snapshot = messages.clone();
+                            let config_clone = config.clone();
+                            tokio::spawn(async move {
+                                ironhermes_agent::nudge::spawn_nudge_review(
+                                    messages_snapshot,
+                                    mgr_clone,
+                                    client_clone,
+                                    &config_clone,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                }
 
                 // WR-04 fix: if ExitCleanly was signalled from the 'turn loop,
                 // break the outer REPL loop to reach on_session_end cleanup.
@@ -1993,6 +2166,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         }
     }
 
+    // D-15 (Phase 27.1.1): fire on_session_end on every registered tool so
+    // tools that override it (e.g., HexapodTcpTool, which sends stop + relax
+    // per D-14) get a chance to clean up. Best-effort, log-and-continue --
+    // matches the surrounding memory_manager.on_session_end pattern.
+    // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
+    registry.read().await.call_session_end_hooks();
+
     state_store
         .lock()
         .unwrap()
@@ -2003,32 +2183,31 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 }
 
 /// Run one agent turn (may involve multiple tool calls).
-#[allow(clippy::too_many_arguments)]
+///
+/// Plan 28.1-04: delegates to `runtime.run_turn` via a `TurnRequest`. The
+/// budget lifecycle (reset at entry), AgentLoop construction, fallback wiring,
+/// and `attach_context_engine` are all owned by `run_turn` — do NOT duplicate
+/// them here.
+///
+/// Compression-count carry-over (T-28.1-09):
+///   - `compression_count` is seeded INTO the TurnRequest (`compression_count:
+///     starting_count`) so the summarizing engine's prior-summary chain continues
+///     across turns (no regression from old behaviour).
+///   - `AgentResult::compression_count_after` carries the post-turn value BACK.
+///     We store it into the shared `Arc<AtomicUsize>` so the next turn seeds the
+///     correct value. This is a full round-trip — seed-in + write-back.
 async fn run_agent_turn(
-    client: &AnyClient,
-    registry: Arc<RwLock<ToolRegistry>>,
+    runtime: &Arc<ironhermes_agent::AgentRuntime>,
     messages: &mut Vec<ChatMessage>,
-    max_turns: usize,
-    config: &Config,
-    resolver: &ProviderResolver,
-    budget: &BudgetHandle,
     session_id: &str,
     pressure_tracker: Arc<PressureTracker>,
     compression_count: Arc<AtomicUsize>,
     tui: Arc<TuiHandle>, // Plan 21-03: TUI handle for activity publishing
     cancel_token: CancellationToken,
-    hook_registry: Arc<ironhermes_hooks::HookRegistry>, // Phase 22: D-05
-    context_length: usize,                              // Phase 21.3: resolved from model metadata
-    memory_manager: Option<Arc<tokio::sync::Mutex<ironhermes_agent::MemoryManager>>>, // GAP-1: wire queue_prefetch
     state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>, // Phase 25: session_search intercept
-    browser_session: Option<
-        std::sync::Arc<
-            tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
-        >,
-    >, // Phase 25.1 D-17
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>, // Phase 25.3 D-T-3
 ) -> Result<Option<String>> {
-    // Phase 18-14: seed the AgentLoop's compression_count from the shared
+    // Phase 18-14: seed the TurnRequest's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
     // continues across REPL turns instead of resetting to 0 each prompt.
     let starting_count = compression_count.load(Ordering::SeqCst);
@@ -2036,13 +2215,25 @@ async fn run_agent_turn(
     let tui_stream = tui.clone();
     let tui_tool = tui.clone();
 
-    let mut agent = AgentLoop::new(client.clone(), registry, max_turns)
-        .with_budget(budget.clone())
-        .with_cancellation_token(cancel_token)
-        .with_hook_registry(hook_registry.clone()) // Phase 22: D-05
-        .with_compression(context_length, config.agent.context_compression)
-        .with_compression_count(starting_count)
-        .with_streaming(Box::new(move |delta| {
+    // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
+    let scrubber_chat = std::sync::Arc::new(std::sync::Mutex::new(
+        ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+    ));
+    let scrubber_chat_cb = std::sync::Arc::clone(&scrubber_chat);
+
+    // Plan 28.1-04: build TurnRequest and call runtime.run_turn.
+    // run_turn owns budget reset, AgentLoop build, fallback wiring, and
+    // attach_context_engine — DO NOT duplicate those here.
+    let request = ironhermes_agent::TurnRequest {
+        messages: messages.clone(),
+        session_id: session_id.to_string(),
+        cancel_token: Some(cancel_token),
+        stream: Some(Box::new(move |delta| {
+            // Phase 34a MEM-READ-05: strip memory-context fence tags before display.
+            let visible = scrubber_chat_cb.lock().unwrap().feed(delta);
+            if visible.is_empty() {
+                return;
+            }
             // Phase 22.3 GAP-22.3-01 closure (Plan 22.3-11):
             // Route every streamed token through write_into_scroll_region so
             // the cursor is saved (DECSC), absolutely positioned to the bottom
@@ -2058,73 +2249,45 @@ async fn run_agent_turn(
             // the prompt row, by rustyline). The helper handles both
             // flushing and the non-TTY fallback so log captures and CI
             // runs are unaffected.
-            write_into_scroll_region(delta.as_bytes(), tui_stream.reserved_row_count());
+            write_into_scroll_region(visible.as_bytes(), tui_stream.reserved_row_count());
             // Publish coarse activity state (best-effort; watch coalesces rapid updates).
             tui_stream.set_activity(ActivityState::Streaming);
-        }))
-        .with_tool_progress(Box::new(move |name, _args| {
+        })),
+        tool_progress: Some(Box::new(move |name, _args| {
             // D-08: REPLACE the old `eprint!("\r Running: ...")` clutter with a
             // watch publish. The render task renders the scanner + label at bottom row
             // every 100ms — no more inline stderr spray.
             tui_tool.set_activity(ActivityState::ToolCall {
                 name: name.to_string(),
             });
-        }))
-        // Phase 25 D-16: wire intercept handlers (todo_write/todo_read per-turn state).
-        .with_intercepts(
-            None,                      // memory handled by register_memory_tool (Plan 4 will migrate)
-            Some(state_store.clone()), // Phase 25 fix: session_search intercept wired
-            None,                      // subagent_runner: delegate_task wiring in Plan 4
-            Some(std::sync::Arc::new(tokio::sync::Mutex::new(
-                Vec::<String>::new(),
-            ))),
-            None, // cron_router: cronjob wiring in Plan 4
-        );
+        })),
+        tool_result: None,
+        trajectory_writer,
+        pressure_tracker: Some(pressure_tracker.clone()), // Phase 18-14: reuse session tracker
+        state_store: Some(state_store),
+        compression_count: starting_count, // Phase 18-14: carry compression chain across turns
+    };
 
-    // Phase 25.1 D-17: wire shared browser session Arc to AgentLoop (T-25.1-04 drop semantics).
-    if let Some(sess) = browser_session {
-        agent = agent.with_browser_session(sess);
+    let result = runtime.run_turn(request).await?;
+
+    // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
+    let tail = scrubber_chat.lock().unwrap().flush();
+    if !tail.is_empty() {
+        write_into_scroll_region(tail.as_bytes(), tui.reserved_row_count());
     }
 
-    // Phase 25.3 D-T-3: attach trajectory writer handle if available so every
-    // tool call in this per-turn AgentLoop lands a TrajectoryEntry on disk.
-    if let Some(handle) = trajectory_writer {
-        agent = agent.with_trajectory_writer(handle);
+    // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+    // Written via write_into_scroll_region so it lands in the scroll region like streamed
+    // output — visibly separate from the model response text (no double-render).
+    if !result.context_warnings.is_empty() {
+        let warning_lines: Vec<String> = result
+            .context_warnings
+            .iter()
+            .map(|w| format!("- {}", w))
+            .collect();
+        let block = format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+        write_into_scroll_region(block.as_bytes(), tui.reserved_row_count());
     }
-
-    // Wire fallback from resolver
-    let main_endpoint = resolver.resolve_for_main();
-    if let Some(fb_name) = main_endpoint.fallback_providers.first() {
-        if let Ok(fb_client) =
-            build_provider_client(resolver, fb_name, &main_endpoint.default_model)
-        {
-            agent = agent.with_fallback(fb_client);
-        }
-    }
-
-    // GAP-1: wire memory_manager to AgentLoop so queue_prefetch fires after
-    // each natural-end agent turn. Guard with if-let per T-21.4-04.
-    if let Some(ref mgr) = memory_manager {
-        agent = agent.with_memory_manager(mgr.clone());
-    }
-
-    // Phase 18 Plan 09: wire agent-side context compression.
-    // Phase 18-14: reuse the session-scoped PressureTracker so hysteresis
-    // state (above_threshold, pending_transient) survives across turns.
-    // GAP-1/GAP-2: pass memory_manager so on_pre_compress fires on compression.
-    agent = ironhermes_agent::attach_context_engine(
-        agent,
-        config,
-        resolver,
-        session_id,
-        Some(hook_registry.clone()), // Phase 22: D-09
-        Some(pressure_tracker.clone()),
-        context_length,         // Phase 21.3
-        memory_manager.clone(), // GAP-2: wire into context engine
-    );
-
-    // Pass a clone of messages so agent can work with them
-    let result = agent.run(messages.clone()).await?;
 
     // After the turn completes, reset activity to Idle so the scanner hides (D-08).
     tui.set_activity(ActivityState::Idle);
@@ -2135,19 +2298,22 @@ async fn run_agent_turn(
     // SubagentProgressCallback, so full `set_status` writes that don't know
     // about the live count would zero it otherwise. Reading the current
     // watch state and preserving `active_subagents` avoids that regression.
+    let config = runtime.config();
+    let context_length = runtime.config().agent.max_iterations; // used for limit display only
+    let _ = context_length; // actual context_length resolved inside run_turn via resolver
     tui.set_status(StatusLineState {
         mode: "Chat".to_string(),
-        model_short: client.model().to_string(),
+        model_short: runtime.client().model().to_string(),
         provider: config.model.provider.clone(),
         tokens_used: result.total_usage.total_tokens,
-        tokens_limit: context_length,
+        tokens_limit: tui.status_snapshot().tokens_limit, // preserve resolved limit from init
         hint: "ctrl+c cancel · /help commands".to_string(),
         active_subagents: tui.status_snapshot().active_subagents,
-        max_subagents: config.subagent.max_subagents,
+        max_subagents: config.delegation.max_concurrent_children,
     });
 
-    // Phase 18-14: persist the post-turn compression_count back into the
-    // shared counter so the next turn seeds its AgentLoop with the right value.
+    // Phase 18-14 / T-28.1-09: write back the post-turn compression_count into the
+    // shared counter so the next turn seeds with the correct value (full round-trip).
     compression_count.store(result.compression_count_after, Ordering::SeqCst);
 
     // Update messages with the full conversation (includes tool calls and results)
@@ -2216,71 +2382,51 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    // Register delegate_task tool (AGENT-01..05, AGENT-03 semaphore enforcement)
-    let subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.subagent.max_subagents));
-    let gateway_client = build_main_client(&resolver)?;
-    // Plan 21.7-05 (PROV-09/PROV-10/D-15 + RESEARCH Open Q#4): construct a
-    // BudgetHandle at gateway startup seeded from config.agent.max_iterations
-    // and thread it into the shared AgentSubagentRunner. Per-request handler
-    // code builds its per-message AgentLoop via GatewayMessageHandler::new,
-    // which receives the SAME handle via with_budget (see handler.rs
-    // GatewayMessageHandler::with_budget_handle). All clones share the
-    // underlying counter so parent + subagents decrement together (PROV-10).
-    //
-    // Lifecycle: gateway-scoped (not per-user-session). A true per-session
-    // budget requires plumbing through SessionStore; that's deferred to
-    // Plan 09 (hermes status) where session-scoped budget readouts live.
-    let budget = BudgetHandle::new(config.agent.max_iterations);
-    // Plan 21.7-07 (D-03 / D-04 / D-05): thread the gateway-scoped
-    // SubagentRegistry + HERMES_HOME into the runner. Transcript paths use
-    // a process-wide "gateway" session id — the per-request runtime could
-    // use the per-user session id but that requires a per-request runner,
-    // which would break the shared delegate_task Arc. Gateway-process
-    // scope matches the BudgetHandle + ProcessRegistry Plan 05/06 decision.
-    let subagent_runner = Arc::new(
-        AgentSubagentRunner::new(gateway_client, resolver.clone(), Some(budget.clone()))
-            .with_subagent_registry(subagent_registry.clone())
-            .with_transcript_scope(hermes_home.clone(), "gateway".to_string()),
-    );
     let gateway_cancel_token = CancellationToken::new();
     let hooks_config = ironhermes_hooks::HooksConfig::load().unwrap_or_default();
-    let runtime_bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
-        config: Arc::new(config.clone()),
-        resolver: Arc::new(resolver.clone()),
-        cwd,
-        process_registry: process_registry.clone(),
-        memory_manager: memory_manager
-            .clone()
-            .map(|m| m as ironhermes_tools::memory_tool::SharedMemoryManager),
-        delegate_task: Some(DelegateTaskWiring {
-            runner: subagent_runner,
-            semaphore: subagent_semaphore,
-            config: config.subagent.clone(),
-            cancel_token: Some(gateway_cancel_token.clone()),
-            progress_callback: None,
-        }),
-        hooks_config,
-        emit_mcp_startup_logs: true,
-    })
-    .await
-    .context("building shared app runtime bundle for run_gateway")?;
 
-    let registry = runtime_bundle.registry.clone();
-    let hook_registry = runtime_bundle.hook_registry.clone();
-    let mcp_manager = runtime_bundle.mcp_manager.clone();
-    let skill_registry = runtime_bundle.skill_registry.clone();
-    let active_skills = runtime_bundle.active_skills.clone();
-    let browser_session = runtime_bundle.browser_session.clone();
-    let job_store = runtime_bundle.job_store.clone();
+    // Plan 28.1-02: build ONE AgentRuntime from config — replaces the manual
+    // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
+    // from_config creates the runtime's top-level BudgetHandle; each child subagent
+    // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the bundle.
+    let runtime = Arc::new(
+        ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
+            config: Arc::new(config.clone()),
+            resolver: Arc::new(resolver.clone()),
+            cwd,
+            process_registry: process_registry.clone(),
+            memory_manager: memory_manager.clone(),
+            hooks_config,
+            emit_mcp_startup_logs: true,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (hermes_home.clone(), "gateway".to_string()),
+            subagent_progress_callback: None,
+            subagent_cancel_token: Some(gateway_cancel_token.clone()),
+        })
+        .await
+        .context("building AgentRuntime for run_gateway")?,
+    );
+
+    // Source the shared Arcs from the runtime accessors so slash/toolset/status
+    // paths and run_turn operate on the same instances (identity-shared).
+    let registry = runtime.registry().clone();
+    let hook_registry = runtime.hook_registry().clone();
+    let mcp_manager = runtime.mcp_manager().cloned();
+    let skill_registry = runtime.skill_registry().clone();
+    let active_skills = runtime.active_skills().clone();
+    let browser_session = runtime.browser_session().clone();
+    let job_store = runtime.job_store().clone();
 
     // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): construct the live
     // RegistryToolsetSession so /toolset list/show/enable/disable work in
     // run_gateway (Telegram). Reuses the existing Arc<RwLock<ToolRegistry>>
     // — DOES NOT introduce a second Arc layer.
+    // Phase 27.1.1-gap-02: use merged_tools (not raw config.tools) so
+    // /toolset enable|disable mutates from the same baseline as the registry filter.
     let toolset_session: Arc<dyn ironhermes_core::commands::context::ToolsetSessionHandle> =
         Arc::new(ironhermes_tools::RegistryToolsetSession::new(
             registry.clone(),
-            config.tools.clone(),
+            runtime.merged_tools().clone(),
         ));
 
     // Override token if provided via --token flag
@@ -2295,11 +2441,12 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
 
     info!("Starting IronHermes Telegram Gateway");
-    let mut runner = GatewayRunner::new(config, resolver, registry);
-    // Plan 21.7-05: thread the same BudgetHandle constructed above into the
-    // runner so each per-request AgentLoop shares the counter with the
-    // registered AgentSubagentRunner (PROV-10 parent/child shared).
-    runner.set_budget_handle(budget.clone());
+    let mut runner = GatewayRunner::new(config.clone(), resolver, registry);
+    // Plan 28.1-02: thread the single AgentRuntime into the runner so the
+    // handler delegates every top-level turn through runtime.run_turn.
+    // The runtime owns the BudgetHandle; run_turn resets it at every turn
+    // boundary (permanent Stop100 fix, replaces the 367eaa79 band-aid).
+    runner.set_agent_runtime(runtime.clone());
     // Plan 21.7-06 (D-29, D-24): thread the gateway-scoped ProcessRegistry
     // into the runner so the per-request handler can call
     // drain_and_kill_session at on_session_end (grep-gate satisfied; no-op
@@ -2316,6 +2463,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     }
     runner.set_job_store(job_store);
     runner.set_skill_registry(skill_registry);
+    // Phase 21.8.2 D-02: wire SkillsConfig so the gateway SkillsReload arm can reload.
+    runner.set_skills_config(config.skills.clone());
     runner.set_hook_registry(hook_registry);
     runner.set_active_skills(active_skills);
     // Phase 25.1 D-17: wire shared browser session Arc into the runner so per-request
@@ -2373,37 +2522,6 @@ fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
     info!(model = %client.model(), provider = %resolver.main_provider(), "Initializing LLM client via ProviderResolver");
 
     Ok((client, config, resolver))
-}
-
-fn build_registry() -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-    registry.register_defaults();
-    registry
-}
-
-/// Plan 21.7-06 (D-29): build a ToolRegistry with a TerminalTool that is
-/// wired to the session-scoped ProcessRegistry so `terminal background=true`
-/// spawns flow through `drain_and_kill_session` at on_session_end. All other
-/// default tools register identically to `build_registry`.
-fn build_registry_with_process_registry(
-    process_registry: Arc<tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
-) -> ToolRegistry {
-    use ironhermes_tools::file_tools::{
-        PatchFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
-    };
-    use ironhermes_tools::web_read::WebReadTool;
-    use ironhermes_tools::web_search::WebSearchTool;
-    let mut registry = ToolRegistry::new();
-    // Terminal with ProcessRegistry wiring.
-    registry.register_terminal_tool_with_process_registry(process_registry.clone());
-    // Other defaults mirror `register_defaults()` sans the plain TerminalTool.
-    registry.register(Box::new(ReadFileTool));
-    registry.register(Box::new(WriteFileTool));
-    registry.register(Box::new(PatchFileTool));
-    registry.register(Box::new(SearchFilesTool));
-    registry.register(Box::new(WebSearchTool));
-    registry.register(Box::new(WebReadTool));
-    registry
 }
 
 /// Phase 21.2: Build and start an McpManager if the config has any MCP servers.
@@ -2687,13 +2805,10 @@ mod tui_extension_wiring_tests {
 #[cfg(test)]
 mod ensure_home_dirs_tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_ensure_home_dirs_creates_all_subdirs() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -2724,7 +2839,7 @@ mod ensure_home_dirs_tests {
     /// checks.
     #[test]
     fn home_dirs_includes_subagent_transcripts() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -2735,6 +2850,25 @@ mod ensure_home_dirs_tests {
             "D-05: $HERMES_HOME/subagent-transcripts must exist after first-run scaffold"
         );
         ensure_home_dirs().unwrap();
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+    }
+
+    // Phase 26.3 UDD-04: ensure_home_dirs() creates $HERMES_HOME/browser-profile.
+    #[test]
+    fn home_dirs_includes_browser_profile() {
+        let _guard = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        ensure_home_dirs().unwrap();
+        assert!(
+            tmp.path().join("browser-profile").is_dir(),
+            "Phase 26.3 UDD-04: $HERMES_HOME/browser-profile must exist after first-run scaffold"
+        );
+        ensure_home_dirs().unwrap(); // idempotent
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
@@ -2758,12 +2892,13 @@ mod mcp_wiring_tests {
     #[test]
     fn run_single_wires_mcp_manager() {
         let src = include_str!("main.rs");
-        // Phase 25.6: startup wiring is centralized in build_app_runtime_bundle,
-        // which is called from run_chat, run_single, and run_gateway.
-        let count = src.matches("build_app_runtime_bundle").count();
+        // Phase 28.1-04: run_chat and run_single now use AgentRuntime::from_config
+        // (which calls build_app_runtime_bundle internally), matching run_gateway
+        // (Plan 28.1-02). All 3 entry points delegate through AgentRuntime.
+        let count = src.matches("AgentRuntime::from_config").count();
         assert!(
             count >= 3,
-            "build_app_runtime_bundle must be called in at least 3 run paths (chat, single, gateway), got {}",
+            "AgentRuntime::from_config must be called in all 3 run paths (gateway, chat, single), got {}",
             count
         );
     }
@@ -2814,25 +2949,25 @@ mod mcp_wiring_tests {
 
     /// INV-25.1: browser session wiring preserved in all 3 entry points.
     ///
-    /// - register_browser_tools must appear in run_chat, run_single, AND run_gateway (≥3)
-    /// - with_browser_session must be called on the AgentLoop builder in run_single and run_chat (≥2)
-    /// - set_browser_session must be called to wire the runner in run_gateway (≥1)
+    /// Phase 28.1-04 update: run_chat and run_single now use AgentRuntime::from_config
+    /// (same as run_gateway since Phase 28.1-02). The browser session is bundled
+    /// inside AgentRuntime — explicit .with_browser_session() calls on AgentLoop are
+    /// no longer needed. set_browser_session on the runner is still needed so
+    /// GatewayRunner's handler arm receives the session handle.
     #[test]
     fn inv_25_1_browser_session_wired_in_all_entry_points() {
         let source = include_str!("main.rs");
-        let reg_count = source.matches("build_app_runtime_bundle(").count();
+        // Phase 28.1-04: all 3 entry points use AgentRuntime::from_config, which
+        // calls build_app_runtime_bundle internally and bundles browser_session.
+        let runtime_count = source.matches("AgentRuntime::from_config").count();
         assert!(
-            reg_count >= 3,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat, run_single, AND run_gateway; got {} calls",
-            reg_count
+            runtime_count >= 3,
+            "Phase 28.1-04: AgentRuntime::from_config MUST be called in all 3 run paths \
+             (gateway, chat, single); got {} calls",
+            runtime_count
         );
-        let with_count = source.matches(".with_browser_session(").count();
-        assert!(
-            with_count >= 2,
-            "Phase 25.1 D-17: with_browser_session MUST be on AgentLoop builder chain in run_single and run_chat; \
-             got {} calls (run_gateway uses runner.set_browser_session instead)",
-            with_count
-        );
+        // run_gateway still calls set_browser_session on the runner (GatewayRunner
+        // needs the Arc to thread it into per-message handlers).
         let set_count = source.matches("set_browser_session(").count();
         assert!(
             set_count >= 1,
@@ -2852,21 +2987,26 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let reg_count = non_comment_source
-            .matches("build_app_runtime_bundle(")
+        // Phase 28.1-04: all 3 entry points (gateway, chat, single) now use
+        // AgentRuntime::from_config which calls build_app_runtime_bundle internally.
+        // Direct build_app_runtime_bundle calls are 0; assert ≥3 from_config calls.
+        let runtime_count = non_comment_source
+            .matches("AgentRuntime::from_config")
             .count();
         assert!(
-            reg_count >= 3,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_single, run_chat, and run_gateway; got {} non-comment calls",
-            reg_count
+            runtime_count >= 3,
+            "Phase 28.1-04: AgentRuntime::from_config MUST be called in all 3 run paths \
+             (gateway, chat, single); got {} non-comment calls",
+            runtime_count
         );
 
+        // All 3 AgentRuntimeInput sites pass config: Arc::new(config.clone()).
         let config_arg_count = non_comment_source
             .matches("config: Arc::new(config.clone())")
             .count();
         assert!(
             config_arg_count >= 3,
-            "Phase 25.6 D-05: each build_app_runtime_bundle call must pass config: Arc::new(config.clone()); got {} occurrences",
+            "Phase 28.1-04: each AgentRuntimeInput must pass config: Arc::new(config.clone()); got {} occurrences",
             config_arg_count
         );
     }
@@ -2882,21 +3022,25 @@ mod mcp_wiring_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Phase 28.1-04: all 3 entry points (gateway, chat, single) now use
+        // AgentRuntime::from_config. Direct build_app_runtime_bundle calls are 0.
         let count = non_comment_source
-            .matches("build_app_runtime_bundle(")
+            .matches("AgentRuntime::from_config")
             .count();
         assert!(
             count >= 3,
-            "Phase 25.6 D-03: build_app_runtime_bundle MUST be called in run_chat, run_single, AND run_gateway; got {} non-comment calls",
+            "Phase 28.1-04: AgentRuntime::from_config MUST be called in all 3 run paths \
+             (gateway, chat, single); got {} non-comment calls",
             count
         );
 
+        // resolver threaded at all 3 AgentRuntimeInput call sites.
         let handle_count = non_comment_source
             .matches("resolver: Arc::new(resolver.clone())")
             .count();
         assert!(
             handle_count >= 3,
-            "Phase 25.6 D-05: runtime bundle input must thread resolver into all 3 CLI entry points; got {} occurrences",
+            "Phase 25.6 D-05: AgentRuntimeInput must thread resolver into all 3 CLI entry points; got {} occurrences",
             handle_count
         );
     }
@@ -2932,6 +3076,101 @@ mod mcp_wiring_tests {
             "Phase 25.2 Plan 15: build_cmd_ctx call sites MUST pass \
              Some(toolset_session.clone()) at ≥2 sites (prompt-time + mid-turn); found {}",
             pass_count
+        );
+    }
+}
+
+/// Plan 28.1-04 invariant (T-28.1-10): file-wide grep gate for main.rs.
+///
+/// Asserts that no production code (comment-stripped, test-stripped) in main.rs
+/// directly constructs a BudgetHandle or calls AgentLoop.with_budget, and that
+/// all three CLI entry points route through AgentRuntime::run_turn.
+///
+/// This gate is intentionally file-wide so it also covers run_gateway (Plan 02),
+/// run_chat, and run_single (Plan 04) in a single assertion.
+#[cfg(test)]
+mod agent_runtime_migration_gate_28_1_04 {
+    /// T-28.1-10: no BudgetHandle::new in main.rs production code, and no
+    /// AgentLoop-level .with_budget( call (the pattern is `.with_budget(budget`
+    /// passing a BudgetHandle directly to AgentLoop). Note: `build_cmd_ctx`
+    /// legitimately calls `.with_budget(Arc::new(budget))` for CommandContext
+    /// observability — that is NOT the prohibited AgentLoop wiring.
+    ///
+    /// T-28.1-08: all CLI turns route through run_turn (latent latch fix verified).
+    #[test]
+    fn main_rs_has_no_direct_budget_construction_or_with_budget() {
+        let source = include_str!("main.rs");
+
+        // Strip comment-only lines and lines containing string literals (test
+        // assertion strings that mention the patterns by name) to avoid false
+        // positives. Production uses of the forbidden patterns are bare identifiers
+        // on non-quoted lines.
+        let stripped: String = source
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                // Exclude comment lines
+                !t.starts_with("//")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // BudgetHandle::new( must not appear in any non-comment production line.
+        // String-literal occurrences (in test assertion messages) contain a `"`.
+        let budget_new_violations: Vec<&str> = stripped
+            .lines()
+            .filter(|line| {
+                line.contains("BudgetHandle::new(") && !line.contains('"')
+            })
+            .collect();
+
+        assert!(
+            budget_new_violations.is_empty(),
+            "T-28.1-10: main.rs production code must not call BudgetHandle::new( directly \
+             (use AgentRuntime::from_config instead). Offending lines:\n{}",
+            budget_new_violations.join("\n")
+        );
+
+        // AgentLoop-level budget wiring: check for `.with_budget(budget` where
+        // budget is a bare BudgetHandle variable (not Arc::new-wrapped CommandContext
+        // usage at build_cmd_ctx). We distinguish by checking for the bare variable
+        // form (no Arc::new wrapper on the same line).
+        let bare_budget_pattern = ".with_budget(budget";
+        let with_budget_violations: Vec<&str> = stripped
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                // Bare pattern (no Arc::new on same line, not a string literal)
+                t.contains(bare_budget_pattern) && !line.contains('"')
+            })
+            .collect();
+
+        assert!(
+            with_budget_violations.is_empty(),
+            "T-28.1-10: production code must not pass BudgetHandle directly to AgentLoop \
+             (use AgentRuntime::run_turn instead). Offending lines:\n{}",
+            with_budget_violations.join("\n")
+        );
+    }
+
+    /// Positive gate: all three CLI entry points must call run_turn, confirming
+    /// the AgentRuntime migration is complete.
+    #[test]
+    fn main_rs_all_entry_points_use_run_turn() {
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains("run_turn("),
+            "T-28.1-08: main.rs must contain run_turn( — all CLI entry points must \
+             route through AgentRuntime::run_turn"
+        );
+        // run_turn appears in run_single (via runtime.run_turn in the request block),
+        // in run_agent_turn (used by run_chat), and in the gateway handler (Plan 02).
+        // At least 2 distinct call sites.
+        let count = source.matches("run_turn(").count();
+        assert!(
+            count >= 2,
+            "T-28.1-08: expected ≥2 run_turn( call sites (run_single + run_agent_turn); got {}",
+            count
         );
     }
 }

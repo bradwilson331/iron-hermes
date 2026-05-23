@@ -37,6 +37,10 @@ pub enum HubErrorKind {
     /// Reserved for internal audit module error plumbing (D-19 is
     /// soft-fail, so this variant rarely surfaces to callers).
     Audit,
+    /// The source directory stored in `SkillLockEntry.identifier` for a
+    /// `local-dir` skill no longer exists at update time. Hard-fail on
+    /// `hermes skills update` per D-C2.
+    LocalSourceMissing,
 }
 
 #[derive(Debug, Error)]
@@ -103,6 +107,11 @@ mod tests_21_8 {
             serde_json::to_string(&HubErrorKind::Audit).unwrap(),
             r#""audit""#
         );
+        // Phase 21.8.1: LocalSourceMissing must serialize as "local_source_missing"
+        assert_eq!(
+            serde_json::to_string(&HubErrorKind::LocalSourceMissing).unwrap(),
+            r#""local_source_missing""#
+        );
     }
 
     #[test]
@@ -110,6 +119,40 @@ mod tests_21_8 {
         assert_eq!(HubErrorKind::ShaMismatch, HubErrorKind::ShaMismatch);
         assert_ne!(HubErrorKind::ShaMismatch, HubErrorKind::ScanHit);
         assert_ne!(HubErrorKind::PathTraversal, HubErrorKind::Audit);
+        // Phase 21.8.1: LocalSourceMissing identity and inequality
+        assert_eq!(HubErrorKind::LocalSourceMissing, HubErrorKind::LocalSourceMissing);
+        assert_ne!(HubErrorKind::LocalSourceMissing, HubErrorKind::Audit);
+    }
+
+    #[test]
+    fn local_source_missing_is_distinct_from_io() {
+        let io_err = HubError::Typed {
+            kind: HubErrorKind::Io,
+            message: "some io error".to_string(),
+            suggestion: None,
+            retry_after_s: None,
+        };
+        let local_missing_err = HubError::Typed {
+            kind: HubErrorKind::LocalSourceMissing,
+            message: "source dir no longer exists at /some/path".to_string(),
+            suggestion: Some(
+                "Run 'hermes skills remove <name>' to de-register, or restore the source directory."
+                    .to_string(),
+            ),
+            retry_after_s: None,
+        };
+        // Both are constructible; kinds are distinct.
+        let io_kind = match &io_err {
+            HubError::Typed { kind, .. } => *kind,
+            _ => panic!("expected Typed"),
+        };
+        let missing_kind = match &local_missing_err {
+            HubError::Typed { kind, .. } => *kind,
+            _ => panic!("expected Typed"),
+        };
+        assert_eq!(io_kind, HubErrorKind::Io);
+        assert_eq!(missing_kind, HubErrorKind::LocalSourceMissing);
+        assert_ne!(io_kind, missing_kind);
     }
 
     #[test]

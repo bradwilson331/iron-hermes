@@ -36,16 +36,31 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
 }
 
 /// Context compressor that summarizes old messages to stay within context window.
+///
+/// Phase 34b Plan 02: the per-session counters (`compression_count` and the
+/// `last_*_tokens` parity fields ported from `context_compressor.py`) are stored
+/// as `AtomicUsize` so the `ContextEngine::on_session_reset(&self)` override can
+/// zero them through a shared `&self` reference (interior mutability) without
+/// requiring `&mut self`.
 pub struct ContextCompressor {
     context_length: usize,
     threshold_percent: f64,
     protect_first_n: usize,
     protect_last_tokens: usize,
-    compression_count: usize,
+    compression_count: std::sync::atomic::AtomicUsize,
+    /// Python parity (`context_compressor.py` `_ineffective_compression_count`):
+    /// counts compression passes that freed no tokens. Zeroed on session reset.
+    ineffective_compression_count: std::sync::atomic::AtomicUsize,
+    /// Python parity: last observed prompt/completion/total token usage. Zeroed
+    /// on session reset so a fresh conversation does not inherit stale metrics.
+    last_prompt_tokens: std::sync::atomic::AtomicUsize,
+    last_completion_tokens: std::sync::atomic::AtomicUsize,
+    last_total_tokens: std::sync::atomic::AtomicUsize,
 }
 
 impl ContextCompressor {
     pub fn new(context_length: usize, threshold_percent: f64) -> Self {
+        use std::sync::atomic::AtomicUsize;
         let protect_last_tokens = 20_000.min(context_length / 4);
 
         Self {
@@ -53,7 +68,11 @@ impl ContextCompressor {
             threshold_percent,
             protect_first_n: 3,
             protect_last_tokens,
-            compression_count: 0,
+            compression_count: AtomicUsize::new(0),
+            ineffective_compression_count: AtomicUsize::new(0),
+            last_prompt_tokens: AtomicUsize::new(0),
+            last_completion_tokens: AtomicUsize::new(0),
+            last_total_tokens: AtomicUsize::new(0),
         }
     }
 
@@ -77,7 +96,12 @@ impl ContextCompressor {
     ///
     /// This is a local compression that doesn't require an LLM call.
     /// For LLM-based summarization, use `compress_with_summary`.
-    pub fn compress(&mut self, messages: &mut Vec<ChatMessage>) -> bool {
+    pub fn compress(&self, messages: &mut Vec<ChatMessage>) -> bool {
+        // Step 0 (Phase 34a D-03): strip ephemeral recall messages before any
+        // token estimation — they are re-derivable next turn and must be freed
+        // first when context is tight.
+        messages.retain(|m| !m.is_recall_context);
+
         if !self.should_compress(messages) {
             return false;
         }
@@ -93,11 +117,18 @@ impl ContextCompressor {
             self.drop_middle_messages(messages);
         }
 
-        self.compression_count += 1;
+        use std::sync::atomic::Ordering;
+        let count = self.compression_count.fetch_add(1, Ordering::SeqCst) + 1;
         let new_tokens = estimate_messages_tokens(messages);
 
+        // Python parity: track passes that freed no tokens.
+        if new_tokens >= original_tokens {
+            self.ineffective_compression_count
+                .fetch_add(1, Ordering::SeqCst);
+        }
+
         info!(
-            compression = self.compression_count,
+            compression = count,
             messages_before = original_count,
             messages_after = messages.len(),
             tokens_before = original_tokens,
@@ -140,7 +171,7 @@ impl ContextCompressor {
                 if text.len() > 500 {
                     msg.content = Some(ironhermes_core::MessageContent::Text(format!(
                         "{}... [truncated, {} chars total]",
-                        &text[..200],
+                        ironhermes_core::truncate_on_char_boundary(&text, 200),
                         text.len()
                     )));
                 }
@@ -193,7 +224,42 @@ impl ContextCompressor {
     }
 
     pub fn compression_count(&self) -> usize {
-        self.compression_count
+        self.compression_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Phase 34b Plan 02: last observed prompt-token count (Python parity).
+    pub fn last_prompt_tokens(&self) -> usize {
+        self.last_prompt_tokens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Phase 34b Plan 02: last observed completion-token count (Python parity).
+    pub fn last_completion_tokens(&self) -> usize {
+        self.last_completion_tokens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Phase 34b Plan 02: last observed total-token count (Python parity).
+    pub fn last_total_tokens(&self) -> usize {
+        self.last_total_tokens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Phase 34b Plan 02: record the per-response token usage (Python parity for
+    /// `update_from_response`). Stored so a long-lived compressor instance can
+    /// report last-turn usage; zeroed by `on_session_reset`.
+    pub fn record_usage(&self, prompt_tokens: usize, completion_tokens: usize, total_tokens: usize) {
+        use std::sync::atomic::Ordering;
+        self.last_prompt_tokens.store(prompt_tokens, Ordering::SeqCst);
+        self.last_completion_tokens
+            .store(completion_tokens, Ordering::SeqCst);
+        self.last_total_tokens.store(total_tokens, Ordering::SeqCst);
+    }
+
+    /// Phase 34b Plan 02: test-only helper to drive a compression pass through a
+    /// shared `&self` reference (the production caller in `agent_loop.rs` holds a
+    /// `Mutex` guard). Lets the reset unit test bump `compression_count` without
+    /// `&mut`.
+    #[cfg(test)]
+    pub fn compress_for_test(&self, messages: &mut Vec<ChatMessage>) -> bool {
+        self.compress(messages)
     }
 
     /// Phase 18 D-15: compute the index where the protected tail segment begins.
@@ -238,6 +304,61 @@ impl ContextCompressor {
     }
 }
 
+/// Phase 34b Plan 02 (D-06/D-10): `ContextCompressor` implements `ContextEngine`
+/// so its `on_session_reset` override can zero the durable per-session counters
+/// (`compression_count` + `last_*_tokens`) — Python parity with
+/// `context_compressor.py::on_session_reset`. The compressor zeroes its OWN
+/// fields directly; `PressureTracker` has no reset method to delegate to.
+///
+/// The `compress` trait method delegates to the inherent local prune+drop logic
+/// (ignoring `stats`, which only the LLM-summarizing engine consumes).
+#[async_trait::async_trait]
+impl crate::context_engine::ContextEngine for ContextCompressor {
+    async fn compress(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        _stats: crate::context_engine::ContextStats,
+    ) -> Result<crate::context_engine::CompressionOutcome, crate::context_engine::ContextError> {
+        let before = estimate_messages_tokens(messages);
+        let compressed = ContextCompressor::compress(self, messages);
+        let after = estimate_messages_tokens(messages);
+        Ok(crate::context_engine::CompressionOutcome {
+            compressed,
+            tokens_freed: before.saturating_sub(after),
+            new_summary: None,
+            pressure_warning_fired: false,
+        })
+    }
+
+    fn threshold(&self) -> f32 {
+        self.threshold_percent as f32
+    }
+
+    fn mode(&self) -> crate::context_engine::CompressionMode {
+        crate::context_engine::CompressionMode::Hard
+    }
+
+    /// Zero ALL per-session counters (Python `on_session_reset` parity).
+    fn on_session_reset(&self) {
+        use std::sync::atomic::Ordering;
+        self.compression_count.store(0, Ordering::SeqCst);
+        self.ineffective_compression_count.store(0, Ordering::SeqCst);
+        self.last_prompt_tokens.store(0, Ordering::SeqCst);
+        self.last_completion_tokens.store(0, Ordering::SeqCst);
+        self.last_total_tokens.store(0, Ordering::SeqCst);
+    }
+
+    /// Record per-response usage so a long-lived compressor reports last-turn
+    /// metrics (Python `update_from_response` parity).
+    fn update_from_response(&self, usage: &crate::agent_loop::AggregatedUsage) {
+        self.record_usage(
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.total_tokens,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +393,92 @@ mod tests {
         let cc = ContextCompressor::new(10_000, 0.5).with_protect(5, 4_000);
         assert_eq!(cc.protect_first_n(), 5);
         assert_eq!(cc.protect_last_tokens(), 4_000);
+    }
+
+    #[test]
+    fn compress_step0_evicts_recall_messages() {
+        // Phase 34a D-03: recall messages must be stripped as step 0, even when
+        // the context is below the compression threshold (no actual compression).
+        let mut compressor = ContextCompressor::new(100_000, 0.9);
+        let recall_msg = ChatMessage::recall_system("Recall: user prefers dark mode.");
+        let normal_system = ChatMessage::system("You are Hermes.");
+        let user_msg = ChatMessage::user("Hello");
+        let mut messages = vec![normal_system, recall_msg, user_msg];
+
+        // Step 0 runs even when should_compress returns false.
+        compressor.compress(&mut messages);
+
+        // No message with is_recall_context == true should remain.
+        assert!(
+            !messages.iter().any(|m| m.is_recall_context),
+            "compressor step 0 must evict all recall messages"
+        );
+        // Normal messages survive.
+        assert_eq!(messages.len(), 2, "normal system + user message should remain");
+    }
+
+    #[test]
+    fn test_context_compressor_reset_zeroes_counter() {
+        // Wave 2 (Plan 02 Task 1): build a ContextCompressor, drive
+        // compression_count up, call on_session_reset(), assert all token counters +
+        // compression_count are zero.
+        use crate::context_engine::ContextEngine;
+
+        // Small context window + low protect tail so the message vec exceeds
+        // the threshold and a real compression pass runs (mirrors the
+        // local_pruning_engine_parity fixture).
+        let cc = ContextCompressor::new(1000, 0.5).with_protect(3, 250);
+
+        // Drive compression_count > 0 by compressing a large message vec.
+        let mut messages: Vec<ChatMessage> = (0..30)
+            .map(|i| ChatMessage::user(format!("message {i} ").repeat(20)))
+            .collect();
+        let did_compress = cc.compress_for_test(&mut messages);
+        assert!(did_compress, "test fixture must trigger a compression pass");
+
+        // Also record some usage so the token counters are non-zero pre-reset.
+        cc.record_usage(123, 45, 168);
+        assert_eq!(cc.last_total_tokens(), 168, "usage recorded pre-reset");
+
+        // Compression count should be non-zero after compression.
+        assert!(
+            cc.compression_count() > 0,
+            "compression_count must be > 0 after compress"
+        );
+
+        // Call on_session_reset() — zeroes all counters.
+        cc.on_session_reset();
+
+        assert_eq!(
+            cc.compression_count(),
+            0,
+            "compression_count must be 0 after on_session_reset"
+        );
+        assert_eq!(
+            cc.last_prompt_tokens(),
+            0,
+            "last_prompt_tokens must be 0 after on_session_reset"
+        );
+        assert_eq!(
+            cc.last_completion_tokens(),
+            0,
+            "last_completion_tokens must be 0 after on_session_reset"
+        );
+        assert_eq!(
+            cc.last_total_tokens(),
+            0,
+            "last_total_tokens must be 0 after on_session_reset"
+        );
+    }
+
+    #[test]
+    fn test_has_content_to_compress_default_true() {
+        use crate::context_engine::ContextEngine;
+        use ironhermes_core::ChatMessage;
+
+        let cc = ContextCompressor::new(100_000, 0.5);
+        let msgs = vec![ChatMessage::user("hello")];
+        // Default has_content_to_compress returns true.
+        assert!(cc.has_content_to_compress(&msgs));
     }
 }

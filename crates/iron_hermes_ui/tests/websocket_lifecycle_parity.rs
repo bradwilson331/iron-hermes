@@ -15,7 +15,8 @@ fn server_ws_runs_turn_in_spawned_task_and_streams_concurrently() {
     assert!(
         ws.contains("#[cfg(feature = \"server\")]\nuse tokio::sync::mpsc;")
             && ws.contains("#[cfg(feature = \"server\")]\nuse tokio::task::JoinHandle;")
-            && ws.contains("#[cfg(feature = \"server\")]\nuse tracing::warn;"),
+            && (ws.contains("#[cfg(feature = \"server\")]\nuse tracing::warn;")
+                || ws.contains("#[cfg(feature = \"server\")]\nuse tracing::{info, warn};")),
         "server-only websocket runtime imports must remain cfg-gated"
     );
     assert!(
@@ -45,13 +46,28 @@ fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
         ws.contains("Invalid request:"),
         "ws_chat must emit protocol errors for malformed JSON"
     );
+    // WR-03: anchor `continue;` to the malformed-request branch (within 500 chars
+    // after the first `Invalid request:` marker) instead of a global file match.
+    // The window is 500 bytes to accommodate the send_raw call between the error
+    // format and the continue; statement.
+    let inv_pos = ws
+        .find("Invalid request:")
+        .expect("ws_chat must emit `Invalid request:` for malformed JSON");
+    let window_end = (inv_pos + 500).min(ws.len());
     assert!(
-        ws.contains("continue;"),
-        "ws_chat malformed request branch must continue receiving frames"
+        ws[inv_pos..window_end].contains("continue;"),
+        "ws_chat malformed request branch must `continue;` within 500 chars after the `Invalid request:` error send"
+    );
+
+    // WR-03: anchor abort assertion to the verbatim call site + adjacent log
+    // message rather than any `abort()` substring elsewhere in the file.
+    assert!(
+        ws.contains("turn.handle.abort();"),
+        "ws_chat must call `turn.handle.abort();` on socket send failure"
     );
     assert!(
-        ws.contains("abort()"),
-        "ws_chat must abort in-flight turn task on socket send failure"
+        ws.contains("aborting in-flight turn"),
+        "ws_chat must log `aborting in-flight turn` near the abort call site"
     );
 }
 
@@ -61,7 +77,8 @@ fn server_ws_disconnect_teardown_distinguishes_clean_recv_from_broken_send() {
 
     assert!(
         ws.contains("websocket recv closed; exiting connection")
-            || ws.contains("websocket recv closed cleanly; exiting connection"),
+            || ws.contains("websocket recv closed cleanly; exiting connection")
+            || ws.contains("websocket close frame received; exiting connection"),
         "clean websocket recv closure should log a clean-exit warning"
     );
 
@@ -119,26 +136,34 @@ fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
 }
 
 #[test]
-fn client_ws_disconnect_notices_are_generic_and_deduplicated_per_disconnect_window() {
-    let ui = read("src/components/warp_hermes.rs");
+fn client_ws_disconnect_resets_streaming_state_and_reconnects() {
+    // Retargeted from legacy warp_hermes.rs to the active HermesApp websocket
+    // client (hoisted to the root component, src/components/hermes_app/mod.rs).
+    // The legacy user-facing disconnect notice (push_disconnect_notice + the
+    // "Connection interrupted..." transcript copy) was intentionally dropped in
+    // the wheel-driven shell: on disconnect it silently clears the streaming
+    // indicator and reconnects, letting the user retry. This test locks that
+    // close/error-boundary contract instead of the removed notice copy.
+    let app = read("src/components/hermes_app/mod.rs");
 
     assert!(
-        ui.contains("fn push_disconnect_notice")
-            || ui.contains("push_disconnect_notice("),
-        "disconnect notice emission should be funneled through a single helper"
+        app.contains("with_automatic_reconnect()"),
+        "client websocket must keep automatic reconnect enabled"
     );
-
     assert!(
-        ui.contains("Connection interrupted. Please retry your message once reconnected."),
-        "disconnect transcript copy must remain generic and user-facing"
+        app.contains("loop {") && app.contains("ws.connect().await"),
+        "client receiver must use an outer reconnect cycle"
     );
-
     assert!(
-        ui.contains("dioxus_fullstack::Message::Close { .. }")
-            && ui.contains("WebSocket closed; reconnecting")
-            && ui.contains("if !disconnect_notified {")
-            && ui.contains("break;"),
-        "close frames should trigger one reconnect boundary, not repeated receive-error churn"
+        app.contains("Ok(dioxus_fullstack::Message::Close { .. }) => {")
+            && app.contains("streaming_id.set(None);")
+            && app.contains("is_ws_connected.set(false);")
+            && app.contains("break;"),
+        "a close frame must clear the streaming indicator, mark ws disconnected, and break to reconnect once"
+    );
+    assert!(
+        app.contains("Err(_) => {"),
+        "the recv error path must be explicitly handled (break + reconnect), not panic"
     );
 }
 
@@ -242,5 +267,98 @@ fn server_ws_emits_application_level_keepalive_ping() {
     assert!(
         ws.contains("websocket keepalive ping failed; closing connection"),
         "failed keepalive Ping must classify as a transport-broken send failure"
+    );
+}
+
+#[test]
+fn busy_gate_opportunistically_clears_finished_turn() {
+    let ws = read("src/server/ws.rs");
+    let finished_pos = ws
+        .find("turn.handle.is_finished()")
+        .expect("ws_chat must check turn.handle.is_finished() to opportunistically clear finished turns (WR-02)");
+    // Use the full `if in_flight_turn.is_some() {` form to anchor to the busy-gate
+    // branch specifically (not the telemetry `let in_flight = in_flight_turn.is_some();`
+    // lines that appear earlier in the file).
+    let busy_pos = ws
+        .find("if in_flight_turn.is_some() {")
+        .expect("ws_chat must keep the `if in_flight_turn.is_some() {` busy-gate check");
+    assert!(
+        finished_pos < busy_pos,
+        "WR-02: turn.handle.is_finished() opportunistic clear must appear BEFORE the in_flight_turn.is_some() busy-gate (file offsets: finished={finished_pos}, busy={busy_pos})"
+    );
+    assert!(
+        ws.contains("in_flight_turn = None;"),
+        "WR-02: opportunistic clear must reset in_flight_turn to None when handle is finished"
+    );
+}
+
+#[test]
+fn session_select_switches_id_and_clears_transcript() {
+    // Retargeted from legacy warp_hermes.rs on_tab_click to the active HermesApp
+    // Sessions + Chat screens. Selecting a session row switches session_id and
+    // routes to the Chat screen (sessions.rs); the Chat screen clears the prior
+    // transcript + streaming indicator on every session_id change (chat.rs).
+    // The legacy mid-stream guard (`scanner_active()` + early `return;`) was
+    // intentionally dropped — the wheel-driven shell allows switching during an
+    // in-flight turn (the orphaned turn is simply discarded).
+    let sessions = read("src/components/hermes_app/screens/sessions.rs");
+    assert!(
+        sessions.contains("let on_select = move |sid: String|")
+            && sessions.contains("session_id.set(sid)")
+            && sessions.contains("active_screen.set(crate::state::Screen::Chat)"),
+        "row select must set session_id and route to the Chat screen (D-09)"
+    );
+
+    let chat = read("src/components/hermes_app/screens/chat.rs");
+    assert!(
+        chat.contains("bubbles.write().clear()"),
+        "Chat screen must clear the transcript on session_id change (D-08: no stale history)"
+    );
+    assert!(
+        chat.contains("streaming_id.set(None)"),
+        "Chat screen must cancel the stale streaming indicator on session switch (D-01)"
+    );
+}
+
+#[test]
+fn tab_new_calls_create_session_and_appends_tab() {
+    let ui = read("src/components/warp_hermes.rs");
+    assert!(
+        ui.contains("let on_tab_new = move |_: ()|"),
+        "WarpHermes must define on_tab_new closure (D-09)"
+    );
+    assert!(
+        ui.contains("create_session().await"),
+        "on_tab_new must call the create_session server function (D-03)"
+    );
+    assert!(
+        ui.contains("\"New Session\".to_string()"),
+        "new tab must use \"New Session\" placeholder label (D-04)"
+    );
+    assert!(
+        ui.contains("tabs.write().push"),
+        "on_tab_new must push the new Tab onto the tabs signal (D-03)"
+    );
+}
+
+#[test]
+fn session_delete_button_uses_stop_propagation() {
+    // Retargeted from the legacy shell_legacy/title_bar.rs tab-close button to the
+    // active HermesApp Sessions screen. The wheel-driven shell replaced the tab
+    // strip + TitleBar with a sessions list; the per-row delete button must still
+    // call evt.stop_propagation() so the click does not bubble to the row-select
+    // handler. The legacy TitleBar prop contract (on_tab_click/on_tab_close/
+    // on_tab_new EventHandlers) and the streaming `disabled: bool` +
+    // `pointer-events: none; opacity: 0.5` gate were intentionally dropped in
+    // hermes_app (the UI stays interactive during streaming), so those assertions
+    // are not carried over.
+    let sessions = read("src/components/hermes_app/screens/sessions.rs");
+    assert!(
+        sessions.contains("evt.stop_propagation()"),
+        "session delete button must call evt.stop_propagation() so the click does not bubble to row select"
+    );
+    assert!(
+        sessions.contains("on_delete.call("),
+        "delete button must invoke the on_delete handler with the session id"
     );
 }

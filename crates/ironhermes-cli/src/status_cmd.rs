@@ -439,7 +439,7 @@ impl StatusReport {
         // -- Subagents / Processes / MCP (D-18 section d) -------------------
         let subagents = SubagentStatus {
             active: 0,
-            max: config.subagent.max_subagents,
+            max: config.delegation.max_concurrent_children,
             budget: BudgetView {
                 iterations_used: 0,
                 iterations_max: config.agent.max_iterations,

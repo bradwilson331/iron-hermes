@@ -8,6 +8,7 @@ description = "Cron scheduler for IronHermes"
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

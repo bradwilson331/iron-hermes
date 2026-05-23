@@ -16,6 +16,11 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Phase 34a D-01: wire-transparent flag — never serialized to wire/disk.
+    /// Identifies ephemeral recall injection messages so they can be evicted
+    /// pre-turn (agent_loop) and as compressor step 0 (D-03).
+    #[serde(skip)]
+    pub is_recall_context: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +334,21 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
+        }
+    }
+
+    /// Phase 34a D-01: construct an ephemeral system recall message.
+    /// Sets `is_recall_context = true` so agent_loop and the compressor
+    /// can evict it without content parsing.
+    pub fn recall_system(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            content: Some(MessageContent::Text(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: true,
         }
     }
 
@@ -339,6 +359,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     }
 
@@ -349,6 +370,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     }
 
@@ -359,6 +381,7 @@ impl ChatMessage {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
+            is_recall_context: false,
         }
     }
 
@@ -369,6 +392,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
+            is_recall_context: false,
         }
     }
 

@@ -8,59 +8,92 @@
 
 const MAIN_RS: &str = include_str!("../src/main.rs");
 
+// Phase 28.1-02: run_gateway no longer constructs the subagent runner inline.
+// It now builds the shared runtime via `AgentRuntime::from_config`, which
+// constructs the runner (and threads the subagent registry) internally. The
+// three logical call sites are therefore split across two files: run_chat +
+// run_single in main.rs, and the gateway/runtime site in agent_runtime.rs.
+const AGENT_RUNTIME_RS: &str =
+    include_str!("../../ironhermes-agent/src/agent_runtime.rs");
+
 #[test]
 fn invariant_21_7_01_three_agent_subagent_runner_new_sites() {
-    let count = MAIN_RS.matches("AgentSubagentRunner::new(").count();
+    // Phase 28.1-04: run_chat and run_single no longer construct AgentSubagentRunner::new
+    // directly — they delegate through AgentRuntime::from_config (same as run_gateway
+    // after Phase 28.1-02). All 3 logical entry points now share the single construction
+    // site inside agent_runtime.rs. Expected: 0 in main.rs, 1 in agent_runtime.rs.
+    let main_sites = MAIN_RS.matches("AgentSubagentRunner::new(").count();
+    let runtime_sites = AGENT_RUNTIME_RS.matches("AgentSubagentRunner::new(").count();
+    let count = main_sites + runtime_sites;
     assert_eq!(
-        count, 3,
-        "INV-21.7-01: run_chat, run_single, and run_gateway each construct AgentSubagentRunner::new(. \
-         Expected 3 call sites; found {}. If you added or removed a site, update this test with justification.",
-        count
+        main_sites, 0,
+        "INV-21.7-01 (Phase 28.1-04): main.rs must have 0 AgentSubagentRunner::new( sites — \
+         all entry points now delegate through AgentRuntime::from_config. Found {main_sites}."
+    );
+    assert_eq!(
+        runtime_sites, 1,
+        "INV-21.7-01 (Phase 28.1-04): agent_runtime.rs must have exactly 1 AgentSubagentRunner::new( \
+         site (shared by run_single, run_chat, run_gateway). Found {runtime_sites}."
+    );
+    let _ = count; // suppress unused warning
+}
+
+// Phase 25.6 consolidated all per-path tool registration into the shared
+// runtime factory `ironhermes_agent::app_runtime_factory::build_app_runtime_bundle`,
+// which run_chat / run_single / run_gateway each call (the 3-call-site contract is
+// itself locked by the `build_app_runtime_bundle`-count tests inside main.rs).
+// register_delegate_task_tool / register_execute_code_tool therefore no longer
+// appear inline in main.rs — they live in the factory. INV-21.7-02/-03 are
+// retargeted to assert the registration survives in that single wiring path.
+// Cross-crate `include_str!` precedent: INV-21.7-07 below reads the gateway handler.
+const RUNTIME_FACTORY: &str = include_str!("../../ironhermes-agent/src/app_runtime_factory.rs");
+
+#[test]
+fn invariant_21_7_02_delegate_task_registered_in_runtime_factory() {
+    assert!(
+        RUNTIME_FACTORY.contains("register_delegate_task_tool("),
+        "INV-21.7-02: delegate_task must remain wired via the shared runtime factory \
+         (build_app_runtime_bundle, used by run_chat/run_single/run_gateway). If this \
+         fails, the delegate_task registration was dropped from app_runtime_factory.rs."
     );
 }
 
 #[test]
-fn invariant_21_7_02_three_register_delegate_task_sites() {
-    let count = MAIN_RS.matches("register_delegate_task_tool(").count();
-    assert_eq!(
-        count, 3,
-        "INV-21.7-02: three register_delegate_task_tool( sites must remain (Phase 22 three-site precedent)."
-    );
-}
-
-#[test]
-fn invariant_21_7_03_three_register_execute_code_sites() {
-    // Either the legacy signature OR the new with_process_registry variant —
-    // total across the two spellings must equal 3 after Wave 2 Plan 06 lands
-    // the rename. Today Wave 0 sees 3 legacy / 0 new.
-    let legacy = MAIN_RS
+fn invariant_21_7_03_execute_code_registered_in_runtime_factory() {
+    // Accept either the legacy signature OR the with_process_registry variant.
+    let legacy = RUNTIME_FACTORY
         .matches("register_execute_code_tool_with_active_skills(")
         .count();
-    let new_variant = MAIN_RS
+    let new_variant = RUNTIME_FACTORY
         .matches("register_execute_code_tool_with_process_registry(")
         .count();
-    assert_eq!(
-        legacy + new_variant,
-        3,
-        "INV-21.7-03: execute_code registration must total 3 sites across CLI + gateway. legacy={}, new={}.",
-        legacy,
-        new_variant
+    assert!(
+        legacy + new_variant >= 1,
+        "INV-21.7-03: execute_code must remain wired via the shared runtime factory. \
+         legacy={legacy}, new={new_variant}."
     );
 }
 
 #[test]
-fn invariant_21_7_04_budget_handle_threaded_through_all_three_sites() {
-    // Plan 05 (Wave 2): every AgentSubagentRunner::new( call passes a
-    // BudgetHandle. The skip-path has been removed — this is now a strict
-    // regression gate. BudgetHandle must appear in run_chat, run_single,
-    // and run_gateway (and also in at least one shared helper such as
-    // run_agent_turn). Minimum count = 3 across all three sites.
-    let marker = MAIN_RS.matches("BudgetHandle").count();
+fn invariant_21_7_04_budget_owned_by_agent_runtime() {
+    // Phase 28.1 INVERTS the original INV-21.7-04. The budget is no longer constructed
+    // in run_chat/run_single/run_gateway — those sites would create per-channel
+    // BudgetHandles that latch at Stop100 across turns. The shared budget is now created
+    // ONCE inside AgentRuntime::from_config and reset per turn by run_turn. The CLI entry
+    // points thread it through the runtime, never by hand.
+    //
+    // The "main.rs production code must not call BudgetHandle::new(" guard lives in
+    // main.rs's own test module (main_rs_has_no_direct_budget_construction_or_with_budget);
+    // here we assert the positive ownership invariant on the runtime.
     assert!(
-        marker >= 3,
-        "INV-21.7-04 / E-09: BudgetHandle must appear in all 3 registration sites \
-         (run_single, run_chat, run_gateway). Found {}.",
-        marker
+        AGENT_RUNTIME_RS.contains("BudgetHandle::new("),
+        "INV-21.7-04 (Phase 28.1): AgentRuntime::from_config must construct the single shared \
+         BudgetHandle that every channel reuses via run_turn."
+    );
+    assert!(
+        AGENT_RUNTIME_RS.contains("self.budget.reset()"),
+        "INV-21.7-04 (Phase 28.1): AgentRuntime::run_turn must reset the shared budget at the \
+         turn boundary so a long-lived runtime never latches at Stop100."
     );
 }
 
@@ -115,15 +148,32 @@ fn invariant_21_7_08_subagent_registry_on_context_and_runner_sites() {
     // AND the CommandContext::new site in run_chat must also install the
     // registry handle for Plan 08 (/agents list/kill/logs) consumers.
     //
-    // Expected count: 3 runner sites (run_single, run_chat, run_gateway) +
-    // 1 CommandContext site (run_chat) = at least 4.
-    let count = MAIN_RS.matches("with_subagent_registry").count();
+    // Phase 28.1-04: run_chat and run_single no longer construct
+    // AgentSubagentRunner::new directly — all 3 entry points now share the
+    // single runner construction inside AgentRuntime::from_config
+    // (agent_runtime.rs). The wiring sites are therefore:
+    //   - 1 runner site in agent_runtime.rs (covers run_single + run_chat + run_gateway)
+    //   - 1 CommandContext site in main.rs (run_chat slash commands)
+    // Expected: main.rs >= 1 (CommandContext), agent_runtime.rs >= 1 (runner).
+    let main_count = MAIN_RS.matches("with_subagent_registry").count();
+    let runtime_count = AGENT_RUNTIME_RS.matches("with_subagent_registry").count();
+    let count = main_count + runtime_count;
     assert!(
-        count >= 4,
-        "INV-21.7-08 / D-03 / D-04: subagent_registry must be threaded \
-         through 3 AgentSubagentRunner::new sites + CommandContext::new \
-         in run_chat. Found {}.",
-        count
+        main_count >= 1,
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): main.rs must have >= 1 \
+         with_subagent_registry site (CommandContext::new in run_chat). Found {main_count}."
+    );
+    assert!(
+        runtime_count >= 1,
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): agent_runtime.rs must have >= 1 \
+         with_subagent_registry site (AgentSubagentRunner::new inside from_config). \
+         Found {runtime_count}."
+    );
+    assert!(
+        count >= 2,
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): subagent_registry must be threaded \
+         through the shared AgentRuntime runner site (agent_runtime.rs) + CommandContext \
+         in run_chat (main.rs). Found {count} total."
     );
 }
 

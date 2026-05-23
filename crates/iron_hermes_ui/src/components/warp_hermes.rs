@@ -4,16 +4,15 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
-use crate::components::shell::{
+use crate::components::shell_legacy::{
     AgentPanel, BlockStream, CommandPalette, InputBox, StatusBar, TitleBar,
 };
 use crate::state::{
     now_time, Block, BlockEntry, Message, Mode, PaletteItem, PaletteState, Personality,
-    ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
+    SessionMemory, ShellSettings, Tab, TokenBudget, ToolCall as UiToolCall, ToolStatus,
 };
 
-const DISCONNECT_NOTICE: &str =
-    "Connection interrupted. Please retry your message once reconnected.";
+const DISCONNECT_NOTICE: &str = "Connection lost. Message not delivered.";
 
 fn push_disconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
     let id = {
@@ -28,6 +27,38 @@ fn push_disconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Si
             time: Some(now_time()),
             exit_code: 1,
             message: DISCONNECT_NOTICE.to_string(),
+        },
+    });
+}
+
+fn push_welcome_block(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
+    let id = {
+        let cur = next_id();
+        next_id.set(cur + 1);
+        cur
+    };
+    blocks.write().push(BlockEntry {
+        id,
+        block: Block::Out {
+            author: Some("hermes".into()),
+            time: Some(now_time()),
+            text: "IronHermes ready. ⌘K commands · ⌥M mode.".into(),
+        },
+    });
+}
+
+fn push_reconnect_notice(blocks: &mut Signal<Vec<BlockEntry>>, next_id: &mut Signal<u64>) {
+    let id = {
+        let cur = next_id();
+        next_id.set(cur + 1);
+        cur
+    };
+    blocks.write().push(BlockEntry {
+        id,
+        block: Block::Out {
+            author: Some("hermes".into()),
+            time: Some(now_time()),
+            text: "Reconnected.".into(),
         },
     });
 }
@@ -51,14 +82,14 @@ pub fn WarpHermes() -> Element {
     let mut blocks = use_signal(Vec::<BlockEntry>::new);
     let mut messages = use_signal(Vec::<Message>::new);
     #[allow(unused_mut)] // required for mode.set via Callback closure capture
-    #[allow(unused_mut)] // required for mode.set via Callback closure capture
     let mut mode = use_signal(|| Mode::Shell);
     let mut pal_open = use_signal(|| false);
     let mut pal_query = use_signal(String::new);
     let mut pal_state = use_signal(|| PaletteState::Browse);
     let mut scanner_active = use_signal(|| false);
     let focused = use_signal(|| false);
-    let active_tab = use_signal(|| 0_usize);
+    let mut active_tab = use_signal(|| 0_usize);
+    let mut active_side_tab = use_signal(|| 0_usize);
     let mut tokens = use_signal(|| TokenBudget {
         used: 0,
         max: 128_000,
@@ -67,12 +98,26 @@ pub fn WarpHermes() -> Element {
 
     // ── Session ID signal — created once on mount via server function. ──
     let mut session_id = use_signal(|| "pending".to_string());
+    let mut tabs = use_signal(Vec::<Tab>::new);
 
     // Create session on mount.
     use_effect(move || {
         spawn(async move {
             match crate::server::api::create_session().await {
-                Ok(sid) => session_id.set(sid),
+                Ok(sid) => {
+                    session_id.set(sid.clone());
+                    let already_present = { tabs.read().iter().any(|t| t.session_id == sid) };
+                    if !already_present {
+                        tabs.write().push(Tab {
+                            label: "New Session".to_string(),
+                            live: true,
+                            session_id: sid,
+                        });
+                        let new_idx = { tabs.read().len() - 1 };
+                        active_tab.set(new_idx);
+                        push_welcome_block(&mut blocks, &mut next_id);
+                    }
+                }
                 Err(e) => {
                     // Log error to console on wasm, stderr on native.
                     #[cfg(target_arch = "wasm32")]
@@ -127,11 +172,17 @@ pub fn WarpHermes() -> Element {
                         // Extract text from the raw message.
                         let msg_text = match raw_msg {
                             dioxus_fullstack::Message::Text(t) => {
-                                disconnect_notified = false;
+                                if disconnect_notified {
+                                    push_reconnect_notice(&mut blocks, &mut next_id);
+                                    disconnect_notified = false;
+                                }
                                 t
                             }
                             dioxus_fullstack::Message::Binary(b) => {
-                                disconnect_notified = false;
+                                if disconnect_notified {
+                                    push_reconnect_notice(&mut blocks, &mut next_id);
+                                    disconnect_notified = false;
+                                }
                                 String::from_utf8_lossy(&b).to_string()
                             }
                             dioxus_fullstack::Message::Close { .. } => {
@@ -256,31 +307,39 @@ pub fn WarpHermes() -> Element {
                                 }
                             }
                             crate::protocol::ChatStreamEvent::Finished { total_tokens } => {
-                                // Update token budget.
                                 tokens.set(TokenBudget {
                                     used: total_tokens,
                                     max: 128_000,
                                 });
                                 scanner_active.set(false);
-                                // Reset streaming block id for next turn.
+                                // WR-01: id-anchor the completed-block lookup to the active streaming id,
+                                // not a reverse-scan that may pick up stale blocks from prior turns.
+                                let completed_id = streaming_block_id();
                                 streaming_block_id.set(None);
-                                // Push the accumulated AI response to messages.
-                                let ai_text: Option<String> = {
-                                    let bs = blocks.read();
-                                    bs.iter().rev().find_map(|e| match &e.block {
-                                        Block::Ai { markdown, .. } if !markdown.is_empty() => {
-                                            Some(markdown.clone())
-                                        }
-                                        _ => None,
-                                    })
-                                };
-                                if let Some(text) = ai_text {
-                                    messages.write().push(Message {
-                                        who: "hermes".into(),
-                                        time: now_time(),
-                                        body: text,
-                                        tool: None,
-                                    });
+
+                                if let Some(id) = completed_id {
+                                    let ai_text: Option<String> = {
+                                        let bs = blocks.read();
+                                        bs.iter().find_map(|entry| {
+                                            if entry.id != id {
+                                                return None;
+                                            }
+                                            match &entry.block {
+                                                Block::Ai { markdown, .. } if !markdown.is_empty() => {
+                                                    Some(markdown.clone())
+                                                }
+                                                _ => None,
+                                            }
+                                        })
+                                    };
+                                    if let Some(text) = ai_text {
+                                        messages.write().push(Message {
+                                            who: "hermes".into(),
+                                            time: now_time(),
+                                            body: text,
+                                            tool: None,
+                                        });
+                                    }
                                 }
                             }
                             crate::protocol::ChatStreamEvent::Error { message } => {
@@ -300,6 +359,11 @@ pub fn WarpHermes() -> Element {
                                 });
                                 scanner_active.set(false);
                                 streaming_block_id.set(None);
+                            }
+                            crate::protocol::ChatStreamEvent::SubagentEvent {} => {
+                                // Phase 26.7.1 Plan 02 (D-07): legacy shell does not
+                                // render the Agents page — this arm is a silent no-op
+                                // for exhaustive-match compliance only.
                             }
                         }
                     }
@@ -337,6 +401,19 @@ pub fn WarpHermes() -> Element {
     // Fetch real sessions from StateStore via server function.
     let sessions = use_server_future(move || crate::server::api::list_sessions())?;
 
+    // ── Seed tabs from list_sessions() once when the server future resolves (D-07). ──
+    use_effect(move || {
+        if let Some(Ok(list)) = sessions() {
+            for s in list {
+                let already_present = { tabs.read().iter().any(|t| t.session_id == s.id) };
+                if !already_present {
+                    let label = s.title.clone().unwrap_or_else(|| s.id.clone());
+                    { tabs.write().push(Tab { label, live: true, session_id: s.id.clone() }); }
+                }
+            }
+        }
+    });
+
     // Convert server data to UI types — map inside component, no cross-module From impls.
     let palette_items: Vec<PaletteItem> = match slash_commands() {
         Some(Ok(cmds)) => cmds
@@ -351,28 +428,67 @@ pub fn WarpHermes() -> Element {
         _ => vec![], // Loading or error — empty palette until data arrives
     };
 
-    let tabs: Vec<Tab> = match sessions() {
-        Some(Ok(sessions)) if !sessions.is_empty() => sessions
-            .into_iter()
-            .map(|s| Tab {
-                label: s.title.unwrap_or(s.id),
-                live: true,
-            })
-            .collect(),
-        _ => vec![Tab {
-            label: "New Session".into(),
-            live: true,
-        }],
-    };
-
-    let (model_name, provider_name) = match config_summary() {
-        Some(Ok(cfg)) => (cfg.model, cfg.provider),
-        _ => ("loading...".to_string(), "...".to_string()),
+    let (model_name, provider_name, context_length, memory_enabled) = match config_summary() {
+        Some(Ok(cfg)) => (cfg.model, cfg.provider, cfg.context_length, cfg.memory_enabled),
+        _ => ("loading...".to_string(), "...".to_string(), 0_u32, false),
     };
 
     // ── ShellSettings via use_context_provider (D-02 + Pattern 5). ──
     let mut personality = use_signal(|| Personality::Default);
     use_context_provider(|| ShellSettings { personality });
+
+    // ── Derive session memory summaries for the side panel MEMORY tab. ──
+    let sessions_memory = use_memo(move || -> Vec<SessionMemory> {
+        let tabs_list = tabs();
+        let msgs = messages.read().clone();
+        let tok = tokens();
+        let cur_sid = session_id();
+        let active_personality = personality();
+
+        tabs_list
+            .into_iter()
+            .map(|tab| {
+                if tab.session_id == cur_sid {
+                    let exchange_count =
+                        msgs.iter().filter(|m| m.who == "user").count() as u32;
+                    let last_input = msgs
+                        .iter()
+                        .rev()
+                        .find(|m| m.who == "user" && !m.body.is_empty())
+                        .map(|m| {
+                            let s = m.body.as_str();
+                            if s.chars().count() > 160 {
+                                s.chars().take(157).collect::<String>() + "\u{2026}"
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let first_time =
+                        msgs.first().map(|m| m.time.clone()).unwrap_or_default();
+                    let last_time =
+                        msgs.last().map(|m| m.time.clone()).unwrap_or_default();
+                    SessionMemory {
+                        session_id: tab.session_id,
+                        label: tab.label,
+                        is_live: tab.live,
+                        first_time,
+                        last_time,
+                        exchange_count,
+                        token_count: tok.used,
+                        personality: active_personality.label().to_string(),
+                        last_input,
+                    }
+                } else {
+                    SessionMemory {
+                        session_id: tab.session_id,
+                        label: tab.label,
+                        ..Default::default()
+                    }
+                }
+            })
+            .collect()
+    });
 
     // ── Global keydown listener (D-17 + Pattern 3). ──
     // Closure stored in Signal<Option<Closure<_>>> so it outlives use_effect
@@ -502,6 +618,87 @@ pub fn WarpHermes() -> Element {
         }
     };
 
+    // ── Tab interaction callbacks (Phase 26.2 D-01..D-06, D-09). ──
+
+    // on_tab_click: switch active session; no-op during streaming (D-02).
+    let on_tab_click = move |idx: usize| {
+        if scanner_active() { return; }
+        let sid = { let ts = tabs.read(); ts.get(idx).map(|t| t.session_id.clone()) };
+        if let Some(sid) = sid {
+            active_tab.set(idx);
+            session_id.set(sid);
+            blocks.set(Vec::new());
+            messages.write().clear();
+        }
+    };
+
+    // on_tab_new: create a new session, append tab, switch active (D-03 + D-04).
+    let on_tab_new = move |_: ()| {
+        spawn(async move {
+            match crate::server::api::create_session().await {
+                Ok(sid) => {
+                    let new_tab = Tab { label: "New Session".to_string(), live: true, session_id: sid.clone() };
+                    tabs.write().push(new_tab);
+                    let new_idx = tabs.read().len() - 1;
+                    active_tab.set(new_idx);
+                    session_id.set(sid);
+                    blocks.set(Vec::new());
+                    messages.write().clear();
+                    push_welcome_block(&mut blocks, &mut next_id);
+                }
+                Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::log_1(&format!("New tab session creation failed: {e}").into());
+                    let _ = e;
+                }
+            }
+        });
+    };
+
+    // on_tab_close: remove tab; auto-switch; guard last-tab case (D-05 + D-06).
+    let on_tab_close = move |idx: usize| {
+        if idx >= tabs.read().len() { return; }
+        tabs.write().remove(idx);
+        let now_empty = tabs.read().is_empty();
+        if now_empty {
+            spawn(async move {
+                match crate::server::api::create_session().await {
+                    Ok(sid) => {
+                        let new_tab = Tab { label: "New Session".to_string(), live: true, session_id: sid.clone() };
+                        tabs.write().push(new_tab);
+                        let new_idx = tabs.read().len() - 1;
+                        active_tab.set(new_idx);
+                        session_id.set(sid);
+                        blocks.set(Vec::new());
+                        messages.write().clear();
+                        push_welcome_block(&mut blocks, &mut next_id);
+                    }
+                    Err(e) => {
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&format!("New tab session creation failed: {e}").into());
+                        let _ = e;
+                    }
+                }
+            });
+        } else {
+            let cur = active_tab();
+            let len = tabs.read().len();
+            let new_idx = if idx < cur { cur - 1 } else if idx == cur { cur.saturating_sub(1).min(len - 1) } else { cur.min(len - 1) };
+            active_tab.set(new_idx);
+            let sid = { let ts = tabs.read(); ts.get(new_idx).map(|t| t.session_id.clone()) };
+            if let Some(sid) = sid { session_id.set(sid); }
+            blocks.set(Vec::new());
+            messages.write().clear();
+        }
+    };
+
+    // Phase 26.4 D-09: side panel tab click — single global signal,
+    // independent of the TitleBar session tab. Does NOT reset on session
+    // switches.
+    let on_side_tab_click = move |idx: usize| {
+        active_side_tab.set(idx);
+    };
+
     // ── submit handler (Plan 04: sends via WebSocket to real AgentLoop). ──
     let mut submit = move || {
         // Read input clone, trim, return early if empty. No live borrow held.
@@ -614,14 +811,14 @@ pub fn WarpHermes() -> Element {
                 // Build status text from the already-fetched config summary (real data).
                 let status_text = match config_summary() {
                     Some(Ok(ref cfg)) => format!(
-                        "IronHermes Status\n\
+                        "status\n\
                          ────────────────────────────────────────\n  \
-                         Model:    {}\n  \
-                         Provider: {}\n  \
-                         Context:  {} tokens",
+                         model:    {}\n  \
+                         provider: {}\n  \
+                         context:  {} tokens",
                         cfg.model, cfg.provider, cfg.context_length,
                     ),
-                    _ => "IronHermes Status\n  Loading...".to_string(),
+                    _ => "status\n  loading\u{2026}".to_string(),
                 };
                 // Reserve an id; write WITHOUT holding next_id across anything else.
                 let id = {
@@ -642,7 +839,7 @@ pub fn WarpHermes() -> Element {
             }
             "/help" => {
                 // Format slash commands from PALETTE_ITEMS (D-29).
-                let mut help_text = String::from("Available commands\n");
+                let mut help_text = String::from("commands\n");
                 for it in palette_items_for_pick
                     .iter()
                     .filter(|p| p.section == "slash")
@@ -686,7 +883,15 @@ pub fn WarpHermes() -> Element {
             "data-density": "comfy",
             "data-block": "framed",
             "data-agent": "right",
-            TitleBar { tabs: tabs, active_tab: active_tab(), show_traffic_lights: true }
+            TitleBar {
+                tabs: tabs(),
+                active_tab: active_tab(),
+                show_traffic_lights: true,
+                disabled: scanner_active(),
+                on_tab_click: on_tab_click,
+                on_tab_close: on_tab_close,
+                on_tab_new: move |_| on_tab_new(()),
+            }
             div { class: "wh-main",
                 div { class: "wh-col",
                     BlockStream {
@@ -700,7 +905,7 @@ pub fn WarpHermes() -> Element {
                         on_submit: move |_| submit(),
                     }
                     StatusBar {
-                        mode: "Chat".to_string(),
+                        mode: (if matches!(mode(), Mode::Agent) { "agent" } else { "shell" }).to_string(),
                         model: model_name.clone(),
                         provider: provider_name.clone(),
                         tokens: tokens,
@@ -708,7 +913,17 @@ pub fn WarpHermes() -> Element {
                         hint: "/help · ⌃C cancel · ⌘K palette".to_string(),
                     }
                 }
-                AgentPanel { messages: messages }
+                AgentPanel {
+                    sessions: sessions_memory,
+                    active_side_tab: active_side_tab,
+                    on_side_tab_click: on_side_tab_click,
+                    session_id: session_id,
+                    token_budget: tokens,
+                    model_label: model_name.clone(),
+                    provider_label: provider_name.clone(),
+                    context_length: context_length,
+                    memory_enabled: memory_enabled,
+                }
             }
             CommandPalette {
                 items: palette_items,

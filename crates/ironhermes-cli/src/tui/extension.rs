@@ -130,6 +130,10 @@ pub enum CommandResult {
     /// Maps from `CoreCommandResult::McpReload`. The REPL loop calls McpReloader
     /// and formats the UI-SPEC status string including partial failure display.
     McpReload,
+    /// Phase 21.8.2 Plan 02: skills reload signal. Plan 03 lands the REPL arm.
+    SkillsReload,
+    /// Phase 21.8.2 Plan 02: skill activation signal. Plan 03 lands the REPL arm.
+    SkillActivated { name: String, body: String },
 }
 
 // ---------------------------------------------------------------------------

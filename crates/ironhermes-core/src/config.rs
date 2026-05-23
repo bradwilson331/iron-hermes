@@ -126,6 +126,46 @@ impl ToolsConfig {
     pub fn is_toolset_enabled(&self, name: &str) -> bool {
         self.toolsets.get(name).map(|e| e.enabled).unwrap_or(false)
     }
+
+    /// Phase 27.1.1-gap-02: merge all known toolsets into `self.toolsets` with
+    /// back-compat semantics:
+    ///   - If a name is ABSENT from the map → insert `enabled: true`
+    ///     (preserves current all-enabled-by-accident behavior for old configs that
+    ///     predate a toolset; upgrades never silently lose tools).
+    ///   - If a name is PRESENT (enabled or disabled) → leave it untouched.
+    ///     An explicit `web: { enabled: false }` stays false.
+    ///
+    /// Uses `crate::constants::ALL_TOOLSETS` as the single source of truth for the
+    /// full set of known toolset names (D-20). `DEFAULT_TOOLSETS` members are a subset
+    /// and receive the same absent→enabled treatment.
+    ///
+    /// This method is idempotent: calling it twice produces the same result as once.
+    pub fn with_default_toolsets_merged(mut self) -> Self {
+        for &name in crate::constants::ALL_TOOLSETS {
+            self.toolsets
+                .entry(name.to_string())
+                .or_insert(ToolsetEntry { enabled: true });
+        }
+        self
+    }
+
+    /// Phase 27.1.1-gap-02: return the set of toolset names where `enabled == true`.
+    ///
+    /// Used by production `PromptBuilder` construction sites to populate
+    /// `active_toolsets` so the system-prompt tool catalog text reflects the same
+    /// enabled set as the API tool schemas.
+    pub fn enabled_toolset_names(&self) -> std::collections::HashSet<String> {
+        self.toolsets
+            .iter()
+            .filter_map(|(name, entry)| {
+                if entry.enabled {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -254,8 +294,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     // EXEC-01..04: code execution sandbox configuration
     pub exec: ExecConfig,
-    // AGENT-01..05: subagent delegation configuration
-    pub subagent: SubagentConfig,
+    // AGENT-01..05: subagent delegation configuration (D-07: renamed from subagent)
+    pub delegation: SubagentConfig,
     // BATCH-01..04: batch processing configuration
     pub batch: BatchConfig,
     // MEM-12: memory provider selection
@@ -362,6 +402,42 @@ fn default_gateway_threshold() -> f32 {
 fn default_true() -> bool {
     true
 }
+/// Default `stale_warn_seconds` for [`SubagentConfig`] — 120 (2 minutes).
+///
+/// Phase 32.3 Plan 01 (D-05): seconds of inactivity before a subagent is
+/// flagged Stale. Per-call override via the delegate_task JSON schema; this
+/// is the fallback when no override is provided. D-07 ceiling
+/// (`child_timeout_seconds`, default 300) remains the hard-kill bound; this
+/// is only a soft warn threshold.
+fn default_stale_warn_seconds() -> u64 {
+    120
+}
+
+/// Default `max_spawn_depth` for [`SubagentConfig`] — 1 (flat delegation only).
+/// Matches the Python hermes-agent reference (D-02, Phase 32.2).
+fn default_max_spawn_depth() -> u32 {
+    1
+}
+
+/// Default `nudge_interval` for [`MemoryConfig`] — 10 user turns.
+/// Matches the Python hermes-agent reference (`memory.nudge_interval: 10`).
+/// Set to 0 in YAML to disable the periodic nudge entirely. (Phase 32 LEARN-01)
+fn default_nudge_interval() -> u32 {
+    10
+}
+
+/// Default `skill_creation_guidance` for [`MemoryConfig`] — true (Phase 33 LEARN-04).
+/// When the `skill_manage` tool is registered AND this flag is true, the system
+/// prompt includes the "Skill Creation (Learning Loop)" trigger guidance block
+/// per RESEARCH.md Pattern 6. Set to `false` in YAML to suppress the section.
+///
+/// Lives on `MemoryConfig` (typed) rather than the wizard-managed raw-YAML
+/// `learning:` block because Plan 33-01 needs a typed, Config-readable flag
+/// the prompt builder can consume directly; the `learning:` block has no
+/// typed `Config` analog today (see `wizard.rs` raw-YAML splice).
+fn default_skill_creation_guidance() -> bool {
+    true
+}
 
 // =============================================================================
 // MemoryConfig (MEM-12)
@@ -388,6 +464,21 @@ pub struct MemoryConfig {
     /// to User target with a clear error. Default: true (D-07, T-21.4-03).
     #[serde(default = "default_true")]
     pub user_profile_enabled: bool,
+    /// Phase 32 LEARN-01: periodic memory nudge interval in user turns.
+    /// Default 10. Set 0 to disable.
+    /// At every N user turns the agent receives a background memory-review prompt
+    /// (`MEMORY_REVIEW_PROMPT`, see `ironhermes_agent::nudge`).
+    /// Honors PRMT-06: mid-session writes persist to disk; the active prompt is unchanged.
+    #[serde(default = "default_nudge_interval")]
+    pub nudge_interval: u32,
+    /// Phase 33 LEARN-04: when true (default), the system prompt includes the
+    /// "Skill Creation (Learning Loop)" trigger guidance block whenever the
+    /// `skill_manage` tool is registered in the active tool set. Set to false
+    /// in YAML to suppress the block (e.g. for child agents or restricted
+    /// deployments). Read by `PromptBuilder::set_skill_creation_guidance` at
+    /// session freeze time.
+    #[serde(default = "default_skill_creation_guidance")]
+    pub skill_creation_guidance: bool,
 }
 
 impl Default for MemoryConfig {
@@ -397,6 +488,8 @@ impl Default for MemoryConfig {
             mirror_provider: None,
             memory_enabled: true,
             user_profile_enabled: true,
+            nudge_interval: 10,
+            skill_creation_guidance: true,
         }
     }
 }
@@ -432,12 +525,20 @@ impl Default for ModelConfig {
 }
 
 fn default_agent_max_iterations() -> usize {
-    50
+    // Unified per-turn cap (Phase: AgentRuntime). Both the AgentLoop turn cap and
+    // the shared BudgetHandle are sized from this single value; it defaults to the
+    // historical loop default so behavior matches the more permissive of the two
+    // pre-unification knobs.
+    DEFAULT_MAX_ITERATIONS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
+    /// DEPRECATED alias for [`AgentConfig::max_iterations`]. Retained so existing
+    /// config.yaml files that set `max_turns` keep working; `normalize()` folds a
+    /// tuned value into `max_iterations` (the single canonical per-turn cap) and
+    /// warns. Do not read this field — read `max_iterations`.
     pub max_turns: usize,
     pub context_compression: f64,
     pub tool_delay_secs: f64,
@@ -461,6 +562,26 @@ pub struct AgentConfig {
     /// `#[serde(default)]`.
     #[serde(default = "default_agent_max_iterations")]
     pub max_iterations: usize,
+}
+
+impl AgentConfig {
+    /// Collapse the deprecated `max_turns` alias into the canonical
+    /// `max_iterations`. Honors a tuned `max_turns` only when `max_iterations`
+    /// was left at the default (so an explicit `max_iterations` always wins),
+    /// then keeps both fields in sync for any not-yet-migrated reader.
+    pub fn normalize(&mut self) {
+        if self.max_turns != self.max_iterations
+            && self.max_iterations == default_agent_max_iterations()
+        {
+            eprintln!(
+                "[config] agent.max_turns is deprecated; using its value ({}) as \
+                 agent.max_iterations. Set agent.max_iterations instead to silence this.",
+                self.max_turns
+            );
+            self.max_iterations = self.max_turns;
+        }
+        self.max_turns = self.max_iterations;
+    }
 }
 
 impl Default for AgentConfig {
@@ -532,7 +653,9 @@ pub struct BrowserConfig {
     pub headed: bool,
     /// D-02: allow `--no-sandbox` flag (required on Docker/restricted envs). Default false.
     pub no_sandbox: bool,
-    /// D-15: domain allowlist for browser_navigate. Empty = allow all hosts. Exact-match (no wildcards in v2.1).
+    /// D-15: domain allowlist for browser_navigate. Empty = allow all hosts.
+    /// Exact hostname match — subdomains are NOT covered by the apex entry.
+    /// To allow both example.com and www.example.com, list both explicitly.
     pub allowed_domains: Vec<String>,
     /// D-16: scheme allowlist for browser_navigate. Default ["http", "https"].
     pub allowed_schemes: Vec<String>,
@@ -540,6 +663,10 @@ pub struct BrowserConfig {
     pub chromium_path: Option<String>,
     /// D-02: per-operation timeout in seconds. Default 30.
     pub timeout_seconds: u64,
+    /// Phase 26.3: persistent browser profile directory.
+    /// None = use $HERMES_HOME/browser-profile (default — resolved at spawn time).
+    /// Set explicitly to override (e.g., "/tmp/ephemeral-profile" for stateless browsing).
+    pub user_data_dir: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -551,6 +678,7 @@ impl Default for BrowserConfig {
             allowed_schemes: vec!["http".to_string(), "https".to_string()],
             chromium_path: None,
             timeout_seconds: 30,
+            user_data_dir: None,
         }
     }
 }
@@ -624,7 +752,11 @@ impl Default for GatewayConfig {
 #[serde(default)]
 pub struct PlatformGatewayConfig {
     pub enabled: bool,
+    /// Bot token: Telegram (TELEGRAM_BOT_TOKEN), Discord (DISCORD_BOT_TOKEN), or Slack bot token (xoxb-, SLACK_BOT_TOKEN).
     pub token: Option<String>,
+    /// Slack Socket Mode app-level token (xapp-). Telegram/Discord leave this None.
+    #[serde(default)]
+    pub app_token: Option<String>,
     pub api_key: Option<String>,
     /// Telegram user IDs allowed to interact with the bot. Empty = deny all (D-12).
     #[serde(default)]
@@ -765,6 +897,12 @@ pub struct SkillsConfig {
     /// Skills Hub settings (Phase 19.1 D-04/D-08).
     #[serde(default)]
     pub hub: HubConfig,
+    /// Phase 26.7.3 D-06 — opt-out list; names present here are explicitly
+    /// disabled. All other skills are on by default. Cross-surface: agent
+    /// loop, web UI, and TUI all read this field. `#[serde(default)]`
+    /// ensures existing config.yaml files without this key still parse.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SkillsConfig {
@@ -775,6 +913,7 @@ impl Default for SkillsConfig {
             credential_dir: None,
             config: HashMap::new(),
             hub: HubConfig::default(),
+            disabled: Vec::new(),
         }
     }
 }
@@ -815,40 +954,93 @@ impl Default for ExecConfig {
 // SubagentConfig (AGENT-01..05)
 // =============================================================================
 
-/// Subagent delegation configuration (D-08, D-09, D-16, D-25).
+/// Subagent delegation configuration (D-07/D-08/D-09, Phase 32.2).
+///
+/// YAML key: `delegation:` (renamed from `subagent:` in Phase 32.2 D-07).
+/// A startup-detection gate in `Config::load_from` rejects configs that still
+/// use the old `subagent:` key with an actionable error message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubagentConfig {
-    /// Timeout in seconds for each subagent execution. Default: 300 (5 minutes).
-    pub timeout_secs: u64,
-    /// Maximum concurrent subagents. Default: 3.
-    pub max_subagents: usize,
-    /// Maximum LLM iterations per subagent. Default: 10.
+    /// Timeout in seconds for each child agent execution. Default: 300 (5 minutes).
+    /// (D-07: renamed from `timeout_secs`)
+    ///
+    /// Phase 32.3 D-07: ceiling stays at 300 — the 6.7-hour ghost bug is the
+    /// leak surviving timeout, not the timeout not firing. RegistrationGuard
+    /// (Plan 01) closes the leak; this ceiling is unchanged.
+    pub child_timeout_seconds: u64,
+    /// Phase 32.3 Plan 01 (D-05/D-06): seconds of inactivity before a subagent
+    /// is flagged Stale. Default: 120 (2 minutes). Per-call override via the
+    /// delegate_task JSON schema (`stale_warn_seconds`); this is the fallback
+    /// when no per-call value is supplied. Only a soft warn threshold — the
+    /// hard-kill ceiling remains `child_timeout_seconds` (D-07 unchanged).
+    #[serde(default = "default_stale_warn_seconds")]
+    pub stale_warn_seconds: u64,
+    /// Maximum concurrent child agents. Default: 3.
+    /// (D-07: renamed from `max_subagents`)
+    pub max_concurrent_children: usize,
+    /// Maximum LLM iterations per child agent. Default: 50 (D-08: raised from 10).
     pub max_iterations: usize,
     /// Default toolset groups for child agents (D-01). Default: ["terminal", "file", "web"].
     pub default_toolsets: Vec<String>,
-    /// Optional model override for subagents (D-23). None = use parent's model.
+    /// Optional model override for child agents (D-23). None = use parent's model.
     pub model: Option<String>,
-    /// Optional provider override for subagents (D-23). None = use parent's provider.
+    /// Optional provider override for child agents (D-23). None = use parent's provider.
     pub provider: Option<String>,
-    /// Optional custom API base URL for subagents (D-23). None = use parent's.
+    /// Optional custom API base URL for child agents (D-23). None = use parent's.
     pub base_url: Option<String>,
-    /// Optional custom API key for subagents (D-23). None = use parent's.
+    /// Optional custom API key for child agents (D-23). None = use parent's.
     pub api_key: Option<String>,
+    /// Maximum spawn depth for orchestrator chains (D-02). Default: 1 (flat delegation only).
+    /// Raise to 2 to allow orchestrators to spawn leaf grandchildren, 3 for three levels.
+    #[serde(default = "default_max_spawn_depth")]
+    pub max_spawn_depth: u32,
+    /// Global kill switch: when false, every child is downgraded to leaf role (D-03).
+    /// Default: true (orchestration allowed up to max_spawn_depth).
+    #[serde(default = "default_true")]
+    pub orchestrator_enabled: bool,
 }
 
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: 300,
-            max_subagents: 3,
-            max_iterations: 10,
+            child_timeout_seconds: 300,
+            // Phase 32.3 Plan 01 (D-05): default soft-stale warn threshold.
+            // D-07 confirmed no-op: child_timeout_seconds stays at 300.
+            stale_warn_seconds: 120,
+            max_concurrent_children: 3,
+            max_iterations: 50,
             default_toolsets: vec!["terminal".into(), "file".into(), "web".into()],
             model: None,
             provider: None,
             base_url: None,
             api_key: None,
+            max_spawn_depth: 1,
+            orchestrator_enabled: true,
         }
+    }
+}
+
+/// Detect the legacy `subagent:` YAML key in raw config file content.
+///
+/// Returns `Some(message)` when a line beginning with `subagent:` is found
+/// (after stripping leading whitespace), indicating the user must rename the
+/// key to `delegation:`.  Returns `None` when no legacy key is detected.
+///
+/// The check is line-start–only so that a string value containing the word
+/// "subagent" (e.g., a task description) does NOT trigger the gate.
+pub(crate) fn detect_legacy_subagent_key(content: &str) -> Option<String> {
+    let found = content
+        .lines()
+        .any(|line| line.trim_start().starts_with("subagent:"));
+    if found {
+        Some(
+            "Config key 'subagent:' is deprecated and no longer supported. \
+             Rename it to 'delegation:' in your config.yaml."
+                .to_string(),
+        )
+    } else {
+        None
     }
 }
 
@@ -907,6 +1099,12 @@ impl Config {
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
             let content = std::fs::read_to_string(path)?;
+            // D-07: detect legacy `subagent:` key before parse so users get an
+            // actionable message rather than silent defaults.
+            if let Some(msg) = detect_legacy_subagent_key(&content) {
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
             let mut config: Config = serde_yaml::from_str(&content)?;
             // D-02: migrate custom_providers entries that are missing from providers HashMap.
             // If providers.foo already exists, the custom_providers.foo entry is silently
@@ -932,6 +1130,9 @@ impl Config {
                     );
                 }
             }
+            // Collapse the deprecated agent.max_turns alias into the single
+            // canonical agent.max_iterations cap (AgentRuntime unification).
+            config.agent.normalize();
             Ok(config)
         } else {
             Ok(Config::default())
@@ -1008,6 +1209,10 @@ mod tests {
         );
         assert_eq!(bc.chromium_path, None);
         assert_eq!(bc.timeout_seconds, 30);
+        assert_eq!(
+            bc.user_data_dir, None,
+            "Phase 26.3 UDD-01: user_data_dir defaults to None"
+        );
     }
 
     #[test]
@@ -1044,6 +1249,42 @@ browser:
             c.browser.allowed_schemes,
             vec!["http".to_string(), "https".to_string()]
         ); // default
+    }
+
+    // Phase 26.3 — UDD-01: BrowserConfig default has user_data_dir == None.
+    #[test]
+    fn browser_config_user_data_dir_defaults_to_none() {
+        let bc = BrowserConfig::default();
+        assert!(
+            bc.user_data_dir.is_none(),
+            "Phase 26.3 UDD-01: user_data_dir must default to None (computed from HERMES_HOME at spawn time)"
+        );
+    }
+
+    // Phase 26.3 — UDD-02: YAML round-trip preserves explicit user_data_dir.
+    #[test]
+    fn browser_config_yaml_round_trips_user_data_dir() {
+        let yaml = r#"
+browser:
+  user_data_dir: /custom/profile
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            c.browser.user_data_dir.as_deref(),
+            Some("/custom/profile"),
+            "Phase 26.3 UDD-02: explicit user_data_dir must round-trip through serde"
+        );
+    }
+
+    // Phase 26.3 — UDD-03: pre-26.3 YAML (no user_data_dir key) parses cleanly with None.
+    #[test]
+    fn browser_config_backward_compat_no_user_data_dir() {
+        let yaml = "browser:\n  headed: true\n";
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            c.browser.user_data_dir.is_none(),
+            "Phase 26.3 UDD-03: missing user_data_dir key must parse as None for backward compat"
+        );
     }
 
     #[test]
@@ -1140,17 +1381,50 @@ model:
     #[test]
     fn test_subagent_config_default() {
         let default = SubagentConfig::default();
-        assert_eq!(default.timeout_secs, 300);
-        assert_eq!(default.max_subagents, 3);
-        assert_eq!(default.max_iterations, 10);
+        assert_eq!(default.child_timeout_seconds, 300);
+        assert_eq!(default.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(default.max_iterations, 50);
+        // Phase 32.3 Plan 01 (D-05): stale_warn_seconds defaults to 120.
+        assert_eq!(
+            default.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 per D-05"
+        );
+        // Phase 32.3 Plan 01 (D-07): child_timeout_seconds ceiling is unchanged
+        // — the 6.7-hour ghost bug is the LEAK surviving timeout, not the
+        // timeout not firing. RegistrationGuard closes the leak structurally;
+        // the hard-kill ceiling stays at 300s.
+        assert_eq!(
+            default.child_timeout_seconds, 300,
+            "D-07: child_timeout_seconds ceiling is unchanged in 32.3"
+        );
+    }
+
+    /// Phase 32.3 Plan 01 (D-05 + D-07): standalone defaults check for the new
+    /// `stale_warn_seconds` field. Mirrored from `test_subagent_config_default`
+    /// per the plan's locked acceptance criteria — a dedicated test name
+    /// makes the regression intent explicit when greps line up against this
+    /// file.
+    #[test]
+    fn test_subagent_config_stale_warn_default() {
+        let default = SubagentConfig::default();
+        assert_eq!(
+            default.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 per D-05"
+        );
+        assert_eq!(
+            default.child_timeout_seconds, 300,
+            "D-07: child_timeout_seconds ceiling is unchanged in 32.3"
+        );
     }
 
     #[test]
     fn test_config_default_includes_subagent() {
         let config = Config::default();
-        assert_eq!(config.subagent.timeout_secs, 300);
-        assert_eq!(config.subagent.max_subagents, 3);
-        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(config.delegation.child_timeout_seconds, 300);
+        assert_eq!(config.delegation.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(config.delegation.max_iterations, 50);
     }
 
     #[test]
@@ -1161,13 +1435,14 @@ model:
   provider: "openrouter"
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
-        assert_eq!(config.subagent.timeout_secs, 300);
-        assert_eq!(config.subagent.max_subagents, 3);
-        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(config.delegation.child_timeout_seconds, 300);
+        assert_eq!(config.delegation.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(config.delegation.max_iterations, 50);
     }
 
     #[test]
-    fn test_subagent_config_default_includes_new_fields() {
+    fn test_subagent_config_defaults_include_new_fields() {
         let default = SubagentConfig::default();
         assert_eq!(
             default.default_toolsets,
@@ -1188,31 +1463,100 @@ model:
             "base_url should default to None"
         );
         assert!(default.api_key.is_none(), "api_key should default to None");
+        // D-32.2 new fields
+        assert_eq!(default.max_spawn_depth, 1, "max_spawn_depth must default to 1");
+        assert!(default.orchestrator_enabled, "orchestrator_enabled must default to true");
+        // D-08: raised from 10 to 50
+        assert_eq!(default.max_iterations, 50, "max_iterations must default to 50 per D-08");
+        // Phase 32.3 Plan 01 (D-05): new soft-stale warn threshold field.
+        assert_eq!(
+            default.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 per D-05"
+        );
     }
 
     #[test]
     fn test_subagent_config_backward_compat_parse() {
-        // Only timeout_secs in YAML — all new fields should get defaults
+        // Only child_timeout_seconds in YAML (new name) — all other fields should get defaults
         let yaml = r#"
-subagent:
-  timeout_secs: 600
+delegation:
+  child_timeout_seconds: 600
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
-        assert_eq!(config.subagent.timeout_secs, 600);
-        assert_eq!(config.subagent.max_subagents, 3);
-        assert_eq!(config.subagent.max_iterations, 10);
+        assert_eq!(config.delegation.child_timeout_seconds, 600);
+        assert_eq!(config.delegation.max_concurrent_children, 3);
+        // D-08: default max_iterations raised from 10 to 50
+        assert_eq!(config.delegation.max_iterations, 50);
         assert_eq!(
-            config.subagent.default_toolsets,
+            config.delegation.default_toolsets,
             vec![
                 "terminal".to_string(),
                 "file".to_string(),
                 "web".to_string()
             ]
         );
-        assert!(config.subagent.model.is_none());
-        assert!(config.subagent.provider.is_none());
-        assert!(config.subagent.base_url.is_none());
-        assert!(config.subagent.api_key.is_none());
+        assert!(config.delegation.model.is_none());
+        assert!(config.delegation.provider.is_none());
+        assert!(config.delegation.base_url.is_none());
+        assert!(config.delegation.api_key.is_none());
+        assert_eq!(config.delegation.max_spawn_depth, 1);
+        assert!(config.delegation.orchestrator_enabled);
+        // Phase 32.3 Plan 01 (D-05): serde default kicks in when YAML omits the field.
+        assert_eq!(
+            config.delegation.stale_warn_seconds, 120,
+            "stale_warn_seconds must default to 120 via #[serde(default = ...)]"
+        );
+    }
+
+    #[test]
+    fn test_config_parses_delegation_key() {
+        let yaml = r#"
+delegation:
+  max_concurrent_children: 5
+  child_timeout_seconds: 120
+  max_spawn_depth: 2
+  orchestrator_enabled: false
+  max_iterations: 100
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(config.delegation.max_concurrent_children, 5);
+        assert_eq!(config.delegation.child_timeout_seconds, 120);
+        assert_eq!(config.delegation.max_spawn_depth, 2);
+        assert!(!config.delegation.orchestrator_enabled);
+        assert_eq!(config.delegation.max_iterations, 100);
+    }
+
+    #[test]
+    fn test_legacy_subagent_key_detected() {
+        let yaml = "subagent:\n  max_subagents: 5\n";
+        let result = detect_legacy_subagent_key(yaml);
+        assert!(result.is_some(), "legacy subagent: key must be detected");
+        let msg = result.unwrap();
+        assert!(msg.contains("subagent:"), "message must mention the old key");
+        assert!(msg.contains("delegation:"), "message must mention the new key");
+        assert!(msg.contains("config.yaml"), "message must mention the config file");
+    }
+
+    #[test]
+    fn test_delegation_key_not_flagged() {
+        let yaml = "delegation:\n  max_concurrent_children: 3\n";
+        let result = detect_legacy_subagent_key(yaml);
+        assert!(result.is_none(), "delegation: key must NOT trigger the legacy detector");
+    }
+
+    #[test]
+    fn test_subagent_substring_in_value_not_flagged() {
+        // A string value containing "subagent" must NOT trigger the gate
+        let yaml = r#"
+agent:
+  name: "my_subagent_runner"
+  description: "subagent: handles delegated tasks"
+"#;
+        let result = detect_legacy_subagent_key(yaml);
+        assert!(
+            result.is_none(),
+            "subagent substring inside a value must NOT trigger the gate (line-start check only)"
+        );
     }
 
     // =========================================================================
@@ -1370,6 +1714,46 @@ skills:
         assert!(cfg.skills.hub.github_token_env.is_none());
         assert!(cfg.skills.hub.extra_taps.is_empty());
         assert!(cfg.skills.hub.well_known_origins.is_empty());
+    }
+
+    // =========================================================================
+    // Phase 26.7.3 Plan 01: SkillsConfig.disabled (D-06) serde tests
+    // =========================================================================
+
+    #[test]
+    fn skills_config_default_has_empty_disabled() {
+        let default = SkillsConfig::default();
+        assert_eq!(
+            default.disabled,
+            Vec::<String>::new(),
+            "disabled must be Vec::new() by default — all skills on by default"
+        );
+    }
+
+    #[test]
+    fn skills_config_disabled_field_round_trip() {
+        let mut cfg = SkillsConfig::default();
+        cfg.disabled = vec!["foo".to_string(), "bar".to_string()];
+        let ser = serde_yaml::to_string(&cfg).expect("serialize");
+        let de: SkillsConfig = serde_yaml::from_str(&ser).expect("deserialize");
+        assert_eq!(
+            de.disabled,
+            vec!["foo".to_string(), "bar".to_string()],
+            "disabled list must round-trip through YAML serde"
+        );
+        assert!(de.enabled, "other fields must be preserved after round-trip");
+    }
+
+    #[test]
+    fn skills_config_missing_disabled_key_defaults_empty() {
+        // Pre-phase config.yaml files have no `disabled:` key.
+        // #[serde(default)] must produce Vec::new() — not an error.
+        let yaml = "enabled: true\nextra_paths: []\n";
+        let cfg: SkillsConfig = serde_yaml::from_str(yaml).expect("must parse without disabled key");
+        assert!(
+            cfg.disabled.is_empty(),
+            "missing disabled key must deserialize to empty Vec via #[serde(default)]"
+        );
     }
 
     // =========================================================================
@@ -1718,7 +2102,9 @@ model:
         }
     }
 
-    /// Test: DEFAULT_TOOLSETS constant matches D-20 (memory/session/agent/skills).
+    /// Test: DEFAULT_TOOLSETS constant matches D-20 (memory/session/agent/skills/robotics).
+    /// Phase 27.1.1-gap-01 added "robotics" to DEFAULT_TOOLSETS (5th entry) so HexapodTcpTool
+    /// reaches `is_available()` even on fresh configs — the HEXAPOD_IP env var is the final gate.
     #[test]
     fn default_toolsets_constant_matches_d20() {
         use crate::constants::DEFAULT_TOOLSETS;
@@ -1738,10 +2124,19 @@ model:
             DEFAULT_TOOLSETS.contains(&"skills"),
             "DEFAULT_TOOLSETS must contain 'skills'"
         );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"robotics"),
+            "Phase 27.1.1-gap-01: DEFAULT_TOOLSETS must contain 'robotics'"
+        );
+        assert!(
+            DEFAULT_TOOLSETS.contains(&"learning"),
+            "Phase 33 LEARN-03..05: DEFAULT_TOOLSETS must contain 'learning' \
+             (autonomous skill creation via skill_manage; no external prereqs)"
+        );
         assert_eq!(
             DEFAULT_TOOLSETS.len(),
-            4,
-            "DEFAULT_TOOLSETS must contain exactly 4 entries (memory, session, agent, skills)"
+            6,
+            "DEFAULT_TOOLSETS must contain exactly 6 entries (memory, session, agent, skills, robotics, learning)"
         );
     }
 
@@ -2113,6 +2508,168 @@ custom_providers:
         assert!(
             RESERVED_ROLE_NAMES.contains(&"summarization"),
             "Phase 25.2 D-13 requires `summarization` in RESERVED_ROLE_NAMES"
+        );
+    }
+
+    // =========================================================================
+    // Phase 27.1.1-gap-02: ToolsConfig merge helper tests
+    // =========================================================================
+
+    #[test]
+    fn test_merge_adds_absent_default_toolsets() {
+        use crate::constants::ALL_TOOLSETS;
+        // Start with a completely empty toolsets map.
+        let cfg = ToolsConfig {
+            toolsets: std::collections::HashMap::new(),
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let merged = cfg.with_default_toolsets_merged();
+        // Every name in ALL_TOOLSETS must be present and enabled.
+        for &name in ALL_TOOLSETS {
+            let entry = merged.toolsets.get(name);
+            assert!(
+                entry.is_some(),
+                "ALL_TOOLSETS entry '{}' must be present after merge",
+                name
+            );
+            assert!(
+                entry.unwrap().enabled,
+                "absent entry '{}' must default to enabled=true after merge",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_preserves_explicit_disabled() {
+        // web is explicitly disabled; robotics is absent.
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: false });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let merged = cfg.with_default_toolsets_merged();
+        // web stays disabled.
+        assert!(
+            !merged.toolsets["web"].enabled,
+            "explicit web: disabled must be preserved after merge"
+        );
+        // robotics (absent) is enabled.
+        assert!(
+            merged.toolsets.get("robotics").map(|e| e.enabled).unwrap_or(false),
+            "absent robotics entry must default to enabled=true after merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_explicit_enabled() {
+        // web is explicitly enabled (non-default to check preservation).
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: true });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let merged = cfg.with_default_toolsets_merged();
+        assert!(
+            merged.toolsets["web"].enabled,
+            "explicit web: enabled must be preserved after merge"
+        );
+    }
+
+    #[test]
+    fn test_enabled_toolset_names() {
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: true });
+        toolsets.insert("code".to_string(), ToolsetEntry { enabled: false });
+        toolsets.insert("memory".to_string(), ToolsetEntry { enabled: true });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        let names = cfg.enabled_toolset_names();
+        assert!(names.contains("web"), "web must be in enabled set");
+        assert!(names.contains("memory"), "memory must be in enabled set");
+        assert!(!names.contains("code"), "code (disabled) must NOT be in enabled set");
+        assert_eq!(names.len(), 2, "enabled set must have exactly 2 entries");
+    }
+
+    #[test]
+    fn test_idempotent_merge() {
+        use crate::constants::ALL_TOOLSETS;
+        // Start with partial explicit config.
+        let mut toolsets = std::collections::HashMap::new();
+        toolsets.insert("web".to_string(), ToolsetEntry { enabled: false });
+        let cfg = ToolsConfig {
+            toolsets,
+            skip_prompts: vec![],
+            disabled: vec![],
+        };
+        // Apply merge twice.
+        let once = cfg.clone().with_default_toolsets_merged();
+        let twice = cfg.with_default_toolsets_merged().with_default_toolsets_merged();
+        // Both must agree on every ALL_TOOLSETS entry.
+        for &name in ALL_TOOLSETS {
+            let once_val = once.toolsets.get(name).map(|e| e.enabled);
+            let twice_val = twice.toolsets.get(name).map(|e| e.enabled);
+            assert_eq!(
+                once_val, twice_val,
+                "merge must be idempotent: '{}' differs between one and two applications",
+                name
+            );
+        }
+    }
+
+    // =========================================================================
+    // Phase 32 Plan 01 (LEARN-01): MemoryConfig.nudge_interval tests.
+    // =========================================================================
+
+    #[test]
+    fn config_nudge_interval_default() {
+        // Default is 10 user turns — matches Python hermes-agent reference.
+        let mc = MemoryConfig::default();
+        assert_eq!(
+            mc.nudge_interval, 10,
+            "Phase 32 LEARN-01: MemoryConfig::default().nudge_interval must be 10"
+        );
+    }
+
+    #[test]
+    fn config_nudge_interval_deserialize() {
+        // Explicit YAML value is preserved through serde.
+        let yaml = "provider: file\nnudge_interval: 5\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(
+            mc.nudge_interval, 5,
+            "Phase 32 LEARN-01: explicit nudge_interval value must round-trip"
+        );
+    }
+
+    #[test]
+    fn config_nudge_interval_missing_uses_default() {
+        // Backward compat: YAML without nudge_interval gives the default (10).
+        let yaml = "provider: file\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(
+            mc.nudge_interval, 10,
+            "Phase 32 LEARN-01: missing nudge_interval key must default to 10"
+        );
+    }
+
+    #[test]
+    fn config_nudge_interval_zero_disabled() {
+        // nudge_interval=0 is the documented "disable" sentinel; serde must
+        // preserve it so the runtime can detect the disabled state.
+        let yaml = "nudge_interval: 0\n";
+        let mc: MemoryConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(
+            mc.nudge_interval, 0,
+            "Phase 32 LEARN-01: nudge_interval=0 must deserialize as 0 (disable sentinel)"
         );
     }
 }
