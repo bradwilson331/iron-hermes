@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-05-19T14:23:35.162Z",
+  "updatedAt": "2026-05-23T12:32:48.025Z",
   "missions": [
     {
       "id": "session:da35ae58-acec-456f-bea8-01537ae49341:none",
@@ -542,6 +542,114 @@
           "agent": "gsd-doc-verifier:a1b8d92",
           "detail": "completed",
           "sourceKey": "session-stop:aa46cc49d9c7ffca8"
+        }
+      ]
+    },
+    {
+      "id": "session:3ad8ada8-7855-425b-91b2-80d866cf983f:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-05-23T00:33:11.520Z",
+      "updatedAt": "2026-05-23T12:32:48.025Z",
+      "status": "done",
+      "workerCount": 3,
+      "taskCounts": {
+        "total": 3,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 0,
+        "completed": 3,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "gsd-verifier:a92e7a7",
+          "role": "gsd-verifier",
+          "ownership": "a92e7a7c86b2f877d",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-05-23T12:32:48.025Z"
+        },
+        {
+          "name": "gsd-executor:aa8eaee",
+          "role": "gsd-executor",
+          "ownership": "aa8eaee8b33de0942",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-05-23T11:23:08.659Z"
+        },
+        {
+          "name": "gsd-doc-writer:a02e7e4",
+          "role": "gsd-doc-writer",
+          "ownership": "a02e7e47552400eb6",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-05-23T12:26:14.006Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-stop:ada23877246676ace:2026-05-23T11:27:34.328Z",
+          "at": "2026-05-23T11:27:34.328Z",
+          "kind": "completion",
+          "agent": "gsd-verifier:a92e7a7",
+          "detail": "completed",
+          "sourceKey": "session-stop:ada23877246676ace"
+        },
+        {
+          "id": "session-stop:a3c1b0495c93aadaf:2026-05-23T11:48:38.924Z",
+          "at": "2026-05-23T11:48:38.924Z",
+          "kind": "completion",
+          "agent": "gsd-verifier:a92e7a7",
+          "detail": "completed",
+          "sourceKey": "session-stop:a3c1b0495c93aadaf"
+        },
+        {
+          "id": "session-start:a02e7e47552400eb6:2026-05-23T12:23:38.350Z",
+          "at": "2026-05-23T12:23:38.350Z",
+          "kind": "update",
+          "agent": "gsd-doc-writer:a02e7e4",
+          "detail": "started gsd-doc-writer:a02e7e4",
+          "sourceKey": "session-start:a02e7e47552400eb6"
+        },
+        {
+          "id": "session-stop:a02e7e47552400eb6:2026-05-23T12:26:14.006Z",
+          "at": "2026-05-23T12:26:14.006Z",
+          "kind": "completion",
+          "agent": "gsd-doc-writer:a02e7e4",
+          "detail": "completed",
+          "sourceKey": "session-stop:a02e7e47552400eb6"
+        },
+        {
+          "id": "session-stop:a434d73f5f9e7ce24:2026-05-23T12:26:26.363Z",
+          "at": "2026-05-23T12:26:26.363Z",
+          "kind": "completion",
+          "agent": "gsd-verifier:a92e7a7",
+          "detail": "completed",
+          "sourceKey": "session-stop:a434d73f5f9e7ce24"
+        },
+        {
+          "id": "session-stop:af342fb507b83f5c5:2026-05-23T12:29:46.227Z",
+          "at": "2026-05-23T12:29:46.227Z",
+          "kind": "completion",
+          "agent": "gsd-verifier:a92e7a7",
+          "detail": "completed",
+          "sourceKey": "session-stop:af342fb507b83f5c5"
+        },
+        {
+          "id": "session-stop:a2c46604d9009537a:2026-05-23T12:32:48.025Z",
+          "at": "2026-05-23T12:32:48.025Z",
+          "kind": "completion",
+          "agent": "gsd-verifier:a92e7a7",
+          "detail": "completed",
+          "sourceKey": "session-stop:a2c46604d9009537a"
         }
       ]
     }

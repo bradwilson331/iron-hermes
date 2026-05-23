@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1779180883216,
+  "lastScanned": 1779534325086,
   "projectRoot": "/Users/twilson/code/ironhermes",
   "techStack": {
     "languages": [
@@ -53,25 +53,32 @@
   },
   "customNotes": [],
   "directoryMap": {
+    "Documents": {
+      "path": "Documents",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1779534325076,
+      "keyFiles": []
+    },
     "assets": {
       "path": "assets",
       "purpose": "Static assets",
       "fileCount": 0,
-      "lastAccessed": 1779180883206,
+      "lastAccessed": 1779534325076,
       "keyFiles": []
     },
     "crates": {
       "path": "crates",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1779180883208,
+      "lastAccessed": 1779534325078,
       "keyFiles": []
     },
     "docker": {
       "path": "docker",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1779180883208,
+      "lastAccessed": 1779534325078,
       "keyFiles": [
         "SOUL.md",
         "entrypoint.sh"
@@ -80,21 +87,21 @@
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 13,
-      "lastAccessed": 1779180883208,
+      "fileCount": 15,
+      "lastAccessed": 1779534325078,
       "keyFiles": [
+        "AGENT-RUNTIME-DESIGN.md",
         "ARCHITECTURE.md",
         "CONFIGURATION.md",
         "CRON-TEMPLATES.md",
-        "DELEGATION.md",
-        "DEPLOYMENT.md"
+        "DELEGATION.md"
       ]
     },
     "optional-skills": {
       "path": "optional-skills",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1779180883208,
+      "lastAccessed": 1779534325078,
       "keyFiles": [
         "DESCRIPTION.md"
       ]
@@ -103,21 +110,21 @@
       "path": "projects",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1779180883208,
+      "lastAccessed": 1779534325079,
       "keyFiles": []
     },
     "providers": {
       "path": "providers",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1779180883208,
+      "lastAccessed": 1779534325079,
       "keyFiles": []
     },
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 2,
-      "lastAccessed": 1779180883209,
+      "lastAccessed": 1779534325079,
       "keyFiles": [
         "ci-gates.sh"
       ]
@@ -126,21 +133,21 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1779180883209,
+      "lastAccessed": 1779534325079,
       "keyFiles": []
     },
     "target": {
       "path": "target",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1779180883209,
+      "fileCount": 3,
+      "lastAccessed": 1779534325080,
       "keyFiles": []
     },
     "tmp": {
       "path": "tmp",
       "purpose": null,
       "fileCount": 8,
-      "lastAccessed": 1779180883209,
+      "lastAccessed": 1779534325080,
       "keyFiles": [
         "ComfyUI_LoRA_Guide.md",
         "ComfyUI_LoRA_Workflow_Examples.json",
@@ -153,7 +160,7 @@
       "path": "website",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1779180883209,
+      "lastAccessed": 1779534325080,
       "keyFiles": [
         "IronHermes Design System-handoff.zip"
       ]
@@ -161,33 +168,45 @@
   },
   "hotPaths": [
     {
-      "path": ".planning/STATE.md",
-      "accessCount": 59,
-      "lastAccessed": 1779209041623,
+      "path": ".planning/ROADMAP.md",
+      "accessCount": 80,
+      "lastAccessed": 1779496398338,
       "type": "file"
     },
     {
-      "path": ".planning/ROADMAP.md",
-      "accessCount": 43,
-      "lastAccessed": 1779209027769,
+      "path": ".planning/STATE.md",
+      "accessCount": 80,
+      "lastAccessed": 1779535373863,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cli/src/main.rs",
+      "accessCount": 49,
+      "lastAccessed": 1779535581406,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-agent/src/agent_loop.rs",
+      "accessCount": 40,
+      "lastAccessed": 1779458798451,
       "type": "file"
     },
     {
       "path": "CLAUDE.md",
-      "accessCount": 35,
-      "lastAccessed": 1779198557722,
+      "accessCount": 40,
+      "lastAccessed": 1779493792010,
+      "type": "file"
+    },
+    {
+      "path": ".planning/REQUIREMENTS.md",
+      "accessCount": 31,
+      "lastAccessed": 1779493785158,
       "type": "file"
     },
     {
       "path": "crates/ironhermes-tools/src/registry.rs",
       "accessCount": 20,
       "lastAccessed": 1778793699386,
-      "type": "file"
-    },
-    {
-      "path": ".planning/REQUIREMENTS.md",
-      "accessCount": 18,
-      "lastAccessed": 1779197249838,
       "type": "file"
     },
     {
@@ -198,8 +217,14 @@
     },
     {
       "path": "crates/ironhermes-agent/src/app_runtime_factory.rs",
-      "accessCount": 14,
-      "lastAccessed": 1779196588275,
+      "accessCount": 17,
+      "lastAccessed": 1779360670976,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-cli/src/tui_rata/event_loop.rs",
+      "accessCount": 13,
+      "lastAccessed": 1779358382370,
       "type": "file"
     },
     {
@@ -215,9 +240,21 @@
       "type": "file"
     },
     {
+      "path": ".planning/PROJECT.md",
+      "accessCount": 9,
+      "lastAccessed": 1779459858397,
+      "type": "file"
+    },
+    {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-RESEARCH.md",
       "accessCount": 8,
       "lastAccessed": 1778447782777,
+      "type": "file"
+    },
+    {
+      "path": "crates/ironhermes-core/src/constants.rs",
+      "accessCount": 8,
+      "lastAccessed": 1779534331865,
       "type": "file"
     },
     {
@@ -245,18 +282,6 @@
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cli/src/main.rs",
-      "accessCount": 7,
-      "lastAccessed": 1778787167989,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-core/src/constants.rs",
-      "accessCount": 7,
-      "lastAccessed": 1778793719747,
-      "type": "file"
-    },
-    {
       "path": ".planning/phases/27.1-import-free-hexapod-gsd-planning/27.1-01-PLAN.md",
       "accessCount": 6,
       "lastAccessed": 1778447155721,
@@ -281,21 +306,9 @@
       "type": "file"
     },
     {
-      "path": "crates/ironhermes-cli/src/tui_rata/event_loop.rs",
-      "accessCount": 6,
-      "lastAccessed": 1778476750564,
-      "type": "file"
-    },
-    {
       "path": ".planning/phases/27.1.1-safe-foundation/27.1.1-gap-01-PLAN.md",
       "accessCount": 6,
       "lastAccessed": 1778476826488,
-      "type": "file"
-    },
-    {
-      "path": "crates/ironhermes-agent/src/agent_loop.rs",
-      "accessCount": 6,
-      "lastAccessed": 1778787308344,
       "type": "file"
     },
     {
@@ -344,12 +357,6 @@
       "path": ".planning/phases/26.2.1-new-web-ui-with-wheel-menu/26.2.1-VERIFICATION.md",
       "accessCount": 3,
       "lastAccessed": 1778752564486,
-      "type": "file"
-    },
-    {
-      "path": ".planning/PROJECT.md",
-      "accessCount": 3,
-      "lastAccessed": 1779181016240,
       "type": "file"
     },
     {
