@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -56,6 +57,50 @@ where
         }
     }
     anyhow::bail!("Bot is being rate limited, please wait")
+}
+
+/// D-02 (Phase 36, locked verbatim): rejection message when a slash command or
+/// free-text message arrives while an agent turn is already in flight.
+/// All three rejection sites (handle_slash_command, MessageHandler::handle,
+/// handle_with_multimodal) reference this single constant — never inline.
+const AGENT_RUNNING_REJECT_MSG: &str =
+    "Agent is running. Use /stop to interrupt or /queue to send after this turn.";
+
+/// Phase 36 (D-06): RAII guard that atomically sets the per-session running flag
+/// to `true` on construction and `false` on `Drop`.
+///
+/// Drop fires on every exit path — `Ok(...)` return, `Err(...)` propagated via `?`,
+/// panic, and future cancellation — covering the "forgot a cleanup branch" bug class.
+/// This is why there is no `set_running` / `clear_running` method on `SessionStore`;
+/// callers must use this guard as the only write path (D-06 RAII discipline).
+///
+/// Use `Ordering::SeqCst` on both store sites (new + Drop) to guarantee visibility
+/// across threads on weakly-ordered architectures (Pitfall 3 mitigation).
+pub struct RunningAgentGuard(Arc<AtomicBool>);
+
+impl RunningAgentGuard {
+    pub fn new(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+impl Drop for RunningAgentGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Phase 36 (D-01): returns true for command names that are allowed to dispatch
+/// even when an agent turn is in flight. Checks the POST-resolution canonical
+/// name (`def.name`), never the raw user input, so `/reset` → `"new"` correctly
+/// bypasses (Pitfall 4 mitigation).
+///
+/// Locked bypass list (D-01): stop, new, status, queue.
+/// "approve" and "deny" are intentionally excluded until the approval queue lands.
+fn is_bypass(name: &str) -> bool {
+    // TODO(D-01): add "approve" | "deny" when approval queue lands
+    matches!(name, "stop" | "new" | "status" | "queue")
 }
 
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
@@ -374,10 +419,9 @@ impl GatewayMessageHandler {
         let session_key =
             SessionKey::new(platform.clone(), &event.chat_id).with_user(&event.sender_id);
 
-        // Build CommandContext (agent_running always false for gateway slash commands —
-        // the running-agent guard is a future enhancement using per-session state).
-        let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running);
+        // Phase 36: per-session running flag wired from SessionStore (D-03/D-05/D-06).
+        let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+        let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running.clone());
         // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
         // production toolset session handle so /toolset list/show/enable/disable
         // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
@@ -439,6 +483,17 @@ impl GatewayMessageHandler {
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                // Phase 36 (D-02, D-01): running-agent guard check.
+                // Check uses def.name (post-alias canonical name) so /reset → "new" correctly
+                // bypasses (Pitfall 4 mitigation). Guard fires BEFORE personality/agents
+                // interceptors — rejection takes priority over dispatch-time concerns.
+                if agent_running.load(Ordering::SeqCst) && !is_bypass(&def.name) {
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
                 // Phase 21.8.3.1 D-05 gateway analog (RESEARCH Open Question 1, Option B):
                 // Intercept /personality clear BEFORE core dispatch. Core's cmd_personality
                 // has no "clear" case — it would return Error("Unknown personality: clear")
@@ -794,6 +849,20 @@ impl GatewayMessageHandler {
                 .handle_slash_command(event, adapter, cancel, processed)
                 .await;
         }
+        // Phase 36 (D-02, Pitfall 1): guard for non-slash (free-text) path.
+        // Retrieve the per-session flag and reject if an agent turn is already in flight.
+        {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            if agent_running.load(Ordering::SeqCst) {
+                with_rate_limit_retry(|| {
+                    adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                })
+                .await?;
+                return Ok(());
+            }
+        }
         self.run_agent(event, adapter, cancel, processed).await
     }
 
@@ -805,6 +874,18 @@ impl GatewayMessageHandler {
         cancel: CancellationToken,
         processed: ProcessedAttachments,
     ) -> Result<()> {
+        // Phase 36 (D-06): RAII running-agent guard. Retrieve the per-session flag
+        // and bind it to a RunningAgentGuard at the top of the function body so
+        // Drop fires on every exit path — Ok, Err/?, panic, cancellation.
+        // This single guard covers all 5 call sites of run_agent (D-06 discipline:
+        // one guard inside the function, not 5 guards at call sites — Pitfall 2).
+        let _running_flag = {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            self.session_store.read().await.get_running_flag(&session_key)
+        };
+        let _agent_guard = RunningAgentGuard::new(_running_flag);
+
         // Fire MessageReceived hook with real platform and chat_id
         if let Some(ref registry) = self.hook_registry {
             let request_id = uuid::Uuid::new_v4().to_string();
@@ -1235,6 +1316,20 @@ impl MessageHandler for GatewayMessageHandler {
             return self
                 .handle_slash_command(event, adapter, cancel, no_attachments)
                 .await;
+        }
+        // Phase 36 (D-02, Pitfall 1): guard for non-slash (free-text) path.
+        // Retrieve the per-session flag and reject if an agent turn is already in flight.
+        {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            if agent_running.load(Ordering::SeqCst) {
+                with_rate_limit_retry(|| {
+                    adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                })
+                .await?;
+                return Ok(());
+            }
         }
         // No multimodal data via this path (text-only fallback)
         let no_attachments = ProcessedAttachments {

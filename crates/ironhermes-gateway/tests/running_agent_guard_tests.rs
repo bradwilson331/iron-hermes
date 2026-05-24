@@ -1,10 +1,7 @@
-//! Phase 36 Wave-0 scaffold — GW-05 running-agent guard integration tests.
+//! Phase 36 GW-05 running-agent guard integration tests.
 //!
-//! This file contains all 11 sub-behavior stubs for GW-05 as defined in
-//! 36-VALIDATION.md. All tests are marked `#[ignore]` so the harness compiles
-//! and reports 11 ignored / 0 failed / 0 passed. Plan 36-02 implements the
-//! production behavior; Plan 36-03 removes the `#[ignore]` attributes once
-//! the guard is wired.
+//! All 11 sub-behaviors from 36-VALIDATION.md are tested here.
+//! Plan 36-02 implements the production guard; this file makes them live.
 //!
 //! ## GW-05 sub-behaviors covered
 //!
@@ -26,7 +23,7 @@ pub mod helpers {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use ironhermes_core::{Config, MessageResponse, Platform, ProviderResolver};
+    use ironhermes_core::{Config, MessageEvent, MessageResponse, Platform, ProviderResolver};
     use ironhermes_gateway::{
         handler::GatewayMessageHandler,
         session::{SessionKey, SessionStore},
@@ -132,245 +129,485 @@ pub mod helpers {
         SessionKey::new(Platform::Telegram, chat_id).with_user("u1")
     }
 
-    /// The locked D-02 error message. Plan 02's emitted string MUST equal this
-    /// byte-for-byte; Plan 03's assertions reference this helper.
+    /// Build a `MessageEvent` for the given chat + content.
+    pub fn make_event(chat_id: &str, content: &str) -> MessageEvent {
+        MessageEvent {
+            platform: Platform::Telegram,
+            message_id: "msg-1".to_string(),
+            chat_id: chat_id.to_string(),
+            sender_id: "u1".to_string(),
+            content: content.to_string(),
+            attachments: vec![],
+            thread_id: None,
+            chat_type: "dm".to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        }
+    }
+
+    /// The locked D-02 error message. Production emitted string MUST equal this
+    /// byte-for-byte; all rejection assertions reference this helper.
     pub fn d02_error_message() -> &'static str {
         "Agent is running. Use /stop to interrupt or /queue to send after this turn."
     }
 }
 
 // ---------------------------------------------------------------------------
-// GW-05 sub-behavior stubs (all #[ignore]'d — Wave 0 scaffold)
+// GW-05 sub-behavior tests
 // ---------------------------------------------------------------------------
+
+use std::sync::atomic::Ordering;
 
 /// GW-05-1: Per-session isolation.
 ///
 /// Session A is set to Running (`running` flag = true). Session B remains Idle.
-/// Dispatching `/model` to session B must succeed (not be rejected with D-02).
+/// Dispatching `/model claude` to session B must succeed (not be rejected with D-02).
 ///
-/// Verifies that the guard uses per-session state, not a global flag
-/// (codex HIGH-2 TOCTOU concern). Two `SessionKey`s, two distinct `Arc<AtomicBool>`s.
-///
-/// Plan 36-02 must:
-/// - Add `running: Arc<AtomicBool>` to `GatewaySession` (Option B).
-/// - Make `handle_slash_command` read the flag from the session, not create a new `false` one.
+/// Verifies that the guard uses per-session state, not a global flag (codex HIGH-2).
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_session_isolation() {
-    // TODO(Plan 36-02): GW-05-1
-    //   let store = helpers::build_test_session_store();
-    //   let adapter = helpers::RecordingPlatformAdapter::new();
-    //   let key_a = helpers::test_session_key("chat-A");
-    //   let key_b = helpers::test_session_key("chat-B");
-    //   // Get-or-create both sessions so the store has entries
-    //   { let mut s = store.write().await; s.get_or_create(key_a.clone(), "model", "test"); s.get_or_create(key_b.clone(), "model", "test"); }
-    //   // Set session A running
-    //   { let s = store.read().await; s.get(&key_a).unwrap().running.store(true, Ordering::SeqCst); }
-    //   // Dispatch /model to session B — must succeed (no D-02 rejection)
-    //   // ... assert adapter.messages() is empty (no rejection sent) ...
-    todo!("Plan 36-02: GW-05-1 — session A Running must not block session B Idle; per-session Arc<AtomicBool> required")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key_a = helpers::test_session_key("chat-A");
+    let key_b = helpers::test_session_key("chat-B");
+
+    // Get-or-create both sessions so the store has entries with real running flags.
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key_a.clone(), "model", "test");
+        s.get_or_create(key_b.clone(), "model", "test");
+    }
+
+    // Set session A running (simulates in-flight turn on session A).
+    {
+        let s = store.read().await;
+        s.get(&key_a)
+            .unwrap()
+            .running
+            .store(true, Ordering::SeqCst);
+    }
+
+    // Dispatch /model to session B — must NOT receive D-02 rejection.
+    // The command may fail with "model not found" etc., but must not be the D-02 guard string.
+    let event_b = helpers::make_event("chat-B", "/model claude");
+    handler
+        .handle(&event_b, adapter.clone(), CancellationToken::new())
+        .await
+        .ok(); // ignore result — we care about what was sent, not whether it errored
+
+    let msgs = adapter.messages().await;
+    let sent_texts: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent_texts.contains(&helpers::d02_error_message()),
+        "Session B must NOT be rejected with D-02 when only session A is running. Got: {:?}",
+        sent_texts
+    );
+
+    // Dispatch /model to session A — MUST receive D-02 rejection.
+    let adapter_a = helpers::RecordingPlatformAdapter::new();
+    let event_a = helpers::make_event("chat-A", "/model claude");
+    handler
+        .handle(&event_a, adapter_a.clone(), CancellationToken::new())
+        .await
+        .ok();
+
+    let msgs_a = adapter_a.messages().await;
+    let sent_a: Vec<&str> = msgs_a.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        sent_a.contains(&helpers::d02_error_message()),
+        "Session A MUST be rejected with D-02 when running. Got: {:?}",
+        sent_a
+    );
 }
 
 /// GW-05-2: `/model` rejected when agent is running.
 ///
-/// Session flag is set to `true` (running). Sending `/model gpt-4` must trigger
-/// the D-02 rejection path in `handle_slash_command`.
-///
+/// Session flag is `true`. Sending `/model gpt-4` must trigger the D-02 rejection.
 /// D-04: `/model` during active turn is rejected. Closes codex HIGH-2 TOCTOU.
-/// D-02: rejection message is `helpers::d02_error_message()`.
-///
-/// Plan 36-02 must:
-/// - After `router.resolve()` returns `Exact(def)` for `model`, check the session flag.
-/// - If running and def.name is not in the bypass list, send D-02 message and return Ok(()).
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_model_rejected_when_running() {
-    // TODO(Plan 36-02): GW-05-2
-    //   let store = helpers::build_test_session_store();
-    //   let adapter = helpers::RecordingPlatformAdapter::new();
-    //   let key = helpers::test_session_key("chat-1");
-    //   { let mut s = store.write().await; s.get_or_create(key.clone(), "model", "test"); }
-    //   // Set running = true
-    //   { let s = store.read().await; s.get(&key).unwrap().running.store(true, Ordering::SeqCst); }
-    //   // Send /model event → handle_slash_command
-    //   // ... assert adapter.messages()[0].1 == helpers::d02_error_message() ...
-    todo!("Plan 36-02: GW-05-2 — /model must be rejected (D-04/D-02) when session flag is true")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+
+    // Set running = true.
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    let event = helpers::make_event("chat-1", "/model gpt-4");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    assert_eq!(
+        msgs.len(),
+        1,
+        "Expected exactly 1 message (D-02 reject). Got: {:?}",
+        msgs
+    );
+    assert_eq!(
+        msgs[0].1,
+        helpers::d02_error_message(),
+        "/model must be rejected with D-02 verbatim string when running"
+    );
 }
 
 /// GW-05-3: `/stop` bypasses the guard when agent is running.
 ///
 /// Session flag is `true`. Sending `/stop` must dispatch (not be rejected with D-02).
-/// The bypass list (D-01) includes `"stop"`.
-///
-/// Plan 36-02 must:
-/// - Implement `is_bypass(name: &str) -> bool` that returns true for `"stop"`.
-/// - Guard check: if running AND is_bypass(def.name) → dispatch normally.
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_stop_bypasses_guard() {
-    // TODO(Plan 36-02): GW-05-3
-    //   // Set running = true, dispatch /stop
-    //   // Assert: NO D-02 message sent; /stop handler output (if any) in messages instead
-    todo!("Plan 36-02: GW-05-3 — /stop must bypass guard (D-01); is_bypass(\"stop\") == true")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    let event = helpers::make_event("chat-1", "/stop");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "/stop must NOT receive D-02; guard must bypass. Got: {:?}",
+        sent
+    );
 }
 
 /// GW-05-4: `/new` bypasses the guard when agent is running.
-///
-/// Session flag is `true`. Sending `/new` must dispatch (not be rejected with D-02).
-/// The bypass list (D-01) includes `"new"`.
-///
-/// Plan 36-02 must:
-/// - `is_bypass("new")` returns true.
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_new_bypasses_guard() {
-    // TODO(Plan 36-02): GW-05-4
-    //   // Set running = true, dispatch /new
-    //   // Assert: guard does not reject; /new handler runs
-    todo!("Plan 36-02: GW-05-4 — /new must bypass guard (D-01); is_bypass(\"new\") == true")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    let event = helpers::make_event("chat-1", "/new");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "/new must NOT receive D-02; guard must bypass. Got: {:?}",
+        sent
+    );
 }
 
 /// GW-05-5: `/status` bypasses the guard when agent is running.
-///
-/// Session flag is `true`. Sending `/status` must dispatch (not be rejected with D-02).
-/// The bypass list (D-01) includes `"status"`.
-///
-/// Plan 36-02 must:
-/// - `is_bypass("status")` returns true.
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_status_bypasses_guard() {
-    // TODO(Plan 36-02): GW-05-5
-    //   // Set running = true, dispatch /status
-    //   // Assert: guard does not reject; /status handler runs
-    todo!("Plan 36-02: GW-05-5 — /status must bypass guard (D-01); is_bypass(\"status\") == true")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    let event = helpers::make_event("chat-1", "/status");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "/status must NOT receive D-02; guard must bypass. Got: {:?}",
+        sent
+    );
 }
 
 /// GW-05-6: `/queue` bypasses the guard when agent is running.
-///
-/// Session flag is `true`. Sending `/queue` must dispatch (not be rejected with D-02).
-/// The bypass list (D-01) includes `"queue"` for hermes-agent parity (inert stub today,
-/// but bypassed so the user can run it during a turn).
-///
-/// Plan 36-02 must:
-/// - `is_bypass("queue")` returns true.
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_queue_bypasses_guard() {
-    // TODO(Plan 36-02): GW-05-6
-    //   // Set running = true, dispatch /queue
-    //   // Assert: guard does not reject; /queue handler runs (TODO stub response ok)
-    todo!("Plan 36-02: GW-05-6 — /queue must bypass guard (D-01); is_bypass(\"queue\") == true")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    let event = helpers::make_event("chat-1", "/queue");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "/queue must NOT receive D-02; guard must bypass. Got: {:?}",
+        sent
+    );
 }
 
 /// GW-05-7: Running flag clears on agent success.
 ///
-/// `RunningAgentGuard` (D-06) is constructed at the top of `run_agent`.
-/// After `run_agent` returns `Ok(...)`, the flag must be `false`.
-///
-/// D-06: RAII guard — `Drop` clears the flag on every exit path.
-///
-/// Plan 36-02 must:
-/// - Define `RunningAgentGuard(Arc<AtomicBool>)` with `Drop` impl that stores false.
-/// - Construct it at the top of `run_agent`; verify flag is false after `run_agent` returns.
+/// `RunningAgentGuard` (D-06) sets flag=true on new(), clears to false on Drop.
+/// After the guard goes out of scope (Ok path), flag must be false.
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_guard_clears_on_success() {
-    // TODO(Plan 36-02): GW-05-7
-    //   let flag = Arc::new(AtomicBool::new(false));
-    //   { let _guard = RunningAgentGuard::new(flag.clone()); assert!(flag.load(SeqCst)); }
-    //   assert!(!flag.load(SeqCst), "Drop must clear to false on success exit");
-    todo!("Plan 36-02: GW-05-7 — RunningAgentGuard Drop must clear flag on Ok exit (D-06)")
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use ironhermes_gateway::RunningAgentGuard;
+
+    let flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let _guard = RunningAgentGuard::new(flag.clone());
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "Flag must be true while guard is alive"
+        );
+        // Guard drops here (end of scope = success path)
+    }
+
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "Drop must clear flag to false on success exit (D-06)"
+    );
 }
 
 /// GW-05-8: Running flag clears on agent error.
 ///
-/// `RunningAgentGuard` must fire `Drop` even when `run_agent` propagates an error
-/// via `?`. After `run_agent` returns `Err(...)`, the flag must be `false`.
-///
-/// D-06: RAII covers success, error, and `?` early-return paths. Rust has no `finally`.
-///
-/// Plan 36-02 must:
-/// - Prove Drop fires on `?` / `Err` path (same `RunningAgentGuard` struct as GW-05-7).
+/// `RunningAgentGuard` must fire `Drop` even when the scope exits via an error.
+/// After the error path, the flag must be `false`.
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_guard_clears_on_error() {
-    // TODO(Plan 36-02): GW-05-8
-    //   let flag = Arc::new(AtomicBool::new(false));
-    //   let result: Result<()> = {
-    //       let _guard = RunningAgentGuard::new(flag.clone());
-    //       Err(anyhow::anyhow!("simulated error"))
-    //   };
-    //   assert!(result.is_err());
-    //   assert!(!flag.load(SeqCst), "Drop must clear to false on Err exit");
-    todo!("Plan 36-02: GW-05-8 — RunningAgentGuard Drop must clear flag on Err/? exit (D-06)")
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use ironhermes_gateway::RunningAgentGuard;
+
+    let flag = Arc::new(AtomicBool::new(false));
+
+    let result: anyhow::Result<()> = {
+        let _guard = RunningAgentGuard::new(flag.clone());
+        assert!(flag.load(Ordering::SeqCst), "Flag must be true inside guard");
+        // Simulate error propagation via ?
+        Err(anyhow::anyhow!("simulated run_agent error"))
+    };
+
+    assert!(result.is_err(), "Result must be Err (sanity check)");
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "Drop must clear flag to false on Err/? exit (D-06)"
+    );
 }
 
 /// GW-05-9: Alias `/reset` (resolves to canonical `"new"`) bypasses the guard.
 ///
 /// `CommandRouter::resolve("/reset")` returns `Exact(def)` where `def.name == "new"`.
-/// The guard checks `resolved_def.name`, not the raw input string, so `/reset` must
-/// correctly bypass because `is_bypass("new") == true`.
-///
-/// Anti-pattern (Pitfall 4): checking raw `"reset"` against the bypass list would
-/// fail to bypass because `"reset"` is not in the list.
-///
-/// Plan 36-02 must:
-/// - Confirm guard check uses `resolved_def.name` after `router.resolve()`.
+/// The guard checks `resolved_def.name` (post-alias), so `/reset` must bypass because
+/// `is_bypass("new") == true` (Pitfall 4 mitigation).
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_alias_bypasses_guard() {
-    // TODO(Plan 36-02): GW-05-9
-    //   // Set running = true, dispatch /reset (alias for new)
-    //   // Assert: guard does not reject; handler for "new" runs
-    todo!("Plan 36-02: GW-05-9 — /reset alias must bypass guard (checks resolved def.name == \"new\", not raw input)")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    // /reset is an alias for "new" in the command registry.
+    // If the alias is not registered, the command falls through to PassThrough/NotFound
+    // and run_agent is skipped (run_agent guard blocks it anyway).
+    // Either way, D-02 must NOT be sent.
+    let event = helpers::make_event("chat-1", "/reset");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .ok(); // ignore any run_agent error; we care about rejection presence
+
+    let msgs = adapter.messages().await;
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "/reset (alias -> new) must NOT receive D-02 (guard uses def.name post-alias). Got: {:?}",
+        sent
+    );
 }
 
 /// GW-05-10: Non-slash free-text message rejected when agent is running.
 ///
 /// A plain-text (non-`/`) message dispatches through `MessageHandler::handle`
 /// to `run_agent` directly. This path must ALSO check the session flag and reject
-/// with the D-02 message when running.
-///
-/// Pitfall 1: guard only in `handle_slash_command` leaves the non-slash path
-/// unguarded — user can bypass by omitting `/`.
-///
-/// Plan 36-02 must:
-/// - Add the flag check in `MessageHandler::handle` before calling `run_agent`
-///   for non-slash messages.
-/// - Reject with the same `helpers::d02_error_message()` string.
+/// with the D-02 message when running (Pitfall 1 mitigation).
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_freetext_rejected_when_running() {
-    // TODO(Plan 36-02): GW-05-10
-    //   // Set running = true
-    //   // Dispatch a plain-text MessageEvent (no leading /)
-    //   // Assert: adapter.messages()[0].1 == helpers::d02_error_message()
-    //   // Assert: run_agent was NOT called (flag still true — guard short-circuited)
-    todo!("Plan 36-02: GW-05-10 — free-text during active turn must be rejected with D-02 (Pitfall 1 guard)")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    // Plain (non-slash) message — goes through non-slash guard path.
+    let event = helpers::make_event("chat-1", "hello world");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    assert_eq!(
+        msgs.len(),
+        1,
+        "Expected exactly 1 message (D-02 reject). Got: {:?}",
+        msgs
+    );
+    assert_eq!(
+        msgs[0].1,
+        helpers::d02_error_message(),
+        "Free-text during active turn must be rejected with D-02 verbatim (Pitfall 1 guard)"
+    );
 }
 
 /// GW-05-11: `cmd_stop` reads a non-false `agent_running` on gateway.
 ///
-/// After Phase 36 implementation, `cmd_stop` in `ironhermes-core/src/commands/handlers.rs:127`
-/// reads `ctx.agent_running.load(Ordering::SeqCst)`. This integration test confirms
-/// that when the gateway wires the REAL per-session `Arc<AtomicBool>` into
-/// `CommandContext.agent_running`, the `/stop` handler observes `true` when the
-/// session is running (instead of always seeing the hardcoded-false shim).
+/// After Phase 36, `handle_slash_command` populates `CommandContext.agent_running`
+/// with the REAL per-session `Arc<AtomicBool>`, not a hardcoded false one.
+/// `/stop` bypasses the guard and reaches dispatch; `cmd_stop` reads the flag.
+/// When the flag is true, `cmd_stop` returns the "Stopping..." / non-idle message.
 ///
-/// Pre-Phase-36 behavior (the bug): handler.rs:377-380 creates a NEW `AtomicBool`
-/// set to `false` each time, so `cmd_stop`'s read always returns false.
-///
-/// Plan 36-02 must:
-/// - Populate `CommandContext.agent_running` with the per-session flag from `GatewaySession.running`.
-/// - Assert that `/stop` handler receives `true` when the session flag is true.
+/// This asserts that the response from `/stop` when running is NOT the
+/// "No agent is currently running" message (which cmd_stop emits when flag==false).
 #[tokio::test]
-#[ignore = "Wave 0 scaffold — implementation lands in Plan 36-02"]
 async fn test_stop_reads_real_flag() {
-    // TODO(Plan 36-02): GW-05-11
-    //   // Set running = true on session
-    //   // Build CommandContext for that session (via handle_slash_command path)
-    //   // Assert ctx.agent_running.load(SeqCst) == true
-    //   // (i.e. the plan's CommandContext received the real per-session Arc, not a new false one)
-    todo!("Plan 36-02: GW-05-11 — CommandContext.agent_running must be the real per-session handle, not a fresh false AtomicBool")
+    use ironhermes_gateway::adapter::MessageHandler;
+    use tokio_util::sync::CancellationToken;
+
+    let store = helpers::build_test_session_store();
+    let adapter = helpers::RecordingPlatformAdapter::new();
+    let handler = helpers::build_test_handler(store.clone());
+
+    let key = helpers::test_session_key("chat-1");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+
+    // Set running = true so cmd_stop sees a non-false flag.
+    {
+        let s = store.read().await;
+        s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
+    }
+
+    let event = helpers::make_event("chat-1", "/stop");
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let msgs = adapter.messages().await;
+    // cmd_stop emits "No agent is currently running..." when flag == false (the old shim behavior).
+    // When flag == true it emits the "Stopping agent..." or "Stopped N background process(es)." path.
+    // We assert the idle message is NOT sent (proves the real flag was read).
+    let idle_msg = "No agent is currently running.";
+    let no_agent_msg = "No agent is currently running. Use Ctrl-C to cancel an \
+                        in-flight turn.";
+    for (_, text) in &msgs {
+        assert!(
+            !text.starts_with(idle_msg) && !text.contains(no_agent_msg),
+            "cmd_stop must NOT say 'No agent is currently running' when flag==true. \
+             This would mean CommandContext.agent_running received a false shim. Got: {:?}",
+            text
+        );
+    }
+    // Also confirm at least one message was sent (stop handler replied).
+    assert!(
+        !msgs.is_empty(),
+        "cmd_stop must send a response when the session is running. Got no messages."
+    );
 }

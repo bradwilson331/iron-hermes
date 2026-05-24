@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
 use ironhermes_core::{ChatMessage, Platform};
@@ -37,6 +38,8 @@ impl SessionKey {
 }
 
 /// An active gateway conversation session.
+///
+/// Phase 36: `running` flag drives per-session agent guard (D-03/D-05/D-06).
 #[derive(Debug, Clone)]
 pub struct GatewaySession {
     pub key: SessionKey,
@@ -45,6 +48,10 @@ pub struct GatewaySession {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub model: String,
+    /// Per-session running flag (D-03/D-05, Phase 36).
+    /// `RunningAgentGuard` sets this true on construction and false on Drop (D-06).
+    /// Never set/cleared directly — RAII-only contract prevents "forgot a branch" bugs.
+    pub running: Arc<AtomicBool>,
 }
 
 impl GatewaySession {
@@ -57,6 +64,7 @@ impl GatewaySession {
             created_at: now,
             updated_at: now,
             model: model.into(),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -235,6 +243,21 @@ impl SessionStore {
 
     pub fn get(&self, key: &SessionKey) -> Option<&GatewaySession> {
         self.sessions.get(&key.to_string_key())
+    }
+
+    /// Phase 36 (D-03/D-05/D-06): return the per-session running flag Arc.
+    ///
+    /// If the session exists, returns a clone of its `running` field.
+    /// If the session does not yet exist (first message of a chat), returns a fresh
+    /// `Arc::new(AtomicBool::new(false))` — no agent turn is in-flight yet, so
+    /// false is the correct value. The caller can hand this to `CommandContext`;
+    /// subsequent messages will find the real session entry once `run_agent`
+    /// calls `get_or_create`.
+    pub fn get_running_flag(&self, key: &SessionKey) -> Arc<AtomicBool> {
+        self.sessions
+            .get(&key.to_string_key())
+            .map(|s| s.running.clone())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
     }
 
     pub fn get_mut(&mut self, key: &SessionKey) -> Option<&mut GatewaySession> {
