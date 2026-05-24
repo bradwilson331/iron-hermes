@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: "**Status:** Deferred"
 status: executing
-stopped_at: Phase 35.1 context gathered
-last_updated: "2026-05-23T11:22:19.492Z"
+stopped_at: Phase 36 context gathered
+last_updated: "2026-05-24T12:24:14.121Z"
 last_activity: 2026-05-23
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 3
   total_plans: 19
   completed_plans: 18
-  percent: 75
+  percent: 60
 ---
 
 # Project State
@@ -486,6 +486,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-23T11:22:19.488Z
-Stopped at: Phase 35.1 context gathered
-Resume file: None
+Last session: 2026-05-24T12:24:14.115Z
+Stopped at: Phase 36 context gathered
+Resume file: .planning/phases/36-gateway-running-agent-guard-wiring-completes-gw-05/36-CONTEXT.md
