@@ -76,10 +76,10 @@ const AGENT_RUNNING_REJECT_MSG: &str =
 ///
 /// Use `Ordering::SeqCst` on both store sites (new + Drop) to guarantee visibility
 /// across threads on weakly-ordered architectures (Pitfall 3 mitigation).
-struct RunningAgentGuard(Arc<AtomicBool>);
+pub struct RunningAgentGuard(Arc<AtomicBool>);
 
 impl RunningAgentGuard {
-    fn new(flag: Arc<AtomicBool>) -> Self {
+    pub fn new(flag: Arc<AtomicBool>) -> Self {
         flag.store(true, Ordering::SeqCst);
         Self(flag)
     }
