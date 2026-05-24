@@ -25,6 +25,7 @@ pub use commands::{
     CommandCategory, CommandDef, CommandResult as SlashCommandResult, CommandRouter,
     PlatformFilter, ResolveResult,
 };
+pub use commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 pub use config::{
     ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, ExtractConfig,
     HubConfig, MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
