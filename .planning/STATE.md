@@ -462,6 +462,7 @@ Recent decisions affecting current work:
 - Phase 35 added: Cron subagent budget isolation (T-28.1-16) — follow-up from Phase 28.1
 - Phase 35 edited: edited fields: title, goal, requirements — broadened to global per-subagent independent budgets (retire PROV-10); T-28.1-16 now a consequence
 - Phase 35.1 inserted after Phase 35: hermes-agent install and setup parity (URGENT)
+- Phase 36 added: Gateway running-agent guard wiring — completes GW-05 (re-opened after Phase 21.1 cross-AI review surfaced gap; codex HIGH-1)
 
 ### Pending Todos
 

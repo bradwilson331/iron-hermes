@@ -144,7 +144,7 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [ ] **GW-02**: Session key format: agent:main:{platform}:{chat_type}:{chat_id} — constructed via build_session_key()
 - [ ] **GW-03**: Two-level message guard: base adapter queues messages and sets interrupt when agent is active; gateway runner intercepts control commands (/stop, /approve, /deny)
 - [ ] **GW-04**: Authorization: per-platform allowlists, DM pairing flow with codes, global allow-all flag, default deny
-- [x] **GW-05**: Gateway slash command dispatch via resolve_command() with running-agent guard (blocks /model while agent active, bypasses /stop /approve /deny)
+- [ ] **GW-05**: Gateway slash command dispatch via resolve_command() with running-agent guard (blocks /model while agent active, bypasses /stop /approve /deny) — *partially shipped in Phase 21.1: dispatch via resolve_command() works, but `agent_running` is hardcoded to `false` at `crates/ironhermes-gateway/src/handler.rs:377-380` so the guard never fires. Re-opened 2026-05-24 after /gsd-review-21.1 surfaced the gap (codex HIGH-1). Guard wiring deferred to follow-up phase.*
 - [ ] **GW-06**: Gateway hook lifecycle events: gateway:startup, session:start/end/reset, agent:start/step/end, command:*
 - [ ] **GW-07**: Delivery routing: direct reply, home channel, explicit target (telegram:chat_id), cross-platform delivery
 - [x] **GW-08**: Cron job deliveries NOT mirrored into gateway session history (prevents message alternation violations)
@@ -355,7 +355,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GW-02 | Phase 29 | Pending |
 | GW-03 | Phase 29 | Pending |
 | GW-04 | Phase 29 | Pending |
-| GW-05 | Phase 21.1 (was 21) | Complete |
+| GW-05 | Phase 21.1 (dispatch only) + follow-up (guard) | Partial — guard pending |
 | GW-06 | Phase 29 | Pending |
 | GW-07 | Phase 29 | Pending |
 | GW-08 | Phase 22.4.2.1/22.4.2.2 (was 21) | Complete |

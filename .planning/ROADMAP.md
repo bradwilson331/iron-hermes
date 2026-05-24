@@ -77,3 +77,13 @@ Plans:
 
 - [x] 35.1-02-PLAN.md — Wire D-11 fast/full choice + D-03 in-process doctor call + D-12 completion summary into `run_setup` None arm; un-ignore d11/d03/d12 source-text invariant tests
 - [x] 35.1-03-PLAN.md — Implement `has_runnable_llm` helper (env-vars → raw .env → local base_url ordering) + integrate into `preflight.rs` Ok(config) arm (D-07/D-08); un-ignore d07_d08 integration tests; verify main.rs Phase 23 gate stays byte-for-byte unchanged
+
+### Phase 36: Gateway running-agent guard wiring — completes GW-05
+
+**Goal:** Wire per-session running-agent state on the gateway so `/stop`, `/approve`, `/deny` bypass while `/model` and other state-mutating commands are queued during an active agent turn. Cross-AI review of Phase 21.1 (2026-05-24, codex HIGH-1) confirmed `crates/ironhermes-gateway/src/handler.rs:377-380` hardcodes `agent_running = AtomicBool::new(false)` with the comment "running-agent guard is a future enhancement using per-session state" — leaving GW-05 only partially satisfied: dispatch through `resolve_command()` works, but the guard never fires, `/stop` always reports "no agent running" on Telegram, and `/model` can switch credentials mid-turn. Replace the per-request `Arc<AtomicBool>` shim with per-session state (Idle/Running/Cancelling/Queued) keyed by `SessionKey`, threaded into `CommandContext`, to eliminate TOCTOU races between flag check and dispatch. Mirror hermes-agent's `gateway/run.py:1735-1852` bypass list (`/stop`, `/new`, `/queue`, `/status`).
+**Requirements**: GW-05 (re-opened 2026-05-24 — see REQUIREMENTS.md note + `.planning/phases/21.1-slash-commands/21.1-REVIEWS.md` HIGH-1/HIGH-2)
+**Depends on:** Phase 35
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36 to break down)
