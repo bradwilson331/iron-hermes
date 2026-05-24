@@ -374,9 +374,10 @@ impl GatewayMessageHandler {
         let session_key =
             SessionKey::new(platform.clone(), &event.chat_id).with_user(&event.sender_id);
 
-        // Build CommandContext (agent_running always false for gateway slash commands —
-        // the running-agent guard is a future enhancement using per-session state).
-        let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Phase 36 / GW-05: per-session running flag retrieved from SessionStore (D-03/D-05/D-06).
+        // Construction here is the single source of truth — handle_with_multimodal and
+        // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
+        let agent_running = self.session_store.read().await.get_running_flag(&session_key);
         let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running);
         // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
         // production toolset session handle so /toolset list/show/enable/disable
