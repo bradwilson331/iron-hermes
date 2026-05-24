@@ -1,7 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
+use ironhermes_core::commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -57,50 +58,6 @@ where
         }
     }
     anyhow::bail!("Bot is being rate limited, please wait")
-}
-
-/// D-02 (Phase 36, locked verbatim): rejection message when a slash command or
-/// free-text message arrives while an agent turn is already in flight.
-/// All three rejection sites (handle_slash_command, MessageHandler::handle,
-/// handle_with_multimodal) reference this single constant — never inline.
-const AGENT_RUNNING_REJECT_MSG: &str =
-    "Agent is running. Use /stop to interrupt or /queue to send after this turn.";
-
-/// Phase 36 (D-06): RAII guard that atomically sets the per-session running flag
-/// to `true` on construction and `false` on `Drop`.
-///
-/// Drop fires on every exit path — `Ok(...)` return, `Err(...)` propagated via `?`,
-/// panic, and future cancellation — covering the "forgot a cleanup branch" bug class.
-/// This is why there is no `set_running` / `clear_running` method on `SessionStore`;
-/// callers must use this guard as the only write path (D-06 RAII discipline).
-///
-/// Use `Ordering::SeqCst` on both store sites (new + Drop) to guarantee visibility
-/// across threads on weakly-ordered architectures (Pitfall 3 mitigation).
-pub struct RunningAgentGuard(Arc<AtomicBool>);
-
-impl RunningAgentGuard {
-    pub fn new(flag: Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::SeqCst);
-        Self(flag)
-    }
-}
-
-impl Drop for RunningAgentGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Phase 36 (D-01): returns true for command names that are allowed to dispatch
-/// even when an agent turn is in flight. Checks the POST-resolution canonical
-/// name (`def.name`), never the raw user input, so `/reset` → `"new"` correctly
-/// bypasses (Pitfall 4 mitigation).
-///
-/// Locked bypass list (D-01): stop, new, status, queue.
-/// "approve" and "deny" are intentionally excluded until the approval queue lands.
-fn is_bypass(name: &str) -> bool {
-    // TODO(D-01): add "approve" | "deny" when approval queue lands
-    matches!(name, "stop" | "new" | "status" | "queue")
 }
 
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
