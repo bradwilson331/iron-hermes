@@ -522,20 +522,25 @@ This section documents running-agent wiring state across all four interfaces, co
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Non-slash message guard (Pitfall 1)**
+All three questions were resolved by the planner during Phase 36 planning (2026-05-24). See `36-01-PLAN.md`, `36-02-PLAN.md`, and `36-03-PLAN.md`.
+
+1. **Non-slash message guard (Pitfall 1)** — **RESOLVED**
    - What we know: `MessageHandler::handle` routes non-slash messages directly to `run_agent`. The slash-command guard does not cover this path. D-02 says "reject with error" for non-bypass commands during active turn.
    - What's unclear: Is a free-text message during an active turn "non-bypass" and therefore rejected? Or silently dropped?
    - Recommendation: Reject with the same D-02 error. There is no input queue; a free-text message is a request to run the agent, so rejecting it is consistent with the policy. Planner should make this explicit.
+   - **RESOLVED IN PLAN:** `36-02-PLAN.md` Task 2 sub-edit F guards BOTH `MessageHandler::handle` AND `handle_with_multimodal` non-slash arms with the D-02 reject; `test_freetext_rejected_when_running` enforces.
 
-2. **`run_agent` signature change — how does it receive the session's flag?**
+2. **`run_agent` signature change — how does it receive the session's flag?** — **RESOLVED**
    - What we know: `run_agent` at `handler.rs:801` must receive the `Arc<AtomicBool>` to construct the guard inside it.
    - What's unclear: Does `run_agent` currently accept `SessionKey` directly? What parameters does it take?
    - Recommendation: Pass the `Arc<AtomicBool>` directly to `run_agent` as a new parameter. The call site already has the handle from `session.running.clone()`.
+   - **RESOLVED IN PLAN:** `36-02-PLAN.md` Task 2 sub-edit C chose a slightly different but valid approach — `run_agent` fetches its own flag via `self.session_store.read().await.get_running_flag(&session_key)` at the top of its body, avoiding signature ripple across the 5 call sites. Plan-checker validated this as acceptable planner discretion (RESEARCH recommendation was non-locked).
 
-3. **Option A vs Option B storage shape (Claude's Discretion)**
+3. **Option A vs Option B storage shape (Claude's Discretion)** — **RESOLVED**
    - Recommendation: Option B (field on `GatewaySession`). Lifecycle matches automatically; no separate HashMap to manage; no cleanup gap risk. Planner should document the rationale.
+   - **RESOLVED IN PLAN:** `36-02-PLAN.md` Task 1 adds `pub running: Arc<AtomicBool>` directly to the `GatewaySession` struct (Option B). Rationale captured in plan notes — lifecycle matches automatically, no separate map to manage, no cleanup gap.
 
 ---
 
