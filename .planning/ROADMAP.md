@@ -83,16 +83,16 @@ Plans:
 **Goal:** Wire per-session running-agent state on the gateway so `/stop`, `/approve`, `/deny` bypass while `/model` and other state-mutating commands are queued during an active agent turn. Cross-AI review of Phase 21.1 (2026-05-24, codex HIGH-1) confirmed `crates/ironhermes-gateway/src/handler.rs:377-380` hardcodes `agent_running = AtomicBool::new(false)` with the comment "running-agent guard is a future enhancement using per-session state" — leaving GW-05 only partially satisfied: dispatch through `resolve_command()` works, but the guard never fires, `/stop` always reports "no agent running" on Telegram, and `/model` can switch credentials mid-turn. Replace the per-request `Arc<AtomicBool>` shim with per-session state (Idle/Running/Cancelling/Queued) keyed by `SessionKey`, threaded into `CommandContext`, to eliminate TOCTOU races between flag check and dispatch. Mirror hermes-agent's `gateway/run.py:1735-1852` bypass list (`/stop`, `/new`, `/queue`, `/status`).
 **Requirements**: GW-05 (re-opened 2026-05-24 — see REQUIREMENTS.md note + `.planning/phases/21.1-slash-commands/21.1-REVIEWS.md` HIGH-1/HIGH-2)
 **Depends on:** Phase 35
-**Plans:** 3 plans
+**Plans:** 2/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 36-01-PLAN.md — Wave 0 test scaffold: `crates/ironhermes-gateway/tests/running_agent_guard_tests.rs` with 11 `#[ignore]` GW-05 sub-behavior stubs + helpers (RecordingPlatformAdapter, build_test_session_store, d02_error_message)
+- [x] 36-01-PLAN.md — Wave 0 test scaffold: `crates/ironhermes-gateway/tests/running_agent_guard_tests.rs` with 11 `#[ignore]` GW-05 sub-behavior stubs + helpers (RecordingPlatformAdapter, build_test_session_store, d02_error_message)
 
 **Wave 2** *(depends on Wave 1)*
 
-- [ ] 36-02-PLAN.md — Core implementation: add `running: Arc<AtomicBool>` to `GatewaySession` (D-03/D-05) + `SessionStore::get_running_flag` accessor; add `RunningAgentGuard` RAII (D-06) and `is_bypass` (D-01) to handler.rs; wire guard at `run_agent` top + `handle_slash_command` + non-slash `MessageHandler::handle` AND `handle_with_multimodal` (Pitfall 1); un-ignore all 11 tests
+- [x] 36-02-PLAN.md — Core implementation: add `running: Arc<AtomicBool>` to `GatewaySession` (D-03/D-05) + `SessionStore::get_running_flag` accessor; add `RunningAgentGuard` RAII (D-06) and `is_bypass` (D-01) to handler.rs; wire guard at `run_agent` top + `handle_slash_command` + non-slash `MessageHandler::handle` AND `handle_with_multimodal` (Pitfall 1); un-ignore all 11 tests
 
 **Wave 3** *(depends on Wave 2)*
 
