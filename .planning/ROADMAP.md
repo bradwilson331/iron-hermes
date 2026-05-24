@@ -97,3 +97,17 @@ Plans:
 **Wave 3** *(depends on Wave 2)*
 
 - [x] 36-03-PLAN.md — Cleanup: delete stale "future enhancement" comment at handler.rs:377-380; flip REQUIREMENTS.md GW-05 to Complete + traceability row to "Phase 21.1 (dispatch) + Phase 36 (guard)"; update ROADMAP.md checkboxes; create 36-BACKLOG.md (web UI slash-interception gap; per-turn LLM cancel handler.rs:1032; CLI/gateway unified mechanism; /approve+/deny bypass when approval queue lands); Real-Telegram UAT checkpoint
+
+### Phase 36.1: Running-agent guard parity — web UI + TUI (INSERTED)
+
+**Goal:** Extend the Phase 36 per-session running-agent guard (`RunningAgentGuard` RAII, `is_bypass`, D-02 rejection message) to the web UI and TUI surfaces, closing the parity gap identified in `36-BACKLOG.md` items 1 and 3. Two tracks: (A) **Web UI** — add per-WebSocket-session `Arc<AtomicBool>` running flag to `iron_hermes_ui` session state, wire `RunningAgentGuard` at `run_web_turn` entry, add slash-command interception before `run_turn` so `/model` and other state-mutating commands are rejected with the D-02 message while an agent turn is active, and `/stop`/`/new` bypass; (B) **TUI** (`tui_rata`) — replace the `pending_rx.is_some()` ad-hoc check at `tui_rata/commands.rs:537` with the same `Arc<AtomicBool>` + RAII pattern, wire guard at TUI turn entry, add command interception with bypass list parity. Extract shared `RunningAgentState` + `RunningAgentGuard` to `ironhermes-core` (or a shared module) so all three surfaces (gateway, web, TUI) use one canonical implementation — mirrors the `MemoryManagerHandle`/`McpReloader` trait patterns from Phases 20/21.2.
+**Requirements**: GW-05-WEB (web UI guard parity), GW-05-TUI (TUI guard parity) (phase-local; defined during /gsd:discuss-phase 36.1)
+**Depends on:** Phase 36
+**Plans:** 4 plans
+
+Plans:
+
+- [ ] 36.1-01-PLAN.md — Extract RunningAgentGuard + is_bypass + AGENT_RUNNING_REJECT_MSG to ironhermes-core::commands::running_agent; update gateway imports + preserve re-export so Phase 36 suite passes unchanged
+- [ ] 36.1-02-PLAN.md — Web UI: AppState.running_agents per-session map, ws.rs slash interception + plain-text guard, run_web_turn RAII guard, 6 GW-05-WEB integration tests
+- [ ] 36.1-03-PLAN.md — TUI: App.agent_running persistent field, commands.rs snapshot replacement + bypass check (Pitfall 4), event_loop.rs spawn_turn guard INSIDE tokio::spawn async block (Pitfall 1), 5 GW-05-TUI integration tests
+- [ ] 36.1-04-PLAN.md — Cross-surface verification: full workspace test + clippy; fill 36.1-VALIDATION.md per-task map; sign off nyquist_compliant true
