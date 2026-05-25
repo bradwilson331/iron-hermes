@@ -333,6 +333,69 @@ pub struct Config {
     /// `#[serde(default)]` makes this field optional in YAML — pre-25.2 configs parse cleanly.
     #[serde(default)]
     pub extract: ExtractConfig,
+    /// Phase 36.2 (D-CACHE-02): prompt caching configuration.
+    /// Pre-36.2 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub prompt_caching: PromptCachingConfig,
+}
+
+// =============================================================================
+// PromptCachingConfig + CacheTtl (Phase 36.2 D-CACHE-02)
+// =============================================================================
+
+/// Phase 36.2 (D-CACHE-02): prompt caching configuration.
+///
+/// Surfaced in `config.yaml` as a top-level `prompt_caching:` block with two
+/// fields: `ttl` (`"5m"` | `"1h"`, default `"1h"`) and `enabled` (default `true`).
+/// `#[serde(default)]` on the field site in [`Config`] makes pre-36.2 configs
+/// parse cleanly with the defaults applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptCachingConfig {
+    /// Cache TTL for Anthropic `cache_control` markers. Only `"5m"` and `"1h"`
+    /// are valid — see [`CacheTtl`]. Default: `"1h"` (D-CACHE-02).
+    pub ttl: CacheTtl,
+    /// Enable prompt caching for Anthropic models. When `false`, no
+    /// `cache_control` markers are attached to the request body.
+    /// Default: `true` (D-CACHE-02).
+    pub enabled: bool,
+}
+
+impl Default for PromptCachingConfig {
+    fn default() -> Self {
+        Self {
+            ttl: CacheTtl::OneHour,
+            enabled: true,
+        }
+    }
+}
+
+/// Phase 36.2 (D-CACHE-02): closed enum for Anthropic `cache_control.ttl`.
+///
+/// Anthropic's `cache_control` envelope accepts exactly two TTL string values:
+/// `"5m"` and `"1h"`. Modeling this as a closed enum with `#[serde(rename = ...)]`
+/// rejects any other value at deserialization time (T-36.2-05-CFG mitigation —
+/// no string interpolation into the request body).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheTtl {
+    /// `"5m"` — short TTL for rolling breakpoints during burst conversations.
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// `"1h"` — long TTL for cross-session cached prefixes (D-CACHE-02 default).
+    #[default]
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Return the string form used in the Anthropic `cache_control` JSON
+    /// envelope (`{"type":"ephemeral","ttl":"1h"}` or `"5m"`).
+    pub fn as_anthropic_ttl(&self) -> &'static str {
+        match self {
+            CacheTtl::FiveMinutes => "5m",
+            CacheTtl::OneHour => "1h",
+        }
+    }
 }
 
 // =============================================================================
