@@ -96,3 +96,32 @@ Verification:
 cargo clippy -p ironhermes-agent --no-deps 2>&1 | grep -c "^warning"
 # 63 (baseline 61 + 2 — see scope-boundary note above)
 ```
+
+## From Plan 36.2-06 (RateLimitTracker)
+
+### Pre-existing clippy errors in `ironhermes-agent`
+
+Plan 36.2-06 acceptance ran `cargo clippy -p ironhermes-agent --no-deps -- -D warnings`
+against the new `rate_limit_tracker.rs`, `tests/rate_limit_tracker.rs`, and
+`tests/invariants_36_2_rate_limit_tracker.rs`. All three files are 100% clean.
+The 58 clippy errors (when `-D warnings` upgrades them) the lib + tests emit
+crate-wide all live in pre-existing files that the plan does not modify
+(matches the "61 pre-existing clippy errors" baseline already documented in
+Plan 36.2-03 SUMMARY):
+
+| File | Lint families | Why deferred |
+|------|---------------|---------------|
+| `agent_wiring.rs` | unused_imports, too_many_arguments, var-not-mutable | Pre-existing; out of scope per Rule SCOPE BOUNDARY |
+| `anthropic_client.rs` | private-type-in-public-interface (3) | Pre-existing; out of scope |
+| `context_compressor.rs`, `context_loader.rs`, `context_refs.rs`, `engine_factory.rs`, `memory/factory.rs`, `nudge.rs`, `subagent_runner.rs`, `subdir_discovery.rs`, `summarizing_engine.rs`, `tool_pair.rs`, `transcript.rs` | collapsible_if, dead_code, needless_range_loop, useless_format, manual_strip, missing_default, etc. | All pre-existing baseline noise |
+
+Scope boundary applied (Rule SCOPE BOUNDARY): only auto-fix issues DIRECTLY
+caused by current task changes. These lints pre-date Plan 36.2-06 and are
+unchanged by it.
+
+Verification:
+```bash
+cargo clippy -p ironhermes-agent --no-deps 2>&1 \
+  | grep -iE 'rate_limit|invariants_36_2_rate'
+# (empty output — new files are lint-clean)
+```
