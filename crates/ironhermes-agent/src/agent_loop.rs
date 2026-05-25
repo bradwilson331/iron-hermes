@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
+use ironhermes_core::pricing::{PricingRegistry, compute_cost_micros};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
@@ -18,8 +19,10 @@ use crate::budget::{BudgetHandle, PressureTier, advisory_text};
 use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::{ContextCompressor, estimate_messages_tokens};
 use crate::context_engine::{ContextEngine, ContextStats};
+use crate::error_classifier::{ProviderError, classify_llm_error_typed};
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
+use crate::rate_limit_tracker::{RateLimitTracker, hash_api_key};
 use crate::subdir_discovery::SubdirDiscovery;
 
 /// Why the agent loop stopped (D-15 / G-01 / Plan 21.7-05).
@@ -222,6 +225,29 @@ pub struct AgentLoop {
     /// complete user-assistant exchange). Recorded in TrajectoryEntry.turn_index
     /// so Phase 25.4 Curator can correlate tool calls within a turn.
     turn_index: std::sync::atomic::AtomicUsize,
+    /// Phase 36.2 Plan 07: pricing registry for per-turn cost computation.
+    /// Wraps the static pricing.toml table (with optional disk-cache overlay).
+    /// Defaults to an `Arc::new(PricingRegistry::new())` instance constructed
+    /// in `new()` so every loop can compute costs without any builder call.
+    /// Plan 09 wires the disk-cache refresh path.
+    pricing_registry: Arc<PricingRegistry>,
+    /// Phase 36.2 Plan 07: per-provider in-memory rate-limit tracker.
+    /// `None` = tracker disabled for this loop (default — backward compatible
+    /// with all existing call sites that do not configure one).
+    /// Wired via `with_rate_limit_tracker()`; consumed at the post-LLM-call
+    /// write site to call `record_headers` (success) / `record_429` (failure).
+    rate_limit_tracker: Option<RateLimitTracker>,
+    /// Phase 36.2 Plan 07: canonical provider name used as the
+    /// `(provider, key_hash, model)` first axis on the RateLimitTracker key
+    /// AND the `usage_events.provider` column. Wired via `with_provider_name`.
+    /// Empty string = "unknown" — usage_events row still writes for forensics.
+    provider_name: String,
+    /// Phase 36.2 Plan 07: cleartext API key used at the post-call write site
+    /// SOLELY to derive a stable `api_key_hash` via `hash_api_key()` BEFORE
+    /// being passed to the RateLimitTracker. The cleartext value is never
+    /// logged, never serialized, never forwarded to the tracker. Empty string
+    /// = "unknown" hash bucket. Wired via `with_api_key_for_usage_tracking`.
+    api_key_for_usage_tracking: String,
 }
 
 impl AgentLoop {
@@ -265,6 +291,16 @@ impl AgentLoop {
             // Phase 25.3 D-T-3 / D-T-1: trajectory ledger fields default to disabled / 0.
             trajectory_writer: None,
             turn_index: std::sync::atomic::AtomicUsize::new(0),
+            // Phase 36.2 Plan 07: pricing registry loaded once at construction.
+            // PricingRegistry::new() reads the bundled pricing.toml; no disk I/O.
+            pricing_registry: Arc::new(PricingRegistry::new()),
+            // Phase 36.2 Plan 07: tracker + provider/key default to disabled.
+            // Existing callers (tests, CLI, gateway) continue to work; the new
+            // builder methods (with_rate_limit_tracker / with_provider_name /
+            // with_api_key_for_usage_tracking) opt in to per-turn forensics.
+            rate_limit_tracker: None,
+            provider_name: String::new(),
+            api_key_for_usage_tracking: String::new(),
         }
     }
 
@@ -401,6 +437,41 @@ impl AgentLoop {
     /// When set, session_search calls are intercepted before registry dispatch.
     pub fn with_state_store(mut self, store: Arc<std::sync::Mutex<StateStore>>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    /// Phase 36.2 Plan 07: override the bundled pricing registry with an
+    /// explicit instance (e.g., one preloaded with disk-cache entries via
+    /// `merge_cache`). Defaults to a fresh `PricingRegistry::new()` if not
+    /// called.
+    pub fn with_pricing_registry(mut self, registry: Arc<PricingRegistry>) -> Self {
+        self.pricing_registry = registry;
+        self
+    }
+
+    /// Phase 36.2 Plan 07: attach a per-provider rate-limit tracker. When
+    /// set, the post-LLM-call site calls `record_headers` (success path) /
+    /// `record_429` (failure path when the typed error is
+    /// `ProviderError::RateLimited`).
+    pub fn with_rate_limit_tracker(mut self, tracker: RateLimitTracker) -> Self {
+        self.rate_limit_tracker = Some(tracker);
+        self
+    }
+
+    /// Phase 36.2 Plan 07: set the canonical provider name used as the first
+    /// axis of the `RateLimitKey` and the `usage_events.provider` column.
+    /// Empty string (default) is permitted but yields less-useful forensics.
+    pub fn with_provider_name(mut self, provider: impl Into<String>) -> Self {
+        self.provider_name = provider.into();
+        self
+    }
+
+    /// Phase 36.2 Plan 07: set the cleartext API key used SOLELY to derive a
+    /// stable `api_key_hash` for the rate-limit tracker's tracking key. The
+    /// raw key is never logged, serialized, or passed to the tracker — only
+    /// the 16-byte SHA-256-truncated hash leaves this struct.
+    pub fn with_api_key_for_usage_tracking(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key_for_usage_tracking = api_key.into();
         self
     }
 
@@ -775,13 +846,282 @@ impl AgentLoop {
     /// Classify an error for fallback decision-making.
     /// Returns (should_retry, should_fallback).
     ///
-    /// Phase 36.2-03 (D-ERR-03): this function is now a one-line facade
+    /// Phase 36.2-03 (D-ERR-03): this function is a one-line facade
     /// delegating to `crate::error_classifier::classify_llm_error_typed`.
     /// The new typed classifier is the canonical source of truth; this
-    /// `(bool, bool)` shape is preserved for every existing call site and
-    /// for the 12+ regression tests at lines 2520-2724.
+    /// `(bool, bool)` shape is preserved for the 15 regression tests at
+    /// lines 2520-2724 and for any external caller that still consumes the
+    /// legacy tuple shape.
+    ///
+    /// Phase 36.2-07: the production post-LLM-call site now derives the
+    /// typed `ProviderError` directly via `classify_llm_error_typed` and
+    /// converts to `(bool, bool)` via `.into()`, so this facade is no
+    /// longer called from production code — only from the legacy
+    /// regression tests. `#[allow(dead_code)]` because the test-only
+    /// references are inside the gated `#[cfg(test)]` module.
+    #[allow(dead_code)]
     fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
         crate::error_classifier::classify_llm_error_typed(err).into()
+    }
+
+    /// Phase 36.2 Plan 07: post-LLM-call success write path.
+    ///
+    /// Computes Anthropic's three-input billable cost (input_tokens +
+    /// cache_read + cache_creation, each priced per million via
+    /// `compute_cost_micros`), inserts a `usage_events` row + increments the
+    /// matching `sessions` row inside a single rusqlite transaction
+    /// (Pitfall 6 atomicity), records header-derived rate-limit state on the
+    /// tracker (Plan 06 surface), emits the per-turn `tracing::info!("usage",
+    /// ...)` line (D-USAGE-03 third channel), and updates the
+    /// context_compressor's full-fidelity per-turn counters
+    /// (record_usage_full from Task 1).
+    ///
+    /// **Resilient by design.** A failure of any write surface (state store,
+    /// tracker) is logged via `tracing::warn!` but does NOT abort the agent
+    /// turn — forensics are best-effort, not load-bearing for user response
+    /// delivery (T-36.2-07-DOS mitigation).
+    ///
+    /// **Key isolation (T-36.2-07-LEAK).** The cleartext API key is hashed
+    /// to a 16-byte SHA-256-truncated digest BEFORE being passed to the
+    /// tracker; the raw key never reaches the tracker module.
+    ///
+    /// Visibility: `pub` + `#[doc(hidden)]` so the integration test in
+    /// `tests/usage_events_write_path.rs` can drive the write site directly
+    /// without spinning a full live LLM call (the same shape Phase 36.2-02's
+    /// `conn_for_test` accessor uses).
+    #[doc(hidden)]
+    pub fn write_usage_success(&self, usage: &Option<Usage>) {
+        let model_str = self.client.model().to_string();
+        let provider_str = self.provider_name.clone();
+        let session_id = self
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let in_tok = usage.as_ref().map(|u| u.prompt_tokens as i64).unwrap_or(0);
+        let out_tok = usage
+            .as_ref()
+            .map(|u| u.completion_tokens as i64)
+            .unwrap_or(0);
+        let cache_read = usage
+            .as_ref()
+            .and_then(|u| u.cache_read_input_tokens)
+            .map(|n| n as i64)
+            .unwrap_or(0);
+        let cache_create = usage
+            .as_ref()
+            .and_then(|u| u.cache_creation_input_tokens)
+            .map(|n| n as i64)
+            .unwrap_or(0);
+
+        // Compute cost via Plan 04 surface — Anthropic three-input formula.
+        let pricing = self.pricing_registry.lookup_or_zero(&model_str);
+        let cost_micros = compute_cost_micros(&pricing, in_tok, out_tok, cache_read, cache_create);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // (1) usage_events INSERT + sessions UPDATE atomically (Plan 02
+        // surface — semantically equivalent to calling
+        // `StateStore::insert_usage_event` + `StateStore::update_session_stats`).
+        // Pitfall 6: both writes happen inside a single rusqlite
+        // `unchecked_transaction` so they commit or roll back together —
+        // never half-applied. Wrapped in if-let so callers without a state
+        // store (subagent tests, in-process unit tests) silently skip the
+        // write. The transaction borrows the Connection immutably, so the
+        // two INSERT / UPDATE statements use `tx.execute(...)` directly
+        // (mirrors `crates/ironhermes-state/tests/usage_events_schema.rs`
+        // b7_* tests) rather than the `&mut self` methods on `StateStore`
+        // which would conflict with the active transaction borrow. The SQL
+        // shape is byte-identical to `StateStore::insert_usage_event` and
+        // `StateStore::update_session_stats` — verified against
+        // crates/ironhermes-state/src/lib.rs:847 and :809 respectively.
+        if let Some(store) = &self.state_store {
+            let store = Arc::clone(store);
+            let sid_for_update = session_id.clone();
+            let provider_for_write = provider_str.clone();
+            let model_for_write = model_str.clone();
+            let write_result: Result<(), anyhow::Error> = (|| {
+                let guard = store.lock().map_err(|_| {
+                    anyhow::anyhow!("state store mutex poisoned")
+                })?;
+                let tx = guard.conn_for_test().unchecked_transaction()?;
+                // INSERT usage_events row.
+                tx.execute(
+                    "INSERT INTO usage_events \
+                     (session_id, ts, provider, model, in_tok, out_tok, \
+                      cache_read, cache_create, cost_usd_micros, error_kind) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    rusqlite::params![
+                        session_id,
+                        now_ms,
+                        provider_for_write,
+                        model_for_write,
+                        in_tok,
+                        out_tok,
+                        cache_read,
+                        cache_create,
+                        cost_micros,
+                        Option::<String>::None,
+                    ],
+                )?;
+                // UPDATE sessions aggregate row.
+                tx.execute(
+                    "UPDATE sessions SET \
+                     input_tokens = input_tokens + ?1, \
+                     output_tokens = output_tokens + ?2, \
+                     tool_call_count = tool_call_count + ?3, \
+                     cache_read_tokens = cache_read_tokens + ?4, \
+                     cache_creation_tokens = cache_creation_tokens + ?5, \
+                     cost_usd_micros = cost_usd_micros + ?6 \
+                     WHERE id = ?7",
+                    rusqlite::params![
+                        in_tok,
+                        out_tok,
+                        0_i64,
+                        cache_read,
+                        cache_create,
+                        cost_micros,
+                        sid_for_update,
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                warn!(error = ?e, "usage_events success write failed");
+            }
+        }
+
+        // (2) RateLimitTracker.record_headers — Plan 06 surface. Headers are
+        // not yet plumbed through ChatResponse (would require an AnyClient
+        // refactor); we still call with an empty iterator so the contract is
+        // wired and tests can verify the call shape. A follow-up plan can
+        // populate real headers once the client layer surfaces them.
+        if let Some(tracker) = &self.rate_limit_tracker {
+            let key_hash = hash_api_key(&self.api_key_for_usage_tracking);
+            let empty_headers: Vec<(String, String)> = Vec::new();
+            tracker.record_headers(&provider_str, key_hash, &model_str, empty_headers);
+        }
+
+        // (3) Per-turn tracing log — D-USAGE-03 third channel.
+        info!(
+            target: "usage",
+            session = %session_id,
+            provider = %provider_str,
+            model = %model_str,
+            in_tok,
+            out_tok,
+            cache_read,
+            cache_create,
+            cost_usd_micros = cost_micros,
+            "usage"
+        );
+
+        // (4) ContextCompressor per-turn counters (Task 1 surface).
+        if let Some(compressor_mutex) = &self.compressor
+            && let Ok(c) = compressor_mutex.try_lock()
+        {
+            c.record_usage_full(
+                in_tok as usize,
+                out_tok as usize,
+                (in_tok + out_tok + cache_read + cache_create) as usize,
+                cache_read as usize,
+                cache_create as usize,
+            );
+        }
+    }
+
+    /// Phase 36.2 Plan 07: post-LLM-call failure write path.
+    ///
+    /// Writes a single `usage_events` row with `error_kind =
+    /// Some(provider_error.variant_name().to_string())` (Plan 03 surface —
+    /// bounded `&'static str`, never the raw err body per T-36.2-07-PII) and
+    /// `cost_usd_micros = 0` (D-USAGE-04 — failed calls cost nothing). No
+    /// `sessions` UPDATE on failure (token counts didn't change), so no
+    /// transaction is required around the single write.
+    ///
+    /// On `ProviderError::RateLimited`, also calls
+    /// `tracker.record_429(provider, key_hash, model, retry_after)` (Plan 06
+    /// reactive path).
+    ///
+    /// Visibility: `pub` + `#[doc(hidden)]` for integration-test access — see
+    /// `write_usage_success`.
+    #[doc(hidden)]
+    pub fn write_usage_failure(&self, provider_error: &ProviderError) {
+        let model_str = self.client.model().to_string();
+        let provider_str = self.provider_name.clone();
+        let session_id = self
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // (1) usage_events row for the failed call (D-USAGE-04 forensics) —
+        // semantically equivalent to a single `StateStore::insert_usage_event`
+        // call. No sessions UPDATE on failure (token counts didn't change),
+        // so a single INSERT inside a transaction suffices.
+        if let Some(store) = &self.state_store {
+            let store = Arc::clone(store);
+            let provider_for_write = provider_str.clone();
+            let model_for_write = model_str.clone();
+            let variant_name = provider_error.variant_name().to_string();
+            let session_for_write = session_id.clone();
+            let write_result: Result<(), anyhow::Error> = (|| {
+                let guard = store.lock().map_err(|_| {
+                    anyhow::anyhow!("state store mutex poisoned")
+                })?;
+                let tx = guard.conn_for_test().unchecked_transaction()?;
+                tx.execute(
+                    "INSERT INTO usage_events \
+                     (session_id, ts, provider, model, in_tok, out_tok, \
+                      cache_read, cache_create, cost_usd_micros, error_kind) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    rusqlite::params![
+                        session_for_write,
+                        now_ms,
+                        provider_for_write,
+                        model_for_write,
+                        0_i64,
+                        0_i64,
+                        0_i64,
+                        0_i64,
+                        0_i64,
+                        Some(variant_name),
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                warn!(error = ?e, "usage_events failure write failed");
+            }
+        }
+
+        // (2) RateLimitTracker.record_429 reactive path — Plan 06 surface.
+        if let Some(tracker) = &self.rate_limit_tracker
+            && let ProviderError::RateLimited { retry_after } = provider_error
+        {
+            let key_hash = hash_api_key(&self.api_key_for_usage_tracking);
+            tracker.record_429(&provider_str, key_hash, &model_str, *retry_after);
+        }
+
+        // (3) Per-turn tracing log (failure forensics — visible in logs only).
+        info!(
+            target: "usage",
+            session = %session_id,
+            provider = %provider_str,
+            model = %model_str,
+            error_kind = provider_error.variant_name(),
+            cost_usd_micros = 0_i64,
+            "usage_failure"
+        );
     }
 
     /// Phase 18 Plan 06: pre-chat compression + transient-drain block.
@@ -1069,9 +1409,36 @@ impl AgentLoop {
                 };
 
                 match llm_result {
-                    Ok(result) => break result,
+                    Ok(result) => {
+                        // Phase 36.2 Plan 07: post-LLM-call success write site.
+                        // Compute cost, write usage_events + sessions UPDATE
+                        // atomically inside a single rusqlite transaction
+                        // (Pitfall 6), record header-derived rate-limit state
+                        // on the tracker (Plan 06 surface), emit the per-turn
+                        // tracing::info!("usage", ...) line (D-USAGE-03 third
+                        // channel), and update the context_compressor's
+                        // full-fidelity per-turn counters.
+                        self.write_usage_success(&result.1);
+                        break result;
+                    }
                     Err(err) => {
-                        let (should_retry, should_fallback) = Self::classify_llm_error(&err);
+                        // Phase 36.2 Plan 07: derive the typed ProviderError
+                        // once at the top of the failure path so both the
+                        // legacy (bool, bool) facade (consumed by the existing
+                        // retry/fallback logic below) and the new
+                        // usage_events / record_429 calls share a single
+                        // classification. Cloning is cheap — the variant
+                        // payload is at most an `Option<Duration>`.
+                        let provider_error = classify_llm_error_typed(&err);
+                        let (should_retry, should_fallback): (bool, bool) =
+                            provider_error.clone().into();
+
+                        // Phase 36.2 Plan 07: write a failure usage_events row
+                        // (D-USAGE-04 forensics) + fire tracker.record_429
+                        // when the typed variant is RateLimited. Resilient by
+                        // design: write failure is logged but never aborts
+                        // the turn.
+                        self.write_usage_failure(&provider_error);
 
                         // Try fallback if available and not already activated (PROV-07, D-11)
                         if should_fallback && !self.fallback_activated {

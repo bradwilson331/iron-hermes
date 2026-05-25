@@ -56,6 +56,11 @@ pub struct ContextCompressor {
     last_prompt_tokens: std::sync::atomic::AtomicUsize,
     last_completion_tokens: std::sync::atomic::AtomicUsize,
     last_total_tokens: std::sync::atomic::AtomicUsize,
+    /// Phase 36.2 Plan 07: full-fidelity cache token counters. Populated by
+    /// [`Self::record_usage_full`] alongside the legacy prompt/completion/total
+    /// triple. Zeroed on session reset.
+    pub last_cache_read_tokens: std::sync::atomic::AtomicUsize,
+    pub last_cache_creation_tokens: std::sync::atomic::AtomicUsize,
 }
 
 impl ContextCompressor {
@@ -73,6 +78,8 @@ impl ContextCompressor {
             last_prompt_tokens: AtomicUsize::new(0),
             last_completion_tokens: AtomicUsize::new(0),
             last_total_tokens: AtomicUsize::new(0),
+            last_cache_read_tokens: AtomicUsize::new(0),
+            last_cache_creation_tokens: AtomicUsize::new(0),
         }
     }
 
@@ -245,12 +252,40 @@ impl ContextCompressor {
     /// Phase 34b Plan 02: record the per-response token usage (Python parity for
     /// `update_from_response`). Stored so a long-lived compressor instance can
     /// report last-turn usage; zeroed by `on_session_reset`.
+    ///
+    /// Phase 36.2 Plan 07: this is now a wrapper around
+    /// [`Self::record_usage_full`] with zero defaults for the cache token
+    /// counters — the legacy 3-arg signature is preserved byte-for-byte so
+    /// existing call sites compile unchanged.
     pub fn record_usage(&self, prompt_tokens: usize, completion_tokens: usize, total_tokens: usize) {
+        self.record_usage_full(prompt_tokens, completion_tokens, total_tokens, 0, 0)
+    }
+
+    /// Phase 36.2 Plan 07: full-fidelity per-response usage record including
+    /// the Anthropic cache token counters (cache_read_input_tokens +
+    /// cache_creation_input_tokens). Updates 5 atomic fields with `SeqCst`
+    /// ordering, matching the existing `record_usage` discipline.
+    ///
+    /// Call sites that don't have cache token data can use the legacy
+    /// [`Self::record_usage`] wrapper which delegates here with cache fields
+    /// defaulted to 0.
+    pub fn record_usage_full(
+        &self,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        total_tokens: usize,
+        cache_read_tokens: usize,
+        cache_creation_tokens: usize,
+    ) {
         use std::sync::atomic::Ordering;
         self.last_prompt_tokens.store(prompt_tokens, Ordering::SeqCst);
         self.last_completion_tokens
             .store(completion_tokens, Ordering::SeqCst);
         self.last_total_tokens.store(total_tokens, Ordering::SeqCst);
+        self.last_cache_read_tokens
+            .store(cache_read_tokens, Ordering::SeqCst);
+        self.last_cache_creation_tokens
+            .store(cache_creation_tokens, Ordering::SeqCst);
     }
 
     /// Phase 34b Plan 02: test-only helper to drive a compression pass through a
@@ -346,6 +381,10 @@ impl crate::context_engine::ContextEngine for ContextCompressor {
         self.last_prompt_tokens.store(0, Ordering::SeqCst);
         self.last_completion_tokens.store(0, Ordering::SeqCst);
         self.last_total_tokens.store(0, Ordering::SeqCst);
+        // Phase 36.2 Plan 07: also zero the new cache token counters so a
+        // fresh conversation does not inherit stale cache metrics.
+        self.last_cache_read_tokens.store(0, Ordering::SeqCst);
+        self.last_cache_creation_tokens.store(0, Ordering::SeqCst);
     }
 
     /// Record per-response usage so a long-lived compressor reports last-turn
@@ -480,5 +519,51 @@ mod tests {
         let msgs = vec![ChatMessage::user("hello")];
         // Default has_content_to_compress returns true.
         assert!(cc.has_content_to_compress(&msgs));
+    }
+
+    /// Phase 36.2 Plan 07 Task 1 — behavior 1:
+    /// Legacy `record_usage(p, c, t)` still compiles and updates the prompt /
+    /// completion / total atomic fields. Cache atomics remain 0 (since the
+    /// 3-arg wrapper passes 0 for cache_read / cache_create).
+    #[test]
+    fn record_usage_3arg_preserves_atomic_state() {
+        use std::sync::atomic::Ordering;
+        let cc = ContextCompressor::new(100_000, 0.5);
+        cc.record_usage(100, 50, 150);
+        assert_eq!(cc.last_prompt_tokens.load(Ordering::SeqCst), 100);
+        assert_eq!(cc.last_completion_tokens.load(Ordering::SeqCst), 50);
+        assert_eq!(cc.last_total_tokens.load(Ordering::SeqCst), 150);
+        // Cache atomics stay 0 — the 3-arg wrapper passes 0 for them.
+        assert_eq!(cc.last_cache_read_tokens.load(Ordering::SeqCst), 0);
+        assert_eq!(cc.last_cache_creation_tokens.load(Ordering::SeqCst), 0);
+    }
+
+    /// Phase 36.2 Plan 07 Task 1 — behavior 2:
+    /// New `record_usage_full(p, c, t, cache_read, cache_create)` updates all
+    /// 5 atomic fields with the supplied values.
+    #[test]
+    fn record_usage_full_updates_all_five_atomics() {
+        use std::sync::atomic::Ordering;
+        let cc = ContextCompressor::new(100_000, 0.5);
+        cc.record_usage_full(100, 50, 150, 8_000, 4_000);
+        assert_eq!(cc.last_prompt_tokens.load(Ordering::SeqCst), 100);
+        assert_eq!(cc.last_completion_tokens.load(Ordering::SeqCst), 50);
+        assert_eq!(cc.last_total_tokens.load(Ordering::SeqCst), 150);
+        assert_eq!(cc.last_cache_read_tokens.load(Ordering::SeqCst), 8_000);
+        assert_eq!(cc.last_cache_creation_tokens.load(Ordering::SeqCst), 4_000);
+    }
+
+    /// Phase 36.2 Plan 07 Task 1 — behavior 3:
+    /// Default state of a freshly-constructed `ContextCompressor` has all 5
+    /// usage atomics at 0.
+    #[test]
+    fn record_usage_default_state_is_zero_for_all_atomics() {
+        use std::sync::atomic::Ordering;
+        let cc = ContextCompressor::new(100_000, 0.5);
+        assert_eq!(cc.last_prompt_tokens.load(Ordering::SeqCst), 0);
+        assert_eq!(cc.last_completion_tokens.load(Ordering::SeqCst), 0);
+        assert_eq!(cc.last_total_tokens.load(Ordering::SeqCst), 0);
+        assert_eq!(cc.last_cache_read_tokens.load(Ordering::SeqCst), 0);
+        assert_eq!(cc.last_cache_creation_tokens.load(Ordering::SeqCst), 0);
     }
 }
