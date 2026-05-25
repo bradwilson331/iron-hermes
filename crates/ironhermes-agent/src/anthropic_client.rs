@@ -135,10 +135,20 @@ enum ResponseContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct AnthropicUsage {
     input_tokens: usize,
     output_tokens: usize,
+    // Phase 36.2 Plan 01 deviation note: plan specified `Option<u64>` but the
+    // outer `Usage` struct (ironhermes-core::types::Usage) declares these as
+    // `Option<usize>`. To preserve the verbatim copy at parse sites
+    // (`cache_read_input_tokens: response.usage.cache_read_input_tokens`) and
+    // avoid an unnecessary `as usize` cast bleeding through every consumer,
+    // these fields adopt the outer struct's `Option<usize>` shape.
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
 }
 
 // =============================================================================
@@ -202,6 +212,12 @@ struct SseMessageDelta {
 #[derive(Debug, Clone, Deserialize)]
 struct SseUsage {
     output_tokens: Option<usize>,
+    // Phase 36.2 Plan 01: matches outer Usage's Option<usize> cache field type
+    // (see deviation note on AnthropicUsage).
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
 }
 
 // =============================================================================
@@ -530,8 +546,8 @@ pub fn parse_anthropic_response(response: &AnthropicResponse) -> (ChatResponse, 
         prompt_tokens: response.usage.input_tokens,
         completion_tokens: response.usage.output_tokens,
         total_tokens: response.usage.input_tokens + response.usage.output_tokens,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
+        cache_read_input_tokens: response.usage.cache_read_input_tokens,
+        cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
     });
 
     (chat_response, usage)
@@ -816,8 +832,8 @@ impl AnthropicClient {
                                         prompt_tokens: 0,
                                         completion_tokens: output_tokens,
                                         total_tokens: output_tokens,
-                                        cache_read_input_tokens: None,
-                                        cache_creation_input_tokens: None,
+                                        cache_read_input_tokens: u.cache_read_input_tokens,
+                                        cache_creation_input_tokens: u.cache_creation_input_tokens,
                                     }))
                                     .await;
                             }
@@ -1024,6 +1040,7 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                ..Default::default()
             },
         };
 
@@ -1056,6 +1073,7 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 20,
                 output_tokens: 8,
+                ..Default::default()
             },
         };
 
@@ -1256,5 +1274,83 @@ mod tests {
             !json.contains("image"),
             "malformed url MUST skip image block, not crash"
         );
+    }
+
+    // =========================================================================
+    // Phase 36.2 Plan 01: AnthropicUsage cache field deserialization tests
+    //
+    // Verifies AnthropicUsage round-trips `cache_read_input_tokens` and
+    // `cache_creation_input_tokens` from Anthropic response bodies, including
+    // the absent-field default-to-None path (#[serde(default)] semantics).
+    // =========================================================================
+
+    #[test]
+    fn anthropic_usage_deserializes_cache_fields_when_present() {
+        // Test 1: Both cache fields present — they round-trip into the struct.
+        let json = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 8200,
+            "cache_creation_input_tokens": 4200
+        }"#;
+        let usage: AnthropicUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, Some(8200));
+        assert_eq!(usage.cache_creation_input_tokens, Some(4200));
+    }
+
+    #[test]
+    fn anthropic_usage_defaults_cache_fields_to_none_when_absent() {
+        // Test 2: Legacy / non-cached response — fields absent → None via #[serde(default)].
+        let json = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50
+        }"#;
+        let usage: AnthropicUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+    }
+
+    #[test]
+    fn anthropic_usage_treats_null_cache_fields_as_none() {
+        // Test 3: Explicit JSON null for cache fields → Option semantics preserve None.
+        let json = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": null,
+            "cache_creation_input_tokens": null
+        }"#;
+        let usage: AnthropicUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+    }
+
+    #[test]
+    fn parse_anthropic_response_populates_outer_usage_cache_fields() {
+        // Verifies the parse-site fix at lines ~537-538: outer Usage wrapper now
+        // copies cache fields through from AnthropicUsage instead of hardcoding None.
+        let response = AnthropicResponse {
+            id: "msg_cache".to_string(),
+            content: vec![ResponseContentBlock::Text {
+                text: "cached!".to_string(),
+            }],
+            model: "claude-opus-4-7".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 12,
+                output_tokens: 7,
+                cache_read_input_tokens: Some(8200),
+                cache_creation_input_tokens: Some(4200),
+            },
+        };
+        let (_chat, usage) = parse_anthropic_response(&response);
+        let u = usage.expect("usage populated");
+        assert_eq!(u.prompt_tokens, 12);
+        assert_eq!(u.completion_tokens, 7);
+        assert_eq!(u.cache_read_input_tokens, Some(8200));
+        assert_eq!(u.cache_creation_input_tokens, Some(4200));
     }
 }
