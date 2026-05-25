@@ -71,3 +71,28 @@ Verification:
 cargo clippy -p ironhermes-core --no-deps 2>&1 | grep -E '(pricing\.rs|pricing_cache\.rs)'
 # (empty output — new files are lint-clean)
 ```
+
+## From Plan 36.2-05 (Anthropic prompt caching)
+
+### `unreachable_pub` on `build_anthropic_request`
+
+The new module-level helper `build_anthropic_request` (in `anthropic_client.rs`)
+is marked `pub(crate)` so internal call sites + test helpers can invoke it.
+Its return type is `AnthropicRequest` which is itself `pub` (so the test helper
+re-export shape stays consistent with the existing test-friendly surface of
+`adapt_messages`, `adapt_tools`, and `parse_anthropic_response` — all three are
+`pub` returning private-to-module types). Clippy emits `unreachable_pub` on the
+return-type-vs-fn-visibility mismatch.
+
+| Lint | File:line | Why deferred |
+|------|-----------|---------------|
+| `unreachable_pub` on `build_anthropic_request` returning `AnthropicRequest` | `crates/ironhermes-agent/src/anthropic_client.rs:592` | Matches the established pattern on `adapt_messages` (line 362), `adapt_tools` (line 568), `parse_anthropic_response` (line 712) — all four emit the same lint. A consistent fix requires marking the four internal request/response struct types as `pub` (cross-cutting refactor unrelated to Plan 05's PRMT-08/PRMT-09 closure). |
+
+Scope boundary applied (Rule SCOPE BOUNDARY in execute-plan.md): only auto-fix
+issues DIRECTLY caused by current task changes. The pre-existing 3 instances of
+this lint pattern (61 baseline warnings) prove the project's accepted posture.
+Verification:
+```bash
+cargo clippy -p ironhermes-agent --no-deps 2>&1 | grep -c "^warning"
+# 63 (baseline 61 + 2 — see scope-boundary note above)
+```
