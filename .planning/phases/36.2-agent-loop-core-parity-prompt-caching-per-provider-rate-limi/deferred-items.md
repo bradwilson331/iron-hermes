@@ -1,0 +1,42 @@
+# Phase 36.2 — Deferred Items
+
+Discovered out-of-scope while executing in-scope work. NOT fixed in this phase.
+
+## From Plan 36.2-02 (Migration v9)
+
+### Pre-existing clippy noise in `ironhermes-state`
+
+Three lints predated this plan but became blockers because the plan introduced a
+`cargo clippy -- -D warnings` acceptance gate. Suppressed with localized `#[allow]`
+attributes to satisfy the gate without an out-of-scope refactor. Re-evaluate when
+the relevant subsystems are next touched.
+
+| Lint | File:line | Why deferred |
+|------|-----------|---------------|
+| `dead_code` on `with_busy_retry` | `crates/ironhermes-state/src/lib.rs:1009` | Helper kept for future SESS-13 (SQLite BUSY retry) wiring; do not delete without a phase that re-enables retries. |
+| `dead_code` on `is_busy` | `crates/ironhermes-state/src/lib.rs:1024` | Companion helper to `with_busy_retry`; same rationale. |
+| `clippy::collapsible_if` | `crates/ironhermes-state/src/session_export.rs:69` | Nested `if let Some(src) = .. { if src.exists() { .. } }` reads clearer than the let-chain form for the trajectory export edge case. Pre-existing from Phase 25.3-10. |
+
+### Acceptance grep "exactly 1" criterion mismatch
+
+The plan's acceptance criteria specify `grep -c 'CREATE TABLE IF NOT EXISTS usage_events'`
+and the two index-create lines return exactly 1. The Phase 25.3 v8 precedent for
+`workspace_root` places the column in **both** `SCHEMA_SQL` (fresh-DB path) **and**
+the migration `ALTER TABLE` block (existing-DB path) — `grep -c 'workspace_root'`
+returns multiple hits. Replicating that pattern for the v9 `usage_events` table
+yields 2 hits for the CREATE TABLE / CREATE INDEX statements (one in `SCHEMA_SQL`,
+one in the migration block). Removing the table from `SCHEMA_SQL` would break the
+fresh-DB path (which does not call `run_migrations`); changing that path to call
+`run_migrations(0)` on fresh installs would be a cross-cutting refactor unrelated
+to D-USAGE-02. Documented in SUMMARY as an intentional deviation; semantic intent
+(no duplicate v9 migration block — `grep -c 'if current < 9'` is 1) is preserved.
+
+### `Session` struct does NOT yet carry cache/cost fields
+
+Plan 02 Step 7 explicitly defers extending the `Session` struct in
+`crates/ironhermes-state/src/lib.rs:119-141` to include `cache_read_tokens`,
+`cache_creation_tokens`, `cost_usd_micros`. The SQL `SELECT` paths at the four
+known read sites (lib.rs:490, 547, 731, 903) still select only `input_tokens,
+output_tokens` — they continue to work because the new columns have `DEFAULT 0`.
+A future plan in this phase (or follow-on) should extend the struct + readers
+so consumers don't have to issue a second query for cost data.
