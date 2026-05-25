@@ -34,6 +34,11 @@ struct SessionState {
     /// all crossings.  Used by REPL-harness tests to assert exactly-once
     /// firing across multiple turns.
     warn_count: u32,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): pending cache-break warnings for this
+    /// session.  Accumulated by `warn_cache_break_*` methods and drained into
+    /// `AgentResult.context_warnings` at run() end so the surfaces (CLI / TUI
+    /// / gateway / web UI) can render them on the existing Phase 34b channel.
+    pending_cache_break_warnings: Vec<String>,
 }
 
 /// Thread-safe per-session pressure tracker.
@@ -155,6 +160,143 @@ impl PressureTracker {
     pub fn warn_count(&self, session_id: &str) -> u32 {
         let map = self.inner.lock().unwrap();
         map.get(session_id).map(|s| s.warn_count).unwrap_or(0)
+    }
+
+    // ─── Phase 36.2 Plan 08: cache-break warnings (D-CACHE-03) ───────────────
+    //
+    // Three trigger points (model swap mid-session, memory edit mid-session,
+    // context-file edit mid-session) each emit ONE warning on the existing
+    // PRMT-10/11 three-channel mechanism:
+    //
+    //   1. `tracing::warn!` — power-user log forensics.
+    //   2. `HookEventKind::ContextPressure` — same hook channel as 18-Plan-05.
+    //      mode field is set to "cache_break" so consumers can filter.
+    //   3. Pending cache-break warnings queue — drained at run() end into
+    //      `AgentResult.context_warnings` for surface rendering.
+    //
+    // No new channel is created — reuses the same three the pressure tracker
+    // already owns (D-CACHE-03 invariant: cache-break warnings ride the SAME
+    // channel as PRMT-10/11). The text strings are byte-identical to
+    // D-CACHE-03 phrasing for hermes-agent parity.
+
+    /// Emit a cache-break warning on all three channels in one place — the
+    /// internal helper shared by the three `warn_cache_break_*` entry points.
+    async fn emit_cache_break_warning(
+        &self,
+        session_id: &str,
+        msg: String,
+        trigger: &'static str,
+        hooks: Option<&HookRegistry>,
+    ) {
+        // Channel 1: tracing — structured fields so log consumers can grep by
+        // `trigger=model_swap|memory_edit|context_file_edit`.
+        tracing::warn!(
+            session_id = %session_id,
+            trigger = trigger,
+            "{}",
+            &msg
+        );
+
+        // Channel 2: hook event — reuses `HookEventKind::ContextPressure` with
+        // mode = "cache_break" so downstream consumers (web UI sidebar,
+        // gateway out-of-band reply) can filter pressure events vs cache
+        // breaks. estimated_tokens / threshold / percent_used are not
+        // meaningful here — set to zero so the JSON envelope stays stable.
+        if let Some(reg) = hooks {
+            let event = HookEvent::new(
+                "req-cache-break",
+                HookEventKind::ContextPressure {
+                    session_id: session_id.to_string(),
+                    estimated_tokens: 0,
+                    threshold: 0.0,
+                    percent_used: 0.0,
+                    mode: format!("cache_break:{trigger}"),
+                },
+            );
+            reg.fire_awaitable(event).await;
+        }
+
+        // Channel 3: append to per-session pending queue.  Drained by
+        // `drain_cache_break_warnings` at AgentLoop::run() end, then attached
+        // to AgentResult.context_warnings (Phase 34b carrier).
+        {
+            let mut map = self.inner.lock().unwrap();
+            let state = map.entry(session_id.to_string()).or_default();
+            state.pending_cache_break_warnings.push(msg);
+        }
+    }
+
+    /// D-CACHE-03 trigger 1: `/model X` swap mid-session.
+    ///
+    /// Phrasing is byte-identical to the parity bar:
+    /// `"Switching from {old_model} to {new_model} will invalidate the cached
+    /// prefix; next turn pays full prompt tokens."`
+    ///
+    /// Callers MUST guard with `turn_count > 0` (a session-zero swap is
+    /// session setup, not a cache break — see Test 4 / D-CACHE-03).
+    pub async fn warn_cache_break_model_swap(
+        &self,
+        session_id: &str,
+        old_model: &str,
+        new_model: &str,
+        hooks: Option<&HookRegistry>,
+    ) {
+        let msg = format!(
+            "Switching from {old_model} to {new_model} will invalidate the cached prefix; \
+             next turn pays full prompt tokens."
+        );
+        self.emit_cache_break_warning(session_id, msg, "model_swap", hooks)
+            .await;
+    }
+
+    /// D-CACHE-03 trigger 2: MEMORY.md / USER.md mutation after session start.
+    ///
+    /// Phrasing is byte-identical to the parity bar:
+    /// `"Memory edit will invalidate cache; new snapshot applies at next
+    /// session start (PRMT-06)."`
+    ///
+    /// Callers MUST guard with `turn_count > 0`.
+    pub async fn warn_cache_break_memory_edit(
+        &self,
+        session_id: &str,
+        hooks: Option<&HookRegistry>,
+    ) {
+        let msg = "Memory edit will invalidate cache; new snapshot applies at next session start (PRMT-06)."
+            .to_string();
+        self.emit_cache_break_warning(session_id, msg, "memory_edit", hooks)
+            .await;
+    }
+
+    /// D-CACHE-03 trigger 3: SOUL.md / AGENTS.md / CLAUDE.md mutation
+    /// mid-session.
+    ///
+    /// Phrasing is byte-identical to the parity bar:
+    /// `"Context file edit will invalidate cache for this session."`
+    ///
+    /// Callers update the mtime snapshot AFTER this fires so subsequent turns
+    /// do not re-emit the same warning (idempotency invariant in Test 5).
+    pub async fn warn_cache_break_context_file_edit(
+        &self,
+        session_id: &str,
+        hooks: Option<&HookRegistry>,
+    ) {
+        let msg = "Context file edit will invalidate cache for this session.".to_string();
+        self.emit_cache_break_warning(session_id, msg, "context_file_edit", hooks)
+            .await;
+    }
+
+    /// Drain the pending cache-break warnings for a session.
+    ///
+    /// Returns the queue in insertion order and clears the per-session pending
+    /// vector — subsequent calls return an empty vec until a new
+    /// `warn_cache_break_*` fires.  Called by `AgentLoop::run()` near the end
+    /// of each top-level turn to flush warnings into
+    /// `AgentResult.context_warnings`.
+    pub fn drain_cache_break_warnings(&self, session_id: &str) -> Vec<String> {
+        let mut map = self.inner.lock().unwrap();
+        map.get_mut(session_id)
+            .map(|s| std::mem::take(&mut s.pending_cache_break_warnings))
+            .unwrap_or_default()
     }
 }
 
