@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: planning
-stopped_at: Phase 36.1 context gathered
-last_updated: "2026-05-25T06:25:30.209Z"
+stopped_at: Phase 36.2 context gathered
+last_updated: "2026-05-25T07:08:48.071Z"
 last_activity: 2026-05-25 — Milestone v3.0 Hermes-agent parity declared; 77 pre-36.x phase dirs archived to .planning/milestones/v2.1-phases/
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 34
+  completed_phases: 2
+  total_plans: 7
+  completed_plans: 7
+  percent: 6
 ---
 
 # Project State
@@ -502,6 +502,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-24T22:29:26.658Z
-Stopped at: Phase 36.1 context gathered
-Resume file: .planning/phases/36.1-running-agent-guard-parity-web-ui-tui-inserted/36.1-CONTEXT.md
+Last session: 2026-05-25T07:08:48.065Z
+Stopped at: Phase 36.2 context gathered
+Resume file: .planning/phases/36.2-agent-loop-core-parity-prompt-caching-per-provider-rate-limi/36.2-CONTEXT.md
