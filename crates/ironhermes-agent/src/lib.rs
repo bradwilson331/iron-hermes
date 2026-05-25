@@ -10,6 +10,7 @@ pub mod context_compressor;
 pub mod context_engine;
 pub mod context_loader;
 pub mod engine_factory;
+pub mod error_classifier;
 pub mod memory;
 pub mod memory_context;
 pub mod memory_flush_handler;
@@ -40,6 +41,7 @@ pub use app_runtime_factory::{
 };
 pub use client::LlmClient;
 pub use context_compressor::ContextCompressor;
+pub use error_classifier::{ProviderError, classify_llm_error_typed};
 pub use ironhermes_core::{CONTEXT_FILE_MAX_CHARS, scan_context_content, truncate_content};
 pub use memory::{MemoryManager, SharedProvider};
 pub use personality::PersonalityRegistry;
