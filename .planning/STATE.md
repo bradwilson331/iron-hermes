@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.2 context gathered
-last_updated: "2026-05-25T08:12:20.456Z"
-last_activity: 2026-05-25 -- Phase 36.2 planning complete
+last_updated: "2026-05-25T09:07:51.490Z"
+last_activity: 2026-05-25 -- Phase 36.2 execution started
 progress:
   total_phases: 34
   completed_phases: 2
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** v3.0 declared (retroactive label). 34 phase dirs in .planning/phases/ ready for planning. Earliest unfinished: Phase 36 (0/3 plans). User picks next via /gsd:plan-phase
+**Current focus:** Phase 36.2 — agent-loop-core-parity-prompt-caching-per-provider-rate-limi
 
 ## Current Position
 
-Phase: 36 — Gateway running-agent guard wiring (0/3 plans; earliest unfinished v3.0 phase)
-Plan: —
-Status: Ready to execute
-Last activity: 2026-05-25 -- Phase 36.2 planning complete
+Phase: 36.2 (agent-loop-core-parity-prompt-caching-per-provider-rate-limi) — EXECUTING
+Plan: 1 of 11
+Status: Executing Phase 36.2
+Last activity: 2026-05-25 -- Phase 36.2 execution started
 
 ## Performance Metrics
 
