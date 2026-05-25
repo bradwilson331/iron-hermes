@@ -78,6 +78,18 @@ Plans:
 - [x] 35.1-02-PLAN.md — Wire D-11 fast/full choice + D-03 in-process doctor call + D-12 completion summary into `run_setup` None arm; un-ignore d11/d03/d12 source-text invariant tests
 - [x] 35.1-03-PLAN.md — Implement `has_runnable_llm` helper (env-vars → raw .env → local base_url ordering) + integrate into `preflight.rs` Ok(config) arm (D-07/D-08); un-ignore d07_d08 integration tests; verify main.rs Phase 23 gate stays byte-for-byte unchanged
 
+---
+
+## Milestone v3.0: Hermes-agent parity
+
+**Declared:** 2026-05-25 (retroactive label over 36.x phases)
+**Goal:** Close the breadth gap between ironhermes (Rust) and hermes-agent (Python v0.14.0) along selected axes — agent loop, tools, skills library, LLM providers, TUI, multi-platform gateway, ACP, MCP server, memory/state, configuration/secrets, packaging — while explicitly rejecting the long tail (17 deferred messaging platforms; no plugin loader port).
+**Source of truth:** `/Users/twilson/Documents/iron-hermes-planning.md` (parity comparison, 2026-05-24)
+**Phases:** 14 parents + 20 sub-phases = 34 total. Phase 36 + 36.1 carry over from v2.1 (36.1 SHIPPED 2026-05-25). Phases 36.2 through 36.13 inserted during the parity walk on 2026-05-25.
+**Strategic narrowings (referenced from memory):**
+- `project_multiplatform_gateway_scope` — 17 messaging platforms deferred under Phase 36.7
+- `project_plugin_loader_rejected` — Phase 36.13 ships AgentRuntime primitives instead of a loader
+
 ### Phase 36: Gateway running-agent guard wiring — completes GW-05
 
 **Goal:** Wire per-session running-agent state on the gateway so `/stop`, `/approve`, `/deny` bypass while `/model` and other state-mutating commands are queued during an active agent turn. Cross-AI review of Phase 21.1 (2026-05-24, codex HIGH-1) confirmed `crates/ironhermes-gateway/src/handler.rs:377-380` hardcodes `agent_running = AtomicBool::new(false)` with the comment "running-agent guard is a future enhancement using per-session state" — leaving GW-05 only partially satisfied: dispatch through `resolve_command()` works, but the guard never fires, `/stop` always reports "no agent running" on Telegram, and `/model` can switch credentials mid-turn. Replace the per-request `Arc<AtomicBool>` shim with per-session state (Idle/Running/Cancelling/Queued) keyed by `SessionKey`, threaded into `CommandContext`, to eliminate TOCTOU races between flag check and dispatch. Mirror hermes-agent's `gateway/run.py:1735-1852` bypass list (`/stop`, `/new`, `/queue`, `/status`).
@@ -97,6 +109,326 @@ Plans:
 **Wave 3** *(depends on Wave 2)*
 
 - [x] 36-03-PLAN.md — Cleanup: delete stale "future enhancement" comment at handler.rs:377-380; flip REQUIREMENTS.md GW-05 to Complete + traceability row to "Phase 21.1 (dispatch) + Phase 36 (guard)"; update ROADMAP.md checkboxes; create 36-BACKLOG.md (web UI slash-interception gap; per-turn LLM cancel handler.rs:1032; CLI/gateway unified mechanism; /approve+/deny bypass when approval queue lands); Real-Telegram UAT checkpoint
+
+### Phase 36.13: Plugins & extensions — DECISION: REJECT plugin loader port (lean on skills+MCP+crates per "ironhermes is its own thing" strategic posture). Ship: (1) OpenTelemetry exporter subsuming hermes-agent's observability plugin (Datadog/New Relic via OTLP); (2) ctx.llm + tool_override as direct AgentRuntime primitives (no plugin system); (3) ADR documenting the decision in PROJECT.md / ARCHITECTURE.md; (4) confirm overlap mapping — memory/model/platforms/image-gen/video-gen/kanban/browser already covered by other phases (INSERTED)
+
+**Goal:** Reject porting the hermes-agent plugin loader; instead extend AgentRuntime with the three primitives that have no current substrate (observability export, ctx.llm, tool_override), and ratify the decision via ADR.
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.13 to break down)
+
+### Phase 36.12: Packaging & distribution parity — Homebrew tap (macOS native install), Nix flake (reproducible builds, NixOS), Termux/Android support, crates.io publication verification, Windows native install (quick_setup_script.ps1 currently exists — verify status); reach feature parity with hermes-agent's distribution matrix (PyPI/Homebrew/Docker/Nix/Termux/Windows beta) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.12 to break down)
+
+### Phase 36.11: Configuration & secrets parity — credential source plugins beyond env/config: macOS Keychain, AWS Secrets Manager, Bitwarden CLI (parity targets from hermes-agent); optional extensions: Linux Secret Service / gnome-keyring, Windows Credential Manager, 1Password CLI. Reduces reliance on plaintext .env files; OS-native credential storage (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.11 to break down)
+
+### Phase 36.10: Memory & state parity — expose session_search tool over existing ironhermes-state FTS5 schema (infrastructure shipped, just no tool wrapper); optionally evaluate adding managed-memory providers (honcho, mem0, supermemory) alongside current sqlite/grafeo/duckdb backends (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.10 to break down)
+
+### Phase 36.9: MCP server — expose ironhermes as MCP server for Claude Code / Cursor / external clients. Port hermes-agent's 9-tool surface: conversations_list, conversation_get, messages_read (FTS-backed), attachments_fetch, events_poll/wait, messages_send, permissions_list_open, permissions_respond, channels_list. ironhermes-state FTS5 + HookRegistry already provide the needed substrate. (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.9 to break down)
+
+### Phase 36.8: ACP adapter — Agent Client Protocol server for Zed / VS Code / JetBrains integration (stdio transport, tool listing + dispatch + streaming, approval-event surface, registry-driven uvx-style install). Single biggest 'cannot switch from hermes-agent' blocker for editor-driven users (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.8 to break down)
+
+### Phase 36.7: Multi-platform gateway parity — port 19 missing platforms from hermes-agent: WhatsApp, Signal, SMS, Email (IMAP/SMTP), Matrix, Mattermost, MS Teams, iMessage (Bluebubbles), LINE, SimpleX, DingTalk, Feishu, Wecom, WeChat (Weixin), QQ, Yuanbao, generic webhook, HTTP REST API server, Home Assistant trigger (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.7 to break down)
+
+### Phase 36.7.1: Foundation — generic webhook adapter + HTTP REST API server (unblocks any custom integration via webhook; provides a programmatic surface for headless ironhermes use). Other 17 hermes-agent platforms (WhatsApp/Signal/SMS/Email/Matrix/Mattermost/Teams/iMessage/LINE/SimpleX/DingTalk/Feishu/Wecom/Weixin/QQ/Yuanbao/HomeAssistant) DEFERRED (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.7
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.7.1 to break down)
+
+### Phase 36.6: TUI parity & visibility fix — BUG: AI responses still not rendering visibly in ratatui TUI; plus Ink-UX feature port (overlays, pickers, skins, thinking panel, command palette, mode picker, model switcher, OSC8 hyperlinks) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.6 to break down)
+
+### Phase 36.6.4: TUI polish — OSC8 clickable hyperlinks, skin engine (dark/light/custom themes), terminal compatibility (iTerm2/Kitty/Ghostty/Windows Terminal) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.6.4 to break down)
+
+### Phase 36.6.3: Ink-UX port — input UX (command palette / slash menu, model/provider switcher with live handoff, picker components) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.6.3 to break down)
+
+### Phase 36.6.2: Ink-UX port — thinking panel + overlays (skill hub overlay polish, mode picker overlay, generic overlay framework matching Ink modal pattern) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.6.2 to break down)
+
+### Phase 36.6.1: BUG FIX: AI response visibility — investigate why streamed/final AI responses don't render visibly in ratatui TUI; verify whether feedback_scroll_width_inner formulas (area.width-2 inner, prefix+body+width-1/width, viewport_content_length) ever landed; ship a regression test (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.6.1 to break down)
+
+### Phase 36.5: Provider parity — OAuth provider (Claude Pro/ChatGPT Pro/SuperGrok OAuth flows), Claude Compliance API integration (enterprise audit export), Cloudflare AI Gateway proxy (unified routing/caching/rate-limiting/analytics) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.5 to break down)
+
+### Phase 36.4: Skills library — bundle hermes-agent's 27 built-in + 18 optional skills; install via GitHub, migrate from hermes-agent, or openclaw local install (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.4 to break down)
+
+### Phase 36.4.3: Openclaw catalog bridge — consume Claude Code openclaw-shaped skill ecosystem via ironhermes-mcp; expose openclaw skills as first-class tools without re-porting (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.4
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.4.3 to break down)
+
+### Phase 36.4.2: Hermes-agent skill port — Tier 1 only (github, productivity, devops, software-development, research, email, data-science, mcp); translate Python-handler skills to ironhermes YAML+Markdown bundles or MCP-bridge wrappers (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.4
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.4.2 to break down)
+
+### Phase 36.4.1: GitHub tap setup + lock-file seed — point ironhermes-hub at huggingface/skills (or new ironhermes/skills repo); seed Tier-1 skills via SKILL.lock without any code port (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.4
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.4.1 to break down)
+
+### Phase 36.3: Tools parity — vision/image/video gen, TTS/STT, computer_use, smart-home, kanban, planning tools (todo/clarify/session_search), first-class send_message, multi-environment exec, browser CDP/dialog (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3 to break down)
+
+### Phase 36.3.12: Multi-environment exec — Docker, SSH, Modal, Daytona, Singularity backends (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.12 to break down)
+
+### Phase 36.3.11: Web search expansion — Brave, DDG, SearXNG; pluggable web_search_registry (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.11 to break down)
+
+### Phase 36.3.10: Browser polish — CDP tool, dialog tool, Camofox-style privacy backend (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.10 to break down)
+
+### Phase 36.3.9: Planning tools — todo, session_search (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.9 to break down)
+
+### Phase 36.3.8: Messaging & clarification tools — first-class send_message tool, clarify with native buttons (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.8 to break down)
+
+### Phase 36.3.7: Kanban / multi-agent board — kanban_* tools (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7 to break down)
+
+### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.6 to break down)
+
+### Phase 36.3.5: Computer use — desktop control via cua-driver (cross-provider) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.5 to break down)
+
+### Phase 36.3.4: Voice I/O — TTS (Edge/ElevenLabs/OpenAI/MiniMax) + STT (faster-whisper) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.4 to break down)
+
+### Phase 36.3.3: Video generation — unified video_generate (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.3 to break down)
+
+### Phase 36.3.2: Image generation — image_generate with Fal/Pixverse registry (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.2 to break down)
+
+### Phase 36.3.1: Vision tools — standalone vision_analyze (cross-provider Claude/GPT-4V/Gemini/Grok) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.1 to break down)
+
+### Phase 36.2: Agent loop & core parity — prompt caching, per-provider rate-limit tracking, usage/cost accounting, error classification (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.2 to break down)
 
 ### Phase 36.1: Running-agent guard parity — web UI + TUI (INSERTED)
 

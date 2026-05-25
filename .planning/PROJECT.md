@@ -97,9 +97,39 @@ A working conversational AI agent with personality (context files) that operates
 | Gateway-only for execute_code/hooks/guardrails | CLI is minimal interactive mode; gateway is full-featured | ⚠️ Revisit — v2 brings CLI parity |
 | Cross-crate transport types use plain Strings (no embedded downstream types) | `OriginDecision` in `ironhermes-core` carries `String` fields, not `ironhermes_cron::JobOrigin` — embedding would create a circular crate dep. Consumers (CLI + LLM tool) construct `JobOrigin` at the call site where both crates are in scope. Pattern applies to any future enum that returns "what platform/route to use" data from `ironhermes-core` to a downstream crate. | ✓ Good (Phase 22.4.2.2) |
 
-## Current Milestone: v2.1 Carry-Overs + Learning Loop
+## Current Milestone: v3.0 Hermes-agent parity
 
-**Goal:** Close all v2.0 deferred requirements (29 carry-overs across 7 categories) **AND** land the Learning Loop foundation (5 new reqs in 2 phases). Together, these make IronHermes self-improving rather than just feature-complete — the Learning Loop is the canonical hermes-agent differentiator (per the architecture article that informed v2.1 planning).
+**Goal:** Close the breadth gap between ironhermes (Rust) and hermes-agent (Python v0.14.0) along selected axes — agent loop, tools, skills library, LLM providers, TUI, multi-platform gateway, ACP, MCP server, memory/state, configuration/secrets, packaging — while **explicitly rejecting** the long tail (17 deferred messaging platforms; no plugin loader port). Two strategic decisions encoded in scope:
+
+1. **Multi-platform gateway narrowed to webhook + REST** (per `project_multiplatform_gateway_scope` memory) — 17 hermes-agent platforms (WhatsApp, Signal, SMS, Email, Matrix, Mattermost, Teams, iMessage, LINE, SimpleX, DingTalk, Feishu, Wecom, Weixin, QQ, Yuanbao, Home Assistant) DEFERRED.
+2. **Plugin loader rejected** (per `project_plugin_loader_rejected` memory) — Phase 36.13 ships only OpenTelemetry exporter + `ctx.llm` + `tool_override` primitives directly on `AgentRuntime`, no plugin system.
+
+Source-of-truth for the milestone scope: `/Users/twilson/Documents/iron-hermes-planning.md` (parity comparison, generated 2026-05-24, drove every 36.x phase insert).
+
+**Milestone v3.0 phases (in `.planning/phases/`):**
+
+| Phase | Title | Status |
+|---|---|---|
+| 36 | Gateway running-agent guard wiring | In flight |
+| 36.1 | Running-agent guard parity (web UI + TUI) | SHIPPED ✓ |
+| 36.2 | Agent loop & core parity (prompt caching, rate-limit tracking, usage/cost, error classification) | Planned |
+| 36.3 | Tools parity (umbrella + 12 children: vision, image gen, video gen, voice I/O, computer use, smart home, kanban, messaging, planning tools, browser polish, web search, multi-env exec) | Planned |
+| 36.4 | Skills library (umbrella + 3 children: GitHub tap, hermes-agent port Tier 1, openclaw bridge) | Planned |
+| 36.5 | Provider parity (OAuth provider + Claude Compliance API + Cloudflare AI Gateway) | Planned |
+| 36.6 | TUI parity & visibility fix (umbrella + 4 children: BUG FIX first, then overlays, input UX, polish) | Planned |
+| 36.7 | Multi-platform gateway parity (umbrella + 36.7.1 webhook+REST foundation only; 17 platforms deferred) | Planned |
+| 36.8 | ACP adapter (Zed / VS Code / JetBrains via Agent Client Protocol) | Planned |
+| 36.9 | MCP server (expose ironhermes to Claude Code / Cursor; 9-tool surface) | Planned |
+| 36.10 | Memory & state parity (`session_search` tool wrapper over existing FTS5) | Planned |
+| 36.11 | Configuration & secrets parity (Keychain + AWS Secrets Manager + Bitwarden CLI) | Planned |
+| 36.12 | Packaging & distribution parity (Homebrew, Nix flake, Termux, crates.io, Windows native) | Planned |
+| 36.13 | Plugins & extensions — **decision phase: REJECT loader**; ship OTel + ctx.llm + tool_override + ADR | Planned |
+
+Total: 14 parent phases + 20 sub-phases = **34 phase directories under v3.0**.
+
+### Previous milestone — v2.1 Carry-Overs + Learning Loop (status: in flight, absorbed into v3.0; formal closeout pending)
+
+Goal was: Close all v2.0 deferred requirements (29 carry-overs across 7 categories) **AND** land the Learning Loop foundation (5 new reqs in 2 phases). Phase 36 (running-agent guard) and Phase 36.1 (running-agent guard parity, shipped 2026-05-25) were the v2.1 closing phases — both now carry forward as the first v3.0 phases since they're already part of the parity scope. The remaining v2.1 carry-overs are subsumed by specific v3.0 phases (ACP → 36.8, prompt caching → 36.2, configuration/setup → 35.1 / 36.11, etc.). User to invoke `/gsd:complete-milestone` when they want a formal v2.1 closeout entry in MILESTONES.md.
 
 **Target features (34 reqs across 8 categories, 11 phases):**
 
@@ -133,8 +163,8 @@ These principles, sourced from the canonical hermes-agent architecture, must be 
 - Shipped: persistent memory subsystem, session storage + FTS5, context compression, 10-layer prompt assembly, context file loading, SOUL.md personality, skill framework + Hub + remote install, slash commands (49), CLI tool parity, ratatui-backed TUI, cron with TG origin routing, MCP client + slash integration, model registry + token estimation, multi-agent + autonomous + sandbox, deployment setup files
 - Audit: `.planning/v2.0-MILESTONE-AUDIT.md`
 
-**v2.2 reservation (Production Polish, ~3 months):**
-After v2.1, the next milestone targets daily-driver tool maturity: credential pools + multi-provider OAuth (NEW), self-update + uninstall (deferred from v2.0 informal scope), smart model routing (NEW), plus any v2.1 carry-overs that didn't ship.
+**v2.2 reservation (SUPERSEDED by v3.0 Hermes-agent parity, 2026-05-25):**
+The originally-reserved v2.2 "Production Polish" scope (credential pools + multi-provider OAuth, self-update + uninstall, smart model routing, plus v2.1 carry-overs) overlaps heavily with v3.0's parity targets — credential sources land in Phase 36.11, OAuth provider in Phase 36.5, and the remaining v2.2 items (self-update, smart routing) are not in v3.0 scope and should be re-evaluated for a future milestone (v3.1 or later). The skipped jump from v2.1 → v3.0 reflects the scope size of the parity push.
 
 **Future Requirements parking lot:**
 14 GAP-NEW items identified during v2.1 planning (Voice STT/TTS, Vision, Image gen, Browser, Profiles, Plugins, Pairing, Insights, MoA, Tirith, Honcho, Shell completions, Clarify toolset, plus Smart routing pre-reservation) parked in REQUIREMENTS.md → Future Requirements. Re-evaluate at each milestone planning.
@@ -159,7 +189,9 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-22 — Phase 34b (context-system parity) complete: @-reference expansion + ContextEngine lifecycle hooks + ContextCompressor reset, with context_warnings rendered out-of-band at all three surfaces (WR-01 closed), verified 16/16. 3 human-UAT items pending live confirmation. See Context above.*
+*Last updated: 2026-05-25 — Milestone v3.0 Hermes-agent parity declared (retroactive label over 36.x phases). 14 parent phases + 20 sub-phases derived from /Users/twilson/Documents/iron-hermes-planning.md §2.1–§2.13. Two strategic scope-narrowings encoded: 17 messaging platforms deferred (project_multiplatform_gateway_scope memory); plugin loader rejected (project_plugin_loader_rejected memory). v2.1 absorbed into v3.0; formal closeout pending. Pre-36.x phases archived to .planning/milestones/v2.1-phases/.*
+
+*Earlier: 2026-05-22 — Phase 34b (context-system parity) complete: @-reference expansion + ContextEngine lifecycle hooks + ContextCompressor reset, with context_warnings rendered out-of-band at all three surfaces (WR-01 closed), verified 16/16. 3 human-UAT items pending live confirmation. See Context above.*
 
 *Earlier: 2026-05-12 — Phase 26.3.2 (Chrome singleton user browser-profile) complete. Closed the stale-`SingletonLock` gap from Phase 26.3: added `ironhermes_core::browser_profile::reconcile_singleton_lock(&Path) -> SingletonOutcome` — a dep-free helper (no `nix`/`libc`/`sysinfo`/`hostname` crate; `/proc/<pid>` on Linux else `kill -0`, `hostname` CLI for the host check) that `read_link`s `$HERMES_HOME/browser-profile/SingletonLock`, parses `<host>-<pid>`, and on a dead pid or wrong-host target removes `SingletonLock`+`SingletonSocket`+`SingletonCookie` (best-effort) then reuses the persistent profile; on a live pid returns `UseEphemeral` (caller skips `builder.user_data_dir(...)` → pre-26.3 ephemeral temp dir, `warn!` logged, launch still succeeds); absent/unparseable is a no-op `UseProfile` (nothing deleted). Wired into both `browser_session.rs` `spawn()` call sites (`ironhermes-tools` + the workspace-excluded `ironagent-tools-api` twin, kept byte-identical) right before the `.user_data_dir(...)` decision; non-Unix is a `#[cfg(not(unix))]` no-op returning `UseProfile`. 8 unit tests (SL-01..SL-07 + extra); 10/10 must-haves (D-01..D-10) verified; live planted-stale-lock → `browser_navigate` smoke test passed (user). Code review: 0 blockers, 3 advisory warnings (live-lock could be deleted on hostname-CLI vs `gethostname` divergence, on a restricted `PATH` making the probe spawn fail, or on macOS where `kill -0` collapses ESRCH/EPERM) — accepted; a cross-process browser mutex stays deferred.*
 
