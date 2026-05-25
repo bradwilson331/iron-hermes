@@ -248,6 +248,37 @@ pub struct AgentLoop {
     /// logged, never serialized, never forwarded to the tracker. Empty string
     /// = "unknown" hash bucket. Wired via `with_api_key_for_usage_tracking`.
     api_key_for_usage_tracking: String,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): the prior session's model name. When
+    /// `Some(prev)` and `prev != self.client.model()` at run() start AND the
+    /// session has prior turns, the model-swap cache-break warning fires.
+    /// Wired via `with_previous_model` from AgentRuntime / the surface layer
+    /// (which knows which model was active in the previous turn). `None`
+    /// means no swap detection — used by tests + first-turn callers.
+    previous_model: Option<String>,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): per-context-file mtime snapshot.
+    /// Captured at the first turn for SOUL.md / AGENTS.md / CLAUDE.md (and
+    /// any other context files the surface registers via
+    /// `with_context_file_paths`). Polled at the start of every subsequent
+    /// turn; any mtime increase fires the context-file-edit warning and
+    /// updates the snapshot (idempotency invariant — Test 5 in
+    /// `tests/cache_break_warnings.rs`).
+    context_file_mtimes: std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
+    >,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): paths the surface wants the cache-break
+    /// system to watch. Empty by default — populated via
+    /// `with_context_file_paths` so existing call sites that don't track
+    /// context-file edits continue to work without modification.
+    context_file_paths: Vec<std::path::PathBuf>,
+    /// Phase 36.2 Plan 08 (D-CACHE-03 session-zero guard): true when the
+    /// session has at least one prior completed turn. Surfaces (AgentRuntime,
+    /// gateway, TUI, web) set this to `true` on every turn after the first;
+    /// the first turn keeps the default `false`. Used by both the model-swap
+    /// trigger (run() start) and the memory-edit trigger (memory tool
+    /// dispatch site) to suppress false positives on session setup — a
+    /// session-zero memory write is the initial MEMORY.md snapshot, not a
+    /// cache break (Test 4 / D-CACHE-03).
+    session_has_prior_turns: bool,
 }
 
 impl AgentLoop {
@@ -301,6 +332,14 @@ impl AgentLoop {
             rate_limit_tracker: None,
             provider_name: String::new(),
             api_key_for_usage_tracking: String::new(),
+            // Phase 36.2 Plan 08 (D-CACHE-03): cache-break detection state
+            // defaults to disabled. previous_model / context_file_paths are
+            // opt-in via with_previous_model / with_context_file_paths so the
+            // existing 100+ AgentLoop::new() call sites continue to work.
+            previous_model: None,
+            context_file_mtimes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            context_file_paths: Vec::new(),
+            session_has_prior_turns: false,
         }
     }
 
@@ -375,6 +414,44 @@ impl AgentLoop {
     /// engine's prior-summary chain is continuous across REPL turns.
     pub fn with_compression_count(mut self, count: usize) -> Self {
         self.compression_count = count;
+        self
+    }
+
+    /// Phase 36.2 Plan 08 (D-CACHE-03 trigger 1): seed the model that was
+    /// active in the prior turn of this session. When `run()` starts, the
+    /// detection site compares `prev` to `self.client.model()` — if they
+    /// differ AND `prev` is non-empty, a model-swap cache-break warning fires
+    /// through the `PressureTracker` channel. AgentRuntime / the surface
+    /// layer passes the previously-used model name here. Pass `None`
+    /// (default) on the first turn of a session — the warning then does not
+    /// fire (session-zero suppression — Test 4).
+    pub fn with_previous_model(mut self, prev: impl Into<String>) -> Self {
+        self.previous_model = Some(prev.into());
+        self
+    }
+
+    /// Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): register the context-file
+    /// paths whose mtime should be polled at each turn-start. A change in
+    /// mtime since the previous turn fires the context-file-edit cache-break
+    /// warning exactly once per change (Test 5 idempotency).
+    /// Typical paths: SOUL.md, AGENTS.md, CLAUDE.md.
+    pub fn with_context_file_paths(
+        mut self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Self {
+        self.context_file_paths = paths;
+        self
+    }
+
+    /// Phase 36.2 Plan 08 (D-CACHE-03 session-zero guard): mark this turn as
+    /// having at least one prior completed turn in the same session. Used by
+    /// the model-swap (run() start) and memory-edit (memory tool dispatch)
+    /// detection sites to suppress false-positive warnings on session setup
+    /// — a model selection or initial MEMORY.md write on turn 1 is not a
+    /// cache break (Test 4). Surfaces should set this to `true` on every
+    /// turn after the first.
+    pub fn with_session_has_prior_turns(mut self, has_prior: bool) -> Self {
+        self.session_has_prior_turns = has_prior;
         self
     }
 
@@ -1234,6 +1311,55 @@ impl AgentLoop {
         // (handler.rs for Telegram, runner.rs for cron) which knows the real platform
         // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
+        // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 1): model-swap cache-break ─
+        // Fire EXACTLY ONCE per `/model X` invocation that lands mid-session.
+        // Three conditions must hold:
+        //   1. The session has prior completed turns (`session_has_prior_turns`).
+        //   2. A previous-model name was wired via `with_previous_model`
+        //      (the surface knows what model the prior turn ran).
+        //   3. The previous name differs from the current `self.client.model()`.
+        // The session-zero suppression (Test 4) is enforced by condition 1 —
+        // a first-turn `/model` selection picks the model rather than swapping
+        // it, so no cached prefix exists yet.
+        if self.session_has_prior_turns
+            && let (Some(prev), Some(tracker), Some(sid)) = (
+                self.previous_model.as_deref(),
+                self.pressure_tracker.as_ref(),
+                self.session_id.as_deref(),
+            )
+        {
+            let current = self.client.model();
+            if !prev.is_empty() && prev != current {
+                tracker
+                    .warn_cache_break_model_swap(
+                        sid,
+                        prev,
+                        current,
+                        self.hook_registry.as_deref(),
+                    )
+                    .await;
+            }
+        }
+
+        // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): seed mtime snapshot ───
+        // First-turn snapshot of the registered context files. Per-turn polls
+        // run inside the loop body below — any mtime increase fires the
+        // context-file-edit warning and updates the snapshot for idempotency.
+        // Missing / unreadable files are skipped silently (existing context
+        // pipeline tolerates them — Phase 15).
+        if !self.context_file_paths.is_empty() {
+            let mut snapshot = self.context_file_mtimes.lock().unwrap();
+            if snapshot.is_empty() {
+                for path in &self.context_file_paths {
+                    if let Ok(meta) = std::fs::metadata(path)
+                        && let Ok(mtime) = meta.modified()
+                    {
+                        snapshot.insert(path.clone(), mtime);
+                    }
+                }
+            }
+        }
+
         loop {
             // D-21: Check cancellation token before each iteration
             if let Some(ref token) = self.cancel_token {
@@ -1280,6 +1406,59 @@ impl AgentLoop {
                         stop_reason: StopReason::BudgetExhausted,
                         context_warnings: Vec::new(),
                     });
+                }
+            }
+
+            // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): per-turn mtime poll ─
+            // For each tracked context file (SOUL.md / AGENTS.md / CLAUDE.md
+            // and any others the surface registered via
+            // `with_context_file_paths`), compare current mtime to the snapshot
+            // taken at run() start. Any increase fires the context-file-edit
+            // warning EXACTLY ONCE per detected change — the snapshot is then
+            // updated to the new mtime so the next turn does not re-warn for
+            // the same edit (Test 5 idempotency).
+            //
+            // Read I/O happens on the agent tokio task; metadata calls are
+            // synchronous and fast for local files. Failures (missing file,
+            // permission denied) are skipped silently — the existing
+            // context-file pipeline tolerates absent files (Phase 15).
+            if !self.context_file_paths.is_empty() {
+                let changed_paths: Vec<std::path::PathBuf> = {
+                    let mut snapshot = self.context_file_mtimes.lock().unwrap();
+                    let mut changes: Vec<std::path::PathBuf> = Vec::new();
+                    for path in &self.context_file_paths {
+                        let Ok(meta) = std::fs::metadata(path) else {
+                            continue;
+                        };
+                        let Ok(mtime) = meta.modified() else {
+                            continue;
+                        };
+                        match snapshot.get(path) {
+                            Some(prev) if mtime > *prev => {
+                                changes.push(path.clone());
+                                snapshot.insert(path.clone(), mtime);
+                            }
+                            None => {
+                                // File now exists but wasn't tracked at run()
+                                // start — seed snapshot, do NOT fire (no
+                                // previous mtime to compare against).
+                                snapshot.insert(path.clone(), mtime);
+                            }
+                            _ => {}
+                        }
+                    }
+                    changes
+                };
+                if !changed_paths.is_empty()
+                    && let (Some(tracker), Some(sid)) =
+                        (self.pressure_tracker.as_ref(), self.session_id.as_deref())
+                {
+                    tracker
+                        .warn_cache_break_context_file_edit(
+                            sid,
+                            self.hook_registry.as_deref(),
+                        )
+                        .await;
                 }
             }
 
@@ -1549,6 +1728,18 @@ impl AgentLoop {
         } else {
             StopReason::MaxIterations
         };
+        // Phase 36.2 Plan 08 (D-CACHE-03): drain any pending cache-break
+        // warnings into AgentResult.context_warnings so the surfaces (CLI /
+        // TUI / gateway / web UI) render them on the same out-of-band channel
+        // Phase 34b shipped. The drain is per-session (keyed by session_id)
+        // so concurrent AgentLoops on different sessions never cross-pollute.
+        let cache_break_warnings: Vec<String> = if let (Some(tracker), Some(sid)) =
+            (self.pressure_tracker.as_ref(), self.session_id.as_deref())
+        {
+            tracker.drain_cache_break_warnings(sid)
+        } else {
+            Vec::new()
+        };
         Ok(AgentResult {
             messages,
             appended,
@@ -1558,7 +1749,7 @@ impl AgentLoop {
             total_usage,
             compression_count_after: self.compression_count,
             stop_reason,
-            context_warnings: Vec::new(),
+            context_warnings: cache_break_warnings,
         })
     }
 
@@ -1827,6 +2018,34 @@ impl AgentLoop {
                 let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
 
                 let tool_start = std::time::Instant::now();
+
+                // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 2): memory-edit ───
+                // Memory tool writes (the built-in "memory" tool — add /
+                // replace / remove sub-actions — or any memory-provider tool
+                // that mutates MEMORY.md / USER.md) invalidate the cached
+                // prefix when they land mid-session. Fire the warning IFF
+                // `session_has_prior_turns == true` (Test 4 session-zero
+                // suppression).
+                //
+                // The detection here is name-based — we fire on tool
+                // invocation rather than on a write-success signal because
+                // the tool dispatch surface does not expose a structured
+                // "memory mutated" callback today. Read-only memory_recall
+                // is excluded explicitly so it doesn't false-positive.
+                let is_memory_write_tool = name.as_str() == "memory"
+                    || (self.memory_provider_tool_names.contains(name.as_str())
+                        && name.as_str() != "memory_recall");
+                if is_memory_write_tool
+                    && self.session_has_prior_turns
+                    && let (Some(tracker), Some(sid)) = (
+                        self.pressure_tracker.as_ref(),
+                        self.session_id.as_deref(),
+                    )
+                {
+                    tracker
+                        .warn_cache_break_memory_edit(sid, self.hook_registry.as_deref())
+                        .await;
+                }
 
                 // Phase 21.5: Intercept memory provider tools (e.g. memory_recall).
                 // Route to MemoryManager.handle_tool_call which delegates to the primary provider.
