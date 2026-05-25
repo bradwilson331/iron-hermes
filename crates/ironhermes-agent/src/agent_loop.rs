@@ -717,7 +717,11 @@ impl AgentLoop {
     /// Recognises both production formats:
     ///   - "(400 Bad Request)"  — `bail!("… ({status}): …")` in client.rs / anthropic_client.rs
     ///   - "status: 429 …"      — synthetic test format kept for regression coverage
-    fn extract_http_status(err_str: &str) -> Option<u16> {
+    ///
+    /// Phase 36.2-03: visibility widened to `pub(crate)` so
+    /// `crate::error_classifier::classify_llm_error_typed` can reuse this
+    /// helper without duplication (D-ERR-03).
+    pub(crate) fn extract_http_status(err_str: &str) -> Option<u16> {
         if let Some(open) = err_str.find('(') {
             let rest = &err_str[open + 1..];
             if rest.len() >= 4 {
@@ -750,7 +754,11 @@ impl AgentLoop {
     ///
     /// Needles are verified against pinned source (reqwest 0.12.28, hyper-util 0.1.20,
     /// anyhow 1.0.100). See phase 27.1.4.1.1 RESEARCH.md — Validated Allowlist (D-01 / D-01a).
-    fn is_transport_failure(err_str: &str) -> bool {
+    ///
+    /// Phase 36.2-03: visibility widened to `pub(crate)` so
+    /// `crate::error_classifier::classify_llm_error_typed` can reuse this
+    /// helper without duplication (D-ERR-03).
+    pub(crate) fn is_transport_failure(err_str: &str) -> bool {
         const TRANSPORT_MARKERS: &[&str] = &[
             "error sending request for url",
             "connection refused",
@@ -766,25 +774,14 @@ impl AgentLoop {
 
     /// Classify an error for fallback decision-making.
     /// Returns (should_retry, should_fallback).
+    ///
+    /// Phase 36.2-03 (D-ERR-03): this function is now a one-line facade
+    /// delegating to `crate::error_classifier::classify_llm_error_typed`.
+    /// The new typed classifier is the canonical source of truth; this
+    /// `(bool, bool)` shape is preserved for every existing call site and
+    /// for the 12+ regression tests at lines 2520-2724.
     fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
-        // Alternate Display walks the full anyhow context chain joined with ": ".
-        // Plain Display only shows the outermost context — production errors are
-        // wrapped at agent_loop.rs:1030 with `.context("Streaming LLM call failed")`,
-        // hiding the underlying `(400 Bad Request)` from the substring scan.
-        let err_str = format!("{err:#}");
-        let Some(code) = Self::extract_http_status(&err_str) else {
-            return (true, Self::is_transport_failure(&err_str));
-        };
-        match code {
-            // Transient — retry first, then fall back if all retries fail.
-            429 | 500 | 502 | 503 | 504 => (true, true),
-            // Permanent client errors — retrying the same call against the
-            // same provider won't help. Skip retry; fall back. 400 is
-            // included because OpenRouter returns 400 for invalid model IDs,
-            // which a sibling provider (e.g. local ollama) may accept.
-            400 | 401 | 403 | 404 => (false, true),
-            _ => (true, false),
-        }
+        crate::error_classifier::classify_llm_error_typed(err).into()
     }
 
     /// Phase 18 Plan 06: pre-chat compression + transient-drain block.
