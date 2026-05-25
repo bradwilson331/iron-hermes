@@ -23,6 +23,7 @@ use ironhermes_core::commands::context::{
     AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
     MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
 };
+use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::types::Platform;
@@ -330,6 +331,12 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 args_str.split_whitespace().collect()
             };
             let ctx = build_command_context(app);
+            // Phase 36.1 (D-10, Pitfall 4): bypass check on POST-resolution canonical def.name —
+            // never raw user input. /reset resolves to "new" via the CommandRouter and correctly
+            // bypasses. Reject non-bypass commands when a turn is in flight.
+            if app.agent_running.load(Ordering::SeqCst) && !is_bypass(def.name) {
+                return SlashOutcome::Handled(AGENT_RUNNING_REJECT_MSG.to_string());
+            }
             match invoke_handler(def.name, &ctx, &app.command_router, &args_vec).await {
                 Ok(result) => {
                     // D-02 post-router App-side hook (Plan 03: FULL multi-name expansion).
@@ -534,7 +541,8 @@ impl CronJobReader for CronJobReaderImpl {
 /// pattern: each field is Option so handlers gracefully return "not configured"
 /// when the handle is None).
 fn build_command_context(app: &App) -> CommandContext {
-    let agent_running = Arc::new(AtomicBool::new(app.pending_rx.is_some()));
+    // Phase 36.1 (D-08, Pitfall 4): live handle replaces the pending_rx.is_some() snapshot.
+    let agent_running = app.agent_running.clone();
     let mut ctx = CommandContext::new(Platform::Local, app.session_id.clone(), agent_running);
     if let Some(mgr) = &app.mcp_manager {
         ctx = ctx.with_mcp_reloader(mgr.clone());
