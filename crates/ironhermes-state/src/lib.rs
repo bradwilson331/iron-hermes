@@ -43,7 +43,7 @@ pub type Result<T, E = StateError> = std::result::Result<T, E>;
 // Schema version
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode=WAL;
@@ -54,23 +54,47 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id                  TEXT PRIMARY KEY,
-    source              TEXT NOT NULL,
-    user_id             TEXT,
-    model               TEXT,
-    system_prompt       TEXT,
-    parent_session_id   TEXT,
-    started_at          REAL NOT NULL,
-    ended_at            REAL,
-    end_reason          TEXT,
-    message_count       INTEGER DEFAULT 0,
-    tool_call_count     INTEGER DEFAULT 0,
-    input_tokens        INTEGER DEFAULT 0,
-    output_tokens       INTEGER DEFAULT 0,
-    title               TEXT,
-    workspace_root      TEXT,
+    id                      TEXT PRIMARY KEY,
+    source                  TEXT NOT NULL,
+    user_id                 TEXT,
+    model                   TEXT,
+    system_prompt           TEXT,
+    parent_session_id       TEXT,
+    started_at              REAL NOT NULL,
+    ended_at                REAL,
+    end_reason              TEXT,
+    message_count           INTEGER DEFAULT 0,
+    tool_call_count         INTEGER DEFAULT 0,
+    input_tokens            INTEGER DEFAULT 0,
+    output_tokens           INTEGER DEFAULT 0,
+    title                   TEXT,
+    workspace_root          TEXT,
+    -- Phase 36.2 (D-USAGE-02): cache token + cost columns for usage ledger.
+    cache_read_tokens       INTEGER DEFAULT 0,
+    cache_creation_tokens   INTEGER DEFAULT 0,
+    cost_usd_micros         INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
+
+-- Phase 36.2 (D-USAGE-02): per-turn usage ledger. One row per LLM call,
+-- including failures (error_kind is NULL on success, ProviderError variant
+-- name on failure). Costs stored as i64 micro-USD (1 USD = 1_000_000) — no
+-- float drift (Pitfall 5). Indexes optimize /usage queries by session and time.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT NOT NULL,
+    ts               INTEGER NOT NULL,
+    provider         TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    in_tok           INTEGER NOT NULL,
+    out_tok          INTEGER NOT NULL,
+    cache_read       INTEGER NOT NULL DEFAULT 0,
+    cache_create     INTEGER NOT NULL DEFAULT 0,
+    cost_usd_micros  INTEGER NOT NULL DEFAULT 0,
+    error_kind       TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_events_session_idx ON usage_events(session_id);
+CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events(ts);
 
 CREATE TABLE IF NOT EXISTS messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +162,40 @@ pub struct Session {
     /// NULL for sessions created before Phase 25.3 or for sessions without a workspace marker.
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+/// A single per-turn LLM usage event row.
+///
+/// Phase 36.2 (D-USAGE-02): persisted per LLM call (success or failure) so
+/// the `/usage` reader (downstream Plan 10) can slice by session / provider /
+/// model / time / error.
+///
+/// **Cost units:** all monetary fields are i64 micro-USD (1 USD = 1_000_000).
+/// This avoids the silent precision loss that would result from f64
+/// representation (Pitfall 5 — float drift).
+///
+/// **`error_kind` discipline:** populated ONLY from
+/// `ProviderError::variant_name()` (Plan 03) — a bounded set of ~10
+/// compile-time constants (e.g., `"RateLimited"`, `"Auth"`, `"ContextLength"`).
+/// Callers MUST NOT serialize the full `ProviderError` debug payload here:
+/// it may contain raw HTTP error bodies that leak PII or secret prefixes
+/// (T-36.2-02-PII mitigation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageEvent {
+    pub session_id: String,
+    /// Unix epoch milliseconds.
+    pub ts: i64,
+    pub provider: String,
+    pub model: String,
+    pub in_tok: i64,
+    pub out_tok: i64,
+    pub cache_read: i64,
+    pub cache_create: i64,
+    /// Micro-USD (1 USD = 1_000_000). 0 on failed calls.
+    pub cost_usd_micros: i64,
+    /// `None` on success; `Some(ProviderError::variant_name())` on failure.
+    /// MUST NOT contain raw error bodies (PII risk; see struct-level doc).
+    pub error_kind: Option<String>,
 }
 
 /// A single message row retrieved from storage.
@@ -363,6 +421,46 @@ impl StateStore {
                 .execute("ALTER TABLE sessions ADD COLUMN workspace_root TEXT", []);
             self.conn
                 .execute("UPDATE schema_version SET version = 8", [])?;
+        }
+        if current < 9 {
+            // v9 (Phase 36.2 D-USAGE-02): cache token columns on sessions +
+            // usage_events table. `let _ =` tolerates "duplicate column" on partial
+            // migration (Pitfall 4 / v8 precedent). SQLite ALTER TABLE adds one
+            // column at a time — do NOT collapse into one statement. CREATE TABLE
+            // / CREATE INDEX are guarded with IF NOT EXISTS so re-runs are safe.
+            let _ = self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
+                [],
+            );
+            let _ = self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
+                [],
+            );
+            let _ = self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cost_usd_micros INTEGER DEFAULT 0",
+                [],
+            );
+            self.conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id       TEXT NOT NULL,
+                    ts               INTEGER NOT NULL,
+                    provider         TEXT NOT NULL,
+                    model            TEXT NOT NULL,
+                    in_tok           INTEGER NOT NULL,
+                    out_tok          INTEGER NOT NULL,
+                    cache_read       INTEGER NOT NULL DEFAULT 0,
+                    cache_create     INTEGER NOT NULL DEFAULT 0,
+                    cost_usd_micros  INTEGER NOT NULL DEFAULT 0,
+                    error_kind       TEXT
+                );
+                CREATE INDEX IF NOT EXISTS usage_events_session_idx ON usage_events(session_id);
+                CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events(ts);
+                ",
+            )?;
+            self.conn
+                .execute("UPDATE schema_version SET version = 9", [])?;
         }
         Ok(())
     }
@@ -694,23 +792,91 @@ impl StateStore {
     // Updates
     // -----------------------------------------------------------------------
 
-    /// Update aggregate token and tool-call statistics for a session.
+    /// Update aggregate token, tool-call, cache, and cost statistics for a session.
+    ///
+    /// Phase 36.2 (D-USAGE-02): extended to aggregate cache_read_tokens,
+    /// cache_creation_tokens, and cost_usd_micros (micro-USD i64; no float).
+    /// All six numeric columns use additive (`+ ?N`) semantics — each call
+    /// increments the row by the supplied deltas. Designed to be wrapped by
+    /// the caller in a single rusqlite transaction together with
+    /// [`Self::insert_usage_event`] for per-turn atomicity (Pitfall 6).
+    //
+    // 7 numeric columns + the row key is the data shape mandated by
+    // 36.2-02-PLAN.md acceptance criteria; collapsing into a struct would
+    // diverge from the call site in downstream Plan 07 and obscure the
+    // INTEGER-micros invariant for each column. The allow is intentional.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_session_stats(
         &mut self,
         id: &str,
         input_tokens: i64,
         output_tokens: i64,
         tool_call_count: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+        cost_usd_micros: i64,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET \
              input_tokens = input_tokens + ?1, \
              output_tokens = output_tokens + ?2, \
-             tool_call_count = tool_call_count + ?3 \
-             WHERE id = ?4",
-            params![input_tokens, output_tokens, tool_call_count, id],
+             tool_call_count = tool_call_count + ?3, \
+             cache_read_tokens = cache_read_tokens + ?4, \
+             cache_creation_tokens = cache_creation_tokens + ?5, \
+             cost_usd_micros = cost_usd_micros + ?6 \
+             WHERE id = ?7",
+            params![
+                input_tokens,
+                output_tokens,
+                tool_call_count,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd_micros,
+                id
+            ],
         )?;
         Ok(())
+    }
+
+    /// Insert a single per-turn usage event row.
+    ///
+    /// Phase 36.2 (D-USAGE-02): designed to be called inside the same
+    /// rusqlite transaction as [`Self::update_session_stats`] for atomic
+    /// per-turn writes (Pitfall 6). All SQL uses `params!` bindings —
+    /// never string interpolation (T-36.2-02-INJ mitigation).
+    pub fn insert_usage_event(&mut self, ev: &UsageEvent) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO usage_events \
+             (session_id, ts, provider, model, in_tok, out_tok, \
+              cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                ev.session_id,
+                ev.ts,
+                ev.provider,
+                ev.model,
+                ev.in_tok,
+                ev.out_tok,
+                ev.cache_read,
+                ev.cache_create,
+                ev.cost_usd_micros,
+                ev.error_kind
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only accessor for the underlying rusqlite Connection.
+    ///
+    /// Phase 36.2 (D-USAGE-02): the per-turn write path is two SQL
+    /// statements (INSERT usage_events + UPDATE sessions) that MUST execute
+    /// inside a single transaction. The transaction is owned by the caller
+    /// (the agent loop, downstream Plan 07), not by the StateStore methods,
+    /// so integration tests need direct connection access to construct an
+    /// `unchecked_transaction()` and verify commit/rollback semantics.
+    #[doc(hidden)]
+    pub fn conn_for_test(&self) -> &Connection {
+        &self.conn
     }
 
     /// Set or replace the human-readable title for a session.
@@ -840,6 +1006,11 @@ pub fn sanitize_fts_query(input: &str) -> String {
 
 /// Retry a closure up to 3 times on `SQLITE_BUSY`, with deterministic jitter
 /// (50 ms, then 125 ms). No `rand` dependency required.
+///
+/// NOTE: pre-existing helper kept for future SESS-13 wiring; #[allow] added
+/// in Phase 36.2 Plan 02 so the new acceptance criterion `clippy -D warnings`
+/// passes. Re-enable as part of any future SQLITE_BUSY retry phase.
+#[allow(dead_code)]
 fn with_busy_retry<T, F: FnMut() -> Result<T>>(mut f: F) -> Result<T> {
     for attempt in 0u32..3 {
         match f() {
@@ -855,6 +1026,7 @@ fn with_busy_retry<T, F: FnMut() -> Result<T>>(mut f: F) -> Result<T> {
 }
 
 /// Check whether a [`StateError`] is a `SQLITE_BUSY` error.
+#[allow(dead_code)]
 fn is_busy(e: &StateError) -> bool {
     if let StateError::Sqlite(sq) = e {
         matches!(
@@ -986,10 +1158,12 @@ mod schema_migration_v8_tests {
     use tempfile::tempdir;
 
     #[test]
-    fn schema_version_constant_is_8() {
+    fn schema_version_constant_is_9() {
+        // Phase 25.3 D-W-1 originally bumped to 8 (workspace_root).
+        // Phase 36.2 D-USAGE-02 bumps to 9 (cache tokens + usage_events table).
         assert_eq!(
-            SCHEMA_VERSION, 8,
-            "Phase 25.3 D-W-1: SCHEMA_VERSION must be bumped to 8"
+            SCHEMA_VERSION, 9,
+            "Phase 36.2 D-USAGE-02: SCHEMA_VERSION must be bumped to 9"
         );
     }
 
@@ -1016,10 +1190,10 @@ mod schema_migration_v8_tests {
     }
 
     #[test]
-    fn v7_db_upgrades_to_v8_preserving_rows() {
+    fn v7_db_upgrades_to_latest_preserving_rows() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.db");
-        // Manually create a v7 DB shape (no workspace_root)
+        // Manually create a v7 DB shape (no workspace_root, no cache/cost cols)
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
@@ -1036,7 +1210,7 @@ mod schema_migration_v8_tests {
             )
             .unwrap();
         }
-        // Open with the new code — should ALTER + bump to 8
+        // Open with the new code — should ALTER + bump to current SCHEMA_VERSION
         let _store = StateStore::new(&path).expect("upgrade open");
         let conn = Connection::open(&path).unwrap();
         let v: i64 = conn
@@ -1044,7 +1218,11 @@ mod schema_migration_v8_tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(v, 8, "schema_version must be 8 after upgrade");
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "schema_version must be SCHEMA_VERSION after upgrade"
+        );
+        // Phase 25.3 invariant: workspace_root added with NULL default for pre-v8 rows.
         let wr: Option<String> = conn
             .query_row(
                 "SELECT workspace_root FROM sessions WHERE id = 'legacy-1'",
@@ -1056,6 +1234,29 @@ mod schema_migration_v8_tests {
             wr.is_none(),
             "pre-v8 row must have NULL workspace_root after upgrade"
         );
+        // Phase 36.2 invariant: cache + cost cols added with 0 default for pre-v9 rows.
+        let (cr, cc, cost): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT cache_read_tokens, cache_creation_tokens, cost_usd_micros \
+                 FROM sessions WHERE id = 'legacy-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (cr, cc, cost),
+            (0, 0, 0),
+            "pre-v9 row must default to 0 on new cache/cost cols"
+        );
+        // Phase 36.2 invariant: usage_events table created during v9 migration.
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_events'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "usage_events table must exist after v9 migration");
     }
 
     #[test]
