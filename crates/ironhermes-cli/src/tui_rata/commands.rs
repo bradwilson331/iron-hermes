@@ -238,6 +238,38 @@ impl StateStoreHandle for StateStoreAdapter {
             .flatten()
             .map(|s| s.id)
     }
+
+    /// Phase 36.2 Plan 10: `/usage` table renderer (production impl).
+    ///
+    /// Builds a `UsageFilter` from the primitive arguments and dispatches
+    /// to `StateStore::query_usage_events` (which is the single SQL-bound
+    /// access site, T-36.2-10-INJ). Output is built by the canonical
+    /// `format_usage_rollups` helper in `ironhermes-state` so every
+    /// platform (CLI, TUI, gateway, web UI) emits byte-identical text.
+    fn usage_text(
+        &self,
+        session_id: Option<&str>,
+        today_only: bool,
+        provider: Option<&str>,
+        model: Option<&str>,
+        since_seconds: Option<i64>,
+    ) -> String {
+        let filter = ironhermes_state::UsageFilter {
+            session_id: session_id.map(|s| s.to_string()),
+            today_only,
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            since_seconds,
+        };
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.query_usage_events(&filter) {
+            Ok(rows) => ironhermes_state::format_usage_rollups(&rows, &filter),
+            Err(e) => format!("Usage query failed: {e}"),
+        }
+    }
 }
 
 /// Adapter: ContextEngine → ContextCompressorHandle for `/compress`.

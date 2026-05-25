@@ -66,13 +66,27 @@ impl StateStoreHandle for TestStateStoreAdapter {
     fn get_session_id(&self, _name_or_id: &str) -> Option<String> {
         unreachable!("not exercised by Plan 10 usage tests")
     }
-    fn usage_text(&self, filter: &UsageFilter) -> String {
+    fn usage_text(
+        &self,
+        session_id: Option<&str>,
+        today_only: bool,
+        provider: Option<&str>,
+        model: Option<&str>,
+        since_seconds: Option<i64>,
+    ) -> String {
+        let filter = UsageFilter {
+            session_id: session_id.map(|s| s.to_string()),
+            today_only,
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            since_seconds,
+        };
         let guard = match self.0.lock() {
             Ok(g) => g,
             Err(_) => return "StateStore lock poisoned.".to_string(),
         };
-        match guard.query_usage_events(filter) {
-            Ok(rows) => format_usage_rollups(&rows, filter),
+        match guard.query_usage_events(&filter) {
+            Ok(rows) => format_usage_rollups(&rows, &filter),
             Err(e) => format!("Usage query failed: {e}"),
         }
     }
