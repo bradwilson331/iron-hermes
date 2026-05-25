@@ -139,6 +139,18 @@ impl LlmClient {
             );
             anyhow::bail!("tool-call pairing invariant violated: {}", diag);
         }
+        // Phase 36.2 Plan 07 fix: OpenAI-compat providers (OpenRouter, vLLM,
+        // Ollama ≥ 0.5, etc.) only return per-stream `usage` when the request
+        // body sets `stream_options.include_usage = true`. Without this, the
+        // streaming response omits `usage`, `StreamEvent::Usage` never fires,
+        // and `agent_loop::write_usage_success` writes usage_events rows with
+        // all-zero tokens — breaking /usage rollups and the Plan 10 status
+        // pills. Caller-supplied `extra` wins (lets a test override the flag).
+        let mut extra = extra.unwrap_or_default();
+        extra
+            .entry("stream_options".to_string())
+            .or_insert_with(|| serde_json::json!({ "include_usage": true }));
+
         let request = ChatRequest {
             model: model.unwrap_or(&self.default_model).to_string(),
             messages: messages.to_vec(),
@@ -147,7 +159,7 @@ impl LlmClient {
             temperature,
             stream: Some(true),
             stop: None,
-            extra: extra.unwrap_or_default(),
+            extra,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
