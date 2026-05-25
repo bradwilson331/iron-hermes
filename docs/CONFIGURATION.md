@@ -89,6 +89,7 @@ Environment variables live in `~/.ironhermes/.env` (or the `IRONHERMES_HOME`-sco
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `IRONHERMES_HOME` | Optional | `~/.ironhermes` | Override the default data and config directory |
+| `IRONHERMES_SOURCE` | Optional | — | Path to the IronHermes project root. When set, `hermes setup` (full) copies skill files from `$IRONHERMES_SOURCE/skills/` and `$IRONHERMES_SOURCE/optional-skills/` into `$IRONHERMES_HOME/skills/`. Auto-detected in dev builds via binary path walk. |
 
 ### Debug Flags
 
@@ -130,7 +131,7 @@ providers:
 | `memory` | Memory provider selection |
 | `compression` | Context compression tuning |
 | `skills` | Skills subsystem enable/disable and scan paths |
-| `subagent` | Subagent delegation limits |
+| `delegation` | Subagent delegation limits (renamed from `subagent` in Phase 32.2 — see [Delegation](#delegation-delegation)) |
 | `rate_limit` | Per-user inbound rate limiting |
 | `batch` | Batch processing worker settings |
 | `security` | Secret redaction in logs |
@@ -151,7 +152,7 @@ The following settings cause startup validation to fail and re-launch the setup 
 
 | Setting | Validation Rule |
 |---|---|
-| `providers.<main-provider>.api_key_env` | Required — must reference a non-empty env var name matching `[A-Z][A-Z0-9_]*` |
+| `providers.<main-provider>.api_key_env` | Required — must reference a non-empty env var name matching `[A-Z][A-Z0-9_]*`. **Auto-backfilled by `hermes setup`** when the matching env var exists in `.env` or process env but the config entry is absent. |
 | `model.default` | Required — must be a non-empty model identifier string |
 | `model.provider` | Required — must be a non-empty provider name (e.g., `openrouter`, `anthropic`) |
 | `memory.provider` | Required (when `memory.memory_enabled: true`) — must be one of: `file`, `sqlite`, `grafeo`, `duckdb` |
@@ -179,12 +180,12 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 
 | Key | Default | Description |
 |---|---|---|
-| `agent.max_turns` | `90` | Maximum agent loop iterations per turn |
+| `agent.max_iterations` | `90` | Canonical per-turn cap — sizes both the `AgentLoop` iteration limit and the `BudgetHandle` it builds. Read by `AgentRuntime::from_config` (Phase 28.1) |
+| `agent.max_turns` | _(deprecated alias)_ | Deprecated in Phase 28.1. If present, `AgentConfig::normalize()` folds it onto `max_iterations` and emits a `warn!`. Remove from new configs |
 | `agent.context_compression` | `0.5` | Context compression ratio |
 | `agent.tool_delay_secs` | `1.0` | Delay between tool calls in seconds |
 | `agent.context_engine` | `summarizing` | Context engine: `summarizing` or `local_prune` |
 | `agent.compression_threshold` | `0.5` | Fraction of context_length at which compression triggers |
-| `agent.max_iterations` | `50` | Maximum agent budget iterations |
 | `agent.system_message` | `""` | Optional injected system message (empty = omitted) |
 
 ### Terminal (`terminal:`)

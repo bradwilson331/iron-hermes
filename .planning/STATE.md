@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.1
-milestone_name: "**Status:** Deferred"
-status: milestone_complete
-stopped_at: Milestone complete (Phase 28.1 was final phase)
-last_updated: 2026-05-21T10:31:04.337Z
-last_activity: 2026-05-21 -- Phase 28.1 execution started
+milestone: v3.0
+milestone_name: Hermes-agent parity
+status: executing
+stopped_at: Phase 36.2 context gathered
+last_updated: "2026-05-25T09:07:51.490Z"
+last_activity: 2026-05-25 -- Phase 36.2 execution started
 progress:
-  total_phases: 1
-  completed_phases: 0
-  total_plans: 6
-  completed_plans: 346
-  percent: 0
+  total_phases: 34
+  completed_phases: 2
+  total_plans: 18
+  completed_plans: 7
+  percent: 6
 ---
 
 # Project State
@@ -21,21 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Milestone complete
+**Current focus:** Phase 36.2 — agent-loop-core-parity-prompt-caching-per-provider-rate-limi
 
 ## Current Position
 
-Phase: 28.1
-Plan: Not started
-Plans: 34-01 ✓ scaffolds; 34-02 ✓ deps + session unification; 34-03 ✓ DiscordAdapter; 34-04 ✓ SlackAdapter; 34-05 ✓ GatewayRunner multi-platform wiring
-Status: Milestone complete
-Last activity: 2026-05-21
+Phase: 36.2 (agent-loop-core-parity-prompt-caching-per-provider-rate-limi) — EXECUTING
+Plan: 1 of 11
+Status: Executing Phase 36.2
+Last activity: 2026-05-25 -- Phase 36.2 execution started
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 126
+- Total plans completed: 130
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -75,6 +74,7 @@ Last activity: 2026-05-21
 | 26.7.1 | 2 | - | - |
 | 34a | 2 | - | - |
 | 28.1 | 6 | - | - |
+| 34b | 4 | - | - |
 
 **Recent Trend:**
 
@@ -402,6 +402,8 @@ Recent decisions affecting current work:
 - [Phase 32.2-subagent-delegation-parity]: ChildRole defaults to Leaf on all parse failures — least privilege per T-32.2-10
 - [Phase 32.2-subagent-delegation-parity]: effective_tools pre-pass adds delegate_task BEFORE the match loop — never after (RESEARCH Pitfall 1)
 - [Phase 32.2-subagent-delegation-parity]: Depth threading via AgentSubagentRunner struct fields — SubagentRunner trait signature unchanged (RESEARCH Pitfall 6)
+- [Phase 35.1-05]: run_skills_section early-return guard removed — create_dir_all guarantees dir exists; SkillRegistry handles empty dir gracefully
+- [Phase 35.1-05]: find_project_skills_source checks IRONHERMES_SOURCE env var first, then walks current_exe() up to 10 levels — graceful None for production installs
 
 ### Roadmap Evolution
 
@@ -456,6 +458,27 @@ Recent decisions affecting current work:
 - Phase 32.3.1 inserted after Phase 32.3: fix delegate_task kill abort wiring — close shrike handle_map gap (residual bug surfaced during 26.7.1 Wave 2 UAT 2026-05-19) (URGENT)
 - Phase 26.7.2 inserted after Phase 26.7.1: Sessions load session data (URGENT)
 - Phase 26.7.3 inserted after Phase 26.7.2: Skills page - enable tab, search and toggle on-off features (URGENT)
+- Phase 35 added: Cron subagent budget isolation (T-28.1-16) — follow-up from Phase 28.1
+- Phase 35 edited: edited fields: title, goal, requirements — broadened to global per-subagent independent budgets (retire PROV-10); T-28.1-16 now a consequence
+- Phase 35.1 inserted after Phase 35: hermes-agent install and setup parity (URGENT)
+- Phase 36 added: Gateway running-agent guard wiring — completes GW-05 (re-opened after Phase 21.1 cross-AI review surfaced gap; codex HIGH-1)
+- Phase 36.2 inserted after Phase 36: Agent loop & core parity — prompt caching, per-provider rate-limit tracking, usage/cost accounting, error classification (from iron-hermes-planning.md §2.1 non-PARITY items) (URGENT)
+- Phase 36.3 inserted after Phase 36: Tools parity — vision/image/video gen, TTS/STT, computer_use, smart-home, kanban, planning tools, first-class send_message, multi-environment exec, browser CDP/dialog (from iron-hermes-planning.md §2.2 non-PARITY items) (URGENT)
+- Phase 36.3.1-36.3.12 inserted after Phase 36.3: Split Phase 36.3 (Tools parity) into 12 per-tool-family sub-phases: vision, image gen, video gen, voice I/O, computer use, smart home, kanban, messaging/clarify, planning tools, browser polish, web search expansion, multi-env exec. See ROADMAP.md for full list. (URGENT)
+- Phase 36.4 inserted after Phase 36: Skills library — bundle hermes-agent's 27 built-in + 18 optional skills; install via GitHub, migrate from hermes-agent, or openclaw local install (from iron-hermes-planning.md §2.3 — runtime/install exists, library does not) (URGENT)
+- Phase 36.4.1-36.4.3 inserted after Phase 36.4: Split Phase 36.4 (Skills library) into 3 migration-path sub-phases: 36.4.1 GitHub tap + lock-file seed (fastest path); 36.4.2 hermes-agent Tier-1 port (highest fidelity); 36.4.3 openclaw catalog bridge (MCP). Paths are additive, not exclusive. (URGENT)
+- Phase 36.5 inserted after Phase 36: Provider parity — closes hermes-agent's biggest tactical gap (OAuth provider proxy) plus enterprise/observability layer. Three targets: (1) OAuth provider — Claude Pro / ChatGPT Pro / SuperGrok device-flow auth; (2) Claude Compliance API for enterprise audit export — https://support.claude.com/en/articles/13015708-access-the-compliance-api; (3) Cloudflare AI Gateway as unified provider proxy — https://developers.cloudflare.com/ai-gateway/get-started/ (from iron-hermes-planning.md §2.4) (URGENT)
+- Phase 36.6 inserted after Phase 36: TUI parity & visibility fix — TWO scopes: (1) UNRESOLVED BUG: AI responses still not rendering visibly in ratatui TUI (prior scroll-width work in feedback_scroll_width_inner.md did not fully resolve); (2) Ink-UX feature port to ratatui per project_tui_ink_ux_phases memory (overlays, pickers, skins, thinking panel, command palette, mode picker, model switcher, OSC8 hyperlinks; Telegram approval UX + voice remain deferred). Bug fix is urgent and must precede feature port (from iron-hermes-planning.md §2.5) (URGENT)
+- Phase 36.6.1-36.6.4 inserted after Phase 36.6: Split Phase 36.6 (TUI parity & visibility fix) into 4 sub-phases: 36.6.1 BUG FIX AI response visibility (blocking, must ship first); 36.6.2 Ink-UX port — thinking panel + overlays; 36.6.3 Ink-UX port — input UX (command palette, mode picker, model switcher); 36.6.4 TUI polish (OSC8, skin engine, terminal compat). 36.6.1 gates the others — feature port is wasted effort if responses are invisible. (URGENT)
+- Phase 36.7 inserted after Phase 36: Multi-platform gateway parity — 19 missing platforms vs hermes-agent (3 shipped: Telegram/Discord/Slack). Targets: WhatsApp, Signal, SMS, Email, Matrix, Mattermost, MS Teams, iMessage, LINE, SimpleX, DingTalk, Feishu, Wecom, WeChat (Weixin), QQ, Yuanbao, generic webhook, HTTP REST API, Home Assistant trigger. Likely needs split — recommend per-platform-cluster sub-phases (foundation/mainstream/privacy/mobile/APAC/automation) rather than per-platform to keep sub-phase count tractable (from iron-hermes-planning.md §2.6) (URGENT)
+- Phase 36.7.1 inserted after Phase 36.7: Scoped Phase 36.7 down to foundation only: 36.7.1 ships generic webhook adapter + HTTP REST API server. The other 17 hermes-agent platforms (WhatsApp, Signal, SMS, Email, Matrix, Mattermost, MS Teams, iMessage, LINE, SimpleX, DingTalk, Feishu, Wecom, WeChat Weixin, QQ, Yuanbao, Home Assistant) are DEFERRED — not on active roadmap, no sub-phases created. Decision: ironhermes serves a narrower audience than hermes-agent's 22-platform breadth; webhook+REST covers any custom integration need. (URGENT)
+- Phase 36.8 inserted after Phase 36: ACP adapter — Agent Client Protocol server. Currently a FULL gap in ironhermes (hermes-agent ships acp_adapter/ + acp_registry/ for Zed/VS Code/JetBrains via uvx). Stdio transport, tool listing + dispatch + streaming, approval-event surface, pairing-code auth, edit-approval UI. Identified in iron-hermes-planning.md §2.7 as the single biggest 'cannot switch from hermes-agent' blocker for editor-driven users. (URGENT)
+- Phase 36.9 inserted after Phase 36: MCP server (server-side MCP) — currently a FULL gap in ironhermes. ironhermes-mcp crate is CLIENT only (consumes external MCP servers). Phase 36.9 ports hermes-agent's mcp_serve.py 9-tool surface: conversations_list, conversation_get, messages_read (FTS), attachments_fetch, events_poll, events_wait, messages_send, permissions_list_open, permissions_respond, channels_list. With this shipped, Claude Code / Cursor / any MCP-aware host can drive ironhermes the same way they currently drive hermes-agent. From iron-hermes-planning.md §2.8. (URGENT)
+- Phase 36.10 inserted after Phase 36: Memory & state parity — narrow gap. ironhermes-state already ships SQLite + FTS5 (schema v8 WAL); three memory backends (sqlite/grafeo/duckdb) already pluggable; memory_tool, frozen-snapshot pattern, and ironhermes-trajectory ledger all in place. The single visible gap is no session_search tool wrapper exposing the existing FTS — likely 1 plan. Optional secondary scope: add managed-memory provider impls (honcho, mem0, supermemory) to mirror hermes-agent's memory plugin set. From iron-hermes-planning.md §2.9. (URGENT)
+- Phase 36.11 inserted after Phase 36: Configuration & secrets parity — security-load-bearing gap. ironhermes currently reads credentials only from env vars + plaintext config; hermes-agent additionally supports AWS Secrets Manager, Bitwarden CLI, macOS Keychain. Phase 36.11 adds CredentialSource trait + 3 first-class implementations (Keychain/AWS/Bitwarden) and reserves room for Linux Secret Service, Windows Credential Manager, 1Password CLI. Pairs naturally with DEFCON scale work (project_security_defcon_scale) — strict DEFCON levels should refuse plaintext .env credentials. From iron-hermes-planning.md §2.10. (URGENT)
+- Phase 36.12 inserted after Phase 36: Packaging & distribution parity — distribution-load-bearing. ironhermes currently ships: Dockerfile, install.sh + install-gitea.sh, launchd/systemd/cron deploy scripts, quick_setup_script.ps1 (Windows, status unverified). Gaps vs hermes-agent: Homebrew tap (macOS native), Nix flake (reproducible/NixOS), Termux/Android (constraints file equivalent), crates.io publication verification, Windows native install verification. Each is independently shippable — splitting per channel is reasonable. From iron-hermes-planning.md §2.11. (URGENT)
+- Phase 36.13 inserted after Phase 36: Plugins & extensions — architecturally uncertain. Hermes-agent's plugins/ system (15+ bundled plugins, ctx.llm + tool_override primitives) overlaps significantly with ironhermes's existing skills + MCP + crate workspace patterns: memory providers (Phase 20 + 36.10), model providers (36.5), platforms (34 + 36.7), image/video gen (36.3.2/3), kanban (36.3.7), browser (shipped) all already covered through other extension mechanisms. REAL gaps that need attention regardless: observability hooks (Datadog/New Relic metrics+traces — no current substrate), lifecycle hooks beyond HookRegistry, ctx.llm + tool_override runtime primitives. Recommend treating this as a decision phase before committing to a plugin loader port. From iron-hermes-planning.md §2.13. (URGENT)
+- Phase 36.13 edited: Phase 36.13 SCOPE LOCKED: Option A — REJECT plugin loader port. Decision rationale: hermes-agent's plugins/ loader is Python-dynamic-loading-shaped (cheap in Python, expensive in Rust); equivalent composability in ironhermes is achieved via crate workspace + skills + MCP, which already cover memory providers / model providers / platforms / image_gen / video_gen / kanban / browser. Only three primitives have no current substrate: observability export (Datadog/New Relic — to be ported as OpenTelemetry/OTLP), ctx.llm runtime override, tool_override runtime override. These ship directly on AgentRuntime, not via a plugin system. Decision will be ratified in an ADR landed in PROJECT.md / ARCHITECTURE.md. Aligned with 'ironhermes is its own thing' strategic posture and parallel narrowing of Phase 36.7 multi-platform gateway.
 
 ### Pending Todos
 
@@ -479,6 +502,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-21T04:32:42.061Z
-Stopped at: Phase 34a complete (2/2) — ready to discuss Phase 34b
-Resume file: None
+Last session: 2026-05-25T07:08:48.065Z
+Stopped at: Phase 36.2 context gathered
+Resume file: .planning/phases/36.2-agent-loop-core-parity-prompt-caching-per-provider-rate-limi/36.2-CONTEXT.md

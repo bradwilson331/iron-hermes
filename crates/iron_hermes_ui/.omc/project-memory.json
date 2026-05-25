@@ -148,8 +148,8 @@
     },
     {
       "path": "src/main.rs",
-      "accessCount": 21,
-      "lastAccessed": 1777824301321,
+      "accessCount": 22,
+      "lastAccessed": 1779329618683,
       "type": "file"
     },
     {
@@ -177,15 +177,15 @@
       "type": "file"
     },
     {
-      "path": ".planning/phases/02-design-system/02-CONTEXT.md",
-      "accessCount": 12,
-      "lastAccessed": 1777814653070,
+      "path": "src/app.rs",
+      "accessCount": 13,
+      "lastAccessed": 1779329622485,
       "type": "file"
     },
     {
-      "path": "src/app.rs",
+      "path": ".planning/phases/02-design-system/02-CONTEXT.md",
       "accessCount": 12,
-      "lastAccessed": 1777818267359,
+      "lastAccessed": 1777814653070,
       "type": "file"
     },
     {
@@ -273,6 +273,12 @@
       "type": "file"
     },
     {
+      "path": "src/components/mod.rs",
+      "accessCount": 6,
+      "lastAccessed": 1779329619042,
+      "type": "file"
+    },
+    {
       "path": ".planning/phases/01-hygiene/01-02-PLAN.md",
       "accessCount": 5,
       "lastAccessed": 1777773269733,
@@ -288,12 +294,6 @@
       "path": ".planning/codebase/CONVENTIONS.md",
       "accessCount": 5,
       "lastAccessed": 1777790994279,
-      "type": "file"
-    },
-    {
-      "path": "src/components/mod.rs",
-      "accessCount": 5,
-      "lastAccessed": 1777797330609,
       "type": "file"
     },
     {

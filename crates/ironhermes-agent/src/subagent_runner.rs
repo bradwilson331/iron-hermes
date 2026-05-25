@@ -31,11 +31,20 @@ pub struct AgentSubagentRunner {
     client: AnyClient,
     /// Provider resolver for constructing override clients.
     resolver: ProviderResolver,
-    /// Optional shared iteration budget handle (PROV-10 / D-15).
-    /// Plan 21.7-05 switched this from `Arc<AtomicUsize>` to [`BudgetHandle`];
-    /// clones of the handle share the underlying counter so parent + child
-    /// subagent loops decrement the SAME budget and observe the same
-    /// pressure-tier ladder.
+    /// Retained budget field (D-04 / Plan 35-02 field-kept decision).
+    ///
+    /// Each child loop is given a FRESH `BudgetHandle::new(max_iterations)` —
+    /// an independent per-child counter — in `run_child`. PROV-10's shared
+    /// parent↔child counter is RETIRED (D-04): children no longer clone this
+    /// field, so the parent budget is not decremented by its children.
+    ///
+    /// The field (and the `Option<BudgetHandle>` param on `new`) are KEPT
+    /// rather than removed because `AgentSubagentRunner::new` is consumed at
+    /// two production sites (`agent_runtime.rs:149` and `tui_rata/event_loop.rs`)
+    /// and is grep-locked by invariant tests (`invariants_21_7.rs`,
+    /// `invariants_22_4.rs`). Removing the param would be more invasive than
+    /// warranted; keeping it written-but-unread-by-children is the blessed choice.
+    #[allow(dead_code)] // retained for new() signature / grep invariants; no longer read by run_child
     budget: Option<BudgetHandle>,
     /// Plan 21.7-07 (D-03 / D-04): shared SubagentRegistry. Each `run_child`
     /// call registers its subagent on entry and unregisters on exit so the
@@ -279,10 +288,11 @@ impl SubagentRunner for AgentSubagentRunner {
         if let Some(cb) = tool_progress_wrapped {
             agent = agent.with_tool_progress(cb);
         }
-        // Wire budget if available
-        if let Some(ref budget) = self.budget {
-            agent = agent.with_budget(budget.clone());
-        }
+        // D-01 / Plan 35-02: give each child its own independent budget.
+        // PROV-10 (shared parent↔child counter) is retired. Each call into
+        // run_child produces a distinct Arc<AtomicUsize> via BudgetHandle::new;
+        // the parent's counter is never cloned into a child.
+        agent = agent.with_budget(BudgetHandle::new(max_iterations));
 
         // Phase 32.3 Plan 02 (D-04): live activity clock — clone the Arc from
         // the constructed AgentLoop. SAFE to grab before `agent.run` because

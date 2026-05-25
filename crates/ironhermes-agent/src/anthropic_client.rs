@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use ironhermes_core::config::PromptCachingConfig;
 use ironhermes_core::{
     ChatChoice, ChatMessage, ChatResponse, ContentPart, FunctionCall, ImageUrl, MessageContent,
     Role, ToolCall, ToolSchema, Usage,
@@ -18,16 +19,82 @@ use crate::client::StreamEvent;
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize)]
-struct AnthropicRequest {
+pub struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<AnthropicSystem>,
     max_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+/// Phase 36.2 (D-CACHE-01/02): Anthropic system block content.
+///
+/// Two serialization shapes:
+/// - `Text(String)` → plain string (legacy, no caching)
+/// - `Blocks(Vec<SystemBlock>)` → array form (required when attaching
+///   `cache_control` markers per Anthropic's API)
+#[derive(Debug, Clone)]
+pub enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<SystemBlock>),
+}
+
+impl Serialize for AnthropicSystem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            AnthropicSystem::Text(s) => serializer.serialize_str(s),
+            AnthropicSystem::Blocks(blocks) => blocks.serialize(serializer),
+        }
+    }
+}
+
+/// Phase 36.2 (D-CACHE-01): Anthropic system content block. Always `type: "text"`.
+///
+/// Carries an optional `cache_control` marker — when present, marks this
+/// system block as a cache breakpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemBlock {
+    #[serde(rename = "type")]
+    ty: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    fn text(text: String) -> Self {
+        Self {
+            ty: "text",
+            text,
+            cache_control: None,
+        }
+    }
+}
+
+/// Phase 36.2 (D-CACHE-01/02): Anthropic `cache_control` envelope.
+///
+/// Serializes as `{"type":"ephemeral","ttl":"5m"|"1h"}`. Attached to content
+/// blocks (NOT messages themselves) to mark cache breakpoints. Per the
+/// `system_and_3` strategy, exactly 4 markers maximum per request: 1 system
+/// + last 3 non-system messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    ty: String,
+    ttl: String,
+}
+
+impl CacheControl {
+    pub fn ephemeral(ttl: &'static str) -> Self {
+        Self {
+            ty: "ephemeral".to_string(),
+            ttl: ttl.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,20 +142,33 @@ impl<'de> Deserialize<'de> for AnthropicContent {
 enum ContentBlock {
     Text {
         text: String,
+        /// Phase 36.2 (D-CACHE-01): cache_control marker for system_and_3.
+        /// Attached to the last content block of the last 3 non-system messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Image {
         source: ImageSource, // Phase 25.1 OQ-2: multimodal user input
+        /// Phase 36.2: cache_control marker. Anthropic allows on any block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Phase 36.2: cache_control marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: String,
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        /// Phase 36.2: cache_control marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
 }
 
@@ -135,10 +215,20 @@ enum ResponseContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct AnthropicUsage {
     input_tokens: usize,
     output_tokens: usize,
+    // Phase 36.2 Plan 01 deviation note: plan specified `Option<u64>` but the
+    // outer `Usage` struct (ironhermes-core::types::Usage) declares these as
+    // `Option<usize>`. To preserve the verbatim copy at parse sites
+    // (`cache_read_input_tokens: response.usage.cache_read_input_tokens`) and
+    // avoid an unnecessary `as usize` cast bleeding through every consumer,
+    // these fields adopt the outer struct's `Option<usize>` shape.
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
 }
 
 // =============================================================================
@@ -202,6 +292,12 @@ struct SseMessageDelta {
 #[derive(Debug, Clone, Deserialize)]
 struct SseUsage {
     output_tokens: Option<usize>,
+    // Phase 36.2 Plan 01: matches outer Usage's Option<usize> cache field type
+    // (see deviation note on AnthropicUsage).
+    #[serde(default)]
+    cache_read_input_tokens: Option<usize>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<usize>,
 }
 
 // =============================================================================
@@ -290,13 +386,17 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
             Role::System => continue,
             Role::User => {
                 let blocks: Vec<ContentBlock> = match msg.content.as_ref() {
-                    Some(MessageContent::Text(t)) => vec![ContentBlock::Text { text: t.clone() }],
+                    Some(MessageContent::Text(t)) => vec![ContentBlock::Text {
+                        text: t.clone(),
+                        cache_control: None,
+                    }],
                     Some(MessageContent::Parts(parts)) => parts
                         .iter()
                         .filter_map(|p| match p {
-                            ContentPart::Text { text } => {
-                                Some(ContentBlock::Text { text: text.clone() })
-                            }
+                            ContentPart::Text { text } => Some(ContentBlock::Text {
+                                text: text.clone(),
+                                cache_control: None,
+                            }),
                             ContentPart::ImageUrl { image_url } => {
                                 convert_image_url_to_block(&image_url.url)
                             }
@@ -304,6 +404,7 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                         .collect(),
                     None => vec![ContentBlock::Text {
                         text: String::new(),
+                        cache_control: None,
                     }],
                 };
                 raw_messages.push(AnthropicMessage {
@@ -319,6 +420,7 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                     if !text.is_empty() {
                         blocks.push(ContentBlock::Text {
                             text: text.to_string(),
+                            cache_control: None,
                         });
                     }
                 }
@@ -332,12 +434,13 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
                             input,
+                            cache_control: None,
                         });
                     }
                 }
 
                 let content = if blocks.len() == 1 {
-                    if let ContentBlock::Text { ref text } = blocks[0] {
+                    if let ContentBlock::Text { ref text, .. } = blocks[0] {
                         AnthropicContent::Text(text.clone())
                     } else {
                         AnthropicContent::Blocks(blocks)
@@ -366,6 +469,7 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                         tool_use_id,
                         content: content_text,
                         is_error: None,
+                        cache_control: None,
                     }]),
                 });
             }
@@ -403,6 +507,7 @@ fn convert_image_url_to_block(url: &str) -> Option<ContentBlock> {
                 media_type,
                 data: data.to_string(),
             },
+            cache_control: None,
         });
     }
     if url.starts_with("http://") || url.starts_with("https://") {
@@ -410,6 +515,7 @@ fn convert_image_url_to_block(url: &str) -> Option<ContentBlock> {
             source: ImageSource::Url {
                 url: url.to_string(),
             },
+            cache_control: None,
         });
     }
     tracing::warn!(url_prefix = %&url.chars().take(32).collect::<String>(),
@@ -429,7 +535,10 @@ fn merge_consecutive_same_role(messages: Vec<AnthropicMessage>) -> Vec<Anthropic
             let new_blocks = content_to_blocks(msg.content);
             match &mut last.content {
                 AnthropicContent::Text(t) => {
-                    let mut blocks = vec![ContentBlock::Text { text: t.clone() }];
+                    let mut blocks = vec![ContentBlock::Text {
+                        text: t.clone(),
+                        cache_control: None,
+                    }];
                     blocks.extend(new_blocks);
                     last.content = AnthropicContent::Blocks(blocks);
                 }
@@ -447,7 +556,10 @@ fn merge_consecutive_same_role(messages: Vec<AnthropicMessage>) -> Vec<Anthropic
 
 fn content_to_blocks(content: AnthropicContent) -> Vec<ContentBlock> {
     match content {
-        AnthropicContent::Text(t) => vec![ContentBlock::Text { text: t }],
+        AnthropicContent::Text(t) => vec![ContentBlock::Text {
+            text: t,
+            cache_control: None,
+        }],
         AnthropicContent::Blocks(blocks) => blocks,
     }
 }
@@ -462,6 +574,138 @@ pub fn adapt_tools(tools: &[ToolSchema]) -> Vec<AnthropicTool> {
             input_schema: t.function.parameters.clone(),
         })
         .collect()
+}
+
+/// Phase 36.2 (D-CACHE-01/02): build an [`AnthropicRequest`] with optional
+/// `cache_control` markers attached per the `system_and_3` strategy.
+///
+/// When `prompt_caching.enabled` is `false`, the request is byte-identical to
+/// the pre-36.2 shape (system as plain string, no markers anywhere).
+///
+/// When enabled, markers are attached to:
+/// - The system block (converted from plain string to single-element array
+///   so the `cache_control` field can attach to a content block per Anthropic's API).
+/// - The last content block of each of the last 3 non-system messages
+///   (`saturating_sub(3)..n` range; gracefully degrades when fewer than 3 messages).
+///
+/// 4 markers max per request matches Anthropic's documented breakpoint cap.
+pub(crate) fn build_anthropic_request(
+    messages: &[ChatMessage],
+    model: &str,
+    max_tokens: usize,
+    adapted_tools: Option<Vec<AnthropicTool>>,
+    stream: Option<bool>,
+    prompt_caching: &PromptCachingConfig,
+) -> AnthropicRequest {
+    let (system_text, mut adapted_messages) = adapt_messages(messages);
+
+    let mut system: Option<AnthropicSystem> = system_text.map(AnthropicSystem::Text);
+
+    if prompt_caching.enabled {
+        let ttl = prompt_caching.ttl.as_anthropic_ttl();
+        attach_cache_control_markers(&mut system, &mut adapted_messages, ttl);
+    }
+
+    AnthropicRequest {
+        model: model.to_string(),
+        messages: adapted_messages,
+        system,
+        max_tokens,
+        tools: if adapted_tools.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
+            None
+        } else {
+            adapted_tools
+        },
+        stream,
+    }
+}
+
+/// Phase 36.2 (D-CACHE-01): attach `cache_control` markers to the system block
+/// + last 3 non-system messages (system_and_3 strategy).
+///
+/// **Marker count rules** (Anthropic API: max 4 breakpoints per request):
+/// - 1 marker on the system block (if any).
+/// - 1 marker each on the last `min(3, messages.len())` non-system messages.
+/// - For multi-block messages, only the LAST content block of each marked
+///   message gets the marker (cache_control attaches to the block, not the
+///   message; placing on the last block caches everything up to that point).
+fn attach_cache_control_markers(
+    system: &mut Option<AnthropicSystem>,
+    messages: &mut [AnthropicMessage],
+    ttl: &'static str,
+) {
+    // Mark the system block — converting from Text to Blocks if needed because
+    // cache_control attaches to content blocks, not bare strings.
+    if let Some(s) = system.as_mut() {
+        let text = match s {
+            AnthropicSystem::Text(t) => std::mem::take(t),
+            AnthropicSystem::Blocks(_) => {
+                // Already in blocks form (unusual on this code path); take the
+                // last block's text-equivalent via a no-op for now. This branch
+                // is not exercised by current call sites — adapt_messages
+                // always returns Text. If a future call site builds Blocks
+                // directly, it can attach its own marker before passing in.
+                return;
+            }
+        };
+        let mut block = SystemBlock::text(text);
+        block.cache_control = Some(CacheControl::ephemeral(ttl));
+        *s = AnthropicSystem::Blocks(vec![block]);
+    }
+
+    // Mark last 3 messages' last content block.
+    let n = messages.len();
+    let start = n.saturating_sub(3);
+    for msg in &mut messages[start..n] {
+        attach_marker_to_last_block(&mut msg.content, ttl);
+    }
+}
+
+/// Helper: attach a cache_control marker to the last content block of a
+/// message's content. If the content is plain text, convert to blocks first.
+fn attach_marker_to_last_block(content: &mut AnthropicContent, ttl: &'static str) {
+    // Convert Text -> Blocks so cache_control can attach to a block.
+    if let AnthropicContent::Text(t) = content {
+        let text = std::mem::take(t);
+        *content = AnthropicContent::Blocks(vec![ContentBlock::Text {
+            text,
+            cache_control: None,
+        }]);
+    }
+    if let AnthropicContent::Blocks(blocks) = content {
+        if let Some(last) = blocks.last_mut() {
+            let marker = Some(CacheControl::ephemeral(ttl));
+            match last {
+                ContentBlock::Text { cache_control, .. }
+                | ContentBlock::Image { cache_control, .. }
+                | ContentBlock::ToolUse { cache_control, .. }
+                | ContentBlock::ToolResult { cache_control, .. } => {
+                    *cache_control = marker;
+                }
+            }
+        }
+    }
+}
+
+/// Phase 36.2 test helper: thin re-export of [`build_anthropic_request`] for
+/// integration tests in `tests/prompt_cache_assertion.rs`.
+///
+/// Identical signature to the production builder so tests exercise the exact
+/// code path.
+#[doc(hidden)]
+pub fn build_anthropic_request_for_test(
+    messages: &[ChatMessage],
+    model: &str,
+    prompt_caching: &PromptCachingConfig,
+) -> AnthropicRequest {
+    build_anthropic_request(messages, model, 4096, None, Some(false), prompt_caching)
+}
+
+/// Phase 36.2 test helper: serialize an [`AnthropicRequest`] to JSON for
+/// envelope-shape assertions.
+#[doc(hidden)]
+pub fn serialize_request_for_test(req: &AnthropicRequest) -> Result<String> {
+    Ok(serde_json::to_string(req)?)
 }
 
 /// Convert an Anthropic response to OpenAI-compatible ChatResponse.
@@ -530,8 +774,8 @@ pub fn parse_anthropic_response(response: &AnthropicResponse) -> (ChatResponse, 
         prompt_tokens: response.usage.input_tokens,
         completion_tokens: response.usage.output_tokens,
         total_tokens: response.usage.input_tokens + response.usage.output_tokens,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
+        cache_read_input_tokens: response.usage.cache_read_input_tokens,
+        cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
     });
 
     (chat_response, usage)
@@ -550,6 +794,10 @@ pub struct AnthropicClient {
     base_url: String,
     api_key: String,
     default_model: String,
+    /// Phase 36.2 (D-CACHE-02): prompt caching config.
+    /// Defaults to enabled=true, ttl=1h via `PromptCachingConfig::default()`
+    /// for backward compatibility with the legacy `new()` constructor.
+    prompt_caching: PromptCachingConfig,
 }
 
 impl std::fmt::Debug for AnthropicClient {
@@ -558,6 +806,7 @@ impl std::fmt::Debug for AnthropicClient {
             .field("base_url", &self.base_url)
             .field("api_key", &"[REDACTED]")
             .field("default_model", &self.default_model)
+            .field("prompt_caching", &self.prompt_caching)
             .finish()
     }
 }
@@ -567,10 +816,26 @@ impl AnthropicClient {
     ///
     /// Creates a reqwest Client with `anthropic-version: 2023-06-01` default header
     /// and 30s connect timeout.
+    ///
+    /// Prompt caching defaults to enabled (TTL 1h) — call
+    /// [`new_with_prompt_caching`](Self::new_with_prompt_caching) to override.
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
+    ) -> Self {
+        Self::new_with_prompt_caching(base_url, api_key, model, PromptCachingConfig::default())
+    }
+
+    /// Phase 36.2 (D-CACHE-02): construct with explicit prompt-caching config.
+    ///
+    /// Used by the AgentLoop after loading `Config::prompt_caching` to thread
+    /// the operator-configured TTL + enable flag through to request building.
+    pub fn new_with_prompt_caching(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        prompt_caching: PromptCachingConfig,
     ) -> Self {
         let api_key_str = api_key.into();
         let mut headers = reqwest::header::HeaderMap::new();
@@ -590,6 +855,7 @@ impl AnthropicClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key_str,
             default_model: model.into(),
+            prompt_caching,
         }
     }
 
@@ -605,21 +871,16 @@ impl AnthropicClient {
         _temperature: Option<f64>, // Anthropic supports temperature but we default
         _extra: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<ChatResponse> {
-        let (system, adapted_messages) = adapt_messages(messages);
         let adapted_tools = tools.map(adapt_tools);
 
-        let request = AnthropicRequest {
-            model: model.unwrap_or(&self.default_model).to_string(),
-            messages: adapted_messages,
-            system,
-            max_tokens: max_tokens.unwrap_or(4096),
-            tools: if adapted_tools.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
-                None
-            } else {
-                adapted_tools
-            },
-            stream: Some(false),
-        };
+        let request = build_anthropic_request(
+            messages,
+            model.unwrap_or(&self.default_model),
+            max_tokens.unwrap_or(4096),
+            adapted_tools,
+            Some(false),
+            &self.prompt_caching,
+        );
 
         let url = format!("{}/v1/messages", self.base_url);
         debug!(url = %url, model = %request.model, "Sending Anthropic chat completion request");
@@ -668,21 +929,16 @@ impl AnthropicClient {
         _temperature: Option<f64>,
         _extra: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
-        let (system, adapted_messages) = adapt_messages(messages);
         let adapted_tools = tools.map(adapt_tools);
 
-        let request = AnthropicRequest {
-            model: model.unwrap_or(&self.default_model).to_string(),
-            messages: adapted_messages,
-            system,
-            max_tokens: max_tokens.unwrap_or(4096),
-            tools: if adapted_tools.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
-                None
-            } else {
-                adapted_tools
-            },
-            stream: Some(true),
-        };
+        let request = build_anthropic_request(
+            messages,
+            model.unwrap_or(&self.default_model),
+            max_tokens.unwrap_or(4096),
+            adapted_tools,
+            Some(true),
+            &self.prompt_caching,
+        );
 
         let url = format!("{}/v1/messages", self.base_url);
         debug!(url = %url, model = %request.model, "Sending Anthropic streaming request");
@@ -816,8 +1072,8 @@ impl AnthropicClient {
                                         prompt_tokens: 0,
                                         completion_tokens: output_tokens,
                                         total_tokens: output_tokens,
-                                        cache_read_input_tokens: None,
-                                        cache_creation_input_tokens: None,
+                                        cache_read_input_tokens: u.cache_read_input_tokens,
+                                        cache_creation_input_tokens: u.cache_creation_input_tokens,
                                     }))
                                     .await;
                             }
@@ -903,7 +1159,7 @@ mod tests {
         match &msgs[0].content {
             AnthropicContent::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 1);
-                matches!(&blocks[0], ContentBlock::Text { text } if text == "Hi");
+                matches!(&blocks[0], ContentBlock::Text { text, .. } if text == "Hi");
             }
             _ => panic!("Expected blocks for user message"),
         }
@@ -937,7 +1193,9 @@ mod tests {
             AnthropicContent::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 1);
                 match &blocks[0] {
-                    ContentBlock::ToolUse { id, name, input } => {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         assert_eq!(id, "call_123");
                         assert_eq!(name, "get_weather");
                         assert_eq!(input, &serde_json::json!({"city": "London"}));
@@ -1024,6 +1282,7 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                ..Default::default()
             },
         };
 
@@ -1056,6 +1315,7 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 20,
                 output_tokens: 8,
+                ..Default::default()
             },
         };
 
@@ -1163,7 +1423,9 @@ mod tests {
         match &msgs[0].content {
             AnthropicContent::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 2);
-                assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "Let me help"));
+                assert!(
+                    matches!(&blocks[0], ContentBlock::Text { text, .. } if text == "Let me help")
+                );
                 assert!(matches!(&blocks[1], ContentBlock::ToolUse { .. }));
             }
             _ => panic!("Expected blocks"),
@@ -1256,5 +1518,83 @@ mod tests {
             !json.contains("image"),
             "malformed url MUST skip image block, not crash"
         );
+    }
+
+    // =========================================================================
+    // Phase 36.2 Plan 01: AnthropicUsage cache field deserialization tests
+    //
+    // Verifies AnthropicUsage round-trips `cache_read_input_tokens` and
+    // `cache_creation_input_tokens` from Anthropic response bodies, including
+    // the absent-field default-to-None path (#[serde(default)] semantics).
+    // =========================================================================
+
+    #[test]
+    fn anthropic_usage_deserializes_cache_fields_when_present() {
+        // Test 1: Both cache fields present — they round-trip into the struct.
+        let json = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 8200,
+            "cache_creation_input_tokens": 4200
+        }"#;
+        let usage: AnthropicUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, Some(8200));
+        assert_eq!(usage.cache_creation_input_tokens, Some(4200));
+    }
+
+    #[test]
+    fn anthropic_usage_defaults_cache_fields_to_none_when_absent() {
+        // Test 2: Legacy / non-cached response — fields absent → None via #[serde(default)].
+        let json = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50
+        }"#;
+        let usage: AnthropicUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+    }
+
+    #[test]
+    fn anthropic_usage_treats_null_cache_fields_as_none() {
+        // Test 3: Explicit JSON null for cache fields → Option semantics preserve None.
+        let json = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": null,
+            "cache_creation_input_tokens": null
+        }"#;
+        let usage: AnthropicUsage = serde_json::from_str(json).expect("parse");
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+    }
+
+    #[test]
+    fn parse_anthropic_response_populates_outer_usage_cache_fields() {
+        // Verifies the parse-site fix at lines ~537-538: outer Usage wrapper now
+        // copies cache fields through from AnthropicUsage instead of hardcoding None.
+        let response = AnthropicResponse {
+            id: "msg_cache".to_string(),
+            content: vec![ResponseContentBlock::Text {
+                text: "cached!".to_string(),
+            }],
+            model: "claude-opus-4-7".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 12,
+                output_tokens: 7,
+                cache_read_input_tokens: Some(8200),
+                cache_creation_input_tokens: Some(4200),
+            },
+        };
+        let (_chat, usage) = parse_anthropic_response(&response);
+        let u = usage.expect("usage populated");
+        assert_eq!(u.prompt_tokens, 12);
+        assert_eq!(u.completion_tokens, 7);
+        assert_eq!(u.cache_read_input_tokens, Some(8200));
+        assert_eq!(u.cache_creation_input_tokens, Some(4200));
     }
 }

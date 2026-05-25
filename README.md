@@ -45,7 +45,17 @@ cargo build --release
 
 ## Quick Start
 
-**1. Set your API key**
+**1. Run the setup wizard (recommended)**
+
+```bash
+hermes setup
+```
+
+The interactive setup wizard configures your API provider, model, and writes both `~/.ironhermes/config.yaml` and `~/.ironhermes/.env` for you. It asks whether you want a quick setup (provider + model only) or a full setup (all sections including skills, terminal, tools, memory, and gateway).
+
+> **First launch:** If you run `ironhermes` (or `ironhermes chat`) without any API key configured, the setup wizard launches automatically.
+
+**Manual alternative:** If you prefer to configure by hand:
 
 ```bash
 mkdir -p ~/.ironhermes
@@ -60,7 +70,7 @@ OpenRouter is the default provider. Anthropic, OpenAI, Gemini, Groq, and local O
 ironhermes doctor
 ```
 
-Checks that environment variables are present, the config parses cleanly, and configured providers are reachable.
+Checks that environment variables are present, the config parses cleanly, and configured providers are reachable. The setup wizard runs this automatically on completion, so you can skip this step if you went through the wizard.
 
 **3. Start the agent**
 
@@ -122,6 +132,8 @@ IronHermes looks for configuration in `~/.ironhermes/`:
 - `.env` — API keys (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
 
 Set `IRONHERMES_HOME` to override the default home directory.
+
+Set `IRONHERMES_SOURCE` to the project root directory to enable skills installation during `hermes setup` (full). When set, the wizard copies skill files from `$IRONHERMES_SOURCE/skills/` and `$IRONHERMES_SOURCE/optional-skills/` into `~/.ironhermes/skills/`. The wizard also auto-detects the source by walking up from the binary location in dev builds.
 
 ### Provider fallback
 

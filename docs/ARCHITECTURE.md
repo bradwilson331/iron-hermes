@@ -15,7 +15,7 @@ graph TD
     GW["ironhermes-gateway\n(Telegram adapter)"]
     UI["iron_hermes_ui\n(Dioxus 0.7 web UI + embedded server)"]
 
-    AGENT["ironhermes-agent\n(AgentLoop, LLM clients,\ncontext engine, prompt builder,\nsubagent runner, subagent registry)"]
+    AGENT["ironhermes-agent\n(AgentRuntime, AgentLoop, LLM clients,\ncontext engine, prompt builder,\nsubagent runner, subagent registry)"]
 
     TOOLS["ironhermes-tools\n(Tool registry: terminal, file ops,\nweb, browser suite, memory, MCP bridge,\nexecute_code, skills, hexapod, approval gate)"]
 
@@ -70,7 +70,7 @@ A typical request moves through the system in the following order:
 
 3. **Prompt is built.** `PromptBuilder` in `ironhermes-agent` assembles the system prompt from the agent identity string, loaded context files (CLAUDE.md / AGENTS.md walk-up), active skill contents, and any pending memory entries from the pluggable `MemoryManager`.
 
-4. **AgentLoop runs.** `AgentLoop` sends the conversation history to an `AnyClient` (which wraps either `AnthropicClient` or an OpenAI-compatible endpoint via `reqwest`, with optional fallback provider). It streams `StreamEvent` chunks back, accumulating the assistant response. A `ContextEngine` (either `LocalPruningEngine` for hard pruning or `SummarizingEngine` for soft compression via an aux model) monitors token pressure and trims the conversation history as needed.
+4. **AgentRuntime drives the turn.** Channels build one `AgentRuntime` per logical agent at startup (gateway = one interactive runtime + one separate cron runtime; web = one per server; CLI `run_chat`/TUI = one per session; `run_single` = one per process). Each turn becomes a `TurnRequest` (messages, session id, cancel token, stream callbacks) handed to `AgentRuntime::run_turn`, which resets the shared `BudgetHandle`, assembles `AgentLoop` with all durable wiring (registry, hooks, skills, browser, memory, fallback, compression, context engine), and runs the loop. `AgentLoop` sends the conversation history to an `AnyClient` (which wraps either `AnthropicClient` or an OpenAI-compatible endpoint via `reqwest`, with optional fallback provider). It streams `StreamEvent` chunks back, accumulating the assistant response. A `ContextEngine` (either `LocalPruningEngine` for hard pruning or `SummarizingEngine` for soft compression via an aux model) monitors token pressure and trims the conversation history as needed.
 
 5. **Tool calls are dispatched.** When the LLM response contains tool calls, `AgentLoop` dispatches each one through `ToolRegistry` in `ironhermes-tools`. Before executing any dangerous command, the `approval` module checks the yolo configuration flag. Tools include `terminal`, `read_file` / `write_file` / `patch` / `search_files`, `web_search` / `web_read` / `web_extract`, a full browser control suite (`navigate`, `click`, `type`, `press`, `scroll`, `back`, `close`, `snapshot`, `get_images`, vision), `execute_code` (Python sandbox via `ironhermes-exec`), `delegate_task` (subagent spawning via `AgentSubagentRunner`), `memory_tool`, hexapod robot tools (`hexapod_tcp`, `hexapod_video`), and any MCP-bridged tools registered by `McpManager`.
 
@@ -88,7 +88,9 @@ A typical request moves through the system in the following order:
 
 | Abstraction | Kind | File | Description |
 |---|---|---|---|
-| `AgentLoop` | struct | `crates/ironhermes-agent/src/agent_loop.rs` | Drives the LLM ↔ tool-call loop; holds budget, context compressor, cancellation token, trajectory handle |
+| `AgentRuntime` | struct | `crates/ironhermes-agent/src/agent_runtime.rs` | Durable, channel-agnostic agent unit. Owns client, registry, budget, skills, hooks, browser session, and memory. Built once per logical agent; `run_turn(TurnRequest)` is the single per-turn entry point used by every channel |
+| `TurnRequest` | struct | `crates/ironhermes-agent/src/agent_runtime.rs` | Per-turn input assembled by the channel: messages, session id, cancel token, stream + tool callbacks. Everything that legitimately varies turn-to-turn |
+| `AgentLoop` | struct | `crates/ironhermes-agent/src/agent_loop.rs` | Drives the LLM ↔ tool-call loop; holds budget, context compressor, cancellation token, trajectory handle. Assembled per-turn inside `AgentRuntime::run_turn` |
 | `AnyClient` | enum | `crates/ironhermes-agent/src/any_client.rs` | Unified LLM client wrapping `AnthropicClient` or an OpenAI-compatible client; wires fallback provider |
 | `LlmClient` | struct | `crates/ironhermes-agent/src/client.rs` | Core streaming LLM client |
 | `ToolRegistry` | struct | `crates/ironhermes-tools/src/registry.rs` | Stores and dispatches all registered `Tool` implementations by name |
@@ -107,7 +109,7 @@ A typical request moves through the system in the following order:
 | `ContextCompressor` | struct | `crates/ironhermes-agent/src/context_compressor.rs` | Shrinks conversation history when approaching context limits via summarization |
 | `ContextEngine` | trait | `crates/ironhermes-agent/src/context_engine.rs` | Abstraction over context management strategies; implementations include `LocalPruningEngine` (hard truncation) and `SummarizingEngine` (LLM-based soft compression, defined in `crates/ironhermes-agent/src/summarizing_engine.rs`) |
 | `SubagentRegistry` | struct | `crates/ironhermes-agent/src/subagent_registry.rs` | In-memory session-scoped registry tracking live subagent tasks by ID, path, and cancellation token |
-| `AppRuntimeBundle` | struct | `crates/ironhermes-agent/src/app_runtime_factory.rs` | Single factory output wiring all agent dependencies (client, tools, state, hooks, trajectory) for a run |
+| `AppRuntimeBundle` | struct | `crates/ironhermes-agent/src/app_runtime_factory.rs` | Internal factory output used by `AgentRuntime::from_config` to wire client, tools, state, hooks, and trajectory. No longer called directly by channels |
 
 ---
 

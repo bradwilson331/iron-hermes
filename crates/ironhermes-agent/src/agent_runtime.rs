@@ -18,12 +18,18 @@
 //! for every channel and removes four copies of the same wiring. See
 //! `docs/AGENT-RUNTIME-DESIGN.md`.
 //!
-//! ## Budget sharing (PROV-10)
+//! ## Budget (top-level / interactive, D-15)
 //!
-//! `from_config` creates the `BudgetHandle` and builds the `AgentSubagentRunner`
-//! with a clone of it, so a parent turn and the subagents it spawns share one
-//! counter (a runaway delegation tree is bounded together). `run_turn` resets
-//! that shared counter before each top-level turn.
+//! `from_config` creates the `BudgetHandle` for the TOP-LEVEL interactive
+//! agent loop and passes a clone to `AgentSubagentRunner::new` for storage.
+//! `run_turn` resets that handle before each user turn so a long-lived runtime
+//! never latches at Stop100.
+//!
+//! Plan 35-02 (D-01/D-04): PROV-10 shared parent↔child counter is RETIRED.
+//! `AgentSubagentRunner::run_child` now gives each child its own fresh
+//! `BudgetHandle::new(max_iterations)` — children no longer clone the stored
+//! runner budget. The stored field is retained for the `new` signature and grep
+//! invariants (see `AgentSubagentRunner` field doc).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,6 +49,7 @@ use ironhermes_tools::memory_tool::SharedMemoryManager;
 
 use crate::agent_wiring::attach_context_engine;
 use crate::any_client::{build_main_client, wire_fallback_if_configured};
+use crate::context_refs::preprocess_context_references_async;
 use crate::app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,
 };
@@ -116,6 +123,9 @@ pub struct AgentRuntime {
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     subagent_registry: Arc<RwLock<SubagentRegistry>>,
     max_iterations: usize,
+    /// Working directory for `@`-ref expansion (D-05: fixed to cwd at startup,
+    /// used as both `cwd` and `allowed_root` in `preprocess_context_references_async`).
+    cwd: PathBuf,
 }
 
 impl AgentRuntime {
@@ -143,7 +153,9 @@ impl AgentRuntime {
 
         let client = build_main_client(&resolver)?;
 
-        // Build the subagent runner with a clone of the SHARED budget (PROV-10).
+        // Build the subagent runner, passing the budget clone for storage (field-kept
+        // per Plan 35-02 field-disposition). Children no longer clone this stored
+        // budget; each child gets a fresh BudgetHandle::new(max_iterations) in run_child.
         let (transcript_home, transcript_scope_label) = transcript_scope;
         let subagent_runner = Arc::new(
             AgentSubagentRunner::new(client.clone(), (*resolver).clone(), Some(budget.clone()))
@@ -159,6 +171,7 @@ impl AgentRuntime {
             .clone()
             .map(|m| m as SharedMemoryManager);
 
+        let cwd_stored = cwd.clone();
         let bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
             config: config.clone(),
             resolver: resolver.clone(),
@@ -186,18 +199,105 @@ impl AgentRuntime {
             memory_manager,
             subagent_registry,
             max_iterations,
+            cwd: cwd_stored,
         })
     }
 
     /// Run one top-level agent turn. This is the budget lifecycle boundary:
-    /// the shared `BudgetHandle` is reset to full here so a long-lived runtime
-    /// never latches at `Stop100`. Subagents spawned during the turn share the
-    /// just-reset counter via the runner's `Arc`.
-    pub async fn run_turn(&self, req: TurnRequest) -> Result<AgentResult> {
+    /// the top-level `BudgetHandle` is reset to full here so a long-lived runtime
+    /// never latches at `Stop100`. Plan 35-02 (D-01/D-04): subagents spawned
+    /// during the turn each receive their own fresh `BudgetHandle::new(max_iterations)`
+    /// in `run_child`; they no longer decrement the top-level counter.
+    pub async fn run_turn(&self, mut req: TurnRequest) -> Result<AgentResult> {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
 
         let context_length = self.resolver.resolve_for_main().context_length();
+
+        // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
+        // Runs ONCE here, BEFORE attach_context_engine/agent.run, over the
+        // latest user message. Never called per-surface (centralization invariant).
+        // D-05: allowed_root = cwd (fixed at startup, no config escape hatch — D-04).
+        let context_warnings: Vec<String> = {
+            // Find the latest user-role message index.
+            let last_user_idx = req
+                .messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| m.role == ironhermes_core::Role::User)
+                .map(|(i, _)| i);
+
+            if let Some(idx) = last_user_idx {
+                if let Some(text) = req.messages[idx].content_text().map(|s| s.to_string()) {
+                    // Production UrlFetcher: WebExtractTool with use_llm_processing:true (D-01).
+                    // Raw fallback on LLM failure is handled inside the fetcher closure (D-02).
+                    let url_fetcher: crate::context_refs::UrlFetcher = {
+                        let registry = self.bundle.registry.clone();
+                        Box::new(move |url: String| {
+                            let registry = registry.clone();
+                            Box::pin(async move {
+                                // Call web_extract tool via the registry with use_llm_processing:true.
+                                let args = serde_json::json!({
+                                    "urls": [url],
+                                    "use_llm_processing": true,
+                                });
+                                let reg = registry.read().await;
+                                match reg.execute_tool("web_extract", args).await {
+                                    Ok(result_str) => {
+                                        // Parse ExtractionResult array from web_extract output.
+                                        if let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&result_str) {
+                                            if let Some(first) = results.first() {
+                                                if let Some(content) = first.get("content").and_then(|v| v.as_str()) {
+                                                    if !content.is_empty() {
+                                                        return Ok(content.to_string());
+                                                    }
+                                                }
+                                                // D-02: fall back to raw content on LLM-processing failure.
+                                                if let Some(err) = first.get("error").and_then(|v| v.as_str()) {
+                                                    return Err(format!("web_extract error: {}", err));
+                                                }
+                                            }
+                                        }
+                                        Err("web_extract returned no content".to_string())
+                                    }
+                                    Err(e) => Err(format!("web_extract failed: {}", e)),
+                                }
+                            })
+                        })
+                    };
+
+                    let ctx_result = preprocess_context_references_async(
+                        &text,
+                        &self.cwd,
+                        context_length,
+                        Some(&url_fetcher),
+                        None, // allowed_root defaults to cwd (D-04/D-05)
+                    )
+                    .await;
+
+                    // Replace the latest user message text with the expanded version.
+                    if ctx_result.expanded || ctx_result.blocked {
+                        if let Some(msg) = req.messages.get_mut(idx) {
+                            msg.content = Some(ironhermes_core::MessageContent::Text(
+                                ctx_result.message.clone(),
+                            ));
+                        }
+                    }
+
+                    // Log warnings centrally (D-11 carrier).
+                    for w in &ctx_result.warnings {
+                        tracing::warn!(target: "ironhermes_agent::context_refs", warning = %w, "@ context expansion warning");
+                    }
+
+                    ctx_result.warnings
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
 
         let mut agent = AgentLoop::new(
             self.client.clone(),
@@ -248,7 +348,38 @@ impl AgentRuntime {
             self.memory_manager.clone(),
         );
 
-        agent.run(req.messages).await
+        // ── Phase 34b Plan 02 (D-07/D-09): central per-turn engine hooks ─────
+        // Invoked ONCE here — the single per-turn locus — never per-surface.
+        // Grab a handle to the attached engine (None on surfaces that disable
+        // compression). The shipped engines treat both as no-ops; an engine
+        // holding durable state can react. update_model is wired definitely
+        // this phase (D-07), NOT conditionally.
+        let engine_handle = agent.context_engine();
+        if let Some(ref engine) = engine_handle {
+            // Per-turn model identity: fully resolvable from the same accessor
+            // run_turn already used for context_length above (no hedge — D-07).
+            let endpoint = self.resolver.resolve_for_main();
+            engine.update_model(
+                endpoint.default_model.as_str(),
+                context_length,
+                Some(endpoint.base_url.as_str()),
+            );
+        }
+
+        // D-11 / WR-01: attach context_warnings from @-ref expansion onto AgentResult.
+        // Each surface (CLI, gateway, web) reads this field after run_turn returns and
+        // renders the --- Context Warnings --- block out-of-band (not embedded in the
+        // model-bound message text — that embedding was removed in Phase 34b Plan 03).
+        let mut out = agent.run(req.messages).await?;
+
+        // Phase 34b Plan 02 (D-09): post-run per-turn usage hook. MUST appear
+        // AFTER agent.run (asserted in invariants_34b).
+        if let Some(ref engine) = engine_handle {
+            engine.update_from_response(&out.total_usage);
+        }
+
+        out.context_warnings = context_warnings;
+        Ok(out)
     }
 
     // ── accessors for channel-specific surfaces (slash dispatch, /agents,
@@ -371,6 +502,7 @@ impl AgentRuntime {
             memory_manager: None,
             subagent_registry,
             max_iterations,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         }
     }
 }
@@ -444,34 +576,36 @@ mod tests {
         );
     }
 
-    /// Regression gate: `from_config` MUST pass a clone of the shared budget
-    /// to `AgentSubagentRunner::new` (PROV-10 — parent and subagents share one
-    /// counter). This source-include guard fails if the wiring is dropped or
-    /// broken by a future refactor.
+    /// Regression gate: `from_config` wires the top-level budget into
+    /// `AgentSubagentRunner::new` for storage, and `run_child` gives each child
+    /// a FRESH `BudgetHandle::new(max_iterations)` — not a clone of the stored
+    /// runner budget. PROV-10 shared parent↔child counter is RETIRED (Plan 35-02
+    /// D-04); this test documents the new independence contract.
     ///
     /// Form chosen: source-include guard. Building a full `AgentRuntime` via
     /// `from_config` in a unit test is impractical (it requires a reachable
-    /// model endpoint and assembles the MCP/tool bundle); the Arc-identity
-    /// invariant is fully captured by asserting the source contains the exact
-    /// clone-pass pattern and that `budget` is stored in `Self`. The behavioral
-    /// Arc-sharing is already covered by `budget.rs::reset_is_visible_through_shared_clone`.
+    /// model endpoint and assembles the MCP/tool bundle). The storage wiring
+    /// (field-kept per Plan 35-02 field-disposition) is verified by asserting
+    /// the exact source patterns; the independence behavior is proven by the
+    /// D-07.1 test in `agent_loop.rs::budget_tests`.
     #[test]
-    fn runner_shares_budget_arc() {
-        // Assert from_config clones the shared budget into the subagent runner.
+    fn runner_stores_budget_field_children_get_fresh_handle() {
+        // Assert from_config still passes the budget clone for storage in the runner
+        // (field-kept so new() signature and grep invariants stay intact).
         assert!(
             SOURCE.contains("Some(budget.clone())"),
             "from_config must pass `Some(budget.clone())` to AgentSubagentRunner::new \
-             (PROV-10 parent/child budget sharing) — source guard failed"
+             (field-kept per Plan 35-02) — source guard failed"
         );
 
-        // Assert the same budget is stored on Self (not a separately-created one).
+        // Assert the top-level budget is stored on Self so run_turn can reset it.
         assert!(
             SOURCE.contains("budget,"),
             "AgentRuntime struct initializer must include `budget,` field — source guard failed; \
-             the shared BudgetHandle must be stored on Self so run_turn can reset it"
+             the top-level BudgetHandle must be stored on Self so run_turn can reset it"
         );
 
-        // Assert the runner is built with the cloned budget before Self is returned.
+        // Assert the runner is built before Self is returned.
         let runner_pos = SOURCE
             .find("Some(budget.clone())")
             .expect("Some(budget.clone()) must be present in agent_runtime.rs");
@@ -481,8 +615,21 @@ mod tests {
         assert!(
             runner_pos < self_ok_pos,
             "Some(budget.clone()) (at byte {runner_pos}) must appear BEFORE \
-             Ok(Self {{ (at byte {self_ok_pos})) — runner must be wired with the \
-             budget before Self is constructed"
+             Ok(Self {{ (at byte {self_ok_pos})) — runner must be wired before Self is constructed"
+        );
+
+        // Assert run_child gives each child a FRESH budget (independence — D-01/D-04).
+        // Use include_str! on subagent_runner.rs to verify the change site.
+        let runner_src = include_str!("subagent_runner.rs");
+        assert!(
+            runner_src.contains("BudgetHandle::new(max_iterations)"),
+            "subagent_runner.rs run_child must use BudgetHandle::new(max_iterations) \
+             to give each child a fresh independent budget (D-01/D-04) — source guard failed"
+        );
+        assert!(
+            !runner_src.contains("agent = agent.with_budget(budget.clone())"),
+            "subagent_runner.rs run_child must NOT clone the parent budget into children \
+             (PROV-10 retired, D-04) — source guard failed"
         );
     }
 }

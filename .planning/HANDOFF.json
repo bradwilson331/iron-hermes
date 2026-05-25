@@ -1,68 +1,30 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-19T08:51:19.302Z",
-  "phase": "26.7.1",
-  "phase_name": "agents-page-live-updates",
-  "phase_dir": ".planning/phases/26.7.1-agents-page-live-updates",
-  "plan": 2,
-  "task": 7,
-  "total_tasks": 7,
-  "status": "paused_at_uat_checkpoint",
-  "wave": 2,
+  "timestamp": "2026-05-21T14:05:55.950Z",
+  "phase": "35",
+  "phase_name": "Per-subagent independent iteration budgets (retire PROV-10; T-28.1-16)",
+  "phase_dir": ".planning/phases/35-cron-subagent-budget-isolation-give-cron-its-own-delegate-ta",
+  "plan": null,
+  "task": null,
+  "total_tasks": 0,
+  "status": "paused",
+  "stage": "context_gathered_ready_to_plan",
   "completed_tasks": [
-    {"id": "plan01-1", "name": "HermesApp subagent_events + is_ws_connected providers", "status": "done", "commit": "5ef04dd1"},
-    {"id": "plan01-2", "name": "diff_terminations pure fn + unit tests (agents_diff.rs)", "status": "done", "commit": "89ace294"},
-    {"id": "plan01-3", "name": ".card.is-ended + .pill.ended CSS modifiers", "status": "done", "commit": "3e594561"},
-    {"id": "plan01-4", "name": "ScreenAgents poll loop + HOLD-N diff + decay + AgentCard is-ended", "status": "done", "commit": "51d4bce3"},
-    {"id": "plan01-5", "name": "VALIDATION.md grep targets patched (warp_hermes → hermes_app/mod.rs)", "status": "done", "commit": "0b55615d"},
-    {"id": "plan01-summary", "name": "Plan 01 SUMMARY.md", "status": "done", "commit": "603b819c"},
-    {"id": "plan01-uat1-fix", "name": "kill/interrupt HOLD card hotfix", "status": "done", "commit": "121db4ec"},
-    {"id": "plan01-uat2-fix", "name": "use_server_future → use_resource (baseline polling regression)", "status": "done", "commit": "e72b8bdd"},
-    {"id": "plan01-uat3-fix", "name": "gate prev_live.set on content change (infinite render loop)", "status": "done", "commit": "5d2f51ca"},
-    {"id": "plan01-uat4-fix", "name": "std::time::Instant → web_time::Instant for wasm32", "status": "done", "commit": "a0532c38"},
-    {"id": "plan01-merge", "name": "Wave 1 merged to develop", "status": "done", "commit": "0f03fc86"},
-    {"id": "plan02-1+5", "name": "ChatStreamEvent::SubagentEvent variant + HermesApp recv-loop wiring", "status": "done_in_worktree", "commit": "34f7c625", "worktree_branch": "worktree-agent-aac7b73dafc0ba46f"},
-    {"id": "plan02-2", "name": "Path A slot on AppState + bundle progress_callback reads slot", "status": "done_in_worktree", "commit": "f14ebdd3"},
-    {"id": "plan02-3", "name": "ws.rs per-turn callback + RAII SubagentCallbackSlotGuard", "status": "done_in_worktree", "commit": "b8e19291"},
-    {"id": "plan02-4", "name": "test_subagent_callback_emits_event server test", "status": "done_in_worktree", "commit": "16f8b8ec"},
-    {"id": "plan02-6", "name": "ScreenAgents use_effect over subagent_events triggers restart", "status": "done_in_worktree", "commit": "7064396c"},
-    {"id": "plan02-summary", "name": "Plan 02 SUMMARY.md", "status": "done_in_worktree", "commit": "079f90f9"}
+    {"id": 1, "name": "discuss-phase 35 — CONTEXT.md + DISCUSSION-LOG.md", "status": "done", "commit": "55a04f31"},
+    {"id": 2, "name": "Broaden ROADMAP Phase 35 title/goal + STATE roadmap-evolution", "status": "done", "commit": "86262782"}
   ],
   "remaining_tasks": [
-    {"id": "plan02-uat", "name": "Wave 2 UAT — user runs 4 scenarios against worktree dx serve", "status": "awaiting_user", "blocking": true},
-    {"id": "merge-wave2", "name": "Merge worktree-agent-aac7b73dafc0ba46f to develop after UAT approval", "status": "blocked_by_uat"},
-    {"id": "code-review", "name": "Run gsd-code-review on phase source changes", "status": "blocked_by_merge"},
-    {"id": "verify-phase", "name": "Spawn gsd-verifier for phase goal verification", "status": "blocked_by_merge"},
-    {"id": "finalize", "name": "phase.complete in roadmap + offer next-step routing", "status": "blocked_by_verify"}
+    {"id": 3, "name": "Plan Phase 35 (/gsd-plan-phase 35)", "status": "not_started"}
   ],
-  "blockers": [
-    {"description": "Wave 2 UAT awaiting user execution against worktree dx serve", "type": "human_action", "workaround": "user runs the 4 scenarios listed in .continue-here.md and reports back"}
-  ],
-  "human_actions_pending": [
-    {"action": "Run `cd /Users/twilson/code/ironhermes/.claude/worktrees/agent-aac7b73dafc0ba46f/crates/iron_hermes_ui && RUSTC_WRAPPER= dx serve`, then verify 4 UAT scenarios (live-spawn <1s, dynamic cadence 5s/1.5s, payload shape, regressions)", "context": "Plan 02 push-driven updates checkpoint:human-verify", "blocking": true}
-  ],
+  "blockers": [],
+  "human_actions_pending": [],
   "decisions": [
-    {"decision": "Reverted original Plan 01+02 implementations (10 commits) and replanned against HermesApp", "rationale": "Both plans targeted warp_hermes.rs which is legacy-shell dead code (default features mount HermesApp). SSR panicked with 'Could not find context Signal<bool>'", "phase": "26.7.1"},
-    {"decision": "Track Cargo.lock at workspace root + pin dioxus = \"=0.7.1\" in iron_hermes_ui/Cargo.toml", "rationale": "Cargo.lock was gitignored; fresh worktrees re-resolved dioxus=0.7 to latest 0.7.9, breaking dx CLI compatibility", "phase": "26.7.1"},
-    {"decision": "Path A for progress_callback (slot + RAII guard on AppState)", "rationale": "AppRuntimeBundle.progress_callback is baked into a singleton Arc at AppState::init(); cannot replace per-turn", "phase": "26.7.1"},
-    {"decision": "Use use_resource instead of use_server_future for ScreenAgents", "rationale": "use_server_future(...)? early-returns on suspended state, killing subsequent hook registrations (poll loop never ran after restart)", "phase": "26.7.1"},
-    {"decision": "use web_time::Instant everywhere instead of std::time::Instant", "rationale": "std::time::Instant panics on wasm32 with 'time not implemented'", "phase": "26.7.1"}
+    {"decision": "Switch to per-subagent independent iteration budgets globally (interactive + cron); each child gets a fresh BudgetHandle::new(delegation.max_iterations) instead of cloning the parent's Arc", "rationale": "Matches hermes-agent reference; resolves T-28.1-16 as a side effect since no subagent charges its parent's budget", "phase": "35"},
+    {"decision": "Retire PROV-10 shared parent/child counter; runaway bounded by max_spawn_depth × max_concurrent_children × delegation.max_iterations (no tree-wide ceiling)", "rationale": "Reference-style guard; depth (Phase 32.2) + concurrency semaphore already exist", "phase": "35"},
+    {"decision": "delegation.max_iterations already exists in SubagentConfig (config.rs:982, default 50) — no new config field; change is the wiring at subagent_runner.rs:282-284", "rationale": "Discovered during CONTEXT write-up", "phase": "35"},
+    {"decision": "Defer subagent handoff to a future phase; DROP budget refresh/top-up entirely", "rationale": "Handoff is net-new design (reference analog is kanban); refresh tensions with DoS containment", "phase": "35"}
   ],
-  "uncommitted_files": [
-    ".omc/project-memory.json",
-    ".omc/state/mission-state.json",
-    ".planning/ROADMAP.md (Plan 01 marked complete by gsd-sdk after merge)",
-    ".planning/STATE.md (begin-phase update)",
-    "crates/iron_hermes_ui/Cargo.lock (regenerated during build, gitignored at crate level)",
-    "untracked: crates/iron_hermes_ui/assets/i_hermes_logo*.png.bak, hello.py, projects/"
-  ],
-  "next_action": "User runs UAT against worktree at /Users/twilson/code/ironhermes/.claude/worktrees/agent-aac7b73dafc0ba46f/crates/iron_hermes_ui. On 'approved', merge worktree-agent-aac7b73dafc0ba46f to develop with no-ff, update ROADMAP plan-02 to complete, then run code-review + verifier.",
-  "context_notes": "Phase 26.7.1 went through extensive iteration. Wave 1 hit 4 UAT cycles (kill/interrupt HOLD bug, baseline-polling regression, infinite render loop, Instant::now wasm32 panic) before passing. Each fix surfaced the next failing line. Wave 2 implementation looks clean on paper (build/test gates all green, Arc::new not Box::new verified, JSON shape test passes). UAT focus is the headline live-spawn <1s behavior. Worktree is still alive — agent ID aac7b73dafc0ba46f addressable via SendMessage.",
-  "active_worktree": {
-    "branch": "worktree-agent-aac7b73dafc0ba46f",
-    "path": "/Users/twilson/code/ironhermes/.claude/worktrees/agent-aac7b73dafc0ba46f",
-    "agent_id": "aac7b73dafc0ba46f",
-    "base_commit": "0f03fc86787c596ed18104d1eca2bd503a718e3e",
-    "note": "Do NOT delete or merge without UAT approval. Agent is suspended, addressable via SendMessage(to: 'aac7b73dafc0ba46f') for any required hotfix."
-  }
+  "uncommitted_files": [],
+  "next_action": "Run /gsd-plan-phase 35. Planner MUST read 35-CONTEXT.md first — the cron-specific architecture in docs/AGENT-RUNTIME-DESIGN.md §8 is SUPERSEDED by the global per-subagent model.",
+  "context_notes": "Phase 35 pivoted mid-discussion from cron-specific isolation to a global delegation-budget-model change after investigating the Python reference (hermes-agent/tools/delegate_tool.py: per-subagent own budget, default 50, no shared counter). All decisions locked in 35-CONTEXT.md. Key change site: subagent_runner.rs:282-284 (replace budget.clone() shared Arc with a fresh per-child BudgetHandle). PROV-10 doc-comment at subagent_runner.rs:34-39 and its regression test(s) must be inverted. No source code changed yet — discussion + roadmap only."
 }

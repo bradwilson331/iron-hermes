@@ -1,0 +1,71 @@
+# Phase 36.2 pricing table. Values verified against
+# /Users/twilson/code/hermes-agent/agent/usage_pricing.py on 2026-05-25.
+# CRITICAL: claude-opus-4-7 is $5/$25 (new-tokenizer 4.x generation),
+# NOT $15/$75 as CONTEXT.md sketched. The $15/$75 row is the legacy
+# claude-opus-4-20250514 (April 2025 release) only.
+#
+# All values are integer micro-USD per 1M tokens (1 USD = 1_000_000).
+# No floats — see RESEARCH.md Pitfall 5: Float Cost Drift.
+
+[models."claude-opus-4-7"]
+provider                     = "anthropic"
+input_per_1m_micros          = 5_000_000      # $5.00
+output_per_1m_micros         = 25_000_000     # $25.00
+cache_read_per_1m_micros     = 500_000        # $0.50
+cache_creation_per_1m_micros = 6_250_000      # $6.25
+
+[models."claude-opus-4-6"]
+provider                     = "anthropic"
+input_per_1m_micros          = 5_000_000
+output_per_1m_micros         = 25_000_000
+cache_read_per_1m_micros     = 500_000
+cache_creation_per_1m_micros = 6_250_000
+
+[models."claude-sonnet-4-6"]
+provider                     = "anthropic"
+input_per_1m_micros          = 3_000_000
+output_per_1m_micros         = 15_000_000
+cache_read_per_1m_micros     = 300_000
+cache_creation_per_1m_micros = 3_750_000
+
+[models."claude-opus-4-20250514"]
+provider                     = "anthropic"
+input_per_1m_micros          = 15_000_000     # $15.00 — legacy April 2025 release
+output_per_1m_micros         = 75_000_000     # $75.00
+cache_read_per_1m_micros     = 1_500_000
+cache_creation_per_1m_micros = 18_750_000
+
+[models."claude-sonnet-4-20250514"]
+provider                     = "anthropic"
+input_per_1m_micros          = 3_000_000
+output_per_1m_micros         = 15_000_000
+cache_read_per_1m_micros     = 300_000
+cache_creation_per_1m_micros = 3_750_000
+
+[models."claude-haiku-4-5"]
+provider                     = "anthropic"
+input_per_1m_micros          = 1_000_000
+output_per_1m_micros         = 5_000_000
+cache_read_per_1m_micros     = 100_000
+cache_creation_per_1m_micros = 1_250_000
+
+[models."claude-3-5-sonnet-20241022"]
+provider                     = "anthropic"
+input_per_1m_micros          = 3_000_000
+output_per_1m_micros         = 15_000_000
+cache_read_per_1m_micros     = 300_000
+cache_creation_per_1m_micros = 3_750_000
+
+[models."claude-3-haiku-20240307"]
+provider                     = "anthropic"
+input_per_1m_micros          = 250_000
+output_per_1m_micros         = 1_250_000
+cache_read_per_1m_micros     = 30_000
+cache_creation_per_1m_micros = 300_000
+
+[models."gpt-4o"]
+provider                     = "openai"
+input_per_1m_micros          = 2_500_000
+output_per_1m_micros         = 10_000_000
+cache_read_per_1m_micros     = 1_250_000
+cache_creation_per_1m_micros = 0              # OpenAI does not bill cache creation separately

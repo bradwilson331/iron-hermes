@@ -53,8 +53,24 @@ cargo build --release
 
 ### 1. Set your API key
 
-IronHermes reads credentials from `~/.ironhermes/.env`. The installer creates
-this file for you (from the template); edit it to add your key:
+The recommended approach is the interactive setup wizard:
+
+```bash
+hermes setup
+```
+
+The wizard asks whether you want a quick setup (provider + model only) or a full
+setup (all sections). It writes both `~/.ironhermes/config.yaml` and
+`~/.ironhermes/.env` for you.
+
+> **Auto-launch on first run.** If you invoke `ironhermes` (or `ironhermes chat`)
+> and no runnable LLM is configured — meaning none of `OPENROUTER_API_KEY`,
+> `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` are set and no local Ollama URL is
+> configured — the setup wizard launches automatically.
+
+**Manual alternative:** If you prefer to configure by hand, IronHermes reads
+credentials from `~/.ironhermes/.env`. The installer creates this file for you
+(from the template); edit it to add your key:
 
 ```bash
 # Using OpenRouter (the default provider)
@@ -75,6 +91,10 @@ ironhermes doctor
 
 This checks that required environment variables are present, the config file
 parses cleanly, and all configured providers are reachable.
+
+> **Note:** If you completed the setup wizard, `hermes doctor` runs automatically
+> before the wizard's completion summary. You do not need to run it again
+> separately.
 
 ### 3. Start the agent
 
@@ -102,6 +122,11 @@ that references an env var via `api_key_env`. The minimal working config is
 already present in the installed `config.yaml` template (the `openrouter`
 block). Make sure the matching key (`OPENROUTER_API_KEY`) is set in
 `~/.ironhermes/.env`.
+
+If your key is in `.env` but the wizard still relaunches, the `api_key_env`
+entry may be missing from `config.yaml`. Run `hermes setup model` to trigger
+the wizard's backfill: it detects env vars present in `.env` and silently
+writes the missing `providers.<provider>.api_key_env` entry into `config.yaml`.
 
 ### Binary not found after install
 

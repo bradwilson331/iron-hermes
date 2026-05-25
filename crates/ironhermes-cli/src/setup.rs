@@ -86,6 +86,138 @@ fn provider_env_var_name(provider: &str) -> String {
     format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
 }
 
+/// Phase 35.1 Plan-05 (Gap-B): Locate the project source root that contains
+/// the bundled skill library.
+///
+/// Detection order:
+/// 1. `IRONHERMES_SOURCE` env var — if set and non-empty, use it directly.
+/// 2. Walk up from `std::env::current_exe()` up to 10 levels, find the first
+///    directory containing both `Cargo.toml` and a `skills/` subdirectory.
+///    This detects dev-build installs where the binary lives inside the
+///    project workspace (e.g. `target/debug/hermes`).
+/// 3. Return `None` — graceful degradation for production installs where the
+///    skill library is expected to have been installed by another mechanism.
+fn find_project_skills_source() -> Option<std::path::PathBuf> {
+    // 1. Explicit override via env var.
+    if let Ok(s) = std::env::var("IRONHERMES_SOURCE") {
+        if !s.is_empty() {
+            return Some(std::path::PathBuf::from(s));
+        }
+    }
+    // 2. Dev-build detection: walk up from the binary location.
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..10 {
+        if dir.join("Cargo.toml").exists() && dir.join("skills").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+/// Phase 35.1 Plan-05 (Gap-B): Copy skills from a project source root into
+/// `hermes_home/skills/`.
+///
+/// Iterates over `skills/` and `optional-skills/` inside `source_root`.
+/// For each category subdirectory found, creates the matching destination
+/// category dir under `hermes_home/skills/{category}/` and copies every
+/// regular file into it. Existing destination files are preserved (skip-if-exists).
+///
+/// Non-directory entries at the category level (e.g. `DESCRIPTION.md`) and
+/// non-file entries inside category dirs (nested subdirs) are silently skipped.
+/// Missing source subdirs (`optional-skills/` may not exist) are also skipped.
+fn install_skills_from_source(
+    source_root: &std::path::Path,
+    hermes_home: &std::path::Path,
+) -> Result<()> {
+    for subdir in &["skills", "optional-skills"] {
+        let src_dir = source_root.join(subdir);
+        if !src_dir.exists() {
+            continue;
+        }
+        for category_entry in std::fs::read_dir(&src_dir)
+            .with_context(|| format!("reading source dir {}", src_dir.display()))?
+        {
+            let category_path = category_entry
+                .with_context(|| format!("reading entry in {}", src_dir.display()))?
+                .path();
+            if !category_path.is_dir() {
+                // Skip files at the category level (e.g. DESCRIPTION.md).
+                continue;
+            }
+            let category_name = match category_path.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dest_category = hermes_home.join("skills").join(category_name);
+            std::fs::create_dir_all(&dest_category).with_context(|| {
+                format!("creating dest category dir {}", dest_category.display())
+            })?;
+            for skill_entry in std::fs::read_dir(&category_path)
+                .with_context(|| format!("reading category dir {}", category_path.display()))?
+            {
+                let skill_path = skill_entry
+                    .with_context(|| format!("reading entry in {}", category_path.display()))?
+                    .path();
+                if !skill_path.is_file() {
+                    // Skip nested subdirs inside category dirs.
+                    continue;
+                }
+                let skill_name = match skill_path.file_name() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let dest_skill = dest_category.join(skill_name);
+                if !dest_skill.exists() {
+                    std::fs::copy(&skill_path, &dest_skill).with_context(|| {
+                        format!(
+                            "copying {} -> {}",
+                            skill_path.display(),
+                            dest_skill.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Phase 35.1 Gap-A: silently backfill `providers.{provider}.api_key_env` for
+/// existing configs that pre-date the canonical providers map.
+///
+/// Logic:
+/// 1. Skip if `config.model.provider` is empty.
+/// 2. Skip if `providers.{provider}.api_key_env` is already set (idempotent).
+/// 3. Derive the expected env-var name via `provider_env_var_name`.
+/// 4. Check for the var in hermes_home/.env and in the process environment.
+/// 5. If found in either place, write it to config via `config_set`.
+///
+/// This function is silent (no prompts, no stdout). Errors are propagated so
+/// the caller can decide whether to surface them.
+fn backfill_providers_api_key_env(config: &Config, hermes_home: &Path) -> Result<()> {
+    let provider = &config.model.provider;
+    if provider.is_empty() {
+        return Ok(());
+    }
+    let key = format!("providers.{}.api_key_env", provider);
+    // Skip if already set (idempotent).
+    if ironhermes_core::config_setter::config_get(hermes_home, &key)?.is_some() {
+        return Ok(());
+    }
+    let env_var_name = provider_env_var_name(provider);
+    let dotenv_path = hermes_home.join(".env");
+    let in_dotenv = env_var_exists_in_dotenv_setup(&dotenv_path, &env_var_name).unwrap_or(false);
+    let in_env = std::env::var(&env_var_name)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if in_dotenv || in_env {
+        ironhermes_core::config_setter::config_set(hermes_home, &key, &env_var_name)?;
+    }
+    Ok(())
+}
+
 /// Like prompt_with_default but with no inline default — used for required fields like API keys.
 fn prompt_required(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Result<String> {
     use rustyline::error::ReadlineError;
@@ -113,15 +245,43 @@ pub async fn run_setup(section: Option<&str>, mode: WizardMode) -> Result<()> {
     let mut rl = make_wizard_editor()?;
 
     match section {
-        None => run_minimum_viable_flow(&mut config, &hermes_home, &mut rl, mode).await?,
+        None => {
+            // D-11: Ask fast/full choice at wizard start. Default = quick (N).
+            let full_setup = prompt_yes_no(
+                &mut rl,
+                "Full setup (all sections)? [y = full, N = quick provider+model only]",
+                false,
+            )?;
+
+            // Both paths always run minimum viable flow (provider + model mandatory).
+            run_minimum_viable_flow(&mut config, &hermes_home, &mut rl, mode).await?;
+
+            // D-11: Full path runs all additional sections in order.
+            if full_setup {
+                run_skills_section(&mut rl, &hermes_home).await?;
+                run_terminal_section(&mut config, &hermes_home, &mut rl).await?;
+                run_tools_section(&mut rl, &hermes_home).await?;
+                run_memory_section(&mut config, &hermes_home, &mut rl).await?;
+                run_gateway_section(&mut config, &mut rl).await?;
+                run_agent_section(&mut config, &mut rl).await?;
+            }
+
+            // D-03: Doctor check fires after ALL sections (quick OR full), before summary.
+            println!("\nRunning doctor check...\n");
+            run_doctor_check()?;
+
+            // D-12: Completion summary — configured provider, model, platforms, next step.
+            print_setup_completion_summary(&config, &hermes_home);
+        }
         Some("model") => run_model_section(&mut config, &mut rl).await?,
         Some("memory") => run_memory_section(&mut config, &hermes_home, &mut rl).await?,
         Some("gateway") => run_gateway_section(&mut config, &mut rl).await?,
         Some("tools") => run_tools_section(&mut rl, &hermes_home).await?,
         Some("agent") => run_agent_section(&mut config, &mut rl).await?,
-        Some("skills") => anyhow::bail!("section deferred to Phase 28"),
+        Some("skills") => run_skills_section(&mut rl, &hermes_home).await?,
+        Some("terminal") => run_terminal_section(&mut config, &hermes_home, &mut rl).await?,
         Some(other) => anyhow::bail!(
-            "unknown setup section: {} (valid: model, memory, gateway, tools)",
+            "unknown setup section: {} (valid: model, memory, gateway, tools, skills, terminal)",
             other
         ),
     }
@@ -142,6 +302,9 @@ async fn run_minimum_viable_flow(
     _mode: WizardMode,
 ) -> Result<()> {
     use ironhermes_core::config_setter;
+
+    // Phase 35.1 Gap-A: silently backfill providers map for existing configs.
+    backfill_providers_api_key_env(config, hermes_home)?;
 
     println!("\nWelcome to IronHermes. Let's get you configured.\n");
 
@@ -239,6 +402,10 @@ async fn run_minimum_viable_flow(
 }
 
 async fn run_model_section(config: &mut Config, rl: &mut rustyline::DefaultEditor) -> Result<()> {
+    // Phase 35.1 Gap-A: silently backfill providers map for existing configs.
+    let hermes_home = get_hermes_home();
+    backfill_providers_api_key_env(config, &hermes_home)?;
+
     let provider = prompt_with_default(rl, "Provider", &config.model.provider)?;
     apply_provider_answer(config, &provider, "openrouter");
     let api_key = prompt_required(rl, &format!("API key for {}", provider))?;
@@ -626,6 +793,191 @@ pub fn apply_tool_prereq_answers(
     for (_tool, prereq_name, value) in answers {
         write_env_var_to_dotenv(hermes_home, prereq_name, value)?;
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-01: skills prerequisite wizard section
+// ---------------------------------------------------------------------------
+
+/// Check whether `var` has a non-empty assignment line in the `.env` file at `env_path`.
+/// Returns `false` if the file does not exist. Mirrors `config_cli::env_var_exists_in_dotenv`
+/// (inlined here because config_cli is a binary-only module not accessible from lib context).
+fn env_var_exists_in_dotenv_setup(env_path: &Path, var: &str) -> Result<bool> {
+    if !env_path.exists() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(env_path)?;
+    Ok(text.lines().any(|l| {
+        let trimmed = l.trim_start();
+        trimmed.starts_with(&format!("{}=", var))
+    }))
+}
+
+/// Phase 35.1 D-01: Walk every installed skill's prerequisites and prompt the
+/// operator for missing required env vars and config fields.
+///
+/// Mirrors `run_tools_section` exactly but sources prereqs from `SkillRegistry`
+/// instead of `ToolRegistry`. Uses the same two-write-path contract (RESEARCH Pitfall 7):
+/// - `required_environment_variables` → `write_env_var_to_dotenv` (secrets masked via `is_secret_prereq_name`)
+/// - `config` fields → `ironhermes_core::config_setter::config_set`
+///
+/// Single-path scan of hermes_home/skills/ only (RESEARCH Pitfall 5; optional-skills/ is Phase 25.7).
+pub async fn run_skills_section(
+    rl: &mut rustyline::DefaultEditor,
+    hermes_home: &Path,
+) -> Result<()> {
+    use ironhermes_core::SkillRegistry;
+
+    // Phase 35.1 Plan-05 (Gap-B): Ensure skills dir exists, then install from
+    // project source (dev-build or IRONHERMES_SOURCE override) before scanning
+    // for prereqs. Gracefully skipped when no source is found (production installs).
+    std::fs::create_dir_all(hermes_home.join("skills"))
+        .context("creating hermes_home/skills directory")?;
+    if let Some(source_root) = find_project_skills_source() {
+        install_skills_from_source(&source_root, hermes_home)?;
+    }
+
+    let skills_dir = hermes_home.join("skills");
+    let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+    let mut had_any = false;
+
+    for skill in registry.list() {
+        if let Some(hm) = &skill.hermes_metadata {
+            // env var gaps: check .env, prompt if missing
+            for env_entry in &hm.required_environment_variables {
+                let env_path = hermes_home.join(".env");
+                let already_set = env_var_exists_in_dotenv_setup(&env_path, &env_entry.name)
+                    .unwrap_or(false);
+                if already_set {
+                    continue;
+                }
+                had_any = true;
+                println!();
+                println!("Skill: {}", skill.name);
+                // Build a Prerequisite so we can reuse prompt_for_prereq_value (masking etc.)
+                let prereq = ironhermes_tools::Prerequisite {
+                    kind: "env_var".to_string(),
+                    name: env_entry.name.clone(),
+                    description: env_entry
+                        .help
+                        .clone()
+                        .or_else(|| env_entry.prompt.clone())
+                        .unwrap_or_else(|| format!("required by skill '{}'", skill.name)),
+                    required: env_entry.required_for.is_some(),
+                };
+                let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
+                match answer {
+                    PrereqAnswer::Value(v) => write_env_var_to_dotenv(hermes_home, &prereq.name, &v)?,
+                    PrereqAnswer::Skip | PrereqAnswer::Defer => continue,
+                }
+            }
+
+            // config field gaps: check config.yaml, prompt if missing
+            for cfg_field in &hm.config {
+                let already_set =
+                    ironhermes_core::config_setter::config_get(hermes_home, &cfg_field.key)
+                        .unwrap_or(None)
+                        .is_some();
+                if already_set {
+                    continue;
+                }
+                had_any = true;
+                println!();
+                println!("Skill: {}", skill.name);
+                let prereq = ironhermes_tools::Prerequisite {
+                    kind: "config_field".to_string(),
+                    name: cfg_field.key.clone(),
+                    description: cfg_field
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| format!("config field for skill '{}'", skill.name)),
+                    required: false,
+                };
+                let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
+                match answer {
+                    PrereqAnswer::Value(v) => {
+                        ironhermes_core::config_setter::config_set(hermes_home, &prereq.name, &v)
+                            .with_context(|| format!("failed to set config field {}", prereq.name))?;
+                    }
+                    PrereqAnswer::Skip | PrereqAnswer::Defer => continue,
+                }
+            }
+        }
+    }
+
+    if !had_any {
+        println!("All skill prerequisites satisfied — nothing to configure.");
+    }
+    Ok(())
+}
+
+/// Testability seam for skills prereq answers — mirrors `apply_tool_prereq_answers`.
+/// Bypasses rustyline for tests. Tuple shape: `(skill_name, kind, prereq_name, value)`.
+/// `kind` is `"env_var"` → writes to `.env` via `write_env_var_to_dotenv`.
+/// `kind` is `"config_field"` → writes to `config.yaml` via `config_setter::config_set`.
+pub fn apply_skills_prereq_answers(
+    hermes_home: &Path,
+    answers: &[(&str, &str, &str, &str)], // (skill_name, kind, prereq_name, value)
+) -> Result<()> {
+    for (_skill_name, kind, prereq_name, value) in answers {
+        match *kind {
+            "env_var" => write_env_var_to_dotenv(hermes_home, prereq_name, value)?,
+            "config_field" => {
+                ironhermes_core::config_setter::config_set(hermes_home, prereq_name, value)
+                    .with_context(|| format!("failed to set config field {}", prereq_name))?;
+            }
+            other => anyhow::bail!("unknown skills prereq kind '{}'", other),
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-02: terminal configuration section
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-02: Prompt the operator for the default working directory (`cwd`).
+/// `config.terminal.backend` is NOT prompted (D-02: cwd only).
+/// After collecting input, saves config to `config.yaml` exactly once.
+pub async fn run_terminal_section(
+    config: &mut Config,
+    hermes_home: &Path,
+    rl: &mut rustyline::DefaultEditor,
+) -> Result<()> {
+    println!("\nTerminal configuration.\n");
+    let current_cwd = if config.terminal.cwd.is_empty() {
+        "."
+    } else {
+        &config.terminal.cwd
+    };
+    let answer = prompt_with_default(rl, "Default working directory for agent", current_cwd)?;
+    config.terminal.cwd = if answer.trim().is_empty() {
+        ".".to_string()
+    } else {
+        answer.trim().to_string()
+    };
+    config
+        .save_to(&hermes_home.join("config.yaml"))
+        .context("writing config.yaml")?;
+    Ok(())
+}
+
+/// Testability seam for terminal section — sets terminal.cwd and saves config.
+/// Bypasses rustyline for tests. Analogous to `apply_skills_prereq_answers`.
+pub fn apply_terminal_answer(hermes_home: &Path, cwd: &str) -> Result<()> {
+    let config_path = hermes_home.join("config.yaml");
+    let mut config = if config_path.exists() {
+        Config::load_from(&config_path)?
+    } else {
+        Config::default()
+    };
+    config.terminal.cwd = if cwd.trim().is_empty() {
+        ".".to_string()
+    } else {
+        cwd.trim().to_string()
+    };
+    config.save_to(&config_path).context("writing config.yaml")?;
     Ok(())
 }
 
@@ -1034,6 +1386,145 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 35.1-04: backfill_providers_api_key_env tests (TDD RED)
+    // -----------------------------------------------------------------------
+
+    /// Test 1: backfill writes providers.{provider}.api_key_env when absent and
+    /// .env has the env var.
+    #[test]
+    fn backfill_writes_api_key_env_when_absent_and_dotenv_has_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Write minimal config.yaml with model.provider=openrouter, empty providers map.
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: ''\nproviders: {}\n",
+        )
+        .unwrap();
+        // Write .env with OPENROUTER_API_KEY set.
+        std::fs::write(hermes_home.join(".env"), "OPENROUTER_API_KEY=sk-test\n").unwrap();
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        backfill_providers_api_key_env(&config, hermes_home).expect("backfill should succeed");
+
+        let result = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            result,
+            Some("OPENROUTER_API_KEY".to_string()),
+            "backfill must write providers.openrouter.api_key_env = OPENROUTER_API_KEY"
+        );
+    }
+
+    /// Test 2: backfill is idempotent — skips when key already set.
+    #[test]
+    fn backfill_skips_when_key_already_set() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Pre-write providers.openrouter.api_key_env.
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: ''\nproviders:\n  openrouter:\n    api_key_env: OPENROUTER_API_KEY\n",
+        )
+        .unwrap();
+        std::fs::write(hermes_home.join(".env"), "OPENROUTER_API_KEY=sk-test\n").unwrap();
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        backfill_providers_api_key_env(&config, hermes_home).expect("backfill should succeed");
+
+        // Value must still be set (idempotent — no double-write, no error).
+        let result = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            result,
+            Some("OPENROUTER_API_KEY".to_string()),
+            "backfill must leave existing value unchanged"
+        );
+    }
+
+    /// Test 3: backfill skips when no env var found (no .env file, no process env).
+    #[test]
+    fn backfill_skips_when_no_env_var_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        // Use a fake provider name unlikely to be in any env.
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: fakeprovider_zzz999\n  default: ''\nproviders: {}\n",
+        )
+        .unwrap();
+        // No .env file. FAKEPROVIDER_ZZZ999_API_KEY is not in any real env.
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        backfill_providers_api_key_env(&config, hermes_home).expect("backfill should succeed");
+
+        let result = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.fakeprovider_zzz999.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            result, None,
+            "backfill must NOT write api_key_env when env var is absent"
+        );
+    }
+
+    /// Test 4: backfill uses process env when .env file is absent.
+    #[test]
+    fn backfill_uses_process_env_when_dotenv_absent() {
+        use std::sync::Mutex;
+        use std::sync::OnceLock;
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hermes_home = tmp.path();
+
+        std::fs::write(
+            hermes_home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: ''\nproviders: {}\n",
+        )
+        .unwrap();
+        // No .env file.
+
+        // SAFETY: single-threaded test gated by ENV_LOCK mutex.
+        unsafe { std::env::set_var("OPENROUTER_API_KEY", "sk-from-env") };
+
+        let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
+            .expect("config should load");
+        let result = backfill_providers_api_key_env(&config, hermes_home);
+
+        // Clean up process env before any assert.
+        // SAFETY: single-threaded test gated by ENV_LOCK mutex.
+        unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
+
+        result.expect("backfill should succeed");
+
+        let value = ironhermes_core::config_setter::config_get(
+            hermes_home,
+            "providers.openrouter.api_key_env",
+        )
+        .expect("config_get should succeed");
+        assert_eq!(
+            value,
+            Some("OPENROUTER_API_KEY".to_string()),
+            "backfill must write providers.openrouter.api_key_env when env var is in process env"
+        );
+    }
+
     /// CFG-01 Test 4: source-text invariant — run_minimum_viable_flow must NOT
     /// call apply_api_key_answer(config, ...) anywhere in its body.
     #[test]
@@ -1056,6 +1547,222 @@ mod tests {
              that writes the deprecated model.api_key field. Body was:\n{}",
             body
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 35.1 Plan 05: find_project_skills_source + install_skills_from_source tests
+    // -------------------------------------------------------------------------
+
+    /// Env-var mutex for tests that mutate process environment.
+    fn skills_env_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// find_project_skills_source returns Some(path) when IRONHERMES_SOURCE is set.
+    #[test]
+    fn find_project_skills_source_uses_ironhermes_source_env_var() {
+        let _guard = skills_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test gated by skills_env_lock mutex.
+        unsafe { std::env::set_var("IRONHERMES_SOURCE", "/tmp/fake-root") };
+        let result = find_project_skills_source();
+        unsafe { std::env::remove_var("IRONHERMES_SOURCE") };
+        assert_eq!(
+            result,
+            Some(std::path::PathBuf::from("/tmp/fake-root")),
+            "find_project_skills_source must return the IRONHERMES_SOURCE path"
+        );
+    }
+
+    /// find_project_skills_source does not panic when IRONHERMES_SOURCE is unset.
+    #[test]
+    fn find_project_skills_source_does_not_panic_without_env_var() {
+        let _guard = skills_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: single-threaded test gated by skills_env_lock mutex.
+        unsafe { std::env::remove_var("IRONHERMES_SOURCE") };
+        // Should return Some or None without panicking.
+        let result = find_project_skills_source();
+        // If it found a path, that path must exist on disk.
+        if let Some(ref p) = result {
+            assert!(p.exists(), "found path {:?} must exist on disk", p);
+        }
+        // The test passes as long as there's no panic.
+    }
+
+    /// install_skills_from_source copies category dirs into hermes_home/skills/.
+    #[test]
+    fn install_skills_from_source_copies_category_dirs_into_hermes_home() {
+        let source_tmp = tempfile::TempDir::new().unwrap();
+        let hermes_tmp = tempfile::TempDir::new().unwrap();
+
+        let cat_dir = source_tmp.path().join("skills").join("testcat");
+        std::fs::create_dir_all(&cat_dir).unwrap();
+        std::fs::write(cat_dir.join("skill-a.md"), "# skill-a").unwrap();
+
+        install_skills_from_source(source_tmp.path(), hermes_tmp.path())
+            .expect("install_skills_from_source should succeed");
+
+        let dest = hermes_tmp.path().join("skills").join("testcat").join("skill-a.md");
+        assert!(dest.exists(), "hermes_home/skills/testcat/skill-a.md must exist after install");
+    }
+
+    /// install_skills_from_source does not overwrite existing files.
+    #[test]
+    fn install_skills_from_source_skips_existing_files() {
+        let source_tmp = tempfile::TempDir::new().unwrap();
+        let hermes_tmp = tempfile::TempDir::new().unwrap();
+
+        let cat_dir = source_tmp.path().join("skills").join("testcat");
+        std::fs::create_dir_all(&cat_dir).unwrap();
+        std::fs::write(cat_dir.join("skill-a.md"), "# new content").unwrap();
+
+        // Pre-write the destination file with "original" content.
+        let dest_cat = hermes_tmp.path().join("skills").join("testcat");
+        std::fs::create_dir_all(&dest_cat).unwrap();
+        std::fs::write(dest_cat.join("skill-a.md"), "original").unwrap();
+
+        install_skills_from_source(source_tmp.path(), hermes_tmp.path())
+            .expect("install_skills_from_source should succeed");
+
+        let content = std::fs::read_to_string(dest_cat.join("skill-a.md")).unwrap();
+        assert_eq!(content, "original", "existing file must NOT be overwritten");
+    }
+
+    /// install_skills_from_source copies from optional-skills/ as well.
+    #[test]
+    fn install_skills_from_source_copies_from_optional_skills() {
+        let source_tmp = tempfile::TempDir::new().unwrap();
+        let hermes_tmp = tempfile::TempDir::new().unwrap();
+
+        let opt_cat_dir = source_tmp.path().join("optional-skills").join("optcat");
+        std::fs::create_dir_all(&opt_cat_dir).unwrap();
+        std::fs::write(opt_cat_dir.join("skill-b.md"), "# skill-b").unwrap();
+
+        install_skills_from_source(source_tmp.path(), hermes_tmp.path())
+            .expect("install_skills_from_source should succeed");
+
+        let dest = hermes_tmp.path().join("skills").join("optcat").join("skill-b.md");
+        assert!(dest.exists(), "hermes_home/skills/optcat/skill-b.md must exist after install from optional-skills");
+    }
+
+    /// install_skills_from_source returns Ok when optional-skills dir is absent.
+    #[test]
+    fn install_skills_from_source_ignores_missing_source_subdirs() {
+        let source_tmp = tempfile::TempDir::new().unwrap();
+        let hermes_tmp = tempfile::TempDir::new().unwrap();
+
+        // Only skills/, no optional-skills/.
+        let cat_dir = source_tmp.path().join("skills").join("testcat");
+        std::fs::create_dir_all(&cat_dir).unwrap();
+        std::fs::write(cat_dir.join("skill-a.md"), "# skill-a").unwrap();
+
+        let result = install_skills_from_source(source_tmp.path(), hermes_tmp.path());
+        assert!(result.is_ok(), "must return Ok when optional-skills is absent");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-03: Doctor check at wizard exit (lib-safe inline version)
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-03: Run a health check at wizard exit.
+///
+/// This is a lib-safe inline version of the doctor check, callable from
+/// setup.rs (which compiles as part of the lib crate). The full
+/// `ironhermes doctor` command dispatches through main.rs → doctor::run_doctor_check()
+/// which adds the profile line; the wizard exit version is equivalent but
+/// omits the profile context (not yet loaded in first-run flows).
+///
+/// Always returns `Ok(())` — issues are shown as MISSING lines, not errors.
+fn run_doctor_check() -> Result<()> {
+    use colored::Colorize;
+
+    println!("{}", "IronHermes Doctor".bold().cyan());
+    println!("{}", "─".repeat(40));
+
+    let home = get_hermes_home();
+    let ok_icon = |ok: bool| if ok { "OK".green() } else { "MISSING".yellow() };
+
+    println!("  [{}] Home directory", ok_icon(home.exists()));
+
+    let config_path = ironhermes_core::config::Config::config_path();
+    println!("  [{}] Config file", ok_icon(config_path.exists()));
+
+    let env_path = ironhermes_core::config::Config::env_path();
+    println!("  [{}] .env file", ok_icon(env_path.exists()));
+
+    println!(
+        "  [{}] OpenRouter API key",
+        ok_icon(std::env::var("OPENROUTER_API_KEY").map(|v| !v.is_empty()).unwrap_or(false))
+    );
+    println!(
+        "  [{}] Anthropic API key",
+        ok_icon(std::env::var("ANTHROPIC_API_KEY").map(|v| !v.is_empty()).unwrap_or(false))
+    );
+
+    let db_path = home.join("state.db");
+    println!("  [{}] State database", ok_icon(db_path.exists()));
+
+    let pid_path = home.join("gateway.pid");
+    if pid_path.exists() {
+        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
+            .ok()
+            .flatten()
+            .map(|r| {
+                matches!(
+                    ironhermes_gateway::pid::is_pid_alive(r.pid),
+                    ironhermes_gateway::pid::PidLiveness::Live
+                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
+                )
+            })
+            .unwrap_or(false);
+        println!(
+            "  [{}] Gateway PID (gateway.pid → live process)",
+            ok_icon(pid_ok)
+        );
+    } else {
+        println!("  [{}] Gateway PID (not running)", ok_icon(true));
+    }
+
+    println!();
+    println!("{}", "Run `ironhermes status` for more details.".dimmed());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-12: Setup completion summary
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-12: Print a completion summary after wizard + doctor have run.
+///
+/// Shows the configured provider, model, which gateway platforms are enabled,
+/// and a next-step hint. Returns `()` — pure stdout printing, no I/O errors
+/// propagated (doctor already covered failures; this is best-effort UX).
+fn print_setup_completion_summary(config: &Config, _hermes_home: &Path) {
+    use colored::Colorize;
+    println!();
+    println!("{}", "Setup complete!".bold().green());
+    println!("  Provider: {}", config.model.provider);
+    println!("  Model:    {}", config.model.default);
+
+    // Determine telegram-enabled status via typed config access (D-12).
+    let telegram_enabled = config
+        .gateway
+        .platforms
+        .get("telegram")
+        .map(|p| p.enabled)
+        .unwrap_or(false);
+
+    if telegram_enabled {
+        println!("  Telegram: enabled");
+    }
+    println!();
+    if telegram_enabled {
+        println!("  Run `ironhermes gateway` to start the Telegram bot.");
+    } else {
+        println!("  Run `ironhermes` to start chatting.");
     }
 }
 

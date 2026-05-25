@@ -210,6 +210,12 @@ pub struct App {
     pub fast_enabled: Arc<AtomicBool>,
     /// `/skin <name>` setter (D-09).
     pub skin: Arc<std::sync::RwLock<String>>,
+    /// Phase 36.1 (GW-05-TUI, D-08): persistent per-session running flag.
+    /// Set to true by `RunningAgentGuard::new()` at spawn_turn entry; cleared by Drop on
+    /// all turn exit paths (Ok/Err/?/panic/cancel). Replaces the `pending_rx.is_some()`
+    /// snapshot anti-pattern at commands.rs:537 (Pitfall 4). DO NOT remove or repurpose
+    /// pending_rx — it still owns the streaming receive role.
+    pub agent_running: Arc<AtomicBool>,
 
     // — D-18 parity handles (Arc-held) ───────────────────────────────────────
     /// Phase 28.1-05: durable agent runtime. spawn_turn builds TurnRequest and
@@ -324,6 +330,8 @@ impl App {
             debug_enabled: deps.debug_enabled,
             fast_enabled: deps.fast_enabled,
             skin: deps.skin,
+            // Phase 36.1 (GW-05-TUI, D-08): persistent running flag — false at session start.
+            agent_running: Arc::new(AtomicBool::new(false)),
             agent_runtime: deps.agent_runtime,
             hook_registry: deps.hook_registry,
             mcp_manager: deps.mcp_manager,
