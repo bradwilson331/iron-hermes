@@ -198,6 +198,48 @@ pub struct UsageEvent {
     pub error_kind: Option<String>,
 }
 
+/// Filter for `StateStore::query_usage_events` (Phase 36.2 Plan 10).
+///
+/// **T-36.2-10-INJ:** every field value flows through `rusqlite::params!`
+/// bindings inside `query_usage_events` — never `format!`-interpolated into
+/// the SQL string. Constructed from user-supplied `--provider X` / `--model X`
+/// / `--since 7d` / `--today` flags at the `/usage` handler entry point.
+#[derive(Debug, Clone, Default)]
+pub struct UsageFilter {
+    /// When `Some`, restrict to a single session. Set to `None` for cross-
+    /// session aggregations (`--today`, `--provider`, etc.).
+    pub session_id: Option<String>,
+    /// Restrict to rows whose `ts` is at or after local-midnight today
+    /// (the cutoff is computed at query time).
+    pub today_only: bool,
+    /// Optional `--provider X` filter.
+    pub provider: Option<String>,
+    /// Optional `--model X` filter.
+    pub model: Option<String>,
+    /// Optional `--since Nd` / `--since Nh` / `--since Nm` rolling window,
+    /// expressed in seconds. The cutoff (`now - since_seconds`) is computed
+    /// at query time.
+    pub since_seconds: Option<i64>,
+}
+
+/// One row of the `(provider, model)` aggregation returned by
+/// `StateStore::query_usage_events` (Phase 36.2 Plan 10).
+///
+/// All numerics are `i64`; cost is in micro-USD per the D-USAGE-01
+/// integer-microdollar discipline (no float drift). The display layer is
+/// the ONLY place that converts to `f64` for human-readable rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageRollup {
+    pub provider: String,
+    pub model: String,
+    pub in_tok: i64,
+    pub out_tok: i64,
+    pub cache_read: i64,
+    pub cache_create: i64,
+    pub cost_usd_micros: i64,
+    pub event_count: i64,
+}
+
 /// A single message row retrieved from storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
@@ -879,6 +921,76 @@ impl StateStore {
         &self.conn
     }
 
+    /// Aggregate `usage_events` rows by `(provider, model)` under the given
+    /// filter (Phase 36.2 Plan 10).
+    ///
+    /// **T-36.2-10-INJ mitigation:** the SQL string is composed with an
+    /// append-only conditional pattern over a fixed `"... WHERE 1=1"` base.
+    /// Every user-supplied filter value is bound via `rusqlite::params!` —
+    /// never `format!`-interpolated into the SQL. The b1 integration test
+    /// (`crates/ironhermes-cli/tests/usage_command.rs`) verifies this with a
+    /// malicious provider string that contains `'; DROP TABLE ...--`; the
+    /// table survives the call and 0 rows are returned (no match).
+    pub fn query_usage_events(&self, filter: &UsageFilter) -> Result<Vec<UsageRollup>> {
+        let mut sql = String::from(
+            "SELECT provider, model, \
+             SUM(in_tok), SUM(out_tok), SUM(cache_read), SUM(cache_create), \
+             SUM(cost_usd_micros), COUNT(*) \
+             FROM usage_events WHERE 1=1",
+        );
+        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(sid) = &filter.session_id {
+            sql.push_str(" AND session_id = ?");
+            bound.push(Box::new(sid.clone()));
+        }
+        if filter.today_only {
+            // Local-midnight today as unix epoch ms.
+            let start_ms = chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is always a valid time of day")
+                .and_local_timezone(chrono::Local)
+                .single()
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() - 86_400_000);
+            sql.push_str(" AND ts >= ?");
+            bound.push(Box::new(start_ms));
+        }
+        if let Some(provider) = &filter.provider {
+            sql.push_str(" AND provider = ?");
+            bound.push(Box::new(provider.clone()));
+        }
+        if let Some(model) = &filter.model {
+            sql.push_str(" AND model = ?");
+            bound.push(Box::new(model.clone()));
+        }
+        if let Some(secs) = filter.since_seconds {
+            let cutoff_ms = chrono::Utc::now().timestamp_millis() - secs * 1000;
+            sql.push_str(" AND ts >= ?");
+            bound.push(Box::new(cutoff_ms));
+        }
+        sql.push_str(" GROUP BY provider, model ORDER BY SUM(cost_usd_micros) DESC");
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows: rusqlite::Result<Vec<UsageRollup>> = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(UsageRollup {
+                    provider: row.get(0)?,
+                    model: row.get(1)?,
+                    in_tok: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    out_tok: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    cache_read: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    cache_create: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    cost_usd_micros: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    event_count: row.get(7)?,
+                })
+            })?
+            .collect();
+        Ok(rows?)
+    }
+
     /// Set or replace the human-readable title for a session.
     pub fn update_session_title(&mut self, id: &str, title: &str) -> Result<()> {
         self.conn.execute(
@@ -976,6 +1088,51 @@ impl StateStore {
 // ---------------------------------------------------------------------------
 // FTS5 sanitization
 // ---------------------------------------------------------------------------
+
+/// Render a `UsageFilter` + rollup list as a human-readable table string.
+///
+/// Phase 36.2 Plan 10 (D-USAGE-03): the single, canonical text renderer used
+/// by the `/usage` slash command across every platform (CLI, TUI, gateway,
+/// web UI). Display is the ONLY place i64 micro-USD becomes f64 — every
+/// upstream arithmetic operation stays integer (Pitfall 5: float drift).
+///
+/// The "Cost" column prints with `${:.4}` (four decimal places) so a 234_000
+/// micro-USD value renders as `$0.2340`. Total cost line at the bottom uses
+/// the same precision so column totals match the row totals byte-for-byte.
+pub fn format_usage_rollups(rollups: &[UsageRollup], filter: &UsageFilter) -> String {
+    if rollups.is_empty() {
+        return "No usage data found for this filter.".to_string();
+    }
+    let mut out = String::new();
+    out.push_str("Usage\n");
+    if let Some(sid) = &filter.session_id {
+        out.push_str(&format!("Session: {sid}\n"));
+    }
+    out.push_str(&format!(
+        "{:<10} {:<24} {:>8} {:>8} {:>8} {:>8} {:>11}\n",
+        "Provider", "Model", "In tok", "Out tok", "Cache R", "Cache C", "Cost"
+    ));
+    let mut total_cost: i64 = 0;
+    for r in rollups {
+        let cost_usd = r.cost_usd_micros as f64 / 1_000_000.0;
+        out.push_str(&format!(
+            "{:<10} {:<24} {:>8} {:>8} {:>8} {:>8} ${:>10.4}\n",
+            r.provider,
+            r.model,
+            r.in_tok,
+            r.out_tok,
+            r.cache_read,
+            r.cache_create,
+            cost_usd
+        ));
+        total_cost += r.cost_usd_micros;
+    }
+    out.push_str(&format!(
+        "Total cost: ${:.4}\n",
+        total_cost as f64 / 1_000_000.0
+    ));
+    out
+}
 
 /// Strip FTS5 special operators from user input to prevent query parse errors.
 /// Pass `raw: true` in [`SearchFilter`] to bypass this.

@@ -309,6 +309,37 @@ pub trait StateStoreHandle: Send + Sync {
     fn update_title(&self, session_id: &str, title: &str) -> Result<(), String>;
     /// Get a session by name or id. Returns `Some(session_id)` when found.
     fn get_session_id(&self, name_or_id: &str) -> Option<String>;
+    /// Phase 36.2 Plan 10 (D-USAGE-03): render the `/usage` table for the
+    /// given filter parameters.
+    ///
+    /// Parameters mirror the four user-visible flat-flags on `/usage`:
+    /// `session_id` (bare invocation — current session), `today_only`
+    /// (`--today` cross-session), `provider` (`--provider X`), `model`
+    /// (`--model X`), and `since_seconds` (`--since Nd` already parsed via
+    /// `handlers::parse_since`). The trait method is intentionally primitive-
+    /// typed so the trait stays in `ironhermes-core` without back-depending
+    /// on `ironhermes-state` (where `UsageFilter` and `UsageRollup` live).
+    ///
+    /// **T-36.2-10-INJ:** every value passed to this method MUST flow into
+    /// `rusqlite::params!` bindings inside the production implementation —
+    /// never `format!`-interpolated into SQL. The b1 / b12 integration tests
+    /// in `crates/ironhermes-cli/tests/usage_command.rs` enforce this both
+    /// dynamically (SQL-injection-shaped provider value) and structurally
+    /// (no `format!(...SELECT` lines in `ironhermes-state/src/lib.rs`).
+    ///
+    /// Default impl returns the "not configured" guard string so existing
+    /// test fakes and the gateway path that doesn't wire a StateStore today
+    /// continue to compile without churn.
+    fn usage_text(
+        &self,
+        _session_id: Option<&str>,
+        _today_only: bool,
+        _provider: Option<&str>,
+        _model: Option<&str>,
+        _since_seconds: Option<i64>,
+    ) -> String {
+        "Session storage not configured.".to_string()
+    }
 }
 
 /// Handle for ProviderResolver status and model information (D-04).
