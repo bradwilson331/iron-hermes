@@ -170,6 +170,11 @@ enum Commands {
         #[command(subcommand)]
         command: models_cmd::ModelsSubcommand,
     },
+    /// Show or refresh the pricing table for cost accounting (Phase 36.2 Plan 09).
+    Pricing {
+        #[command(subcommand)]
+        command: ironhermes_cli::pricing_cmd::PricingSubcommand,
+    },
     /// Manage MCP server connections
     Mcp {
         #[command(subcommand)]
@@ -435,6 +440,9 @@ async fn main() -> Result<()> {
             action: MemorySubcommand::Off,
         }) => memory_cmd::handle_memory_off().await,
         Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
+        Some(Commands::Pricing { command }) => {
+            ironhermes_cli::pricing_cmd::handle_pricing_command(command).await
+        }
         Some(Commands::Mcp { action }) => match mcp_config::handle_mcp_command(action).await {
             Ok(()) => Ok(()),
             Err(e) => {
