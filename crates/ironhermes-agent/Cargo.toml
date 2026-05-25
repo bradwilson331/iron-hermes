@@ -37,6 +37,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
+sha2 = { workspace = true }
 memory-sqlite = { path = "../../providers/memory-sqlite", optional = true }
 memory-grafeo = { path = "../../providers/memory-grafeo", optional = true }
 memory-duckdb = { path = "../../providers/memory-duckdb", optional = true }

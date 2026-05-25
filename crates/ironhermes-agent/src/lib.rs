@@ -19,6 +19,7 @@ pub mod nudge;
 pub mod personality;
 pub mod pressure_warning;
 pub mod prompt_builder;
+pub mod rate_limit_tracker;
 pub mod session_search;
 pub mod shrike;
 pub mod streaming_scrubber;
@@ -48,5 +49,9 @@ pub use memory::{MemoryManager, SharedProvider};
 pub use personality::PersonalityRegistry;
 pub use pressure_warning::PressureTracker;
 pub use prompt_builder::{PromptBuilder, PromptSlot};
+pub use rate_limit_tracker::{
+    RateLimitEvent, RateLimitKey, RateLimitSeverity, RateLimitSource, RateLimitTracker,
+    TrackerState, hash_api_key,
+};
 pub use shrike::{KillResult, ShrikeService};
 pub use subagent_runner::AgentSubagentRunner;
