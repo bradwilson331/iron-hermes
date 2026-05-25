@@ -1255,6 +1255,138 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 36.2 Plan 07 (fixup): shared StateStoreHandle adapter
+// ---------------------------------------------------------------------------
+//
+// Wraps `Arc<Mutex<StateStore>>` and implements the
+// `ironhermes_core::commands::context::StateStoreHandle` trait so the slash
+// command handlers — including `/usage` (Plan 10) — run against the real DB
+// from every surface (CLI, TUI, web). Without this, `iron_hermes_ui` had no
+// way to wire a `StateStoreHandle` into `CommandContext` and every slash
+// command intercepted in `ws.rs` returned "Session storage not configured."
+//
+// Mirrors `tui_rata::commands::StateStoreAdapter` so both surfaces emit
+// byte-identical text. Lives in `ironhermes-state` because that's where
+// `UsageFilter` / `format_usage_rollups` live and adding the impl here
+// avoids a circular dependency from `ironhermes-core`.
+
+use ironhermes_core::commands::context::StateStoreHandle as CoreStateStoreHandle;
+
+/// `Arc<Mutex<StateStore>>` → `dyn StateStoreHandle` adapter.
+///
+/// Wrap with `Arc::new(StateStoreHandleAdapter(store.clone()))` and pass into
+/// `CommandContext::with_state_store(...)`. Synchronous; callers that hold
+/// the tokio runtime should wrap dispatch in `tokio::task::block_in_place`.
+pub struct StateStoreHandleAdapter(pub std::sync::Arc<std::sync::Mutex<StateStore>>);
+
+impl CoreStateStoreHandle for StateStoreHandleAdapter {
+    fn list_sessions_text(&self, limit: usize) -> String {
+        self.list_sessions_text_filtered(limit, None)
+    }
+
+    fn list_sessions_text_filtered(&self, limit: usize, workspace_root: Option<&str>) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.list_sessions_filtered(None, limit, workspace_root) {
+            Ok(sessions) if sessions.is_empty() => match workspace_root {
+                Some(ws) => format!("No sessions found for workspace: {ws}"),
+                None => "No sessions found.".to_string(),
+            },
+            Ok(sessions) => {
+                let lines: Vec<String> =
+                    sessions.iter().map(|s| format!("  {}", s.id)).collect();
+                let header = match workspace_root {
+                    Some(ws) => format!("Recent sessions (workspace={ws}):"),
+                    None => "Recent sessions:".to_string(),
+                };
+                format!("{header}\n{}", lines.join("\n"))
+            }
+            Err(e) => format!("Error listing sessions: {e}"),
+        }
+    }
+
+    fn history_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.get_messages(session_id) {
+            Ok(msgs) if msgs.is_empty() => "No messages in history.".to_string(),
+            Ok(msgs) => {
+                let lines: Vec<String> = msgs
+                    .iter()
+                    .map(|m| {
+                        format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or(""))
+                    })
+                    .collect();
+                format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
+            }
+            Err(e) => format!("Error loading history: {e}"),
+        }
+    }
+
+    fn export_session_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.export_session(session_id) {
+            Ok(export) => format!("Session exported: {} messages.", export.messages.len()),
+            Err(e) => format!("Error exporting session: {e}"),
+        }
+    }
+
+    fn update_title(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| "StateStore lock poisoned.".to_string())?;
+        guard
+            .update_session_title(session_id, title)
+            .map_err(|e| e.to_string())
+    }
+
+    fn get_session_id(&self, name_or_id: &str) -> Option<String> {
+        let guard = self.0.lock().ok()?;
+        if let Ok(Some(s)) = guard.get_session(name_or_id) {
+            return Some(s.id);
+        }
+        guard
+            .get_session_by_title(name_or_id)
+            .ok()
+            .flatten()
+            .map(|s| s.id)
+    }
+
+    fn usage_text(
+        &self,
+        session_id: Option<&str>,
+        today_only: bool,
+        provider: Option<&str>,
+        model: Option<&str>,
+        since_seconds: Option<i64>,
+    ) -> String {
+        let filter = UsageFilter {
+            session_id: session_id.map(|s| s.to_string()),
+            today_only,
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            since_seconds,
+        };
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.query_usage_events(&filter) {
+            Ok(rows) => format_usage_rollups(&rows, &filter),
+            Err(e) => format!("Usage query failed: {e}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 25.3 Plan 10 Task 2: list_sessions_filtered tests (D-W-2)
 // ---------------------------------------------------------------------------
 

@@ -275,11 +275,24 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         } else {
                                             vec![]
                                         };
+                                        // Phase 36.2 Plan 07 fix: thread state_store into
+                                        // CommandContext so `/usage` (and other store-backed
+                                        // slash commands) run against the real DB. Without this,
+                                        // handlers fall back to the "Session storage not
+                                        // configured." guard.
+                                        let store_handle: std::sync::Arc<
+                                            dyn ironhermes_core::commands::context::StateStoreHandle,
+                                        > = std::sync::Arc::new(
+                                            ironhermes_state::StateStoreHandleAdapter(
+                                                app_state.state_store.clone(),
+                                            ),
+                                        );
                                         let ctx = ironhermes_core::commands::context::CommandContext::new(
                                             platform,
                                             session_id.clone(),
                                             running_flag,
-                                        );
+                                        )
+                                        .with_state_store(store_handle);
                                         let result = ironhermes_core::commands::handlers::dispatch(
                                             &def,
                                             &args,
