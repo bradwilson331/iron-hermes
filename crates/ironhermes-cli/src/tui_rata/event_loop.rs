@@ -720,9 +720,14 @@ fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rec
 ///   - Streaming: Delta
 ///   - Tool: ToolCall, ToolProgress, ToolResult
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
+    use ironhermes_core::commands::running_agent::RunningAgentGuard;
     let runtime = app.agent_runtime.clone();
     let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
+    // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): clone the Arc in the SYNC body so it can
+    // be moved into the async block. The guard MUST be bound inside tokio::spawn so Drop
+    // fires when the future completes, NOT when spawn_turn returns synchronously.
+    let agent_running = app.agent_running.clone();
     let mut messages_snapshot = app.history.clone();
 
     // Phase 21.8.3.1 D-03 / D-04 / D-06: inject active personality overlay
@@ -740,6 +745,11 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let session_id = app.session_id.clone();
 
     tokio::spawn(async move {
+        // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): RAII guard MUST be bound inside the async
+        // block so Drop fires when the future completes, NOT when spawn_turn returns
+        // synchronously. Binding this outside the tokio::spawn would set the flag true then
+        // immediately clear it before the turn runs, providing zero protection.
+        let _agent_guard = RunningAgentGuard::new(agent_running);
         let _ = tx.send(StreamEvent::Started);
 
         // Build streaming + tool callbacks that forward to the UI event loop.
