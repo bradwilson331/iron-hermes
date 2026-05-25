@@ -334,6 +334,15 @@ impl AgentRuntime {
             agent = agent.with_trajectory_writer(tw);
         }
         if let Some(store) = req.state_store {
+            // Phase 36.2 Plan 07 fix: `with_intercepts` only registers the
+            // `session_search` tool intercept — it does NOT set
+            // `AgentLoop::state_store`. Without this `with_state_store` call,
+            // the post-LLM-call write site at agent_loop.rs:1018 (gated by
+            // `if let Some(store) = &self.state_store`) silently skips on EVERY
+            // turn that runs through the runtime — usage_events stays empty
+            // and `sessions.input_tokens` / `output_tokens` / cost columns
+            // never increment, breaking /usage and the Plan 10 status pills.
+            agent = agent.with_state_store(store.clone());
             agent = agent.with_intercepts(None, Some(store), None, None, None);
         }
 
@@ -631,5 +640,50 @@ mod tests {
             "subagent_runner.rs run_child must NOT clone the parent budget into children \
              (PROV-10 retired, D-04) — source guard failed"
         );
+    }
+
+    /// INV-36.2-07-RUNTIME: Phase 36.2 Plan 07 regression net.
+    /// When `req.state_store` is `Some(...)`, `run_turn` MUST call
+    /// `with_state_store(...)` on the per-turn `AgentLoop` (not just
+    /// `with_intercepts(...)`). `with_intercepts` only registers the
+    /// `session_search` tool intercept; it does NOT set `AgentLoop.state_store`.
+    /// Without `with_state_store`, the post-LLM-call write site in
+    /// `agent_loop.rs` (`if let Some(store) = &self.state_store`) silently
+    /// skips on every turn that runs through the runtime — `usage_events`
+    /// stays empty, `sessions.input_tokens`/`output_tokens`/cost columns
+    /// never increment, /usage shows "no data", and the Plan 10 status pills
+    /// never render.
+    #[test]
+    fn inv_36_2_07_runtime_calls_with_state_store_before_with_intercepts() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let with_state_store_pos = non_comment.find("agent.with_state_store(");
+        let with_intercepts_pos = non_comment.find(".with_intercepts(None, Some(store)");
+
+        assert!(
+            with_state_store_pos.is_some(),
+            "Phase 36.2 Plan 07: run_turn MUST call `agent.with_state_store(store)` so \
+             the post-LLM-call write site receives the state store. Otherwise \
+             usage_events writes silently skip on every turn."
+        );
+        assert!(
+            with_intercepts_pos.is_some(),
+            "run_turn must still call `with_intercepts(None, Some(store), ...)` so the \
+             session_search tool intercept is registered."
+        );
+        // Ordering: state_store wiring before intercepts (matches the doc comment
+        // on with_intercepts which says "Call this AFTER with_state_store()").
+        if let (Some(a), Some(b)) = (with_state_store_pos, with_intercepts_pos) {
+            assert!(
+                a < b,
+                "Phase 36.2 Plan 07: `agent.with_state_store(...)` (byte {a}) must \
+                 appear BEFORE `.with_intercepts(None, Some(store), ...)` (byte {b}) \
+                 so the write site is wired before tool intercepts are registered."
+            );
+        }
     }
 }
