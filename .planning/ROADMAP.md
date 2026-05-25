@@ -422,13 +422,32 @@ Plans:
 
 ### Phase 36.2: Agent loop & core parity — prompt caching, per-provider rate-limit tracking, usage/cost accounting, error classification (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Close the four AGENT-LOOP & CORE parity gaps from iron-hermes-planning §2.1 against hermes-agent v0.14.0 as four interlocking sub-systems sharing a typed classification source. (A) Anthropic-native prompt caching via `cache_control` breakpoints with `system_and_3` strategy (PRMT-08/PRMT-09); configurable TTL 5m/1h default 1h; cache_read/cache_creation Usage fields populated end-to-end; cache-break warnings on the existing PRMT-10/11 channel for the 3 known triggers (model swap, memory edit, context-file edit); strict cached/ephemeral layer assertion at assembly time. (B) Per-provider in-memory `RateLimitTracker` in `ironhermes-agent` keyed on (provider, api_key_hash, model); reads anthropic-ratelimit-* and x-ratelimit-* headers (Anthropic uses RFC 3339 reset, OpenRouter/Nous use float-seconds); reactive 429 fallback when headers absent; emits structured `RateLimitEvent` on a Tokio broadcast channel; api_key_hash is SHA-256-truncated-16-bytes via sha2 0.10.9 (BLAKE3 not in Cargo.lock); cleartext keys never serialize anywhere. (C) Usage/cost ledger via static `pricing.toml` + disk cache at `$HERMES_HOME/pricing-cache.json` + `hermes pricing refresh` CLI; schema migration v9 adds 3 cache+cost columns to `sessions` and creates `usage_events` table with per-turn rows + 2 indexes; every LLM call (success or failure) writes one row atomically with the sessions UPDATE inside a single rusqlite transaction; failed calls write `error_kind = Some(ProviderError::variant_name())` with cost=0; subagent rows tagged with subagent session_id; surfaces via `/usage` slash command + TUI status-bar `$X.YYY │ N.NK tok` pill + per-turn `tracing::info!`. (D) Typed `ProviderError` enum (11 variants: RateLimited, Auth, Billing, ContextLength, Server, Transport, SchemaInvalid, ToolError, ModelNotFound, PayloadTooLarge, Unknown) — additive wrap of the existing `classify_llm_error` (now a `From<ProviderError> for (bool, bool)` facade); ports 30 hermes-agent `error_classifier.py` test cases verbatim into Rust as the parity bar; the typed enum is the canonical classification source consumed by sub-system B (`RateLimited{retry_after}` destructure) and sub-system C (`variant_name()` stored in `usage_events.error_kind`). The existing 12+ Rust classifier tests at agent_loop.rs:2585-2789 pass byte-for-byte verbatim. Anthropic billable input cost formula sums (input_tokens + cache_read + cache_creation) per appropriate per-million rate (Anthropic `input_tokens` field is post-last-breakpoint only). All cost arithmetic is i64 micro-USD integers; f64 conversion is gated to (a) the network refresh boundary and (b) the display layer.
+**Requirements**: PRMT-08, PRMT-09 (closed by Area A). Coordinates with PRMT-10, PRMT-11, PROV-07, PROV-09, PROV-10 (no closure).
 **Depends on:** Phase 36
-**Plans:** 0 plans
+**Plans:** 11 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.2 to break down)
+**Wave 1** *(foundations — no internal deps)*
+
+- [ ] 36.2-01-PLAN.md — Extend AnthropicUsage struct (anthropic_client.rs:138) with #[serde(default)] cache_read_input_tokens + cache_creation_input_tokens; populate outer Usage at lines 533-534 + 819-820
+- [ ] 36.2-02-PLAN.md — Schema migration v9: ALTER sessions ADD cache_read_tokens/cache_creation_tokens/cost_usd_micros + CREATE TABLE usage_events + 2 indexes; UsageEvent struct + insert_usage_event method + extended update_session_stats signature; atomic transaction pattern
+- [ ] 36.2-03-PLAN.md — ProviderError typed enum (11 variants) + classify_llm_error_typed in new error_classifier.rs; existing helpers stay in agent_loop.rs as pub(crate); 30 Python error_classifier.py test cases ported verbatim; invariants_27_1_4_1_1.rs stays green; invariants_36_2_error_classifier.rs locks the new surface
+- [ ] 36.2-04-PLAN.md — PricingRegistry mirroring model_metadata.rs pattern + bundled pricing.toml ($5/$25 opus-4-7 new tokenizer, $15/$75 opus-4-20250514 legacy) + PricingCache disk-cache infra at $HERMES_HOME/pricing-cache.json + compute_cost_micros(in_tok, out_tok, cache_read, cache_create) i64 sum
+
+**Wave 2** *(consumes Wave 1)*
+
+- [ ] 36.2-05-PLAN.md — Anthropic cache_control markers on AnthropicMessages arm (system_and_3 strategy: 1 system + last 3 messages); PromptCachingConfig with strict CacheTtl enum (5m/1h, default 1h); cached_layers_must_be_stable() assertion (panic debug / warn release); ChatCompletions arm explicitly untouched in wave 1/2
+- [ ] 36.2-06-PLAN.md — RateLimitTracker module in ironhermes-agent (NOT core; D-RL-04); (provider, api_key_hash, model) three-axis key with SHA-256-truncated-16-bytes hash; Anthropic + x-ratelimit header parsers branch on provider; broadcast::channel(64) RateLimitEvent emitter; severity Critical at remaining=0 AND reset>=60s; static-grep invariants lock no-fallback-import + no-classify-llm-error + no-blake3 + no-cleartext-key
+- [ ] 36.2-07-PLAN.md — Wire post-LLM-call write site in agent_loop.rs: success path writes usage_events INSERT + sessions UPDATE atomically inside unchecked_transaction with cost via compute_cost_micros; failure path writes row with error_kind = variant_name() + cost=0; tracker.record_headers(hash_api_key(key), ...) on success; tracker.record_429(...) on ProviderError::RateLimited; per-turn tracing::info! line; context_compressor.record_usage_full extends signature
+- [ ] 36.2-08-PLAN.md — Three cache-break warning methods on PressureTracker (warn_cache_break_model_swap, warn_cache_break_memory_edit, warn_cache_break_context_file_edit) reusing the existing PRMT-10/11 channel; detection sites in agent_loop.rs at /model swap + memory tool write + context-file mtime poll; session-zero suppression + mtime snapshot idempotency
+- [ ] 36.2-09-PLAN.md — `hermes pricing list` + `hermes pricing refresh [--force]` CLI subcommands mirroring main.rs:169-172 Models pattern; fetch_from_models_dev implementation replacing Plan 04 stub with strict JSON parsing + f64-to-micro-USD conversion gated at network boundary; failure preserves existing cache file; MODELS_DEV_URL hardcoded
+
+**Wave 3** *(UX surfaces; consumes Wave 2)*
+
+- [ ] 36.2-10-PLAN.md — `/usage` slash command handler replacing todo_stub at handlers.rs:1533 (flat-flag --today/--provider/--model/--since Nd parsing); StateStore.query_usage_events with rusqlite params![] bindings only (T-36.2-10-INJ); multi-platform via CommandRouter; TUI StatusLineState gains cost_usd_micros + session_total_tokens fields with build_pills cost+token pills; web UI sidebar surface (or documented deferral); manual UAT checkpoint covering 5 verifications
+- [ ] 36.2-11-PLAN.md — OPTIONAL STRETCH: OpenRouter Claude cache_control on ChatCompletions arm gated by is_openrouter_claude(provider, model) predicate; cut criterion enforced — if envelope diverges from Anthropic's, plan defers to Phase 36.2.1 without affecting Plan 05 PARITY claim
+
 
 ### Phase 36.1: Running-agent guard parity — web UI + TUI (INSERTED)
 

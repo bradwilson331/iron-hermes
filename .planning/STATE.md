@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: planning
+status: executing
 stopped_at: Phase 36.2 context gathered
-last_updated: "2026-05-25T07:08:48.071Z"
-last_activity: 2026-05-25 — Milestone v3.0 Hermes-agent parity declared; 77 pre-36.x phase dirs archived to .planning/milestones/v2.1-phases/
+last_updated: "2026-05-25T08:12:20.456Z"
+last_activity: 2026-05-25 -- Phase 36.2 planning complete
 progress:
   total_phases: 34
   completed_phases: 2
-  total_plans: 7
+  total_plans: 18
   completed_plans: 7
   percent: 6
 ---
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 36 — Gateway running-agent guard wiring (0/3 plans; earliest unfinished v3.0 phase)
 Plan: —
-Status: v3.0 declared via retroactive label over 36.x phases; planning not yet resumed
-Last activity: 2026-05-25 — Milestone v3.0 Hermes-agent parity declared; 77 pre-36.x phase dirs archived to .planning/milestones/v2.1-phases/
+Status: Ready to execute
+Last activity: 2026-05-25 -- Phase 36.2 planning complete
 
 ## Performance Metrics
 
