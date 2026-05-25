@@ -78,11 +78,135 @@ impl PricingCache {
     }
 }
 
-/// Stub for Plan 09 — `hermes pricing refresh` CLI wires this up. Returning
-/// `Err` keeps the surface present (so callers can `pub use` it) without
-/// promising a working fetch here.
+// ---------------------------------------------------------------------------
+// Phase 36.2 Plan 09 — online refresh from models.dev
+// ---------------------------------------------------------------------------
+
+/// Hardcoded compile-time URL for `hermes pricing refresh`. Threat T-36.2-09-URL
+/// (Spoofing — refresh URL forgery) mitigation: the URL is NOT a config field
+/// and NOT user-overridable, so an adversary cannot redirect refresh traffic to
+/// a malicious endpoint via config tampering. The const is exposed only at the
+/// network boundary; everything downstream is integer micro-USD.
+pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+
+/// Default per-request timeout for the models.dev fetch. Bounds latency / DoS
+/// surface — see threat T-36.2-09-DOS.
+const FETCH_TIMEOUT_SECS: u64 = 30;
+
+/// Fetch the latest pricing from models.dev (production entry point used by
+/// `hermes pricing refresh`).
+///
+/// Mirrors the shape of `models_cache::fetch_from_models_dev`: reqwest GET,
+/// strict JSON parse, no leakage of f64 past `cost_field_to_micros`.
+///
+/// Returns a `HashMap<String, PricingCacheEntry>` keyed by canonical model id.
+/// Errors propagate verbatim — the caller (`pricing_cmd::cmd_refresh`) is
+/// responsible for surfacing them and preserving the existing on-disk cache.
 pub async fn fetch_from_models_dev() -> anyhow::Result<HashMap<String, PricingCacheEntry>> {
-    anyhow::bail!("hermes pricing refresh: online fetch not yet implemented (Plan 09)")
+    fetch_from_url(MODELS_DEV_URL).await
+}
+
+/// Test-injection seam: fetch from an arbitrary URL. Production code always
+/// uses the [`MODELS_DEV_URL`] const — this seam exists so wiremock-backed
+/// integration tests can drive the parser end-to-end without spoofing the
+/// real DNS hostname.
+pub async fn fetch_from_url(url: &str) -> anyhow::Result<HashMap<String, PricingCacheEntry>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("models.dev returned HTTP {}", resp.status());
+    }
+    let body: serde_json::Value = resp.json().await?;
+    Ok(parse_models_dev_body(&body))
+}
+
+/// Parse a models.dev `/api.json` response body into pricing entries.
+///
+/// Expected JSON shape (verified 2026-05-25):
+/// ```json
+/// {
+///   "<provider-id>": {
+///     "models": {
+///       "<model-id>": {
+///         "cost": {
+///           "input":       <float USD per 1M tokens>,
+///           "output":      <float USD per 1M tokens>,
+///           "cache_read":  <float USD per 1M tokens>,
+///           "cache_write": <float USD per 1M tokens>
+///         }
+///       }
+///     }
+///   }
+/// }
+/// ```
+///
+/// Threat T-36.2-09-PARSE mitigation: strict typed extraction via
+/// `as_object()` / `as_f64()` / `as_i64()` / `as_u64()`. Unknown JSON shapes
+/// degrade silently to an empty map; the body never feeds `format!`, `eval`,
+/// or any template. Entries with all-zero input AND output pricing are
+/// skipped (likely incomplete upstream data — defensive against partial
+/// scrapes).
+pub fn parse_models_dev_body(body: &serde_json::Value) -> HashMap<String, PricingCacheEntry> {
+    let mut out = HashMap::new();
+    let now = Utc::now();
+
+    let Some(providers) = body.as_object() else {
+        return out;
+    };
+
+    for (provider_id, provider_val) in providers {
+        let Some(models) = provider_val.get("models").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for (model_id, model_val) in models {
+            let Some(cost) = model_val.get("cost").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            let entry = PricingEntry {
+                provider: provider_id.clone(),
+                input_per_1m_micros: cost_field_to_micros(cost.get("input")),
+                output_per_1m_micros: cost_field_to_micros(cost.get("output")),
+                cache_read_per_1m_micros: cost_field_to_micros(cost.get("cache_read")),
+                cache_creation_per_1m_micros: cost_field_to_micros(cost.get("cache_write")),
+            };
+            // Skip entries with all-zero pricing (likely incomplete upstream data).
+            if entry.input_per_1m_micros == 0 && entry.output_per_1m_micros == 0 {
+                continue;
+            }
+            out.insert(
+                model_id.clone(),
+                PricingCacheEntry {
+                    pricing: entry,
+                    fetched_at: now,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Convert a JSON numeric field (USD per 1M, possibly float) to i64 micro-USD.
+///
+/// This is the **ONLY** place an f64 value crosses the boundary into the
+/// pricing subsystem (RESEARCH.md Pitfall 5: Float Cost Drift). After this
+/// function returns, all downstream arithmetic uses `i64` micro-USD.
+///
+/// Behavior:
+/// - `f64`  → `(v * 1_000_000) as i64`  (precision floor — matches Anthropic
+///   billing rounding which never publishes sub-cent values for the price-list
+///   side of cache pricing)
+/// - `i64`  → `v * 1_000_000`
+/// - `u64`  → `(v as i64) * 1_000_000`
+/// - `None` / null / non-numeric → `0` (graceful — see threat T-36.2-09-PARSE)
+pub fn cost_field_to_micros(field: Option<&serde_json::Value>) -> i64 {
+    match field {
+        Some(v) if v.is_f64() => (v.as_f64().unwrap_or(0.0) * 1_000_000.0) as i64,
+        Some(v) if v.is_i64() => v.as_i64().unwrap_or(0) * 1_000_000,
+        Some(v) if v.is_u64() => (v.as_u64().unwrap_or(0) as i64) * 1_000_000,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
