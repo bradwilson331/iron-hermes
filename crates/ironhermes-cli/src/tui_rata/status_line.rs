@@ -40,6 +40,17 @@ pub struct StatusLineState {
     /// Seeded once from `config.delegation.max_concurrent_children` (renamed
     /// in Phase 32.2 D-07; the local struct field name is kept for stability).
     pub max_subagents: usize,
+    /// Phase 36.2 Plan 10 (D-USAGE-03): current session cost in micro-USD.
+    /// 1 USD = 1_000_000 micros. The render layer is the ONLY place this
+    /// becomes f64 (`as f64 / 1_000_000.0`) — every upstream arithmetic op
+    /// stays i64 (Pitfall 5: float drift). Populated by the post-turn
+    /// ticker that reads the latest `sessions` row's `cost_usd_micros`
+    /// column (Plan 02 schema).
+    pub cost_usd_micros: i64,
+    /// Phase 36.2 Plan 10 (D-USAGE-03): total tokens in the current session
+    /// (`in + out + cache_read + cache_create`). Populated alongside
+    /// `cost_usd_micros` from the same sessions-row read.
+    pub session_total_tokens: usize,
 }
 
 impl Default for StatusLineState {
@@ -53,6 +64,10 @@ impl Default for StatusLineState {
             hint: "ctrl+c cancel · /help commands".to_string(),
             active_subagents: 0,
             max_subagents: 0,
+            // Phase 36.2 Plan 10 (D-USAGE-03): zero-state defaults so the
+            // ticker can wake up before any usage_events row exists.
+            cost_usd_micros: 0,
+            session_total_tokens: 0,
         }
     }
 }
@@ -109,6 +124,23 @@ fn build_pills(state: &StatusLineState) -> (Vec<String>, Option<String>) {
         pills.push(format!(
             "agents: {}/{}",
             state.active_subagents, state.max_subagents
+        ));
+    }
+
+    // Phase 36.2 Plan 10 (D-USAGE-03): cost + token pills.
+    //
+    // Hidden when zero — same idle-noise discipline as the agents pill. The
+    // ONLY f64 conversion sits here (display layer) per Pitfall 5; every
+    // upstream arithmetic stays i64. Per the plan's <action> Step 2, these
+    // sit AFTER the existing pills and BEFORE the hint span.
+    if state.cost_usd_micros > 0 {
+        let usd = state.cost_usd_micros as f64 / 1_000_000.0;
+        pills.push(format!("${:.3}", usd));
+    }
+    if state.session_total_tokens > 0 {
+        pills.push(format!(
+            "{:.1}K tok",
+            state.session_total_tokens as f64 / 1_000.0
         ));
     }
 
@@ -225,6 +257,7 @@ mod tests {
             hint: "ctrl+c cancel".to_string(),
             active_subagents: 0,
             max_subagents: 0,
+            ..StatusLineState::default()
         };
         let line = render_status_line_ratatui(&state);
         // 4 pills + 3 dot seps + 1 dot sep before hint + 1 hint span = 9
@@ -253,6 +286,7 @@ mod tests {
             hint: String::new(),
             active_subagents: 0,
             max_subagents: 0,
+            ..StatusLineState::default()
         };
         let line = render_status_line_ratatui(&state);
         // pill spans alternate with dot_sep spans; pill spans at indices 0, 2, 4, 6
@@ -296,6 +330,7 @@ mod tests {
             hint: String::new(),
             active_subagents: 0,
             max_subagents: 4,
+            ..StatusLineState::default()
         };
         let line = render_status_line_ratatui(&state);
         // No span should contain "agents:"
@@ -317,6 +352,7 @@ mod tests {
             hint: String::new(),
             active_subagents: 2,
             max_subagents: 4,
+            ..StatusLineState::default()
         };
         let line = render_status_line_ratatui(&state);
         let has_agents = line.spans.iter().any(|s| s.content.contains("agents: 2/4"));

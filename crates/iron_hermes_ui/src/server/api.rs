@@ -46,6 +46,38 @@ pub struct ConfigSummary {
     pub memory_enabled: bool,
 }
 
+// TODO Phase 36.2 Plan 10 (D-USAGE-03) — web UI cost surface:
+//
+// The TUI's `tui_rata::status_line::StatusLineState` gained two new
+// fields this plan — `cost_usd_micros: i64` and `session_total_tokens:
+// usize` — and the `/usage` slash command is wired across every
+// platform via `CommandRouter::resolve` + `dispatch` (so the web UI
+// gets `/usage` text rendering for free, today).
+//
+// The PARALLEL sidebar pill surface (the cost + token pills next to
+// the existing `provider` / `model` pills in `components/shell_legacy/
+// status_bar.rs`) is intentionally deferred from Plan 10 because:
+//
+// 1. The web UI status bar uses Dioxus `ReadSignal<TokenBudget>`
+//    signals, NOT the TUI's `StatusLineState` struct — wiring the
+//    cost fields end-to-end requires extending the `TokenBudget`
+//    signal AND threading a new `CostBudget` signal through the
+//    WebSocket payload and the `state.rs` AppState (cross-cutting
+//    Dioxus refactor).
+//
+// 2. The hermes-agent → ironhermes web UI parity scope (iron-
+//    hermes-planning §2.1) treats this as a TUI-first feature; the
+//    web pill surface follows once Phase 26.7 (web wiring) is fully
+//    UAT'd and the live AgentRuntime is broadcasting per-turn usage
+//    over the websocket.
+//
+// When the deferral closes, the canonical shape is `cost_usd_micros:
+// i64` + `session_total_tokens: usize` on `ConfigSummary` (or a
+// sibling `UsageSummary`), wired through `state.rs::record_usage` to
+// the websocket. The TUI render formula (display-only f64 conversion,
+// `${:.3}` + `{:.1}K tok`) is the canonical formatting contract — see
+// `crates/ironhermes-cli/src/tui_rata/status_line.rs::build_pills`.
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ToolInfo {
     pub name: String,
