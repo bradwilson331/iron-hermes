@@ -188,6 +188,15 @@ impl LlmClient {
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
             let chunk_timeout = Duration::from_secs(60);
+            // Phase 36.2 Plan 07 fix: defer emitting `StreamEvent::Done` until
+            // the `[DONE]` sentinel arrives (or the byte stream ends), so the
+            // post-finish_reason `usage` chunk that OpenAI-spec providers send
+            // when `stream_options.include_usage: true` is honored is captured
+            // first. Previously we emitted Done immediately on finish_reason
+            // and `return`ed — the consumer broke on Done and the trailing
+            // usage chunk was lost, leaving every `usage_events` row at zero
+            // tokens and stranding the TUI / web token pills at 0/128k.
+            let mut pending_finish_reason: Option<String> = None;
 
             loop {
                 let chunk_result = match timeout(chunk_timeout, byte_stream.next()).await {
@@ -225,13 +234,18 @@ impl LlmClient {
                     };
 
                     if data == "[DONE]" {
-                        let _ = tx.send(StreamEvent::Done(None)).await;
+                        // Emit Done last so any usage chunk delivered between
+                        // the finish_reason chunk and [DONE] has already been
+                        // forwarded to the consumer via StreamEvent::Usage.
+                        let _ = tx
+                            .send(StreamEvent::Done(pending_finish_reason.take()))
+                            .await;
                         return;
                     }
 
                     match serde_json::from_str::<ChatStreamChunk>(data) {
                         Ok(chunk) => {
-                            // Process usage first (may appear in same chunk as finish_reason)
+                            // Process usage first (may appear in same chunk as finish_reason).
                             if let Some(ref usage) = chunk.usage {
                                 let _ = tx.send(StreamEvent::Usage(usage.clone())).await;
                             }
@@ -259,8 +273,11 @@ impl LlmClient {
                                     }
                                 }
                                 if let Some(ref reason) = choice.finish_reason {
-                                    let _ = tx.send(StreamEvent::Done(Some(reason.clone()))).await;
-                                    return; // Don't wait for [DONE] — finish_reason is authoritative
+                                    // Stash the reason; the Done event is
+                                    // emitted only when `[DONE]` arrives or
+                                    // the byte stream ends — see the local
+                                    // declaration above for rationale.
+                                    pending_finish_reason = Some(reason.clone());
                                 }
                             }
                         }
@@ -270,6 +287,13 @@ impl LlmClient {
                     }
                 }
             }
+            // Stream ended without an explicit `[DONE]` sentinel (server closed
+            // the connection, read timeout, or transport error). Forward the
+            // stashed finish_reason so the consumer's `Done` arm fires once;
+            // dropping `tx` afterwards closes the channel naturally.
+            let _ = tx
+                .send(StreamEvent::Done(pending_finish_reason.take()))
+                .await;
         });
 
         Ok(rx)
