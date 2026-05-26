@@ -330,54 +330,60 @@ security:
 # is REQUIRED for validation to pass. Without it the setup wizard re-launches
 # on every start. The actual secret stays in ~/.ironhermes/.env.
 #
-# Example (openrouter as default):
+# Canonical pattern (cloud-primary + Ollama fallback, with remote Ollama host):
+#
+#   - openrouter is the primary provider (matches model.provider above)
+#   - api_key_env points to OPENROUTER_API_KEY in ~/.ironhermes/.env
+#   - fallback_providers: when openrouter returns 401/403/404/429/5xx the agent
+#     one-shots a swap to the named fallback provider. The fallback uses ITS OWN
+#     `default_model` — the primary's model string is NOT carried over.
+#   - ollama is wired with an explicit remote base_url (env-var interpolation
+#     in YAML is NOT supported; the URL must be a literal). The dummy
+#     OLLAMA_API_KEY=ollama value in .env satisfies the api_key_env contract.
+#
+# NOTE on extra_request_options (PROV-11..PROV-14):
+#   `model.extra_request_options` is NOT a field — it must live under
+#   `providers.<name>.extra_request_options`. Provider-level keys flow into
+#   every request; `models.<model>.extra_request_options` overrides per-key
+#   for that specific model (merge semantics).
+#
 providers:
   openrouter:
     api_key_env: OPENROUTER_API_KEY     # secret lives in .env
+    fallback_providers: ["ollama"]      # one-shot swap on hard failure
     # api_mode: chat_completions          # override only if needed
-    # fallback_providers: ["local-llama"] # one-shot swap on 401/403/404/429/5xx.
-    #                                     # The fallback uses ITS OWN default_model
-    #                                     # (the primary's model string is NOT
-    #                                     # carried over), so a local server doesn't
-    #                                     # need to know the primary's model name.
     # base_url: null                      # override only if needed
     # default_model: "anthropic/claude-sonnet-4"
     # disabled: false                     # set true to exclude from resolver
     #
-    # --- Per-Provider Extra Request Options (PROV-11..PROV-14) ---
-    # Free-form map merged into outgoing chat-completions requests at the wire
-    # level. Use this to tune small-model knobs without code changes.
-    # Per-model overrides under `models.<model>.extra_request_options` win on a
-    # PER-KEY basis (provider-level keys are kept; per-model entries override or
-    # add individual keys). See docs/CONFIGURATION.md "Per-Provider Extra
-    # Request Options" for full semantics.
+    # OpenRouter routing preference (upstream provider IDs — anthropic, openai,
+    # mistral, etc. — NOT your local provider names):
     # extra_request_options:
     #   provider:
-    #     order: ["anthropic", "openai"]   # OpenRouter routing preference
+    #     order: ["anthropic", "openai"]
+  ollama:
+    api_key_env: OLLAMA_API_KEY                  # add OLLAMA_API_KEY=ollama in .env
+    base_url: "http://192.168.7.201:11434/v1"    # remote host example; use localhost for local
+    api_mode: chat_completions
+    default_model: "llama3.1:8b"
+    # Provider-level extras — applied to every request to this provider
+    extra_request_options:
+      num_ctx: 8192            # default 8K context window
+      num_predict: 512
+    # Per-model overrides — merged per-key on top of provider-level defaults
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768       # bump just this model to 32K
+      "qwen2.5-coder:7b":
+        extra_request_options:
+          top_k: 40
 #   anthropic:
 #     api_key_env: ANTHROPIC_API_KEY
 #     api_mode: anthropic_messages
 #   openai:
 #     api_key_env: OPENAI_API_KEY
 #     api_mode: chat_completions
-#
-#   # --- Ollama (local) with provider + per-model num_ctx tuning ---
-#   ollama:
-#     base_url: "http://localhost:11434/v1"
-#     api_mode: chat_completions
-#     default_model: "llama3.1:8b"
-#     # Provider-level defaults — applied to every request to this provider
-#     extra_request_options:
-#       num_ctx: 8192            # default 8K context window
-#       num_predict: 512
-#     # Per-model overrides — merged per-key on top of provider-level defaults
-#     models:
-#       "llama3.1:8b":
-#         extra_request_options:
-#           num_ctx: 32768       # bump just this model to 32K
-#       "qwen2.5-coder:7b":
-#         extra_request_options:
-#           top_k: 40
 #
 #   # --- vLLM (local) with top_k / top_p ---
 #   vllm:
@@ -390,6 +396,8 @@ providers:
 # Legacy fields (still parsed, will warn at startup):
 #   - `api_key: <literal>` under a provider — use `api_key_env` instead.
 #   - `model.api_key:` at the top level — use `providers.<main>.api_key_env`.
+#   - `model.api_key_env:` at the top level — NOT a field on ModelConfig; serde
+#     silently drops it. Move to `providers.<main>.api_key_env`.
 #   - Bare `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env
 #     vars without a matching `providers.<name>.api_key_env` declaration.
 

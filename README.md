@@ -137,45 +137,38 @@ Set `IRONHERMES_SOURCE` to the project root directory to enable skills installat
 
 ### Provider fallback
 
-Set `fallback_providers` on a provider to swap to another provider on hard failure (HTTP 401, 403, 404, 429, or 5xx). The swap is one-shot per session and the fallback uses the **fallback provider's own `default_model`**.
+Set `fallback_providers` on a provider to swap to another provider on hard failure (HTTP 401, 403, 404, 429, or 5xx). The swap is one-shot per session and the fallback uses the **fallback provider's own `default_model`** — the primary's model string is NOT carried over.
+
+#### Cloud-primary + Ollama fallback (canonical example)
+
+This pattern lets a frontier model handle most turns and routes to a self-hosted Ollama box when the cloud provider returns a hard error. The Ollama host can be remote (LAN, VPN, Tailscale, etc.) — set `base_url` to wherever the OpenAI-compatible endpoint lives.
 
 ```yaml
-providers:
-  openrouter:
-    api_key_env: OPENROUTER_API_KEY
-    fallback_providers: ["local-llama"]
-
-custom_providers:
-  - name: local-llama
-    base_url: http://localhost:11434/v1
-    api_key: ollama
-    api_mode: chat_completions
-    default_model: llama3.2:latest
-```
-
-#### Cloud-primary + local Ollama fallback (canonical example)
-
-```yaml
-custom_providers:
-  local-ollama:
-    base_url: "http://localhost:11434/v1"
-    api_key_env: ""          # Ollama requires no API key
-    default_model: "gemma4:latest"
-    api_mode: chat_completions
-
 model:
   default: "anthropic/claude-sonnet-4"
+  provider: openrouter
 
 providers:
   openrouter:
-    api_key_env: OPENROUTER_API_KEY
-    fallback_providers:
-      - local-ollama
+    api_key_env: OPENROUTER_API_KEY        # secret lives in ~/.ironhermes/.env
+    fallback_providers: ["ollama"]         # one-shot swap on 401/403/404/429/5xx
+
+  ollama:
+    api_key_env: OLLAMA_API_KEY            # add OLLAMA_API_KEY=ollama in .env
+    base_url: "http://192.168.7.201:11434/v1"   # local or remote host
+    api_mode: chat_completions
+    default_model: "llama3.1:8b"           # fallback uses THIS model, not the primary's
+    extra_request_options:                 # Phase 36.15 — provider-level knobs
+      num_ctx: 8192
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768                   # per-model override wins per-key
 ```
 
-The `fallback_providers` list is tried in order. The swap is one-shot per session; if the fallback also fails the error is returned to the caller.
+YAML does NOT support `${OLLAMA_BASE_URL}` env-var interpolation — `base_url` must be a literal string. The `api_key_env` field references an env var name; the actual secret stays in `.env`.
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference and [docs/providers.md](docs/providers.md) for per-provider setup.
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference (including the `Per-Provider Extra Request Options` section covering merge semantics and the reserved-key caveat) and [docs/providers.md](docs/providers.md) for per-provider setup.
 
 ---
 
