@@ -381,6 +381,18 @@ impl GatewayMessageHandler {
         // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
         let agent_running = self.session_store.read().await.get_running_flag(&session_key);
         let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running.clone());
+        // Phase 36.2 chat-fix follow-up: attach the StateStoreHandle so /usage,
+        // /sessions, /history, /export, etc. can reach the SQLite session/usage
+        // tables. Without this the gateway returns "Session storage not
+        // configured." even though session_store already owns the StateStore.
+        // Mirrors the TUI (tui_rata/commands.rs) and web (iron_hermes_ui/ws.rs)
+        // wiring that landed in commits a9fb0d0d / 402113b3.
+        let ctx = {
+            let store_arc = self.session_store.read().await.state_store().clone();
+            let handle: std::sync::Arc<dyn ironhermes_core::commands::context::StateStoreHandle> =
+                std::sync::Arc::new(ironhermes_state::StateStoreHandleAdapter(store_arc));
+            ctx.with_state_store(handle)
+        };
         // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
         // production toolset session handle so /toolset list/show/enable/disable
         // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
