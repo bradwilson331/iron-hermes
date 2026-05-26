@@ -243,6 +243,73 @@ pub fn schema() -> Vec<ConfigField> {
             env_var: None,
             url: None,
         },
+        // --- Plan 36.15-03: per-provider extras keys (PROV-13) ---
+        ConfigField {
+            key: "providers.ollama.extra_request_options.num_ctx".into(),
+            description: Some("Ollama context window size (tokens). Sets num_ctx in request body.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "providers.ollama.extra_request_options.num_predict".into(),
+            description: Some("Ollama max tokens to predict. Sets num_predict in request body.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "providers.ollama.extra_request_options.top_k".into(),
+            description: Some("Ollama top-k sampling. Sets top_k in request body.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "providers.vllm.extra_request_options.top_k".into(),
+            description: Some("vLLM top-k sampling. Sets top_k in request body.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "providers.vllm.extra_request_options.top_p".into(),
+            description: Some("vLLM top-p (nucleus) sampling. Sets top_p in request body.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "providers.openrouter.extra_request_options.provider.order".into(),
+            description: Some("OpenRouter provider preference order (YAML list of provider names).".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: Some("https://openrouter.ai/docs/features/provider-routing".into()),
+        },
     ]
 }
 
@@ -357,6 +424,80 @@ mod tests {
             assert!(
                 !f.cache_breaking,
                 "field {} is secret but should NOT be cache_breaking (only model.api_key is the D-13 exception)",
+                f.key
+            );
+        }
+    }
+
+    // --- Plan 36.15-03: extras keys schema tests ---
+
+    #[test]
+    fn schema_contains_ollama_extras_keys() {
+        let s = schema();
+        for key in &[
+            "providers.ollama.extra_request_options.num_ctx",
+            "providers.ollama.extra_request_options.num_predict",
+            "providers.ollama.extra_request_options.top_k",
+        ] {
+            assert!(
+                s.iter().any(|f| f.key == *key),
+                "schema missing ollama extras key: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_contains_vllm_extras_keys() {
+        let s = schema();
+        for key in &[
+            "providers.vllm.extra_request_options.top_k",
+            "providers.vllm.extra_request_options.top_p",
+        ] {
+            assert!(
+                s.iter().any(|f| f.key == *key),
+                "schema missing vllm extras key: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_contains_openrouter_provider_order_key() {
+        let s = schema();
+        assert!(
+            s.iter()
+                .any(|f| f.key == "providers.openrouter.extra_request_options.provider.order"),
+            "schema missing providers.openrouter.extra_request_options.provider.order"
+        );
+    }
+
+    #[test]
+    fn extras_entries_are_non_secret_non_cache_breaking() {
+        let s = schema();
+        let extras: Vec<&ConfigField> = s
+            .iter()
+            .filter(|f| {
+                f.key.starts_with("providers.")
+                    && f.key.contains(".extra_request_options.")
+            })
+            .collect();
+        assert!(
+            !extras.is_empty(),
+            "expected at least one providers.*.extra_request_options.* entry in schema"
+        );
+        for f in &extras {
+            assert!(
+                !f.secret,
+                "extras key {} must not be secret (Pitfall 4)",
+                f.key
+            );
+            assert!(
+                !f.cache_breaking,
+                "extras key {} must not be cache_breaking (Pitfall 4)",
+                f.key
+            );
+            assert!(
+                !f.required,
+                "extras key {} must not be required",
                 f.key
             );
         }
