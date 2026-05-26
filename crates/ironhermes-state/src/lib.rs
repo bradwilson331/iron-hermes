@@ -43,7 +43,7 @@ pub type Result<T, E = StateError> = std::result::Result<T, E>;
 // Schema version
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode=WAL;
@@ -54,23 +54,47 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id                  TEXT PRIMARY KEY,
-    source              TEXT NOT NULL,
-    user_id             TEXT,
-    model               TEXT,
-    system_prompt       TEXT,
-    parent_session_id   TEXT,
-    started_at          REAL NOT NULL,
-    ended_at            REAL,
-    end_reason          TEXT,
-    message_count       INTEGER DEFAULT 0,
-    tool_call_count     INTEGER DEFAULT 0,
-    input_tokens        INTEGER DEFAULT 0,
-    output_tokens       INTEGER DEFAULT 0,
-    title               TEXT,
-    workspace_root      TEXT,
+    id                      TEXT PRIMARY KEY,
+    source                  TEXT NOT NULL,
+    user_id                 TEXT,
+    model                   TEXT,
+    system_prompt           TEXT,
+    parent_session_id       TEXT,
+    started_at              REAL NOT NULL,
+    ended_at                REAL,
+    end_reason              TEXT,
+    message_count           INTEGER DEFAULT 0,
+    tool_call_count         INTEGER DEFAULT 0,
+    input_tokens            INTEGER DEFAULT 0,
+    output_tokens           INTEGER DEFAULT 0,
+    title                   TEXT,
+    workspace_root          TEXT,
+    -- Phase 36.2 (D-USAGE-02): cache token + cost columns for usage ledger.
+    cache_read_tokens       INTEGER DEFAULT 0,
+    cache_creation_tokens   INTEGER DEFAULT 0,
+    cost_usd_micros         INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
+
+-- Phase 36.2 (D-USAGE-02): per-turn usage ledger. One row per LLM call,
+-- including failures (error_kind is NULL on success, ProviderError variant
+-- name on failure). Costs stored as i64 micro-USD (1 USD = 1_000_000) — no
+-- float drift (Pitfall 5). Indexes optimize /usage queries by session and time.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT NOT NULL,
+    ts               INTEGER NOT NULL,
+    provider         TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    in_tok           INTEGER NOT NULL,
+    out_tok          INTEGER NOT NULL,
+    cache_read       INTEGER NOT NULL DEFAULT 0,
+    cache_create     INTEGER NOT NULL DEFAULT 0,
+    cost_usd_micros  INTEGER NOT NULL DEFAULT 0,
+    error_kind       TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_events_session_idx ON usage_events(session_id);
+CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events(ts);
 
 CREATE TABLE IF NOT EXISTS messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +162,102 @@ pub struct Session {
     /// NULL for sessions created before Phase 25.3 or for sessions without a workspace marker.
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+/// A single per-turn LLM usage event row.
+///
+/// Phase 36.2 (D-USAGE-02): persisted per LLM call (success or failure) so
+/// the `/usage` reader (downstream Plan 10) can slice by session / provider /
+/// model / time / error.
+///
+/// **Cost units:** all monetary fields are i64 micro-USD (1 USD = 1_000_000).
+/// This avoids the silent precision loss that would result from f64
+/// representation (Pitfall 5 — float drift).
+///
+/// **`error_kind` discipline:** populated ONLY from
+/// `ProviderError::variant_name()` (Plan 03) — a bounded set of ~10
+/// compile-time constants (e.g., `"RateLimited"`, `"Auth"`, `"ContextLength"`).
+/// Callers MUST NOT serialize the full `ProviderError` debug payload here:
+/// it may contain raw HTTP error bodies that leak PII or secret prefixes
+/// (T-36.2-02-PII mitigation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageEvent {
+    pub session_id: String,
+    /// Unix epoch milliseconds.
+    pub ts: i64,
+    pub provider: String,
+    pub model: String,
+    pub in_tok: i64,
+    pub out_tok: i64,
+    pub cache_read: i64,
+    pub cache_create: i64,
+    /// Micro-USD (1 USD = 1_000_000). 0 on failed calls.
+    pub cost_usd_micros: i64,
+    /// `None` on success; `Some(ProviderError::variant_name())` on failure.
+    /// MUST NOT contain raw error bodies (PII risk; see struct-level doc).
+    pub error_kind: Option<String>,
+}
+
+/// Filter for `StateStore::query_usage_events` (Phase 36.2 Plan 10).
+///
+/// **T-36.2-10-INJ:** every field value flows through `rusqlite::params!`
+/// bindings inside `query_usage_events` — never `format!`-interpolated into
+/// the SQL string. Constructed from user-supplied `--provider X` / `--model X`
+/// / `--since 7d` / `--today` flags at the `/usage` handler entry point.
+#[derive(Debug, Clone, Default)]
+pub struct UsageFilter {
+    /// When `Some`, restrict to a single session. Set to `None` for cross-
+    /// session aggregations (`--today`, `--provider`, etc.).
+    pub session_id: Option<String>,
+    /// Restrict to rows whose `ts` is at or after local-midnight today
+    /// (the cutoff is computed at query time).
+    pub today_only: bool,
+    /// Optional `--provider X` filter.
+    pub provider: Option<String>,
+    /// Optional `--model X` filter.
+    pub model: Option<String>,
+    /// Optional `--since Nd` / `--since Nh` / `--since Nm` rolling window,
+    /// expressed in seconds. The cutoff (`now - since_seconds`) is computed
+    /// at query time.
+    pub since_seconds: Option<i64>,
+}
+
+/// One row of the `(provider, model)` aggregation returned by
+/// `StateStore::query_usage_events` (Phase 36.2 Plan 10).
+///
+/// All numerics are `i64`; cost is in micro-USD per the D-USAGE-01
+/// integer-microdollar discipline (no float drift). The display layer is
+/// the ONLY place that converts to `f64` for human-readable rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageRollup {
+    pub provider: String,
+    pub model: String,
+    pub in_tok: i64,
+    pub out_tok: i64,
+    pub cache_read: i64,
+    pub cache_create: i64,
+    pub cost_usd_micros: i64,
+    pub event_count: i64,
+}
+
+/// Phase 36.2 follow-up: per-call statistics from `backfill_usage_costs`.
+/// `total_cost_delta_micros` is the signed sum (new − old); positive means
+/// total recognized cost increased after the backfill.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageBackfillStats {
+    pub rows_examined: usize,
+    pub rows_updated: usize,
+    pub total_cost_delta_micros: i64,
+    pub sessions_resynced: usize,
+    /// Count of `usage_events` rows whose `session_id` does not match any
+    /// `sessions.id`. These rows are still counted toward `rows_examined` /
+    /// `rows_updated` / `total_cost_delta_micros`, but their cost does NOT
+    /// roll up into a `sessions` row.
+    pub orphan_rows: usize,
+    /// Number of orphan rows actually DELETED from `usage_events` during the
+    /// backfill. Zero unless `clean_orphans=true` was passed. Always ≤
+    /// `orphan_rows`.
+    pub orphans_deleted: usize,
 }
 
 /// A single message row retrieved from storage.
@@ -363,6 +483,46 @@ impl StateStore {
                 .execute("ALTER TABLE sessions ADD COLUMN workspace_root TEXT", []);
             self.conn
                 .execute("UPDATE schema_version SET version = 8", [])?;
+        }
+        if current < 9 {
+            // v9 (Phase 36.2 D-USAGE-02): cache token columns on sessions +
+            // usage_events table. `let _ =` tolerates "duplicate column" on partial
+            // migration (Pitfall 4 / v8 precedent). SQLite ALTER TABLE adds one
+            // column at a time — do NOT collapse into one statement. CREATE TABLE
+            // / CREATE INDEX are guarded with IF NOT EXISTS so re-runs are safe.
+            let _ = self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
+                [],
+            );
+            let _ = self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
+                [],
+            );
+            let _ = self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cost_usd_micros INTEGER DEFAULT 0",
+                [],
+            );
+            self.conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id       TEXT NOT NULL,
+                    ts               INTEGER NOT NULL,
+                    provider         TEXT NOT NULL,
+                    model            TEXT NOT NULL,
+                    in_tok           INTEGER NOT NULL,
+                    out_tok          INTEGER NOT NULL,
+                    cache_read       INTEGER NOT NULL DEFAULT 0,
+                    cache_create     INTEGER NOT NULL DEFAULT 0,
+                    cost_usd_micros  INTEGER NOT NULL DEFAULT 0,
+                    error_kind       TEXT
+                );
+                CREATE INDEX IF NOT EXISTS usage_events_session_idx ON usage_events(session_id);
+                CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events(ts);
+                ",
+            )?;
+            self.conn
+                .execute("UPDATE schema_version SET version = 9", [])?;
         }
         Ok(())
     }
@@ -694,23 +854,274 @@ impl StateStore {
     // Updates
     // -----------------------------------------------------------------------
 
-    /// Update aggregate token and tool-call statistics for a session.
+    /// Update aggregate token, tool-call, cache, and cost statistics for a session.
+    ///
+    /// Phase 36.2 (D-USAGE-02): extended to aggregate cache_read_tokens,
+    /// cache_creation_tokens, and cost_usd_micros (micro-USD i64; no float).
+    /// All six numeric columns use additive (`+ ?N`) semantics — each call
+    /// increments the row by the supplied deltas. Designed to be wrapped by
+    /// the caller in a single rusqlite transaction together with
+    /// [`Self::insert_usage_event`] for per-turn atomicity (Pitfall 6).
+    //
+    // 7 numeric columns + the row key is the data shape mandated by
+    // 36.2-02-PLAN.md acceptance criteria; collapsing into a struct would
+    // diverge from the call site in downstream Plan 07 and obscure the
+    // INTEGER-micros invariant for each column. The allow is intentional.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_session_stats(
         &mut self,
         id: &str,
         input_tokens: i64,
         output_tokens: i64,
         tool_call_count: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+        cost_usd_micros: i64,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET \
              input_tokens = input_tokens + ?1, \
              output_tokens = output_tokens + ?2, \
-             tool_call_count = tool_call_count + ?3 \
-             WHERE id = ?4",
-            params![input_tokens, output_tokens, tool_call_count, id],
+             tool_call_count = tool_call_count + ?3, \
+             cache_read_tokens = cache_read_tokens + ?4, \
+             cache_creation_tokens = cache_creation_tokens + ?5, \
+             cost_usd_micros = cost_usd_micros + ?6 \
+             WHERE id = ?7",
+            params![
+                input_tokens,
+                output_tokens,
+                tool_call_count,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd_micros,
+                id
+            ],
         )?;
         Ok(())
+    }
+
+    /// Insert a single per-turn usage event row.
+    ///
+    /// Phase 36.2 (D-USAGE-02): designed to be called inside the same
+    /// rusqlite transaction as [`Self::update_session_stats`] for atomic
+    /// per-turn writes (Pitfall 6). All SQL uses `params!` bindings —
+    /// never string interpolation (T-36.2-02-INJ mitigation).
+    pub fn insert_usage_event(&mut self, ev: &UsageEvent) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO usage_events \
+             (session_id, ts, provider, model, in_tok, out_tok, \
+              cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                ev.session_id,
+                ev.ts,
+                ev.provider,
+                ev.model,
+                ev.in_tok,
+                ev.out_tok,
+                ev.cache_read,
+                ev.cache_create,
+                ev.cost_usd_micros,
+                ev.error_kind
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only accessor for the underlying rusqlite Connection.
+    ///
+    /// Phase 36.2 (D-USAGE-02): the per-turn write path is two SQL
+    /// statements (INSERT usage_events + UPDATE sessions) that MUST execute
+    /// inside a single transaction. The transaction is owned by the caller
+    /// (the agent loop, downstream Plan 07), not by the StateStore methods,
+    /// so integration tests need direct connection access to construct an
+    /// `unchecked_transaction()` and verify commit/rollback semantics.
+    #[doc(hidden)]
+    pub fn conn_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Recompute `cost_usd_micros` on every `usage_events` row using the
+    /// caller-supplied closure, then resync each session's aggregate column.
+    /// Atomic: either all changes commit, or none. `dry_run = true` rolls
+    /// back so operators can preview the impact.
+    ///
+    /// The closure receives `(model, in_tok, out_tok, cache_read, cache_create)`
+    /// and must return the new `cost_usd_micros` value (i64 micro-USD).
+    ///
+    /// Phase 36.2 follow-up: existing rows were written when the disk-resident
+    /// pricing cache was not threaded onto AgentLoop (every OpenRouter slug
+    /// like `google/gemini-3.5-flash` got cost=0). This method lets the
+    /// `hermes pricing backfill` CLI command retroactively populate the
+    /// cost column using current pricing.
+    pub fn backfill_usage_costs<F>(
+        &mut self,
+        mut recompute: F,
+        dry_run: bool,
+        clean_orphans: bool,
+    ) -> Result<UsageBackfillStats>
+    where
+        F: FnMut(&str, i64, i64, i64, i64) -> i64,
+    {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stats = UsageBackfillStats::default();
+
+        // Collect all rows first so we can release the SELECT statement
+        // before issuing UPDATEs (rusqlite borrows the connection mutably
+        // for the duration of a prepared statement iter).
+        let rows: Vec<(i64, String, String, i64, i64, i64, i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, cost_usd_micros \
+                 FROM usage_events",
+            )?;
+            let iter = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                ))
+            })?;
+            iter.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        stats.rows_examined = rows.len();
+
+        // Count orphans (session_id with no matching sessions.id) — these
+        // sum into total cost but never roll up into a sessions row. Report
+        // but don't fix here (cleanup is a separate decision).
+        let mut session_ids_present: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        {
+            let mut stmt = tx.prepare("SELECT id FROM sessions")?;
+            let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for row in iter {
+                session_ids_present.insert(row?);
+            }
+        }
+
+        for (rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, old_cost) in
+            &rows
+        {
+            if !session_ids_present.contains(session_id) {
+                stats.orphan_rows += 1;
+            }
+            let new_cost = recompute(model, *in_tok, *out_tok, *cache_read, *cache_create);
+            if new_cost != *old_cost {
+                stats.rows_updated += 1;
+                stats.total_cost_delta_micros =
+                    stats.total_cost_delta_micros.saturating_add(new_cost - old_cost);
+                tx.execute(
+                    "UPDATE usage_events SET cost_usd_micros = ?1 WHERE rowid = ?2",
+                    rusqlite::params![new_cost, rowid],
+                )?;
+            }
+        }
+
+        // Optional orphan cleanup: delete usage_events rows whose session_id
+        // has no matching sessions.id. Runs BEFORE the sessions aggregate
+        // resync so the SUM reflects the post-cleanup state. Always reports
+        // the count via stats.orphans_deleted; in dry-run mode the rollback
+        // below undoes the actual delete.
+        if clean_orphans {
+            stats.orphans_deleted = tx.execute(
+                "DELETE FROM usage_events WHERE session_id NOT IN (SELECT id FROM sessions)",
+                [],
+            )?;
+        }
+
+        // Resync sessions.cost_usd_micros = SUM of matching usage_events.
+        // The COALESCE handles sessions with no usage rows (sum is NULL).
+        let sessions_resynced = tx.execute(
+            "UPDATE sessions \
+             SET cost_usd_micros = COALESCE((\
+                 SELECT SUM(cost_usd_micros) FROM usage_events \
+                 WHERE usage_events.session_id = sessions.id\
+             ), 0)",
+            [],
+        )?;
+        stats.sessions_resynced = sessions_resynced;
+
+        if dry_run {
+            tx.rollback()?;
+        } else {
+            tx.commit()?;
+        }
+        Ok(stats)
+    }
+
+    /// Aggregate `usage_events` rows by `(provider, model)` under the given
+    /// filter (Phase 36.2 Plan 10).
+    ///
+    /// **T-36.2-10-INJ mitigation:** the SQL string is composed with an
+    /// append-only conditional pattern over a fixed `"... WHERE 1=1"` base.
+    /// Every user-supplied filter value is bound via `rusqlite::params!` —
+    /// never `format!`-interpolated into the SQL. The b1 integration test
+    /// (`crates/ironhermes-cli/tests/usage_command.rs`) verifies this with a
+    /// malicious provider string that contains `'; DROP TABLE ...--`; the
+    /// table survives the call and 0 rows are returned (no match).
+    pub fn query_usage_events(&self, filter: &UsageFilter) -> Result<Vec<UsageRollup>> {
+        let mut sql = String::from(
+            "SELECT provider, model, \
+             SUM(in_tok), SUM(out_tok), SUM(cache_read), SUM(cache_create), \
+             SUM(cost_usd_micros), COUNT(*) \
+             FROM usage_events WHERE 1=1",
+        );
+        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(sid) = &filter.session_id {
+            sql.push_str(" AND session_id = ?");
+            bound.push(Box::new(sid.clone()));
+        }
+        if filter.today_only {
+            // Local-midnight today as unix epoch ms.
+            let start_ms = chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is always a valid time of day")
+                .and_local_timezone(chrono::Local)
+                .single()
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() - 86_400_000);
+            sql.push_str(" AND ts >= ?");
+            bound.push(Box::new(start_ms));
+        }
+        if let Some(provider) = &filter.provider {
+            sql.push_str(" AND provider = ?");
+            bound.push(Box::new(provider.clone()));
+        }
+        if let Some(model) = &filter.model {
+            sql.push_str(" AND model = ?");
+            bound.push(Box::new(model.clone()));
+        }
+        if let Some(secs) = filter.since_seconds {
+            let cutoff_ms = chrono::Utc::now().timestamp_millis() - secs * 1000;
+            sql.push_str(" AND ts >= ?");
+            bound.push(Box::new(cutoff_ms));
+        }
+        sql.push_str(" GROUP BY provider, model ORDER BY SUM(cost_usd_micros) DESC");
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows: rusqlite::Result<Vec<UsageRollup>> = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(UsageRollup {
+                    provider: row.get(0)?,
+                    model: row.get(1)?,
+                    in_tok: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    out_tok: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    cache_read: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    cache_create: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    cost_usd_micros: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    event_count: row.get(7)?,
+                })
+            })?
+            .collect();
+        Ok(rows?)
     }
 
     /// Set or replace the human-readable title for a session.
@@ -811,6 +1222,51 @@ impl StateStore {
 // FTS5 sanitization
 // ---------------------------------------------------------------------------
 
+/// Render a `UsageFilter` + rollup list as a human-readable table string.
+///
+/// Phase 36.2 Plan 10 (D-USAGE-03): the single, canonical text renderer used
+/// by the `/usage` slash command across every platform (CLI, TUI, gateway,
+/// web UI). Display is the ONLY place i64 micro-USD becomes f64 — every
+/// upstream arithmetic operation stays integer (Pitfall 5: float drift).
+///
+/// The "Cost" column prints with `${:.4}` (four decimal places) so a 234_000
+/// micro-USD value renders as `$0.2340`. Total cost line at the bottom uses
+/// the same precision so column totals match the row totals byte-for-byte.
+pub fn format_usage_rollups(rollups: &[UsageRollup], filter: &UsageFilter) -> String {
+    if rollups.is_empty() {
+        return "No usage data found for this filter.".to_string();
+    }
+    let mut out = String::new();
+    out.push_str("Usage\n");
+    if let Some(sid) = &filter.session_id {
+        out.push_str(&format!("Session: {sid}\n"));
+    }
+    out.push_str(&format!(
+        "{:<10} {:<24} {:>8} {:>8} {:>8} {:>8} {:>11}\n",
+        "Provider", "Model", "In tok", "Out tok", "Cache R", "Cache C", "Cost"
+    ));
+    let mut total_cost: i64 = 0;
+    for r in rollups {
+        let cost_usd = r.cost_usd_micros as f64 / 1_000_000.0;
+        out.push_str(&format!(
+            "{:<10} {:<24} {:>8} {:>8} {:>8} {:>8} ${:>10.4}\n",
+            r.provider,
+            r.model,
+            r.in_tok,
+            r.out_tok,
+            r.cache_read,
+            r.cache_create,
+            cost_usd
+        ));
+        total_cost += r.cost_usd_micros;
+    }
+    out.push_str(&format!(
+        "Total cost: ${:.4}\n",
+        total_cost as f64 / 1_000_000.0
+    ));
+    out
+}
+
 /// Strip FTS5 special operators from user input to prevent query parse errors.
 /// Pass `raw: true` in [`SearchFilter`] to bypass this.
 pub fn sanitize_fts_query(input: &str) -> String {
@@ -840,6 +1296,11 @@ pub fn sanitize_fts_query(input: &str) -> String {
 
 /// Retry a closure up to 3 times on `SQLITE_BUSY`, with deterministic jitter
 /// (50 ms, then 125 ms). No `rand` dependency required.
+///
+/// NOTE: pre-existing helper kept for future SESS-13 wiring; #[allow] added
+/// in Phase 36.2 Plan 02 so the new acceptance criterion `clippy -D warnings`
+/// passes. Re-enable as part of any future SQLITE_BUSY retry phase.
+#[allow(dead_code)]
 fn with_busy_retry<T, F: FnMut() -> Result<T>>(mut f: F) -> Result<T> {
     for attempt in 0u32..3 {
         match f() {
@@ -855,6 +1316,7 @@ fn with_busy_retry<T, F: FnMut() -> Result<T>>(mut f: F) -> Result<T> {
 }
 
 /// Check whether a [`StateError`] is a `SQLITE_BUSY` error.
+#[allow(dead_code)]
 fn is_busy(e: &StateError) -> bool {
     if let StateError::Sqlite(sq) = e {
         matches!(
@@ -926,6 +1388,138 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 36.2 Plan 07 (fixup): shared StateStoreHandle adapter
+// ---------------------------------------------------------------------------
+//
+// Wraps `Arc<Mutex<StateStore>>` and implements the
+// `ironhermes_core::commands::context::StateStoreHandle` trait so the slash
+// command handlers — including `/usage` (Plan 10) — run against the real DB
+// from every surface (CLI, TUI, web). Without this, `iron_hermes_ui` had no
+// way to wire a `StateStoreHandle` into `CommandContext` and every slash
+// command intercepted in `ws.rs` returned "Session storage not configured."
+//
+// Mirrors `tui_rata::commands::StateStoreAdapter` so both surfaces emit
+// byte-identical text. Lives in `ironhermes-state` because that's where
+// `UsageFilter` / `format_usage_rollups` live and adding the impl here
+// avoids a circular dependency from `ironhermes-core`.
+
+use ironhermes_core::commands::context::StateStoreHandle as CoreStateStoreHandle;
+
+/// `Arc<Mutex<StateStore>>` → `dyn StateStoreHandle` adapter.
+///
+/// Wrap with `Arc::new(StateStoreHandleAdapter(store.clone()))` and pass into
+/// `CommandContext::with_state_store(...)`. Synchronous; callers that hold
+/// the tokio runtime should wrap dispatch in `tokio::task::block_in_place`.
+pub struct StateStoreHandleAdapter(pub std::sync::Arc<std::sync::Mutex<StateStore>>);
+
+impl CoreStateStoreHandle for StateStoreHandleAdapter {
+    fn list_sessions_text(&self, limit: usize) -> String {
+        self.list_sessions_text_filtered(limit, None)
+    }
+
+    fn list_sessions_text_filtered(&self, limit: usize, workspace_root: Option<&str>) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.list_sessions_filtered(None, limit, workspace_root) {
+            Ok(sessions) if sessions.is_empty() => match workspace_root {
+                Some(ws) => format!("No sessions found for workspace: {ws}"),
+                None => "No sessions found.".to_string(),
+            },
+            Ok(sessions) => {
+                let lines: Vec<String> =
+                    sessions.iter().map(|s| format!("  {}", s.id)).collect();
+                let header = match workspace_root {
+                    Some(ws) => format!("Recent sessions (workspace={ws}):"),
+                    None => "Recent sessions:".to_string(),
+                };
+                format!("{header}\n{}", lines.join("\n"))
+            }
+            Err(e) => format!("Error listing sessions: {e}"),
+        }
+    }
+
+    fn history_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.get_messages(session_id) {
+            Ok(msgs) if msgs.is_empty() => "No messages in history.".to_string(),
+            Ok(msgs) => {
+                let lines: Vec<String> = msgs
+                    .iter()
+                    .map(|m| {
+                        format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or(""))
+                    })
+                    .collect();
+                format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
+            }
+            Err(e) => format!("Error loading history: {e}"),
+        }
+    }
+
+    fn export_session_text(&self, session_id: &str) -> String {
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.export_session(session_id) {
+            Ok(export) => format!("Session exported: {} messages.", export.messages.len()),
+            Err(e) => format!("Error exporting session: {e}"),
+        }
+    }
+
+    fn update_title(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| "StateStore lock poisoned.".to_string())?;
+        guard
+            .update_session_title(session_id, title)
+            .map_err(|e| e.to_string())
+    }
+
+    fn get_session_id(&self, name_or_id: &str) -> Option<String> {
+        let guard = self.0.lock().ok()?;
+        if let Ok(Some(s)) = guard.get_session(name_or_id) {
+            return Some(s.id);
+        }
+        guard
+            .get_session_by_title(name_or_id)
+            .ok()
+            .flatten()
+            .map(|s| s.id)
+    }
+
+    fn usage_text(
+        &self,
+        session_id: Option<&str>,
+        today_only: bool,
+        provider: Option<&str>,
+        model: Option<&str>,
+        since_seconds: Option<i64>,
+    ) -> String {
+        let filter = UsageFilter {
+            session_id: session_id.map(|s| s.to_string()),
+            today_only,
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            since_seconds,
+        };
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.query_usage_events(&filter) {
+            Ok(rows) => format_usage_rollups(&rows, &filter),
+            Err(e) => format!("Usage query failed: {e}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 25.3 Plan 10 Task 2: list_sessions_filtered tests (D-W-2)
 // ---------------------------------------------------------------------------
 
@@ -986,10 +1580,12 @@ mod schema_migration_v8_tests {
     use tempfile::tempdir;
 
     #[test]
-    fn schema_version_constant_is_8() {
+    fn schema_version_constant_is_9() {
+        // Phase 25.3 D-W-1 originally bumped to 8 (workspace_root).
+        // Phase 36.2 D-USAGE-02 bumps to 9 (cache tokens + usage_events table).
         assert_eq!(
-            SCHEMA_VERSION, 8,
-            "Phase 25.3 D-W-1: SCHEMA_VERSION must be bumped to 8"
+            SCHEMA_VERSION, 9,
+            "Phase 36.2 D-USAGE-02: SCHEMA_VERSION must be bumped to 9"
         );
     }
 
@@ -1016,10 +1612,10 @@ mod schema_migration_v8_tests {
     }
 
     #[test]
-    fn v7_db_upgrades_to_v8_preserving_rows() {
+    fn v7_db_upgrades_to_latest_preserving_rows() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.db");
-        // Manually create a v7 DB shape (no workspace_root)
+        // Manually create a v7 DB shape (no workspace_root, no cache/cost cols)
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
@@ -1036,7 +1632,7 @@ mod schema_migration_v8_tests {
             )
             .unwrap();
         }
-        // Open with the new code — should ALTER + bump to 8
+        // Open with the new code — should ALTER + bump to current SCHEMA_VERSION
         let _store = StateStore::new(&path).expect("upgrade open");
         let conn = Connection::open(&path).unwrap();
         let v: i64 = conn
@@ -1044,7 +1640,11 @@ mod schema_migration_v8_tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(v, 8, "schema_version must be 8 after upgrade");
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "schema_version must be SCHEMA_VERSION after upgrade"
+        );
+        // Phase 25.3 invariant: workspace_root added with NULL default for pre-v8 rows.
         let wr: Option<String> = conn
             .query_row(
                 "SELECT workspace_root FROM sessions WHERE id = 'legacy-1'",
@@ -1056,6 +1656,29 @@ mod schema_migration_v8_tests {
             wr.is_none(),
             "pre-v8 row must have NULL workspace_root after upgrade"
         );
+        // Phase 36.2 invariant: cache + cost cols added with 0 default for pre-v9 rows.
+        let (cr, cc, cost): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT cache_read_tokens, cache_creation_tokens, cost_usd_micros \
+                 FROM sessions WHERE id = 'legacy-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (cr, cc, cost),
+            (0, 0, 0),
+            "pre-v9 row must default to 0 on new cache/cost cols"
+        );
+        // Phase 36.2 invariant: usage_events table created during v9 migration.
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_events'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "usage_events table must exist after v9 migration");
     }
 
     #[test]
@@ -1086,5 +1709,185 @@ mod schema_migration_v8_tests {
             .unwrap();
         assert_eq!(r1.as_deref(), Some("/repo/foo"));
         assert!(r2.is_none());
+    }
+
+    /// Phase 36.2 follow-up: backfill recomputes cost_usd_micros and resyncs
+    /// the sessions aggregate column. Dry-run rolls back; non-dry-run commits.
+    #[test]
+    fn backfill_usage_costs_dry_run_then_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+
+        // Seed a session and three usage_events rows with cost=0 (the
+        // pre-fix state). Plus one orphan row (session_id has no matching
+        // sessions.id) to test the orphan counter.
+        store
+            .create_session("sess-1", "telegram", Some("gpt-4o"), None, None, None)
+            .unwrap();
+        let conn = store.conn_for_test();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('sess-1', 1, 'openai', 'gpt-4o', 1000, 500, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('sess-1', 2, 'openai', 'gpt-4o', 2000, 1000, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('orphan-sid', 3, 'openai', 'gpt-4o', 100, 50, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Recompute closure: stub pricing — every row gets new_cost = in_tok * 2.
+        let recompute = |_model: &str, in_tok: i64, _out: i64, _cr: i64, _cc: i64| -> i64 {
+            in_tok * 2
+        };
+
+        // Dry-run: report what would change without persisting.
+        let stats = store.backfill_usage_costs(recompute, true, false).unwrap();
+        assert_eq!(stats.rows_examined, 3);
+        assert_eq!(stats.rows_updated, 3);
+        assert_eq!(stats.orphan_rows, 1);
+        assert_eq!(stats.orphans_deleted, 0, "dry-run without clean-orphans deletes nothing");
+        // Cost delta = (2000 + 4000 + 200) - 0 = 6200
+        assert_eq!(stats.total_cost_delta_micros, 6200);
+
+        // Verify dry-run did NOT commit — rows still at cost=0.
+        let conn = store.conn_for_test();
+        let cost_after_dry_run: i64 = conn
+            .query_row(
+                "SELECT SUM(cost_usd_micros) FROM usage_events",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost_after_dry_run, 0, "dry-run must not commit");
+
+        // Apply for real.
+        let stats = store.backfill_usage_costs(recompute, false, false).unwrap();
+        assert_eq!(stats.rows_updated, 3);
+        assert_eq!(stats.total_cost_delta_micros, 6200);
+        assert_eq!(stats.orphans_deleted, 0);
+
+        // Verify rows now have new cost.
+        let conn = store.conn_for_test();
+        let cost_after_apply: i64 = conn
+            .query_row(
+                "SELECT SUM(cost_usd_micros) FROM usage_events",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost_after_apply, 6200);
+
+        // sess-1 aggregate = sum of its two non-orphan rows = 2000 + 4000 = 6000.
+        let session_cost: i64 = conn
+            .query_row(
+                "SELECT cost_usd_micros FROM sessions WHERE id = 'sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_cost, 6000);
+    }
+
+    /// Backfill is idempotent: running twice on the same closure produces
+    /// rows_updated = 0 on the second pass.
+    #[test]
+    fn backfill_usage_costs_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-1", "telegram", Some("gpt-4o"), None, None, None)
+            .unwrap();
+        store
+            .conn_for_test()
+            .execute(
+                "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+                 cache_read, cache_create, cost_usd_micros, error_kind) \
+                 VALUES ('sess-1', 1, 'openai', 'gpt-4o', 1000, 500, 0, 0, 0, NULL)",
+                [],
+            )
+            .unwrap();
+        let recompute = |_m: &str, in_tok: i64, _o: i64, _cr: i64, _cc: i64| in_tok * 2;
+
+        let s1 = store.backfill_usage_costs(recompute, false, false).unwrap();
+        assert_eq!(s1.rows_updated, 1);
+
+        let s2 = store.backfill_usage_costs(recompute, false, false).unwrap();
+        assert_eq!(s2.rows_updated, 0, "second run should be a no-op");
+        assert_eq!(s2.total_cost_delta_micros, 0);
+    }
+
+    /// Phase 36.2 follow-up: --clean-orphans deletes usage_events rows whose
+    /// session_id has no matching sessions.id and reports the count.
+    #[test]
+    fn backfill_usage_costs_clean_orphans_deletes_unmatched_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-1", "telegram", Some("gpt-4o"), None, None, None)
+            .unwrap();
+        let conn = store.conn_for_test();
+        // One valid row, two orphan rows.
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('sess-1', 1, 'openai', 'gpt-4o', 100, 50, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('gw:7018:7018', 2, 'openai', 'gpt-4o', 100, 50, 0, 0, 999, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('Telegram:1:1', 3, 'openai', 'gpt-4o', 100, 50, 0, 0, 888, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let identity = |_: &str, _: i64, _: i64, _: i64, _: i64| -> i64 { 0 };
+
+        // Dry-run with clean_orphans=true: report counts, no DB mutation.
+        let stats = store.backfill_usage_costs(identity, true, true).unwrap();
+        assert_eq!(stats.orphan_rows, 2);
+        assert_eq!(stats.orphans_deleted, 2);
+        let count_after_dry: i64 = store
+            .conn_for_test()
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_after_dry, 3, "dry-run must not delete");
+
+        // Apply for real.
+        let stats = store.backfill_usage_costs(identity, false, true).unwrap();
+        assert_eq!(stats.orphans_deleted, 2);
+        let count_after_apply: i64 = store
+            .conn_for_test()
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_after_apply, 1, "orphans deleted, valid row preserved");
+
+        // A second pass finds 0 orphans (already cleaned).
+        let stats = store.backfill_usage_costs(identity, false, true).unwrap();
+        assert_eq!(stats.orphan_rows, 0);
+        assert_eq!(stats.orphans_deleted, 0);
     }
 }

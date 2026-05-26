@@ -230,10 +230,9 @@ Each stage is independently shippable and leaves the tree green.
    turn to `AgentRuntime::run_turn` instead of assembling an `AgentLoop` itself.
 4. **Cron is a distinct unit.** The cron tick gets its own runtime/budget so
    scheduled turns don't compete with or drain the interactive chat budget.
-   *Shipped at the top-level turn boundary (28.1-06).* **Open (T-28.1-16):** a
-   cron job that calls `delegate_task` still reaches the interactive delegate
-   runner through the shared `ToolRegistry`, so its subagents draw on the
-   interactive budget — see §8.
+   *Shipped at the top-level turn boundary (28.1-06).* **Resolved (T-28.1-16,
+   Phase 35):** the subagent-layer contamination vector is closed by the global
+   per-subagent independent-budget model — see §8.
 5. **All four channels in one pass.** Stages 1–3 below (gateway, web, `run_chat`,
    TUI) land together; stage 4 (skills/tool-registry ownership) is a follow-up.
 
@@ -250,37 +249,90 @@ Each stage is independently shippable and leaves the tree green.
   `BudgetHandle::reset()` (commit `367eaa79`) once `run_turn` owns the reset.
   Keep `BudgetHandle::reset()` itself — `run_turn` calls it.
 
-## 8. Open follow-up — T-28.1-16: cron subagent budget isolation
+## 8. Resolved — T-28.1-16: global per-subagent independent-budget model (Phase 35)
 
-**Status:** open (deferred per threat model in Phase 28.1; candidate for a new phase).
+**Status:** resolved in Phase 35 (plans 35-02 / 35-03).
 
-**What works today (28.1-06):** `run_cron_job` constructs a fresh
-`BudgetHandle::new(config.agent.max_iterations)` per job and installs it on the
-per-job `AgentLoop`. A regression test proves draining the cron budget leaves the
-interactive budget untouched, and vice versa, for **top-level** cron turns.
+### What was the gap (historical context)
 
-**The gap:** budget isolation stops at the top-level loop. When a cron job's agent
-calls the `delegate_task` tool, that tool resolves its subagent runner from the
-shared `ToolRegistry` (built by the interactive `AgentRuntime`). The interactive
-runner holds a clone of the **interactive** `BudgetHandle` (the PROV-10
-parent/child sharing arrangement). So cron-spawned subagents charge their
-iterations against the interactive budget instead of the cron-scoped one — a busy
-cron fan-out can drain interactive chat headroom, the exact cross-contamination
-§6.4 set out to prevent.
+Before Phase 35, `AgentSubagentRunner::run_child` gave each child loop a
+**clone** of the runner's `budget` field — the PROV-10 shared parent↔child
+`Arc<AtomicUsize>`. This meant:
 
-**Why it was deferred:** top-level cron isolation removes the common-case
-contention; subagent fan-out from cron is a narrower path. Fixing it correctly
-means giving cron its **own** delegate runner bound to the cron budget — i.e.
-cron should build (or be handed) an `AgentRuntime`/registry whose `delegate_task`
-wiring carries the cron `BudgetHandle`, rather than reusing the interactive
-registry.
+- Every subagent (interactive or cron) decremented the **same** counter as its
+  parent.
+- A cron job delegating via `delegate_task` reached the shared `ToolRegistry`
+  delegate runner (built by the interactive `AgentRuntime`), so cron-spawned
+  subagents charged iterations against the **interactive** budget — the
+  cross-contamination T-28.1-16 identified.
 
-**Sketch of the fix (for the follow-up phase to refine):**
-- Give the cron runner its own `AgentRuntime` (or a cron-scoped registry) so the
-  `delegate_task` tool's `AgentSubagentRunner` clones the **cron** budget, not the
-  interactive one.
-- Verify with a regression test: a cron job that calls `delegate_task` to
-  exhaustion must leave the interactive budget at full headroom.
-- Watch the shared-Arc identity: the interactive runtime intentionally shares one
-  budget Arc parent↔child (PROV-10); cron must get a *separate* Arc, mirroring the
-  top-level fresh-budget approach already in `run_cron_job`.
+The cron-specific "give cron its own AgentRuntime / own delegate runner" fix
+sketched in earlier drafts of this section is **superseded** and was never
+implemented. The chosen solution is global (see below).
+
+### The fix: global per-subagent independent budgets (D-01 / D-04)
+
+`AgentSubagentRunner::run_child` now constructs a **fresh**
+`BudgetHandle::new(max_iterations)` for every child loop, replacing the
+`budget.clone()` that shared the parent's `Arc<AtomicUsize>`. This applies to
+**all** subagents — interactive and cron alike — matching the hermes-agent
+reference implementation (each subagent has its own budget; total parent+child
+iterations can exceed any single agent's cap).
+
+**PROV-10 retired (D-04).** The shared parent↔child counter invariant is no
+longer in effect. `BudgetHandle::clone` still shares one `Arc` and is still used
+for gateway/CommandContext reset visibility; it is simply no longer used for
+parent↔child subagent wiring.
+
+### Clamp-to-ceiling policy (D-03)
+
+`config.delegation.max_iterations` (default 50) is a hard **ceiling** on the
+per-child budget. The `delegate_task` tool's `execute` / `execute_batch` paths
+resolve an `effective_max_iterations` value:
+
+- A caller/model-supplied per-call `max_iterations` that is **≤ ceiling** is
+  honored verbatim.
+- A value **exceeding** the ceiling is clamped down to the ceiling and a
+  `tracing::warn!` records the clamp.
+
+This preserves the Phase 32.2 per-call override feature for *shrinking* budgets
+while capping DoS exposure from runaway delegation.
+
+### DoS containment bound (D-05)
+
+PROV-10's shared counter provided a single tree-wide backstop. Its retirement
+shifts DoS containment to the **reference-style structural bound**:
+
+> **Maximum tree-wide iterations = `max_spawn_depth` × `max_concurrent_children` × `max_iterations`**
+>
+> = 1 × 3 × 50 = **150** (default config values).
+
+Both `max_spawn_depth` (default 1, `config.rs:994-997`) and
+`max_concurrent_children` (default 3, `config.rs:981`) guards were enforced in
+Phase 32.2 and remain in effect. No separate aggregate tree-wide budget backstop
+is added; the depth × concurrency × per-subagent product is the security
+boundary (documented here per D-05 — DEFCON-relevant).
+
+### Behavioral change (D-02)
+
+A parent's budget is **no longer decremented by its children**. For interactive
+chat, a parent that spawns subagents via `delegate_task` will see its own
+remaining counter unaffected by child iteration consumption. This matches the
+hermes-agent reference and is the deliberate, user-chosen wider scope of Phase 35.
+
+### Verification (D-07)
+
+Three regression tests cover the resolved gap:
+
+1. **D-07.1** — `test_independent_budget_child_drain_does_not_affect_parent`
+   (`crates/ironhermes-agent/src/agent_loop.rs`): a child draining its budget to
+   exhaustion leaves the parent budget unchanged.
+2. **D-07.2** — `cron_subagent_budget_independence_from_interactive`
+   (`crates/ironhermes-cron-runner/src/runner.rs`): a cron-spawned subagent
+   draining its per-child budget to exhaustion leaves the interactive budget at
+   full headroom (the original T-28.1-16 acceptance criterion at the subagent
+   layer). The shared `ToolRegistry` delegate runner is confirmed not to be a
+   contamination vector.
+3. **D-07.3** — clamp-to-ceiling test (`crates/ironhermes-tools/src/delegate_task.rs`):
+   a caller-supplied `max_iterations` exceeding the ceiling is clamped; a value at
+   or below the ceiling is honored verbatim.

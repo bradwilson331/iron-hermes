@@ -30,6 +30,7 @@ use tracing::info;
 mod batch;
 mod config_cli;
 mod cron;
+mod doctor;
 mod mcp_config;
 mod memory_cmd;
 mod memory_setup;
@@ -168,6 +169,11 @@ enum Commands {
     Models {
         #[command(subcommand)]
         command: models_cmd::ModelsSubcommand,
+    },
+    /// Show or refresh the pricing table for cost accounting (Phase 36.2 Plan 09).
+    Pricing {
+        #[command(subcommand)]
+        command: ironhermes_cli::pricing_cmd::PricingSubcommand,
     },
     /// Manage MCP server connections
     Mcp {
@@ -364,7 +370,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
-        Some(Commands::Doctor) => cmd_doctor(),
+        Some(Commands::Doctor) => doctor::run_doctor_check(),
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat {
             ref message,
@@ -434,6 +440,9 @@ async fn main() -> Result<()> {
             action: MemorySubcommand::Off,
         }) => memory_cmd::handle_memory_off().await,
         Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
+        Some(Commands::Pricing { command }) => {
+            ironhermes_cli::pricing_cmd::handle_pricing_command(command).await
+        }
         Some(Commands::Mcp { action }) => match mcp_config::handle_mcp_command(action).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -576,70 +585,6 @@ fn ensure_home_dirs() -> Result<()> {
 // processes, MCP, yolo) and supports `--all`, `--deep`, `--json` flags.
 // The dispatch arm in `main()` calls `run_status(args).await`.
 
-fn cmd_doctor() -> Result<()> {
-    println!("{}", "IronHermes Doctor".bold().cyan());
-    // Phase 24 D-16: show which profile this doctor run is inspecting.
-    println!("Profile: {}", ironhermes_cli::status_cmd::current_profile());
-    println!("{}", "─".repeat(40));
-
-    // Check home directory
-    let home = ironhermes_core::get_hermes_home();
-    print_check("Home directory", home.exists());
-
-    // Check config
-    let config_path = Config::config_path();
-    print_check("Config file", config_path.exists());
-
-    // Check .env
-    let env_path = Config::env_path();
-    print_check(".env file", env_path.exists());
-
-    // Check API keys
-    print_check(
-        "OpenRouter API key",
-        std::env::var("OPENROUTER_API_KEY").is_ok(),
-    );
-    print_check(
-        "Anthropic API key",
-        std::env::var("ANTHROPIC_API_KEY").is_ok(),
-    );
-
-    // Check state database
-    let db_path = home.join("state.db");
-    print_check("State database", db_path.exists());
-
-    // Phase 24 D-16: gateway.pid liveness check (active profile only — no
-    // cross-profile sweep per the deferred-ideas list).
-    let pid_path = home.join("gateway.pid");
-    if pid_path.exists() {
-        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
-            .ok()
-            .flatten()
-            .map(|r| {
-                matches!(
-                    ironhermes_gateway::pid::is_pid_alive(r.pid),
-                    ironhermes_gateway::pid::PidLiveness::Live
-                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
-                )
-            })
-            .unwrap_or(false);
-        print_check("Gateway PID (gateway.pid → live process)", pid_ok);
-    } else {
-        // Absent file = healthy (no gateway running). Use the "OK" branch.
-        print_check("Gateway PID (not running)", true);
-    }
-
-    println!();
-    println!("{}", "Run `ironhermes status` for more details.".dimmed());
-
-    Ok(())
-}
-
-fn print_check(name: &str, ok: bool) {
-    let icon = if ok { "OK".green() } else { "MISSING".yellow() };
-    println!("  [{icon}] {name}");
-}
-
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
     let (client, config, resolver) = build_client(cli)?;
@@ -751,8 +696,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 
     // Plan 28.1-04: build ONE AgentRuntime from config — replaces the manual
     // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
-    // from_config creates the shared BudgetHandle, builds the subagent runner
-    // with a clone of it (PROV-10), and assembles the tool registry/skills/browser bundle.
+    // from_config creates the runtime's top-level BudgetHandle; each child subagent
+    // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the
+    // tool registry/skills/browser bundle.
     // run_turn resets the budget at every turn boundary, fixing any Stop100 latch.
     let runtime = ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
         config: Arc::new(config.clone()),
@@ -853,6 +799,20 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let tail = scrubber_single.lock().unwrap().flush();
     if !tail.is_empty() {
         print!("{}", tail);
+        io::stdout().flush().ok();
+    }
+
+    // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+    // Warnings are NOT embedded in the model-bound message text; each surface renders
+    // them separately so the user sees them without the model echoing them.
+    if !result.context_warnings.is_empty() {
+        let warning_lines: Vec<String> = result
+            .context_warnings
+            .iter()
+            .map(|w| format!("- {}", w))
+            .collect();
+        let block = format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+        print!("{}", block);
         io::stdout().flush().ok();
     }
 
@@ -1297,8 +1257,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 
     // Plan 28.1-04: build ONE AgentRuntime — replaces the manual BudgetHandle::new
     // + AgentSubagentRunner + build_app_runtime_bundle block. from_config creates
-    // the shared BudgetHandle, builds the subagent runner with a clone of it
-    // (PROV-10), and assembles the tool registry/skills/browser bundle.
+    // the runtime's top-level BudgetHandle; each child subagent gets its own fresh
+    // BudgetHandle (D-01/D-04, Phase 35), and assembles the tool registry/skills/browser bundle.
     // run_turn resets the budget at each turn boundary, permanently fixing the
     // latent multi-turn Stop100 latch (T-28.1-08).
     let runtime = Arc::new(
@@ -1571,6 +1531,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         }
                         CommandResult::ClearSession(output) => {
                             messages.truncate(1); // Keep system message
+                            // Phase 34b Plan 02 (D-09/D-10): /new is the durable
+                            // per-session reset locus. Under the fresh-per-turn
+                            // engine model the real durable counter is this
+                            // surface-owned Arc<AtomicUsize>, so zero it here so
+                            // the next conversation does not inherit a stale
+                            // compression_count / prior-summary chain.
+                            compression_count.store(0, Ordering::SeqCst);
                             println!("{}", output.dimmed());
                             continue;
                         }
@@ -2317,6 +2284,19 @@ async fn run_agent_turn(
         write_into_scroll_region(tail.as_bytes(), tui.reserved_row_count());
     }
 
+    // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+    // Written via write_into_scroll_region so it lands in the scroll region like streamed
+    // output — visibly separate from the model response text (no double-render).
+    if !result.context_warnings.is_empty() {
+        let warning_lines: Vec<String> = result
+            .context_warnings
+            .iter()
+            .map(|w| format!("- {}", w))
+            .collect();
+        let block = format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+        write_into_scroll_region(block.as_bytes(), tui.reserved_row_count());
+    }
+
     // After the turn completes, reset activity to Idle so the scanner hides (D-08).
     tui.set_activity(ActivityState::Idle);
 
@@ -2415,8 +2395,8 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
 
     // Plan 28.1-02: build ONE AgentRuntime from config — replaces the manual
     // BudgetHandle::new + AgentSubagentRunner + build_app_runtime_bundle block.
-    // from_config creates the shared BudgetHandle, builds the subagent runner
-    // with a clone of it (PROV-10), and assembles the bundle.
+    // from_config creates the runtime's top-level BudgetHandle; each child subagent
+    // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the bundle.
     let runtime = Arc::new(
         ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
             config: Arc::new(config.clone()),

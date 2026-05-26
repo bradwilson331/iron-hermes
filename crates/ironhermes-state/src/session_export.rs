@@ -66,6 +66,9 @@ impl SessionDirectoryExport {
         // 4. trajectories.jsonl — copy from the trajectory crate's primary location.
         // Operator-tolerant: missing source => no trajectories.jsonl in the export
         // (matches D-T-4 "no automatic eviction" semantic; absence is informative).
+        // Phase 36.2 Plan 02: nested-if kept for readability; pre-existing
+        // clippy::collapsible_if from Phase 25.3-10 noted in deferred-items.md.
+        #[allow(clippy::collapsible_if)]
         if let Some(src) = trajectory_source {
             if src.exists() {
                 let dst = self.output_dir.join("trajectories.jsonl");

@@ -6,6 +6,7 @@ pub mod context;
 pub mod handlers;
 pub mod provider_display;
 pub mod registry;
+pub mod running_agent;
 pub mod toolset_display;
 pub mod typo;
 

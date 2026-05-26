@@ -36,6 +36,17 @@ pub struct AppState {
     /// "agent:main:web:dm:{uuid}" produced by api.rs create_session).
     /// (Phase 32 LEARN-01 — web UI nudge wiring)
     pub nudge_turns: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    /// Phase 36.1 (GW-05-WEB, D-03): per-session running-agent flag map.
+    /// Each session_id maps to its own Arc<AtomicBool>. When the flag is true,
+    /// a turn is in flight for that session; new slash commands (non-bypass)
+    /// and plain-text messages are rejected with the D-02 rejection message.
+    ///
+    /// Mutex choice: std::sync::Mutex (non-async brief access), matching the
+    /// nudge_turns field directly above. The Arc is cloned out of the map before
+    /// any async work — the lock is never held across an .await point.
+    ///
+    /// Map grows unbounded (Pitfall 5 accepted tradeoff — matches nudge_turns precedent).
+    pub running_agents: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     /// Phase 32.3 Plan 04 (D-08): subagent registry Arc — same handle threaded
     /// into the AgentRuntime via `subagent_registry`. Held on
     /// AppState so the four `/api/agents/*` endpoints can read it for status
@@ -159,6 +170,9 @@ impl AppState {
             runtime: Arc::new(runtime),
             memory_manager,
             nudge_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 36.1 (GW-05-WEB, D-03): per-session running-agent flag map.
+            // std::sync::Mutex matches nudge_turns precedent; Arc for Clone.
+            running_agents: Arc::new(std::sync::Mutex::new(HashMap::new())),
             // Phase 32.3 Plan 04: subagent_registry + shrike — same Arcs the
             // delegate-task runner uses, so the four `/api/agents/*` endpoints
             // operate on the live registry.
@@ -192,6 +206,37 @@ impl AppState {
         Ok(())
     }
 
+    /// Phase 34b Plan 02 (D-09/D-10, CONTEXT Open Q1): per-session reset stub for
+    /// the web surface. No new-chat / `/new` trigger is wired in the web UI yet,
+    /// so there is no call site today. When such a trigger lands, this is the
+    /// locus that would discard the session's durable per-session state (and call
+    /// the engine's `on_session_reset`) the same way CLI `/new` and gateway `/new`
+    /// do. Documented stub is the accepted scope for this phase.
+    pub fn reset_web_session(&self, session_id: &str) {
+        tracing::debug!(
+            session = %session_id,
+            "reset_web_session: no new-chat trigger wired yet (Phase 34b stub, CONTEXT Open Q1)"
+        );
+    }
+
+    /// Phase 36.1 (GW-05-WEB, D-03): get or create the per-session running-agent flag.
+    ///
+    /// Returns an `Arc<AtomicBool>` for the given session_id, creating a
+    /// fresh `false`-initialized flag if none exists yet. Multiple calls with
+    /// the same `session_id` return handles to the SAME underlying AtomicBool
+    /// (get-OR-create semantics — the second call does NOT create a fresh flag).
+    ///
+    /// Mirrors `SessionStore::get_running_flag` in `ironhermes-gateway/src/session.rs`.
+    pub fn get_or_create_running_flag(
+        &self,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut map = self.running_agents.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
     pub async fn run_web_turn(
         &self,
         session_id: &str,
@@ -200,6 +245,15 @@ impl AppState {
         tool_progress_callback: Option<ToolProgressCallback>,
         tool_result_callback: Option<ToolResultCallback>,
     ) -> Result<ironhermes_agent::AgentResult> {
+        // Phase 36.1 (GW-05-WEB, D-06, Pitfall 1): RAII running-agent guard.
+        // Constructed INSIDE the async fn body (not in the sync caller) so Drop
+        // fires when this future completes — on Ok return, Err propagation via ?,
+        // panic, and future cancellation. Sets the per-session flag to true on
+        // construction; Drop sets it to false on every exit path.
+        let _agent_guard = ironhermes_core::commands::running_agent::RunningAgentGuard::new(
+            self.get_or_create_running_flag(session_id),
+        );
+
         let messages = self.build_messages_for_turn(session_id, user_input).await?;
         // Snapshot the messages BEFORE agent.run consumes them — the nudge
         // (if it fires) sees the exact turn the model just consumed, not any
@@ -210,10 +264,23 @@ impl AppState {
         // - state_store threaded via TurnRequest so session_search intercept fires (T-28.1-07).
         // - pressure_tracker: fresh per-turn, matching prior build_agent_loop behavior.
         // - session_id: use the real per-session id (behavior improvement over hardcoded "web-ui").
+        //
+        // WR-01 (Phase 34b Plan 03): retain a shared reference to stream_callback so
+        // we can emit context_warnings out-of-band AFTER run_turn returns. StreamCallback
+        // is Box<dyn Fn>, not Clone, so we wrap it in Arc before passing a forwarding Box
+        // into TurnRequest — the Arc clone is used post-turn for the warnings block.
+        let stream_cb_arc: std::sync::Arc<ironhermes_agent::agent_loop::StreamCallback> =
+            std::sync::Arc::new(stream_callback);
+        let cb_for_turn = {
+            let arc = stream_cb_arc.clone();
+            let cb: ironhermes_agent::agent_loop::StreamCallback =
+                Box::new(move |s: &str| (arc)(s));
+            cb
+        };
         let request = TurnRequest {
             messages,
             session_id: session_id.to_string(),
-            stream: Some(stream_callback),
+            stream: Some(cb_for_turn),
             tool_progress: tool_progress_callback,
             tool_result: tool_result_callback,
             state_store: Some(self.state_store.clone()),
@@ -231,6 +298,25 @@ impl AppState {
         // Drop the state_store guard explicitly so we don't hold two locks
         // when we acquire the nudge_turns Mutex below.
         drop(store);
+
+        // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band after run_turn.
+        // Streamed via the same stream_callback so the web client receives it as a distinct
+        // annotation after the model response. tracing::warn! for server-side visibility.
+        if !result.context_warnings.is_empty() {
+            let warning_lines: Vec<String> = result
+                .context_warnings
+                .iter()
+                .map(|w| format!("- {}", w))
+                .collect();
+            let warnings_block =
+                format!("\n--- Context Warnings ---\n{}\n", warning_lines.join("\n"));
+            tracing::warn!(
+                session_id = session_id,
+                warnings = ?result.context_warnings,
+                "context_warnings surfaced out-of-band (WR-01)"
+            );
+            (stream_cb_arc)(warnings_block.as_str());
+        }
 
         // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
         // Fires AFTER run_turn() succeeded and AFTER result.appended is persisted.
@@ -498,6 +584,102 @@ impl AppState {
     /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_status`.
     pub fn api_agents_status(&self, id: &str) -> Option<serde_json::Value> {
         api_agents_status(self.shrike.as_deref(), id)
+    }
+}
+
+// =============================================================================
+// Phase 36.1 Plan 02 (GW-05-WEB) — running_agents helper unit tests
+// =============================================================================
+
+#[cfg(test)]
+mod phase_36_1_02_state_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Helper: build a minimal AppState for unit testing. Skips the heavy
+    /// AgentRuntime / StateStore init by constructing only the running_agents
+    /// field directly — tests operate on the public helper, not AppState::init.
+    fn make_running_agents() -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// get_or_create_running_flag helper as a free fn so unit tests don't need
+    /// to build AppState. Mirrors the method body exactly.
+    fn get_or_create(
+        map: &Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// Test 1 (GW-05-WEB behavior): fresh session flag starts false.
+    #[test]
+    fn new_session_flag_starts_false() {
+        let map = make_running_agents();
+        let flag = get_or_create(&map, "session-A");
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "A freshly created session flag must start as false"
+        );
+    }
+
+    /// Test 2 (GW-05-WEB behavior): get-OR-create semantics — two lookups with
+    /// the same session_id must return handles to the SAME AtomicBool, not a
+    /// fresh allocation.
+    #[test]
+    fn flag_persists_across_lookups() {
+        let map = make_running_agents();
+        let flag1 = get_or_create(&map, "session-A");
+        flag1.store(true, Ordering::SeqCst);
+        let flag2 = get_or_create(&map, "session-A");
+        assert!(
+            flag2.load(Ordering::SeqCst),
+            "Second lookup for session-A must see the value set via the first handle (same Arc)"
+        );
+    }
+
+    /// Test 3 (GW-05-WEB behavior, T-36.1-06 mitigation): per-session isolation.
+    /// Setting session A's flag must NOT affect session B's flag.
+    #[test]
+    fn session_isolation() {
+        let map = make_running_agents();
+        // Set A's flag to true
+        get_or_create(&map, "session-A").store(true, Ordering::SeqCst);
+        // B must still be false
+        let flag_b = get_or_create(&map, "session-B");
+        assert!(
+            !flag_b.load(Ordering::SeqCst),
+            "Session B's flag must remain false after session A's flag is set (no cross-session bleed)"
+        );
+    }
+
+    /// Test 4 (RAII smoke): RunningAgentGuard::new sets the flag to true;
+    /// Drop sets it back to false. Proves the guard type from ironhermes_core
+    /// integrates correctly with the helper-returned Arc.
+    #[test]
+    fn running_agent_guard_raii_sets_and_clears_flag() {
+        use ironhermes_core::commands::running_agent::RunningAgentGuard;
+
+        let map = make_running_agents();
+        let flag = get_or_create(&map, "session-raii");
+        assert!(!flag.load(Ordering::SeqCst), "pre: flag must start false");
+
+        {
+            let _guard = RunningAgentGuard::new(flag.clone());
+            assert!(
+                flag.load(Ordering::SeqCst),
+                "flag must be true while guard is in scope"
+            );
+        } // guard drops here
+
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "flag must be false after guard drops (RAII discipline)"
+        );
     }
 }
 

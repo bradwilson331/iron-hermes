@@ -23,6 +23,7 @@ use ironhermes_core::commands::context::{
     AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
     MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
 };
+use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::types::Platform;
@@ -237,6 +238,38 @@ impl StateStoreHandle for StateStoreAdapter {
             .flatten()
             .map(|s| s.id)
     }
+
+    /// Phase 36.2 Plan 10: `/usage` table renderer (production impl).
+    ///
+    /// Builds a `UsageFilter` from the primitive arguments and dispatches
+    /// to `StateStore::query_usage_events` (which is the single SQL-bound
+    /// access site, T-36.2-10-INJ). Output is built by the canonical
+    /// `format_usage_rollups` helper in `ironhermes-state` so every
+    /// platform (CLI, TUI, gateway, web UI) emits byte-identical text.
+    fn usage_text(
+        &self,
+        session_id: Option<&str>,
+        today_only: bool,
+        provider: Option<&str>,
+        model: Option<&str>,
+        since_seconds: Option<i64>,
+    ) -> String {
+        let filter = ironhermes_state::UsageFilter {
+            session_id: session_id.map(|s| s.to_string()),
+            today_only,
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            since_seconds,
+        };
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.query_usage_events(&filter) {
+            Ok(rows) => ironhermes_state::format_usage_rollups(&rows, &filter),
+            Err(e) => format!("Usage query failed: {e}"),
+        }
+    }
 }
 
 /// Adapter: ContextEngine → ContextCompressorHandle for `/compress`.
@@ -330,6 +363,12 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 args_str.split_whitespace().collect()
             };
             let ctx = build_command_context(app);
+            // Phase 36.1 (D-10, Pitfall 4): bypass check on POST-resolution canonical def.name —
+            // never raw user input. /reset resolves to "new" via the CommandRouter and correctly
+            // bypasses. Reject non-bypass commands when a turn is in flight.
+            if app.agent_running.load(Ordering::SeqCst) && !is_bypass(def.name) {
+                return SlashOutcome::Handled(AGENT_RUNNING_REJECT_MSG.to_string());
+            }
             match invoke_handler(def.name, &ctx, &app.command_router, &args_vec).await {
                 Ok(result) => {
                     // D-02 post-router App-side hook (Plan 03: FULL multi-name expansion).
@@ -534,7 +573,8 @@ impl CronJobReader for CronJobReaderImpl {
 /// pattern: each field is Option so handlers gracefully return "not configured"
 /// when the handle is None).
 fn build_command_context(app: &App) -> CommandContext {
-    let agent_running = Arc::new(AtomicBool::new(app.pending_rx.is_some()));
+    // Phase 36.1 (D-08, Pitfall 4): live handle replaces the pending_rx.is_some() snapshot.
+    let agent_running = app.agent_running.clone();
     let mut ctx = CommandContext::new(Platform::Local, app.session_id.clone(), agent_running);
     if let Some(mgr) = &app.mcp_manager {
         ctx = ctx.with_mcp_reloader(mgr.clone());

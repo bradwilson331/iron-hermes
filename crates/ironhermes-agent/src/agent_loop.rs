@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
+use ironhermes_core::pricing::{PricingRegistry, compute_cost_micros};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
@@ -18,8 +19,10 @@ use crate::budget::{BudgetHandle, PressureTier, advisory_text};
 use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::{ContextCompressor, estimate_messages_tokens};
 use crate::context_engine::{ContextEngine, ContextStats};
+use crate::error_classifier::{ProviderError, classify_llm_error_typed};
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
+use crate::rate_limit_tracker::{RateLimitTracker, hash_api_key};
 use crate::subdir_discovery::SubdirDiscovery;
 
 /// Why the agent loop stopped (D-15 / G-01 / Plan 21.7-05).
@@ -68,6 +71,16 @@ pub struct AgentResult {
     /// Legacy callers that don't inspect this field continue to work — the
     /// default for pre-21.7 paths is `Natural` or `MaxIterations` as before.
     pub stop_reason: StopReason,
+    /// Phase 34b Plan 03 (WR-01): out-of-band warnings produced by `@`-reference
+    /// expansion in `run_turn`. Populated by `AgentRuntime::run_turn` after
+    /// `preprocess_context_references_async` runs. Each surface (CLI `run_single` +
+    /// `run_chat_turn`, gateway `run_agent`, web `run_web_turn`) reads this field
+    /// after `run_turn` returns and renders the `--- Context Warnings ---` block
+    /// separately from the model response text. The warnings are NOT embedded in the
+    /// message text sent to the model — `preprocess_context_references_async` populates
+    /// only `ContextReferenceResult.warnings`; the surface rendering is done here.
+    /// Invariant locked in `invariants_34b::surfaces_consume_context_warnings`.
+    pub context_warnings: Vec<String>,
 }
 
 impl AgentResult {
@@ -86,6 +99,7 @@ impl AgentResult {
             final_response: None,
             total_usage: AggregatedUsage::default(),
             compression_count_after: 0,
+            context_warnings: Vec::new(),
             stop_reason: StopReason::BudgetExhausted,
         }
     }
@@ -144,12 +158,12 @@ pub struct AgentLoop {
     activity_last: Arc<std::sync::Mutex<std::time::Instant>>,
     activity_kind: Arc<std::sync::Mutex<ActivityKind>>,
     current_tool: Arc<std::sync::Mutex<Option<String>>>,
-    /// Shared iteration budget handle (PROV-09, PROV-10, D-15).
-    /// Tracks total turns across parent + child agents and exposes the
-    /// pressure-tier ladder (None / Caution70 / Warning90 / Stop100) via
-    /// `BudgetHandle::pressure()`. Plan 21.7-05 replaced the bare
-    /// `Arc<AtomicUsize>` with the handle so parent + child decrement the
-    /// same counter and tier transitions are observed consistently.
+    /// This agent's OWN iteration budget handle (PROV-09, D-15).
+    /// Tracks turns consumed by THIS loop and exposes the pressure-tier ladder
+    /// (None / Caution70 / Warning90 / Stop100) via `BudgetHandle::pressure()`.
+    /// Plan 21.7-05 replaced the bare `Arc<AtomicUsize>` with the handle.
+    /// Plan 35-02 (D-01/D-04): each agent loop owns its own counter; the
+    /// `budget()` getter is no longer used to hand a shared handle to children.
     /// None = use local `max_iterations` only (backward compat).
     budget: Option<BudgetHandle>,
     /// Plan 21.7-05: last pressure tier injected as an advisory system
@@ -211,6 +225,60 @@ pub struct AgentLoop {
     /// complete user-assistant exchange). Recorded in TrajectoryEntry.turn_index
     /// so Phase 25.4 Curator can correlate tool calls within a turn.
     turn_index: std::sync::atomic::AtomicUsize,
+    /// Phase 36.2 Plan 07: pricing registry for per-turn cost computation.
+    /// Wraps the static pricing.toml table (with optional disk-cache overlay).
+    /// Defaults to an `Arc::new(PricingRegistry::new())` instance constructed
+    /// in `new()` so every loop can compute costs without any builder call.
+    /// Plan 09 wires the disk-cache refresh path.
+    pricing_registry: Arc<PricingRegistry>,
+    /// Phase 36.2 Plan 07: per-provider in-memory rate-limit tracker.
+    /// `None` = tracker disabled for this loop (default — backward compatible
+    /// with all existing call sites that do not configure one).
+    /// Wired via `with_rate_limit_tracker()`; consumed at the post-LLM-call
+    /// write site to call `record_headers` (success) / `record_429` (failure).
+    rate_limit_tracker: Option<RateLimitTracker>,
+    /// Phase 36.2 Plan 07: canonical provider name used as the
+    /// `(provider, key_hash, model)` first axis on the RateLimitTracker key
+    /// AND the `usage_events.provider` column. Wired via `with_provider_name`.
+    /// Empty string = "unknown" — usage_events row still writes for forensics.
+    provider_name: String,
+    /// Phase 36.2 Plan 07: cleartext API key used at the post-call write site
+    /// SOLELY to derive a stable `api_key_hash` via `hash_api_key()` BEFORE
+    /// being passed to the RateLimitTracker. The cleartext value is never
+    /// logged, never serialized, never forwarded to the tracker. Empty string
+    /// = "unknown" hash bucket. Wired via `with_api_key_for_usage_tracking`.
+    api_key_for_usage_tracking: String,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): the prior session's model name. When
+    /// `Some(prev)` and `prev != self.client.model()` at run() start AND the
+    /// session has prior turns, the model-swap cache-break warning fires.
+    /// Wired via `with_previous_model` from AgentRuntime / the surface layer
+    /// (which knows which model was active in the previous turn). `None`
+    /// means no swap detection — used by tests + first-turn callers.
+    previous_model: Option<String>,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): per-context-file mtime snapshot.
+    /// Captured at the first turn for SOUL.md / AGENTS.md / CLAUDE.md (and
+    /// any other context files the surface registers via
+    /// `with_context_file_paths`). Polled at the start of every subsequent
+    /// turn; any mtime increase fires the context-file-edit warning and
+    /// updates the snapshot (idempotency invariant — Test 5 in
+    /// `tests/cache_break_warnings.rs`).
+    context_file_mtimes: std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
+    >,
+    /// Phase 36.2 Plan 08 (D-CACHE-03): paths the surface wants the cache-break
+    /// system to watch. Empty by default — populated via
+    /// `with_context_file_paths` so existing call sites that don't track
+    /// context-file edits continue to work without modification.
+    context_file_paths: Vec<std::path::PathBuf>,
+    /// Phase 36.2 Plan 08 (D-CACHE-03 session-zero guard): true when the
+    /// session has at least one prior completed turn. Surfaces (AgentRuntime,
+    /// gateway, TUI, web) set this to `true` on every turn after the first;
+    /// the first turn keeps the default `false`. Used by both the model-swap
+    /// trigger (run() start) and the memory-edit trigger (memory tool
+    /// dispatch site) to suppress false positives on session setup — a
+    /// session-zero memory write is the initial MEMORY.md snapshot, not a
+    /// cache break (Test 4 / D-CACHE-03).
+    session_has_prior_turns: bool,
 }
 
 impl AgentLoop {
@@ -254,6 +322,24 @@ impl AgentLoop {
             // Phase 25.3 D-T-3 / D-T-1: trajectory ledger fields default to disabled / 0.
             trajectory_writer: None,
             turn_index: std::sync::atomic::AtomicUsize::new(0),
+            // Phase 36.2 Plan 07: pricing registry loaded once at construction.
+            // PricingRegistry::new() reads the bundled pricing.toml; no disk I/O.
+            pricing_registry: Arc::new(PricingRegistry::new()),
+            // Phase 36.2 Plan 07: tracker + provider/key default to disabled.
+            // Existing callers (tests, CLI, gateway) continue to work; the new
+            // builder methods (with_rate_limit_tracker / with_provider_name /
+            // with_api_key_for_usage_tracking) opt in to per-turn forensics.
+            rate_limit_tracker: None,
+            provider_name: String::new(),
+            api_key_for_usage_tracking: String::new(),
+            // Phase 36.2 Plan 08 (D-CACHE-03): cache-break detection state
+            // defaults to disabled. previous_model / context_file_paths are
+            // opt-in via with_previous_model / with_context_file_paths so the
+            // existing 100+ AgentLoop::new() call sites continue to work.
+            previous_model: None,
+            context_file_mtimes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            context_file_paths: Vec::new(),
+            session_has_prior_turns: false,
         }
     }
 
@@ -331,6 +417,44 @@ impl AgentLoop {
         self
     }
 
+    /// Phase 36.2 Plan 08 (D-CACHE-03 trigger 1): seed the model that was
+    /// active in the prior turn of this session. When `run()` starts, the
+    /// detection site compares `prev` to `self.client.model()` — if they
+    /// differ AND `prev` is non-empty, a model-swap cache-break warning fires
+    /// through the `PressureTracker` channel. AgentRuntime / the surface
+    /// layer passes the previously-used model name here. Pass `None`
+    /// (default) on the first turn of a session — the warning then does not
+    /// fire (session-zero suppression — Test 4).
+    pub fn with_previous_model(mut self, prev: impl Into<String>) -> Self {
+        self.previous_model = Some(prev.into());
+        self
+    }
+
+    /// Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): register the context-file
+    /// paths whose mtime should be polled at each turn-start. A change in
+    /// mtime since the previous turn fires the context-file-edit cache-break
+    /// warning exactly once per change (Test 5 idempotency).
+    /// Typical paths: SOUL.md, AGENTS.md, CLAUDE.md.
+    pub fn with_context_file_paths(
+        mut self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Self {
+        self.context_file_paths = paths;
+        self
+    }
+
+    /// Phase 36.2 Plan 08 (D-CACHE-03 session-zero guard): mark this turn as
+    /// having at least one prior completed turn in the same session. Used by
+    /// the model-swap (run() start) and memory-edit (memory tool dispatch)
+    /// detection sites to suppress false-positive warnings on session setup
+    /// — a model selection or initial MEMORY.md write on turn 1 is not a
+    /// cache break (Test 4). Surfaces should set this to `true` on every
+    /// turn after the first.
+    pub fn with_session_has_prior_turns(mut self, has_prior: bool) -> Self {
+        self.session_has_prior_turns = has_prior;
+        self
+    }
+
     // ── Phase 18 Plan 09: introspection accessors for tests ────────────────
     // These are harmless `is_some` / clone accessors used by unit tests in
     // this crate and in `ironhermes-gateway` to verify that the Phase 18
@@ -347,6 +471,15 @@ impl AgentLoop {
     }
     pub fn context_engine_threshold(&self) -> Option<f32> {
         self.context_engine.as_ref().map(|e| e.threshold())
+    }
+
+    /// Phase 34b Plan 02 (D-09): expose the attached context engine so
+    /// `AgentRuntime::run_turn` can invoke the per-turn lifecycle hooks
+    /// (`update_model` before the run, `update_from_response` after) at the
+    /// single central locus. Returns a cloned `Arc` so the caller holds its own
+    /// handle without borrowing the loop across the `run` boundary.
+    pub fn context_engine(&self) -> Option<Arc<dyn ContextEngine>> {
+        self.context_engine.clone()
     }
 
     /// Set a cancellation token for cooperative shutdown (D-21).
@@ -381,6 +514,41 @@ impl AgentLoop {
     /// When set, session_search calls are intercepted before registry dispatch.
     pub fn with_state_store(mut self, store: Arc<std::sync::Mutex<StateStore>>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    /// Phase 36.2 Plan 07: override the bundled pricing registry with an
+    /// explicit instance (e.g., one preloaded with disk-cache entries via
+    /// `merge_cache`). Defaults to a fresh `PricingRegistry::new()` if not
+    /// called.
+    pub fn with_pricing_registry(mut self, registry: Arc<PricingRegistry>) -> Self {
+        self.pricing_registry = registry;
+        self
+    }
+
+    /// Phase 36.2 Plan 07: attach a per-provider rate-limit tracker. When
+    /// set, the post-LLM-call site calls `record_headers` (success path) /
+    /// `record_429` (failure path when the typed error is
+    /// `ProviderError::RateLimited`).
+    pub fn with_rate_limit_tracker(mut self, tracker: RateLimitTracker) -> Self {
+        self.rate_limit_tracker = Some(tracker);
+        self
+    }
+
+    /// Phase 36.2 Plan 07: set the canonical provider name used as the first
+    /// axis of the `RateLimitKey` and the `usage_events.provider` column.
+    /// Empty string (default) is permitted but yields less-useful forensics.
+    pub fn with_provider_name(mut self, provider: impl Into<String>) -> Self {
+        self.provider_name = provider.into();
+        self
+    }
+
+    /// Phase 36.2 Plan 07: set the cleartext API key used SOLELY to derive a
+    /// stable `api_key_hash` for the rate-limit tracker's tracking key. The
+    /// raw key is never logged, serialized, or passed to the tracker — only
+    /// the 16-byte SHA-256-truncated hash leaves this struct.
+    pub fn with_api_key_for_usage_tracking(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key_for_usage_tracking = api_key.into();
         self
     }
 
@@ -549,18 +717,25 @@ impl AgentLoop {
         self
     }
 
-    /// Set a shared iteration budget handle (PROV-09, PROV-10, D-15).
+    /// Set this agent loop's own iteration budget handle (PROV-09, D-15).
     ///
     /// Plan 21.7-05: accepts [`BudgetHandle`] rather than a bare
     /// `Arc<AtomicUsize>`. The handle's `consume()` is called at the top of
     /// every turn (Stop100 → clean-stop via `AgentResult::budget_exhausted`);
     /// `pressure()` drives the advisory-injection ladder (Caution70/Warning90).
+    ///
+    /// Plan 35-02 (D-01/D-04): each call to `run_child` now passes a FRESH
+    /// `BudgetHandle::new(max_iterations)` — not a clone of the parent handle.
     pub fn with_budget(mut self, budget: BudgetHandle) -> Self {
         self.budget = Some(budget);
         self
     }
 
-    /// Get the budget handle for sharing with child agents (PROV-10).
+    /// Get this agent's own budget handle (PROV-09, D-15).
+    ///
+    /// Note: since Plan 35-02 (D-01/D-04), this getter is no longer used to
+    /// hand a shared handle to child agents — each child receives a fresh
+    /// `BudgetHandle::new(max_iterations)` from `run_child` directly.
     pub fn budget(&self) -> Option<BudgetHandle> {
         self.budget.clone()
     }
@@ -690,7 +865,11 @@ impl AgentLoop {
     /// Recognises both production formats:
     ///   - "(400 Bad Request)"  — `bail!("… ({status}): …")` in client.rs / anthropic_client.rs
     ///   - "status: 429 …"      — synthetic test format kept for regression coverage
-    fn extract_http_status(err_str: &str) -> Option<u16> {
+    ///
+    /// Phase 36.2-03: visibility widened to `pub(crate)` so
+    /// `crate::error_classifier::classify_llm_error_typed` can reuse this
+    /// helper without duplication (D-ERR-03).
+    pub(crate) fn extract_http_status(err_str: &str) -> Option<u16> {
         if let Some(open) = err_str.find('(') {
             let rest = &err_str[open + 1..];
             if rest.len() >= 4 {
@@ -723,7 +902,11 @@ impl AgentLoop {
     ///
     /// Needles are verified against pinned source (reqwest 0.12.28, hyper-util 0.1.20,
     /// anyhow 1.0.100). See phase 27.1.4.1.1 RESEARCH.md — Validated Allowlist (D-01 / D-01a).
-    fn is_transport_failure(err_str: &str) -> bool {
+    ///
+    /// Phase 36.2-03: visibility widened to `pub(crate)` so
+    /// `crate::error_classifier::classify_llm_error_typed` can reuse this
+    /// helper without duplication (D-ERR-03).
+    pub(crate) fn is_transport_failure(err_str: &str) -> bool {
         const TRANSPORT_MARKERS: &[&str] = &[
             "error sending request for url",
             "connection refused",
@@ -739,25 +922,283 @@ impl AgentLoop {
 
     /// Classify an error for fallback decision-making.
     /// Returns (should_retry, should_fallback).
+    ///
+    /// Phase 36.2-03 (D-ERR-03): this function is a one-line facade
+    /// delegating to `crate::error_classifier::classify_llm_error_typed`.
+    /// The new typed classifier is the canonical source of truth; this
+    /// `(bool, bool)` shape is preserved for the 15 regression tests at
+    /// lines 2520-2724 and for any external caller that still consumes the
+    /// legacy tuple shape.
+    ///
+    /// Phase 36.2-07: the production post-LLM-call site now derives the
+    /// typed `ProviderError` directly via `classify_llm_error_typed` and
+    /// converts to `(bool, bool)` via `.into()`, so this facade is no
+    /// longer called from production code — only from the legacy
+    /// regression tests. `#[allow(dead_code)]` because the test-only
+    /// references are inside the gated `#[cfg(test)]` module.
+    #[allow(dead_code)]
     fn classify_llm_error(err: &anyhow::Error) -> (bool, bool) {
-        // Alternate Display walks the full anyhow context chain joined with ": ".
-        // Plain Display only shows the outermost context — production errors are
-        // wrapped at agent_loop.rs:1030 with `.context("Streaming LLM call failed")`,
-        // hiding the underlying `(400 Bad Request)` from the substring scan.
-        let err_str = format!("{err:#}");
-        let Some(code) = Self::extract_http_status(&err_str) else {
-            return (true, Self::is_transport_failure(&err_str));
-        };
-        match code {
-            // Transient — retry first, then fall back if all retries fail.
-            429 | 500 | 502 | 503 | 504 => (true, true),
-            // Permanent client errors — retrying the same call against the
-            // same provider won't help. Skip retry; fall back. 400 is
-            // included because OpenRouter returns 400 for invalid model IDs,
-            // which a sibling provider (e.g. local ollama) may accept.
-            400 | 401 | 403 | 404 => (false, true),
-            _ => (true, false),
+        crate::error_classifier::classify_llm_error_typed(err).into()
+    }
+
+    /// Phase 36.2 Plan 07: post-LLM-call success write path.
+    ///
+    /// Computes Anthropic's three-input billable cost (input_tokens +
+    /// cache_read + cache_creation, each priced per million via
+    /// `compute_cost_micros`), inserts a `usage_events` row + increments the
+    /// matching `sessions` row inside a single rusqlite transaction
+    /// (Pitfall 6 atomicity), records header-derived rate-limit state on the
+    /// tracker (Plan 06 surface), emits the per-turn `tracing::info!("usage",
+    /// ...)` line (D-USAGE-03 third channel), and updates the
+    /// context_compressor's full-fidelity per-turn counters
+    /// (record_usage_full from Task 1).
+    ///
+    /// **Resilient by design.** A failure of any write surface (state store,
+    /// tracker) is logged via `tracing::warn!` but does NOT abort the agent
+    /// turn — forensics are best-effort, not load-bearing for user response
+    /// delivery (T-36.2-07-DOS mitigation).
+    ///
+    /// **Key isolation (T-36.2-07-LEAK).** The cleartext API key is hashed
+    /// to a 16-byte SHA-256-truncated digest BEFORE being passed to the
+    /// tracker; the raw key never reaches the tracker module.
+    ///
+    /// Visibility: `pub` + `#[doc(hidden)]` so the integration test in
+    /// `tests/usage_events_write_path.rs` can drive the write site directly
+    /// without spinning a full live LLM call (the same shape Phase 36.2-02's
+    /// `conn_for_test` accessor uses).
+    #[doc(hidden)]
+    pub fn write_usage_success(&self, usage: &Option<Usage>) {
+        let model_str = self.client.model().to_string();
+        let provider_str = self.provider_name.clone();
+        let session_id = self
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let in_tok = usage.as_ref().map(|u| u.prompt_tokens as i64).unwrap_or(0);
+        let out_tok = usage
+            .as_ref()
+            .map(|u| u.completion_tokens as i64)
+            .unwrap_or(0);
+        let cache_read = usage
+            .as_ref()
+            .and_then(|u| u.cache_read_input_tokens)
+            .map(|n| n as i64)
+            .unwrap_or(0);
+        let cache_create = usage
+            .as_ref()
+            .and_then(|u| u.cache_creation_input_tokens)
+            .map(|n| n as i64)
+            .unwrap_or(0);
+
+        // Compute cost via Plan 04 surface — Anthropic three-input formula.
+        let pricing = self.pricing_registry.lookup_or_zero(&model_str);
+        let cost_micros = compute_cost_micros(&pricing, in_tok, out_tok, cache_read, cache_create);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // (1) usage_events INSERT + sessions UPDATE atomically (Plan 02
+        // surface — semantically equivalent to calling
+        // `StateStore::insert_usage_event` + `StateStore::update_session_stats`).
+        // Pitfall 6: both writes happen inside a single rusqlite
+        // `unchecked_transaction` so they commit or roll back together —
+        // never half-applied. Wrapped in if-let so callers without a state
+        // store (subagent tests, in-process unit tests) silently skip the
+        // write. The transaction borrows the Connection immutably, so the
+        // two INSERT / UPDATE statements use `tx.execute(...)` directly
+        // (mirrors `crates/ironhermes-state/tests/usage_events_schema.rs`
+        // b7_* tests) rather than the `&mut self` methods on `StateStore`
+        // which would conflict with the active transaction borrow. The SQL
+        // shape is byte-identical to `StateStore::insert_usage_event` and
+        // `StateStore::update_session_stats` — verified against
+        // crates/ironhermes-state/src/lib.rs:847 and :809 respectively.
+        if let Some(store) = &self.state_store {
+            let store = Arc::clone(store);
+            let sid_for_update = session_id.clone();
+            let provider_for_write = provider_str.clone();
+            let model_for_write = model_str.clone();
+            let write_result: Result<(), anyhow::Error> = (|| {
+                let guard = store.lock().map_err(|_| {
+                    anyhow::anyhow!("state store mutex poisoned")
+                })?;
+                let tx = guard.conn_for_test().unchecked_transaction()?;
+                // INSERT usage_events row.
+                tx.execute(
+                    "INSERT INTO usage_events \
+                     (session_id, ts, provider, model, in_tok, out_tok, \
+                      cache_read, cache_create, cost_usd_micros, error_kind) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    rusqlite::params![
+                        session_id,
+                        now_ms,
+                        provider_for_write,
+                        model_for_write,
+                        in_tok,
+                        out_tok,
+                        cache_read,
+                        cache_create,
+                        cost_micros,
+                        Option::<String>::None,
+                    ],
+                )?;
+                // UPDATE sessions aggregate row.
+                tx.execute(
+                    "UPDATE sessions SET \
+                     input_tokens = input_tokens + ?1, \
+                     output_tokens = output_tokens + ?2, \
+                     tool_call_count = tool_call_count + ?3, \
+                     cache_read_tokens = cache_read_tokens + ?4, \
+                     cache_creation_tokens = cache_creation_tokens + ?5, \
+                     cost_usd_micros = cost_usd_micros + ?6 \
+                     WHERE id = ?7",
+                    rusqlite::params![
+                        in_tok,
+                        out_tok,
+                        0_i64,
+                        cache_read,
+                        cache_create,
+                        cost_micros,
+                        sid_for_update,
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                warn!(error = ?e, "usage_events success write failed");
+            }
         }
+
+        // (2) RateLimitTracker.record_headers — Plan 06 surface. Headers are
+        // not yet plumbed through ChatResponse (would require an AnyClient
+        // refactor); we still call with an empty iterator so the contract is
+        // wired and tests can verify the call shape. A follow-up plan can
+        // populate real headers once the client layer surfaces them.
+        if let Some(tracker) = &self.rate_limit_tracker {
+            let key_hash = hash_api_key(&self.api_key_for_usage_tracking);
+            let empty_headers: Vec<(String, String)> = Vec::new();
+            tracker.record_headers(&provider_str, key_hash, &model_str, empty_headers);
+        }
+
+        // (3) Per-turn tracing log — D-USAGE-03 third channel.
+        info!(
+            target: "usage",
+            session = %session_id,
+            provider = %provider_str,
+            model = %model_str,
+            in_tok,
+            out_tok,
+            cache_read,
+            cache_create,
+            cost_usd_micros = cost_micros,
+            "usage"
+        );
+
+        // (4) ContextCompressor per-turn counters (Task 1 surface).
+        if let Some(compressor_mutex) = &self.compressor
+            && let Ok(c) = compressor_mutex.try_lock()
+        {
+            c.record_usage_full(
+                in_tok as usize,
+                out_tok as usize,
+                (in_tok + out_tok + cache_read + cache_create) as usize,
+                cache_read as usize,
+                cache_create as usize,
+            );
+        }
+    }
+
+    /// Phase 36.2 Plan 07: post-LLM-call failure write path.
+    ///
+    /// Writes a single `usage_events` row with `error_kind =
+    /// Some(provider_error.variant_name().to_string())` (Plan 03 surface —
+    /// bounded `&'static str`, never the raw err body per T-36.2-07-PII) and
+    /// `cost_usd_micros = 0` (D-USAGE-04 — failed calls cost nothing). No
+    /// `sessions` UPDATE on failure (token counts didn't change), so no
+    /// transaction is required around the single write.
+    ///
+    /// On `ProviderError::RateLimited`, also calls
+    /// `tracker.record_429(provider, key_hash, model, retry_after)` (Plan 06
+    /// reactive path).
+    ///
+    /// Visibility: `pub` + `#[doc(hidden)]` for integration-test access — see
+    /// `write_usage_success`.
+    #[doc(hidden)]
+    pub fn write_usage_failure(&self, provider_error: &ProviderError) {
+        let model_str = self.client.model().to_string();
+        let provider_str = self.provider_name.clone();
+        let session_id = self
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // (1) usage_events row for the failed call (D-USAGE-04 forensics) —
+        // semantically equivalent to a single `StateStore::insert_usage_event`
+        // call. No sessions UPDATE on failure (token counts didn't change),
+        // so a single INSERT inside a transaction suffices.
+        if let Some(store) = &self.state_store {
+            let store = Arc::clone(store);
+            let provider_for_write = provider_str.clone();
+            let model_for_write = model_str.clone();
+            let variant_name = provider_error.variant_name().to_string();
+            let session_for_write = session_id.clone();
+            let write_result: Result<(), anyhow::Error> = (|| {
+                let guard = store.lock().map_err(|_| {
+                    anyhow::anyhow!("state store mutex poisoned")
+                })?;
+                let tx = guard.conn_for_test().unchecked_transaction()?;
+                tx.execute(
+                    "INSERT INTO usage_events \
+                     (session_id, ts, provider, model, in_tok, out_tok, \
+                      cache_read, cache_create, cost_usd_micros, error_kind) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    rusqlite::params![
+                        session_for_write,
+                        now_ms,
+                        provider_for_write,
+                        model_for_write,
+                        0_i64,
+                        0_i64,
+                        0_i64,
+                        0_i64,
+                        0_i64,
+                        Some(variant_name),
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                warn!(error = ?e, "usage_events failure write failed");
+            }
+        }
+
+        // (2) RateLimitTracker.record_429 reactive path — Plan 06 surface.
+        if let Some(tracker) = &self.rate_limit_tracker
+            && let ProviderError::RateLimited { retry_after } = provider_error
+        {
+            let key_hash = hash_api_key(&self.api_key_for_usage_tracking);
+            tracker.record_429(&provider_str, key_hash, &model_str, *retry_after);
+        }
+
+        // (3) Per-turn tracing log (failure forensics — visible in logs only).
+        info!(
+            target: "usage",
+            session = %session_id,
+            provider = %provider_str,
+            model = %model_str,
+            error_kind = provider_error.variant_name(),
+            cost_usd_micros = 0_i64,
+            "usage_failure"
+        );
     }
 
     /// Phase 18 Plan 06: pre-chat compression + transient-drain block.
@@ -870,6 +1311,55 @@ impl AgentLoop {
         // (handler.rs for Telegram, runner.rs for cron) which knows the real platform
         // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
+        // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 1): model-swap cache-break ─
+        // Fire EXACTLY ONCE per `/model X` invocation that lands mid-session.
+        // Three conditions must hold:
+        //   1. The session has prior completed turns (`session_has_prior_turns`).
+        //   2. A previous-model name was wired via `with_previous_model`
+        //      (the surface knows what model the prior turn ran).
+        //   3. The previous name differs from the current `self.client.model()`.
+        // The session-zero suppression (Test 4) is enforced by condition 1 —
+        // a first-turn `/model` selection picks the model rather than swapping
+        // it, so no cached prefix exists yet.
+        if self.session_has_prior_turns
+            && let (Some(prev), Some(tracker), Some(sid)) = (
+                self.previous_model.as_deref(),
+                self.pressure_tracker.as_ref(),
+                self.session_id.as_deref(),
+            )
+        {
+            let current = self.client.model();
+            if !prev.is_empty() && prev != current {
+                tracker
+                    .warn_cache_break_model_swap(
+                        sid,
+                        prev,
+                        current,
+                        self.hook_registry.as_deref(),
+                    )
+                    .await;
+            }
+        }
+
+        // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): seed mtime snapshot ───
+        // First-turn snapshot of the registered context files. Per-turn polls
+        // run inside the loop body below — any mtime increase fires the
+        // context-file-edit warning and updates the snapshot for idempotency.
+        // Missing / unreadable files are skipped silently (existing context
+        // pipeline tolerates them — Phase 15).
+        if !self.context_file_paths.is_empty() {
+            let mut snapshot = self.context_file_mtimes.lock().unwrap();
+            if snapshot.is_empty() {
+                for path in &self.context_file_paths {
+                    if let Ok(meta) = std::fs::metadata(path)
+                        && let Ok(mtime) = meta.modified()
+                    {
+                        snapshot.insert(path.clone(), mtime);
+                    }
+                }
+            }
+        }
+
         loop {
             // D-21: Check cancellation token before each iteration
             if let Some(ref token) = self.cancel_token {
@@ -884,6 +1374,7 @@ impl AgentLoop {
                         total_usage,
                         compression_count_after: self.compression_count,
                         stop_reason: StopReason::Cancelled,
+                        context_warnings: Vec::new(),
                     });
                 }
             }
@@ -913,7 +1404,61 @@ impl AgentLoop {
                         total_usage,
                         compression_count_after: self.compression_count,
                         stop_reason: StopReason::BudgetExhausted,
+                        context_warnings: Vec::new(),
                     });
+                }
+            }
+
+            // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): per-turn mtime poll ─
+            // For each tracked context file (SOUL.md / AGENTS.md / CLAUDE.md
+            // and any others the surface registered via
+            // `with_context_file_paths`), compare current mtime to the snapshot
+            // taken at run() start. Any increase fires the context-file-edit
+            // warning EXACTLY ONCE per detected change — the snapshot is then
+            // updated to the new mtime so the next turn does not re-warn for
+            // the same edit (Test 5 idempotency).
+            //
+            // Read I/O happens on the agent tokio task; metadata calls are
+            // synchronous and fast for local files. Failures (missing file,
+            // permission denied) are skipped silently — the existing
+            // context-file pipeline tolerates absent files (Phase 15).
+            if !self.context_file_paths.is_empty() {
+                let changed_paths: Vec<std::path::PathBuf> = {
+                    let mut snapshot = self.context_file_mtimes.lock().unwrap();
+                    let mut changes: Vec<std::path::PathBuf> = Vec::new();
+                    for path in &self.context_file_paths {
+                        let Ok(meta) = std::fs::metadata(path) else {
+                            continue;
+                        };
+                        let Ok(mtime) = meta.modified() else {
+                            continue;
+                        };
+                        match snapshot.get(path) {
+                            Some(prev) if mtime > *prev => {
+                                changes.push(path.clone());
+                                snapshot.insert(path.clone(), mtime);
+                            }
+                            None => {
+                                // File now exists but wasn't tracked at run()
+                                // start — seed snapshot, do NOT fire (no
+                                // previous mtime to compare against).
+                                snapshot.insert(path.clone(), mtime);
+                            }
+                            _ => {}
+                        }
+                    }
+                    changes
+                };
+                if !changed_paths.is_empty()
+                    && let (Some(tracker), Some(sid)) =
+                        (self.pressure_tracker.as_ref(), self.session_id.as_deref())
+                {
+                    tracker
+                        .warn_cache_break_context_file_edit(
+                            sid,
+                            self.hook_registry.as_deref(),
+                        )
+                        .await;
                 }
             }
 
@@ -1031,6 +1576,7 @@ impl AgentLoop {
                                 total_usage,
                                 compression_count_after: self.compression_count,
                                 stop_reason: StopReason::Cancelled,
+                                context_warnings: Vec::new(),
                             });
                         }
                     }
@@ -1042,9 +1588,36 @@ impl AgentLoop {
                 };
 
                 match llm_result {
-                    Ok(result) => break result,
+                    Ok(result) => {
+                        // Phase 36.2 Plan 07: post-LLM-call success write site.
+                        // Compute cost, write usage_events + sessions UPDATE
+                        // atomically inside a single rusqlite transaction
+                        // (Pitfall 6), record header-derived rate-limit state
+                        // on the tracker (Plan 06 surface), emit the per-turn
+                        // tracing::info!("usage", ...) line (D-USAGE-03 third
+                        // channel), and update the context_compressor's
+                        // full-fidelity per-turn counters.
+                        self.write_usage_success(&result.1);
+                        break result;
+                    }
                     Err(err) => {
-                        let (should_retry, should_fallback) = Self::classify_llm_error(&err);
+                        // Phase 36.2 Plan 07: derive the typed ProviderError
+                        // once at the top of the failure path so both the
+                        // legacy (bool, bool) facade (consumed by the existing
+                        // retry/fallback logic below) and the new
+                        // usage_events / record_429 calls share a single
+                        // classification. Cloning is cheap — the variant
+                        // payload is at most an `Option<Duration>`.
+                        let provider_error = classify_llm_error_typed(&err);
+                        let (should_retry, should_fallback): (bool, bool) =
+                            provider_error.clone().into();
+
+                        // Phase 36.2 Plan 07: write a failure usage_events row
+                        // (D-USAGE-04 forensics) + fire tracker.record_429
+                        // when the typed variant is RateLimited. Resilient by
+                        // design: write failure is logged but never aborts
+                        // the turn.
+                        self.write_usage_failure(&provider_error);
 
                         // Try fallback if available and not already activated (PROV-07, D-11)
                         if should_fallback && !self.fallback_activated {
@@ -1155,6 +1728,18 @@ impl AgentLoop {
         } else {
             StopReason::MaxIterations
         };
+        // Phase 36.2 Plan 08 (D-CACHE-03): drain any pending cache-break
+        // warnings into AgentResult.context_warnings so the surfaces (CLI /
+        // TUI / gateway / web UI) render them on the same out-of-band channel
+        // Phase 34b shipped. The drain is per-session (keyed by session_id)
+        // so concurrent AgentLoops on different sessions never cross-pollute.
+        let cache_break_warnings: Vec<String> = if let (Some(tracker), Some(sid)) =
+            (self.pressure_tracker.as_ref(), self.session_id.as_deref())
+        {
+            tracker.drain_cache_break_warnings(sid)
+        } else {
+            Vec::new()
+        };
         Ok(AgentResult {
             messages,
             appended,
@@ -1164,6 +1749,7 @@ impl AgentLoop {
             total_usage,
             compression_count_after: self.compression_count,
             stop_reason,
+            context_warnings: cache_break_warnings,
         })
     }
 
@@ -1432,6 +2018,34 @@ impl AgentLoop {
                 let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
 
                 let tool_start = std::time::Instant::now();
+
+                // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 2): memory-edit ───
+                // Memory tool writes (the built-in "memory" tool — add /
+                // replace / remove sub-actions — or any memory-provider tool
+                // that mutates MEMORY.md / USER.md) invalidate the cached
+                // prefix when they land mid-session. Fire the warning IFF
+                // `session_has_prior_turns == true` (Test 4 session-zero
+                // suppression).
+                //
+                // The detection here is name-based — we fire on tool
+                // invocation rather than on a write-success signal because
+                // the tool dispatch surface does not expose a structured
+                // "memory mutated" callback today. Read-only memory_recall
+                // is excluded explicitly so it doesn't false-positive.
+                let is_memory_write_tool = name.as_str() == "memory"
+                    || (self.memory_provider_tool_names.contains(name.as_str())
+                        && name.as_str() != "memory_recall");
+                if is_memory_write_tool
+                    && self.session_has_prior_turns
+                    && let (Some(tracker), Some(sid)) = (
+                        self.pressure_tracker.as_ref(),
+                        self.session_id.as_deref(),
+                    )
+                {
+                    tracker
+                        .warn_cache_break_memory_edit(sid, self.hook_registry.as_deref())
+                        .await;
+                }
 
                 // Phase 21.5: Intercept memory provider tools (e.g. memory_recall).
                 // Route to MemoryManager.handle_tool_call which delegates to the primary provider.
@@ -2417,7 +3031,8 @@ mod budget_tests {
 
     #[test]
     fn test_shared_budget_increment() {
-        // Parent + child share the same underlying counter via BudgetHandle::clone.
+        // BudgetHandle::clone shares the same underlying counter (Arc<AtomicUsize>).
+        // This is still used by gateway/CommandContext and reset() visibility.
         let parent = BudgetHandle::new(10);
         let child = parent.clone();
         for _ in 0..5 {
@@ -2427,7 +3042,41 @@ mod budget_tests {
             child.consume();
         }
         assert_eq!(parent.used(), 8);
-        assert_eq!(child.used(), 8, "clones share the same counter (PROV-10)");
+        assert_eq!(child.used(), 8, "clones share the same counter");
+    }
+
+    /// D-07.1 independence regression test (Plan 35-02).
+    ///
+    /// Two distinct `BudgetHandle::new(max)` instances do NOT share a counter.
+    /// This models the parent agent loop's budget and the fresh per-child budget
+    /// produced by `AgentSubagentRunner::run_child` (which now calls
+    /// `BudgetHandle::new(max_iterations)` rather than cloning the parent handle).
+    ///
+    /// Draining the child to exhaustion must leave the parent budget unchanged.
+    /// This is the inversion of the old PROV-10 shared-counter assumption.
+    #[test]
+    fn test_independent_budget_child_drain_does_not_affect_parent() {
+        let max = 10;
+        // Two separate handles — two distinct Arc<AtomicUsize> instances.
+        let parent = BudgetHandle::new(max);
+        let child = BudgetHandle::new(max);
+
+        // Both start full.
+        assert_eq!(parent.remaining(), max, "parent starts at max");
+        assert_eq!(child.remaining(), max, "child starts at max");
+
+        // Drain the child to exhaustion.
+        for _ in 0..max {
+            child.consume();
+        }
+        assert_eq!(child.remaining(), 0, "child is fully drained");
+
+        // Independence guarantee: the parent's counter is untouched.
+        assert_eq!(
+            parent.remaining(),
+            max,
+            "child drain must not affect parent remaining() — independence guarantee (D-07.1)"
+        );
     }
 
     #[test]

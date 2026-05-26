@@ -340,7 +340,9 @@ Tool modules (each exports one or more `Tool` implementations):
 
 | Item | Kind | Description |
 |------|------|-------------|
-| `AgentLoop` | struct | Core turn loop: calls LLM, parses tool calls, executes tools, repeats |
+| `AgentRuntime` | struct | Durable, channel-agnostic agent unit. Built once per logical agent via `from_config`; owns client, registry, budget, skills, hooks, browser, memory. `run_turn(TurnRequest)` is the single per-turn API used by every channel (Phase 28.1) |
+| `TurnRequest` | struct | Per-turn input channels assemble: messages, session id, cancel token, stream + tool callbacks |
+| `AgentLoop` | struct | Core turn loop: calls LLM, parses tool calls, executes tools, repeats. Assembled per-turn inside `AgentRuntime::run_turn` |
 | `AgentResult` | struct | Loop output: `messages`, `appended`, `turns_used`, `finished_naturally`, `final_response`, `total_usage`, `compression_count_after`, `stop_reason` |
 | `AggregatedUsage` | struct | Accumulated input/output token counts |
 | `StopReason` | enum | `Natural` / `MaxIterations` / `BudgetExhausted` / `Cancelled` |
@@ -355,9 +357,9 @@ Tool modules (each exports one or more `Tool` implementations):
 | `PersonalityRegistry` | struct | Named personality presets (concise, technical, noir, hype, catgirl, default) |
 | `MemoryManager` / `SharedProvider` | struct + type | Multi-backend memory abstraction |
 | `PressureTracker` | struct | Context-window pressure monitoring with tiered warnings |
-| `BudgetHandle` | struct | Shared turn budget with hard-stop enforcement |
-| `AgentSubagentRunner` | struct | Spawns and supervises sub-agent loops |
-| `AppRuntimeBundle` / `build_app_runtime_bundle` | struct + fn | Assembled runtime dependencies for a full agent session |
+| `BudgetHandle` | struct | Per-turn iteration budget with hard-stop enforcement. Reset at the top-level turn boundary by `AgentRuntime::run_turn`; each subagent gets its own fresh handle (Phase 35 — PROV-10 retired) |
+| `AgentSubagentRunner` | struct | Spawns and supervises sub-agent loops; issues each child a fresh `BudgetHandle::new(effective_max_iterations)` |
+| `AppRuntimeBundle` / `build_app_runtime_bundle` | struct + fn | Internal assembly used by `AgentRuntime::from_config`; not called directly by channels post-Phase 28.1 |
 
 **Cargo features:**
 - `memory-sqlite` — enables the SQLite memory provider
@@ -371,7 +373,9 @@ Tool modules (each exports one or more `Tool` implementations):
 - `AgentResult.appended` contains only the messages produced by the current run (not the full history), making it safe to persist without re-filtering for role pairing — critical for correct OpenAI assistant↔tool ordering across turns.
 - `BudgetHandle::consume()` returning `None` triggers a clean `BudgetExhausted` result rather than a panic or `process::exit`. This path cannot be bypassed by yolo mode.
 - Context compression fires `ContextPreCompress` hook events and awaits async listeners (e.g., memory flush) before pruning.
-- `build_app_runtime_bundle` is the single assembly point for all session dependencies; CLI, gateway, and UI all call it (or its equivalent) at session start.
+- `AgentRuntime::run_turn` resets the runtime's `BudgetHandle` at every top-level turn boundary, fixing the gateway latch class of bug where a multi-turn channel would exhaust its budget once and then return `turns_used=0` for every subsequent message (Phase 28.1).
+- Each subagent receives an independent `BudgetHandle`; the PROV-10 shared parent↔child counter invariant is retired (Phase 35). DoS containment is structural — `max_spawn_depth × max_concurrent_children × max_iterations`. See [DELEGATION.md § Budget Model](DELEGATION.md#budget-model).
+- `build_app_runtime_bundle` is now an internal detail of `AgentRuntime::from_config`. CLI, gateway, web, TUI, and cron channels all go through `AgentRuntime` rather than calling the bundle factory directly.
 
 ---
 
@@ -385,7 +389,7 @@ Tool modules (each exports one or more `Tool` implementations):
 |------|------|-------------|
 | `GatewayRunner` | struct | Top-level orchestrator: long-polling loop, JoinSet supervision, Semaphore concurrency, CancellationToken shutdown |
 | `dispatch_delivery` | fn | Route a completed agent response to the platform |
-| `GatewayMessageHandler` | struct | Per-message handler: assembles `AgentLoop`, executes turn, persists messages |
+| `GatewayMessageHandler` | struct | Per-message platform adapter: builds a `TurnRequest`, calls `AgentRuntime::run_turn`, persists messages. Slash commands, attachments, and Telegram-specific behavior stay here (Phase 28.1) |
 | `PlatformAdapter` / `MessageHandler` | traits | Adapter interface for adding new messaging platforms |
 | `TelegramAdapter` | struct | Telegram Bot API long-polling implementation |
 | `TgMessage` / `TgUpdate` / `TgUser` / `TgChat` / `TgDocument` / `TgPhotoSize` / `TgFile` / `TgSendApi` / `TgBotCommand` | structs | Telegram API type wrappers |

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use ironhermes_core::commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -374,10 +376,40 @@ impl GatewayMessageHandler {
         let session_key =
             SessionKey::new(platform.clone(), &event.chat_id).with_user(&event.sender_id);
 
-        // Build CommandContext (agent_running always false for gateway slash commands —
-        // the running-agent guard is a future enhancement using per-session state).
-        let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running);
+        // Phase 36 / GW-05: per-session running flag retrieved from SessionStore (D-03/D-05/D-06).
+        // Construction here is the single source of truth — handle_with_multimodal and
+        // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
+        let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+        // Phase 36.2 follow-up: use the canonical SQLite session UUID for
+        // CommandContext.session_id so /usage, /history, /export, /rename all
+        // filter on the same id that agent_loop writes to the sessions /
+        // usage_events tables. Pre-fix used session_key.to_string_key()
+        // ("Telegram:<chat>:<user>") which never matched the UUID stored in
+        // sessions.id — every /usage on a gateway session returned empty.
+        // Falls back to the string-key form if no canonical id exists yet
+        // (e.g., slash command issued before the first chat turn creates the
+        // SQLite session row).
+        let ctx_session_id = {
+            let store = self.session_store.read().await;
+            store
+                .get(&session_key)
+                .map(|s| s.session_id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| session_key.to_string_key())
+        };
+        let ctx = CommandContext::new(platform.clone(), ctx_session_id, agent_running.clone());
+        // Phase 36.2 chat-fix follow-up: attach the StateStoreHandle so /usage,
+        // /sessions, /history, /export, etc. can reach the SQLite session/usage
+        // tables. Without this the gateway returns "Session storage not
+        // configured." even though session_store already owns the StateStore.
+        // Mirrors the TUI (tui_rata/commands.rs) and web (iron_hermes_ui/ws.rs)
+        // wiring that landed in commits a9fb0d0d / 402113b3.
+        let ctx = {
+            let store_arc = self.session_store.read().await.state_store().clone();
+            let handle: std::sync::Arc<dyn ironhermes_core::commands::context::StateStoreHandle> =
+                std::sync::Arc::new(ironhermes_state::StateStoreHandleAdapter(store_arc));
+            ctx.with_state_store(handle)
+        };
         // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
         // production toolset session handle so /toolset list/show/enable/disable
         // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
@@ -439,6 +471,17 @@ impl GatewayMessageHandler {
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                // Phase 36 (D-02, D-01): running-agent guard check.
+                // Check uses def.name (post-alias canonical name) so /reset → "new" correctly
+                // bypasses (Pitfall 4 mitigation). Guard fires BEFORE personality/agents
+                // interceptors — rejection takes priority over dispatch-time concerns.
+                if agent_running.load(Ordering::SeqCst) && !is_bypass(&def.name) {
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
                 // Phase 21.8.3.1 D-05 gateway analog (RESEARCH Open Question 1, Option B):
                 // Intercept /personality clear BEFORE core dispatch. Core's cmd_personality
                 // has no "clear" case — it would return Error("Unknown personality: clear")
@@ -523,7 +566,19 @@ impl GatewayMessageHandler {
                                 .run_agent(&intro_event, adapter, cancel, no_attachments)
                                 .await;
                         }
-                        // /new: clear entire session history
+                        // /new: clear entire session history.
+                        // Phase 34b Plan 02 (D-09/D-10): removing the session from
+                        // the store discards ALL per-session state — including the
+                        // compression_count carried in the SessionStore entry — so
+                        // the next turn rebuilds a fresh ContextEngine with a zeroed
+                        // counter. No separate engine.on_session_reset() call is
+                        // needed here because the gateway holds no long-lived,
+                        // session-scoped engine handle (the engine is rebuilt fresh
+                        // per turn in run_turn).
+                        tracing::debug!(
+                            session = ?session_key,
+                            "gateway /new: session removed; per-session compression state discarded (34b D-10)"
+                        );
                         let had_session = {
                             let mut store = self.session_store.write().await;
                             store.remove(&session_key).is_some()
@@ -782,6 +837,20 @@ impl GatewayMessageHandler {
                 .handle_slash_command(event, adapter, cancel, processed)
                 .await;
         }
+        // Phase 36 (D-02, Pitfall 1): guard for non-slash (free-text) path.
+        // Retrieve the per-session flag and reject if an agent turn is already in flight.
+        {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            if agent_running.load(Ordering::SeqCst) {
+                with_rate_limit_retry(|| {
+                    adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                })
+                .await?;
+                return Ok(());
+            }
+        }
         self.run_agent(event, adapter, cancel, processed).await
     }
 
@@ -793,6 +862,18 @@ impl GatewayMessageHandler {
         cancel: CancellationToken,
         processed: ProcessedAttachments,
     ) -> Result<()> {
+        // Phase 36 (D-06): RAII running-agent guard. Retrieve the per-session flag
+        // and bind it to a RunningAgentGuard at the top of the function body so
+        // Drop fires on every exit path — Ok, Err/?, panic, cancellation.
+        // This single guard covers all 5 call sites of run_agent (D-06 discipline:
+        // one guard inside the function, not 5 guards at call sites — Pitfall 2).
+        let _running_flag = {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            self.session_store.read().await.get_running_flag(&session_key)
+        };
+        let _agent_guard = RunningAgentGuard::new(_running_flag);
+
         // Fire MessageReceived hook with real platform and chat_id
         if let Some(ref registry) = self.hook_registry {
             let request_id = uuid::Uuid::new_v4().to_string();
@@ -1010,20 +1091,42 @@ impl GatewayMessageHandler {
             .map(|rt| rt.client().clone())
             .unwrap_or_else(|| build_main_client(&self.resolver).expect("nudge client fallback"));
 
+        // Phase 36.2 chat-fix follow-up: thread state_store into TurnRequest so
+        // AgentRuntime::run_turn calls `with_state_store` on the AgentLoop, which
+        // enables the post-LLM-call usage_events write site. Without this the
+        // gateway never writes usage_events rows even though session_store has
+        // a valid StateStore — mirrors the TUI fix at commit a9fb0d0d. Symptom
+        // pre-fix: /usage returns "No usage data found for this filter" because
+        // the table is empty despite turns completing successfully.
+        let state_store_for_turn = self.session_store.read().await.state_store().clone();
+
         // Build TurnRequest and call runtime.run_turn.
         // budget reset, loop construction, attach_context_engine, and fallback wiring
         // are all handled inside run_turn — do NOT call them again here.
+        // Phase 36.2 follow-up: pass the canonical SQLite session UUID into
+        // TurnRequest.session_id (not the `gw:<chat>:<sender>` hook form).
+        // agent_loop's write site uses this as both usage_events.session_id
+        // AND the `WHERE id = ?` clause on the sessions aggregate UPDATE; the
+        // UPDATE silently affects 0 rows if the value doesn't match sessions.id.
+        // The hook-side `session_id_str` (gw:…) remains the per-message identity
+        // for on_session_end / progress hooks (kept distinct intentionally per
+        // the Phase 25.3-15 CR-02 comment above).
+        let turn_session_id = if canonical_session_id.is_empty() {
+            session_id_str.clone()
+        } else {
+            canonical_session_id.clone()
+        };
         let agent_result = if let Some(ref rt) = self.agent_runtime {
             let request = TurnRequest {
                 messages,
-                session_id: session_id_str.clone(),
+                session_id: turn_session_id,
                 cancel_token: None, // gateway has no per-turn cancel today
                 stream: Some(stream_callback),
                 tool_progress: Some(tool_callback),
                 tool_result: None,
                 trajectory_writer,
                 pressure_tracker: None, // run_turn makes a fresh tracker per turn
-                state_store: None,
+                state_store: Some(state_store_for_turn),
                 compression_count: 0,
             };
             rt.run_turn(request).await
@@ -1112,6 +1215,23 @@ impl GatewayMessageHandler {
                             });
                         }
                     }
+                }
+
+                // WR-01 (Phase 34b Plan 03): render context_warnings out-of-band.
+                // Sent as a SEPARATE message so it is visibly distinct from the agent
+                // response — mirrors the Err arm's error_suffix pattern (a distinct
+                // send_message call, not appended to the streamed response).
+                if !result.context_warnings.is_empty() {
+                    let warning_lines: Vec<String> = result
+                        .context_warnings
+                        .iter()
+                        .map(|w| format!("- {}", w))
+                        .collect();
+                    let warnings_block =
+                        format!("--- Context Warnings ---\n{}", warning_lines.join("\n"));
+                    let _ = adapter
+                        .send_message(&event.chat_id, &warnings_block, None)
+                        .await;
                 }
 
                 // 11. Update session with agent's response messages (write-through to SQLite).
@@ -1206,6 +1326,20 @@ impl MessageHandler for GatewayMessageHandler {
             return self
                 .handle_slash_command(event, adapter, cancel, no_attachments)
                 .await;
+        }
+        // Phase 36 (D-02, Pitfall 1): guard for non-slash (free-text) path.
+        // Retrieve the per-session flag and reject if an agent turn is already in flight.
+        {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            if agent_running.load(Ordering::SeqCst) {
+                with_rate_limit_retry(|| {
+                    adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                })
+                .await?;
+                return Ok(());
+            }
         }
         // No multimodal data via this path (text-only fallback)
         let no_attachments = ProcessedAttachments {

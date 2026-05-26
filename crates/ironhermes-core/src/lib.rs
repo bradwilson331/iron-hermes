@@ -11,6 +11,8 @@ pub mod memory_provider;
 pub mod memory_store;
 pub mod model_metadata;
 pub mod models_cache;
+pub mod pricing;
+pub mod pricing_cache;
 pub mod profile;
 pub mod provider;
 pub mod skills;
@@ -25,6 +27,7 @@ pub use commands::{
     CommandCategory, CommandDef, CommandResult as SlashCommandResult, CommandRouter,
     PlatformFilter, ResolveResult,
 };
+pub use commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 pub use config::{
     ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, ExtractConfig,
     HubConfig, MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
@@ -43,6 +46,8 @@ pub use models_cache::{
     FetchResult, ModelsCache, ModelsCacheEntry, fetch_all, fetch_from_models_dev,
     fetch_from_openrouter, normalize_model_id,
 };
+pub use pricing::{PricingEntry, PricingRegistry, compute_cost_micros};
+pub use pricing_cache::{PricingCache, PricingCacheEntry};
 pub use provider::{ProviderResolver, ResolvedEndpoint, SummarizationClientHandle};
 pub use skills::{
     CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,

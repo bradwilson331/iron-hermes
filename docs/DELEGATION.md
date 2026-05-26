@@ -2,6 +2,8 @@
 
 The `delegate_task` tool spawns child `AgentLoop` instances with isolated context, a restricted toolset, and their own temp directory. Each child gets a fresh conversation and works independently — only its final structured summary enters the parent's context.
 
+As of Phase 35, each child is also issued its **own** `BudgetHandle` (a fresh `max_iterations` quota). The old PROV-10 shared parent↔child counter is retired: a child draining its budget no longer decrements the parent, and a cron-spawned subagent no longer charges iterations against the interactive runtime's budget. DoS containment moves to a structural bound (`max_spawn_depth × max_concurrent_children × max_iterations`) — see [Budget Model](#budget-model) below.
+
 ---
 
 ## Single Task
@@ -156,6 +158,8 @@ delegate_task(tasks=[
     {"goal": "Longer task", "max_iterations": 30, "toolsets": ["terminal", "file"]}
 ])
 ```
+
+**Clamp-to-ceiling (Phase 35 / D-03).** `delegation.max_iterations` is a hard **ceiling** on the per-child budget. A per-call value ≤ ceiling is honored verbatim; a value > ceiling is silently clamped down to the ceiling and a `tracing::warn!` records the clamp. This preserves the shrinking-budget feature while capping DoS exposure from runaway delegation.
 
 ### `stale_warn_seconds` — per-call soft-warn threshold
 
@@ -595,6 +599,34 @@ The semaphore emits a `tracing::warn!` at target `ironhermes_tools::delegate_tas
 - **Cancel propagation.** Interrupting the parent cancels all `detach=false` children. `detach=true` children run to completion.
 - **Inherit credentials.** Children inherit the parent's API key, provider, and rate-limit pool. Model can be overridden per-call or globally via config.
 - **Only the summary lands in parent context.** The full child turn history stays in the transcript file — the parent sees only the structured `**Actions Taken / Files Modified / Findings / Issues Encountered**` block.
+
+---
+
+## Budget Model
+
+Resolved in Phase 35 (supersedes the historical PROV-10 shared parent↔child counter).
+
+**Each subagent owns an independent budget.** `AgentSubagentRunner::run_child` constructs a fresh `BudgetHandle::new(effective_max_iterations)` for every child loop instead of cloning the parent's `Arc<AtomicUsize>`. Consequences:
+
+- A child draining its budget to exhaustion **does not** decrement the parent — interactive parents that delegate keep their full remaining headroom.
+- Cron-spawned subagents draw on a cron-scoped per-child budget, never on the interactive runtime's counter. The shared `ToolRegistry` delegate runner is no longer a cross-channel contamination vector (the original T-28.1-16 acceptance criterion).
+- This matches the hermes-agent reference implementation. Total parent + child iterations can exceed any single agent's cap by design.
+
+**DoS containment is structural, not summative.** With PROV-10 retired, the safety bound is:
+
+> **Maximum tree-wide iterations = `max_spawn_depth` × `max_concurrent_children` × `max_iterations`**
+>
+> = 1 × 3 × 50 = **150** at default config.
+
+Both depth and concurrency guards (Phase 32.2) remain in effect; raising `max_spawn_depth` or `max_concurrent_children` raises this ceiling multiplicatively. No separate tree-wide aggregate counter exists — the depth × concurrency × per-subagent product is the security boundary.
+
+**Per-call `max_iterations` clamp.** See [`max_iterations` — per-call override](#max_iterations--per-call-override). The config value is a ceiling; oversize per-call values are clamped down with a `tracing::warn!`.
+
+Regression tests locking this model:
+
+- `test_independent_budget_child_drain_does_not_affect_parent` (`crates/ironhermes-agent/src/agent_loop.rs`)
+- `cron_subagent_budget_independence_from_interactive` (`crates/ironhermes-cron-runner/src/runner.rs`)
+- clamp-to-ceiling test (`crates/ironhermes-tools/src/delegate_task.rs`)
 
 ---
 

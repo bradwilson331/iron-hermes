@@ -306,10 +306,24 @@ impl DelegateTaskTool {
                 .unwrap_or(config.child_timeout_seconds);
 
             // D-08 Phase 32.2: per-task max_iterations override; falls back to config default.
+            // D-03 Phase 35 (Option B — clamp-to-ceiling): a caller/model-supplied value above
+            // config.max_iterations is clamped DOWN to the ceiling; values at or below are honored
+            // verbatim.  Enforcement is UPSTREAM here (not in run_child) because run_child has no
+            // access to config.delegation.
             let per_task_max_iterations = task_obj
                 .get("max_iterations")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
+                .map(|v| {
+                    let requested = v as usize;
+                    if requested > config.max_iterations {
+                        tracing::warn!(
+                            requested_max_iterations = requested,
+                            ceiling = config.max_iterations,
+                            "per-task max_iterations exceeds delegation.max_iterations ceiling; clamping to ceiling"
+                        );
+                    }
+                    requested.min(config.max_iterations)
+                })
                 .unwrap_or(config.max_iterations);
 
             // Phase 32.3 Plan 02 (D-05): per-task stale_warn_seconds override;
@@ -674,7 +688,7 @@ impl Tool for DelegateTaskTool {
                                 "context": { "type": "string", "description": "Additional context for the child agent." },
                                 "toolsets": { "type": "array", "items": { "type": "string" }, "description": "Toolset groups for this task." },
                                 "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Per-task timeout override in seconds." },
-                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config." },
+                                "max_iterations": { "type": "integer", "minimum": 1, "description": "Per-task max iterations override. Defaults to delegation.max_iterations from config. Values above delegation.max_iterations are clamped down to the ceiling (D-03 Option B)." },
                                 "stale_warn_seconds": { "type": "integer", "minimum": 1, "description": "Seconds of inactivity before this subagent is flagged Stale. Default: 120 (or delegation.stale_warn_seconds from config). Soft warn threshold only; hard-kill ceiling stays at timeout_seconds." },
                                 "role": { "type": "string", "enum": ["leaf", "orchestrator"], "default": "leaf", "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth." }
                             },
@@ -695,7 +709,7 @@ impl Tool for DelegateTaskTool {
                     "max_iterations": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config."
+                        "description": "Per-call max LLM iterations override. Defaults to delegation.max_iterations from config. Values above delegation.max_iterations are clamped down to the ceiling (D-03 Option B)."
                     },
                     "stale_warn_seconds": {
                         "type": "integer",
@@ -884,10 +898,24 @@ impl Tool for DelegateTaskTool {
             .unwrap_or(self.config.child_timeout_seconds);
 
         // D-08 Phase 32.2: per-call max_iterations override; falls back to config default.
+        // D-03 Phase 35 (Option B — clamp-to-ceiling): a caller/model-supplied value above
+        // config.max_iterations is clamped DOWN to the ceiling; values at or below are honored
+        // verbatim.  Enforcement is UPSTREAM here (not in run_child) because run_child has no
+        // access to config.delegation.
         let effective_max_iterations = args
             .get("max_iterations")
             .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
+            .map(|v| {
+                let requested = v as usize;
+                if requested > self.config.max_iterations {
+                    tracing::warn!(
+                        requested_max_iterations = requested,
+                        ceiling = self.config.max_iterations,
+                        "per-call max_iterations exceeds delegation.max_iterations ceiling; clamping to ceiling"
+                    );
+                }
+                requested.min(self.config.max_iterations)
+            })
             .unwrap_or(self.config.max_iterations);
 
         // Phase 32.3 Plan 02 (D-05): per-call stale_warn_seconds override;
@@ -2061,7 +2089,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_per_call_max_iterations_overrides_config() {
+    async fn test_per_call_max_iterations_clamps_to_ceiling() {
         use std::sync::Mutex;
 
         struct IterCapture {
@@ -2085,10 +2113,35 @@ mod tests {
             }
         }
 
-        let captured = Arc::new(Mutex::new(None));
-        let tool = DelegateTaskTool::new(
+        // Case (a): config ceiling = 5, request 99 → clamped to 5.
+        let captured_a = Arc::new(Mutex::new(None::<usize>));
+        let tool_a = DelegateTaskTool::new(
             Arc::new(IterCapture {
-                captured: captured.clone(),
+                captured: captured_a.clone(),
+            }),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig {
+                max_iterations: 5,
+                ..SubagentConfig::default()
+            },
+            None,
+        );
+        let _result_a = tool_a
+            .execute(json!({"task": "test task", "max_iterations": 99}))
+            .await
+            .unwrap();
+        let seen_a = captured_a.lock().unwrap().expect("runner was called (case a)");
+        assert_eq!(
+            seen_a, 5,
+            "per-call max_iterations=99 exceeds ceiling=5 and must be clamped to 5"
+        );
+
+        // Case (b): config ceiling = 99, request 3 → honored verbatim (3).
+        let captured_b = Arc::new(Mutex::new(None::<usize>));
+        let tool_b = DelegateTaskTool::new(
+            Arc::new(IterCapture {
+                captured: captured_b.clone(),
             }),
             Arc::new(Semaphore::new(3)),
             None,
@@ -2098,16 +2151,14 @@ mod tests {
             },
             None,
         );
-
-        let _result = tool
+        let _result_b = tool_b
             .execute(json!({"task": "test task", "max_iterations": 3}))
             .await
             .unwrap();
-
-        let seen = captured.lock().unwrap().expect("runner was called");
+        let seen_b = captured_b.lock().unwrap().expect("runner was called (case b)");
         assert_eq!(
-            seen, 3,
-            "per-call max_iterations=3 should override config max_iterations=99"
+            seen_b, 3,
+            "per-call max_iterations=3 is at or below ceiling=99 and must be honored verbatim"
         );
     }
 

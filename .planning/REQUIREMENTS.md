@@ -144,7 +144,7 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [ ] **GW-02**: Session key format: agent:main:{platform}:{chat_type}:{chat_id} — constructed via build_session_key()
 - [ ] **GW-03**: Two-level message guard: base adapter queues messages and sets interrupt when agent is active; gateway runner intercepts control commands (/stop, /approve, /deny)
 - [ ] **GW-04**: Authorization: per-platform allowlists, DM pairing flow with codes, global allow-all flag, default deny
-- [x] **GW-05**: Gateway slash command dispatch via resolve_command() with running-agent guard (blocks /model while agent active, bypasses /stop /approve /deny)
+- [x] **GW-05**: Gateway slash command dispatch via resolve_command() with running-agent guard (blocks /model while agent active, bypasses /stop /approve /deny) — *Phase 21.1 shipped dispatch; Phase 36 completes the per-session guard wiring (codex HIGH-1/HIGH-2 closed). Note: /approve /deny remain off the bypass list pending approval-queue implementation per D-01.*
 - [ ] **GW-06**: Gateway hook lifecycle events: gateway:startup, session:start/end/reset, agent:start/step/end, command:*
 - [ ] **GW-07**: Delivery routing: direct reply, home channel, explicit target (telegram:chat_id), cross-platform delivery
 - [x] **GW-08**: Cron job deliveries NOT mirrored into gateway session history (prevents message alternation violations)
@@ -355,7 +355,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | GW-02 | Phase 29 | Pending |
 | GW-03 | Phase 29 | Pending |
 | GW-04 | Phase 29 | Pending |
-| GW-05 | Phase 21.1 (was 21) | Complete |
+| GW-05 | Phase 21.1 (dispatch) + Phase 36 (guard) | Complete |
 | GW-06 | Phase 29 | Pending |
 | GW-07 | Phase 29 | Pending |
 | GW-08 | Phase 22.4.2.1/22.4.2.2 (was 21) | Complete |
@@ -408,3 +408,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 ---
 *Requirements defined: 2026-04-11*
 *Last updated: 2026-05-10 — Phase 27.1 import: + 16 Hexapod Integration reqs (HXP-TOOL-01..06, HXP-LOCO-01..05, HXP-NAV-01..04, HXP-DOC-01) across Phases 27.1.1/.2/.3. Total active: 50 reqs across 9 categories.*
+*Last updated: 2026-05-24 — Phase 36 complete: GW-05 guard wiring landed (per-session AtomicBool, RunningAgentGuard RAII, three rejection sites); traceability updated to Phase 21.1 (dispatch) + Phase 36 (guard).*

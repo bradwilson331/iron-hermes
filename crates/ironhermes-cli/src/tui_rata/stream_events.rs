@@ -28,7 +28,13 @@ pub enum StreamEvent {
     /// status hint.
     ToolResult { name: String, ok: bool },
     /// Turn completed cleanly (all deltas + tool calls applied).
-    Finished,
+    ///
+    /// Phase 36.2 Plan 07/10 fix: `total_tokens` carries the per-turn
+    /// `AgentResult.total_usage.total_tokens` so the status-bar token pill
+    /// (`StatusLineState.tokens_used`) updates when the turn ends. Without
+    /// this payload the pill has no upstream writer and stays stranded at
+    /// 0. `0` is a valid value (provider didn't return usage data).
+    Finished { total_tokens: usize },
     /// Turn ended with an error. String is already user-facing (no PII
     /// stripping is this enum's responsibility).
     Error(String),
@@ -57,7 +63,7 @@ mod tests {
                 name: "bash".to_string(),
                 ok: true,
             },
-            StreamEvent::Finished,
+            StreamEvent::Finished { total_tokens: 0 },
             StreamEvent::Error("timeout".to_string()),
             StreamEvent::Cancelled,
         ];

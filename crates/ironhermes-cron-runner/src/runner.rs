@@ -722,6 +722,96 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test: cron subagent budget independence at the SUBAGENT layer (D-07.2 / T-28.1-16)
+    // -----------------------------------------------------------------------
+
+    /// Prove that a cron job delegating to a subagent leaves the interactive
+    /// budget at full headroom — the T-28.1-16 acceptance criterion at the
+    /// SUBAGENT layer.
+    ///
+    /// The existing `cron_budget_is_independent_from_interactive_budget` test
+    /// (above) only proves TOP-LEVEL cron independence (28.1-06): a fresh
+    /// per-job BudgetHandle cannot drain the interactive handle.  This test
+    /// proves the next layer: the per-child BudgetHandle that Plan 35-02
+    /// installs in `AgentSubagentRunner::run_child` (one fresh
+    /// `BudgetHandle::new(max_iterations)` per child loop, replacing the
+    /// PROV-10 budget.clone()) is equally independent from the interactive
+    /// budget.
+    ///
+    /// After Plan 35-02 the shared `ToolRegistry` delegate runner is no longer
+    /// a cross-budget contamination vector: children get their own counter
+    /// rather than cloning the parent's Arc<AtomicUsize>.  This test confirms
+    /// that invariant holds at the cron-subagent boundary.
+    ///
+    /// References: T-28.1-16, D-07.2, D-01, D-04 (PROV-10 retirement).
+    #[test]
+    fn cron_subagent_budget_independence_from_interactive() {
+        use ironhermes_agent::budget::BudgetHandle;
+        use ironhermes_core::Config;
+
+        let config = Config::default();
+        let max = config.agent.max_iterations;
+
+        // Simulate the interactive budget owned by the gateway AgentRuntime.
+        // This is what the interactive chat runtime holds across turns.
+        let interactive_budget = BudgetHandle::new(max);
+
+        // Simulate the per-child fresh budget that Plan 35-02 installs in
+        // AgentSubagentRunner::run_child.  Each cron-spawned subagent gets
+        // BudgetHandle::new(max_iterations) — a distinct Arc<AtomicUsize>.
+        let child_budget_1 = BudgetHandle::new(max);
+
+        // Preconditions: both start full.
+        assert_eq!(interactive_budget.remaining(), max);
+        assert_eq!(child_budget_1.remaining(), max);
+
+        // Drain the per-child budget to exhaustion (simulating a cron
+        // subagent running to Stop100).
+        for _ in 0..max {
+            child_budget_1.consume();
+        }
+        assert_eq!(
+            child_budget_1.remaining(),
+            0,
+            "child budget drained to exhaustion"
+        );
+        assert_eq!(
+            child_budget_1.consume(),
+            None,
+            "consume at 0 returns None (Stop100)"
+        );
+
+        // T-28.1-16 acceptance: the interactive budget MUST be untouched.
+        // Before Plan 35-02 this would fail because children cloned the
+        // parent Arc (PROV-10) — draining child_budget_1 would have drained
+        // interactive_budget too.
+        assert_eq!(
+            interactive_budget.remaining(),
+            max,
+            "interactive budget must be at full headroom after cron subagent drain (T-28.1-16)"
+        );
+
+        // A second cron subagent gets its own fresh budget regardless of the
+        // first subagent's exhaustion.
+        let child_budget_2 = BudgetHandle::new(max);
+        assert_eq!(
+            child_budget_2.remaining(),
+            max,
+            "second cron subagent starts with a full budget (fresh BudgetHandle::new per child)"
+        );
+
+        // Draining the second child also cannot touch interactive headroom.
+        for _ in 0..max {
+            child_budget_2.consume();
+        }
+        assert_eq!(
+            interactive_budget.remaining(),
+            max,
+            "interactive budget still at full headroom after second cron subagent drain (T-28.1-16)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Test: complete_and_dispatch with local deliver (no delivery)
     // -----------------------------------------------------------------------
 

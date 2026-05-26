@@ -63,6 +63,38 @@ pub trait ContextEngine: Send + Sync + 'static {
     async fn check_pressure(&self, _stats: &ContextStats) -> bool {
         false
     }
+
+    // ── Phase 34b Plan 02 (D-06): lifecycle hooks ──────────────────────────
+    //
+    // Ported from `hermes-agent/agent/context_engine.py`. All five are ADDITIVE
+    // default-no-op methods following the `check_pressure` idiom, so existing
+    // implementors (`LocalPruningEngine`, `SummarizingEngine`) inherit the
+    // no-ops and compile unchanged. `&self` only — any state clearing uses
+    // interior mutability (see `ContextCompressor`). Per-turn hooks
+    // (`update_from_response`, `update_model`) are invoked ONCE centrally in
+    // `AgentRuntime::run_turn` (D-09); per-session hooks (`on_session_start`,
+    // `on_session_reset`) are wired at the surfaces where the durable
+    // per-session counter lives (D-10).
+
+    /// Called when a new session begins. Default no-op.
+    fn on_session_start(&self, _session_id: &str) {}
+
+    /// Called when a session is reset (`/new`). Engines holding durable
+    /// per-session state zero it here. Default no-op.
+    fn on_session_reset(&self) {}
+
+    /// Called once per turn (centrally in `run_turn`) with the post-run
+    /// aggregated token usage. Default no-op.
+    fn update_from_response(&self, _usage: &crate::agent_loop::AggregatedUsage) {}
+
+    /// Called once per turn (centrally in `run_turn`) with the resolved model
+    /// identity for the turn. Default no-op.
+    fn update_model(&self, _model: &str, _context_length: usize, _base_url: Option<&str>) {}
+
+    /// Whether there is content worth compressing. Default `true`.
+    fn has_content_to_compress(&self, _messages: &[ChatMessage]) -> bool {
+        true
+    }
 }
 
 pub struct LocalPruningEngine {

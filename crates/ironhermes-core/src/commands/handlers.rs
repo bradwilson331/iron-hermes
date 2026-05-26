@@ -32,6 +32,7 @@ pub fn dispatch(
         "status" => cmd_status(ctx),
         "title" => cmd_title(args, ctx),
         "sessions" => cmd_sessions(args, ctx),
+        "usage" => cmd_usage(args, ctx),
         "export-session" => cmd_export_session(args, ctx),
         "resume" => cmd_resume(args, ctx),
         "save" => cmd_save(args, ctx),
@@ -645,6 +646,105 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
         None => store.list_sessions_text(limit),
     };
     CommandResult::Output(text)
+}
+
+/// `/usage [--today | --provider X | --since Nd | --model X]` — show per-turn
+/// usage and cost rollups from the `usage_events` ledger (Phase 36.2 Plan 10).
+///
+/// Subcommands (flat-flag parsing, mirrors `cmd_sessions` style):
+/// - bare `/usage` — totals for the current `ctx.session_id`.
+/// - `--today` — cross-session totals, today-only (local midnight cutoff).
+/// - `--provider X` — cross-session, filtered by provider name.
+/// - `--model X` — cross-session, filtered by model name.
+/// - `--since Nd|Nh|Nm` — cross-session, rolling time window relative to now.
+///
+/// Any of the cross-session flags clear the `session_id` filter so they
+/// aggregate across all sessions (matches the documented `/usage` semantics
+/// in CONTEXT.md / `36.2-10-PLAN.md`).
+///
+/// T-36.2-10-INJ: every filter value flows through `rusqlite::params!`
+/// bindings inside `StateStore::query_usage_events` — never `format!`-
+/// interpolated into SQL. The dispatch into the state crate happens via
+/// `StateStoreHandle::usage_text(...)`, which is platform-neutral.
+///
+/// Guard pattern (D-05): when `ctx.state_store` is None, returns informational
+/// text rather than panicking (gateway / classic-tui compat).
+fn cmd_usage(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output("Session storage not configured.".to_string()),
+    };
+
+    let mut session_id: Option<String> = Some(ctx.session_id.clone());
+    let mut today_only = false;
+    let mut provider: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut since_seconds: Option<i64> = None;
+
+    let mut iter = args.iter().peekable();
+    while let Some(a) = iter.next() {
+        match *a {
+            "--today" => {
+                today_only = true;
+                session_id = None;
+            }
+            "--provider" => {
+                if let Some(v) = iter.next() {
+                    provider = Some((*v).to_string());
+                    session_id = None;
+                }
+            }
+            "--model" => {
+                if let Some(v) = iter.next() {
+                    model = Some((*v).to_string());
+                    session_id = None;
+                }
+            }
+            "--since" => {
+                if let Some(v) = iter.next() {
+                    if let Some(secs) = parse_since(v) {
+                        since_seconds = Some(secs);
+                        session_id = None;
+                    }
+                }
+            }
+            _ => { /* unknown flag — ignore so future additions don't break old call sites */ }
+        }
+    }
+
+    let text = store.usage_text(
+        session_id.as_deref(),
+        today_only,
+        provider.as_deref(),
+        model.as_deref(),
+        since_seconds,
+    );
+    CommandResult::Output(text)
+}
+
+/// Parse a `--since` argument like `"7d"` / `"24h"` / `"30m"` into seconds.
+///
+/// Returns `None` for empty input, missing-number input, or any unit
+/// character outside the accepted set `{d, h, m}`. The handler treats `None`
+/// as "skip this filter" (don't apply a window) — matches the plan's
+/// permissive UX (unknown flags don't error out).
+pub fn parse_since(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Split on the LAST byte (must be ASCII unit char).
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    if num_part.is_empty() {
+        return None;
+    }
+    let n: i64 = num_part.parse().ok()?;
+    match unit {
+        "d" => Some(n * 86400),
+        "h" => Some(n * 3600),
+        "m" => Some(n * 60),
+        _ => None,
+    }
 }
 
 /// `/export-session [session_id]` — export a session to the 4-file layout (Phase 25.3 D-F-1).
@@ -1530,7 +1630,9 @@ fn todo_stub(name: &str) -> CommandResult {
         "voice" => "No TTS infrastructure",
         "snapshot" => "No checkpoint system",
         "insights" => "No analytics infrastructure",
-        "usage" => "No token cost tracking",
+        // Phase 36.2 Plan 10: "usage" handled by cmd_usage in the dispatch
+        // match above — entry removed so b10's "is not yet available" guard
+        // catches any future regression that re-routes /usage to todo_stub.
         "update" => "Binary build \u{2014} use package manager",
         "sethome" | "set-home" => "No home channel concept",
         "approve" => "No approval queue",
@@ -1839,7 +1941,7 @@ mod tests {
             // "rollback" removed — now has real handler (Phase 22.4.2 Plan 04)
             "snapshot",
             "insights",
-            "usage",
+            // "usage" removed — now has real handler (Phase 36.2 Plan 10)
             "update",
             "sethome",
             // "retry" removed — now has real handler (Phase 22.4.2 Plan 04)

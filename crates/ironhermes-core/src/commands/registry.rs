@@ -218,7 +218,13 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[page]")
             .platform(GatewayOnly),
         CommandDef::new("help", "Show this help message", Info).platform(All),
-        CommandDef::new("usage", "Show token usage", Info).platform(Universal),
+        // Phase 36.2 Plan 10: `/usage` now wires through cmd_usage with flat-
+        // flag filters; description + args_hint updated to reflect the new
+        // subcommand surface (CommandRouter dispatch fans out to CLI / TUI /
+        // gateway / web UI for free).
+        CommandDef::new("usage", "Show token usage and costs", Info)
+            .args_hint("[--today | --provider X | --since Nd | --model X]")
+            .platform(Universal),
         CommandDef::new("models", "Show or refresh model metadata", Info)
             .args_hint("[refresh|info <model>]")
             .platform(Universal),

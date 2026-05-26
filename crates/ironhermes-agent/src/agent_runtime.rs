@@ -18,12 +18,18 @@
 //! for every channel and removes four copies of the same wiring. See
 //! `docs/AGENT-RUNTIME-DESIGN.md`.
 //!
-//! ## Budget sharing (PROV-10)
+//! ## Budget (top-level / interactive, D-15)
 //!
-//! `from_config` creates the `BudgetHandle` and builds the `AgentSubagentRunner`
-//! with a clone of it, so a parent turn and the subagents it spawns share one
-//! counter (a runaway delegation tree is bounded together). `run_turn` resets
-//! that shared counter before each top-level turn.
+//! `from_config` creates the `BudgetHandle` for the TOP-LEVEL interactive
+//! agent loop and passes a clone to `AgentSubagentRunner::new` for storage.
+//! `run_turn` resets that handle before each user turn so a long-lived runtime
+//! never latches at Stop100.
+//!
+//! Plan 35-02 (D-01/D-04): PROV-10 shared parent↔child counter is RETIRED.
+//! `AgentSubagentRunner::run_child` now gives each child its own fresh
+//! `BudgetHandle::new(max_iterations)` — children no longer clone the stored
+//! runner budget. The stored field is retained for the `new` signature and grep
+//! invariants (see `AgentSubagentRunner` field doc).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,6 +49,7 @@ use ironhermes_tools::memory_tool::SharedMemoryManager;
 
 use crate::agent_wiring::attach_context_engine;
 use crate::any_client::{build_main_client, wire_fallback_if_configured};
+use crate::context_refs::preprocess_context_references_async;
 use crate::app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,
 };
@@ -116,6 +123,23 @@ pub struct AgentRuntime {
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     subagent_registry: Arc<RwLock<SubagentRegistry>>,
     max_iterations: usize,
+    /// Working directory for `@`-ref expansion (D-05: fixed to cwd at startup,
+    /// used as both `cwd` and `allowed_root` in `preprocess_context_references_async`).
+    cwd: PathBuf,
+    /// Phase 36.2 CR-04: model name from the immediately previous turn. Used
+    /// to fire the cache-break warning when an operator swaps models mid-
+    /// session. `None` on the first turn since runtime construction.
+    previous_model: std::sync::Mutex<Option<String>>,
+    /// Phase 36.2 CR-04: count of turns this runtime has executed. The
+    /// model-swap cache-break warning suppresses on turn 0 (the first turn
+    /// PICKS a model rather than swapping it). Atomic so per-turn updates
+    /// don't need a Mutex acquire.
+    session_turn_count: std::sync::atomic::AtomicUsize,
+    /// Phase 36.2 CR-04: paths the PressureTracker mtime-snapshots so a
+    /// SOUL.md / AGENTS.md / CLAUDE.md edit fires the cache-break warning.
+    /// Resolved once at runtime construction (cwd-derived candidates + the
+    /// $HERMES_HOME identity files). Empty list = no context-file tracking.
+    context_file_paths: Vec<PathBuf>,
 }
 
 impl AgentRuntime {
@@ -141,9 +165,20 @@ impl AgentRuntime {
         let max_iterations = config.agent.max_iterations;
         let budget = BudgetHandle::new(max_iterations);
 
-        let client = build_main_client(&resolver)?;
+        let mut client = build_main_client(&resolver)?;
+        // Phase 36.2 CR-09: enable OpenRouter Claude cache_control routing on
+        // the streaming send path. No-op for non-OpenRouter providers and
+        // non-Claude models (the inner check in `chat_completion_stream`
+        // guards via `is_openrouter_claude`). For Anthropic-native this is
+        // also a no-op — the AnthropicMessages arm has its own cache wiring.
+        client.enable_openrouter_caching(
+            resolver.main_provider().to_string(),
+            config.prompt_caching.clone(),
+        );
 
-        // Build the subagent runner with a clone of the SHARED budget (PROV-10).
+        // Build the subagent runner, passing the budget clone for storage (field-kept
+        // per Plan 35-02 field-disposition). Children no longer clone this stored
+        // budget; each child gets a fresh BudgetHandle::new(max_iterations) in run_child.
         let (transcript_home, transcript_scope_label) = transcript_scope;
         let subagent_runner = Arc::new(
             AgentSubagentRunner::new(client.clone(), (*resolver).clone(), Some(budget.clone()))
@@ -159,6 +194,7 @@ impl AgentRuntime {
             .clone()
             .map(|m| m as SharedMemoryManager);
 
+        let cwd_stored = cwd.clone();
         let bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
             config: config.clone(),
             resolver: resolver.clone(),
@@ -177,6 +213,18 @@ impl AgentRuntime {
         })
         .await?;
 
+        // Phase 36.2 CR-04: resolve the context files PressureTracker will
+        // mtime-snapshot. Mirrors PromptBuilder's load order: HERMES_HOME
+        // identity files + every CONTEXT_CANDIDATES filename under cwd. Paths
+        // need not exist at startup — agent_loop tolerates missing files.
+        let mut context_file_paths: Vec<PathBuf> = Vec::new();
+        let hermes_home = ironhermes_core::get_hermes_home();
+        context_file_paths.push(hermes_home.join("SOUL.md"));
+        context_file_paths.push(hermes_home.join("AGENTS.md"));
+        for filename in crate::context_loader::CONTEXT_CANDIDATES {
+            context_file_paths.push(cwd_stored.join(filename));
+        }
+
         Ok(Self {
             config,
             resolver,
@@ -186,18 +234,108 @@ impl AgentRuntime {
             memory_manager,
             subagent_registry,
             max_iterations,
+            cwd: cwd_stored,
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths,
         })
     }
 
     /// Run one top-level agent turn. This is the budget lifecycle boundary:
-    /// the shared `BudgetHandle` is reset to full here so a long-lived runtime
-    /// never latches at `Stop100`. Subagents spawned during the turn share the
-    /// just-reset counter via the runner's `Arc`.
-    pub async fn run_turn(&self, req: TurnRequest) -> Result<AgentResult> {
+    /// the top-level `BudgetHandle` is reset to full here so a long-lived runtime
+    /// never latches at `Stop100`. Plan 35-02 (D-01/D-04): subagents spawned
+    /// during the turn each receive their own fresh `BudgetHandle::new(max_iterations)`
+    /// in `run_child`; they no longer decrement the top-level counter.
+    pub async fn run_turn(&self, mut req: TurnRequest) -> Result<AgentResult> {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
 
         let context_length = self.resolver.resolve_for_main().context_length();
+
+        // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
+        // Runs ONCE here, BEFORE attach_context_engine/agent.run, over the
+        // latest user message. Never called per-surface (centralization invariant).
+        // D-05: allowed_root = cwd (fixed at startup, no config escape hatch — D-04).
+        let context_warnings: Vec<String> = {
+            // Find the latest user-role message index.
+            let last_user_idx = req
+                .messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| m.role == ironhermes_core::Role::User)
+                .map(|(i, _)| i);
+
+            if let Some(idx) = last_user_idx {
+                if let Some(text) = req.messages[idx].content_text().map(|s| s.to_string()) {
+                    // Production UrlFetcher: WebExtractTool with use_llm_processing:true (D-01).
+                    // Raw fallback on LLM failure is handled inside the fetcher closure (D-02).
+                    let url_fetcher: crate::context_refs::UrlFetcher = {
+                        let registry = self.bundle.registry.clone();
+                        Box::new(move |url: String| {
+                            let registry = registry.clone();
+                            Box::pin(async move {
+                                // Call web_extract tool via the registry with use_llm_processing:true.
+                                let args = serde_json::json!({
+                                    "urls": [url],
+                                    "use_llm_processing": true,
+                                });
+                                let reg = registry.read().await;
+                                match reg.execute_tool("web_extract", args).await {
+                                    Ok(result_str) => {
+                                        // Parse ExtractionResult array from web_extract output.
+                                        if let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&result_str) {
+                                            if let Some(first) = results.first() {
+                                                if let Some(content) = first.get("content").and_then(|v| v.as_str()) {
+                                                    if !content.is_empty() {
+                                                        return Ok(content.to_string());
+                                                    }
+                                                }
+                                                // D-02: fall back to raw content on LLM-processing failure.
+                                                if let Some(err) = first.get("error").and_then(|v| v.as_str()) {
+                                                    return Err(format!("web_extract error: {}", err));
+                                                }
+                                            }
+                                        }
+                                        Err("web_extract returned no content".to_string())
+                                    }
+                                    Err(e) => Err(format!("web_extract failed: {}", e)),
+                                }
+                            })
+                        })
+                    };
+
+                    let ctx_result = preprocess_context_references_async(
+                        &text,
+                        &self.cwd,
+                        context_length,
+                        Some(&url_fetcher),
+                        None, // allowed_root defaults to cwd (D-04/D-05)
+                    )
+                    .await;
+
+                    // Replace the latest user message text with the expanded version.
+                    if ctx_result.expanded || ctx_result.blocked {
+                        if let Some(msg) = req.messages.get_mut(idx) {
+                            msg.content = Some(ironhermes_core::MessageContent::Text(
+                                ctx_result.message.clone(),
+                            ));
+                        }
+                    }
+
+                    // Log warnings centrally (D-11 carrier).
+                    for w in &ctx_result.warnings {
+                        tracing::warn!(target: "ironhermes_agent::context_refs", warning = %w, "@ context expansion warning");
+                    }
+
+                    ctx_result.warnings
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
 
         let mut agent = AgentLoop::new(
             self.client.clone(),
@@ -234,7 +372,77 @@ impl AgentRuntime {
             agent = agent.with_trajectory_writer(tw);
         }
         if let Some(store) = req.state_store {
-            agent = agent.with_intercepts(None, Some(store), None, None, None);
+            // Phase 36.2 Plan 07 fix: `with_intercepts` only registers the
+            // `session_search` tool intercept — it does NOT set
+            // `AgentLoop::state_store`. Without this `with_state_store` call,
+            // the post-LLM-call write site at agent_loop.rs:1018 (gated by
+            // `if let Some(store) = &self.state_store`) silently skips on EVERY
+            // turn that runs through the runtime — usage_events stays empty
+            // and `sessions.input_tokens` / `output_tokens` / cost columns
+            // never increment, breaking /usage and the Plan 10 status pills.
+            agent = agent.with_state_store(store);
+            // NOTE: `with_intercepts(None, Some(store), None, None, None)` was
+            // also called here previously, which registered `session_search`
+            // as a new tool the model could call. That tool was never wired on
+            // the gateway pre-Phase 36.2; re-registering it on every turn (now
+            // that all surfaces enable state_store) introduces a tool the
+            // model didn't expect and can confuse multi-iteration tool flows.
+            // The write site only needs `state_store`, not the intercept, so
+            // it is intentionally omitted here. If a future surface needs
+            // session_search exposed as a model tool, register it once on
+            // AgentRuntime construction — not per-turn in run_turn.
+        }
+
+        // Phase 36.2 code-review fix CR-02: wire provider name + api-key hash
+        // source onto the AgentLoop so the post-LLM-call write site records
+        // non-empty `usage_events.provider` and a per-key-derived
+        // `api_key_hash`. Without this, every production row was written with
+        // provider="" and a constant SHA-256-of-empty-string hash bucket —
+        // making /usage --provider filters useless and (worse) collapsing
+        // multi-tenant rate-limit tracking into a single shared bucket.
+        agent = agent.with_provider_name(self.resolver.main_provider());
+        if let Some(ref key) = self.resolver.resolve_for_main().api_key {
+            agent = agent.with_api_key_for_usage_tracking(key.clone());
+        }
+
+        // Phase 36.2 follow-up: load the disk-resident pricing cache and merge
+        // it into the per-turn `PricingRegistry`. Without this, every turn's
+        // write_usage_success used the default `PricingRegistry::new()` which
+        // reads ONLY the bundled `pricing.toml` — the entries operators add
+        // via `hermes pricing refresh [--source openrouter]` were silently
+        // ignored and `usage_events.cost_usd_micros` stayed at 0 for any model
+        // not in the bundled table (notably every OpenRouter slug like
+        // `google/gemini-3.5-flash`). Loading per-turn keeps the cache hot —
+        // operators can refresh mid-session and the very next turn picks it
+        // up without a restart. The load is a small synchronous JSON read
+        // (file may not exist → returns default()).
+        {
+            let mut pricing = ironhermes_core::PricingRegistry::new();
+            let cache = ironhermes_core::pricing_cache::PricingCache::load();
+            pricing.merge_cache(cache.into_pricing_map());
+            agent = agent.with_pricing_registry(std::sync::Arc::new(pricing));
+        }
+
+        // Phase 36.2 CR-04: wire the cache-break advisory state. The model-
+        // swap warning needs the previous-turn model name plus a
+        // "session-has-prior-turns" flag; the context-file-edit warning
+        // needs the list of paths to snapshot. Without these, both triggers
+        // are dead code — defined and tested but unreachable from any
+        // production surface.
+        let prior_turns = self
+            .session_turn_count
+            .load(std::sync::atomic::Ordering::Acquire);
+        agent = agent.with_session_has_prior_turns(prior_turns > 0);
+        if let Some(prev) = self
+            .previous_model
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+        {
+            agent = agent.with_previous_model(prev);
+        }
+        if !self.context_file_paths.is_empty() {
+            agent = agent.with_context_file_paths(self.context_file_paths.clone());
         }
 
         agent = attach_context_engine(
@@ -248,7 +456,52 @@ impl AgentRuntime {
             self.memory_manager.clone(),
         );
 
-        agent.run(req.messages).await
+        // ── Phase 34b Plan 02 (D-07/D-09): central per-turn engine hooks ─────
+        // Invoked ONCE here — the single per-turn locus — never per-surface.
+        // Grab a handle to the attached engine (None on surfaces that disable
+        // compression). The shipped engines treat both as no-ops; an engine
+        // holding durable state can react. update_model is wired definitely
+        // this phase (D-07), NOT conditionally.
+        let engine_handle = agent.context_engine();
+        if let Some(ref engine) = engine_handle {
+            // Per-turn model identity: fully resolvable from the same accessor
+            // run_turn already used for context_length above (no hedge — D-07).
+            let endpoint = self.resolver.resolve_for_main();
+            engine.update_model(
+                endpoint.default_model.as_str(),
+                context_length,
+                Some(endpoint.base_url.as_str()),
+            );
+        }
+
+        // D-11 / WR-01: attach context_warnings from @-ref expansion onto AgentResult.
+        // Each surface (CLI, gateway, web) reads this field after run_turn returns and
+        // renders the --- Context Warnings --- block out-of-band (not embedded in the
+        // model-bound message text — that embedding was removed in Phase 34b Plan 03).
+        let mut out = agent.run(req.messages).await?;
+
+        // Phase 34b Plan 02 (D-09): post-run per-turn usage hook. MUST appear
+        // AFTER agent.run (asserted in invariants_34b).
+        if let Some(ref engine) = engine_handle {
+            engine.update_from_response(&out.total_usage);
+        }
+
+        out.context_warnings = context_warnings;
+
+        // Phase 36.2 CR-04: snapshot the just-run model name + bump the turn
+        // counter so the NEXT turn can compare and fire the model-swap cache-
+        // break warning if the operator swapped models. Uses the resolver's
+        // currently-resolved main model — that is what `agent.client.model()`
+        // exposed to the LLM. Stored unconditionally so a fast model-swap →
+        // single-call → swap-back pattern still gets the prior name on the
+        // intermediate turn.
+        if let Ok(mut prev) = self.previous_model.lock() {
+            *prev = Some(self.resolver.resolve_for_main().default_model.clone());
+        }
+        self.session_turn_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+
+        Ok(out)
     }
 
     // ── accessors for channel-specific surfaces (slash dispatch, /agents,
@@ -371,6 +624,10 @@ impl AgentRuntime {
             memory_manager: None,
             subagent_registry,
             max_iterations,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths: Vec::new(),
         }
     }
 }
@@ -444,34 +701,36 @@ mod tests {
         );
     }
 
-    /// Regression gate: `from_config` MUST pass a clone of the shared budget
-    /// to `AgentSubagentRunner::new` (PROV-10 — parent and subagents share one
-    /// counter). This source-include guard fails if the wiring is dropped or
-    /// broken by a future refactor.
+    /// Regression gate: `from_config` wires the top-level budget into
+    /// `AgentSubagentRunner::new` for storage, and `run_child` gives each child
+    /// a FRESH `BudgetHandle::new(max_iterations)` — not a clone of the stored
+    /// runner budget. PROV-10 shared parent↔child counter is RETIRED (Plan 35-02
+    /// D-04); this test documents the new independence contract.
     ///
     /// Form chosen: source-include guard. Building a full `AgentRuntime` via
     /// `from_config` in a unit test is impractical (it requires a reachable
-    /// model endpoint and assembles the MCP/tool bundle); the Arc-identity
-    /// invariant is fully captured by asserting the source contains the exact
-    /// clone-pass pattern and that `budget` is stored in `Self`. The behavioral
-    /// Arc-sharing is already covered by `budget.rs::reset_is_visible_through_shared_clone`.
+    /// model endpoint and assembles the MCP/tool bundle). The storage wiring
+    /// (field-kept per Plan 35-02 field-disposition) is verified by asserting
+    /// the exact source patterns; the independence behavior is proven by the
+    /// D-07.1 test in `agent_loop.rs::budget_tests`.
     #[test]
-    fn runner_shares_budget_arc() {
-        // Assert from_config clones the shared budget into the subagent runner.
+    fn runner_stores_budget_field_children_get_fresh_handle() {
+        // Assert from_config still passes the budget clone for storage in the runner
+        // (field-kept so new() signature and grep invariants stay intact).
         assert!(
             SOURCE.contains("Some(budget.clone())"),
             "from_config must pass `Some(budget.clone())` to AgentSubagentRunner::new \
-             (PROV-10 parent/child budget sharing) — source guard failed"
+             (field-kept per Plan 35-02) — source guard failed"
         );
 
-        // Assert the same budget is stored on Self (not a separately-created one).
+        // Assert the top-level budget is stored on Self so run_turn can reset it.
         assert!(
             SOURCE.contains("budget,"),
             "AgentRuntime struct initializer must include `budget,` field — source guard failed; \
-             the shared BudgetHandle must be stored on Self so run_turn can reset it"
+             the top-level BudgetHandle must be stored on Self so run_turn can reset it"
         );
 
-        // Assert the runner is built with the cloned budget before Self is returned.
+        // Assert the runner is built before Self is returned.
         let runner_pos = SOURCE
             .find("Some(budget.clone())")
             .expect("Some(budget.clone()) must be present in agent_runtime.rs");
@@ -481,8 +740,166 @@ mod tests {
         assert!(
             runner_pos < self_ok_pos,
             "Some(budget.clone()) (at byte {runner_pos}) must appear BEFORE \
-             Ok(Self {{ (at byte {self_ok_pos})) — runner must be wired with the \
-             budget before Self is constructed"
+             Ok(Self {{ (at byte {self_ok_pos})) — runner must be wired before Self is constructed"
+        );
+
+        // Assert run_child gives each child a FRESH budget (independence — D-01/D-04).
+        // Use include_str! on subagent_runner.rs to verify the change site.
+        let runner_src = include_str!("subagent_runner.rs");
+        assert!(
+            runner_src.contains("BudgetHandle::new(max_iterations)"),
+            "subagent_runner.rs run_child must use BudgetHandle::new(max_iterations) \
+             to give each child a fresh independent budget (D-01/D-04) — source guard failed"
+        );
+        assert!(
+            !runner_src.contains("agent = agent.with_budget(budget.clone())"),
+            "subagent_runner.rs run_child must NOT clone the parent budget into children \
+             (PROV-10 retired, D-04) — source guard failed"
+        );
+    }
+
+    /// INV-36.2-07-RUNTIME: Phase 36.2 Plan 07 regression net.
+    /// When `req.state_store` is `Some(...)`, `run_turn` MUST call
+    /// `with_state_store(...)` on the per-turn `AgentLoop` (not just
+    /// `with_intercepts(...)`). `with_intercepts` only registers the
+    /// `session_search` tool intercept; it does NOT set `AgentLoop.state_store`.
+    /// Without `with_state_store`, the post-LLM-call write site in
+    /// `agent_loop.rs` (`if let Some(store) = &self.state_store`) silently
+    /// skips on every turn that runs through the runtime — `usage_events`
+    /// stays empty, `sessions.input_tokens`/`output_tokens`/cost columns
+    /// never increment, /usage shows "no data", and the Plan 10 status pills
+    /// never render.
+    #[test]
+    fn inv_36_2_07_runtime_calls_with_state_store_before_with_intercepts() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let with_state_store_pos = non_comment.find("agent.with_state_store(");
+
+        assert!(
+            with_state_store_pos.is_some(),
+            "Phase 36.2 Plan 07: run_turn MUST call `agent.with_state_store(store)` so \
+             the post-LLM-call write site receives the state store. Otherwise \
+             usage_events writes silently skip on every turn."
+        );
+
+        // Phase 36.2 follow-up: the `with_intercepts(None, Some(store), ...)`
+        // call was REMOVED from run_turn because registering session_search
+        // as a per-turn tool intercept confused multi-iteration tool flows
+        // (chat truncation observed on gateway after enabling state_store).
+        // The write site only needs state_store, not the intercept. This
+        // assertion locks the removal — if anyone re-adds it, debug carefully.
+        let intercept_needle = concat!(".with_intercepts(None, Some(", "store)");
+        assert!(
+            !non_comment.contains(intercept_needle),
+            "Phase 36.2 follow-up: run_turn must NOT call with_intercepts to register \
+             session_search per-turn. Tool registration must happen once on AgentRuntime \
+             construction — not in run_turn. See agent_runtime.rs comment for context."
+        );
+    }
+
+    /// INV-36.2-CR-09: Phase 36.2 code-review CR-09 regression net.
+    /// `AgentRuntime::from_config` MUST call `enable_openrouter_caching` on
+    /// the freshly-built `AnyClient` so the streaming send path can route
+    /// OpenRouter Claude requests through the `cache_control`-attaching
+    /// builder. Pre-fix the Plan 11 OpenRouter Claude wiring was defined
+    /// and unit-tested but never invoked from any production code — Claude
+    /// via OpenRouter never received cache_control markers, so the cache
+    /// hits Plan 11 was designed to deliver never fired.
+    #[test]
+    fn inv_36_2_cr_09_from_config_enables_openrouter_caching() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("client.enable_openrouter_caching("),
+            "Phase 36.2 CR-09: from_config MUST call `client.enable_openrouter_caching(...)` \
+             so the streaming send path routes OpenRouter Claude requests through the \
+             cache_control-attaching builder (build_openrouter_chat_request_full)."
+        );
+    }
+
+    /// INV-36.2-CR-04: Phase 36.2 code-review CR-04 regression net.
+    /// `run_turn` MUST chain the Plan 08 cache-break advisory builders so
+    /// the model-swap and context-file-edit triggers can actually fire in
+    /// production. Pre-fix these builders were defined and unit-tested but
+    /// never called from any production entry point — the warnings were
+    /// dead code on every surface.
+    #[test]
+    fn inv_36_2_cr_04_runtime_wires_cache_break_builders() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("agent.with_session_has_prior_turns("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_session_has_prior_turns(...) \
+             so trigger 1 (model-swap cache break) can suppress on session zero."
+        );
+        assert!(
+            non_comment.contains("agent.with_previous_model("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_previous_model(...) \
+             so trigger 1 (model-swap cache break) can compare the new model \
+             against the prior turn's model name."
+        );
+        assert!(
+            non_comment.contains("agent.with_context_file_paths("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_context_file_paths(...) \
+             so trigger 3 (context-file-edit cache break) can mtime-snapshot \
+             SOUL.md / AGENTS.md / CLAUDE.md."
+        );
+
+        // Post-turn state update must also be present so the next turn has
+        // the prior model name to compare against.
+        assert!(
+            non_comment.contains("self.previous_model.lock()"),
+            "Phase 36.2 CR-04: run_turn MUST store the just-run model name \
+             into self.previous_model after agent.run completes."
+        );
+        assert!(
+            non_comment.contains("self.session_turn_count.fetch_add(1"),
+            "Phase 36.2 CR-04: run_turn MUST increment self.session_turn_count \
+             after agent.run completes so the next turn's `has_prior_turns` flag \
+             becomes true."
+        );
+    }
+
+    /// INV-36.2-CR-02: Phase 36.2 code-review CR-02 regression net.
+    /// `run_turn` MUST call `with_provider_name(...)` and
+    /// `with_api_key_for_usage_tracking(...)` on the per-turn `AgentLoop`.
+    /// Without these, `usage_events.provider` is empty on every production
+    /// row, the `/usage --provider X` filter is useless, and the
+    /// `RateLimitTracker` keys all sessions into a single shared bucket
+    /// (sha256 of empty key) — a cross-tenant data-leak in any multi-tenant
+    /// deployment. The test `inv_36_2_07_runtime_calls_with_state_store_before_with_intercepts`
+    /// covers the related state_store wiring; this complements it.
+    #[test]
+    fn inv_36_2_cr_02_runtime_calls_with_provider_name_and_api_key() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("agent.with_provider_name("),
+            "Phase 36.2 CR-02: run_turn MUST call `agent.with_provider_name(...)` so the \
+             post-LLM-call write site stamps a non-empty provider column on every \
+             usage_events row. Without it, /usage --provider filters are useless."
+        );
+        assert!(
+            non_comment.contains("agent.with_api_key_for_usage_tracking("),
+            "Phase 36.2 CR-02: run_turn MUST call `agent.with_api_key_for_usage_tracking(...)` \
+             so the SHA-256 hash bucket on usage_events is per-key, not a constant \
+             empty-string hash that collapses every session into one bucket."
         );
     }
 }

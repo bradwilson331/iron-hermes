@@ -17,6 +17,7 @@ pub use discord::{DiscordAdapter, run_discord_adapter};
 pub use slack::{SlackAdapter, run_slack_adapter};
 pub use backoff::BackoffState;
 pub use handler::GatewayMessageHandler;
+pub use ironhermes_core::commands::running_agent::RunningAgentGuard;
 pub use pid::{
     GatewayPidRecord, PidLiveness, PidLockGuard, acquire_pid_lock, is_pid_alive, read_gateway_pid,
     write_gateway_pid,

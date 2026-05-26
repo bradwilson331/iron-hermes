@@ -1,7 +1,16 @@
-//! Shared parent/child iteration-budget handle (PROV-10, D-10/D-15/D-16/D-17).
+//! Per-agent iteration-budget handle (D-10/D-15/D-16/D-17).
 //!
-//! Wave-0 SHELL — concrete impl lands in Wave 1 Plan 02.
-//! AI-SPEC Pitfall 9 (E-05): use SeqCst ordering only on this shared counter.
+//! Each agent loop (top-level or child subagent) receives its OWN
+//! `BudgetHandle::new(max)` — a distinct `Arc<AtomicUsize>` — so budgets are
+//! independent. Plan 35-02 (D-01/D-04) retired the PROV-10 shared parent↔child
+//! counter; children no longer clone the parent handle.
+//!
+//! `BudgetHandle::clone` STILL shares one counter (the `Arc` is cloned), and
+//! this is still used by gateway/CommandContext reset visibility and the
+//! `reset_is_visible_through_shared_clone` test. The clone-sharing API is
+//! preserved — it is simply no longer used for parent↔child subagent sharing.
+//!
+//! AI-SPEC Pitfall 9 (E-05): use SeqCst ordering only on this counter.
 //! The lax Relaxed variant is forbidden here because the pressure-tier
 //! transitions must be observed in a consistent total order across threads.
 //! The budget_ordering_grep static-grep test enforces this at CI time.
@@ -9,9 +18,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Shared iteration budget handle. Clones share the same underlying counter
-/// via [`Arc`], so parent and child subagent loops can see each other's
-/// deductions without duplicated bookkeeping.
+/// Per-agent iteration budget handle. Clones share the same underlying counter
+/// via [`Arc`] — useful for gateway/CommandContext reset visibility and the
+/// `reset_is_visible_through_shared_clone` test. Each agent loop is given its
+/// OWN fresh handle via `BudgetHandle::new`; cloning for parent↔child subagent
+/// sharing (PROV-10) is retired as of Plan 35-02 (D-04).
 #[derive(Clone)]
 pub struct BudgetHandle {
     remaining: Arc<AtomicUsize>,

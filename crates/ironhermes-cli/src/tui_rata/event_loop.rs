@@ -720,9 +720,20 @@ pub(crate) fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::
 ///   - Streaming: Delta
 ///   - Tool: ToolCall, ToolProgress, ToolResult
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
+    use ironhermes_core::commands::running_agent::RunningAgentGuard;
     let runtime = app.agent_runtime.clone();
     let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
+    // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): clone the Arc in the SYNC body so it can
+    // be moved into the async block. The guard MUST be bound inside tokio::spawn so Drop
+    // fires when the future completes, NOT when spawn_turn returns synchronously.
+    let agent_running = app.agent_running.clone();
+    // Phase 36.2 Plan 07 fix: thread state_store so the post-LLM-call
+    // write site in `agent_loop.rs` records `usage_events` rows and
+    // updates session aggregates. Without this, the write is silently
+    // skipped (`if let Some(store) = &self.state_store`) and /usage stays
+    // empty, the status-bar cost/tok pills never render.
+    let state_store = app.state_store.clone();
     let mut messages_snapshot = app.history.clone();
 
     // Phase 21.8.3.1 D-03 / D-04 / D-06: inject active personality overlay
@@ -740,6 +751,11 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let session_id = app.session_id.clone();
 
     tokio::spawn(async move {
+        // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): RAII guard MUST be bound inside the async
+        // block so Drop fires when the future completes, NOT when spawn_turn returns
+        // synchronously. Binding this outside the tokio::spawn would set the flag true then
+        // immediately clear it before the turn runs, providing zero protection.
+        let _agent_guard = RunningAgentGuard::new(agent_running);
         let _ = tx.send(StreamEvent::Started);
 
         // Build streaming + tool callbacks that forward to the UI event loop.
@@ -790,14 +806,18 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             tool_result: Some(tool_result_cb),
             trajectory_writer,
             pressure_tracker: None,
-            state_store: None,
+            state_store,
             compression_count: 0,
         };
 
         let result = runtime.run_turn(request).await;
 
         let terminal_event = match result {
-            Ok(_) => StreamEvent::Finished,
+            // Phase 36.2 Plan 07/10 fix: forward the per-turn aggregated
+            // token count so the status-bar `tokens_used` field updates.
+            Ok(agent_result) => StreamEvent::Finished {
+                total_tokens: agent_result.total_usage.total_tokens,
+            },
             Err(_) if cancel_token.is_cancelled() => StreamEvent::Cancelled,
             Err(e) => StreamEvent::Error(e.to_string()),
         };
@@ -867,6 +887,40 @@ mod tests {
             "Phase 25.1 GAP-8 / 28.1-05: AgentRuntime::run_turn MUST chain \
              .with_browser_session(...) so the rata chat REPL's browser tools reach \
              the per-turn agent loop."
+        );
+    }
+
+    /// INV-36.2-07-TUI: Phase 36.2 Plan 07 regression net.
+    /// `spawn_turn` MUST thread `app.state_store.clone()` into the per-turn
+    /// `TurnRequest`. If `state_store: None` is passed, the post-LLM-call write
+    /// site in `agent_loop.rs` (gated by `if let Some(store) = &self.state_store`)
+    /// silently skips — `usage_events` stays empty, `/usage` returns "no data",
+    /// and the status-bar cost/tok pills (Plan 10) never render.
+    #[test]
+    fn inv_36_2_07_tui_threads_state_store_into_turn_request() {
+        let source = include_str!("event_loop.rs");
+        let non_comment: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("let state_store = app.state_store.clone();"),
+            "Phase 36.2 Plan 07 fix: spawn_turn MUST clone app.state_store into a \
+             local so it can be moved into the tokio::spawn body and threaded into \
+             TurnRequest; otherwise usage_events writes silently skip in the TUI."
+        );
+
+        // Ensure the TurnRequest in spawn_turn does NOT pass the unwired sentinel
+        // (the literal pattern is intentionally split across concatenated string
+        // literals so this assertion's own message does not match itself).
+        let bad_pattern = concat!("state_store", ": None");
+        assert!(
+            !non_comment.contains(bad_pattern),
+            "Phase 36.2 Plan 07 fix: spawn_turn MUST thread the state store \
+             through the TurnRequest; passing the unwired sentinel disables the \
+             agent_loop write site and breaks /usage + status-bar cost/tok pills."
         );
     }
 

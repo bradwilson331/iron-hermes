@@ -15,6 +15,13 @@ use tracing::{info, warn};
 
 pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 
+// Phase 36.1 D-04/D-05/D-06/D-07: slash interception + running-agent guard
+// imports. Used inside the #[cfg(feature = "server")] WebSocket select! loop.
+#[cfg(feature = "server")]
+use ironhermes_core::commands::{CommandResult, ResolveResult};
+#[cfg(feature = "server")]
+use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
+
 /// Phase 26.7.1 Plan 02 (D-06 / Path A): RAII guard that clears the per-turn
 /// callback slot on drop. Ensures the slot is reset to None even if
 /// `run_web_turn` panics — the tokio task's drop machinery runs Drop before
@@ -211,6 +218,148 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                             let session_id = req.session_id;
                             let session_id_for_turn = session_id.clone();
                             let message = req.message;
+
+                            // Phase 36.1 D-03/D-04/D-05/D-06 (Pitfall 4, Pitfall 7):
+                            // Slash-command interception BEFORE run_web_turn.
+                            //
+                            // Resolution uses the canonical def.name (post-alias)
+                            // so /reset → "new" correctly bypasses the guard
+                            // (Pitfall 4 mitigation: never call is_bypass on raw input).
+                            //
+                            // Slash dispatch does NOT set in_flight_turn (Pitfall 7):
+                            // slash responses are synchronous single-turn outputs;
+                            // keeping in_flight_turn=None allows the next message
+                            // to arrive immediately after dispatch completes.
+                            if message.starts_with('/') {
+                                let platform = ironhermes_core::types::Platform::Web;
+                                let running_flag =
+                                    app_state.get_or_create_running_flag(&session_id);
+                                match app_state.command_router.resolve(&message, &platform) {
+                                    ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                                        // D-06: non-bypass slash rejected while turn in flight.
+                                        if running_flag
+                                            .load(std::sync::atomic::Ordering::SeqCst)
+                                            && !is_bypass(&def.name)
+                                        {
+                                            // Phase 36.1 D-05: deliver as Delta + Finished —
+                                            // no new protocol variant needed.
+                                            // AGENT_RUNNING_REJECT_MSG is the canonical D-02
+                                            // constant — never inlined (T-36.1-09 mitigation).
+                                            let _ = tx.send(ChatStreamEvent::Delta {
+                                                text: AGENT_RUNNING_REJECT_MSG.to_string(),
+                                            });
+                                            let _ =
+                                                tx.send(ChatStreamEvent::Finished { total_tokens: 0 });
+                                            // Drain tx→rx and forward to the WebSocket client.
+                                            // Phase 36.1 D-04/D-05: slash result is bounded
+                                            // (Delta + Finished = 2 frames) — drain inline
+                                            // without setting in_flight_turn (Pitfall 7).
+                                            drop(tx);
+                                            let mut slash_rx = rx;
+                                            while let Some(ev) = slash_rx.recv().await {
+                                                let json =
+                                                    serde_json::to_string(&ev).unwrap_or_default();
+                                                let _ = socket
+                                                    .send_raw(Message::Text(json))
+                                                    .await;
+                                            }
+                                            continue;
+                                        }
+
+                                        // D-07: bypass-listed slash (stop/new/status/queue)
+                                        // OR non-running state → dispatch normally.
+                                        let parts: Vec<&str> =
+                                            message.split_whitespace().collect();
+                                        let args: Vec<&str> = if parts.len() > 1 {
+                                            parts[1..].to_vec()
+                                        } else {
+                                            vec![]
+                                        };
+                                        // Phase 36.2 Plan 07 fix: thread state_store into
+                                        // CommandContext so `/usage` (and other store-backed
+                                        // slash commands) run against the real DB. Without this,
+                                        // handlers fall back to the "Session storage not
+                                        // configured." guard.
+                                        let store_handle: std::sync::Arc<
+                                            dyn ironhermes_core::commands::context::StateStoreHandle,
+                                        > = std::sync::Arc::new(
+                                            ironhermes_state::StateStoreHandleAdapter(
+                                                app_state.state_store.clone(),
+                                            ),
+                                        );
+                                        let ctx = ironhermes_core::commands::context::CommandContext::new(
+                                            platform,
+                                            session_id.clone(),
+                                            running_flag,
+                                        )
+                                        .with_state_store(store_handle);
+                                        let result = ironhermes_core::commands::handlers::dispatch(
+                                            &def,
+                                            &args,
+                                            &ctx,
+                                            &app_state.command_router,
+                                        );
+                                        let text = match result {
+                                            CommandResult::Output(t) => t,
+                                            CommandResult::Error(e) => {
+                                                format!("Command error: {e}")
+                                            }
+                                            CommandResult::NewSession { message: m } => {
+                                                app_state.reset_web_session(&session_id);
+                                                m
+                                            }
+                                            CommandResult::Handled | CommandResult::Quit => {
+                                                String::new()
+                                            }
+                                            other => {
+                                                format!("{other:?}")
+                                            }
+                                        };
+                                        if !text.is_empty() {
+                                            let _ = tx.send(ChatStreamEvent::Delta { text });
+                                        }
+                                        let _ =
+                                            tx.send(ChatStreamEvent::Finished { total_tokens: 0 });
+                                        drop(tx);
+                                        let mut slash_rx = rx;
+                                        while let Some(ev) = slash_rx.recv().await {
+                                            let json =
+                                                serde_json::to_string(&ev).unwrap_or_default();
+                                            let _ = socket.send_raw(Message::Text(json)).await;
+                                        }
+                                        continue;
+                                    }
+                                    ResolveResult::Ambiguous(_) | ResolveResult::NotFound => {
+                                        // Not a recognised slash command — fall through to
+                                        // run_web_turn as a plain-text message.
+                                    }
+                                }
+                            }
+
+                            // Phase 36.1 D-06: plain-text guard check.
+                            // Reject free-text messages when a turn is in flight —
+                            // same D-02 string, same Delta+Finished delivery (D-05).
+                            // AGENT_RUNNING_REJECT_MSG is the canonical D-02 constant.
+                            {
+                                let running_flag =
+                                    app_state.get_or_create_running_flag(&session_id);
+                                if running_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                    let _ = tx.send(ChatStreamEvent::Delta {
+                                        text: AGENT_RUNNING_REJECT_MSG.to_string(),
+                                    });
+                                    let _ =
+                                        tx.send(ChatStreamEvent::Finished { total_tokens: 0 });
+                                    drop(tx);
+                                    let mut plain_rx = rx;
+                                    while let Some(ev) = plain_rx.recv().await {
+                                        let json =
+                                            serde_json::to_string(&ev).unwrap_or_default();
+                                        let _ = socket.send_raw(Message::Text(json)).await;
+                                    }
+                                    continue;
+                                }
+                            }
+
                             let handle = tokio::spawn(async move {
                                 // Phase 34a MEM-READ-05: scrub <memory-context> fence tags.
                                 let scrubber_ws = std::sync::Arc::new(std::sync::Mutex::new(
