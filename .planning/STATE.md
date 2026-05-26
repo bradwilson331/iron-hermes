@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: completed
-stopped_at: Phase 36.2 context gathered
-last_updated: "2026-05-26T15:30:46.185Z"
+stopped_at: Phase 36.15 context gathered
+last_updated: "2026-05-26T15:57:14.583Z"
 last_activity: 2026-05-26 -- Phase 36.14 marked complete
 progress:
   total_phases: 37
@@ -530,6 +530,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-26T12:47:51.159Z
-Stopped at: Phase 36.2 context gathered
-Resume file: None
+Last session: 2026-05-26T15:57:14.577Z
+Stopped at: Phase 36.15 context gathered
+Resume file: .planning/phases/36.15-small-model-mode-smm-per-provider-extra-request-options-toml/36.15-CONTEXT.md
