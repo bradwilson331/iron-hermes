@@ -240,6 +240,22 @@ pub struct UsageRollup {
     pub event_count: i64,
 }
 
+/// Phase 36.2 follow-up: per-call statistics from `backfill_usage_costs`.
+/// `total_cost_delta_micros` is the signed sum (new − old); positive means
+/// total recognized cost increased after the backfill.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageBackfillStats {
+    pub rows_examined: usize,
+    pub rows_updated: usize,
+    pub total_cost_delta_micros: i64,
+    pub sessions_resynced: usize,
+    /// Count of `usage_events` rows whose `session_id` does not match any
+    /// `sessions.id`. These rows are still counted toward `rows_examined` /
+    /// `rows_updated` / `total_cost_delta_micros`, but their cost does NOT
+    /// roll up into a `sessions` row.
+    pub orphan_rows: usize,
+}
+
 /// A single message row retrieved from storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
@@ -921,6 +937,106 @@ impl StateStore {
         &self.conn
     }
 
+    /// Recompute `cost_usd_micros` on every `usage_events` row using the
+    /// caller-supplied closure, then resync each session's aggregate column.
+    /// Atomic: either all changes commit, or none. `dry_run = true` rolls
+    /// back so operators can preview the impact.
+    ///
+    /// The closure receives `(model, in_tok, out_tok, cache_read, cache_create)`
+    /// and must return the new `cost_usd_micros` value (i64 micro-USD).
+    ///
+    /// Phase 36.2 follow-up: existing rows were written when the disk-resident
+    /// pricing cache was not threaded onto AgentLoop (every OpenRouter slug
+    /// like `google/gemini-3.5-flash` got cost=0). This method lets the
+    /// `hermes pricing backfill` CLI command retroactively populate the
+    /// cost column using current pricing.
+    pub fn backfill_usage_costs<F>(
+        &mut self,
+        mut recompute: F,
+        dry_run: bool,
+    ) -> Result<UsageBackfillStats>
+    where
+        F: FnMut(&str, i64, i64, i64, i64) -> i64,
+    {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stats = UsageBackfillStats::default();
+
+        // Collect all rows first so we can release the SELECT statement
+        // before issuing UPDATEs (rusqlite borrows the connection mutably
+        // for the duration of a prepared statement iter).
+        let rows: Vec<(i64, String, String, i64, i64, i64, i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, cost_usd_micros \
+                 FROM usage_events",
+            )?;
+            let iter = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                ))
+            })?;
+            iter.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        stats.rows_examined = rows.len();
+
+        // Count orphans (session_id with no matching sessions.id) — these
+        // sum into total cost but never roll up into a sessions row. Report
+        // but don't fix here (cleanup is a separate decision).
+        let mut session_ids_present: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        {
+            let mut stmt = tx.prepare("SELECT id FROM sessions")?;
+            let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for row in iter {
+                session_ids_present.insert(row?);
+            }
+        }
+
+        for (rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, old_cost) in
+            &rows
+        {
+            if !session_ids_present.contains(session_id) {
+                stats.orphan_rows += 1;
+            }
+            let new_cost = recompute(model, *in_tok, *out_tok, *cache_read, *cache_create);
+            if new_cost != *old_cost {
+                stats.rows_updated += 1;
+                stats.total_cost_delta_micros =
+                    stats.total_cost_delta_micros.saturating_add(new_cost - old_cost);
+                tx.execute(
+                    "UPDATE usage_events SET cost_usd_micros = ?1 WHERE rowid = ?2",
+                    rusqlite::params![new_cost, rowid],
+                )?;
+            }
+        }
+
+        // Resync sessions.cost_usd_micros = SUM of matching usage_events.
+        // The COALESCE handles sessions with no usage rows (sum is NULL).
+        let sessions_resynced = tx.execute(
+            "UPDATE sessions \
+             SET cost_usd_micros = COALESCE((\
+                 SELECT SUM(cost_usd_micros) FROM usage_events \
+                 WHERE usage_events.session_id = sessions.id\
+             ), 0)",
+            [],
+        )?;
+        stats.sessions_resynced = sessions_resynced;
+
+        if dry_run {
+            tx.rollback()?;
+        } else {
+            tx.commit()?;
+        }
+        Ok(stats)
+    }
+
     /// Aggregate `usage_events` rows by `(provider, model)` under the given
     /// filter (Phase 36.2 Plan 10).
     ///
@@ -1576,5 +1692,122 @@ mod schema_migration_v8_tests {
             .unwrap();
         assert_eq!(r1.as_deref(), Some("/repo/foo"));
         assert!(r2.is_none());
+    }
+
+    /// Phase 36.2 follow-up: backfill recomputes cost_usd_micros and resyncs
+    /// the sessions aggregate column. Dry-run rolls back; non-dry-run commits.
+    #[test]
+    fn backfill_usage_costs_dry_run_then_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+
+        // Seed a session and three usage_events rows with cost=0 (the
+        // pre-fix state). Plus one orphan row (session_id has no matching
+        // sessions.id) to test the orphan counter.
+        store
+            .create_session("sess-1", "telegram", Some("gpt-4o"), None, None, None)
+            .unwrap();
+        let conn = store.conn_for_test();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('sess-1', 1, 'openai', 'gpt-4o', 1000, 500, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('sess-1', 2, 'openai', 'gpt-4o', 2000, 1000, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('orphan-sid', 3, 'openai', 'gpt-4o', 100, 50, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Recompute closure: stub pricing — every row gets new_cost = in_tok * 2.
+        let recompute = |_model: &str, in_tok: i64, _out: i64, _cr: i64, _cc: i64| -> i64 {
+            in_tok * 2
+        };
+
+        // Dry-run: report what would change without persisting.
+        let stats = store.backfill_usage_costs(recompute, true).unwrap();
+        assert_eq!(stats.rows_examined, 3);
+        assert_eq!(stats.rows_updated, 3);
+        assert_eq!(stats.orphan_rows, 1);
+        // Cost delta = (2000 + 4000 + 200) - 0 = 6200
+        assert_eq!(stats.total_cost_delta_micros, 6200);
+
+        // Verify dry-run did NOT commit — rows still at cost=0.
+        let conn = store.conn_for_test();
+        let cost_after_dry_run: i64 = conn
+            .query_row(
+                "SELECT SUM(cost_usd_micros) FROM usage_events",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost_after_dry_run, 0, "dry-run must not commit");
+
+        // Apply for real.
+        let stats = store.backfill_usage_costs(recompute, false).unwrap();
+        assert_eq!(stats.rows_updated, 3);
+        assert_eq!(stats.total_cost_delta_micros, 6200);
+
+        // Verify rows now have new cost.
+        let conn = store.conn_for_test();
+        let cost_after_apply: i64 = conn
+            .query_row(
+                "SELECT SUM(cost_usd_micros) FROM usage_events",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost_after_apply, 6200);
+
+        // sess-1 aggregate = sum of its two non-orphan rows = 2000 + 4000 = 6000.
+        let session_cost: i64 = conn
+            .query_row(
+                "SELECT cost_usd_micros FROM sessions WHERE id = 'sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_cost, 6000);
+    }
+
+    /// Backfill is idempotent: running twice on the same closure produces
+    /// rows_updated = 0 on the second pass.
+    #[test]
+    fn backfill_usage_costs_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-1", "telegram", Some("gpt-4o"), None, None, None)
+            .unwrap();
+        store
+            .conn_for_test()
+            .execute(
+                "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+                 cache_read, cache_create, cost_usd_micros, error_kind) \
+                 VALUES ('sess-1', 1, 'openai', 'gpt-4o', 1000, 500, 0, 0, 0, NULL)",
+                [],
+            )
+            .unwrap();
+        let recompute = |_m: &str, in_tok: i64, _o: i64, _cr: i64, _cc: i64| in_tok * 2;
+
+        let s1 = store.backfill_usage_costs(recompute, false).unwrap();
+        assert_eq!(s1.rows_updated, 1);
+
+        let s2 = store.backfill_usage_costs(recompute, false).unwrap();
+        assert_eq!(s2.rows_updated, 0, "second run should be a no-op");
+        assert_eq!(s2.total_cost_delta_micros, 0);
     }
 }

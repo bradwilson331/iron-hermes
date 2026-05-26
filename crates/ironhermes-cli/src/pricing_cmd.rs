@@ -38,6 +38,15 @@ pub enum PricingSubcommand {
         #[arg(long, default_value = "models.dev")]
         source: String,
     },
+    /// Recompute `cost_usd_micros` on every existing `usage_events` row
+    /// using current pricing (bundled table + disk cache), then resync the
+    /// `sessions` aggregate column. Use after `pricing refresh` to populate
+    /// cost for rows written before pricing was wired correctly.
+    Backfill {
+        /// Report what WOULD change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +57,7 @@ pub async fn handle_pricing_command(cmd: PricingSubcommand) -> Result<()> {
     match cmd {
         PricingSubcommand::List => cmd_list().await,
         PricingSubcommand::Refresh { force, source } => cmd_refresh(force, &source).await,
+        PricingSubcommand::Backfill { dry_run } => cmd_backfill(dry_run).await,
     }
 }
 
@@ -229,6 +239,70 @@ pub async fn cmd_refresh_from_url_with_path(
 #[allow(dead_code)]
 fn build_cache(entries: std::collections::HashMap<String, PricingCacheEntry>) -> PricingCache {
     PricingCache { entries }
+}
+
+// ---------------------------------------------------------------------------
+// cmd_backfill — recompute cost_usd_micros on existing usage_events rows
+// ---------------------------------------------------------------------------
+
+async fn cmd_backfill(dry_run: bool) -> Result<()> {
+    // Build the merged pricing registry exactly the way the agent does at
+    // turn time: bundled pricing.toml + disk cache from `pricing refresh`.
+    let mut registry = PricingRegistry::new();
+    let cache = PricingCache::load();
+    let pre_merge_cache_entries = cache.entries.len();
+    registry.merge_cache(cache.into_pricing_map());
+
+    // Open the production StateStore at $HERMES_HOME/state.db.
+    let mut store = ironhermes_state::StateStore::open_default()
+        .map_err(|e| anyhow::anyhow!("open StateStore: {e}"))?;
+
+    // Compute closure shared between dry-run and write paths.
+    let recompute = |model: &str, in_tok: i64, out_tok: i64, cache_read: i64, cache_create: i64| -> i64 {
+        let entry = registry.lookup_or_zero(model);
+        ironhermes_core::pricing::compute_cost_micros(
+            &entry,
+            in_tok,
+            out_tok,
+            cache_read,
+            cache_create,
+        )
+    };
+
+    let stats = store
+        .backfill_usage_costs(recompute, dry_run)
+        .map_err(|e| anyhow::anyhow!("backfill failed: {e}"))?;
+
+    let mode = if dry_run { "dry-run" } else { "applied" };
+    println!(
+        "{}: examined {} rows, {} would change ({} sessions resync, {} orphan rows)",
+        format!("hermes pricing backfill ({mode})").bold().cyan(),
+        stats.rows_examined,
+        stats.rows_updated,
+        stats.sessions_resynced,
+        stats.orphan_rows,
+    );
+    println!(
+        "  total cost delta:  {}",
+        format_micros_as_dollars(stats.total_cost_delta_micros),
+    );
+    println!(
+        "  pricing source:    bundled pricing.toml + {} disk-cache entries",
+        pre_merge_cache_entries,
+    );
+    if dry_run && stats.rows_updated > 0 {
+        println!("\nRe-run without --dry-run to apply.");
+    }
+    if stats.orphan_rows > 0 {
+        println!(
+            "\nNote: {} usage_events rows have a session_id with no matching sessions row.",
+            stats.orphan_rows,
+        );
+        println!(
+            "  These rows still carry recomputed cost but do NOT contribute to any session aggregate."
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
