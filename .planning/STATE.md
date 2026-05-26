@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.2 complete — all 11 plans + 10 code-review BLOCKERs closed
-last_updated: "2026-05-26T05:30:00.000Z"
-last_activity: 2026-05-26 -- Phase 36.2 closeout (code review + chat-fix series + CR-04/CR-09 BLOCKER fixes)
+stopped_at: Phase 36.2 context gathered
+last_updated: "2026-05-26T08:47:02.765Z"
+last_activity: 2026-05-26 -- Phase 36.6.1 planning complete
 progress:
   total_phases: 34
   completed_phases: 3
-  total_plans: 18
+  total_plans: 20
   completed_plans: 18
   percent: 9
 ---
@@ -27,25 +27,29 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 36.2 (agent-loop-core-parity-prompt-caching-per-provider-rate-limi) — SHIPPED
 Plan: 11 of 11
-Status: Phase 36.2 complete — code review BLOCKERs CR-01 through CR-10 all closed; gateway /usage end-to-end; OpenRouter Claude cache_control wired into production send path
-Last activity: 2026-05-26 -- Phase 36.2 closeout
+Status: Ready to execute
+Last activity: 2026-05-26 -- Phase 36.6.1 planning complete
 
 ## Phase 36.2 Closure Summary
 
 **Wave execution:** 11/11 plans complete (commits aa65bdba, c90c17e1, 8d7ce6ce, 3db67dd0, 7bc8a059, b355e116, fd7f63f9, 0ebcf16c, 2d379cd1, 8b9c68bb, f86d647a, 99a491a1, ce9b3200, a5a2f902, 6493e8b2, bf5a9013, 8fa811b4, bcb7b25f, 8333bfdc, etc.)
 
 **Chat-fix series (post-merge, 2026-05-25):** 7 commits patching usage_events streaming defects
+
 - a9fb0d0d, 4eead836, 0987e2e2, c74cac60, 402113b3, 0b7a9b85, 9071afc6
 
 **Code-review BLOCKER closeout (2026-05-26):** all 10 CR-* findings from REVIEW.md fixed
+
 - CR-01 `12a887d9` · CR-02 `7f6431dd` · CR-03 `185c98aa` · CR-04 `d94d73fa`
 - CR-05/06/07/10 `4fededb0` · CR-08 `185c98aa` · CR-09 `e865a5ca`
 
 **Gateway integration fixes (2026-05-26):**
+
 - `7fd63515` CommandContext.state_store · `beaaf471` TurnRequest.state_store
 - `2f253697` canonical UUID alignment · `6360ae72` drop with_intercepts (chat truncation)
 
 **Operator tooling (2026-05-26):**
+
 - `8203ec36` `hermes pricing refresh --source openrouter`
 - `f000d234` disk pricing cache merged per-turn
 - `cd3e2ee5` `hermes pricing backfill` + `56a454eb` `--clean-orphans`
