@@ -2736,3 +2736,179 @@ custom_providers:
         );
     }
 }
+
+#[cfg(test)]
+mod extras_canary {
+    //! Wave 0 (Phase 36.15) canary tests. These reference fields not yet present on ProviderConfig —
+    //! compilation fails on purpose until Plan 02 lands the struct extension. If untagged-enum
+    //! deserialization (D-01) proves brittle in serde_yaml when all variant fields are Option<T>,
+    //! the planner falls back to Option<HashMap<String, serde_json::Value>> on ProviderConfig
+    //! directly; these tests are updated accordingly at that decision point.
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Test 1: provider-level extra_request_options.num_ctx = 8192 round-trips through Config.
+    ///
+    /// Locks the D-03 acceptance shape: a YAML doc with
+    /// `providers.ollama.extra_request_options.num_ctx = 8192` must deserialize into Config
+    /// such that `config.providers["ollama"].extra_request_options` is Some(...) with
+    /// num_ctx == 8192.
+    #[test]
+    fn extras_canary_provider_level_num_ctx_roundtrips() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+    extra_request_options:
+      num_ctx: 8192
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        let extras = provider
+            .extra_request_options
+            .as_ref()
+            .expect("extra_request_options must be Some");
+        if let ProviderExtraOptions::Ollama(opts) = extras {
+            assert_eq!(
+                opts.num_ctx,
+                Some(8192),
+                "provider-level num_ctx must round-trip as 8192"
+            );
+        } else {
+            panic!("expected ProviderExtraOptions::Ollama variant for ollama provider");
+        }
+    }
+
+    /// Test 2: per-model override wins; provider-level default preserved.
+    ///
+    /// Locks D-03: YAML with provider-level num_ctx=8192 AND
+    /// providers.ollama.models."llama3.1:8b".extra_request_options.num_ctx=32768
+    /// must deserialize such that:
+    ///   - the per-model entry's num_ctx == 32768
+    ///   - the provider-level num_ctx == 8192 (merge happens in resolve_extras, not at deserialization)
+    #[test]
+    fn extras_canary_per_model_override_wins() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+    extra_request_options:
+      num_ctx: 8192
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+
+        // Provider-level num_ctx must remain 8192 (deserialization only; merge happens later).
+        if let Some(ProviderExtraOptions::Ollama(provider_opts)) = &provider.extra_request_options {
+            assert_eq!(
+                provider_opts.num_ctx,
+                Some(8192),
+                "provider-level num_ctx must be preserved as 8192"
+            );
+        } else {
+            panic!("expected Some(ProviderExtraOptions::Ollama) on provider level");
+        }
+
+        // Per-model entry must have num_ctx == 32768.
+        let model_cfg = provider
+            .models
+            .get("llama3.1:8b")
+            .expect("llama3.1:8b model entry must be present");
+        let model_extras = model_cfg
+            .extra_request_options
+            .as_ref()
+            .expect("model extra_request_options must be Some");
+        if let ProviderExtraOptions::Ollama(model_opts) = model_extras {
+            assert_eq!(
+                model_opts.num_ctx,
+                Some(32768),
+                "per-model num_ctx must be 32768"
+            );
+        } else {
+            panic!("expected ProviderExtraOptions::Ollama variant for model-level extras");
+        }
+    }
+
+    /// Test 3: YAML key with colon ("llama3.1:8b") parses without serde error.
+    ///
+    /// Locks the quoted-key requirement: YAML keys containing colons must be quoted.
+    /// Verifies that serde_yaml handles the quoted key `"llama3.1:8b"` in providers.models.
+    #[test]
+    fn extras_canary_quoted_yaml_key_with_colon_parses() {
+        let yaml = r#"
+providers:
+  ollama:
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768
+      "llama3.1:70b":
+        extra_request_options:
+          num_ctx: 4096
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse with colon-bearing keys");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            provider.models.contains_key("llama3.1:8b"),
+            "models map must contain key 'llama3.1:8b' (colon in key)"
+        );
+        assert!(
+            provider.models.contains_key("llama3.1:70b"),
+            "models map must contain key 'llama3.1:70b' (colon in key)"
+        );
+    }
+
+    /// Test 4: OpenRouter nested provider.order list round-trips.
+    ///
+    /// Locks D-03: YAML with providers.openrouter.extra_request_options.provider.order =
+    /// ["anthropic", "openai"] must deserialize such that the nested order list is preserved.
+    #[test]
+    fn extras_canary_openrouter_provider_order_nested() {
+        let yaml = r#"
+providers:
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    extra_request_options:
+      provider:
+        order:
+          - anthropic
+          - openai
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider must be present");
+        let extras = provider
+            .extra_request_options
+            .as_ref()
+            .expect("extra_request_options must be Some");
+        if let ProviderExtraOptions::OpenRouter(or) = extras {
+            let order = or
+                .provider
+                .as_ref()
+                .and_then(|p| p.order.as_ref())
+                .expect("provider.order must be Some");
+            assert_eq!(
+                order,
+                &vec!["anthropic".to_string(), "openai".to_string()],
+                "OpenRouter provider.order must round-trip as [anthropic, openai]"
+            );
+        } else {
+            panic!("expected ProviderExtraOptions::OpenRouter variant for openrouter provider");
+        }
+    }
+}

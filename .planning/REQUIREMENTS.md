@@ -137,6 +137,10 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [ ] **PROV-08**: Named custom providers configurable in config.yaml for any OpenAI-compatible endpoint
 - [x] **PROV-09**: Iteration budget with 2-tier pressure: caution at 70% (consolidate), warning at 90% (respond now), stop at 100%
 - [x] **PROV-10**: Budget shared across parent and child agents — subagent consumes from parent's budget
+- [ ] **PROV-11**: Per-provider `extra_request_options` TOML/YAML knob wired through `AgentRuntime` into `ChatRequest.extra` on every OpenAI-compat LLM call (Ollama `num_ctx`, vLLM `top_k`, OpenRouter non-Claude `provider.order`).
+- [ ] **PROV-12**: Per-model override of `extra_request_options` under `providers.<name>.models.<model>` with shallow per-key merge (per-model wins; missing per-model keys fall back to provider default).
+- [ ] **PROV-13**: `extra_request_options` keys discoverable via `hermes config show`/`hermes config set` — entries appear in `config_schema.rs` static schema Vec.
+- [ ] **PROV-14**: Merge precedence is "caller wins per key" (D-09); the existing `stream_options.include_usage: true` floor at `client.rs:236` is preserved; mid-session `/model` switch picks up per-model extras on the next turn (D-10); PROV-07 SSE fallback chain from Phase 36.14 is unchanged.
 
 ### Gateway Architecture
 
@@ -351,6 +355,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PROV-08 | Phase 26 | Pending |
 | PROV-09 | Phase 21.7 (was 12) | Complete |
 | PROV-10 | Phase 21.7 (was 12) | Complete |
+| PROV-11 | Phase 36.15 | Pending |
+| PROV-12 | Phase 36.15 | Pending |
+| PROV-13 | Phase 36.15 | Pending |
+| PROV-14 | Phase 36.15 | Pending |
 | GW-01 | Phase 29 | Pending |
 | GW-02 | Phase 29 | Pending |
 | GW-03 | Phase 29 | Pending |
@@ -409,3 +417,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 *Requirements defined: 2026-04-11*
 *Last updated: 2026-05-10 — Phase 27.1 import: + 16 Hexapod Integration reqs (HXP-TOOL-01..06, HXP-LOCO-01..05, HXP-NAV-01..04, HXP-DOC-01) across Phases 27.1.1/.2/.3. Total active: 50 reqs across 9 categories.*
 *Last updated: 2026-05-24 — Phase 36 complete: GW-05 guard wiring landed (per-session AtomicBool, RunningAgentGuard RAII, three rejection sites); traceability updated to Phase 21.1 (dispatch) + Phase 36 (guard).*
+*Last updated: 2026-05-26 — Phase 36.15 import: + 4 Provider Resolution reqs (PROV-11 extras flow, PROV-12 per-model override, PROV-13 schema discoverability, PROV-14 merge + D-10 + PROV-07 regression).*
