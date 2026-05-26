@@ -201,10 +201,41 @@ pub fn parse_models_dev_body(body: &serde_json::Value) -> HashMap<String, Pricin
 /// - `u64`  → `(v as i64) * 1_000_000`
 /// - `None` / null / non-numeric → `0` (graceful — see threat T-36.2-09-PARSE)
 pub fn cost_field_to_micros(field: Option<&serde_json::Value>) -> i64 {
+    // CR-08: round on float→int conversion (was truncate-toward-zero, which
+    // caused a 1% accuracy loss on cheap-model prices like $0.0001/M where
+    // 0.0001 * 1_000_000.0 ≈ 99.9999... truncated to 99 instead of 100).
+    // Also use checked arithmetic on i64/u64 so a malformed refresh payload
+    // with an absurdly large value can't silently wrap into a negative
+    // micro-USD value.
+    const MAX_TOK_PRICE: i64 = i64::MAX / 1_000_000;
     match field {
-        Some(v) if v.is_f64() => (v.as_f64().unwrap_or(0.0) * 1_000_000.0) as i64,
-        Some(v) if v.is_i64() => v.as_i64().unwrap_or(0) * 1_000_000,
-        Some(v) if v.is_u64() => (v.as_u64().unwrap_or(0) as i64) * 1_000_000,
+        Some(v) if v.is_f64() => {
+            let scaled = v.as_f64().unwrap_or(0.0) * 1_000_000.0;
+            if scaled.is_finite() {
+                scaled.round() as i64
+            } else {
+                tracing::warn!("pricing cost field is non-finite f64; treating as 0");
+                0
+            }
+        }
+        Some(v) if v.is_i64() => {
+            let n = v.as_i64().unwrap_or(0);
+            if n.abs() <= MAX_TOK_PRICE {
+                n * 1_000_000
+            } else {
+                tracing::warn!("pricing cost field i64 overflows i64 micros; treating as 0");
+                0
+            }
+        }
+        Some(v) if v.is_u64() => {
+            let n = v.as_u64().unwrap_or(0);
+            if n <= MAX_TOK_PRICE as u64 {
+                (n as i64) * 1_000_000
+            } else {
+                tracing::warn!("pricing cost field u64 overflows i64 micros; treating as 0");
+                0
+            }
+        }
         _ => 0,
     }
 }

@@ -159,10 +159,20 @@ pub fn compute_cost_micros(
     cache_read: i64,
     cache_create: i64,
 ) -> i64 {
-    let input_cost = (in_tok * entry.input_per_1m_micros) / 1_000_000;
-    let output_cost = (out_tok * entry.output_per_1m_micros) / 1_000_000;
-    let read_cost = (cache_read * entry.cache_read_per_1m_micros) / 1_000_000;
-    let create_cost = (cache_create * entry.cache_creation_per_1m_micros) / 1_000_000;
+    // CR-03: bias the division by half a divisor so we round-to-nearest
+    // instead of truncating. For cheap models (e.g. Haiku at $0.25/M = 250_000
+    // micros/1M), a 3-token row computes (3 * 250_000) = 750_000 which
+    // truncated to micro-USD gives 0; with +500_000 bias it gives 1 (correct
+    // round-up since 0.75 → 1). Negative inputs are impossible (token counts
+    // are non-negative), so the symmetric round-toward-zero gotcha doesn't
+    // bite. See REVIEW.md CR-03.
+    fn round_div(prod: i64) -> i64 {
+        (prod + 500_000) / 1_000_000
+    }
+    let input_cost = round_div(in_tok * entry.input_per_1m_micros);
+    let output_cost = round_div(out_tok * entry.output_per_1m_micros);
+    let read_cost = round_div(cache_read * entry.cache_read_per_1m_micros);
+    let create_cost = round_div(cache_create * entry.cache_creation_per_1m_micros);
     input_cost + output_cost + read_cost + create_cost
 }
 

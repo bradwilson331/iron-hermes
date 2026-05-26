@@ -111,10 +111,16 @@ fn compute_cost_micros_small_counts_integer_math() {
     // input  = 100 * 5_000_000 / 1_000_000 = 500
     // output = 50 * 25_000_000 / 1_000_000 = 1_250
     // read   = 200 * 500_000 / 1_000_000   = 100
-    // create = 10 * 6_250_000 / 1_000_000  = 62 (62.5 truncated by integer div)
-    // total  = 1_912 micros
+    // create = 10 * 6_250_000 / 1_000_000  = 63 (62.5 → 63 via CR-03 round-to-nearest)
+    // total  = 1_913 micros
+    //
+    // CR-03 fix (commit on develop): compute_cost_micros now adds 500_000
+    // before dividing by 1_000_000 so the result rounds-to-nearest instead
+    // of truncating-toward-zero. Pre-fix the create term was 62 (and short
+    // Haiku/$0.25-class turns silently rounded down to $0); post-fix it is
+    // 63, which is the correct billing value.
     let cost = compute_cost_micros(entry, 100, 50, 200, 10);
-    assert_eq!(cost, 1_912);
+    assert_eq!(cost, 1_913);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
