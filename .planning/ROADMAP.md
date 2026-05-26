@@ -230,12 +230,14 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 36.6.2 to break down)
 
-### Phase 36.6.1: BUG FIX: AI response visibility — investigate why streamed/final AI responses don't render visibly in ratatui TUI; verify whether feedback_scroll_width_inner formulas (area.width-2 inner, prefix+body+width-1/width, viewport_content_length) ever landed; ship a regression test (INSERTED)
+### Phase 36.6.1: BUG FIX: AI response visibility — investigate why streamed/final AI responses don't render visibly in ratatui TUI; verify whether feedback_scroll_width_inner formulas (area.width-2 inner, prefix+body+width-1/width, viewport_content_length) ever landed; ship a regression test (SHIPPED 2026-05-26)
 
 **Goal:** Fix the ratatui TUI auto-scroll undershoot so AI responses always land visible at the true viewport bottom after `StreamEvent::Finished`. Root cause (D-01): `transcript_line_count` uses character-ceiling-divide while ratatui's `Paragraph { wrap: Wrap { trim: false } }` uses word-wrap via `WordWrapper`; the per-line undercount accumulates and `transcript_max_scroll = total - visible` ends up too small (or zero for short responses), leaving the tail of the response — or in extreme cases the whole response — hidden below the viewport. Fix replaces `wrapped_line_count` with a word-wrap simulator using `unicode-width`, repairs both call sites in `transcript_line_count` (i==0 prefix-sharing path + i>0 path), and ships D-02 unit + D-03 integration regression tests.
 **Requirements**: D-01, D-02, D-03 (from `.planning/phases/36.6.1-.../36.6.1-CONTEXT.md`)
 **Depends on:** Phase 36.6
 **Plans:** 2/2 plans complete
+
+**Closeout (2026-05-26):** Verifier passed 7/7 automated must-haves: D-02 module `word_wrap_tests` 5/5 pass, D-03 `auto_scroll_lands_at_true_bottom_after_stream_finished` passes, `unicode-width = "0.2"` direct dep landed, `pub(crate) fn compute_transcript_area` confirmed, both `i==0` and `i>0` call sites in `transcript_line_count` route through `word_wrapped_line_count`, old `fn wrapped_line_count` deleted. Plan 02 auto-fix patched a subtle `flush_word` double-count bug in Plan 01's simulator (caught by the broader D-03 test — exactly the integration coverage's intent) and re-baselined 5 insta snapshots to reflect the now-correct scrollbar appearance. Manual UAT (live TUI reproducing screenshot 1 "Hi!" + screenshot 2 `/usage`) confirmed by user.
 
 Plans:
 - [x] 36.6.1-01-PLAN.md — Wave 0: Add `unicode-width` direct dep, replace `wrapped_line_count` with `word_wrapped_line_count` (word-wrap simulator), fix both call sites in `transcript_line_count`, add D-02 unit tests in `app.rs`
