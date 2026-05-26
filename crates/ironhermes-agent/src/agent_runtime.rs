@@ -252,6 +252,22 @@ impl AgentRuntime {
 
         let context_length = self.resolver.resolve_for_main().context_length();
 
+        // ── Phase 36.15 Plan 04 (PROV-11): per-turn extras resolution ─────
+        // D-10: resolve (provider, model) → merged HashMap on every turn so a
+        // mid-session /model switch picks up the new per-model override immediately.
+        // resolver.main_provider() is the providers: map key; resolve_for_main()
+        // .default_model is the wire model string LlmClient uses when None is passed.
+        let resolved_extras_for_turn: Option<std::collections::HashMap<String, serde_json::Value>> = {
+            let provider_name = self.resolver.main_provider();
+            let model_name = self.resolver.resolve_for_main().default_model.clone();
+            let merged = ironhermes_core::config_extras::resolve_extras(
+                &self.config.providers,
+                provider_name,
+                &model_name,
+            );
+            if merged.is_empty() { None } else { Some(merged) }
+        };
+
         // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
         // Runs ONCE here, BEFORE attach_context_engine/agent.run, over the
         // latest user message. Never called per-surface (centralization invariant).
@@ -401,6 +417,8 @@ impl AgentRuntime {
         // making /usage --provider filters useless and (worse) collapsing
         // multi-tenant rate-limit tracking into a single shared bucket.
         agent = agent.with_provider_name(self.resolver.main_provider());
+        // Phase 36.15 Plan 04 (PROV-11): wire per-turn merged extras resolved above.
+        agent = agent.with_resolved_extras(resolved_extras_for_turn);
         if let Some(ref key) = self.resolver.resolve_for_main().api_key {
             agent = agent.with_api_key_for_usage_tracking(key.clone());
         }
@@ -629,6 +647,25 @@ impl AgentRuntime {
             session_turn_count: std::sync::atomic::AtomicUsize::new(0),
             context_file_paths: Vec::new(),
         }
+    }
+
+    /// Phase 36.15 Plan 04 (PROV-11): test-only helper that re-derives
+    /// `(provider, model) → merged extras` using the same logic as `run_turn`.
+    ///
+    /// Allows unit tests to assert on the extras resolution result without
+    /// running a full async `run_turn` (which requires a live LLM endpoint).
+    #[cfg(test)]
+    pub(crate) fn resolved_extras_for_test_turn(
+        &self,
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        let provider_name = self.resolver.main_provider();
+        let model_name = self.resolver.resolve_for_main().default_model.clone();
+        let merged = ironhermes_core::config_extras::resolve_extras(
+            &self.config.providers,
+            provider_name,
+            &model_name,
+        );
+        if merged.is_empty() { None } else { Some(merged) }
     }
 }
 
@@ -900,6 +937,123 @@ mod tests {
             "Phase 36.2 CR-02: run_turn MUST call `agent.with_api_key_for_usage_tracking(...)` \
              so the SHA-256 hash bucket on usage_events is per-key, not a constant \
              empty-string hash that collapses every session into one bucket."
+        );
+    }
+
+    // ── Phase 36.15 Plan 04 (PROV-11): extras resolution wiring ──────────
+
+    /// Verify that run_turn calls config_extras::resolve_extras (source guard).
+    #[test]
+    fn run_turn_calls_resolve_extras() {
+        assert!(
+            SOURCE.contains("ironhermes_core::config_extras::resolve_extras"),
+            "Phase 36.15 (PROV-11): run_turn must call \
+             ironhermes_core::config_extras::resolve_extras to resolve per-turn extras."
+        );
+    }
+
+    /// Verify that run_turn wires extras into AgentLoop via with_resolved_extras (source guard).
+    #[test]
+    fn run_turn_wires_with_resolved_extras() {
+        assert!(
+            SOURCE.contains("with_resolved_extras("),
+            "Phase 36.15 (PROV-11): run_turn must call agent.with_resolved_extras(...) \
+             to pass resolved extras into AgentLoop."
+        );
+    }
+
+    /// Behavioral test: resolved_extras_for_test_turn returns Some(map) with
+    /// num_ctx=4096 when Config has providers.test_provider.extra_request_options
+    /// set accordingly. Validates the D-10 per-turn resolution path.
+    #[test]
+    fn resolved_extras_for_test_turn_returns_provider_extras() {
+        use ironhermes_core::{Config, ProviderResolver};
+        use std::collections::HashMap;
+
+        // Build a Config with a single provider that has num_ctx=4096 as an extra.
+        let mut config = Config::default();
+        let mut extras: HashMap<String, serde_json::Value> = HashMap::new();
+        extras.insert("num_ctx".to_string(), serde_json::json!(4096u32));
+
+        let mut provider_cfg = ironhermes_core::config::ProviderConfig::default();
+        provider_cfg.extra_request_options = extras;
+        // Give the provider a base_url so the resolver can build successfully.
+        provider_cfg.base_url = Some("http://localhost:11434".to_string());
+
+        config.providers.insert("test_provider".to_string(), provider_cfg);
+
+        // Make test_provider the main provider.
+        config.model.provider = "test_provider".to_string();
+        config.model.default = "llama3.1:8b".to_string();
+
+        let config = std::sync::Arc::new(config);
+        let resolver = std::sync::Arc::new(
+            ProviderResolver::build(&config)
+                .expect("ProviderResolver::build must succeed with test config"),
+        );
+
+        // Build a minimal AgentRuntime with the test config + resolver.
+        let client = crate::AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:0",
+            "test-key",
+            "llama3.1:8b",
+        ));
+        let max_iterations = config.agent.max_iterations;
+        let budget = crate::budget::BudgetHandle::new(max_iterations);
+        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            ironhermes_tools::ToolRegistry::new(),
+        ));
+        let hook_registry = std::sync::Arc::new(ironhermes_hooks::HookRegistry::new(
+            ironhermes_hooks::HooksConfig::default(),
+        ));
+        let skill_registry = std::sync::Arc::new(
+            ironhermes_core::SkillRegistry::load_with_paths(&[]),
+        );
+        let active_skills = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cron_dir = std::env::temp_dir()
+            .join(format!("ironhermes_test_cron_extras_{}", std::process::id()));
+        let job_store = std::sync::Arc::new(std::sync::Mutex::new(
+            ironhermes_cron::JobStore::open(cron_dir)
+                .expect("temp-dir JobStore must succeed"),
+        ));
+        let browser_session = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let bundle = crate::app_runtime_factory::AppRuntimeBundle {
+            registry,
+            hook_registry,
+            skill_registry,
+            active_skills,
+            job_store,
+            browser_session,
+            mcp_manager: None,
+            merged_tools: ironhermes_core::config::ToolsConfig::default(),
+        };
+        let subagent_registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::subagent_registry::SubagentRegistry::new(),
+        ));
+
+        let runtime = AgentRuntime {
+            config,
+            resolver,
+            client,
+            bundle,
+            budget,
+            memory_manager: None,
+            subagent_registry,
+            max_iterations,
+            cwd: std::path::PathBuf::from("."),
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths: Vec::new(),
+        };
+
+        let result = runtime.resolved_extras_for_test_turn();
+        let map = result.expect(
+            "resolved_extras_for_test_turn must return Some when provider has extras",
+        );
+        assert_eq!(
+            map.get("num_ctx"),
+            Some(&serde_json::json!(4096u32)),
+            "num_ctx=4096 set in provider config must appear in resolved extras"
         );
     }
 }
