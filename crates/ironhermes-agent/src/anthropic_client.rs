@@ -637,20 +637,25 @@ fn attach_cache_control_markers(
     // Mark the system block — converting from Text to Blocks if needed because
     // cache_control attaches to content blocks, not bare strings.
     if let Some(s) = system.as_mut() {
-        let text = match s {
-            AnthropicSystem::Text(t) => std::mem::take(t),
-            AnthropicSystem::Blocks(_) => {
-                // Already in blocks form (unusual on this code path); take the
-                // last block's text-equivalent via a no-op for now. This branch
-                // is not exercised by current call sites — adapt_messages
-                // always returns Text. If a future call site builds Blocks
-                // directly, it can attach its own marker before passing in.
-                return;
+        // CR-05 fix: split the early-return into per-shape arms so the
+        // message-level markers below still attach when the system is
+        // already Blocks. Previously the Blocks branch did `return` which
+        // skipped the entire function (including the last-3-messages loop).
+        match s {
+            AnthropicSystem::Text(t) => {
+                let text = std::mem::take(t);
+                let mut block = SystemBlock::text(text);
+                block.cache_control = Some(CacheControl::ephemeral(ttl));
+                *s = AnthropicSystem::Blocks(vec![block]);
             }
-        };
-        let mut block = SystemBlock::text(text);
-        block.cache_control = Some(CacheControl::ephemeral(ttl));
-        *s = AnthropicSystem::Blocks(vec![block]);
+            AnthropicSystem::Blocks(blocks) => {
+                // Attach marker to the last existing system block so
+                // multi-block callers still benefit from cache_control.
+                if let Some(last) = blocks.last_mut() {
+                    last.cache_control = Some(CacheControl::ephemeral(ttl));
+                }
+            }
+        }
     }
 
     // Mark last 3 messages' last content block.
@@ -989,6 +994,19 @@ impl AnthropicClient {
                 };
 
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // CR-07: hard cap on SSE buffer to defend against a malicious
+                // or buggy proxy that streams without ever emitting "\n\n".
+                // Without this the spawned task could OOM on a slow-drip
+                // attack since the 60s idle timeout fires only on read stalls.
+                const MAX_SSE_BUFFER: usize = 4 * 1024 * 1024;
+                if buffer.len() > MAX_SSE_BUFFER {
+                    warn!(
+                        "Anthropic SSE buffer exceeded {} bytes without an event boundary; aborting stream",
+                        MAX_SSE_BUFFER
+                    );
+                    break;
+                }
 
                 // Process SSE events: each event is separated by blank lines
                 // Format:

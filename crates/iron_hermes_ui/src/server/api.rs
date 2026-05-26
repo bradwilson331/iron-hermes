@@ -133,7 +133,13 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
     // per Phase 34 Plan 02 session-store unification requirement.
     let platform_filter = Platform::Web.to_string();
     let sessions = {
-        let store = state.state_store.lock().unwrap();
+        // CR-06: map lock-poison to a structured error instead of panicking the
+        // request handler. A poisoned mutex (from a prior thread panic) used to
+        // surface as opaque HTTP 500 with no body; now operators see the cause.
+        let store = state
+            .state_store
+            .lock()
+            .map_err(|_| ServerFnError::new("State store mutex poisoned"))?;
         store.list_sessions(Some(&platform_filter), 100)
             .map_err(|e| ServerFnError::new(format!("StateStore list sessions failed: {e}")))?
     };
@@ -154,9 +160,15 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
             // MutexGuard is scoped to the inner block and drops before SessionInfo is constructed,
             // so session.id can be moved into the struct literal without a borrow conflict.
             let last_message = {
-                let store = state.state_store.lock().unwrap();
-                store.get_messages(&session.id).ok().and_then(|msgs| {
-                    extract_last_message_preview(&msgs)
+                // CR-06: don't panic the whole list_sessions request if the
+                // mutex is poisoned mid-iteration. Falling back to None here
+                // is acceptable because last_message is a decorative preview
+                // — better to render the row without a preview than 500 the
+                // entire sessions list.
+                state.state_store.lock().ok().and_then(|store| {
+                    store.get_messages(&session.id).ok().and_then(|msgs| {
+                        extract_last_message_preview(&msgs)
+                    })
                 })
             };
             SessionInfo {
@@ -486,10 +498,11 @@ const HISTORY_LIMIT: usize = 50;
 #[server]
 pub async fn get_session_messages(id: String) -> Result<Vec<ChatMessage>> {
     let state = crate::server::state::global_app_state();
+    // CR-06: surface lock-poisoning as a structured error instead of panicking.
     let all_msgs = state
         .state_store
         .lock()
-        .unwrap()
+        .map_err(|_| ServerFnError::new("State store mutex poisoned"))?
         .get_messages(&id)
         .map_err(|e| ServerFnError::new(format!("get_messages failed: {e}")))?;
 

@@ -218,6 +218,19 @@ impl LlmClient {
 
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
+                // CR-07: hard cap on SSE buffer to defend against a malicious
+                // or buggy proxy that streams without ever emitting newlines.
+                // Without this the spawned task could OOM on a slow-drip
+                // attack since the 60s idle timeout fires only on read stalls.
+                const MAX_SSE_BUFFER: usize = 4 * 1024 * 1024;
+                if buffer.len() > MAX_SSE_BUFFER {
+                    warn!(
+                        "SSE buffer exceeded {} bytes without a line terminator; aborting stream",
+                        MAX_SSE_BUFFER
+                    );
+                    break;
+                }
+
                 // Process complete SSE lines
                 while let Some(line_end) = buffer.find('\n') {
                     let line = buffer[..line_end].trim().to_string();

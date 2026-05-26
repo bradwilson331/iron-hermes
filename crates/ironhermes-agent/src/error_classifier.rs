@@ -220,7 +220,11 @@ fn parse_retry_after(err_str: &str) -> Option<Duration> {
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
             if let Ok(n) = secs_str.parse::<u64>() {
-                return Some(Duration::from_secs(n));
+                // CR-10: clamp to 24h. An adversarial server returning
+                // Retry-After: 9223372036854775000 would otherwise produce a
+                // Duration that overflows downstream SystemTime arithmetic.
+                let capped = n.min(86_400);
+                return Some(Duration::from_secs(capped));
             }
         }
     }
