@@ -1192,26 +1192,27 @@ mod scroll_tests {
         }
     }
 
-    // — wrapped_line_count ──────────────────────────────────────────────────
+    // — word_wrapped_line_count ──────────────────────────────────────────────
 
     #[test]
     fn wrapped_empty_is_one() {
-        assert_eq!(wrapped_line_count("", 10), 1);
+        assert_eq!(word_wrapped_line_count("", 10), 1);
     }
 
     #[test]
     fn wrapped_fits_one_row() {
-        assert_eq!(wrapped_line_count("hello", 10), 1);
+        assert_eq!(word_wrapped_line_count("hello", 10), 1);
     }
 
     #[test]
     fn wrapped_exactly_one_row() {
-        assert_eq!(wrapped_line_count("helloworld", 10), 1);
+        assert_eq!(word_wrapped_line_count("helloworld", 10), 1);
     }
 
     #[test]
     fn wrapped_overflows_one_row() {
-        assert_eq!(wrapped_line_count("helloworld!", 10), 2);
+        // "helloworld!" is a single word of width 11 at width=10 → character-wraps to 2 rows
+        assert_eq!(word_wrapped_line_count("helloworld!", 10), 2);
     }
 
     // — scroll helpers ───────────────────────────────────────────────────────
@@ -1657,6 +1658,158 @@ mod scroll_tests {
         assert_eq!(
             app.transcript_scroll, max,
             "reconcile_scroll with auto_follow=true must snap transcript_scroll to transcript_max_scroll (post-fix the max is correct)"
+        );
+    }
+}
+
+// ── D-02 Word-wrap unit tests (Phase 36.6.1 Plan 01) ──────────────────────────
+//
+// These tests verify that `word_wrapped_line_count` matches ratatui's actual
+// render output (via TestBackend) for representative inputs, pinning the
+// formula's correctness independently of the full UI stack.
+//
+// Test IDs per VALIDATION.md: 36.6.1-01-01 through 36.6.1-01-05.
+
+#[cfg(all(test, feature = "test-support"))]
+mod word_wrap_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend, widgets::{Paragraph, Wrap}};
+
+    /// Helper: count rows ratatui actually renders for `text` at column `width`.
+    ///
+    /// Uses a `TestBackend` tall enough (200 rows) to never clip, renders
+    /// `Paragraph::new(text).wrap(Wrap { trim: false })`, then counts non-blank
+    /// rows from the top, stopping at the first all-blank row after content starts.
+    fn ratatui_line_count(text: &str, width: u16) -> usize {
+        let height = 200u16;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let para = Paragraph::new(text).wrap(Wrap { trim: false });
+            f.render_widget(para, f.area());
+        }).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut count = 0usize;
+        for row in 0..height {
+            let row_blank = (0..width).all(|col| {
+                buf.cell((col, row)).map(|c| c.symbol() == " ").unwrap_or(true)
+            });
+            if row_blank && row > 0 {
+                break;
+            }
+            if !row_blank {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// 36.6.1-01-01: A long sentence that wraps at width 78 must produce the
+    /// same row count as ratatui's actual render.
+    #[test]
+    fn word_wrapped_line_count_matches_ratatui_for_wrapping_sentence() {
+        let line = "This is a long sentence that definitely wraps at a standard terminal \
+                    width because it exceeds eighty characters in total length blah blah.";
+        let width = 78usize;
+        let our_count = word_wrapped_line_count(line, width);
+        let ratatui_count = ratatui_line_count(line, width as u16);
+        assert_eq!(
+            our_count, ratatui_count,
+            "word_wrapped_line_count({width}) = {our_count}, ratatui = {ratatui_count}\nline: {line:?}"
+        );
+    }
+
+    /// 36.6.1-01-02: Short line, empty line, and exact-width line each produce 1 row.
+    #[test]
+    fn word_wrapped_line_count_short_empty_exact() {
+        // Short line
+        assert_eq!(word_wrapped_line_count("Hi!", 78), 1);
+        assert_eq!(word_wrapped_line_count("Hi!", 78), ratatui_line_count("Hi!", 78));
+        // Empty line
+        assert_eq!(word_wrapped_line_count("", 78), 1);
+        // Exact-width line (78 'a' chars) — fills one row, no wrap
+        let exact = "a".repeat(78);
+        assert_eq!(word_wrapped_line_count(&exact, 78), 1);
+        assert_eq!(word_wrapped_line_count(&exact, 78), ratatui_line_count(&exact, 78));
+    }
+
+    /// 36.6.1-01-03: A word that straddles the column-78 boundary is pushed to
+    /// the next row, producing exactly 2 rows.
+    #[test]
+    fn word_wrapped_line_count_word_that_straddles_boundary() {
+        // 70 'a' + space + "boundary" (8 chars) = 79 cols — "boundary" doesn't fit on row 1
+        let line = format!("{} boundary", "a".repeat(70));
+        let width = 78usize;
+        let our_count = word_wrapped_line_count(&line, width);
+        let ratatui_count = ratatui_line_count(&line, width as u16);
+        assert_eq!(
+            our_count, ratatui_count,
+            "word boundary wrap mismatch: our={our_count}, ratatui={ratatui_count}"
+        );
+        assert_eq!(our_count, 2, "should need exactly 2 rows");
+    }
+
+    /// 36.6.1-01-04: A line with 4 leading spaces followed by enough words to
+    /// wrap at width 78 must match ratatui's row count.
+    ///
+    /// Regression test for RESEARCH §6 Risk 1 (leading whitespace): a naive
+    /// `split_whitespace`-based simulator would drop the leading spaces and
+    /// potentially produce one fewer row than ratatui.
+    #[test]
+    fn word_wrapped_line_count_leading_whitespace() {
+        let line = "    bullet item with enough words to overflow the available column width when wrapped at seventy-eight";
+        let width = 78usize;
+        let our_count = word_wrapped_line_count(line, width);
+        let ratatui_count = ratatui_line_count(line, width as u16);
+        assert_eq!(
+            our_count, ratatui_count,
+            "leading-whitespace wrap mismatch: our={our_count}, ratatui={ratatui_count}\nline: {line:?}"
+        );
+    }
+
+    /// 36.6.1-01-05: A 25-line assistant message — `transcript_line_count(78)`
+    /// must equal the non-blank row count ratatui actually renders via `ui()`.
+    #[test]
+    fn transcript_line_count_matches_ratatui() {
+        use crate::tui_rata::ui::ui;
+
+        let body: &'static str = Box::leak(
+            (1..=25)
+                .map(|i| format!("Line {i}: this is content"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_boxed_str(),
+        );
+        let app = App::new_test_with_messages(vec![("assistant", body)]);
+        let inner_width = 78usize; // 80-col terminal minus 2 border cols
+        let our_count = app.transcript_line_count(inner_width);
+
+        // Render to a tall TestBackend and count non-blank rows in the transcript
+        // content area. We exclude:
+        // - Col 0 and col 79: block border characters
+        // - Col 78: scrollbar track (always non-blank in every interior row)
+        // So we check cols 1..78 (exclusive of 78) for actual text content.
+        // Rows start at 1 (below top border) and stop at the first blank row
+        // after content has been seen.
+        let backend = TestBackend::new(80, 200);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut ratatui_count = 0usize;
+        for row in 1u16..199 {
+            let row_blank = (1u16..78).all(|col| {
+                buf.cell((col, row)).map(|c| c.symbol() == " ").unwrap_or(true)
+            });
+            if row_blank && ratatui_count > 0 {
+                break;
+            }
+            if !row_blank {
+                ratatui_count += 1;
+            }
+        }
+        assert_eq!(
+            our_count, ratatui_count,
+            "transcript_line_count mismatch: our={our_count}, ratatui={ratatui_count}"
         );
     }
 }
