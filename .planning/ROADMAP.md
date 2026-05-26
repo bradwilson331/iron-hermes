@@ -115,10 +115,11 @@ Plans:
 **Goal:** Close the third major fallback gap class: streaming LLM providers (e.g., OpenRouter) that return HTTP 200 but deliver an error payload as an in-stream SSE `data:` line. Currently `LlmClient::chat_completion_stream` only inspects the HTTP status, so SSE-body errors deserialize-fail silently as `debug!` parse warnings, `call_llm_streaming` returns `Ok` with empty content, and `should_fallback` never fires. Fix adds `StreamEvent::ProviderError(String)` and detection in the stream consumer (when `ChatStreamChunk` deserialization fails AND the data parses as a JSON object with a top-level `error` key), synthesizes a `(NNN Reason)`-formatted error string so `extract_http_status` / `classify_400_subcases` route through the existing classifier, and locks the shape with static-grep invariants in `tests/invariants_36_14.rs`. AnthropicClient streaming path and the `agent_loop.rs` fallback/retry block are NOT modified. Extends Phase 27.1.4.1 (gateway fallback wiring) and 27.1.4.1.1 (transport-error fallback).
 **Requirements**: PROV-07 (extension)
 **Depends on:** Phase 36
-**Plans:** 0/1 plans complete
+**Plans:** 1/1 plans complete
+**Status:** COMPLETE (2026-05-26) — 18 new tests green (7 unit + 7 wiremock integration + 4 static-grep invariants); cargo build --workspace + cargo test -p ironhermes-agent green; atomicity verified (variant + match arm in same commit); see `.planning/phases/36.14-sse-stream-error-fallback-gap/36.14-VERIFICATION.md`.
 
 Plans:
-- [ ] 36.14-01-PLAN.md — Detect SSE error envelopes in stream consumer, add `StreamEvent::ProviderError` variant, propagate as `Err` in `call_llm_streaming`, add invariants_36_14.rs static-grep regression gates
+- [x] 36.14-01-PLAN.md — Detect SSE error envelopes in stream consumer, add `StreamEvent::ProviderError` variant, propagate as `Err` in `call_llm_streaming`, add invariants_36_14.rs static-grep regression gates
 
 ### Phase 36.13: Plugins & extensions — DECISION: REJECT plugin loader port (lean on skills+MCP+crates per "ironhermes is its own thing" strategic posture). Ship: (1) OpenTelemetry exporter subsuming hermes-agent's observability plugin (Datadog/New Relic via OTLP); (2) ctx.llm + tool_override as direct AgentRuntime primitives (no plugin system); (3) ADR documenting the decision in PROJECT.md / ARCHITECTURE.md; (4) confirm overlap mapping — memory/model/platforms/image-gen/video-gen/kanban/browser already covered by other phases (INSERTED)
 
