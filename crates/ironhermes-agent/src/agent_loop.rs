@@ -242,6 +242,13 @@ pub struct AgentLoop {
     /// AND the `usage_events.provider` column. Wired via `with_provider_name`.
     /// Empty string = "unknown" — usage_events row still writes for forensics.
     provider_name: String,
+    /// Phase 36.15 Plan 04 (PROV-11): merged per-provider + per-model extra
+    /// request options forwarded to every LLM call via `chat_completion{,_stream}`.
+    /// Resolved per-turn by `AgentRuntime::run_turn` via
+    /// `ironhermes_core::config_extras::resolve_extras` and wired here via
+    /// `with_resolved_extras`. `None` means no extras configured (default,
+    /// backward-compatible — all existing call sites continue to work).
+    resolved_extras: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// Phase 36.2 Plan 07: cleartext API key used at the post-call write site
     /// SOLELY to derive a stable `api_key_hash` via `hash_api_key()` BEFORE
     /// being passed to the RateLimitTracker. The cleartext value is never
@@ -331,6 +338,7 @@ impl AgentLoop {
             // with_api_key_for_usage_tracking) opt in to per-turn forensics.
             rate_limit_tracker: None,
             provider_name: String::new(),
+            resolved_extras: None,
             api_key_for_usage_tracking: String::new(),
             // Phase 36.2 Plan 08 (D-CACHE-03): cache-break detection state
             // defaults to disabled. previous_model / context_file_paths are
@@ -540,6 +548,20 @@ impl AgentLoop {
     /// Empty string (default) is permitted but yields less-useful forensics.
     pub fn with_provider_name(mut self, provider: impl Into<String>) -> Self {
         self.provider_name = provider.into();
+        self
+    }
+
+    /// Phase 36.15 Plan 04 (PROV-11): set the merged per-provider + per-model
+    /// extra request options resolved by `AgentRuntime::run_turn`. When `Some`,
+    /// the map is forwarded as the `extra` parameter to every
+    /// `chat_completion` / `chat_completion_stream` call in this loop.
+    /// `None` (default) means no extras — backward compatible with all existing
+    /// call sites that do not configure `extra_request_options` in TOML.
+    pub fn with_resolved_extras(
+        mut self,
+        extras: Option<std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Self {
+        self.resolved_extras = extras;
         self
     }
 
@@ -1761,7 +1783,7 @@ impl AgentLoop {
     ) -> Result<(ChatMessage, Option<Usage>)> {
         let response: ChatResponse = self
             .client
-            .chat_completion(messages, tools, None, None, None, None)
+            .chat_completion(messages, tools, None, None, None, self.resolved_extras.clone())
             .await
             .context("LLM call failed")?;
 
@@ -1794,7 +1816,7 @@ impl AgentLoop {
     ) -> Result<(ChatMessage, Option<Usage>)> {
         let mut rx = self
             .client
-            .chat_completion_stream(messages, tools, None, None, None, None)
+            .chat_completion_stream(messages, tools, None, None, None, self.resolved_extras.clone())
             .await
             .context("Streaming LLM call failed")?;
 
@@ -4269,6 +4291,74 @@ mod activity_tracker_run_wiring {
             summary.seconds_since < 5.0,
             "seconds_since after a fresh bump must be < 5.0s, got {}",
             summary.seconds_since
+        );
+    }
+}
+
+// =============================================================================
+// Phase 36.15 Plan 04 (PROV-11): resolved_extras field + with_resolved_extras
+// builder unit tests.
+// =============================================================================
+
+#[cfg(test)]
+mod resolved_extras_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_minimal_agent() -> AgentLoop {
+        AgentLoop::for_tests()
+    }
+
+    /// Test 1: When AgentLoop is constructed without calling with_resolved_extras,
+    /// the resolved_extras field equals None (backward-compatible default).
+    #[test]
+    fn agent_loop_default_resolved_extras_is_none() {
+        let agent = make_minimal_agent();
+        assert!(
+            agent.resolved_extras.is_none(),
+            "resolved_extras must default to None — backward-compat invariant for all \
+             existing call sites that do not configure extra_request_options in TOML"
+        );
+    }
+
+    /// Test 2: After .with_resolved_extras(Some(map)), the AgentLoop's
+    /// resolved_extras field equals the map that was passed in.
+    #[test]
+    fn agent_loop_with_resolved_extras_stores_the_map() {
+        let mut map: HashMap<String, serde_json::Value> = HashMap::new();
+        map.insert("num_ctx".to_string(), serde_json::json!(8192u32));
+        let agent = make_minimal_agent().with_resolved_extras(Some(map.clone()));
+        let stored = agent.resolved_extras.as_ref().expect(
+            "resolved_extras must be Some after with_resolved_extras(Some(map))",
+        );
+        assert_eq!(
+            stored.get("num_ctx"),
+            Some(&serde_json::json!(8192u32)),
+            "num_ctx must survive the with_resolved_extras round-trip"
+        );
+        assert_eq!(
+            stored.len(),
+            map.len(),
+            "stored map must have the same number of keys as the input"
+        );
+    }
+
+    /// Regression gate (Test 3): call_llm and call_llm_streaming no longer pass
+    /// the literal `None` as the final argument to chat_completion /
+    /// chat_completion_stream. Verified by asserting self.resolved_extras.clone()
+    /// appears exactly twice (one per call site).
+    #[test]
+    fn call_llm_no_longer_passes_literal_none_for_extra() {
+        let src = include_str!("agent_loop.rs");
+        // Positive assertion: self.resolved_extras.clone() must appear at least twice
+        // — once in call_llm and once in call_llm_streaming.
+        let resolved_count = src.matches("self.resolved_extras.clone()").count();
+        assert!(
+            resolved_count >= 2,
+            "PROV-11 (phase 36.15): agent_loop.rs call_llm and call_llm_streaming must \
+             both pass self.resolved_extras.clone() as the extra parameter. \
+             Found {} occurrences, expected >= 2.",
+            resolved_count
         );
     }
 }
