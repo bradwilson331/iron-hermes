@@ -367,6 +367,24 @@ impl AgentRuntime {
             agent = agent.with_api_key_for_usage_tracking(key.clone());
         }
 
+        // Phase 36.2 follow-up: load the disk-resident pricing cache and merge
+        // it into the per-turn `PricingRegistry`. Without this, every turn's
+        // write_usage_success used the default `PricingRegistry::new()` which
+        // reads ONLY the bundled `pricing.toml` — the entries operators add
+        // via `hermes pricing refresh [--source openrouter]` were silently
+        // ignored and `usage_events.cost_usd_micros` stayed at 0 for any model
+        // not in the bundled table (notably every OpenRouter slug like
+        // `google/gemini-3.5-flash`). Loading per-turn keeps the cache hot —
+        // operators can refresh mid-session and the very next turn picks it
+        // up without a restart. The load is a small synchronous JSON read
+        // (file may not exist → returns default()).
+        {
+            let mut pricing = ironhermes_core::PricingRegistry::new();
+            let cache = ironhermes_core::pricing_cache::PricingCache::load();
+            pricing.merge_cache(cache.into_pricing_map());
+            agent = agent.with_pricing_registry(std::sync::Arc::new(pricing));
+        }
+
         agent = attach_context_engine(
             agent,
             &self.config,
