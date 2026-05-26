@@ -346,6 +346,18 @@ impl AgentRuntime {
             agent = agent.with_intercepts(None, Some(store), None, None, None);
         }
 
+        // Phase 36.2 code-review fix CR-02: wire provider name + api-key hash
+        // source onto the AgentLoop so the post-LLM-call write site records
+        // non-empty `usage_events.provider` and a per-key-derived
+        // `api_key_hash`. Without this, every production row was written with
+        // provider="" and a constant SHA-256-of-empty-string hash bucket —
+        // making /usage --provider filters useless and (worse) collapsing
+        // multi-tenant rate-limit tracking into a single shared bucket.
+        agent = agent.with_provider_name(self.resolver.main_provider());
+        if let Some(ref key) = self.resolver.resolve_for_main().api_key {
+            agent = agent.with_api_key_for_usage_tracking(key.clone());
+        }
+
         agent = attach_context_engine(
             agent,
             &self.config,
@@ -685,5 +697,36 @@ mod tests {
                  so the write site is wired before tool intercepts are registered."
             );
         }
+    }
+
+    /// INV-36.2-CR-02: Phase 36.2 code-review CR-02 regression net.
+    /// `run_turn` MUST call `with_provider_name(...)` and
+    /// `with_api_key_for_usage_tracking(...)` on the per-turn `AgentLoop`.
+    /// Without these, `usage_events.provider` is empty on every production
+    /// row, the `/usage --provider X` filter is useless, and the
+    /// `RateLimitTracker` keys all sessions into a single shared bucket
+    /// (sha256 of empty key) — a cross-tenant data-leak in any multi-tenant
+    /// deployment. The test `inv_36_2_07_runtime_calls_with_state_store_before_with_intercepts`
+    /// covers the related state_store wiring; this complements it.
+    #[test]
+    fn inv_36_2_cr_02_runtime_calls_with_provider_name_and_api_key() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("agent.with_provider_name("),
+            "Phase 36.2 CR-02: run_turn MUST call `agent.with_provider_name(...)` so the \
+             post-LLM-call write site stamps a non-empty provider column on every \
+             usage_events row. Without it, /usage --provider filters are useless."
+        );
+        assert!(
+            non_comment.contains("agent.with_api_key_for_usage_tracking("),
+            "Phase 36.2 CR-02: run_turn MUST call `agent.with_api_key_for_usage_tracking(...)` \
+             so the SHA-256 hash bucket on usage_events is per-key, not a constant \
+             empty-string hash that collapses every session into one bucket."
+        );
     }
 }
