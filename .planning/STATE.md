@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
+status: completed
 stopped_at: Phase 36.15 context gathered
-last_updated: "2026-05-26T16:39:45.589Z"
-last_activity: 2026-05-26 -- Phase 36.15 execution started
+last_updated: "2026-05-26T21:20:50.543Z"
+last_activity: 2026-05-26 -- Phase 36.15 marked complete
 progress:
-  total_phases: 37
-  completed_phases: 5
+  total_phases: 41
+  completed_phases: 6
   total_plans: 27
-  completed_plans: 21
-  percent: 14
+  completed_plans: 27
+  percent: 15
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.15 (small-model-mode-smm-per-provider-extra-request-options-toml) — EXECUTING
+Phase: 36.15 — COMPLETE
 Plan: 1 of 6
-Status: Executing Phase 36.15
-Last activity: 2026-05-26 -- Phase 36.15 execution started
+Status: Phase 36.15 complete
+Last activity: 2026-05-26 -- Phase 36.15 marked complete
 
 ## Phase 36.2 Closure Summary
 
