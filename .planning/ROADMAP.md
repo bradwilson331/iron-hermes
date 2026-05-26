@@ -125,7 +125,7 @@ Plans:
 **Goal:** Add a per-provider (with optional per-model override) TOML/YAML configuration knob — `extra_request_options` — whose values flow through `AgentRuntime` into `ChatRequest.extra` on every OpenAI-compatible LLM call, so Ollama `num_ctx`, vLLM `top_k`, and OpenRouter `provider.order` (non-Claude routes) can be tuned without code changes. Scope is the knob and its wiring only; the full Small Model Mode architecture port (governor, router, escalation) is Phase 36.16. Closes the Ollama `exceed_context_size_error` fallback path by making `num_ctx` operator-configurable (static knob per D-08; no dynamic retry).
 **Requirements**: PROV-11, PROV-12, PROV-13, PROV-14 (added to REQUIREMENTS.md as part of Phase 36.15)
 **Depends on:** Phase 36
-**Plans:** 4/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 0**
@@ -143,8 +143,8 @@ Plans:
 
 **Wave 3** *(parallel — 05 appends to tests/extra_request_options.rs; 06 creates tests/invariants_36_15.rs — different files, no overlap)*
 
-- [ ] 36.15-05-PLAN.md — Append four invariant tests to tests/extra_request_options.rs: D-09 caller-wins per-key, D-09 stream_options.include_usage floor preserved (client.rs:236), reserved-key collision (named-field-wins, T-36.15-09 mitigation), D-10 mid-session model-switch via resolve_extras with different model_name
-- [ ] 36.15-06-PLAN.md — Create tests/invariants_36_15.rs with 5 static-grep gates: no literal `None` for extra in agent_loop.rs, `resolved_extras.clone()` count ≥ 2, D-06 `build_openrouter_chat_request_full` still present in any_client.rs, `_extra: Option<HashMap` still present in anthropic_client.rs, client.rs floor markers preserved; full-workspace release build + cargo test gate
+- [x] 36.15-05-PLAN.md — Append four invariant tests to tests/extra_request_options.rs: D-09 caller-wins per-key, D-09 stream_options.include_usage floor preserved (client.rs:236), reserved-key collision (named-field-wins, T-36.15-09 mitigation), D-10 mid-session model-switch via resolve_extras with different model_name
+- [x] 36.15-06-PLAN.md — Create tests/invariants_36_15.rs with 5 static-grep gates: no literal `None` for extra in agent_loop.rs, `resolved_extras.clone()` count ≥ 2, D-06 `build_openrouter_chat_request_full` still present in any_client.rs, `_extra: Option<HashMap` still present in anthropic_client.rs, client.rs floor markers preserved; full-workspace release build + cargo test gate
 
 
 ### Phase 36.14: SSE stream error fallback gap — detect provider error envelopes inside HTTP 200 SSE bodies and route them through the existing PROV-07 fallback/retry chain (INSERTED)
