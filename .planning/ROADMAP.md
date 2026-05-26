@@ -235,10 +235,10 @@ Plans:
 **Goal:** Fix the ratatui TUI auto-scroll undershoot so AI responses always land visible at the true viewport bottom after `StreamEvent::Finished`. Root cause (D-01): `transcript_line_count` uses character-ceiling-divide while ratatui's `Paragraph { wrap: Wrap { trim: false } }` uses word-wrap via `WordWrapper`; the per-line undercount accumulates and `transcript_max_scroll = total - visible` ends up too small (or zero for short responses), leaving the tail of the response — or in extreme cases the whole response — hidden below the viewport. Fix replaces `wrapped_line_count` with a word-wrap simulator using `unicode-width`, repairs both call sites in `transcript_line_count` (i==0 prefix-sharing path + i>0 path), and ships D-02 unit + D-03 integration regression tests.
 **Requirements**: D-01, D-02, D-03 (from `.planning/phases/36.6.1-.../36.6.1-CONTEXT.md`)
 **Depends on:** Phase 36.6
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
-- [ ] 36.6.1-01-PLAN.md — Wave 0: Add `unicode-width` direct dep, replace `wrapped_line_count` with `word_wrapped_line_count` (word-wrap simulator), fix both call sites in `transcript_line_count`, add D-02 unit tests in `app.rs`
+- [x] 36.6.1-01-PLAN.md — Wave 0: Add `unicode-width` direct dep, replace `wrapped_line_count` with `word_wrapped_line_count` (word-wrap simulator), fix both call sites in `transcript_line_count`, add D-02 unit tests in `app.rs`
 - [ ] 36.6.1-02-PLAN.md — Wave 1: Promote `compute_transcript_area` to `pub(crate)` in `event_loop.rs`, add D-03 end-to-end auto-scroll integration test in `ui.rs`
 
 ### Phase 36.5: Provider parity — OAuth provider (Claude Pro/ChatGPT Pro/SuperGrok OAuth flows), Claude Compliance API integration (enterprise audit export), Cloudflare AI Gateway proxy (unified routing/caching/rate-limiting/analytics) (INSERTED)
