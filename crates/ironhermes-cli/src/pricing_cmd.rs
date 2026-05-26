@@ -46,6 +46,12 @@ pub enum PricingSubcommand {
         /// Report what WOULD change without writing.
         #[arg(long)]
         dry_run: bool,
+        /// Also delete `usage_events` rows whose `session_id` has no matching
+        /// `sessions.id`. Operators that ran the gateway before commit
+        /// `2f253697` (session_id alignment fix) accumulated these as
+        /// `gw:<chat>:<sender>` rows that no `sessions` row claims.
+        #[arg(long)]
+        clean_orphans: bool,
     },
 }
 
@@ -57,7 +63,9 @@ pub async fn handle_pricing_command(cmd: PricingSubcommand) -> Result<()> {
     match cmd {
         PricingSubcommand::List => cmd_list().await,
         PricingSubcommand::Refresh { force, source } => cmd_refresh(force, &source).await,
-        PricingSubcommand::Backfill { dry_run } => cmd_backfill(dry_run).await,
+        PricingSubcommand::Backfill { dry_run, clean_orphans } => {
+            cmd_backfill(dry_run, clean_orphans).await
+        }
     }
 }
 
@@ -245,7 +253,7 @@ fn build_cache(entries: std::collections::HashMap<String, PricingCacheEntry>) ->
 // cmd_backfill — recompute cost_usd_micros on existing usage_events rows
 // ---------------------------------------------------------------------------
 
-async fn cmd_backfill(dry_run: bool) -> Result<()> {
+async fn cmd_backfill(dry_run: bool, clean_orphans: bool) -> Result<()> {
     // Build the merged pricing registry exactly the way the agent does at
     // turn time: bundled pricing.toml + disk cache from `pricing refresh`.
     let mut registry = PricingRegistry::new();
@@ -270,10 +278,15 @@ async fn cmd_backfill(dry_run: bool) -> Result<()> {
     };
 
     let stats = store
-        .backfill_usage_costs(recompute, dry_run)
+        .backfill_usage_costs(recompute, dry_run, clean_orphans)
         .map_err(|e| anyhow::anyhow!("backfill failed: {e}"))?;
 
-    let mode = if dry_run { "dry-run" } else { "applied" };
+    let mode = match (dry_run, clean_orphans) {
+        (true, true) => "dry-run + clean-orphans",
+        (true, false) => "dry-run",
+        (false, true) => "applied + clean-orphans",
+        (false, false) => "applied",
+    };
     println!(
         "{}: examined {} rows, {} would change ({} sessions resync, {} orphan rows)",
         format!("hermes pricing backfill ({mode})").bold().cyan(),
@@ -290,16 +303,26 @@ async fn cmd_backfill(dry_run: bool) -> Result<()> {
         "  pricing source:    bundled pricing.toml + {} disk-cache entries",
         pre_merge_cache_entries,
     );
-    if dry_run && stats.rows_updated > 0 {
+    if clean_orphans {
+        let verb = if dry_run { "would delete" } else { "deleted" };
+        println!(
+            "  orphan cleanup:    {} {} unmatched usage_events rows",
+            verb, stats.orphans_deleted,
+        );
+    }
+    if dry_run && (stats.rows_updated > 0 || stats.orphans_deleted > 0) {
         println!("\nRe-run without --dry-run to apply.");
     }
-    if stats.orphan_rows > 0 {
+    if stats.orphan_rows > 0 && !clean_orphans {
         println!(
             "\nNote: {} usage_events rows have a session_id with no matching sessions row.",
             stats.orphan_rows,
         );
         println!(
-            "  These rows still carry recomputed cost but do NOT contribute to any session aggregate."
+            "  Pass --clean-orphans to delete them. Otherwise they still carry recomputed"
+        );
+        println!(
+            "  cost but do NOT contribute to any session aggregate."
         );
     }
     Ok(())

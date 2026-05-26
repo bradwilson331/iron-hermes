@@ -254,6 +254,10 @@ pub struct UsageBackfillStats {
     /// `rows_updated` / `total_cost_delta_micros`, but their cost does NOT
     /// roll up into a `sessions` row.
     pub orphan_rows: usize,
+    /// Number of orphan rows actually DELETED from `usage_events` during the
+    /// backfill. Zero unless `clean_orphans=true` was passed. Always ≤
+    /// `orphan_rows`.
+    pub orphans_deleted: usize,
 }
 
 /// A single message row retrieved from storage.
@@ -954,6 +958,7 @@ impl StateStore {
         &mut self,
         mut recompute: F,
         dry_run: bool,
+        clean_orphans: bool,
     ) -> Result<UsageBackfillStats>
     where
         F: FnMut(&str, i64, i64, i64, i64) -> i64,
@@ -1015,6 +1020,18 @@ impl StateStore {
                     rusqlite::params![new_cost, rowid],
                 )?;
             }
+        }
+
+        // Optional orphan cleanup: delete usage_events rows whose session_id
+        // has no matching sessions.id. Runs BEFORE the sessions aggregate
+        // resync so the SUM reflects the post-cleanup state. Always reports
+        // the count via stats.orphans_deleted; in dry-run mode the rollback
+        // below undoes the actual delete.
+        if clean_orphans {
+            stats.orphans_deleted = tx.execute(
+                "DELETE FROM usage_events WHERE session_id NOT IN (SELECT id FROM sessions)",
+                [],
+            )?;
         }
 
         // Resync sessions.cost_usd_micros = SUM of matching usage_events.
@@ -1737,10 +1754,11 @@ mod schema_migration_v8_tests {
         };
 
         // Dry-run: report what would change without persisting.
-        let stats = store.backfill_usage_costs(recompute, true).unwrap();
+        let stats = store.backfill_usage_costs(recompute, true, false).unwrap();
         assert_eq!(stats.rows_examined, 3);
         assert_eq!(stats.rows_updated, 3);
         assert_eq!(stats.orphan_rows, 1);
+        assert_eq!(stats.orphans_deleted, 0, "dry-run without clean-orphans deletes nothing");
         // Cost delta = (2000 + 4000 + 200) - 0 = 6200
         assert_eq!(stats.total_cost_delta_micros, 6200);
 
@@ -1756,9 +1774,10 @@ mod schema_migration_v8_tests {
         assert_eq!(cost_after_dry_run, 0, "dry-run must not commit");
 
         // Apply for real.
-        let stats = store.backfill_usage_costs(recompute, false).unwrap();
+        let stats = store.backfill_usage_costs(recompute, false, false).unwrap();
         assert_eq!(stats.rows_updated, 3);
         assert_eq!(stats.total_cost_delta_micros, 6200);
+        assert_eq!(stats.orphans_deleted, 0);
 
         // Verify rows now have new cost.
         let conn = store.conn_for_test();
@@ -1803,11 +1822,72 @@ mod schema_migration_v8_tests {
             .unwrap();
         let recompute = |_m: &str, in_tok: i64, _o: i64, _cr: i64, _cc: i64| in_tok * 2;
 
-        let s1 = store.backfill_usage_costs(recompute, false).unwrap();
+        let s1 = store.backfill_usage_costs(recompute, false, false).unwrap();
         assert_eq!(s1.rows_updated, 1);
 
-        let s2 = store.backfill_usage_costs(recompute, false).unwrap();
+        let s2 = store.backfill_usage_costs(recompute, false, false).unwrap();
         assert_eq!(s2.rows_updated, 0, "second run should be a no-op");
         assert_eq!(s2.total_cost_delta_micros, 0);
+    }
+
+    /// Phase 36.2 follow-up: --clean-orphans deletes usage_events rows whose
+    /// session_id has no matching sessions.id and reports the count.
+    #[test]
+    fn backfill_usage_costs_clean_orphans_deletes_unmatched_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-1", "telegram", Some("gpt-4o"), None, None, None)
+            .unwrap();
+        let conn = store.conn_for_test();
+        // One valid row, two orphan rows.
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('sess-1', 1, 'openai', 'gpt-4o', 100, 50, 0, 0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('gw:7018:7018', 2, 'openai', 'gpt-4o', 100, 50, 0, 0, 999, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, ts, provider, model, in_tok, out_tok, \
+             cache_read, cache_create, cost_usd_micros, error_kind) \
+             VALUES ('Telegram:1:1', 3, 'openai', 'gpt-4o', 100, 50, 0, 0, 888, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let identity = |_: &str, _: i64, _: i64, _: i64, _: i64| -> i64 { 0 };
+
+        // Dry-run with clean_orphans=true: report counts, no DB mutation.
+        let stats = store.backfill_usage_costs(identity, true, true).unwrap();
+        assert_eq!(stats.orphan_rows, 2);
+        assert_eq!(stats.orphans_deleted, 2);
+        let count_after_dry: i64 = store
+            .conn_for_test()
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_after_dry, 3, "dry-run must not delete");
+
+        // Apply for real.
+        let stats = store.backfill_usage_costs(identity, false, true).unwrap();
+        assert_eq!(stats.orphans_deleted, 2);
+        let count_after_apply: i64 = store
+            .conn_for_test()
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_after_apply, 1, "orphans deleted, valid row preserved");
+
+        // A second pass finds 0 orphans (already cleaned).
+        let stats = store.backfill_usage_costs(identity, false, true).unwrap();
+        assert_eq!(stats.orphan_rows, 0);
+        assert_eq!(stats.orphans_deleted, 0);
     }
 }
