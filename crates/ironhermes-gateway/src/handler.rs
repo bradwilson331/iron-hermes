@@ -1074,6 +1074,15 @@ impl GatewayMessageHandler {
             .map(|rt| rt.client().clone())
             .unwrap_or_else(|| build_main_client(&self.resolver).expect("nudge client fallback"));
 
+        // Phase 36.2 chat-fix follow-up: thread state_store into TurnRequest so
+        // AgentRuntime::run_turn calls `with_state_store` on the AgentLoop, which
+        // enables the post-LLM-call usage_events write site. Without this the
+        // gateway never writes usage_events rows even though session_store has
+        // a valid StateStore — mirrors the TUI fix at commit a9fb0d0d. Symptom
+        // pre-fix: /usage returns "No usage data found for this filter" because
+        // the table is empty despite turns completing successfully.
+        let state_store_for_turn = self.session_store.read().await.state_store().clone();
+
         // Build TurnRequest and call runtime.run_turn.
         // budget reset, loop construction, attach_context_engine, and fallback wiring
         // are all handled inside run_turn — do NOT call them again here.
@@ -1087,7 +1096,7 @@ impl GatewayMessageHandler {
                 tool_result: None,
                 trajectory_writer,
                 pressure_tracker: None, // run_turn makes a fresh tracker per turn
-                state_store: None,
+                state_store: Some(state_store_for_turn),
                 compression_count: 0,
             };
             rt.run_turn(request).await
