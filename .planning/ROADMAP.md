@@ -125,7 +125,7 @@ Plans:
 **Goal:** Add a per-provider (with optional per-model override) TOML/YAML configuration knob — `extra_request_options` — whose values flow through `AgentRuntime` into `ChatRequest.extra` on every OpenAI-compatible LLM call, so Ollama `num_ctx`, vLLM `top_k`, and OpenRouter `provider.order` (non-Claude routes) can be tuned without code changes. Scope is the knob and its wiring only; the full Small Model Mode architecture port (governor, router, escalation) is Phase 36.16. Closes the Ollama `exceed_context_size_error` fallback path by making `num_ctx` operator-configurable (static knob per D-08; no dynamic retry).
 **Requirements**: PROV-11, PROV-12, PROV-13, PROV-14 (added to REQUIREMENTS.md as part of Phase 36.15)
 **Depends on:** Phase 36
-**Plans:** 1/6 plans executed
+**Plans:** 3/6 plans executed
 
 Plans:
 **Wave 0**
@@ -134,8 +134,8 @@ Plans:
 
 **Wave 1** *(parallel — 02 owns config.rs + new config_extras.rs; 03 owns config_schema.rs — zero files_modified overlap)*
 
-- [ ] 36.15-02-PLAN.md — Create config_extras.rs (typed OllamaExtraOptions / VllmExtraOptions / OpenRouterExtraOptions / ProviderRouting / ProviderExtraOptions untagged enum / ProviderModelConfig + resolve_extras merge helper); extend ProviderConfig with `extra_request_options` + `models` fields; turn Plan 01 canary GREEN; ADR fallback path documented if untagged-enum mis-deserializes
-- [ ] 36.15-03-PLAN.md — Append six ConfigField entries to config_schema.rs for canonical extras keys (Ollama num_ctx/num_predict/top_k, vLLM top_k/top_p, OpenRouter provider.order); schema-contains tests; cache_breaking: false invariant (Pitfall 4)
+- [x] 36.15-02-PLAN.md — Create config_extras.rs (typed OllamaExtraOptions / VllmExtraOptions / OpenRouterExtraOptions / ProviderRouting / ProviderExtraOptions untagged enum / ProviderModelConfig + resolve_extras merge helper); extend ProviderConfig with `extra_request_options` + `models` fields; turn Plan 01 canary GREEN; ADR fallback path documented if untagged-enum mis-deserializes
+- [x] 36.15-03-PLAN.md — Append six ConfigField entries to config_schema.rs for canonical extras keys (Ollama num_ctx/num_predict/top_k, vLLM top_k/top_p, OpenRouter provider.order); schema-contains tests; cache_breaking: false invariant (Pitfall 4)
 
 **Wave 2** *(depends on Wave 1)*
 
