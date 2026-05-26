@@ -4615,6 +4615,7 @@ dependencies = [
  "tracing-test",
  "tui-logger",
  "tui-textarea-2",
+ "unicode-width",
  "uuid",
  "walkdir",
  "wiremock",

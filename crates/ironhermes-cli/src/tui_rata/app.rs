@@ -994,17 +994,22 @@ pub(crate) fn word_wrapped_line_count(line: &str, width: usize) -> usize {
             // Word fits on current row (including whitespace separator).
             *current_row_width = needed;
         } else {
-            // Word doesn't fit: start a new row.
-            *rows += 1;
-            *current_row_width = 0;
-            *pending_ws_width = 0; // whitespace before a break is consumed (trim: false)
-            // Does the word alone fit on the new row?
+            // Word doesn't fit on the current row.
+            // If we are not already at the start of a row, wrap to a new row first.
+            if *current_row_width > 0 || *pending_ws_width > 0 {
+                *rows += 1;
+                *current_row_width = 0;
+                *pending_ws_width = 0; // whitespace before a break is consumed (trim: false)
+            }
+            // Now place the word at the start of the (possibly just-started) current row.
             if *pending_word_width <= width {
+                // Word fits on a fresh row.
                 *current_row_width = *pending_word_width;
             } else {
                 // Oversized word: character-wrap it across rows (ratatui line_full path).
+                // We are at the start of a row, so the first row is already counted.
                 let word_rows = (*pending_word_width + width - 1) / width;
-                *rows += word_rows - 1; // first new row already counted above
+                *rows += word_rows - 1; // additional rows beyond the current one
                 let remainder = *pending_word_width % width;
                 *current_row_width = if remainder == 0 { width } else { remainder };
             }
