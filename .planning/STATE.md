@@ -4,14 +4,14 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: completed
 stopped_at: Phase 36.2 context gathered
-last_updated: "2026-05-26T12:56:58.864Z"
+last_updated: "2026-05-26T15:13:00.588Z"
 last_activity: 2026-05-26 -- Phase 36.14 marked complete
 progress:
-  total_phases: 39
+  total_phases: 36
   completed_phases: 5
   total_plans: 21
   completed_plans: 21
-  percent: 13
+  percent: 14
 ---
 
 # Project State
@@ -505,6 +505,7 @@ Recent decisions affecting current work:
 - Phase 36.12 inserted after Phase 36: Packaging & distribution parity — distribution-load-bearing. ironhermes currently ships: Dockerfile, install.sh + install-gitea.sh, launchd/systemd/cron deploy scripts, quick_setup_script.ps1 (Windows, status unverified). Gaps vs hermes-agent: Homebrew tap (macOS native), Nix flake (reproducible/NixOS), Termux/Android (constraints file equivalent), crates.io publication verification, Windows native install verification. Each is independently shippable — splitting per channel is reasonable. From iron-hermes-planning.md §2.11. (URGENT)
 - Phase 36.13 inserted after Phase 36: Plugins & extensions — architecturally uncertain. Hermes-agent's plugins/ system (15+ bundled plugins, ctx.llm + tool_override primitives) overlaps significantly with ironhermes's existing skills + MCP + crate workspace patterns: memory providers (Phase 20 + 36.10), model providers (36.5), platforms (34 + 36.7), image/video gen (36.3.2/3), kanban (36.3.7), browser (shipped) all already covered through other extension mechanisms. REAL gaps that need attention regardless: observability hooks (Datadog/New Relic metrics+traces — no current substrate), lifecycle hooks beyond HookRegistry, ctx.llm + tool_override runtime primitives. Recommend treating this as a decision phase before committing to a plugin loader port. From iron-hermes-planning.md §2.13. (URGENT)
 - Phase 36.13 edited: Phase 36.13 SCOPE LOCKED: Option A — REJECT plugin loader port. Decision rationale: hermes-agent's plugins/ loader is Python-dynamic-loading-shaped (cheap in Python, expensive in Rust); equivalent composability in ironhermes is achieved via crate workspace + skills + MCP, which already cover memory providers / model providers / platforms / image_gen / video_gen / kanban / browser. Only three primitives have no current substrate: observability export (Datadog/New Relic — to be ported as OpenTelemetry/OTLP), ctx.llm runtime override, tool_override runtime override. These ship directly on AgentRuntime, not via a plugin system. Decision will be ratified in an ADR landed in PROJECT.md / ARCHITECTURE.md. Aligned with 'ironhermes is its own thing' strategic posture and parallel narrowing of Phase 36.7 multi-platform gateway.
+- Phase 36.15 inserted after Phase 36: Small Model Mode (SMM) — provider extra_request_options for num_ctx/top_k/etc. (URGENT)
 
 ### Pending Todos
 

@@ -110,6 +110,16 @@ Plans:
 
 - [x] 36-03-PLAN.md — Cleanup: delete stale "future enhancement" comment at handler.rs:377-380; flip REQUIREMENTS.md GW-05 to Complete + traceability row to "Phase 21.1 (dispatch) + Phase 36 (guard)"; update ROADMAP.md checkboxes; create 36-BACKLOG.md (web UI slash-interception gap; per-turn LLM cancel handler.rs:1032; CLI/gateway unified mechanism; /approve+/deny bypass when approval queue lands); Real-Telegram UAT checkpoint
 
+### Phase 36.15: Small Model Mode (SMM) — per-provider extra_request_options TOML knob wired through AgentRuntime to ChatRequest.extra so Ollama num_ctx / vLLM top_k / OpenRouter provider.order can be tuned without code changes; closes Ollama exceed_context_size_error fallback path (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.15 to break down)
+
 ### Phase 36.14: SSE stream error fallback gap — detect provider error envelopes inside HTTP 200 SSE bodies and route them through the existing PROV-07 fallback/retry chain (INSERTED)
 
 **Goal:** Close the third major fallback gap class: streaming LLM providers (e.g., OpenRouter) that return HTTP 200 but deliver an error payload as an in-stream SSE `data:` line. Currently `LlmClient::chat_completion_stream` only inspects the HTTP status, so SSE-body errors deserialize-fail silently as `debug!` parse warnings, `call_llm_streaming` returns `Ok` with empty content, and `should_fallback` never fires. Fix adds `StreamEvent::ProviderError(String)` and detection in the stream consumer (when `ChatStreamChunk` deserialization fails AND the data parses as a JSON object with a top-level `error` key), synthesizes a `(NNN Reason)`-formatted error string so `extract_http_status` / `classify_400_subcases` route through the existing classifier, and locks the shape with static-grep invariants in `tests/invariants_36_14.rs`. AnthropicClient streaming path and the `agent_loop.rs` fallback/retry block are NOT modified. Extends Phase 27.1.4.1 (gateway fallback wiring) and 27.1.4.1.1 (transport-error fallback).
