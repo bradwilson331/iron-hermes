@@ -1825,12 +1825,10 @@ impl AgentLoop {
                     usage = Some(u);
                 }
                 StreamEvent::ProviderError(body) => {
-                    // Phase 36.14 (PROV-07): SSE error envelope arrived inside an HTTP 200 stream.
-                    // Convert to Err so the existing run() fallback/retry block in agent_loop.rs
-                    // (~line 1603) reclassifies via classify_llm_error_typed and activates the
-                    // configured fallback_providers. Partial ContentDelta events that may have
-                    // already been forwarded to on_stream are observed by the UI; the in-function
-                    // accumulated `current_text` is dropped here. See phase 36.14 deferred.
+                    // Phase 36.14 (PROV-07): SSE error envelope at HTTP 200.
+                    // return Err so run() fallback/retry block activates fallback_providers.
+                    // Partial deltas already forwarded to on_stream are observed by the UI;
+                    // in-function accumulated text is dropped. See phase 36.14 deferred.
                     return Err(anyhow::anyhow!(body));
                 }
                 StreamEvent::Done(_) => break,
@@ -3378,6 +3376,79 @@ mod fallback_tests {
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "500 should be retryable");
         assert!(should_fallback, "500 should trigger fallback");
+    }
+
+    // --- Phase 36.14 PROV-07: SSE-body error classification tests ---
+
+    #[test]
+    fn test_sse_provider_error_400_triggers_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (400 Bad Request): qwen/qwen3.7-max is not a valid model ID [body: {{\"error\":{{\"message\":\"qwen/qwen3.7-max is not a valid model ID\",\"code\":400}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, false, "phase 36.14 PROV-07: 400 Bad Request");
+        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 400 Bad Request");
+    }
+
+    #[test]
+    // Codex MEDIUM #2: string-shaped "code" must classify identically to numeric.
+    fn test_sse_provider_error_string_code_400_triggers_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (400 Bad Request): qwen/qwen3.7-max is not a valid model ID [body: {{\"error\":{{\"message\":\"qwen/qwen3.7-max is not a valid model ID\",\"code\":\"400\"}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, false, "phase 36.14 PROV-07: string-code 400 Bad Request");
+        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: string-code 400 Bad Request");
+    }
+
+    #[test]
+    fn test_sse_provider_error_429_triggers_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (429 Too Many Requests): rate limit exceeded [body: {{\"error\":{{\"message\":\"rate limit exceeded\",\"code\":429}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 429 Too Many Requests");
+        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 429 Too Many Requests");
+    }
+
+    #[test]
+    fn test_sse_provider_error_500_triggers_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (500 Internal Server Error): upstream error [body: {{\"error\":{{\"message\":\"upstream error\",\"code\":500}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 500 Internal Server Error");
+        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 500 Internal Server Error");
+    }
+
+    #[test]
+    fn test_sse_provider_error_502_triggers_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (502 Bad Gateway): bad gateway [body: {{\"error\":{{\"message\":\"bad gateway\",\"code\":502}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 502 Bad Gateway");
+        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 502 Bad Gateway");
+    }
+
+    #[test]
+    fn test_sse_provider_error_503_triggers_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (503 Service Unavailable): service unavailable [body: {{\"error\":{{\"message\":\"service unavailable\",\"code\":503}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 503 Service Unavailable");
+        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 503 Service Unavailable");
+    }
+
+    #[test]
+    fn test_sse_provider_error_unknown_code_no_fallback() {
+        let err = anyhow::anyhow!(
+            "Streaming chat completion failed (SSE error): upstream failure [body: {{\"error\":{{\"message\":\"upstream failure\"}}}}]"
+        );
+        let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
+        assert_eq!(should_retry, true, "phase 36.14 PROV-07: unknown code SSE error");
+        assert_eq!(should_fallback, false, "phase 36.14 PROV-07: unknown code SSE error — safe conservative default");
     }
 }
 
