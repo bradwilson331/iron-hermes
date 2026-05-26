@@ -728,7 +728,7 @@ impl App {
                 let icon = if ok { "✓" } else { "✗" };
                 self.status.hint = format!("{icon} {name}");
             }
-            StreamEvent::Finished => {
+            StreamEvent::Finished { total_tokens } => {
                 self.commit_assistant_buffer();
                 // D-08: snap-to-bottom safety net — defense-in-depth against future
                 // line-count drift. Cheap because reconcile_scroll runs every render tick anyway.
@@ -738,6 +738,14 @@ impl App {
                 self.pending_rx = None;
                 self.cancel_child = None;
                 self.status.hint = String::new();
+                // Phase 36.2 Plan 07/10 fix: stamp the per-turn token total
+                // onto the status bar. `0` means the provider didn't return
+                // usage data — preserve the prior count rather than reset to
+                // 0 so the pill doesn't visibly regress on providers that
+                // omit usage (older Ollama, custom gateways, etc.).
+                if total_tokens > 0 {
+                    self.status.tokens_used = total_tokens;
+                }
             }
             StreamEvent::Error(e) => {
                 self.commit_assistant_buffer();
@@ -1167,7 +1175,7 @@ mod scroll_tests {
         app.pending_rx = Some(rx);
         app.pending_tx = Some(tx);
         app.assistant_buffer = Some("response text".to_string());
-        app.handle_stream_event(StreamEvent::Finished);
+        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
         assert!(app.pending_rx.is_none());
         assert!(app.assistant_buffer.is_none());
         assert_eq!(app.history.len(), 1);
@@ -1474,7 +1482,7 @@ mod scroll_tests {
         app.handle_stream_event(StreamEvent::Delta("some text".to_string()));
         // Simulate user re-engaging auto_follow before stream finishes
         app.auto_follow = true;
-        app.handle_stream_event(StreamEvent::Finished);
+        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
         assert_eq!(
             app.transcript_scroll, 0,
             "Finished with auto_follow=true must call scroll_to_bottom() which zeros transcript_scroll"

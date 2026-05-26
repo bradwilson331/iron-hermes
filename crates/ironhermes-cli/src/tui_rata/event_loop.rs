@@ -813,7 +813,11 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         let result = runtime.run_turn(request).await;
 
         let terminal_event = match result {
-            Ok(_) => StreamEvent::Finished,
+            // Phase 36.2 Plan 07/10 fix: forward the per-turn aggregated
+            // token count so the status-bar `tokens_used` field updates.
+            Ok(agent_result) => StreamEvent::Finished {
+                total_tokens: agent_result.total_usage.total_tokens,
+            },
             Err(_) if cancel_token.is_cancelled() => StreamEvent::Cancelled,
             Err(e) => StreamEvent::Error(e.to_string()),
         };
