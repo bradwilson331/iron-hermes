@@ -1,3 +1,4 @@
+use crate::config_extras::ProviderModelConfig;
 use crate::constants::{DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL, get_hermes_home};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -207,6 +208,18 @@ pub struct ProviderConfig {
     /// When `true`, this provider is excluded from the resolver (D-14, Phase 26).
     /// `hermes provider disable <name>` writes this flag; `enable` clears it.
     pub disabled: Option<bool>,
+    /// Per-provider extra request body options forwarded to the LLM API (D-01 fallback, Phase 36.15).
+    /// Provider-level defaults; per-model overrides live under `models.<model>.extra_request_options`.
+    /// Uses `HashMap<String, serde_json::Value>` (D-01 deviation — avoids serde_yaml untagged
+    /// enum ambiguity with all-Optional struct fields; see config_extras.rs module doc).
+    /// `#[serde(default)]` ensures pre-36.15 configs parse cleanly with an empty map.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra_request_options: HashMap<String, serde_json::Value>,
+    /// Per-model configuration overrides (D-02, Phase 36.15).
+    /// Keys are model identifiers (e.g., `"llama3.1:8b"`); YAML keys with colons must be quoted.
+    /// `#[serde(default)]` ensures pre-36.15 configs parse cleanly with an empty map.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub models: HashMap<String, ProviderModelConfig>,
 }
 
 impl Default for ProviderConfig {
@@ -219,6 +232,8 @@ impl Default for ProviderConfig {
             default_model: None,
             fallback_providers: vec![],
             disabled: None,
+            extra_request_options: HashMap::new(),
+            models: HashMap::new(),
         }
     }
 }
@@ -1126,6 +1141,8 @@ impl Config {
                             default_model: custom.default_model.clone(),
                             fallback_providers: vec![],
                             disabled: None,
+                            extra_request_options: HashMap::new(),
+                            models: HashMap::new(),
                         },
                     );
                 }
@@ -2670,6 +2687,195 @@ custom_providers:
         assert_eq!(
             mc.nudge_interval, 0,
             "Phase 32 LEARN-01: nudge_interval=0 must deserialize as 0 (disable sentinel)"
+        );
+    }
+
+    /// Phase 36.15 backward compat: pre-36.15 configs (no extra_request_options, no models)
+    /// must parse cleanly with the new fields defaulting to empty maps.
+    #[test]
+    fn pre_36_15_config_yaml_still_parses() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434/v1"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("pre-36.15 Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            provider.extra_request_options.is_empty(),
+            "extra_request_options must default to empty map for pre-36.15 configs"
+        );
+        assert!(
+            provider.models.is_empty(),
+            "models must default to empty map for pre-36.15 configs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod extras_canary {
+    //! Wave 0 (Phase 36.15) canary tests. These lock the D-03 YAML deserialization shape.
+    //!
+    //! D-01 DEVIATION applied: the original plan used `#[serde(untagged)] enum ProviderExtraOptions`
+    //! on ProviderConfig.extra_request_options. This was tested and FAILED for the OpenRouter
+    //! variant (serde_yaml with all-Optional fields always matches the first variant — Pitfall 1).
+    //! The fallback `HashMap<String, serde_json::Value>` is now in use. These tests have been
+    //! updated accordingly to use .get("key") HashMap access instead of enum pattern matching.
+    use super::*;
+
+    /// Test 1: provider-level extra_request_options.num_ctx = 8192 round-trips through Config.
+    ///
+    /// Locks the D-03 acceptance shape: a YAML doc with
+    /// `providers.ollama.extra_request_options.num_ctx = 8192` must deserialize into Config
+    /// such that `config.providers["ollama"].extra_request_options["num_ctx"] == 8192`.
+    #[test]
+    fn extras_canary_provider_level_num_ctx_roundtrips() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+    extra_request_options:
+      num_ctx: 8192
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            !provider.extra_request_options.is_empty(),
+            "extra_request_options must be non-empty"
+        );
+        assert_eq!(
+            provider.extra_request_options.get("num_ctx"),
+            Some(&serde_json::json!(8192)),
+            "provider-level num_ctx must round-trip as 8192"
+        );
+    }
+
+    /// Test 2: per-model override wins; provider-level default preserved at deserialization.
+    ///
+    /// Locks D-03: YAML with provider-level num_ctx=8192 AND
+    /// providers.ollama.models."llama3.1:8b".extra_request_options.num_ctx=32768
+    /// must deserialize such that:
+    ///   - the per-model entry's num_ctx == 32768
+    ///   - the provider-level num_ctx == 8192 (merge happens in resolve_extras, not at deserialization)
+    #[test]
+    fn extras_canary_per_model_override_wins() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+    extra_request_options:
+      num_ctx: 8192
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+
+        // Provider-level num_ctx must remain 8192 (deserialization only; merge happens in resolve_extras).
+        assert_eq!(
+            provider.extra_request_options.get("num_ctx"),
+            Some(&serde_json::json!(8192)),
+            "provider-level num_ctx must be preserved as 8192"
+        );
+
+        // Per-model entry must have num_ctx == 32768.
+        let model_cfg = provider
+            .models
+            .get("llama3.1:8b")
+            .expect("llama3.1:8b model entry must be present");
+        assert_eq!(
+            model_cfg.extra_request_options.get("num_ctx"),
+            Some(&serde_json::json!(32768)),
+            "per-model num_ctx must be 32768"
+        );
+    }
+
+    /// Test 3: YAML key with colon ("llama3.1:8b") parses without serde error.
+    ///
+    /// Locks the quoted-key requirement: YAML keys containing colons must be quoted.
+    /// Verifies that serde_yaml handles the quoted key `"llama3.1:8b"` in providers.models.
+    #[test]
+    fn extras_canary_quoted_yaml_key_with_colon_parses() {
+        let yaml = r#"
+providers:
+  ollama:
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768
+      "llama3.1:70b":
+        extra_request_options:
+          num_ctx: 4096
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse with colon-bearing keys");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            provider.models.contains_key("llama3.1:8b"),
+            "models map must contain key 'llama3.1:8b' (colon in key)"
+        );
+        assert!(
+            provider.models.contains_key("llama3.1:70b"),
+            "models map must contain key 'llama3.1:70b' (colon in key)"
+        );
+    }
+
+    /// Test 4: OpenRouter nested provider.order list round-trips.
+    ///
+    /// Locks D-03: YAML with providers.openrouter.extra_request_options.provider.order =
+    /// ["anthropic", "openai"] must deserialize such that the nested order object is preserved.
+    /// Under the D-01 fallback (HashMap deserialization), the nested `provider` object becomes
+    /// a serde_json::Value::Object, and `order` is a Value::Array — both survive the round-trip.
+    #[test]
+    fn extras_canary_openrouter_provider_order_nested() {
+        let yaml = r#"
+providers:
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    extra_request_options:
+      provider:
+        order:
+          - anthropic
+          - openai
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider must be present");
+        assert!(
+            !provider.extra_request_options.is_empty(),
+            "extra_request_options must be non-empty for openrouter"
+        );
+        let provider_val = provider
+            .extra_request_options
+            .get("provider")
+            .expect("provider key must be present in extras");
+        let order = provider_val
+            .as_object()
+            .and_then(|o| o.get("order"))
+            .and_then(|v| v.as_array())
+            .expect("provider.order must be a JSON array");
+        assert_eq!(
+            order,
+            &vec![
+                serde_json::Value::String("anthropic".to_string()),
+                serde_json::Value::String("openai".to_string()),
+            ],
+            "OpenRouter provider.order must round-trip as [anthropic, openai]"
         );
     }
 }
