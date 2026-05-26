@@ -685,7 +685,7 @@ async fn recv_pending(app: &mut App) -> Option<StreamEvent> {
 /// Compute the transcript chunk area by mirroring the 4-chunk layout from ui.rs.
 ///
 /// Used by `run_app_inner` to pass `transcript_area` to `reconcile_scroll`.
-fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rect {
+pub(crate) fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
     let frame_area = Rect {
         x: 0,
