@@ -1,6 +1,7 @@
 pub mod browser_profile;
 pub mod commands;
 pub mod config;
+pub mod config_extras;
 pub mod config_schema;
 pub mod config_setter;
 pub mod config_validate;
