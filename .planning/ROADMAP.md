@@ -125,7 +125,7 @@ Plans:
 **Goal:** Add a per-provider (with optional per-model override) TOML/YAML configuration knob — `extra_request_options` — whose values flow through `AgentRuntime` into `ChatRequest.extra` on every OpenAI-compatible LLM call, so Ollama `num_ctx`, vLLM `top_k`, and OpenRouter `provider.order` (non-Claude routes) can be tuned without code changes. Scope is the knob and its wiring only; the full Small Model Mode architecture port (governor, router, escalation) is Phase 36.16. Closes the Ollama `exceed_context_size_error` fallback path by making `num_ctx` operator-configurable (static knob per D-08; no dynamic retry).
 **Requirements**: PROV-11, PROV-12, PROV-13, PROV-14 (added to REQUIREMENTS.md as part of Phase 36.15)
 **Depends on:** Phase 36
-**Plans:** 3/6 plans executed
+**Plans:** 4/6 plans executed
 
 Plans:
 **Wave 0**
@@ -139,7 +139,7 @@ Plans:
 
 **Wave 2** *(depends on Wave 1)*
 
-- [ ] 36.15-04-PLAN.md — Add `resolved_extras` field + `with_resolved_extras` builder to AgentLoop (mirrors `with_provider_name`); substitute `self.resolved_extras.clone()` for literal `None` at `call_llm` (agent_loop.rs:1757) + `call_llm_streaming` (agent_loop.rs:1790); wire AgentRuntime::run_turn to call `ironhermes_core::config_extras::resolve_extras` per-turn (D-10); create `tests/extra_request_options.rs` with three wiremock wire-body tests for Ollama num_ctx + vLLM top_k + OpenRouter provider.order
+- [x] 36.15-04-PLAN.md — Add `resolved_extras` field + `with_resolved_extras` builder to AgentLoop (mirrors `with_provider_name`); substitute `self.resolved_extras.clone()` for literal `None` at `call_llm` (agent_loop.rs:1757) + `call_llm_streaming` (agent_loop.rs:1790); wire AgentRuntime::run_turn to call `ironhermes_core::config_extras::resolve_extras` per-turn (D-10); create `tests/extra_request_options.rs` with three wiremock wire-body tests for Ollama num_ctx + vLLM top_k + OpenRouter provider.order
 
 **Wave 3** *(parallel — 05 appends to tests/extra_request_options.rs; 06 creates tests/invariants_36_15.rs — different files, no overlap)*
 
