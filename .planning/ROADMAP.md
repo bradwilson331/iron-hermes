@@ -110,6 +110,16 @@ Plans:
 
 - [x] 36-03-PLAN.md — Cleanup: delete stale "future enhancement" comment at handler.rs:377-380; flip REQUIREMENTS.md GW-05 to Complete + traceability row to "Phase 21.1 (dispatch) + Phase 36 (guard)"; update ROADMAP.md checkboxes; create 36-BACKLOG.md (web UI slash-interception gap; per-turn LLM cancel handler.rs:1032; CLI/gateway unified mechanism; /approve+/deny bypass when approval queue lands); Real-Telegram UAT checkpoint
 
+### Phase 36.16: Small Model Mode (SMM) architecture port — mirror the smallcode JS reference architecture (System Overview / Component Responsibilities / Layers / Data Flow / Key Abstractions / Entry Points / Architectural Constraints / Anti-Patterns / Error Handling / Cross-Cutting Concerns) into ironhermes Rust; consumes 36.15's per-provider extra_request_options knob as one input; see 36.16-CONTEXT.md (from SmallModelMode_ARCHITECTURE.md) for the reference shape (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.16 to break down)
+
 ### Phase 36.15: Small Model Mode (SMM) — per-provider extra_request_options TOML knob wired through AgentRuntime to ChatRequest.extra so Ollama num_ctx / vLLM top_k / OpenRouter provider.order can be tuned without code changes; closes Ollama exceed_context_size_error fallback path (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
