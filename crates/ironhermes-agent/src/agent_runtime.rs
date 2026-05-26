@@ -165,7 +165,16 @@ impl AgentRuntime {
         let max_iterations = config.agent.max_iterations;
         let budget = BudgetHandle::new(max_iterations);
 
-        let client = build_main_client(&resolver)?;
+        let mut client = build_main_client(&resolver)?;
+        // Phase 36.2 CR-09: enable OpenRouter Claude cache_control routing on
+        // the streaming send path. No-op for non-OpenRouter providers and
+        // non-Claude models (the inner check in `chat_completion_stream`
+        // guards via `is_openrouter_claude`). For Anthropic-native this is
+        // also a no-op — the AnthropicMessages arm has its own cache wiring.
+        client.enable_openrouter_caching(
+            resolver.main_provider().to_string(),
+            config.prompt_caching.clone(),
+        );
 
         // Build the subagent runner, passing the budget clone for storage (field-kept
         // per Plan 35-02 field-disposition). Children no longer clone this stored
@@ -789,6 +798,30 @@ mod tests {
             "Phase 36.2 follow-up: run_turn must NOT call with_intercepts to register \
              session_search per-turn. Tool registration must happen once on AgentRuntime \
              construction — not in run_turn. See agent_runtime.rs comment for context."
+        );
+    }
+
+    /// INV-36.2-CR-09: Phase 36.2 code-review CR-09 regression net.
+    /// `AgentRuntime::from_config` MUST call `enable_openrouter_caching` on
+    /// the freshly-built `AnyClient` so the streaming send path can route
+    /// OpenRouter Claude requests through the `cache_control`-attaching
+    /// builder. Pre-fix the Plan 11 OpenRouter Claude wiring was defined
+    /// and unit-tested but never invoked from any production code — Claude
+    /// via OpenRouter never received cache_control markers, so the cache
+    /// hits Plan 11 was designed to deliver never fired.
+    #[test]
+    fn inv_36_2_cr_09_from_config_enables_openrouter_caching() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("client.enable_openrouter_caching("),
+            "Phase 36.2 CR-09: from_config MUST call `client.enable_openrouter_caching(...)` \
+             so the streaming send path routes OpenRouter Claude requests through the \
+             cache_control-attaching builder (build_openrouter_chat_request_full)."
         );
     }
 

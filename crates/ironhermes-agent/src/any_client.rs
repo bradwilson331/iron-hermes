@@ -111,6 +111,24 @@ impl AnyClient {
         }
     }
 
+    /// Phase 36.2 CR-09: enable OpenRouter Claude `cache_control` routing on
+    /// the ChatCompletions arm by stamping the provider name and prompt-
+    /// caching config onto the inner `LlmClient`. No-op on the
+    /// `AnthropicMessages` arm (its own builder already handles caching).
+    /// Operators wire this from `AgentRuntime::from_config` right after
+    /// `build_main_client` so every turn sends with cache_control attached
+    /// when the (provider, model) pair qualifies.
+    pub fn enable_openrouter_caching(
+        &mut self,
+        provider_name: impl Into<String>,
+        prompt_caching: PromptCachingConfig,
+    ) {
+        if let AnyClient::ChatCompletions(c) = self {
+            c.set_provider_name(provider_name);
+            c.set_prompt_caching(prompt_caching);
+        }
+    }
+
     /// Streaming chat completion — delegates to the inner client.
     pub async fn chat_completion_stream(
         &self,
@@ -467,6 +485,16 @@ pub struct OpenRouterChatRequest {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Phase 36.2 CR-09: tool schemas — OpenRouter's Chat Completions accepts
+    /// these alongside cache_control'd messages. Required so the agent's
+    /// tool-use loop continues to work on the OpenRouter Claude path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ironhermes_core::ToolSchema>>,
+    /// Phase 36.2 CR-09: passthrough for extension fields (e.g.,
+    /// `stream_options: { include_usage: true }`). Same role as the
+    /// `extra` flatten on `ChatRequest`.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Phase 36.2 Plan 11: build an [`OpenRouterChatRequest`] with optional
@@ -496,11 +524,36 @@ pub fn build_openrouter_chat_request(
     stream: Option<bool>,
     prompt_caching: &PromptCachingConfig,
 ) -> OpenRouterChatRequest {
-    // Adapt every ChatMessage to OpenRouter's content-block array shape.
-    // Non-text content parts (image_url, etc.) are not common on cached
-    // prefixes and are passed through as text where possible; the cached
-    // layers must be stable per D-CACHE-04, so dynamic image data should
-    // not appear in the cached prefix anyway.
+    build_openrouter_chat_request_full(
+        provider,
+        model,
+        messages,
+        None,
+        max_tokens,
+        temperature,
+        stream,
+        prompt_caching,
+        std::collections::HashMap::new(),
+    )
+}
+
+/// Phase 36.2 CR-09: full-arg variant used by the production send path so
+/// tool schemas and extension fields (e.g. `stream_options`) survive the
+/// OpenRouter Claude routing. Kept separate from the 7-arg
+/// `build_openrouter_chat_request` so the Plan 11 tests don't need to
+/// pass `None`/`HashMap::new` boilerplate.
+#[allow(clippy::too_many_arguments)]
+pub fn build_openrouter_chat_request_full(
+    provider: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: Option<&[ironhermes_core::ToolSchema]>,
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    stream: Option<bool>,
+    prompt_caching: &PromptCachingConfig,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) -> OpenRouterChatRequest {
     let mut adapted: Vec<OpenRouterMessage> = messages
         .iter()
         .map(adapt_chat_message_to_openrouter)
@@ -519,6 +572,8 @@ pub fn build_openrouter_chat_request(
         max_tokens,
         temperature,
         stream,
+        tools: tools.map(|t| t.to_vec()),
+        extra,
     }
 }
 

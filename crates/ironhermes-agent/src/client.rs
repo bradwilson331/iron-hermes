@@ -35,6 +35,15 @@ pub struct LlmClient {
     base_url: String,
     api_key: String,
     default_model: String,
+    /// Phase 36.2 CR-09: provider name (e.g., "openrouter") used to detect
+    /// OpenRouter Claude routing in the streaming path. Empty string means
+    /// "unknown" — equivalent to the pre-CR-09 behavior (no special routing).
+    provider_name: String,
+    /// Phase 36.2 CR-09: prompt-caching config. When `enabled` is true AND
+    /// the (provider, model) pair is OpenRouter Claude, the streaming path
+    /// routes through `build_openrouter_chat_request` so `cache_control`
+    /// markers attach per the system_and_3 strategy.
+    prompt_caching: ironhermes_core::config::PromptCachingConfig,
 }
 
 impl LlmClient {
@@ -51,7 +60,27 @@ impl LlmClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             default_model: model.into(),
+            provider_name: String::new(),
+            prompt_caching: ironhermes_core::config::PromptCachingConfig::default(),
         }
+    }
+
+    /// Phase 36.2 CR-09: set the provider name. Required for OpenRouter Claude
+    /// routing detection (`is_openrouter_claude(provider, model)`). Empty
+    /// string disables the special routing.
+    pub fn set_provider_name(&mut self, name: impl Into<String>) {
+        self.provider_name = name.into();
+    }
+
+    /// Phase 36.2 CR-09: set the prompt-caching config. When `enabled` AND
+    /// the client's provider+model are OpenRouter Claude, the streaming
+    /// request body is built via `build_openrouter_chat_request` so
+    /// `cache_control` markers attach per the system_and_3 strategy.
+    pub fn set_prompt_caching(
+        &mut self,
+        cfg: ironhermes_core::config::PromptCachingConfig,
+    ) {
+        self.prompt_caching = cfg;
     }
 
     /// Non-streaming chat completion.
@@ -151,29 +180,66 @@ impl LlmClient {
             .entry("stream_options".to_string())
             .or_insert_with(|| serde_json::json!({ "include_usage": true }));
 
-        let request = ChatRequest {
-            model: model.unwrap_or(&self.default_model).to_string(),
-            messages: messages.to_vec(),
-            tools: tools.map(|t| t.to_vec()),
-            max_tokens,
-            temperature,
-            stream: Some(true),
-            stop: None,
-            extra,
-        };
-
+        let resolved_model = model.unwrap_or(&self.default_model).to_string();
         let url = format!("{}/chat/completions", self.base_url);
 
-        debug!(url = %url, model = %request.model, "Sending streaming LLM request");
-        let response = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send streaming request")?;
+        // Phase 36.2 CR-09: when the (provider, model) pair is OpenRouter
+        // Claude AND prompt_caching is enabled, route through the OpenRouter
+        // Claude request builder so `cache_control` markers attach per the
+        // system_and_3 strategy. Pre-fix this builder existed and was tested
+        // but no production code path invoked it — the OpenRouter Claude
+        // cache hits Plan 11 was meant to deliver never fired.
+        let response = if crate::any_client::is_openrouter_claude(
+            &self.provider_name,
+            &resolved_model,
+        ) && self.prompt_caching.enabled
+        {
+            let or_request = crate::any_client::build_openrouter_chat_request_full(
+                &self.provider_name,
+                &resolved_model,
+                messages,
+                tools,
+                max_tokens,
+                temperature,
+                Some(true),
+                &self.prompt_caching,
+                extra,
+            );
+            debug!(
+                url = %url,
+                model = %or_request.model,
+                "Sending streaming OpenRouter Claude request (cache_control attached)"
+            );
+            self.http
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&or_request)
+                .send()
+                .await
+                .context("Failed to send streaming request")?
+        } else {
+            let request = ChatRequest {
+                model: resolved_model,
+                messages: messages.to_vec(),
+                tools: tools.map(|t| t.to_vec()),
+                max_tokens,
+                temperature,
+                stream: Some(true),
+                stop: None,
+                extra,
+            };
+
+            debug!(url = %url, model = %request.model, "Sending streaming LLM request");
+            self.http
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request)
+                .send()
+                .await
+                .context("Failed to send streaming request")?
+        };
 
         let status = response.status();
         debug!(status = %status, "LLM response received");
