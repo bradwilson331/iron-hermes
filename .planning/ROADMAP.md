@@ -125,12 +125,12 @@ Plans:
 **Goal:** Add a per-provider (with optional per-model override) TOML/YAML configuration knob — `extra_request_options` — whose values flow through `AgentRuntime` into `ChatRequest.extra` on every OpenAI-compatible LLM call, so Ollama `num_ctx`, vLLM `top_k`, and OpenRouter `provider.order` (non-Claude routes) can be tuned without code changes. Scope is the knob and its wiring only; the full Small Model Mode architecture port (governor, router, escalation) is Phase 36.16. Closes the Ollama `exceed_context_size_error` fallback path by making `num_ctx` operator-configurable (static knob per D-08; no dynamic retry).
 **Requirements**: PROV-11, PROV-12, PROV-13, PROV-14 (added to REQUIREMENTS.md as part of Phase 36.15)
 **Depends on:** Phase 36
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 Plans:
 **Wave 0**
 
-- [ ] 36.15-01-PLAN.md — Wave 0 scaffolding: append PROV-11..PROV-14 to REQUIREMENTS.md, finalize ROADMAP.md Phase 36.15 entry, add failing YAML round-trip canary test module to config.rs locking the D-03 shape (Pitfall 1 gate)
+- [x] 36.15-01-PLAN.md — Wave 0 scaffolding: append PROV-11..PROV-14 to REQUIREMENTS.md, finalize ROADMAP.md Phase 36.15 entry, add failing YAML round-trip canary test module to config.rs locking the D-03 shape (Pitfall 1 gate)
 
 **Wave 1** *(parallel — 02 owns config.rs + new config_extras.rs; 03 owns config_schema.rs — zero files_modified overlap)*
 
