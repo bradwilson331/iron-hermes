@@ -454,12 +454,14 @@ Plans:
 - [x] 36.2-11-PLAN.md — OPTIONAL STRETCH: OpenRouter Claude cache_control on ChatCompletions arm gated by is_openrouter_claude(provider, model) predicate; cut criterion enforced — if envelope diverges from Anthropic's, plan defers to Phase 36.2.1 without affecting Plan 05 PARITY claim
 
 
-### Phase 36.1: Running-agent guard parity — web UI + TUI (INSERTED)
+### Phase 36.1: Running-agent guard parity — web UI + TUI (SHIPPED 2026-05-25)
 
 **Goal:** Extend the Phase 36 per-session running-agent guard (`RunningAgentGuard` RAII, `is_bypass`, D-02 rejection message) to the web UI and TUI surfaces, closing the parity gap identified in `36-BACKLOG.md` items 1 and 3. Two tracks: (A) **Web UI** — add per-WebSocket-session `Arc<AtomicBool>` running flag to `iron_hermes_ui` session state, wire `RunningAgentGuard` at `run_web_turn` entry, add slash-command interception before `run_turn` so `/model` and other state-mutating commands are rejected with the D-02 message while an agent turn is active, and `/stop`/`/new` bypass; (B) **TUI** (`tui_rata`) — replace the `pending_rx.is_some()` ad-hoc check at `tui_rata/commands.rs:537` with the same `Arc<AtomicBool>` + RAII pattern, wire guard at TUI turn entry, add command interception with bypass list parity. Extract shared `RunningAgentState` + `RunningAgentGuard` to `ironhermes-core` (or a shared module) so all three surfaces (gateway, web, TUI) use one canonical implementation — mirrors the `MemoryManagerHandle`/`McpReloader` trait patterns from Phases 20/21.2.
 **Requirements**: GW-05-WEB (web UI guard parity), GW-05-TUI (TUI guard parity) (phase-local; defined during /gsd:discuss-phase 36.1)
 **Depends on:** Phase 36
 **Plans:** 4/4 plans complete
+
+**Closeout (2026-05-25):** All 4 plans merged to develop; 82 tests passing across 4 suites; D-01–D-10 all verified in code; all 3 anti-pattern pitfalls mitigated (SeqCst ordering, guard-inside-async, canonical-name bypass); zero regressions — Phase 36 gateway suite still 11/11 green. Shared `RunningAgentGuard` + `is_bypass` + `AGENT_RUNNING_REJECT_MSG` now live in `ironhermes-core::commands::running_agent`; gateway, web UI, and TUI all import from the single canonical module. CLI `main.rs:1707`/`:2024` remains the deferred outlier per CONTEXT.md (intentionally out of scope for this phase). Final commit: `335ca05d`.
 
 Plans:
 
