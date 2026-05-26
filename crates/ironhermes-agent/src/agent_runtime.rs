@@ -342,8 +342,17 @@ impl AgentRuntime {
             // turn that runs through the runtime — usage_events stays empty
             // and `sessions.input_tokens` / `output_tokens` / cost columns
             // never increment, breaking /usage and the Plan 10 status pills.
-            agent = agent.with_state_store(store.clone());
-            agent = agent.with_intercepts(None, Some(store), None, None, None);
+            agent = agent.with_state_store(store);
+            // NOTE: `with_intercepts(None, Some(store), None, None, None)` was
+            // also called here previously, which registered `session_search`
+            // as a new tool the model could call. That tool was never wired on
+            // the gateway pre-Phase 36.2; re-registering it on every turn (now
+            // that all surfaces enable state_store) introduces a tool the
+            // model didn't expect and can confuse multi-iteration tool flows.
+            // The write site only needs `state_store`, not the intercept, so
+            // it is intentionally omitted here. If a future surface needs
+            // session_search exposed as a model tool, register it once on
+            // AgentRuntime construction — not per-turn in run_turn.
         }
 
         // Phase 36.2 code-review fix CR-02: wire provider name + api-key hash
@@ -674,7 +683,6 @@ mod tests {
             .join("\n");
 
         let with_state_store_pos = non_comment.find("agent.with_state_store(");
-        let with_intercepts_pos = non_comment.find(".with_intercepts(None, Some(store)");
 
         assert!(
             with_state_store_pos.is_some(),
@@ -682,21 +690,20 @@ mod tests {
              the post-LLM-call write site receives the state store. Otherwise \
              usage_events writes silently skip on every turn."
         );
+
+        // Phase 36.2 follow-up: the `with_intercepts(None, Some(store), ...)`
+        // call was REMOVED from run_turn because registering session_search
+        // as a per-turn tool intercept confused multi-iteration tool flows
+        // (chat truncation observed on gateway after enabling state_store).
+        // The write site only needs state_store, not the intercept. This
+        // assertion locks the removal — if anyone re-adds it, debug carefully.
+        let intercept_needle = concat!(".with_intercepts(None, Some(", "store)");
         assert!(
-            with_intercepts_pos.is_some(),
-            "run_turn must still call `with_intercepts(None, Some(store), ...)` so the \
-             session_search tool intercept is registered."
+            !non_comment.contains(intercept_needle),
+            "Phase 36.2 follow-up: run_turn must NOT call with_intercepts to register \
+             session_search per-turn. Tool registration must happen once on AgentRuntime \
+             construction — not in run_turn. See agent_runtime.rs comment for context."
         );
-        // Ordering: state_store wiring before intercepts (matches the doc comment
-        // on with_intercepts which says "Call this AFTER with_state_store()").
-        if let (Some(a), Some(b)) = (with_state_store_pos, with_intercepts_pos) {
-            assert!(
-                a < b,
-                "Phase 36.2 Plan 07: `agent.with_state_store(...)` (byte {a}) must \
-                 appear BEFORE `.with_intercepts(None, Some(store), ...)` (byte {b}) \
-                 so the write site is wired before tool intercepts are registered."
-            );
-        }
     }
 
     /// INV-36.2-CR-02: Phase 36.2 code-review CR-02 regression net.
