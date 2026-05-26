@@ -343,12 +343,49 @@ providers:
     # base_url: null                      # override only if needed
     # default_model: "anthropic/claude-sonnet-4"
     # disabled: false                     # set true to exclude from resolver
+    #
+    # --- Per-Provider Extra Request Options (PROV-11..PROV-14) ---
+    # Free-form map merged into outgoing chat-completions requests at the wire
+    # level. Use this to tune small-model knobs without code changes.
+    # Per-model overrides under `models.<model>.extra_request_options` win on a
+    # PER-KEY basis (provider-level keys are kept; per-model entries override or
+    # add individual keys). See docs/CONFIGURATION.md "Per-Provider Extra
+    # Request Options" for full semantics.
+    # extra_request_options:
+    #   provider:
+    #     order: ["anthropic", "openai"]   # OpenRouter routing preference
 #   anthropic:
 #     api_key_env: ANTHROPIC_API_KEY
 #     api_mode: anthropic_messages
 #   openai:
 #     api_key_env: OPENAI_API_KEY
 #     api_mode: chat_completions
+#
+#   # --- Ollama (local) with provider + per-model num_ctx tuning ---
+#   ollama:
+#     base_url: "http://localhost:11434/v1"
+#     api_mode: chat_completions
+#     default_model: "llama3.1:8b"
+#     # Provider-level defaults — applied to every request to this provider
+#     extra_request_options:
+#       num_ctx: 8192            # default 8K context window
+#       num_predict: 512
+#     # Per-model overrides — merged per-key on top of provider-level defaults
+#     models:
+#       "llama3.1:8b":
+#         extra_request_options:
+#           num_ctx: 32768       # bump just this model to 32K
+#       "qwen2.5-coder:7b":
+#         extra_request_options:
+#           top_k: 40
+#
+#   # --- vLLM (local) with top_k / top_p ---
+#   vllm:
+#     base_url: "http://localhost:8000/v1"
+#     api_mode: chat_completions
+#     extra_request_options:
+#       top_k: 40
+#       top_p: 0.95
 #
 # Legacy fields (still parsed, will warn at startup):
 #   - `api_key: <literal>` under a provider — use `api_key_env` instead.
