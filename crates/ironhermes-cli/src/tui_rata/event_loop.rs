@@ -53,7 +53,9 @@ pub async fn run_chat_ratatui(
     initial: Option<String>,
     yolo: bool,
 ) -> Result<()> {
-    install_tui_logger_subscriber();
+    // The WorkerGuard must outlive the TUI session — dropping it shuts down the
+    // non-blocking file-appender thread and any buffered log lines are lost.
+    let _file_log_guard = install_tui_logger_subscriber();
 
     let mut terminal = ratatui::init();
     execute!(io::stdout(), EnableMouseCapture)?;
@@ -63,22 +65,55 @@ pub async fn run_chat_ratatui(
 
     drop(_mouse_guard);
     ratatui::restore();
+    drop(_file_log_guard);
     result
 }
 
 // ── Tracing subscriber install ────────────────────────────────────────────────
 
-/// Install `tui_logger::TuiTracingSubscriberLayer` before `ratatui::init()`.
+/// Install `tui_logger::TuiTracingSubscriberLayer` + a daily-rolling file
+/// appender writing to `$IRONHERMES_HOME/logs/tui.log` before `ratatui::init()`.
+///
+/// Returns the `tracing_appender::non_blocking::WorkerGuard` for the file
+/// appender — the caller MUST hold this for the duration of the TUI session
+/// (dropping it shuts down the writer thread and loses buffered output).
+/// `None` is returned only when the logs directory can't be created (e.g.
+/// read-only home in tests); the in-TUI log panel still works in that case.
 ///
 /// Uses `try_init` so double-install in tests (or when the classic subscriber
 /// is already installed) is a no-op rather than a panic (Pitfall 2).
-fn install_tui_logger_subscriber() {
+fn install_tui_logger_subscriber() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
-    let layer = tui_logger::TuiTracingSubscriberLayer;
-    let registry = tracing_subscriber::registry().with(layer);
-    let _ = registry.try_init();
+
+    let log_dir = ironhermes_core::constants::get_hermes_home().join("logs");
+    let file_layer_pair = std::fs::create_dir_all(&log_dir).ok().map(|_| {
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "tui.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironhermes=info"));
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_target(true)
+            .with_filter(env_filter);
+        (layer, guard)
+    });
+
+    let tui_layer = tui_logger::TuiTracingSubscriberLayer;
+    let registry = tracing_subscriber::registry().with(tui_layer);
+    let guard = match file_layer_pair {
+        Some((file_layer, guard)) => {
+            let _ = registry.with(file_layer).try_init();
+            Some(guard)
+        }
+        None => {
+            let _ = registry.try_init();
+            None
+        }
+    };
     let _ = tui_logger::init_logger(tui_logger::LevelFilter::Trace);
     tui_logger::set_default_level(tui_logger::LevelFilter::Info);
+    guard
 }
 
 // ── Main bootstrap ────────────────────────────────────────────────────────────
