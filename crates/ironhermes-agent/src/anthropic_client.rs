@@ -1033,18 +1033,49 @@ impl AnthropicClient {
                         continue;
                     };
 
-                    // Parse the event by constructing a tagged JSON for serde
-                    let tagged = format!(r#"{{"type":"{etype}",{}}}"#, &data[1..data.len() - 1]);
-                    let parsed: AnthropicSseEvent = match serde_json::from_str(&tagged) {
-                        Ok(e) => e,
+                    // CR-01: parse `data` as a JSON Value first, then inject
+                    // the `type` discriminant from the SSE `event:` line. The
+                    // old implementation used `format!("{{...,{}}}", &data[1..data.len()-1])`
+                    // which (a) panicked on data with len < 2 (e.g., upstream
+                    // sends `data: {}` or a truncated frame), (b) corrupted
+                    // payloads that weren't `{...}`-shaped, and (c) injected
+                    // `etype` raw into the JSON without quoting — vulnerable
+                    // to malformed SSE event types containing quote bytes.
+                    let inner: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
                         Err(e) => {
                             debug!(
-                                "Failed to parse Anthropic SSE event '{}': {} — data: {}",
+                                "Failed to parse Anthropic SSE data as JSON '{}': {} — data: {}",
                                 etype, e, data
                             );
                             continue;
                         }
                     };
+                    let mut obj = match inner {
+                        serde_json::Value::Object(m) => m,
+                        other => {
+                            debug!(
+                                "Anthropic SSE data was not a JSON object for event '{}': {}",
+                                etype, other
+                            );
+                            continue;
+                        }
+                    };
+                    obj.insert(
+                        "type".to_string(),
+                        serde_json::Value::String(etype.clone()),
+                    );
+                    let parsed: AnthropicSseEvent =
+                        match serde_json::from_value(serde_json::Value::Object(obj)) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                debug!(
+                                    "Failed to parse Anthropic SSE event '{}': {} — data: {}",
+                                    etype, e, data
+                                );
+                                continue;
+                            }
+                        };
 
                     match parsed {
                         AnthropicSseEvent::ContentBlockStart {
@@ -1614,5 +1645,41 @@ mod tests {
         assert_eq!(u.completion_tokens, 7);
         assert_eq!(u.cache_read_input_tokens, Some(8200));
         assert_eq!(u.cache_creation_input_tokens, Some(4200));
+    }
+
+    /// INV-36.2-CR-01: regression guard against the SSE format-splice
+    /// panic. The pre-fix code in chat_completion_stream built the tagged
+    /// JSON via `format!("{{\"type\":\"{etype}\",{}}}", &data[1..data.len()-1])`
+    /// which panicked when `data.len() < 2` (e.g., a transport hiccup truncates
+    /// to a single brace) and could corrupt non-object payloads. The fix
+    /// parses `data` as a `serde_json::Value` first and inserts the `type`
+    /// key only if the value is an object. This guard fails if anyone
+    /// re-introduces the splice pattern.
+    #[test]
+    fn inv_36_2_cr_01_sse_parse_does_not_use_format_splice() {
+        const SOURCE: &str = include_str!("anthropic_client.rs");
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The dangerous pattern that produced CR-01: indexing into `data` with
+        // `data.len() - 1` could underflow on short payloads. Detect any
+        // reappearance. Build the needle via concat! so this assertion's own
+        // text doesn't trip the contains() check above.
+        let needle = concat!("&data[1..data", ".len() - 1]");
+        assert!(
+            !non_comment.contains(needle),
+            "Phase 36.2 CR-01: anthropic_client.rs must not slice `data` with \
+             the underflow-prone `len minus one` index — that pattern panics on \
+             short SSE payloads. Use serde_json::from_str(&data) to parse, then \
+             inject the type key."
+        );
+        assert!(
+            non_comment.contains("serde_json::from_value(serde_json::Value::Object(obj))"),
+            "Phase 36.2 CR-01: SSE parse must go through serde_json::from_value \
+             on a Value::Object after injecting the type discriminant."
+        );
     }
 }
