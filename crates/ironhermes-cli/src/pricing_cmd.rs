@@ -13,7 +13,7 @@ use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
 use ironhermes_core::pricing_cache::{
-    PricingCache, PricingCacheEntry, fetch_from_url,
+    PricingCache, PricingCacheEntry, PricingSource, fetch_from_openrouter_url, fetch_from_url,
 };
 use ironhermes_core::{PricingEntry, PricingRegistry};
 
@@ -25,12 +25,18 @@ use ironhermes_core::{PricingEntry, PricingRegistry};
 pub enum PricingSubcommand {
     /// Show current pricing table (static table + cache overlay merged).
     List,
-    /// Fetch latest pricing from models.dev; write $HERMES_HOME/pricing-cache.json.
+    /// Fetch latest pricing from an upstream source and merge into
+    /// `$HERMES_HOME/pricing-cache.json`. Defaults to models.dev; pass
+    /// `--source openrouter` to pull OpenRouter slugs like
+    /// `google/gemini-3.5-flash`.
     Refresh {
         /// Overwrite cache even if the source returns a partial response.
         /// Without --force, partial responses (zero parsed entries) are rejected.
         #[arg(long)]
         force: bool,
+        /// Pricing source: `models.dev` (default) or `openrouter`.
+        #[arg(long, default_value = "models.dev")]
+        source: String,
     },
 }
 
@@ -41,7 +47,7 @@ pub enum PricingSubcommand {
 pub async fn handle_pricing_command(cmd: PricingSubcommand) -> Result<()> {
     match cmd {
         PricingSubcommand::List => cmd_list().await,
-        PricingSubcommand::Refresh { force } => cmd_refresh(force).await,
+        PricingSubcommand::Refresh { force, source } => cmd_refresh(force, &source).await,
     }
 }
 
@@ -141,18 +147,22 @@ const EXIT_FETCH_FAILED: i32 = 2;
 /// AND `--force` was not supplied.
 const EXIT_EMPTY_REJECTED: i32 = 3;
 
-async fn cmd_refresh(force: bool) -> Result<()> {
+async fn cmd_refresh(force: bool, source_str: &str) -> Result<()> {
+    let source = match PricingSource::parse(source_str) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "hermes pricing refresh: unknown --source '{source_str}'. \
+                 Valid values: models.dev, openrouter."
+            );
+            std::process::exit(EXIT_FETCH_FAILED);
+        }
+    };
     let cache_path = PricingCache::cache_path();
-    match cmd_refresh_from_url_with_path(
-        ironhermes_core::pricing_cache::MODELS_DEV_URL,
-        force,
-        &cache_path,
-    )
-    .await
-    {
+    match cmd_refresh_from_url_with_path(source.url(), force, &cache_path, Some(source)).await {
         Ok(count) => {
             println!(
-                "hermes pricing refresh: wrote {count} entries to {}",
+                "hermes pricing refresh ({source_str}): wrote {count} entries to {}",
                 cache_path.display()
             );
             Ok(())
@@ -169,10 +179,7 @@ async fn cmd_refresh(force: bool) -> Result<()> {
                 std::process::exit(EXIT_EMPTY_REJECTED);
             } else {
                 eprintln!("hermes pricing refresh: fetch failed — {msg}");
-                eprintln!(
-                    "Existing {} was NOT overwritten.",
-                    cache_path.display()
-                );
+                eprintln!("Existing {} was NOT overwritten.", cache_path.display());
                 std::process::exit(EXIT_FETCH_FAILED);
             }
         }
@@ -196,19 +203,30 @@ pub async fn cmd_refresh_from_url_with_path(
     url: &str,
     force: bool,
     cache_path: &Path,
+    source: Option<PricingSource>,
 ) -> Result<usize> {
-    let fetched = fetch_from_url(url).await?;
+    // Dispatch on the source parser. None => default models.dev for backward
+    // compat with existing integration-test call sites.
+    let fetched = match source.unwrap_or(PricingSource::ModelsDev) {
+        PricingSource::ModelsDev => fetch_from_url(url).await?,
+        PricingSource::OpenRouter => fetch_from_openrouter_url(url).await?,
+    };
     if fetched.is_empty() && !force {
         anyhow::bail!(
-            "EMPTY-REJECTED: models.dev returned 0 entries; re-run with --force to overwrite"
+            "EMPTY-REJECTED: source returned 0 entries; re-run with --force to overwrite"
         );
     }
     let count = fetched.len();
-    let cache = build_cache(fetched);
-    cache.save_to(cache_path)?;
+    // MERGE the freshly-fetched entries into any existing cache so refreshing
+    // from OpenRouter does not wipe models.dev entries and vice versa. The new
+    // batch's keys overwrite the old batch's same keys (latest-wins).
+    let mut existing = PricingCache::load_from(cache_path);
+    existing.entries.extend(fetched);
+    existing.save_to(cache_path)?;
     Ok(count)
 }
 
+#[allow(dead_code)]
 fn build_cache(entries: std::collections::HashMap<String, PricingCacheEntry>) -> PricingCache {
     PricingCache { entries }
 }

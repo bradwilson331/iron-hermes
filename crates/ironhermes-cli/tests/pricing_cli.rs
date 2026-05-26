@@ -51,9 +51,15 @@ fn cli_parses_pricing_list_subcommand() {
 fn cli_parses_pricing_refresh_without_force() {
     // Behavior 2: `hermes pricing refresh` parses to PricingSubcommand::Refresh { force: false }.
     // Lib-level: the enum variant exists and can be constructed with force=false.
-    let cmd = PricingSubcommand::Refresh { force: false };
+    let cmd = PricingSubcommand::Refresh {
+        force: false,
+        source: "models.dev".to_string(),
+    };
     match cmd {
-        PricingSubcommand::Refresh { force } => assert!(!force),
+        PricingSubcommand::Refresh { force, source } => {
+            assert!(!force);
+            assert_eq!(source, "models.dev");
+        }
         _ => panic!("expected Refresh variant"),
     }
 }
@@ -61,9 +67,25 @@ fn cli_parses_pricing_refresh_without_force() {
 #[test]
 fn cli_parses_pricing_refresh_with_force() {
     // Behavior 3: `hermes pricing refresh --force` parses to PricingSubcommand::Refresh { force: true }.
-    let cmd = PricingSubcommand::Refresh { force: true };
+    let cmd = PricingSubcommand::Refresh {
+        force: true,
+        source: "models.dev".to_string(),
+    };
     match cmd {
-        PricingSubcommand::Refresh { force } => assert!(force),
+        PricingSubcommand::Refresh { force, source: _ } => assert!(force),
+        _ => panic!("expected Refresh variant"),
+    }
+}
+
+#[test]
+fn cli_parses_pricing_refresh_with_openrouter_source() {
+    // Phase 36.2 follow-up: `hermes pricing refresh --source openrouter`
+    let cmd = PricingSubcommand::Refresh {
+        force: false,
+        source: "openrouter".to_string(),
+    };
+    match cmd {
+        PricingSubcommand::Refresh { source, .. } => assert_eq!(source, "openrouter"),
         _ => panic!("expected Refresh variant"),
     }
 }
@@ -158,7 +180,7 @@ async fn cmd_refresh_rejects_empty_response_without_force() {
     let pre_existing = r#"{"entries":{"sentinel":{"pricing":{"provider":"sentinel-provider","input_per_1m_micros":1,"output_per_1m_micros":2,"cache_read_per_1m_micros":3,"cache_creation_per_1m_micros":4},"fetched_at":"2026-05-25T00:00:00Z"}}}"#;
     std::fs::write(&cache_path, pre_existing).unwrap();
 
-    let result = cmd_refresh_from_url_with_path(&server.uri(), false, &cache_path).await;
+    let result = cmd_refresh_from_url_with_path(&server.uri(), false, &cache_path, None).await;
     assert!(result.is_err(), "empty response without --force must error");
 
     // Cache file is byte-identical to the pre-existing seed.
@@ -181,7 +203,7 @@ async fn cmd_refresh_with_force_writes_empty_cache() {
     let tmp = TempDir::new().unwrap();
     let cache_path = tmp.path().join("pricing-cache.json");
 
-    let result = cmd_refresh_from_url_with_path(&server.uri(), true, &cache_path).await;
+    let result = cmd_refresh_from_url_with_path(&server.uri(), true, &cache_path, None).await;
     assert!(result.is_ok(), "with --force, empty response must succeed");
 
     assert!(cache_path.exists(), "cache file must be written");
@@ -203,7 +225,7 @@ async fn cmd_refresh_handles_network_failure_without_touching_cache() {
     let pre_existing = r#"{"entries":{}}"#;
     std::fs::write(&cache_path, pre_existing).unwrap();
 
-    let result = cmd_refresh_from_url_with_path(bogus_url, false, &cache_path).await;
+    let result = cmd_refresh_from_url_with_path(bogus_url, false, &cache_path, None).await;
     assert!(result.is_err(), "network failure must error");
 
     let post = std::fs::read_to_string(&cache_path).unwrap();
@@ -254,7 +276,7 @@ async fn round_trip_refresh_then_list_surfaces_new_entry() {
     let tmp = TempDir::new().unwrap();
     let cache_path = tmp.path().join("pricing-cache.json");
 
-    cmd_refresh_from_url_with_path(&server.uri(), false, &cache_path)
+    cmd_refresh_from_url_with_path(&server.uri(), false, &cache_path, None)
         .await
         .expect("refresh succeeds with valid body");
 
