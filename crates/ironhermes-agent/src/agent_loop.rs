@@ -1824,6 +1824,15 @@ impl AgentLoop {
                 StreamEvent::Usage(u) => {
                     usage = Some(u);
                 }
+                StreamEvent::ProviderError(body) => {
+                    // Phase 36.14 (PROV-07): SSE error envelope arrived inside an HTTP 200 stream.
+                    // Convert to Err so the existing run() fallback/retry block in agent_loop.rs
+                    // (~line 1603) reclassifies via classify_llm_error_typed and activates the
+                    // configured fallback_providers. Partial ContentDelta events that may have
+                    // already been forwarded to on_stream are observed by the UI; the in-function
+                    // accumulated `current_text` is dropped here. See phase 36.14 deferred.
+                    return Err(anyhow::anyhow!(body));
+                }
                 StreamEvent::Done(_) => break,
             }
         }

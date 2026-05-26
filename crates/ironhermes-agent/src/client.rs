@@ -26,6 +26,63 @@ pub enum StreamEvent {
     Usage(Usage),
     /// Stream finished with a reason.
     Done(Option<String>),
+    /// Provider returned an error payload inside the SSE stream at HTTP 200. The inner String is a
+    /// pre-formatted error message in the '(NNN Reason): message [body: ...]' style for direct use
+    /// with anyhow!. See phase 36.14-sse-stream-error-fallback-gap.
+    ProviderError(String),
+}
+
+/// Extract the HTTP-like status code from an SSE error envelope value.
+///
+/// Reads `val.pointer("/error/code")` first, falls back to `val.get("code")`.
+/// Accepts BOTH numeric (`as_u64`) AND string (`as_str().parse::<u16>()`) shapes —
+/// addresses Codex MEDIUM #2 (provider variation: OpenRouter may return "code":400
+/// while some upstreams forward "code":"400").
+fn extract_sse_error_code(val: &serde_json::Value) -> Option<u16> {
+    let code_val = val.pointer("/error/code").or_else(|| val.get("code"))?;
+    // Try numeric first
+    if let Some(n) = code_val.as_u64().and_then(|n| u16::try_from(n).ok()) {
+        return Some(n);
+    }
+    // Try string-shaped (e.g. "400")
+    code_val.as_str().and_then(|s| s.parse::<u16>().ok())
+}
+
+/// Format a bail string from an SSE error envelope.
+///
+/// Extracts the `error.code` (numeric or string), maps it to a reason text,
+/// extracts the `error.message` field, and caps the raw JSON tail at 512 chars
+/// with a `... [truncated]` marker to prevent provider request IDs / echoed user
+/// input from bloating warn!-level fallback logs (Codex MEDIUM #3).
+///
+/// Output format: `"Streaming chat completion failed (NNN Reason): {message} [body: {raw}]"`
+fn sse_error_to_bail_string(raw: &str, val: &serde_json::Value) -> String {
+    let code = extract_sse_error_code(val);
+    let (status_token, _reason) = match code {
+        Some(400) => ("400 Bad Request", "Bad Request"),
+        Some(401) => ("401 Unauthorized", "Unauthorized"),
+        Some(403) => ("403 Forbidden", "Forbidden"),
+        Some(404) => ("404 Not Found", "Not Found"),
+        Some(429) => ("429 Too Many Requests", "Too Many Requests"),
+        Some(500) => ("500 Internal Server Error", "Internal Server Error"),
+        Some(502) => ("502 Bad Gateway", "Bad Gateway"),
+        Some(503) => ("503 Service Unavailable", "Service Unavailable"),
+        Some(504) => ("504 Gateway Timeout", "Gateway Timeout"),
+        _ => ("SSE error", "SSE error"),
+    };
+    let message = val
+        .pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("<no message>");
+    let body_excerpt = if raw.len() <= 512 {
+        raw.to_string()
+    } else {
+        format!("{}... [truncated]", &raw[..512])
+    };
+    format!(
+        "Streaming chat completion failed ({}): {} [body: {}]",
+        status_token, message, body_excerpt
+    )
 }
 
 /// Client for OpenAI-compatible chat completions API.
@@ -360,8 +417,17 @@ impl LlmClient {
                                 }
                             }
                         }
-                        Err(e) => {
-                            debug!("Failed to parse stream chunk: {} — data: {}", e, data);
+                        Err(_parse_err) => {
+                            // D-01 (phase 36.14): second-pass — is this an SSE provider error envelope?
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                                if val.get("error").is_some() {
+                                    let msg = sse_error_to_bail_string(data, &val);
+                                    let _ = tx.send(StreamEvent::ProviderError(msg)).await;
+                                    return;
+                                }
+                            }
+                            // D-05 (phase 36.14): not a recognised error envelope — preserve existing debug log.
+                            debug!("Failed to parse stream chunk: {} — data: {}", _parse_err, data);
                         }
                     }
                 }
