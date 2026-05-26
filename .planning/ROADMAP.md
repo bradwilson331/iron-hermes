@@ -122,13 +122,30 @@ Plans:
 
 ### Phase 36.15: Small Model Mode (SMM) — per-provider extra_request_options TOML knob wired through AgentRuntime to ChatRequest.extra so Ollama num_ctx / vLLM top_k / OpenRouter provider.order can be tuned without code changes; closes Ollama exceed_context_size_error fallback path (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Add a per-provider (with optional per-model override) TOML/YAML configuration knob — `extra_request_options` — whose values flow through `AgentRuntime` into `ChatRequest.extra` on every OpenAI-compatible LLM call, so Ollama `num_ctx`, vLLM `top_k`, and OpenRouter `provider.order` (non-Claude routes) can be tuned without code changes. Scope is the knob and its wiring only; the full Small Model Mode architecture port (governor, router, escalation) is Phase 36.16. Closes the Ollama `exceed_context_size_error` fallback path by making `num_ctx` operator-configurable (static knob per D-08; no dynamic retry).
+**Requirements**: PROV-11, PROV-12, PROV-13, PROV-14 (added to REQUIREMENTS.md as part of Phase 36.15)
 **Depends on:** Phase 36
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.15 to break down)
+**Wave 0**
+
+- [ ] 36.15-01-PLAN.md — Wave 0 scaffolding: append PROV-11..PROV-14 to REQUIREMENTS.md, finalize ROADMAP.md Phase 36.15 entry, add failing YAML round-trip canary test module to config.rs locking the D-03 shape (Pitfall 1 gate)
+
+**Wave 1** *(parallel — 02 owns config.rs + new config_extras.rs; 03 owns config_schema.rs — zero files_modified overlap)*
+
+- [ ] 36.15-02-PLAN.md — Create config_extras.rs (typed OllamaExtraOptions / VllmExtraOptions / OpenRouterExtraOptions / ProviderRouting / ProviderExtraOptions untagged enum / ProviderModelConfig + resolve_extras merge helper); extend ProviderConfig with `extra_request_options` + `models` fields; turn Plan 01 canary GREEN; ADR fallback path documented if untagged-enum mis-deserializes
+- [ ] 36.15-03-PLAN.md — Append six ConfigField entries to config_schema.rs for canonical extras keys (Ollama num_ctx/num_predict/top_k, vLLM top_k/top_p, OpenRouter provider.order); schema-contains tests; cache_breaking: false invariant (Pitfall 4)
+
+**Wave 2** *(depends on Wave 1)*
+
+- [ ] 36.15-04-PLAN.md — Add `resolved_extras` field + `with_resolved_extras` builder to AgentLoop (mirrors `with_provider_name`); substitute `self.resolved_extras.clone()` for literal `None` at `call_llm` (agent_loop.rs:1757) + `call_llm_streaming` (agent_loop.rs:1790); wire AgentRuntime::run_turn to call `ironhermes_core::config_extras::resolve_extras` per-turn (D-10); create `tests/extra_request_options.rs` with three wiremock wire-body tests for Ollama num_ctx + vLLM top_k + OpenRouter provider.order
+
+**Wave 3** *(parallel — 05 appends to tests/extra_request_options.rs; 06 creates tests/invariants_36_15.rs — different files, no overlap)*
+
+- [ ] 36.15-05-PLAN.md — Append four invariant tests to tests/extra_request_options.rs: D-09 caller-wins per-key, D-09 stream_options.include_usage floor preserved (client.rs:236), reserved-key collision (named-field-wins, T-36.15-09 mitigation), D-10 mid-session model-switch via resolve_extras with different model_name
+- [ ] 36.15-06-PLAN.md — Create tests/invariants_36_15.rs with 5 static-grep gates: no literal `None` for extra in agent_loop.rs, `resolved_extras.clone()` count ≥ 2, D-06 `build_openrouter_chat_request_full` still present in any_client.rs, `_extra: Option<HashMap` still present in anthropic_client.rs, client.rs floor markers preserved; full-workspace release build + cargo test gate
+
 
 ### Phase 36.14: SSE stream error fallback gap — detect provider error envelopes inside HTTP 200 SSE bodies and route them through the existing PROV-07 fallback/retry chain (INSERTED)
 
