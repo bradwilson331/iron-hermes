@@ -380,7 +380,24 @@ impl GatewayMessageHandler {
         // Construction here is the single source of truth — handle_with_multimodal and
         // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
         let agent_running = self.session_store.read().await.get_running_flag(&session_key);
-        let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running.clone());
+        // Phase 36.2 follow-up: use the canonical SQLite session UUID for
+        // CommandContext.session_id so /usage, /history, /export, /rename all
+        // filter on the same id that agent_loop writes to the sessions /
+        // usage_events tables. Pre-fix used session_key.to_string_key()
+        // ("Telegram:<chat>:<user>") which never matched the UUID stored in
+        // sessions.id — every /usage on a gateway session returned empty.
+        // Falls back to the string-key form if no canonical id exists yet
+        // (e.g., slash command issued before the first chat turn creates the
+        // SQLite session row).
+        let ctx_session_id = {
+            let store = self.session_store.read().await;
+            store
+                .get(&session_key)
+                .map(|s| s.session_id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| session_key.to_string_key())
+        };
+        let ctx = CommandContext::new(platform.clone(), ctx_session_id, agent_running.clone());
         // Phase 36.2 chat-fix follow-up: attach the StateStoreHandle so /usage,
         // /sessions, /history, /export, etc. can reach the SQLite session/usage
         // tables. Without this the gateway returns "Session storage not
@@ -1086,10 +1103,23 @@ impl GatewayMessageHandler {
         // Build TurnRequest and call runtime.run_turn.
         // budget reset, loop construction, attach_context_engine, and fallback wiring
         // are all handled inside run_turn — do NOT call them again here.
+        // Phase 36.2 follow-up: pass the canonical SQLite session UUID into
+        // TurnRequest.session_id (not the `gw:<chat>:<sender>` hook form).
+        // agent_loop's write site uses this as both usage_events.session_id
+        // AND the `WHERE id = ?` clause on the sessions aggregate UPDATE; the
+        // UPDATE silently affects 0 rows if the value doesn't match sessions.id.
+        // The hook-side `session_id_str` (gw:…) remains the per-message identity
+        // for on_session_end / progress hooks (kept distinct intentionally per
+        // the Phase 25.3-15 CR-02 comment above).
+        let turn_session_id = if canonical_session_id.is_empty() {
+            session_id_str.clone()
+        } else {
+            canonical_session_id.clone()
+        };
         let agent_result = if let Some(ref rt) = self.agent_runtime {
             let request = TurnRequest {
                 messages,
-                session_id: session_id_str.clone(),
+                session_id: turn_session_id,
                 cancel_token: None, // gateway has no per-turn cancel today
                 stream: Some(stream_callback),
                 tool_progress: Some(tool_callback),
