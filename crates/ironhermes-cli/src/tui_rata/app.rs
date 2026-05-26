@@ -22,6 +22,8 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::tui_rata::double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
 use crate::tui_rata::history::{DEFAULT_MAX, ReplHistory};
 use crate::tui_rata::status_line::StatusLineState;
@@ -449,31 +451,32 @@ impl App {
             // No role currently returns None post-22.4-17; this is a structural guard for future
             // Role variants. See .planning/phases/21.8.3.../21.8.3-RESEARCH.md Pitfall 1.
             let Some(_color) = color else { continue };
-            let prefix_len = role_label.len() + 2; // ": " separator
             let body = render_message_body(msg);
             for (i, line) in body.lines().enumerate() {
                 let rows = if i == 0 {
                     // First row: prefix + body share the same terminal row.
-                    // ceil((prefix + body) / width), minimum 1.
-                    let body_chars = line.chars().count();
-                    let total_chars = prefix_len + body_chars;
-                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
+                    // Build the full first-line string and run word_wrapped_line_count on it.
+                    // prefix is ASCII ("You: ", "Hermes: " etc.) so len() == display width.
+                    // Fixes D-01: word-wrap semantics + unicode display width (RESEARCH §3).
+                    let first_line = format!("{}: {}", role_label, line);
+                    word_wrapped_line_count(&first_line, width)
                 } else {
-                    wrapped_line_count(line, width)
+                    word_wrapped_line_count(line, width)
                 };
                 total = total.saturating_add(rows);
             }
         }
         if let Some(buf) = &self.assistant_buffer {
             // assistant_buffer renders with "Hermes: " prefix on line 0 (transcript_text:807-819)
-            let prefix_len = "Hermes".len() + 2; // 8
             for (i, line) in buf.lines().enumerate() {
                 let rows = if i == 0 {
-                    let body_chars = line.chars().count();
-                    let total_chars = prefix_len + body_chars;
-                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
+                    // First row: prefix + body share the same terminal row.
+                    // Build the full first-line string and run word_wrapped_line_count on it.
+                    // Fixes D-01: word-wrap semantics + unicode display width (RESEARCH §3).
+                    let first_line = format!("Hermes: {}", line);
+                    word_wrapped_line_count(&first_line, width)
                 } else {
-                    wrapped_line_count(line, width)
+                    word_wrapped_line_count(line, width)
                 };
                 total = total.saturating_add(rows);
             }
@@ -932,20 +935,112 @@ fn assistant_message(body: String) -> ChatMessage {
     ChatMessage::assistant(&body)
 }
 
-/// Compute wrapped line count for `line` at terminal width `width`.
+/// Count the terminal rows that `line` occupies when rendered by ratatui's
+/// `WordWrapper { trim: false }` at the given column `width`.
 ///
-/// - Empty line → 1 (blank line still occupies a row).
-/// - `width == 0` → 1 (defensive; avoids divide-by-zero).
-/// - Otherwise → ceil(char_count / width).
-pub(crate) fn wrapped_line_count(line: &str, width: usize) -> usize {
-    if line.is_empty() {
+/// Mirrors the word-boundary logic from ratatui-widgets `WordWrapper::process_input`
+/// for the `trim: false` case, using `unicode_width::UnicodeWidthChar` for per-char
+/// display widths. This is the corrected replacement for the old `wrapped_line_count`
+/// which used character-ceiling-divide and diverged from ratatui on word-wrapped lines.
+///
+/// Properties:
+/// - Empty line → 1  (blank row is still rendered)
+/// - `width == 0` → 1  (defensive; avoids divide-by-zero)
+/// - Long single word → character-wraps (ratatui's `line_full` fallback)
+/// - Leading whitespace preserved (char-level iteration, not `split_whitespace`)
+///
+/// See D-01 root cause and algorithm in
+/// `.planning/phases/36.6.1-.../36.6.1-RESEARCH.md` §3.
+pub(crate) fn word_wrapped_line_count(line: &str, width: usize) -> usize {
+    if line.is_empty() || width == 0 {
         return 1;
     }
-    let cols = line.chars().count();
-    if width == 0 {
-        return 1;
+
+    let mut rows: usize = 1;
+    let mut current_row_width: usize = 0; // display columns used on the current row
+
+    // We track two "pending" accumulators mirroring ratatui WordWrapper's
+    // `pending_word` and `pending_whitespace` buffers (trim: false).
+    let mut pending_word_width: usize = 0;
+    let mut pending_ws_width: usize = 0;
+    let mut in_word = false;
+
+    let flush_word = |rows: &mut usize,
+                      current_row_width: &mut usize,
+                      pending_ws_width: &mut usize,
+                      pending_word_width: &mut usize,
+                      width: usize| {
+        if *pending_word_width == 0 {
+            return;
+        }
+        let needed = *current_row_width + *pending_ws_width + *pending_word_width;
+        if needed <= width {
+            // Word fits on current row (including whitespace separator).
+            *current_row_width = needed;
+        } else {
+            // Word doesn't fit: start a new row.
+            *rows += 1;
+            *current_row_width = 0;
+            *pending_ws_width = 0; // whitespace before a break is consumed (trim: false)
+            // Does the word alone fit on the new row?
+            if *pending_word_width <= width {
+                *current_row_width = *pending_word_width;
+            } else {
+                // Oversized word: character-wrap it across rows (ratatui line_full path).
+                let word_rows = (*pending_word_width + width - 1) / width;
+                *rows += word_rows - 1; // first new row already counted above
+                let remainder = *pending_word_width % width;
+                *current_row_width = if remainder == 0 { width } else { remainder };
+            }
+        }
+        *pending_word_width = 0;
+        *pending_ws_width = 0;
+    };
+
+    for c in line.chars() {
+        let char_w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if c.is_whitespace() {
+            if in_word {
+                // Flush the accumulated word before processing the whitespace.
+                flush_word(
+                    &mut rows,
+                    &mut current_row_width,
+                    &mut pending_ws_width,
+                    &mut pending_word_width,
+                    width,
+                );
+                in_word = false;
+            }
+            // Accumulate whitespace (trim: false keeps it on the row).
+            // If whitespace alone overflows, it wraps — mirror ratatui's grapheme accumulation.
+            if char_w > 0 {
+                if current_row_width + pending_ws_width + char_w > width {
+                    // Whitespace causes a row overflow: emit a new row.
+                    rows += 1;
+                    current_row_width = 0;
+                    pending_ws_width = char_w;
+                } else {
+                    pending_ws_width += char_w;
+                }
+            }
+        } else {
+            in_word = true;
+            pending_word_width += char_w;
+        }
     }
-    (cols + width - 1) / width
+
+    // Flush any remaining word at end-of-line.
+    if pending_word_width > 0 {
+        flush_word(
+            &mut rows,
+            &mut current_row_width,
+            &mut pending_ws_width,
+            &mut pending_word_width,
+            width,
+        );
+    }
+
+    rows
 }
 
 // ── test-support helpers ──────────────────────────────────────────────────────
