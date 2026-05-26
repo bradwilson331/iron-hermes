@@ -126,6 +126,20 @@ pub struct AgentRuntime {
     /// Working directory for `@`-ref expansion (D-05: fixed to cwd at startup,
     /// used as both `cwd` and `allowed_root` in `preprocess_context_references_async`).
     cwd: PathBuf,
+    /// Phase 36.2 CR-04: model name from the immediately previous turn. Used
+    /// to fire the cache-break warning when an operator swaps models mid-
+    /// session. `None` on the first turn since runtime construction.
+    previous_model: std::sync::Mutex<Option<String>>,
+    /// Phase 36.2 CR-04: count of turns this runtime has executed. The
+    /// model-swap cache-break warning suppresses on turn 0 (the first turn
+    /// PICKS a model rather than swapping it). Atomic so per-turn updates
+    /// don't need a Mutex acquire.
+    session_turn_count: std::sync::atomic::AtomicUsize,
+    /// Phase 36.2 CR-04: paths the PressureTracker mtime-snapshots so a
+    /// SOUL.md / AGENTS.md / CLAUDE.md edit fires the cache-break warning.
+    /// Resolved once at runtime construction (cwd-derived candidates + the
+    /// $HERMES_HOME identity files). Empty list = no context-file tracking.
+    context_file_paths: Vec<PathBuf>,
 }
 
 impl AgentRuntime {
@@ -190,6 +204,18 @@ impl AgentRuntime {
         })
         .await?;
 
+        // Phase 36.2 CR-04: resolve the context files PressureTracker will
+        // mtime-snapshot. Mirrors PromptBuilder's load order: HERMES_HOME
+        // identity files + every CONTEXT_CANDIDATES filename under cwd. Paths
+        // need not exist at startup — agent_loop tolerates missing files.
+        let mut context_file_paths: Vec<PathBuf> = Vec::new();
+        let hermes_home = ironhermes_core::get_hermes_home();
+        context_file_paths.push(hermes_home.join("SOUL.md"));
+        context_file_paths.push(hermes_home.join("AGENTS.md"));
+        for filename in crate::context_loader::CONTEXT_CANDIDATES {
+            context_file_paths.push(cwd_stored.join(filename));
+        }
+
         Ok(Self {
             config,
             resolver,
@@ -200,6 +226,9 @@ impl AgentRuntime {
             subagent_registry,
             max_iterations,
             cwd: cwd_stored,
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths,
         })
     }
 
@@ -385,6 +414,28 @@ impl AgentRuntime {
             agent = agent.with_pricing_registry(std::sync::Arc::new(pricing));
         }
 
+        // Phase 36.2 CR-04: wire the cache-break advisory state. The model-
+        // swap warning needs the previous-turn model name plus a
+        // "session-has-prior-turns" flag; the context-file-edit warning
+        // needs the list of paths to snapshot. Without these, both triggers
+        // are dead code — defined and tested but unreachable from any
+        // production surface.
+        let prior_turns = self
+            .session_turn_count
+            .load(std::sync::atomic::Ordering::Acquire);
+        agent = agent.with_session_has_prior_turns(prior_turns > 0);
+        if let Some(prev) = self
+            .previous_model
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+        {
+            agent = agent.with_previous_model(prev);
+        }
+        if !self.context_file_paths.is_empty() {
+            agent = agent.with_context_file_paths(self.context_file_paths.clone());
+        }
+
         agent = attach_context_engine(
             agent,
             &self.config,
@@ -427,6 +478,20 @@ impl AgentRuntime {
         }
 
         out.context_warnings = context_warnings;
+
+        // Phase 36.2 CR-04: snapshot the just-run model name + bump the turn
+        // counter so the NEXT turn can compare and fire the model-swap cache-
+        // break warning if the operator swapped models. Uses the resolver's
+        // currently-resolved main model — that is what `agent.client.model()`
+        // exposed to the LLM. Stored unconditionally so a fast model-swap →
+        // single-call → swap-back pattern still gets the prior name on the
+        // intermediate turn.
+        if let Ok(mut prev) = self.previous_model.lock() {
+            *prev = Some(self.resolver.resolve_for_main().default_model.clone());
+        }
+        self.session_turn_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+
         Ok(out)
     }
 
@@ -551,6 +616,9 @@ impl AgentRuntime {
             subagent_registry,
             max_iterations,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths: Vec::new(),
         }
     }
 }
@@ -721,6 +789,53 @@ mod tests {
             "Phase 36.2 follow-up: run_turn must NOT call with_intercepts to register \
              session_search per-turn. Tool registration must happen once on AgentRuntime \
              construction — not in run_turn. See agent_runtime.rs comment for context."
+        );
+    }
+
+    /// INV-36.2-CR-04: Phase 36.2 code-review CR-04 regression net.
+    /// `run_turn` MUST chain the Plan 08 cache-break advisory builders so
+    /// the model-swap and context-file-edit triggers can actually fire in
+    /// production. Pre-fix these builders were defined and unit-tested but
+    /// never called from any production entry point — the warnings were
+    /// dead code on every surface.
+    #[test]
+    fn inv_36_2_cr_04_runtime_wires_cache_break_builders() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("agent.with_session_has_prior_turns("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_session_has_prior_turns(...) \
+             so trigger 1 (model-swap cache break) can suppress on session zero."
+        );
+        assert!(
+            non_comment.contains("agent.with_previous_model("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_previous_model(...) \
+             so trigger 1 (model-swap cache break) can compare the new model \
+             against the prior turn's model name."
+        );
+        assert!(
+            non_comment.contains("agent.with_context_file_paths("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_context_file_paths(...) \
+             so trigger 3 (context-file-edit cache break) can mtime-snapshot \
+             SOUL.md / AGENTS.md / CLAUDE.md."
+        );
+
+        // Post-turn state update must also be present so the next turn has
+        // the prior model name to compare against.
+        assert!(
+            non_comment.contains("self.previous_model.lock()"),
+            "Phase 36.2 CR-04: run_turn MUST store the just-run model name \
+             into self.previous_model after agent.run completes."
+        );
+        assert!(
+            non_comment.contains("self.session_turn_count.fetch_add(1"),
+            "Phase 36.2 CR-04: run_turn MUST increment self.session_turn_count \
+             after agent.run completes so the next turn's `has_prior_turns` flag \
+             becomes true."
         );
     }
 
