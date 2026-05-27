@@ -11,6 +11,7 @@ use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -100,6 +101,18 @@ pub struct GatewayRunner {
     /// `SessionQueue` type is intentionally not exported in lib.rs — adapters
     /// reach it only via the thin public API methods on this struct.
     session_queue: Arc<SessionQueue>,
+    /// Phase 36.17.1 D-03 (Plan 04): drain-mode flag — set true BEFORE
+    /// `cancel.cancel()` during shutdown so late-arriving messages stay in
+    /// the queue and reach the next agent turn (in-process only). The flag
+    /// is a SIGNAL, not a gate — `SessionQueue::try_push` does NOT consult
+    /// it. Python parity: `_queue_during_drain_enabled` (gateway/run.py:2298-2302).
+    ///
+    /// Closes T-36.17.1-03 (lost-update during drain-mode transition) by
+    /// pairing the flag flip with the cancel call in `drain_for_restart`:
+    /// any concurrent `try_push` observing `is_draining=true` is guaranteed
+    /// to see `cancel` not-yet-fired AND the queue continues to accept the
+    /// push (D-03 preserve-AND-accept).
+    is_draining: Arc<AtomicBool>,
     cancel: CancellationToken,
 }
 
@@ -139,6 +152,10 @@ impl GatewayRunner {
             // No `set_session_queue` method — the queue is owned by the runner from
             // construction; `build_gateway_handler` clones the Arc into the handler.
             session_queue: Arc::new(SessionQueue::new()),
+            // Phase 36.17.1 Plan 04 (D-03): drain-mode flag starts false.
+            // `drain_for_restart()` flips it to true BEFORE cancelling the
+            // cancel token — preserve-AND-accept semantics live there.
+            is_draining: Arc::new(AtomicBool::new(false)),
             cancel: CancellationToken::new(),
         }
     }
@@ -353,6 +370,38 @@ impl GatewayRunner {
     /// same accessor for drain-mode wiring.
     pub(crate) fn session_queue(&self) -> Arc<SessionQueue> {
         self.session_queue.clone()
+    }
+
+    /// Phase 36.17.1 Plan 04 (D-03): true once the runner has entered
+    /// drain-mode (graceful shutdown). The queue continues to accept pushes
+    /// while this flag is set — drain mode is a SIGNAL, not a gate
+    /// (`SessionQueue::try_push` does not consult this flag). Python parity:
+    /// `_queue_during_drain_enabled` (gateway/run.py:2298-2302).
+    pub fn is_draining(&self) -> bool {
+        self.is_draining.load(Ordering::SeqCst)
+    }
+
+    /// Phase 36.17.1 Plan 04 (D-03): enter drain-mode.
+    ///
+    /// Sets `is_draining` to `true` BEFORE cancelling the cancel token. The
+    /// ordering is the T-36.17.1-03 mitigation: any concurrent `try_push`
+    /// that observes `is_draining=true` is guaranteed to also see the cancel
+    /// token NOT YET fired, AND `SessionQueue::try_push` continues to accept
+    /// the push (D-03 preserve-AND-accept). The brief in-process window
+    /// between flag-flip and process exit preserves arrival order without
+    /// losing user input.
+    ///
+    /// Called from the graceful-shutdown path in `start()` in place of the
+    /// previous bare `self.cancel.cancel()`. Forced-abort paths may still
+    /// call `cancel.cancel()` directly when drain semantics are explicitly
+    /// undesired — that is acceptable per the locked decision contract.
+    ///
+    /// Python parity: equivalent transition to `_restart_requested = True`
+    /// + the existing busy-mode being `queue`/`steer` (gateway/run.py:2298-2302).
+    pub fn drain_for_restart(&self) {
+        // ORDERING is load-bearing — do NOT reorder. T-36.17.1-03 mitigation.
+        self.is_draining.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
     }
 
     /// Phase 36.17.1 Plan 02 Task 3: post-turn FIFO drain (D-01 part (b)).
@@ -1102,7 +1151,10 @@ impl GatewayRunner {
         }
 
         // Propagate cancellation to all subtasks
-        self.cancel.cancel();
+        // Phase 36.17.1 Plan 04 (D-03): set is_draining BEFORE cancel so the
+        // queue keeps accepting late arrivals (preserve-AND-accept). Closes
+        // T-36.17.1-03 (lost-update during drain-mode transition).
+        self.drain_for_restart();
 
         // Plan 03 (Phase 22.4.2.1): drain per-chat worker tasks with bounded 5s timeout (D-11).
         // Workers observe cancel_task.is_cancelled() after each agent turn; the 5s timeout covers
@@ -2443,18 +2495,30 @@ mod tests {
             // The graceful shutdown call must use drain_for_restart, not the
             // bare cancel.cancel(). The exact anchor: the "Propagate cancellation
             // to all subtasks" comment is the marker for the shutdown injection
-            // point per the Phase 21.2 Plan 11 invariant.
+            // point per the Phase 21.2 Plan 11 invariant. We scan a window
+            // generous enough to span the comment block + the actual call line
+            // (up to ~1KB) but small enough that an unrelated
+            // `drain_for_restart` token far away cannot satisfy the assertion.
             let anchor = "// Propagate cancellation to all subtasks";
             let anchor_idx = src
                 .find(anchor)
                 .expect("shutdown anchor comment must exist");
-            // The next non-blank source after the anchor should be
-            // `self.drain_for_restart();`, not `self.cancel.cancel();`.
-            let window = &src[anchor_idx..anchor_idx + 256.min(src.len() - anchor_idx)];
+            let end = (anchor_idx + 1024).min(src.len());
+            let window = &src[anchor_idx..end];
+            // First, the bare `self.cancel.cancel();` MUST NOT be the next call.
+            // (Comments mentioning `self.cancel.cancel()` are fine — only the
+            // statement form is forbidden.)
             assert!(
-                window.contains("self.drain_for_restart()"),
+                !window.contains("self.cancel.cancel();"),
+                "Phase 36.17.1 D-03: the bare self.cancel.cancel(); call must NOT \
+                 appear after the 'Propagate cancellation' anchor (use \
+                 self.drain_for_restart(); instead). Window: {window}"
+            );
+            // Second, drain_for_restart must be the chosen call.
+            assert!(
+                window.contains("self.drain_for_restart();"),
                 "Phase 36.17.1 D-03: graceful shutdown after the 'Propagate cancellation' \
-                 anchor must call self.drain_for_restart() (not self.cancel.cancel()): {window}"
+                 anchor must call self.drain_for_restart(); — got window: {window}"
             );
         }
 
