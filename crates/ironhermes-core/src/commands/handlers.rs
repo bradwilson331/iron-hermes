@@ -1600,25 +1600,31 @@ fn cmd_btw(args: &[&str], ctx: &CommandContext) -> CommandResult {
 
 /// `/queue [message]` — add a message to the input queue.
 ///
-/// Queues a message to be submitted after the current turn completes.
-/// The actual queuing happens in the tui_rata post-router hook.
+/// Phase 36.17.1 (D-01.c / D-08, Pitfall 3): returns
+/// `CommandResult::Queued { message }`. The gateway handler intercepts this
+/// variant, synthesizes a `MessageEvent`, and calls `session_queue.try_push(...)`
+/// (gateway/src/handler.rs Queued arm) — the actual queuing is a side-effect at
+/// the gateway boundary, NOT inside this handler. That keeps `handlers.rs`
+/// side-effect free, consistent with how `cmd_new` returns `NewSession {..}`
+/// and the gateway intercepts.
 ///
-/// Guard pattern (D-05): when `ctx.agent_loop` is None, returns informational text.
-fn cmd_queue(args: &[&str], ctx: &CommandContext) -> CommandResult {
-    if ctx.agent_loop.is_none() {
-        return CommandResult::Output(
-            "Agent loop not configured. Queue requires agent threading.".to_string(),
-        );
-    }
+/// Pitfall 3 mitigation: the previous stub gated on `ctx.agent_loop.is_none()`,
+/// but `agent_loop` is never set in the gateway `CommandContext`, so the gate
+/// was always true and `/queue` always returned "Agent loop not configured."
+/// That gate is removed entirely — the real gate is "does the session queue
+/// accept this event?" which is the result of `try_push` at the gateway
+/// boundary, not whether an agent loop is wired here.
+///
+/// Pre-resolution bypass: `/queue` is in `is_bypass` (Phase 36 / GW-05) so it
+/// works during an active agent turn (D-01.c).
+fn cmd_queue(args: &[&str], _ctx: &CommandContext) -> CommandResult {
     if args.is_empty() {
         return CommandResult::Output(
             "Usage: /queue <message> — add a message to the input queue.".to_string(),
         );
     }
     let message = args.join(" ");
-    CommandResult::Output(format!(
-        "Message queued: \"{message}\" (post-router hook will submit after current turn)."
-    ))
+    CommandResult::Queued { message }
 }
 
 // =============================================================================
@@ -2612,6 +2618,77 @@ mod tests {
             matches!(result, ResolveResult::Exact(c) if c.name == "export-session"),
             "expected /export-session Exact match, got: {:?}",
             result
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.17.1 Plan 03 Task 1 — cmd_queue tests
+    // ---------------------------------------------------------------------------
+
+    /// Non-empty args produce `CommandResult::Queued { message }` where the
+    /// message is the space-joined args. The gateway handler intercepts this
+    /// variant and calls `session_queue.try_push(...)` (D-08).
+    #[test]
+    fn test_cmd_queue_produces_queued() {
+        let ctx = make_ctx(false);
+        let result = cmd_queue(&["hello", "world"], &ctx);
+        assert_eq!(
+            result,
+            CommandResult::Queued {
+                message: "hello world".to_string(),
+            },
+            "cmd_queue with non-empty args must return Queued {{ message }}"
+        );
+    }
+
+    /// Empty args return a `CommandResult::Output` usage string. The usage
+    /// string MUST contain the literal `"Usage: /queue"` so the acceptance
+    /// grep check passes and the user sees actionable guidance.
+    #[test]
+    fn test_cmd_queue_empty_args_returns_usage() {
+        let ctx = make_ctx(false);
+        let result = cmd_queue(&[], &ctx);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("Usage: /queue"),
+                "Empty args must return Output containing 'Usage: /queue'; got: {}",
+                s
+            ),
+            other => panic!(
+                "Empty args must return CommandResult::Output(...); got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Pitfall 3 mitigation: the `ctx.agent_loop.is_none()` gate is gone.
+    /// The previous stub always returned "Agent loop not configured." in the
+    /// gateway. Verify cmd_queue returns Queued regardless of agent_running
+    /// state — only args.is_empty() controls the output.
+    #[test]
+    fn test_cmd_queue_agent_running_state_is_irrelevant() {
+        // ctx with agent_running == true
+        let ctx_busy = make_ctx(true);
+        let result_busy = cmd_queue(&["test"], &ctx_busy);
+        assert_eq!(
+            result_busy,
+            CommandResult::Queued {
+                message: "test".to_string(),
+            },
+            "Pitfall 3: cmd_queue must NOT gate on agent_running — got {:?}",
+            result_busy
+        );
+
+        // ctx with agent_running == false
+        let ctx_idle = make_ctx(false);
+        let result_idle = cmd_queue(&["test"], &ctx_idle);
+        assert_eq!(
+            result_idle,
+            CommandResult::Queued {
+                message: "test".to_string(),
+            },
+            "Pitfall 3: cmd_queue must NOT gate on agent_running flag — got {:?}",
+            result_idle
         );
     }
 }

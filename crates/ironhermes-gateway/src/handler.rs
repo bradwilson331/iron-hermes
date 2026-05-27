@@ -787,6 +787,15 @@ impl GatewayMessageHandler {
                         )).await;
                         return Ok(());
                     }
+                    // Phase 36.17.1 Plan 03 Task 1 placeholder — the real Queued
+                    // intercept (synthesize MessageEvent, call session_queue.try_push,
+                    // depth-aware reply, cap-hit UX) is implemented by Task 2 of
+                    // this plan. This stub exists only to keep `cargo build` clean
+                    // while Task 1 lands the enum variant.
+                    CoreCommandResult::Queued { message: _ } => {
+                        // TODO Plan 03 Task 2: intercept Queued and call session_queue.try_push
+                        return Ok(());
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {

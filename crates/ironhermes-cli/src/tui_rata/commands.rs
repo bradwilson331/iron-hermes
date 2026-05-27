@@ -1120,5 +1120,12 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         ),
         CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
         CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
+        // Phase 36.17.1 Plan 03 Task 1: the SessionQueue lives on GatewayRunner
+        // only. tui_rata has no per-session FIFO yet (TUI queue wiring deferred
+        // per D-02). Map to a visible Handled outcome so the user gets feedback
+        // that the /queue command was understood.
+        CommandResult::Queued { message } => {
+            SlashOutcome::Handled(format!("Queued: {message}"))
+        }
     }
 }

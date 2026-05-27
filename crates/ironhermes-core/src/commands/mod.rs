@@ -173,6 +173,22 @@ pub enum CommandResult {
     /// (kebab-case); `body` is the full SKILL.md body text returned by
     /// `SkillRegistry::read_content`.
     SkillActivated { name: String, body: String },
+
+    /// Phase 36.17.1 (D-01.c / D-08): `/queue <message>` produced an event that
+    /// should be queued for replay after the current agent turn finishes. The
+    /// gateway handler intercepts this variant, synthesizes a `MessageEvent`
+    /// inheriting platform / chat_id / sender_id / message_id from the triggering
+    /// event, and calls `session_queue.try_push(...)` (handler.rs Queued arm).
+    ///
+    /// Non-gateway surfaces (CLI/TUI) without a per-session queue should map
+    /// this variant to `CommandResult::Output(format!("Queued: {message}"))` or
+    /// a surface-appropriate equivalent so the user receives feedback even
+    /// without a real queue (the SessionQueue lives on `GatewayRunner` only).
+    ///
+    /// This keeps `cmd_queue` (handlers.rs) side-effect free — the actual push
+    /// happens at the gateway boundary, mirroring how `NewSession` is
+    /// intercepted by the gateway/TUI handlers.
+    Queued { message: String },
 }
 
 // =============================================================================
