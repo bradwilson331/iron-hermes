@@ -104,6 +104,24 @@ cargo build -p iron_hermes_ui --features server
 echo
 
 # -----------------------------------------------------------------------------
+# Satisfy dioxus-server's public-dir precondition.
+#
+# dioxus-server (0.7.x) panics at startup if target/debug/public/ does not
+# exist (serve_dir_cached calls fs::read_dir and unwrap_or_else-panics on
+# ENOENT). In normal dev workflow `dx build` / `dx serve` produces this
+# directory with the bundled client assets. This UAT bypasses the Dioxus CLI
+# (it boots the bin via `cargo run` so TraceLayer behavior is unobscured by
+# the dx-serve dev proxy). An empty public/ is enough — TraceLayer is a
+# router-level middleware that fires on every incoming request BEFORE any
+# SSR/static-asset handler runs, so the access-log entry happens regardless
+# of whether the SSR handler returns 200 or 500.
+# -----------------------------------------------------------------------------
+echo "==> Ensuring target/debug/public/ exists (dioxus-server precondition)"
+mkdir -p target/debug/public
+echo "    OK"
+echo
+
+# -----------------------------------------------------------------------------
 # Start the server in the background. Redirect stdout + stderr to /tmp files
 # so we can (a) keep this script's own output uncluttered, (b) post-mortem
 # the server's tracing output if a gate fails, (c) grep stdout for Gate 5's
