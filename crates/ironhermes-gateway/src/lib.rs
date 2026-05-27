@@ -7,6 +7,7 @@ pub mod pid;
 pub mod rate_limiter;
 pub mod runner;
 pub mod session;
+pub mod session_queue; // Phase 36.17.1 — per-session FIFO queue (Python parity: gateway/run.py §2304-2415)
 pub mod slack; // Phase 34 — D-11
 pub mod stream_consumer;
 pub mod telegram;
