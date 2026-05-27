@@ -606,6 +606,17 @@ impl GatewayMessageHandler {
                             session = ?session_key,
                             "gateway /new: session removed; per-session compression state discarded (34b D-10)"
                         );
+                        // Phase 36.17.1 Pitfall 5: clear queue BEFORE session_store.remove.
+                        // If store.remove fires first, the GatewaySession (including the
+                        // running AtomicBool) is dropped — a racing run_agent turn could see
+                        // the flag is gone and create a new session, then clear_queue would
+                        // clear the NEW session's queue. By clearing first, we guarantee:
+                        //   queue cleared -> session removed -> no window for stale events
+                        // The clear call is sync (std::sync::Mutex) so no guard crosses an
+                        // await. Covers /reset too (def.name aliased to "new" at the router).
+                        if let Some(ref queue) = self.session_queue {
+                            queue.clear(&session_key);
+                        }
                         let had_session = {
                             let mut store = self.session_store.write().await;
                             store.remove(&session_key).is_some()
@@ -785,6 +796,95 @@ impl GatewayMessageHandler {
                             &activation_msg,
                             None,
                         )).await;
+                        return Ok(());
+                    }
+                    // Phase 36.17.1 Plan 03 Task 2: /queue dispatch intercept.
+                    //
+                    // Synthesize a new MessageEvent whose content is the
+                    // user-supplied `message`, but whose identity
+                    // (platform/chat_id/sender_id/message_id) inherits from the
+                    // triggering event (T-36.17.1-02 mitigation: a user cannot
+                    // impersonate another session via crafted /queue input —
+                    // identity fields are NOT taken from args).
+                    //
+                    // Call session_queue.try_push under the existing
+                    // session_key (Pitfall 7: full triple, built at line 404).
+                    // On Ok(()): depth-aware reply mirroring Python parity
+                    // (gateway/run.py:6814-6820). On Err(CapacityReached):
+                    // identical D-13 UX as the busy-branch cap-hit path
+                    // (❌ reaction + ⏳ chat reply + tracing::warn!).
+                    //
+                    // If session_queue is None (handler built outside
+                    // build_gateway_handler — e.g., legacy GW-05 tests), reply
+                    // with the depth-1 confirmation anyway so the user sees
+                    // feedback. This matches the busy-branch fallback (degraded
+                    // but visible).
+                    //
+                    // Pitfall 2: SessionQueue methods are sync; the std::sync
+                    // MutexGuard inside try_push/len drops before any .await
+                    // here. The borrow checker enforces that the guard is
+                    // !Send so it cannot cross an await boundary.
+                    CoreCommandResult::Queued { message } => {
+                        let queued_event = MessageEvent {
+                            content: message.clone(),
+                            ..event.clone()
+                        };
+                        if let Some(queue) = self.session_queue.as_ref() {
+                            match queue.try_push(&session_key, queued_event) {
+                                Ok(()) => {
+                                    let depth = queue.len(&session_key);
+                                    let reply = if depth <= 1 {
+                                        "Queued for the next turn.".to_string()
+                                    } else {
+                                        format!("Queued for the next turn. ({depth} queued)")
+                                    };
+                                    with_rate_limit_retry(|| {
+                                        adapter.send_message(&event.chat_id, &reply, None)
+                                    })
+                                    .await?;
+                                    tracing::debug!(
+                                        session = %session_key.to_string_key(),
+                                        depth,
+                                        "SessionQueue: /queue dispatched, event enqueued (Phase 36.17.1)"
+                                    );
+                                }
+                                Err(QueueError::CapacityReached { .. }) => {
+                                    // D-13 UX: best-effort ❌ reaction
+                                    // (Telegram may rate-limit reactions, so we
+                                    // use .ok() — failure must not poison the
+                                    // chat reply). Then the ⏳ chat reply.
+                                    adapter
+                                        .add_reaction(&event.chat_id, &event.message_id, "❌")
+                                        .await
+                                        .ok();
+                                    with_rate_limit_retry(|| {
+                                        adapter.send_message(
+                                            &event.chat_id,
+                                            "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
+                                            None,
+                                        )
+                                    })
+                                    .await?;
+                                    tracing::warn!(
+                                        session = %session_key.to_string_key(),
+                                        "SessionQueue: /queue cap reached, message dropped (Phase 36.17.1)"
+                                    );
+                                }
+                            }
+                        } else {
+                            // Degraded fallback: no per-session queue wired.
+                            // Send the depth-1 confirmation so the user gets
+                            // feedback even on handlers built outside
+                            // build_gateway_handler (e.g., legacy GW-05 tests).
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "Queued for the next turn.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                        }
                         return Ok(());
                     }
                 }
