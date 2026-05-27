@@ -425,6 +425,12 @@ impl GatewayRunner {
         if let Some(ref ws) = self.workspace {
             handler.set_workspace(ws.clone());
         }
+
+        // Phase 36.17.1 (D-14, D-15, RESEARCH Open Q3): thread the per-session
+        // FIFO queue Arc. Without this call the handler.session_queue stays
+        // None and `handle_with_multimodal` falls back to the Phase 36 reject
+        // path. With it, the busy-branch enqueues and cap-hit fires D-13 UX.
+        handler.set_session_queue(self.session_queue.clone());
         // Phase 25.3-15 CR-02 close-out: trajectory writers are no longer
         // process-wide; per-session writers are owned (and lazily opened) by
         // `SessionStore` keyed by the canonical SQLite session UUID. The

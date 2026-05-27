@@ -30,6 +30,7 @@ use crate::adapter::{MessageHandler, PlatformAdapter};
 use crate::multimodal::ProcessedAttachments;
 use crate::rate_limiter::PerUserRateLimiter;
 use crate::session::{SessionKey, SessionStore};
+use crate::session_queue::{QueueError, SessionQueue};
 use crate::stream_consumer::StreamConsumer;
 
 /// Retry wrapper for Telegram API calls that may hit 429 rate limits (D-19).
@@ -167,6 +168,18 @@ pub struct GatewayMessageHandler {
     /// Reset to 0 on fire; entries removed via session_store eviction is best-effort
     /// (T-32-06 accepted — one u32 per active session is negligible memory).
     nudge_turns: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, u32>>>,
+
+    /// Phase 36.17.1 (D-14, RESEARCH Open Q3): per-session FIFO message queue,
+    /// threaded from `GatewayRunner::build_gateway_handler` via
+    /// `set_session_queue`. `Option` preserves backward-compat for handlers
+    /// built outside `build_gateway_handler` (e.g. Phase 36 GW-05 tests at
+    /// `tests/running_agent_guard_tests.rs` that call `GatewayMessageHandler::new`
+    /// directly — those still see the original reject-with-AGENT_RUNNING_REJECT_MSG
+    /// behavior when this field is `None`). The `Arc` mirrors the exact pattern
+    /// used for `Arc<RwLock<SessionStore>>`; using `Arc<SessionQueue>` rather
+    /// than `Arc<GatewayRunner>` avoids the circular-reference trap noted in
+    /// RESEARCH Open Q3.
+    session_queue: Option<Arc<SessionQueue>>,
 }
 
 impl GatewayMessageHandler {
@@ -211,6 +224,11 @@ impl GatewayMessageHandler {
             // Phase 32 Plan 02 (LEARN-01): per-session nudge counter starts empty;
             // entries created lazily on first turn per session in run_agent's fire site.
             nudge_turns: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // Phase 36.17.1 (D-14, RESEARCH Open Q3): no queue wired until
+            // `build_gateway_handler` calls `set_session_queue`. Phase 36 GW-05
+            // tests that construct `GatewayMessageHandler::new` directly see
+            // None here and fall through to the original reject path.
+            session_queue: None,
         }
     }
 
@@ -325,6 +343,15 @@ impl GatewayMessageHandler {
     /// runner + tool registry + context engine for consistent fanout.
     pub fn set_memory_manager(&mut self, manager: Arc<TokioMutex<MemoryManager>>) {
         self.memory_manager = Some(manager);
+    }
+
+    /// Phase 36.17.1 (D-14, D-15, RESEARCH Open Q3): install the per-session
+    /// FIFO queue Arc threaded from `GatewayRunner::build_gateway_handler`.
+    /// Once set, `handle_with_multimodal`'s busy-branch enqueues instead of
+    /// rejecting; unset preserves the original `AGENT_RUNNING_REJECT_MSG`
+    /// path for handlers built outside the runner (e.g. Phase 36 GW-05 tests).
+    pub fn set_session_queue(&mut self, queue: Arc<SessionQueue>) {
+        self.session_queue = Some(queue);
     }
 
     /// Set the hook registry for event emission.
@@ -837,17 +864,59 @@ impl GatewayMessageHandler {
                 .handle_slash_command(event, adapter, cancel, processed)
                 .await;
         }
-        // Phase 36 (D-02, Pitfall 1): guard for non-slash (free-text) path.
-        // Retrieve the per-session flag and reject if an agent turn is already in flight.
+        // Phase 36 (D-02, Pitfall 1) + Phase 36.17.1 (D-01, D-13):
+        //   - if `session_queue` is set (handler built via GatewayRunner): enqueue
+        //     instead of rejecting; cap-hit fires the D-13 Telegram UX (❌ + chat
+        //     reply). Free-text enqueues are SILENT per D-13 — the existing
+        //     UserQueueManager transport-layer 👁 reaction is the visible signal.
+        //   - if `session_queue` is None (handler built directly via ::new(),
+        //     e.g. Phase 36 GW-05 tests at running_agent_guard_tests.rs): keep
+        //     the original AGENT_RUNNING_REJECT_MSG behavior for backward-compat.
         {
             let session_key =
                 SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
             let agent_running = self.session_store.read().await.get_running_flag(&session_key);
             if agent_running.load(Ordering::SeqCst) {
-                with_rate_limit_retry(|| {
-                    adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
-                })
-                .await?;
+                if let Some(queue) = self.session_queue.as_ref() {
+                    // Phase 36.17.1: enqueue branch. `try_push` is sync — guard
+                    // drops before any await (RESEARCH Pitfall 2 mitigation).
+                    match queue.try_push(&session_key, event.clone()) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                session = %session_key.to_string_key(),
+                                depth = queue.len(&session_key),
+                                "SessionQueue: enqueued event while agent busy (Phase 36.17.1)"
+                            );
+                        }
+                        Err(QueueError::CapacityReached { .. }) => {
+                            // D-13 UX: best-effort ❌ reaction, then chat reply.
+                            // `.ok()` so a reaction failure does not poison the
+                            // chat reply (Telegram may rate-limit reactions).
+                            adapter
+                                .add_reaction(&event.chat_id, &event.message_id, "❌")
+                                .await
+                                .ok();
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                            tracing::warn!(
+                                session = %session_key.to_string_key(),
+                                "SessionQueue: capacity reached, message dropped (Phase 36.17.1)"
+                            );
+                        }
+                    }
+                } else {
+                    // Backward-compat fallback: original Phase 36 reject path.
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                }
                 return Ok(());
             }
         }
