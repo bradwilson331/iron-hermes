@@ -533,3 +533,255 @@ async fn test_drain_after_turn() {
         msgs
     );
 }
+
+// ===========================================================================
+// Phase 36.17.1 Plan 03 Task 2 — /queue dispatch + /new clear-ordering tests
+// ===========================================================================
+
+/// Helper: dispatch the literal `/queue <text>` command through the public
+/// MessageHandler::handle entry point so we exercise the FULL gateway slash
+/// dispatch path including handle_slash_command's CommandResult::Queued arm.
+fn make_slash_event(chat_id: &str, slash_text: &str) -> MessageEvent {
+    MessageEvent {
+        platform: Platform::Telegram,
+        // Unique message_id so cap-hit reaction assertions can target it.
+        message_id: format!("slashmsg-{}", slash_text.replace(' ', "_")),
+        chat_id: chat_id.to_string(),
+        sender_id: "u1".to_string(),
+        content: slash_text.to_string(),
+        attachments: vec![],
+        thread_id: None,
+        chat_type: "dm".to_string(),
+        chat_name: None,
+        sender_name: None,
+        replied_to_id: None,
+    }
+}
+
+/// Plan 03 Task 2 behavior 1:
+/// `/queue <message>` dispatched via MessageHandler::handle goes through
+/// the Queued arm of handle_slash_command, synthesizes a MessageEvent that
+/// inherits the triggering event's identity, pushes onto SessionQueue, and
+/// sends a depth-aware confirmation:
+///   - First push (depth == 1): "Queued for the next turn."
+///   - Second push (depth == 2): "Queued for the next turn. (2 queued)"
+#[tokio::test]
+async fn test_cmd_queue_enqueues_and_replies_with_depth() {
+    use ironhermes_gateway::adapter::MessageHandler;
+
+    let store = build_test_session_store();
+    let queue = Arc::new(SessionQueue::new());
+    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
+    let adapter = RecordingPlatformAdapter::new();
+
+    let key = test_session_key("chat-q");
+    // Pre-create the session so SessionStore.get_running_flag returns a
+    // stable Arc<AtomicBool> for the slash-dispatch path.
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+
+    // Pre-condition: queue is empty.
+    assert_eq!(queue.len(&key), 0, "queue must start empty");
+
+    // First /queue dispatch.
+    let ev1 = make_slash_event("chat-q", "/queue hello");
+    handler
+        .handle(&ev1, adapter.clone(), CancellationToken::new())
+        .await
+        .expect("first /queue handles Ok");
+
+    // After push: depth == 1; one chat reply containing the singular text.
+    assert_eq!(queue.len(&key), 1, "first /queue must push (depth == 1)");
+    let msgs1 = adapter.messages().await;
+    assert_eq!(msgs1.len(), 1, "expected exactly 1 send_message, got {:?}", msgs1);
+    assert_eq!(
+        msgs1[0].1, "Queued for the next turn.",
+        "depth==1 reply must use the singular form"
+    );
+
+    // Second /queue dispatch.
+    let ev2 = make_slash_event("chat-q", "/queue world");
+    handler
+        .handle(&ev2, adapter.clone(), CancellationToken::new())
+        .await
+        .expect("second /queue handles Ok");
+
+    // After push: depth == 2; second chat reply contains plural form.
+    assert_eq!(queue.len(&key), 2, "second /queue must push (depth == 2)");
+    let msgs2 = adapter.messages().await;
+    assert_eq!(msgs2.len(), 2, "expected exactly 2 send_message after 2 pushes");
+    assert!(
+        msgs2[1].1.contains("(2 queued)"),
+        "depth==2 reply must include depth suffix; got {:?}",
+        msgs2[1].1
+    );
+
+    // T-36.17.1-02 mitigation evidence: the synthesized MessageEvents in the
+    // queue inherit identity from the triggering event (chat_id, sender_id),
+    // and content == the args (hello / world), not the raw "/queue hello".
+    // Pop and inspect.
+    let popped1 = queue.pop(&key).expect("first pop yields event");
+    assert_eq!(popped1.content, "hello", "first queued content == 'hello'");
+    assert_eq!(popped1.chat_id, "chat-q", "chat_id inherits from triggering event");
+    assert_eq!(popped1.sender_id, "u1", "sender_id inherits from triggering event");
+
+    let popped2 = queue.pop(&key).expect("second pop yields event");
+    assert_eq!(popped2.content, "world", "second queued content == 'world'");
+    assert_eq!(popped2.chat_id, "chat-q");
+    assert_eq!(popped2.sender_id, "u1");
+}
+
+/// Plan 03 Task 2 behavior 2:
+/// `/queue` cap-hit: pre-fill the queue to MAX_QUEUE_DEPTH (128), dispatch a
+/// `/queue overflow` slash command and assert the cap-hit branch fires:
+///   - one add_reaction("❌") targeting the slash message's message_id
+///   - one chat reply containing "Queue is full (128 messages)"
+///   - queue depth still 128 (T-36.17.1-01 cap held)
+#[tokio::test]
+async fn test_cmd_queue_cap_hit_emits_reaction() {
+    use ironhermes_gateway::adapter::MessageHandler;
+
+    let store = build_test_session_store();
+    let queue = Arc::new(SessionQueue::new());
+    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
+    let adapter = RecordingPlatformAdapter::new();
+
+    let key = test_session_key("chat-q-cap");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+
+    // Pre-fill the queue to the cap directly via the public SessionQueue API.
+    for i in 0..MAX_QUEUE_DEPTH {
+        let prefill_event = make_event("chat-q-cap", &format!("prefill-{}", i));
+        queue
+            .try_push(&key, prefill_event)
+            .expect("prefill within cap");
+    }
+    assert_eq!(queue.len(&key), MAX_QUEUE_DEPTH, "queue pre-filled to cap");
+
+    // /queue command — must trip the CapacityReached branch of the Queued
+    // arm, not the Ok branch.
+    let slash_event = make_slash_event("chat-q-cap", "/queue overflow");
+    handler
+        .handle(&slash_event, adapter.clone(), CancellationToken::new())
+        .await
+        .expect("handle returns Ok on cap-hit (UX sent, return Ok)");
+
+    // Cap held — push was rejected.
+    assert_eq!(
+        queue.len(&key),
+        MAX_QUEUE_DEPTH,
+        "cap must hold at {}; new push must be dropped",
+        MAX_QUEUE_DEPTH
+    );
+
+    // Exactly one ❌ reaction targeting the slash-message_id.
+    let reactions = adapter.reactions().await;
+    assert_eq!(
+        reactions.len(),
+        1,
+        "expected exactly 1 add_reaction call; got {:?}",
+        reactions
+    );
+    assert_eq!(reactions[0].emoji, "❌");
+    assert_eq!(reactions[0].chat_id, "chat-q-cap");
+    assert_eq!(
+        reactions[0].message_id, "slashmsg-/queue_overflow",
+        "reaction targets the /queue slash message_id"
+    );
+
+    // Exactly one chat reply containing the cap-hit literal.
+    let msgs = adapter.messages().await;
+    let cap_hit_msgs: Vec<&(String, String)> = msgs
+        .iter()
+        .filter(|(_, c)| c.contains("Queue is full (128 messages)"))
+        .collect();
+    assert_eq!(
+        cap_hit_msgs.len(),
+        1,
+        "expected exactly 1 cap-hit chat reply via Queued arm; got messages: {:?}",
+        msgs
+    );
+}
+
+/// Plan 03 Task 2 behavior 3 — Pitfall 5 ordering proof:
+/// /new (slash command) MUST call session_queue.clear(&session_key) BEFORE
+/// session_store.remove(&session_key). Pre-fill the queue with 3 events for
+/// a session_key; dispatch `/new`; assert that AFTER the dispatch:
+///   - queue_len(key) == 0 (clear ran)
+///   - session_store no longer contains the key (remove ran)
+/// The relative ordering is enforced at source-code level by the gateway
+/// handler's clear-then-remove block; this test confirms both ran and the
+/// post-state is consistent.
+#[tokio::test]
+async fn test_new_clears_queue_before_session_remove() {
+    use ironhermes_gateway::adapter::MessageHandler;
+
+    let store = build_test_session_store();
+    let queue = Arc::new(SessionQueue::new());
+    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
+    let adapter = RecordingPlatformAdapter::new();
+
+    let key = test_session_key("chat-new");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+
+    // Pre-fill queue with 3 events for this session.
+    for c in ["A", "B", "C"] {
+        queue
+            .try_push(&key, make_event("chat-new", c))
+            .expect("pre-fill under cap");
+    }
+    assert_eq!(queue.len(&key), 3, "queue pre-filled with 3 events");
+
+    // Pre-condition: session exists in store.
+    {
+        let s = store.read().await;
+        assert!(
+            s.get(&key).is_some(),
+            "session must exist in store before /new"
+        );
+    }
+
+    // Dispatch /new.
+    let new_event = make_slash_event("chat-new", "/new");
+    handler
+        .handle(&new_event, adapter.clone(), CancellationToken::new())
+        .await
+        .expect("/new handles Ok");
+
+    // Post-condition 1: queue is empty (clear ran).
+    assert_eq!(
+        queue.len(&key),
+        0,
+        "Pitfall 5: queue must be empty after /new (clear before remove)"
+    );
+
+    // Post-condition 2: session removed from store.
+    {
+        let s = store.read().await;
+        assert!(
+            s.get(&key).is_none(),
+            "session must be removed from store after /new"
+        );
+    }
+
+    // Confirmation reply was sent ("Conversation cleared. Starting fresh.").
+    let msgs = adapter.messages().await;
+    let confirmation_msgs: Vec<&(String, String)> = msgs
+        .iter()
+        .filter(|(_, c)| c.contains("Conversation cleared") || c.contains("Ready for a new one"))
+        .collect();
+    assert_eq!(
+        confirmation_msgs.len(),
+        1,
+        "expected /new confirmation reply; got messages: {:?}",
+        msgs
+    );
+}
