@@ -49,7 +49,9 @@ ironhermes/
 | `ToolCall` / `FunctionCall` | structs | Wire-format tool call and function invocation |
 | `ToolSchema` / `FunctionSchema` | structs | OpenAI-compatible tool definition |
 | `Config` | struct | Top-level config with ~20 sub-structs covering models, memory, cron, exec, browser, security, hub, subagents, and batch |
-| `ProviderConfig` / `CustomProviderConfig` | structs | Per-provider API endpoint and key configuration |
+| `ProviderConfig` / `CustomProviderConfig` | structs | Per-provider API endpoint and key configuration; `extra_request_options` + `models` map (Phase 36.15) flow into `ChatRequest.extra` at LLM call time |
+| `ProviderModelConfig` | struct | Per-model override block under `providers.<name>.models.<model>` — typically holds `extra_request_options` (Phase 36.15) |
+| `resolve_extras` | fn (config_extras) | Merges provider-level + per-model `extra_request_options` per-turn into the `HashMap` passed to `AgentLoop::with_resolved_extras` (Phase 36.15) |
 | `ProviderResolver` / `ResolvedEndpoint` | structs | Runtime provider selection and endpoint resolution |
 | `ModelRegistry` / `ModelMetadata` / `ModelCapabilities` | structs | Cached model capability metadata |
 | `ModelsCache` / `fetch_all` | struct + fn | Fetches and normalizes model lists from OpenRouter and models.dev |
@@ -342,7 +344,7 @@ Tool modules (each exports one or more `Tool` implementations):
 |------|------|-------------|
 | `AgentRuntime` | struct | Durable, channel-agnostic agent unit. Built once per logical agent via `from_config`; owns client, registry, budget, skills, hooks, browser, memory. `run_turn(TurnRequest)` is the single per-turn API used by every channel (Phase 28.1) |
 | `TurnRequest` | struct | Per-turn input channels assemble: messages, session id, cancel token, stream + tool callbacks |
-| `AgentLoop` | struct | Core turn loop: calls LLM, parses tool calls, executes tools, repeats. Assembled per-turn inside `AgentRuntime::run_turn` |
+| `AgentLoop` | struct | Core turn loop: calls LLM, parses tool calls, executes tools, repeats. Assembled per-turn inside `AgentRuntime::run_turn`. `with_resolved_extras` carries per-turn extras (Phase 36.15) into `call_llm` / `call_llm_streaming` and onto `ChatRequest.extra` |
 | `AgentResult` | struct | Loop output: `messages`, `appended`, `turns_used`, `finished_naturally`, `final_response`, `total_usage`, `compression_count_after`, `stop_reason` |
 | `AggregatedUsage` | struct | Accumulated input/output token counts |
 | `StopReason` | enum | `Natural` / `MaxIterations` / `BudgetExhausted` / `Cancelled` |
