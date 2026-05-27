@@ -924,7 +924,13 @@ impl GatewayMessageHandler {
     }
 
     /// Run the agent loop for a message event — drives streaming to StreamConsumer.
-    async fn run_agent(
+    ///
+    /// Phase 36.17.1 Plan 02 Task 3: visibility relaxed to `pub(crate)` so
+    /// `GatewayRunner::drain_pending` can invoke `run_agent` directly,
+    /// bypassing `handle_with_multimodal`'s busy-guard (RESEARCH Pitfall 4 —
+    /// the RAII `RunningAgentGuard` inside `run_agent` re-sets the AtomicBool
+    /// for each drained turn).
+    pub(crate) async fn run_agent(
         &self,
         event: &MessageEvent,
         adapter: Arc<dyn PlatformAdapter>,
@@ -1396,17 +1402,51 @@ impl MessageHandler for GatewayMessageHandler {
                 .handle_slash_command(event, adapter, cancel, no_attachments)
                 .await;
         }
-        // Phase 36 (D-02, Pitfall 1): guard for non-slash (free-text) path.
-        // Retrieve the per-session flag and reject if an agent turn is already in flight.
+        // Phase 36 (D-02, Pitfall 1) + Phase 36.17.1 (D-01, D-13):
+        // Mirror of `handle_with_multimodal`'s busy-branch behavior (text-only
+        // path — no multimodal attachments forwarded). When `session_queue`
+        // is set, enqueue + D-13 cap-hit UX; otherwise fall back to the
+        // original AGENT_RUNNING_REJECT_MSG path for backward compatibility
+        // with Phase 36 GW-05 reject tests that bypass `set_session_queue`.
         {
             let session_key =
                 SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
             let agent_running = self.session_store.read().await.get_running_flag(&session_key);
             if agent_running.load(Ordering::SeqCst) {
-                with_rate_limit_retry(|| {
-                    adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
-                })
-                .await?;
+                if let Some(queue) = self.session_queue.as_ref() {
+                    match queue.try_push(&session_key, event.clone()) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                session = %session_key.to_string_key(),
+                                depth = queue.len(&session_key),
+                                "SessionQueue: enqueued event while agent busy (Phase 36.17.1)"
+                            );
+                        }
+                        Err(QueueError::CapacityReached { .. }) => {
+                            adapter
+                                .add_reaction(&event.chat_id, &event.message_id, "❌")
+                                .await
+                                .ok();
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                            tracing::warn!(
+                                session = %session_key.to_string_key(),
+                                "SessionQueue: capacity reached, message dropped (Phase 36.17.1)"
+                            );
+                        }
+                    }
+                } else {
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                }
                 return Ok(());
             }
         }

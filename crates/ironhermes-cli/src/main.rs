@@ -2503,7 +2503,10 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     if let Some(ref mgr) = mcp_manager {
         runner.set_mcp_manager(mgr.clone());
     }
-    runner.start().await
+    // Phase 36.17.1 Plan 02 Task 3: GatewayRunner::start now takes Arc<Self>
+    // so per-chat workers can capture Arc<GatewayRunner> and invoke
+    // `runner.drain_pending(...)` after each handler turn.
+    std::sync::Arc::new(runner).start().await
 }
 
 fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {

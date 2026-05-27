@@ -355,6 +355,85 @@ impl GatewayRunner {
         self.session_queue.clone()
     }
 
+    /// Phase 36.17.1 Plan 02 Task 3: post-turn FIFO drain (D-01 part (b)).
+    ///
+    /// Pops events from the session queue and re-invokes `handler.run_agent`
+    /// in arrival order until the queue is empty. Called by the per-chat
+    /// worker after each `handle_with_multimodal` turn returns.
+    ///
+    /// Bypasses `handle_with_multimodal` per RESEARCH Pitfall 4 — the
+    /// RAII `RunningAgentGuard` inside `run_agent` re-sets the per-session
+    /// AtomicBool true for the duration of each drained turn, so a push
+    /// arriving mid-drain enqueues onto the same key and is picked up on
+    /// the next pop iteration. Order is preserved by `VecDeque` FIFO.
+    ///
+    /// Exposed as `pub` so the Plan 02 Task 3 integration test
+    /// (`tests/session_queue_integration.rs` — an external test binary that
+    /// can only see `pub` items, not `pub(crate)`) can invoke the real drain
+    /// loop directly. NOT a substitute pop-sequence unit test — the test
+    /// must exercise this code path.
+    ///
+    /// [Rule 3 - Blocking] The plan acceptance criterion says
+    /// `pub(crate) async fn drain_pending` but integration tests cannot reach
+    /// crate-private items. We widen to `pub` so the required integration
+    /// test in `tests/session_queue_integration.rs` can call
+    /// `runner.drain_pending(...)`. Documented in the plan SUMMARY.
+    pub async fn drain_pending(
+        &self,
+        key: &SessionKey,
+        handler: &GatewayMessageHandler,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        // Replayed events go through the agent loop without their original
+        // multimodal envelope (which was consumed at the original
+        // `handle_with_multimodal` call). The `MessageEvent.content` field
+        // already carries any text-only payload the agent needs.
+        //
+        // Phase 36.17.1 Plan 02 Task 3 [Rule 2 - critical functionality
+        // refinement]: drain continues on individual `run_agent` errors
+        // (logs and proceeds to next event) rather than propagating the
+        // first `?` — a single bad event must not poison the rest of the
+        // queue. This matches the Python reference's per-iteration
+        // resilience in `_promote_queued_event`. Cancellation still
+        // short-circuits the drain via the `cancel` token; the loop
+        // is broken explicitly when the token is fired between pops.
+        while let Some(next_event) = self.session_queue.pop(key) {
+            if cancel.is_cancelled() {
+                tracing::info!(
+                    session = %key.to_string_key(),
+                    "SessionQueue: drain cancelled (Phase 36.17.1)"
+                );
+                break;
+            }
+            tracing::debug!(
+                session = %key.to_string_key(),
+                remaining = self.session_queue.len(key),
+                "SessionQueue: draining next queued event (Phase 36.17.1)"
+            );
+            let no_attachments = crate::multimodal::ProcessedAttachments {
+                text_prefix: None,
+                image_data_uri: None,
+            };
+            if let Err(e) = handler
+                .run_agent(
+                    &next_event,
+                    adapter.clone(),
+                    cancel.clone(),
+                    no_attachments,
+                )
+                .await
+            {
+                tracing::error!(
+                    session = %key.to_string_key(),
+                    error = %e,
+                    "SessionQueue: drained event run_agent failed; continuing (Phase 36.17.1)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Plan 03 (Phase 22.4.2.1): returns a clone of the runner's CancellationToken.
     /// Used by gateway integration tests (tests/gateway_shutdown.rs) to fire
     /// shutdown without going through the OS signal layer.
@@ -478,7 +557,13 @@ impl GatewayRunner {
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
-    pub async fn start(&self) -> Result<()> {
+    ///
+    /// Phase 36.17.1 Plan 02 Task 3: takes `self: Arc<Self>` so the per-chat
+    /// worker spawn closure can capture an `Arc<GatewayRunner>` clone and
+    /// call `runner.drain_pending(...)` after each handler turn. The
+    /// `'static` requirement of `JoinSet::spawn` forces this — a borrow of
+    /// `&self` cannot escape into the spawned task.
+    pub async fn start(self: Arc<Self>) -> Result<()> {
         // --- 0. Acquire PID lock (Phase 24 D-09/D-12) ---
         // Refuses startup if another live gateway is already running under
         // the same HERMES_HOME (profile-scoped after Phase 24's --profile
@@ -727,6 +812,11 @@ impl GatewayRunner {
         let cancel_dispatch = self.cancel.clone();
         let mut msg_rx = msg_rx;
         let bot_username_str = bot_username.clone();
+        // Phase 36.17.1 Plan 02 Task 3: clone Arc<GatewayRunner> for the per-chat
+        // worker spawn closure so it can call `runner.drain_pending(...)` after
+        // each handler turn returns. The Arc<Self> threading is what motivates
+        // the `start(self: Arc<Self>)` signature change introduced in this plan.
+        let runner_dispatch: Arc<Self> = self.clone();
 
         // Plan 03: clone Arc so dispatch_future (async move) can spawn into worker_join_set
         let worker_join_set_dispatch = worker_join_set.clone();
@@ -809,6 +899,9 @@ impl GatewayRunner {
                             let cancel_task = cancel_dispatch.clone();
                             let queue_task = user_queue_dispatch.clone();
                             let chat_id_task = msg.chat.id.to_string();
+                            // Phase 36.17.1 Plan 02 Task 3: Arc<GatewayRunner> for
+                            // the post-turn `drain_pending` call after each turn.
+                            let runner_task = runner_dispatch.clone();
 
                             // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
                             // per-chat workers are tracked and drained on shutdown (D-10/D-11).
@@ -835,8 +928,6 @@ impl GatewayRunner {
                                         )
                                         .await;
 
-                                    drop(permit);
-
                                     if let Err(e) = result {
                                         error!(
                                             chat_id = %queued_msg.event.chat_id,
@@ -844,6 +935,35 @@ impl GatewayRunner {
                                             "Handler error for message"
                                         );
                                     }
+
+                                    // Phase 36.17.1 Plan 02 Task 3 (D-01 part (b)):
+                                    // After each handler turn — whether it ran the
+                                    // agent or queued during a busy turn — drain any
+                                    // events that arrived while the agent was busy.
+                                    // The drain helper calls `run_agent` directly,
+                                    // bypassing the busy-guard (RESEARCH Pitfall 4).
+                                    let drain_key = SessionKey::new(
+                                        queued_msg.event.platform.clone(),
+                                        &queued_msg.event.chat_id,
+                                    )
+                                    .with_user(&queued_msg.event.sender_id);
+                                    if let Err(e) = runner_task
+                                        .drain_pending(
+                                            &drain_key,
+                                            handler_task.as_ref(),
+                                            adapter_task.clone(),
+                                            cancel_task.child_token(),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            chat_id = %queued_msg.event.chat_id,
+                                            error = %e,
+                                            "drain_pending error after turn (Phase 36.17.1)"
+                                        );
+                                    }
+
+                                    drop(permit);
 
                                     // Check if we should stop
                                     if cancel_task.is_cancelled() {
