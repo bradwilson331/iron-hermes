@@ -57,7 +57,55 @@ async fn main() {
         .into_make_service();
 
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
-    axum::serve(listener, router).await.unwrap();
+
+    // Deterministic startup marker — fires before the server starts accepting
+    // traffic so web.log has at least one INFO line on every boot, even when
+    // the agent loop never runs (e.g. brief UAT lifecycle). Without this,
+    // a short-lived process may only emit lower-priority events that match the
+    // filter, leaving web.log empty by happenstance.
+    tracing::info!(target: "iron_hermes_ui", "server bound to {address}");
+
+    // Graceful shutdown is load-bearing for file logging: SIGTERM / Ctrl-C
+    // signal axum to complete in-flight requests and return, which lets
+    // main() unwind and drop both _web_log_guard and _access_log_guard. The
+    // guard Drop impls synchronously join the non-blocking writer threads,
+    // flushing any buffered log lines to disk. Without with_graceful_shutdown,
+    // the runtime is hard-killed before main() returns — guards never drop —
+    // and the last batch of buffered tracing events is silently lost.
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+// Resolves when the process receives SIGTERM (POSIX container shutdown) or
+// SIGINT (terminal Ctrl-C). Wired into axum's with_graceful_shutdown so the
+// WorkerGuards held in main() get a chance to flush before process exit.
+#[cfg(feature = "server")]
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        let _ = signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 #[cfg(not(feature = "server"))]
