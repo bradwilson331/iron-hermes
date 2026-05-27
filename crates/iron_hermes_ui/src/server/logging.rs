@@ -42,13 +42,6 @@ use tracing_subscriber::{fmt, prelude::*, registry, EnvFilter};
 /// with the matching `TraceLayer` setup in `main.rs` (Plan 03), which uses
 /// `DefaultOnRequest::new().level(Level::INFO)` to ensure events match the
 /// fixed `tower_http::trace=info` filter on the access file layer.
-///
-/// `#[allow(dead_code)]` is intentional: Plan 36.17-02 ships the helper in
-/// isolation; the call site in `main.rs` (replacing the current
-/// `tracing_subscriber::fmt()...init()` block, lines 18–23) is added by
-/// Plan 36.17-03. Without this attribute, `cargo clippy -- -D warnings`
-/// would fail with `dead_code` until Plan 03 lands.
-#[allow(dead_code)]
 pub fn install_web_logger_subscriber() -> (Option<WorkerGuard>, Option<WorkerGuard>) {
     // Mention Level in code so the import isn't dead — the type doubles as a
     // compile-time anchor for the documented "events emit at INFO" contract
