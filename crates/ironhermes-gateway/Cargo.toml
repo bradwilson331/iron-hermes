@@ -41,3 +41,7 @@ slack-morphism = { version = "2.22.0", features = ["axum"] }
 
 [dev-dependencies]
 # tempfile promoted to [dependencies] — needed at runtime for write_gateway_pid atomic write (Phase 24 D-10)
+# Phase 36.17.1 D-07: proptest powers the #[cfg(test)] SplitSlotQueue parity suite in session_queue.rs.
+# Dev-only — zero runtime cost. ASSUMED legitimate per RESEARCH.md Package Legitimacy Audit.
+proptest = "1"
+tracing-subscriber = { workspace = true }
