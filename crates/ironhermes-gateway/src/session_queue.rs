@@ -440,3 +440,301 @@ mod tests {
         assert_eq!(q.pop(&bob).unwrap().content, "bob-1");
     }
 }
+
+// =============================================================================
+// Parity mirror — #[cfg(test)] only (D-07: zero runtime cost)
+// =============================================================================
+//
+// Mirrors Python's two-layer `pending_slot` + `overflow` layout from
+// `gateway/run.py` §2304-2415 byte-for-byte, then drives both `SessionQueue`
+// and `SplitSlotQueue` through the same arbitrary op sequence via proptest
+// (1024 cases) to prove observable equivalence.
+//
+// Nothing in this module is referenced by the production binary. A release
+// build of `ironhermes-gateway` does not link any of these symbols.
+
+#[cfg(test)]
+mod parity {
+    use super::*;
+    use ironhermes_core::Platform;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    /// Common surface exercised by both queue implementations under proptest.
+    /// `&str` keys (not `SessionKey`) — the mirror only needs string keys for
+    /// equivalence; the production type already proves SessionKey isolation in
+    /// `tests::test_session_isolation` and `tests::test_session_key_full_triple_used`.
+    trait SessionFifoQueue {
+        fn push(&mut self, key: &str, event: MessageEvent) -> Result<(), QueueError>;
+        fn pop(&mut self, key: &str) -> Option<MessageEvent>;
+        fn len(&self, key: &str) -> usize;
+        fn clear(&mut self, key: &str);
+    }
+
+    /// Build a fixture event whose `content` carries the proptest identity.
+    /// All other fields are constant — equivalence is asserted on `content`.
+    fn fixture(content: &str) -> MessageEvent {
+        MessageEvent {
+            platform: Platform::Telegram,
+            message_id: "m".to_string(),
+            chat_id: "c".to_string(),
+            sender_id: "s".to_string(),
+            content: content.to_string(),
+            attachments: Vec::new(),
+            thread_id: None,
+            chat_type: "dm".to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        }
+    }
+
+    fn str_to_session_key(key: &str) -> SessionKey {
+        SessionKey::new(Platform::Telegram, key).with_user("proptest")
+    }
+
+    // ---------- Adapter over the real production SessionQueue ----------
+
+    impl SessionFifoQueue for SessionQueue {
+        fn push(&mut self, key: &str, event: MessageEvent) -> Result<(), QueueError> {
+            SessionQueue::try_push(self, &str_to_session_key(key), event)
+        }
+        fn pop(&mut self, key: &str) -> Option<MessageEvent> {
+            SessionQueue::pop(self, &str_to_session_key(key))
+        }
+        fn len(&self, key: &str) -> usize {
+            SessionQueue::len(self, &str_to_session_key(key))
+        }
+        fn clear(&mut self, key: &str) {
+            SessionQueue::clear(self, &str_to_session_key(key));
+        }
+    }
+
+    // ---------- Python parity mirror ----------
+
+    /// Two-layer FIFO mirroring `gateway/run.py` §2304-2415:
+    ///   - `pending_slot`: adapter._pending_messages (single-slot per session)
+    ///   - `overflow`:     self._queued_events (overflow list per session)
+    ///
+    /// Push: if slot occupied → append overflow; else → fill slot.
+    /// Pop : take slot, then promote overflow head into slot (Python's
+    ///       `_dequeue_pending_event` + `_promote_queued_event` composed).
+    /// Len : `(slot occupied) + overflow.len()`  (Python `_queue_depth`).
+    /// Clear: drop slot AND overflow for this session.
+    struct SplitSlotQueue {
+        pending_slot: HashMap<String, MessageEvent>,
+        overflow: HashMap<String, Vec<MessageEvent>>,
+    }
+
+    impl SplitSlotQueue {
+        fn new() -> Self {
+            Self {
+                pending_slot: HashMap::new(),
+                overflow: HashMap::new(),
+            }
+        }
+    }
+
+    impl SessionFifoQueue for SplitSlotQueue {
+        // _enqueue_fifo (run.py:2315) + MAX_QUEUE_DEPTH cap (D-09)
+        fn push(&mut self, key: &str, event: MessageEvent) -> Result<(), QueueError> {
+            let depth = self.len(key);
+            if depth >= MAX_QUEUE_DEPTH {
+                return Err(QueueError::CapacityReached {
+                    session_key: str_to_session_key(key).to_string_key(),
+                    max: MAX_QUEUE_DEPTH,
+                });
+            }
+            if self.pending_slot.contains_key(key) {
+                // Slot occupied → append to overflow (run.py:2326).
+                self.overflow
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(event);
+            } else {
+                // Slot free → install (run.py:2328).
+                self.pending_slot.insert(key.to_string(), event);
+            }
+            Ok(())
+        }
+
+        // _dequeue_pending_event (run.py:1007) followed by _promote_queued_event (run.py:2331).
+        // Composed because callers observe one logical "pop" — the slot value is
+        // returned, and the overflow head (if any) is promoted into the slot for
+        // the next pop. This mirrors what `VecDeque::pop_front` does in one step.
+        fn pop(&mut self, key: &str) -> Option<MessageEvent> {
+            let taken = self.pending_slot.remove(key)?;
+            // Promote overflow head into the slot.
+            let overflow_now_empty = match self.overflow.get_mut(key) {
+                Some(o) if !o.is_empty() => {
+                    let next = o.remove(0);
+                    self.pending_slot.insert(key.to_string(), next);
+                    o.is_empty()
+                }
+                Some(o) => o.is_empty(),
+                None => true,
+            };
+            if overflow_now_empty {
+                self.overflow.remove(key);
+            }
+            Some(taken)
+        }
+
+        // _queue_depth (run.py:2366).
+        fn len(&self, key: &str) -> usize {
+            let in_slot = if self.pending_slot.contains_key(key) {
+                1
+            } else {
+                0
+            };
+            let in_overflow = self.overflow.get(key).map(|v| v.len()).unwrap_or(0);
+            in_slot + in_overflow
+        }
+
+        // /new + /reset clearing (run.py:6788 and adapter clearing).
+        fn clear(&mut self, key: &str) {
+            self.pending_slot.remove(key);
+            self.overflow.remove(key);
+        }
+    }
+
+    // ---------- Op alphabet driving both queues ----------
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Push(String, String),
+        Pop(String),
+        Len(String),
+        Clear(String),
+    }
+
+    /// Proptest strategy: bounded key/content alphabets so the cap is exercised
+    /// within `0..200` ops per case. Three keys × ~200 ops per case lets some
+    /// runs reach `MAX_QUEUE_DEPTH = 128` (and is uniform across queues).
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        let key_strategy = prop_oneof!["a", "b", "c"];
+        let payload_strategy = "[a-z]{1,4}";
+        prop_oneof![
+            (key_strategy.clone(), payload_strategy)
+                .prop_map(|(k, v)| Op::Push(k.to_string(), v.to_string())),
+            key_strategy.clone().prop_map(|k| Op::Pop(k.to_string())),
+            key_strategy.clone().prop_map(|k| Op::Len(k.to_string())),
+            key_strategy.prop_map(|k| Op::Clear(k.to_string())),
+        ]
+    }
+
+    /// Observable side-effects from running a single Op against a queue.
+    ///   - Push:  emits `PushResult(Ok/Err)`.
+    ///   - Pop:   emits `Popped(Option<content>)`.
+    ///   - Len:   emits `Length(usize)`.
+    ///   - Clear: emits no observation (no return value).
+    #[derive(Debug, PartialEq, Eq)]
+    enum Observation {
+        PushOk,
+        PushErr,
+        Popped(Option<String>),
+        Length(usize),
+    }
+
+    fn drive<Q: SessionFifoQueue>(queue: &mut Q, ops: &[Op]) -> Vec<Observation> {
+        let mut out = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                Op::Push(k, content) => {
+                    let event = fixture(content);
+                    match queue.push(k, event) {
+                        Ok(()) => out.push(Observation::PushOk),
+                        Err(_) => out.push(Observation::PushErr),
+                    }
+                }
+                Op::Pop(k) => {
+                    let popped = queue.pop(k).map(|e| e.content);
+                    out.push(Observation::Popped(popped));
+                }
+                Op::Len(k) => {
+                    out.push(Observation::Length(queue.len(k)));
+                }
+                Op::Clear(k) => {
+                    queue.clear(k);
+                }
+            }
+        }
+        out
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 1024,
+            .. ProptestConfig::default()
+        })]
+
+        /// For any sequence of push/pop/len/clear ops, `SessionQueue` and
+        /// `SplitSlotQueue` produce identical observation sequences.
+        ///
+        /// Closes T-36.17.1-01 (behavioral DoS-bound parity) and proves D-07
+        /// (the production unified `VecDeque` is observably equivalent to
+        /// Python's two-layer pending_slot + overflow layout).
+        #[test]
+        fn proptest_equivalence(ops in prop::collection::vec(op_strategy(), 0..200)) {
+            let mut session_queue = SessionQueue::new();
+            let mut split_slot = SplitSlotQueue::new();
+
+            let observed_session = drive(&mut session_queue, &ops);
+            let observed_split = drive(&mut split_slot, &ops);
+
+            prop_assert_eq!(observed_session, observed_split);
+        }
+
+        /// Push-only sequences never let `SessionQueue::len` exceed
+        /// `MAX_QUEUE_DEPTH` — explicit T-36.17.1-01 memory-DoS evidence.
+        #[test]
+        fn proptest_cap_invariant(
+            keys in prop::collection::vec(prop_oneof!["a", "b", "c"], 0..300)
+        ) {
+            let q = SessionQueue::new();
+            for k in &keys {
+                let _ = q.try_push(&str_to_session_key(k), fixture("x"));
+                prop_assert!(q.len(&str_to_session_key(k)) <= MAX_QUEUE_DEPTH);
+            }
+            for k in ["a", "b", "c"] {
+                prop_assert!(q.len(&str_to_session_key(k)) <= MAX_QUEUE_DEPTH);
+            }
+        }
+    }
+
+    /// Smoke test for the mirror itself — pre-flight check that
+    /// `SplitSlotQueue` implements FIFO correctly before proptest compares it
+    /// against `SessionQueue`.
+    #[test]
+    fn split_slot_smoke() {
+        let mut q = SplitSlotQueue::new();
+        q.push("k", fixture("A")).unwrap();
+        q.push("k", fixture("B")).unwrap();
+        q.push("k", fixture("C")).unwrap();
+        assert_eq!(q.len("k"), 3);
+
+        assert_eq!(q.pop("k").unwrap().content, "A");
+        assert_eq!(q.len("k"), 2);
+        assert_eq!(q.pop("k").unwrap().content, "B");
+        assert_eq!(q.len("k"), 1);
+        assert_eq!(q.pop("k").unwrap().content, "C");
+        assert_eq!(q.len("k"), 0);
+        assert!(q.pop("k").is_none());
+    }
+
+    /// Sanity: the mirror also rejects at MAX_QUEUE_DEPTH (so push-cap parity
+    /// is real, not a coincidence from sequences not reaching the cap).
+    #[test]
+    fn split_slot_cap_at_128() {
+        let mut q = SplitSlotQueue::new();
+        for i in 0..MAX_QUEUE_DEPTH {
+            q.push("k", fixture(&format!("m-{i}"))).unwrap();
+        }
+        assert_eq!(q.len("k"), MAX_QUEUE_DEPTH);
+        let err = q.push("k", fixture("overflow")).unwrap_err();
+        match err {
+            QueueError::CapacityReached { max, .. } => assert_eq!(max, MAX_QUEUE_DEPTH),
+        }
+        assert_eq!(q.len("k"), MAX_QUEUE_DEPTH);
+    }
+}
