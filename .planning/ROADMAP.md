@@ -115,13 +115,13 @@ Plans:
 **Goal:** Mirror the TUI file-logging pattern (commit eedb49e1) in the `iron_hermes_ui` server binary: daily-rolling `web.log` (app/agent tracing) and `web-access.log` (HTTP access via `tower_http::trace::TraceLayer`) under `$IRONHERMES_HOME/logs/`, with ANSI-stripped file output, non-blocking writers held across `axum::serve`, per-layer EnvFilters, and console behavior unchanged.
 **Requirements**: D-01..D-18 (see 36.17-CONTEXT.md — phase uses D-IDs in lieu of REQ-IDs)
 **Depends on:** Phase 36
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] 36.17-01-PLAN.md — Add `tower-http = { version = "0.6", features = ["trace"] }` to workspace deps; add `tracing-appender` + `tower-http` to `iron_hermes_ui` non-wasm32 deps (D-13/D-14)
-- [ ] 36.17-02-PLAN.md — Create `crates/iron_hermes_ui/src/server/logging.rs` with `install_web_logger_subscriber()` (3-layer registry, both appenders, ANSI-stripped file layers, per-layer filters, `try_init`); declare module in `server/mod.rs` (D-02..D-05, D-15..D-18)
-- [ ] 36.17-03-PLAN.md — Replace `tracing_subscriber::fmt().init()` in `main.rs` with `install_web_logger_subscriber()`; mount `TraceLayer::new_for_http().on_request(DefaultOnRequest::new().level(Level::INFO)).on_response(DefaultOnResponse::new().level(Level::INFO))` on the Axum router (D-01, D-07..D-12 + Q2 INFO-level fix)
-- [ ] 36.17-04-PLAN.md — Create `scripts/uat/phase-36.17-web-logging.sh` UAT script (mktemp IRONHERMES_HOME, start server, curl, assert both files exist + non-empty + ANSI-free + `tower_http::trace` target present in access log); blocking-human verify (D-01..D-05, D-09, D-10, D-15, D-16)
+- [x] 36.17-01-PLAN.md — Add `tower-http = { version = "0.6", features = ["trace"] }` to workspace deps; add `tracing-appender` + `tower-http` to `iron_hermes_ui` non-wasm32 deps (D-13/D-14)
+- [x] 36.17-02-PLAN.md — Create `crates/iron_hermes_ui/src/server/logging.rs` with `install_web_logger_subscriber()` (3-layer registry, both appenders, ANSI-stripped file layers, per-layer filters, `try_init`); declare module in `server/mod.rs` (D-02..D-05, D-15..D-18)
+- [x] 36.17-03-PLAN.md — Replace `tracing_subscriber::fmt().init()` in `main.rs` with `install_web_logger_subscriber()`; mount `TraceLayer::new_for_http().on_request(DefaultOnRequest::new().level(Level::INFO)).on_response(DefaultOnResponse::new().level(Level::INFO))` on the Axum router (D-01, D-07..D-12 + Q2 INFO-level fix)
+- [x] 36.17-04-PLAN.md — Create `scripts/uat/phase-36.17-web-logging.sh` UAT script (mktemp IRONHERMES_HOME, start server, curl, assert both files exist + non-empty + ANSI-free + `tower_http::trace` target present in access log); blocking-human verify (D-01..D-05, D-09, D-10, D-15, D-16)
 
 ### Phase 36.16: Small Model Mode (SMM) architecture port — mirror the smallcode JS reference architecture (System Overview / Component Responsibilities / Layers / Data Flow / Key Abstractions / Entry Points / Architectural Constraints / Anti-Patterns / Error Handling / Cross-Cutting Concerns) into ironhermes Rust; consumes 36.15's per-provider extra_request_options knob as one input; see 36.16-CONTEXT.md (from SmallModelMode_ARCHITECTURE.md) for the reference shape (INSERTED)
 
