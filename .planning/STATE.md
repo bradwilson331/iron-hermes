@@ -4,13 +4,13 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.17.1 context gathered
-last_updated: "2026-05-27T17:40:15.055Z"
-last_activity: 2026-05-27 -- Phase 36.17.1 planning complete
+last_updated: "2026-05-27T18:05:48.916Z"
+last_activity: 2026-05-27
 progress:
   total_phases: 39
   completed_phases: 7
   total_plans: 36
-  completed_plans: 31
+  completed_plans: 32
   percent: 18
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.1 — INSERTED (urgent: in-mem FIFO queuing parity)
+**Current focus:** Phase 36.17.1 — in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions
 
 ## Current Position
 
-Phase: 36.17.1 (in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions) — NOT PLANNED
-Plan: 4 of 4
+Phase: 36.17.1 (in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-05-27 -- Phase 36.17.1 planning complete
+Last activity: 2026-05-27
 
 ## Phase 36.2 Closure Summary
 
