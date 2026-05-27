@@ -21,10 +21,12 @@ use crate::adapter::PlatformAdapter;
 use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal;
-use crate::session::SessionStore;
+use crate::session::{SessionKey, SessionStore};
+use crate::session_queue::{QueueError, SessionQueue};
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use ironhermes_cron::TgSendApi;
 use crate::user_queue::UserQueueManager;
+use ironhermes_core::MessageEvent;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
@@ -91,6 +93,13 @@ pub struct GatewayRunner {
     /// Populated by `set_skills_config` (called from run_gateway after `set_skill_registry`).
     /// `build_gateway_handler` passes it to the handler via `set_skills_config`.
     skills_config: Option<ironhermes_core::config::SkillsConfig>,
+    /// Phase 36.17.1: per-session FIFO queue (D-06, D-14). Always initialized.
+    /// Wrapped in Arc so `build_gateway_handler` can thread a clone to
+    /// `GatewayMessageHandler` (D-15, RESEARCH Open Q3 — Arc<SessionQueue>,
+    /// NOT Arc<GatewayRunner>, to avoid a circular reference). The raw
+    /// `SessionQueue` type is intentionally not exported in lib.rs — adapters
+    /// reach it only via the thin public API methods on this struct.
+    session_queue: Arc<SessionQueue>,
     cancel: CancellationToken,
 }
 
@@ -126,6 +135,10 @@ impl GatewayRunner {
             workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
             trajectory_root: None, // Phase 25.3-15 CR-02: wired by run_gateway before start()
             skills_config: None,   // Phase 21.8.2 D-02: wired by run_gateway before start()
+            // Phase 36.17.1 (D-06, D-14): always-initialized per-session FIFO queue.
+            // No `set_session_queue` method — the queue is owned by the runner from
+            // construction; `build_gateway_handler` clones the Arc into the handler.
+            session_queue: Arc::new(SessionQueue::new()),
             cancel: CancellationToken::new(),
         }
     }
@@ -278,6 +291,149 @@ impl GatewayRunner {
         self.browser_session = Some(session);
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 36.17.1: SessionQueue public API (D-15)
+    //
+    // Thin delegation layer over `Arc<SessionQueue>`. The raw `SessionQueue`
+    // type is intentionally not re-exported from lib.rs — adapters and other
+    // call sites reach the queue only through these methods. All methods are
+    // synchronous (D-17); the underlying `std::sync::Mutex` guard is dropped
+    // before any await on the caller's side.
+    // ---------------------------------------------------------------------
+
+    /// Push an event onto the per-session FIFO queue.
+    ///
+    /// Returns `Err(QueueError::CapacityReached)` when the session's queue
+    /// holds `MAX_QUEUE_DEPTH` events (D-09). Delegates to
+    /// `SessionQueue::try_push` (Python parity: `_enqueue_fifo`).
+    pub fn try_enqueue(
+        &self,
+        key: &SessionKey,
+        event: MessageEvent,
+    ) -> Result<(), QueueError> {
+        self.session_queue.try_push(key, event)
+    }
+
+    /// Pop the oldest queued event for the session, or `None` if empty.
+    ///
+    /// Delegates to `SessionQueue::pop` (Python parity: `_dequeue_pending_event`).
+    pub fn dequeue(&self, key: &SessionKey) -> Option<MessageEvent> {
+        self.session_queue.pop(key)
+    }
+
+    /// Current queue depth for the session (0 if no queue allocated).
+    ///
+    /// Delegates to `SessionQueue::len` (Python parity: `_queue_depth`).
+    pub fn queue_len(&self, key: &SessionKey) -> usize {
+        self.session_queue.len(key)
+    }
+
+    /// Drop every queued event for the session.
+    ///
+    /// Delegates to `SessionQueue::clear`. Called by `/new` and `/reset`
+    /// handlers BEFORE `SessionStore::remove` (RESEARCH Pitfall 5).
+    pub fn clear_queue(&self, key: &SessionKey) {
+        self.session_queue.clear(key);
+    }
+
+    /// Retain only events matching `predicate`, in arrival order.
+    ///
+    /// Delegates to `SessionQueue::retain`. The goal-continuation predicate
+    /// is deferred per D-04 — this method is the general mechanism.
+    pub fn retain_queue<F: Fn(&MessageEvent) -> bool>(
+        &self,
+        key: &SessionKey,
+        predicate: F,
+    ) {
+        self.session_queue.retain(key, predicate);
+    }
+
+    /// Phase 36.17.1: crate-private accessor for threading `Arc<SessionQueue>`
+    /// into the handler from `build_gateway_handler`. Plan 04 will reuse the
+    /// same accessor for drain-mode wiring.
+    pub(crate) fn session_queue(&self) -> Arc<SessionQueue> {
+        self.session_queue.clone()
+    }
+
+    /// Phase 36.17.1 Plan 02 Task 3: post-turn FIFO drain (D-01 part (b)).
+    ///
+    /// Pops events from the session queue and re-invokes `handler.run_agent`
+    /// in arrival order until the queue is empty. Called by the per-chat
+    /// worker after each `handle_with_multimodal` turn returns.
+    ///
+    /// Bypasses `handle_with_multimodal` per RESEARCH Pitfall 4 — the
+    /// RAII `RunningAgentGuard` inside `run_agent` re-sets the per-session
+    /// AtomicBool true for the duration of each drained turn, so a push
+    /// arriving mid-drain enqueues onto the same key and is picked up on
+    /// the next pop iteration. Order is preserved by `VecDeque` FIFO.
+    ///
+    /// Exposed as `pub` so the Plan 02 Task 3 integration test
+    /// (`tests/session_queue_integration.rs` — an external test binary that
+    /// can only see `pub` items, not `pub(crate)`) can invoke the real drain
+    /// loop directly. NOT a substitute pop-sequence unit test — the test
+    /// must exercise this code path.
+    ///
+    /// [Rule 3 - Blocking] The plan acceptance criterion says
+    /// `pub(crate) async fn drain_pending` but integration tests cannot reach
+    /// crate-private items. We widen to `pub` so the required integration
+    /// test in `tests/session_queue_integration.rs` can call
+    /// `runner.drain_pending(...)`. Documented in the plan SUMMARY.
+    pub async fn drain_pending(
+        &self,
+        key: &SessionKey,
+        handler: &GatewayMessageHandler,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        // Replayed events go through the agent loop without their original
+        // multimodal envelope (which was consumed at the original
+        // `handle_with_multimodal` call). The `MessageEvent.content` field
+        // already carries any text-only payload the agent needs.
+        //
+        // Phase 36.17.1 Plan 02 Task 3 [Rule 2 - critical functionality
+        // refinement]: drain continues on individual `run_agent` errors
+        // (logs and proceeds to next event) rather than propagating the
+        // first `?` — a single bad event must not poison the rest of the
+        // queue. This matches the Python reference's per-iteration
+        // resilience in `_promote_queued_event`. Cancellation still
+        // short-circuits the drain via the `cancel` token; the loop
+        // is broken explicitly when the token is fired between pops.
+        while let Some(next_event) = self.session_queue.pop(key) {
+            if cancel.is_cancelled() {
+                tracing::info!(
+                    session = %key.to_string_key(),
+                    "SessionQueue: drain cancelled (Phase 36.17.1)"
+                );
+                break;
+            }
+            tracing::debug!(
+                session = %key.to_string_key(),
+                remaining = self.session_queue.len(key),
+                "SessionQueue: draining next queued event (Phase 36.17.1)"
+            );
+            let no_attachments = crate::multimodal::ProcessedAttachments {
+                text_prefix: None,
+                image_data_uri: None,
+            };
+            if let Err(e) = handler
+                .run_agent(
+                    &next_event,
+                    adapter.clone(),
+                    cancel.clone(),
+                    no_attachments,
+                )
+                .await
+            {
+                tracing::error!(
+                    session = %key.to_string_key(),
+                    error = %e,
+                    "SessionQueue: drained event run_agent failed; continuing (Phase 36.17.1)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Plan 03 (Phase 22.4.2.1): returns a clone of the runner's CancellationToken.
     /// Used by gateway integration tests (tests/gateway_shutdown.rs) to fire
     /// shutdown without going through the OS signal layer.
@@ -348,6 +504,12 @@ impl GatewayRunner {
         if let Some(ref ws) = self.workspace {
             handler.set_workspace(ws.clone());
         }
+
+        // Phase 36.17.1 (D-14, D-15, RESEARCH Open Q3): thread the per-session
+        // FIFO queue Arc. Without this call the handler.session_queue stays
+        // None and `handle_with_multimodal` falls back to the Phase 36 reject
+        // path. With it, the busy-branch enqueues and cap-hit fires D-13 UX.
+        handler.set_session_queue(self.session_queue.clone());
         // Phase 25.3-15 CR-02 close-out: trajectory writers are no longer
         // process-wide; per-session writers are owned (and lazily opened) by
         // `SessionStore` keyed by the canonical SQLite session UUID. The
@@ -395,7 +557,13 @@ impl GatewayRunner {
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
-    pub async fn start(&self) -> Result<()> {
+    ///
+    /// Phase 36.17.1 Plan 02 Task 3: takes `self: Arc<Self>` so the per-chat
+    /// worker spawn closure can capture an `Arc<GatewayRunner>` clone and
+    /// call `runner.drain_pending(...)` after each handler turn. The
+    /// `'static` requirement of `JoinSet::spawn` forces this — a borrow of
+    /// `&self` cannot escape into the spawned task.
+    pub async fn start(self: Arc<Self>) -> Result<()> {
         // --- 0. Acquire PID lock (Phase 24 D-09/D-12) ---
         // Refuses startup if another live gateway is already running under
         // the same HERMES_HOME (profile-scoped after Phase 24's --profile
@@ -644,6 +812,11 @@ impl GatewayRunner {
         let cancel_dispatch = self.cancel.clone();
         let mut msg_rx = msg_rx;
         let bot_username_str = bot_username.clone();
+        // Phase 36.17.1 Plan 02 Task 3: clone Arc<GatewayRunner> for the per-chat
+        // worker spawn closure so it can call `runner.drain_pending(...)` after
+        // each handler turn returns. The Arc<Self> threading is what motivates
+        // the `start(self: Arc<Self>)` signature change introduced in this plan.
+        let runner_dispatch: Arc<Self> = self.clone();
 
         // Plan 03: clone Arc so dispatch_future (async move) can spawn into worker_join_set
         let worker_join_set_dispatch = worker_join_set.clone();
@@ -726,6 +899,9 @@ impl GatewayRunner {
                             let cancel_task = cancel_dispatch.clone();
                             let queue_task = user_queue_dispatch.clone();
                             let chat_id_task = msg.chat.id.to_string();
+                            // Phase 36.17.1 Plan 02 Task 3: Arc<GatewayRunner> for
+                            // the post-turn `drain_pending` call after each turn.
+                            let runner_task = runner_dispatch.clone();
 
                             // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
                             // per-chat workers are tracked and drained on shutdown (D-10/D-11).
@@ -752,8 +928,6 @@ impl GatewayRunner {
                                         )
                                         .await;
 
-                                    drop(permit);
-
                                     if let Err(e) = result {
                                         error!(
                                             chat_id = %queued_msg.event.chat_id,
@@ -761,6 +935,35 @@ impl GatewayRunner {
                                             "Handler error for message"
                                         );
                                     }
+
+                                    // Phase 36.17.1 Plan 02 Task 3 (D-01 part (b)):
+                                    // After each handler turn — whether it ran the
+                                    // agent or queued during a busy turn — drain any
+                                    // events that arrived while the agent was busy.
+                                    // The drain helper calls `run_agent` directly,
+                                    // bypassing the busy-guard (RESEARCH Pitfall 4).
+                                    let drain_key = SessionKey::new(
+                                        queued_msg.event.platform.clone(),
+                                        &queued_msg.event.chat_id,
+                                    )
+                                    .with_user(&queued_msg.event.sender_id);
+                                    if let Err(e) = runner_task
+                                        .drain_pending(
+                                            &drain_key,
+                                            handler_task.as_ref(),
+                                            adapter_task.clone(),
+                                            cancel_task.child_token(),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            chat_id = %queued_msg.event.chat_id,
+                                            error = %e,
+                                            "drain_pending error after turn (Phase 36.17.1)"
+                                        );
+                                    }
+
+                                    drop(permit);
 
                                     // Check if we should stop
                                     if cancel_task.is_cancelled() {
