@@ -785,3 +785,365 @@ async fn test_new_clears_queue_before_session_remove() {
         msgs
     );
 }
+
+// ===========================================================================
+// Phase 36.17.1 Plan 05 Task 1 — Telegram end-to-end flow tests
+// ===========================================================================
+//
+// Three new tests that lock D-02 (Telegram-only ship requirement) end-to-end
+// against the real GatewayMessageHandler + GatewayRunner code paths:
+//
+//   1. `test_telegram_busy_path_enqueues` — Telegram MessageEvent arrives while
+//      agent_running == true → enqueues onto SessionQueue with ZERO chat replies
+//      (D-13: free-text enqueue is silent).
+//   2. `test_telegram_cap_hit_full_ux` — pre-fill to 128; 129th Telegram event
+//      triggers exactly one ❌ reaction + one "Queue is full (128 messages)"
+//      chat reply; cap held at 128.
+//   3. `test_telegram_post_turn_drain_in_arrival_order` — enqueue 3 events
+//      "A","B","C" via the real `runner.try_enqueue` path; release busy flag;
+//      invoke `runner.drain_pending(...)` directly; assert queue drains 3 → 0
+//      via VecDeque FIFO (proven elsewhere by the proptest suite — depth count
+//      proves the loop iterated for every event).
+//
+// NOTE on Pitfall 6 (Telegram getUpdates offset advance, D-13):
+// The Telegram poll loop in runner.rs:723-736 advances the `offset` to
+// `update.update_id + 1` UNCONDITIONALLY before each update is forwarded into
+// the `msg_tx` mpsc channel. The cap-hit UX (and any handler-level work) fires
+// strictly AFTER that offset advance — so a cap-hit cannot cause Telegram to
+// re-deliver the dropped update on the next getUpdates call. This is a
+// runner-loop invariant and cannot be exercised from a handler-level test;
+// the live verification lives in the UAT runbook
+// (`tests/session_queue_telegram_uat.md`, Scenario 3 step e).
+
+/// Plan 05 Task 1 behavior 1 — Telegram busy-enqueue silent path:
+/// A Telegram MessageEvent arriving via `MessageHandler::handle` while
+/// `agent_running == true` is enqueued onto `SessionQueue`. The handler's
+/// busy-branch records ZERO `send_message` AND ZERO `add_reaction` calls
+/// (D-13: free-text enqueue is silent; UserQueueManager's transport-layer
+/// 👁 reaction is a separate layer not exercised in handler-level tests).
+#[tokio::test]
+async fn test_telegram_busy_path_enqueues() {
+    use ironhermes_gateway::adapter::MessageHandler;
+
+    // Pitfall 6: Telegram getUpdates offset advance happens at
+    // runner.rs:723-736 BEFORE dispatch. Handler-level test cannot verify
+    // offset advance — see session_queue_telegram_uat.md for the live
+    // verification step.
+
+    let store = build_test_session_store();
+    let queue = Arc::new(SessionQueue::new());
+    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
+    let adapter = RecordingPlatformAdapter::new();
+
+    // Build the canonical Telegram SessionKey (Platform::Telegram + chat_id
+    // "test_chat" + sender_id "test_user") matching the planner's spec.
+    let key = SessionKey::new(Platform::Telegram, "test_chat").with_user("test_user");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key)
+            .expect("session was just created")
+            .running
+            .store(true, Ordering::SeqCst);
+    }
+
+    assert_eq!(queue.len(&key), 0, "queue must start empty");
+
+    // Telegram MessageEvent — platform=Telegram, chat_id, sender_id matching
+    // the SessionKey, content "hello".
+    let event = MessageEvent {
+        platform: Platform::Telegram,
+        message_id: "tg-msg-1".to_string(),
+        chat_id: "test_chat".to_string(),
+        sender_id: "test_user".to_string(),
+        content: "hello".to_string(),
+        attachments: vec![],
+        thread_id: None,
+        chat_type: "private".to_string(),
+        chat_name: None,
+        sender_name: None,
+        replied_to_id: None,
+    };
+
+    handler
+        .handle(&event, adapter.clone(), CancellationToken::new())
+        .await
+        .expect("handle returns Ok on Telegram enqueue path");
+
+    // Depth 1 — busy-branch must enqueue, not reject.
+    assert_eq!(
+        queue.len(&key),
+        1,
+        "Telegram busy-branch must enqueue (depth == 1 after one push)"
+    );
+
+    // D-13: free-text enqueue is silent. The handler's Queued/busy branch
+    // MUST NOT emit a chat reply or a reaction. UserQueueManager's
+    // transport-layer 👁 is a separate layer above the handler.
+    let msgs = adapter.messages().await;
+    assert!(
+        msgs.is_empty(),
+        "D-13: free-text enqueue is silent; expected zero send_message from the handler, got {:?}",
+        msgs
+    );
+    let reactions = adapter.reactions().await;
+    assert!(
+        reactions.is_empty(),
+        "D-13: handler's Queued/busy branch must not emit reactions; \
+         transport-layer 👁 is UserQueueManager's job, not the handler's. Got {:?}",
+        reactions
+    );
+}
+
+/// Plan 05 Task 1 behavior 2 — Telegram cap-hit full UX:
+/// Pre-fill SessionQueue to MAX_QUEUE_DEPTH (128). Dispatch a 129th Telegram
+/// event with chat_id="test_chat", message_id="msg_id_129". Assertions:
+///   - RecordingPlatformAdapter.add_reaction calls == 1 with emoji "❌"
+///     matching the 129th event's chat_id + message_id (drop-newest, D-13).
+///   - RecordingPlatformAdapter.send_message calls == 1 with content
+///     containing "Queue is full (128 messages)" (D-13 literal).
+///   - SessionQueue.len(&key) == 128 after the attempt (cap held,
+///     T-36.17.1-01 mitigation evidence).
+///
+/// The poll-loop offset advance is OUTSIDE handler scope (runner.rs:723-736);
+/// see Pitfall 6 note above and the live UAT runbook for the offset-advance
+/// verification step.
+#[tokio::test]
+async fn test_telegram_cap_hit_full_ux() {
+    use ironhermes_gateway::adapter::MessageHandler;
+
+    // Pitfall 6: Telegram getUpdates offset advance happens at
+    // runner.rs:723-736 BEFORE dispatch. Handler-level test cannot verify
+    // offset advance — see session_queue_telegram_uat.md for the live
+    // verification step.
+
+    let store = build_test_session_store();
+    let queue = Arc::new(SessionQueue::new());
+    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
+    let adapter = RecordingPlatformAdapter::new();
+
+    let key = SessionKey::new(Platform::Telegram, "test_chat").with_user("test_user");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+    {
+        let s = store.read().await;
+        s.get(&key)
+            .expect("session")
+            .running
+            .store(true, Ordering::SeqCst);
+    }
+
+    // Pre-fill the queue to MAX_QUEUE_DEPTH with distinct content
+    // "msg_001"..="msg_128". The numbering deviates from the integer-typed
+    // pre-fill in `test_cap_hit_emits_reaction` to make the planner's spec
+    // (msg_001..msg_128 / msg_129) literally observable in pop order if
+    // anyone wants to inspect.
+    for i in 1..=MAX_QUEUE_DEPTH {
+        let content = format!("msg_{:03}", i);
+        let prefill_event = MessageEvent {
+            platform: Platform::Telegram,
+            message_id: format!("tg-prefill-{:03}", i),
+            chat_id: "test_chat".to_string(),
+            sender_id: "test_user".to_string(),
+            content,
+            attachments: vec![],
+            thread_id: None,
+            chat_type: "private".to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        };
+        queue
+            .try_push(&key, prefill_event)
+            .expect("prefill within cap");
+    }
+    assert_eq!(queue.len(&key), MAX_QUEUE_DEPTH, "queue pre-filled to cap");
+
+    // 129th event — message_id="msg_id_129" matches the planner's spec
+    // so the reaction assertion is byte-for-byte against the dropped id.
+    let event_129 = MessageEvent {
+        platform: Platform::Telegram,
+        message_id: "msg_id_129".to_string(),
+        chat_id: "test_chat".to_string(),
+        sender_id: "test_user".to_string(),
+        content: "msg_129".to_string(),
+        attachments: vec![],
+        thread_id: None,
+        chat_type: "private".to_string(),
+        chat_name: None,
+        sender_name: None,
+        replied_to_id: None,
+    };
+    handler
+        .handle(&event_129, adapter.clone(), CancellationToken::new())
+        .await
+        .expect("handle returns Ok on cap-hit (UX sent, return Ok)");
+
+    // T-36.17.1-01: cap holds at 128 — the 129th push was dropped.
+    assert_eq!(
+        queue.len(&key),
+        MAX_QUEUE_DEPTH,
+        "cap must hold at {}; 129th push must be dropped (drop-newest, D-10)",
+        MAX_QUEUE_DEPTH
+    );
+
+    // Exactly one ❌ reaction recorded targeting the 129th message's
+    // chat_id="test_chat" and message_id="msg_id_129".
+    let reactions = adapter.reactions().await;
+    assert_eq!(
+        reactions.len(),
+        1,
+        "expected exactly 1 add_reaction call on cap-hit; got {:?}",
+        reactions
+    );
+    assert_eq!(reactions[0].emoji, "❌", "D-13 cap-hit emoji literal");
+    assert_eq!(
+        reactions[0].chat_id, "test_chat",
+        "reaction targets the cap-hit message's chat_id"
+    );
+    assert_eq!(
+        reactions[0].message_id, "msg_id_129",
+        "reaction targets the 129th message's message_id (D-13: drop-newest)"
+    );
+
+    // Exactly one chat reply whose content contains the literal D-13 string.
+    let msgs = adapter.messages().await;
+    let cap_hit_msgs: Vec<&(String, String)> = msgs
+        .iter()
+        .filter(|(_, c)| c.contains("Queue is full (128 messages)"))
+        .collect();
+    assert_eq!(
+        cap_hit_msgs.len(),
+        1,
+        "expected exactly 1 cap-hit chat reply containing the D-13 literal; got messages: {:?}",
+        msgs
+    );
+    assert_eq!(
+        cap_hit_msgs[0].0, "test_chat",
+        "cap-hit reply goes to event.chat_id"
+    );
+}
+
+/// Plan 05 Task 1 behavior 3 — Telegram post-turn drain in arrival order:
+/// Enqueue 3 Telegram events with content "A","B","C" via the real
+/// `runner.try_enqueue` path while agent_running==true. Release the busy
+/// flag, then invoke `runner.drain_pending(&key, &handler, adapter, cancel)`
+/// DIRECTLY (NOT a substitute pop-sequence test — the planner is explicit
+/// that the test must exercise the real drain helper).
+///
+/// Post-conditions:
+///   - `runner.queue_len(&key) == 0`: drain consumed all queued events.
+///   - The recording adapter saw exactly 3 placeholder `█` send_message
+///     attempts (one per `run_agent` invocation), proving the drain loop
+///     iterated 3 times. The FIFO arrival order — A, B, C — is a property
+///     of `SessionQueue::pop`'s VecDeque backing, proven exhaustively by
+///     the 1024-case proptest in `session_queue.rs::parity`; depth==3 + 3
+///     iterations + a FIFO pop primitive implies A→B→C ordering by
+///     construction. (D-01 explicit: one full agent turn per queued item.)
+#[tokio::test]
+async fn test_telegram_post_turn_drain_in_arrival_order() {
+    let store = build_test_session_store();
+    let queue = Arc::new(SessionQueue::new());
+    // The handler still needs a SessionQueue Arc for the busy-branch path,
+    // even though drain_pending pops from the runner's own Arc. Mirrors
+    // the pattern in `test_drain_after_turn` (Plan 02 Task 3).
+    let handler = build_test_handler_with_queue(store.clone(), queue.clone());
+    let adapter = FailingPlatformAdapter::new();
+
+    let config = Config::default();
+    let resolver = ProviderResolver::build(&config).expect("resolver");
+    let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+    let runner = GatewayRunner::new(config, resolver, tool_registry);
+
+    let key = SessionKey::new(Platform::Telegram, "test_chat").with_user("test_user");
+    {
+        let mut s = store.write().await;
+        s.get_or_create(key.clone(), "model", "test");
+    }
+
+    // First set agent_running=true (mirroring the live flow: events arrive
+    // and queue while the agent's previous turn is mid-flight).
+    {
+        let s = store.read().await;
+        s.get(&key)
+            .expect("session exists")
+            .running
+            .store(true, Ordering::SeqCst);
+    }
+
+    // Enqueue 3 Telegram events with content "A","B","C" in arrival order
+    // through the runner's PUBLIC `try_enqueue` API. This is the same path
+    // the live gateway uses when the per-chat worker observes agent_running.
+    for c in ["A", "B", "C"] {
+        let event = MessageEvent {
+            platform: Platform::Telegram,
+            message_id: format!("tg-msg-{}", c),
+            chat_id: "test_chat".to_string(),
+            sender_id: "test_user".to_string(),
+            content: c.to_string(),
+            attachments: vec![],
+            thread_id: None,
+            chat_type: "private".to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        };
+        runner
+            .try_enqueue(&key, event)
+            .expect("enqueue under cap");
+    }
+    assert_eq!(
+        runner.queue_len(&key),
+        3,
+        "pre-load saw 3 events for Telegram session"
+    );
+
+    // Release the busy flag — the live flow does this when the previous
+    // run_agent invocation completes and RunningAgentGuard drops.
+    {
+        let s = store.read().await;
+        s.get(&key)
+            .expect("session exists")
+            .running
+            .store(false, Ordering::SeqCst);
+    }
+
+    // Invoke the REAL drain helper directly — runner.drain_pending(...).
+    // This is the same `pub async fn drain_pending` exposed by Plan 02
+    // Task 3; the planner forbids a hand-rolled pop loop in this test.
+    let adapter_dyn: Arc<dyn PlatformAdapter> = adapter.clone();
+    runner
+        .drain_pending(&key, &handler, adapter_dyn, CancellationToken::new())
+        .await
+        .expect("drain_pending returns Ok (errors are logged+continued)");
+
+    // Drain consumed everything — queue depth went 3 → 2 → 1 → 0 in FIFO
+    // arrival order (VecDeque::pop_front).
+    assert_eq!(
+        runner.queue_len(&key),
+        0,
+        "drain must consume every queued event for the Telegram session"
+    );
+
+    // Exactly 3 placeholder sends — one per `run_agent` invocation. This
+    // proves the drain loop iterated 3 times (no merging — D-01 explicit:
+    // one full agent turn per queued item). The FIFO arrival order is a
+    // property of SessionQueue::pop (VecDeque::pop_front) proven by the
+    // proptest suite in session_queue.rs::parity (1024 cases).
+    let msgs = adapter.messages().await;
+    let placeholders: Vec<&(String, String)> = msgs
+        .iter()
+        .filter(|(_, c)| c == "\u{2588}")
+        .collect();
+    assert_eq!(
+        placeholders.len(),
+        3,
+        "expected 3 placeholder sends (one per drained run_agent); got {:?}",
+        msgs
+    );
+}
