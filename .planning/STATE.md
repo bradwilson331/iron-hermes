@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: completed
-stopped_at: Phase 36.15 context gathered
-last_updated: "2026-05-26T21:20:50.543Z"
+stopped_at: Phase 36.17 context gathered
+last_updated: "2026-05-27T10:32:46.233Z"
 last_activity: 2026-05-26 -- Phase 36.15 marked complete
 progress:
-  total_phases: 41
+  total_phases: 38
   completed_phases: 6
   total_plans: 27
   completed_plans: 27
-  percent: 15
+  percent: 16
 ---
 
 # Project State
@@ -507,6 +507,7 @@ Recent decisions affecting current work:
 - Phase 36.13 edited: Phase 36.13 SCOPE LOCKED: Option A — REJECT plugin loader port. Decision rationale: hermes-agent's plugins/ loader is Python-dynamic-loading-shaped (cheap in Python, expensive in Rust); equivalent composability in ironhermes is achieved via crate workspace + skills + MCP, which already cover memory providers / model providers / platforms / image_gen / video_gen / kanban / browser. Only three primitives have no current substrate: observability export (Datadog/New Relic — to be ported as OpenTelemetry/OTLP), ctx.llm runtime override, tool_override runtime override. These ship directly on AgentRuntime, not via a plugin system. Decision will be ratified in an ADR landed in PROJECT.md / ARCHITECTURE.md. Aligned with 'ironhermes is its own thing' strategic posture and parallel narrowing of Phase 36.7 multi-platform gateway.
 - Phase 36.15 inserted after Phase 36: Small Model Mode (SMM) — provider extra_request_options for num_ctx/top_k/etc. (URGENT)
 - Phase 36.16 inserted after Phase 36: Small Model Mode architecture port (consumes 36.15 knob); seeded from SmallModelMode_ARCHITECTURE.md (URGENT)
+- Phase 36.17 inserted after Phase 36: iron_hermes_ui web logging in $IRONHERMES_HOME/logs (URGENT)
 
 ### Pending Todos
 
@@ -530,6 +531,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-26T15:57:14.577Z
-Stopped at: Phase 36.15 context gathered
-Resume file: .planning/phases/36.15-small-model-mode-smm-per-provider-extra-request-options-toml/36.15-CONTEXT.md
+Last session: 2026-05-27T10:32:46.227Z
+Stopped at: Phase 36.17 context gathered
+Resume file: .planning/phases/36.17-iron-hermes-ui-web-logging-in-ironhermes-home-logs/36.17-CONTEXT.md
