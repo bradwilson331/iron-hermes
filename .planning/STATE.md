@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: completed
-stopped_at: Phase 36.17 shipped — UAT green
-last_updated: "2026-05-27T13:30:00.000Z"
-last_activity: 2026-05-27 -- Phase 36.17 complete, UAT 5/5 green
+status: planning
+stopped_at: Phase 36.17.1 context gathered
+last_updated: "2026-05-27T15:49:14.142Z"
+last_activity: 2026-05-27 -- Phase 36.17.1 inserted after 36.17
 progress:
-  total_phases: 38
+  total_phases: 39
   completed_phases: 7
   total_plans: 31
   completed_plans: 31
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17 — COMPLETE (UAT green)
+**Current focus:** Phase 36.17.1 — INSERTED (urgent: in-mem FIFO queuing parity)
 
 ## Current Position
 
-Phase: 36.17 (iron-hermes-ui-web-logging-in-ironhermes-home-logs) — COMPLETE
+Phase: 36.17.1 (in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions) — NOT PLANNED
 Plan: 4 of 4
-Status: Phase 36.17 shipped — all 5 UAT gates green; production graceful-shutdown fix included
-Last activity: 2026-05-27 -- Phase 36.17 complete, UAT 5/5 green
+Status: Phase 36.17.1 inserted — awaiting planning
+Last activity: 2026-05-27 -- Phase 36.17.1 inserted after 36.17
 
 ## Phase 36.2 Closure Summary
 
@@ -508,6 +508,7 @@ Recent decisions affecting current work:
 - Phase 36.15 inserted after Phase 36: Small Model Mode (SMM) — provider extra_request_options for num_ctx/top_k/etc. (URGENT)
 - Phase 36.16 inserted after Phase 36: Small Model Mode architecture port (consumes 36.15 knob); seeded from SmallModelMode_ARCHITECTURE.md (URGENT)
 - Phase 36.17 inserted after Phase 36: iron_hermes_ui web logging in $IRONHERMES_HOME/logs (URGENT)
+- Phase 36.17.1 inserted after Phase 36.17: in-mem FIFO queuing parity of python deque for chat sessions (URGENT)
 
 ### Pending Todos
 
@@ -531,6 +532,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-27T10:32:46.227Z
-Stopped at: Phase 36.17 context gathered
-Resume file: .planning/phases/36.17-iron-hermes-ui-web-logging-in-ironhermes-home-logs/36.17-CONTEXT.md
+Last session: 2026-05-27T15:49:14.135Z
+Stopped at: Phase 36.17.1 context gathered
+Resume file: .planning/phases/36.17.1-in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions/36.17.1-CONTEXT.md
