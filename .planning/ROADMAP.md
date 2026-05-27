@@ -128,7 +128,7 @@ Plans:
 **Goal:** Port hermes-agent's per-session `/queue` FIFO mechanism (`gateway/run.py` §2304-2415) into IronHermes so messages arriving while a per-session agent is busy are queued in arrival order and replayed one full agent turn per queued item, with no merging. Ships Telegram-only (D-02): the queue data structure (single `Mutex<HashMap<SessionKey, VecDeque<MessageEvent>>>` on `GatewayRunner`, 128-message per-session cap with drop-newest + ❌ reaction + chat-reply UX on cap-hit, soft warn at 75%), `/queue` slash command (replaces broken stub at `handlers.rs:1607-1621` via new `CommandResult::Queued` variant), busy-agent enqueue (replacing the reject branch at `handler.rs:840-854`), post-turn drain loop (per-chat worker), `/new` + `/reset` clearing hooks (clear BEFORE `store.remove` per Pitfall 5), drain-mode flag (`is_draining: Arc<AtomicBool>` flipped before `self.cancel.cancel()` so the queue keeps accepting late arrivals in-process), and a `#[cfg(test)]`-isolated `SplitSlotQueue` parity mirror with proptest equivalence (1024 cases) against Python's `pending_slot + overflow_list` layout — zero runtime cost. Discord, Slack, web, and `/goal` continuation are out of scope (D-02, D-04, D-05).
 **Requirements**: TBD (phase partially anticipates GW-03 per CONTEXT.md but reqs are not pinned)
 **Depends on:** Phase 36.17
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 Plans:
 **Wave 1**
@@ -137,7 +137,7 @@ Plans:
 
 **Wave 2** *(depends on Wave 1)*
 
-- [ ] 36.17.1-02-PLAN.md — GatewayRunner wiring: `Arc<SessionQueue>` field + 5 public API methods (`try_enqueue`/`dequeue`/`queue_len`/`clear_queue`/`retain_queue`) + thread `Arc<SessionQueue>` into `GatewayMessageHandler` via `build_gateway_handler` (Option-fallback for backward-compat); replace busy-reject at `handler.rs:840-854` with try_push + D-13 cap-hit UX (❌ reaction + chat reply); post-turn drain loop in the per-chat worker calling `run_agent` directly (Pitfall 4) (D-14..D-17)
+- [x] 36.17.1-02-PLAN.md — GatewayRunner wiring: `Arc<SessionQueue>` field + 5 public API methods (`try_enqueue`/`dequeue`/`queue_len`/`clear_queue`/`retain_queue`) + thread `Arc<SessionQueue>` into `GatewayMessageHandler` via `build_gateway_handler` (Option-fallback for backward-compat); replace busy-reject at `handler.rs:840-854` with try_push + D-13 cap-hit UX (❌ reaction + chat reply); post-turn drain loop in the per-chat worker calling `run_agent` directly (Pitfall 4) (D-14..D-17)
 
 **Wave 3** *(parallel — 03 owns commands/mod.rs + commands/handlers.rs + handler.rs Queued arm; 04 owns runner.rs is_draining — zero overlap with 03 within runner.rs since 04 touches shutdown sequence + new accessor only)*
 
