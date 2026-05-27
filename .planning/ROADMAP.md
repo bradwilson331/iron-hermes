@@ -123,6 +123,31 @@ Plans:
 - [x] 36.17-03-PLAN.md — Replace `tracing_subscriber::fmt().init()` in `main.rs` with `install_web_logger_subscriber()`; mount `TraceLayer::new_for_http().on_request(DefaultOnRequest::new().level(Level::INFO)).on_response(DefaultOnResponse::new().level(Level::INFO))` on the Axum router (D-01, D-07..D-12 + Q2 INFO-level fix)
 - [x] 36.17-04-PLAN.md — Create `scripts/uat/phase-36.17-web-logging.sh` UAT script (mktemp IRONHERMES_HOME, start server, curl, assert both files exist + non-empty + ANSI-free + `tower_http::trace` target present in access log); blocking-human verify (D-01..D-05, D-09, D-10, D-15, D-16)
 
+### Phase 36.17.1: in-mem FIFO queuing parity of python deque for chat sessions (INSERTED)
+
+**Goal:** Port hermes-agent's per-session `/queue` FIFO mechanism (`gateway/run.py` §2304-2415) into IronHermes so messages arriving while a per-session agent is busy are queued in arrival order and replayed one full agent turn per queued item, with no merging. Ships Telegram-only (D-02): the queue data structure (single `Mutex<HashMap<SessionKey, VecDeque<MessageEvent>>>` on `GatewayRunner`, 128-message per-session cap with drop-newest + ❌ reaction + chat-reply UX on cap-hit, soft warn at 75%), `/queue` slash command (replaces broken stub at `handlers.rs:1607-1621` via new `CommandResult::Queued` variant), busy-agent enqueue (replacing the reject branch at `handler.rs:840-854`), post-turn drain loop (per-chat worker), `/new` + `/reset` clearing hooks (clear BEFORE `store.remove` per Pitfall 5), drain-mode flag (`is_draining: Arc<AtomicBool>` flipped before `self.cancel.cancel()` so the queue keeps accepting late arrivals in-process), and a `#[cfg(test)]`-isolated `SplitSlotQueue` parity mirror with proptest equivalence (1024 cases) against Python's `pending_slot + overflow_list` layout — zero runtime cost. Discord, Slack, web, and `/goal` continuation are out of scope (D-02, D-04, D-05).
+**Requirements**: TBD (phase partially anticipates GW-03 per CONTEXT.md but reqs are not pinned)
+**Depends on:** Phase 36.17
+**Plans:** 5 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 36.17.1-01-PLAN.md — SessionQueue type + QueueError + MAX_QUEUE_DEPTH=128 + WARN_QUEUE_DEPTH=96 + `#[cfg(test)] mod parity` SplitSlotQueue mirror + proptest equivalence (1024 cases); add `proptest` dev-dep; declare module in `lib.rs` (D-06..D-11)
+
+**Wave 2** *(depends on Wave 1)*
+
+- [ ] 36.17.1-02-PLAN.md — GatewayRunner wiring: `Arc<SessionQueue>` field + 5 public API methods (`try_enqueue`/`dequeue`/`queue_len`/`clear_queue`/`retain_queue`) + thread `Arc<SessionQueue>` into `GatewayMessageHandler` via `build_gateway_handler` (Option-fallback for backward-compat); replace busy-reject at `handler.rs:840-854` with try_push + D-13 cap-hit UX (❌ reaction + chat reply); post-turn drain loop in the per-chat worker calling `run_agent` directly (Pitfall 4) (D-14..D-17)
+
+**Wave 3** *(parallel — 03 owns commands/mod.rs + commands/handlers.rs + handler.rs Queued arm; 04 owns runner.rs is_draining — zero overlap with 03 within runner.rs since 04 touches shutdown sequence + new accessor only)*
+
+- [ ] 36.17.1-03-PLAN.md — `/queue` slash command parity: new `CommandResult::Queued { message: String }` variant + rewrite `cmd_queue` (drop the `ctx.agent_loop` gate per Pitfall 3); intercept `CommandResult::Queued` in gateway handler (synthesize `MessageEvent` inheriting platform/chat_id/sender_id from the triggering event, call `session_queue.try_push`, reply with depth-aware "Queued for the next turn." / "({n} queued)" or cap-hit UX); wire `/new` + `/reset` to call `session_queue.clear(&session_key)` BEFORE `session_store.remove(&session_key)` (Pitfall 5); verify `is_bypass("queue") == true`
+- [ ] 36.17.1-04-PLAN.md — Drain-mode preservation (D-03): add `is_draining: Arc<AtomicBool>` field on `GatewayRunner` + `drain_for_restart()` method that flips the flag BEFORE `self.cancel.cancel()` (atomic source-order, awk-checked); replace shutdown's `self.cancel.cancel()` (runner.rs:~902) with `self.drain_for_restart()`; contract: `try_push` does NOT consult `is_draining` (preserve AND accept new pushes during the in-process drain window); 4 unit tests close T-36.17.1-03
+
+**Wave 4** *(depends on Wave 2 + Wave 3)*
+
+- [ ] 36.17.1-05-PLAN.md — Telegram cap-hit UX end-to-end integration tests (busy-enqueue silence, cap-hit ❌+chat-reply with cap held at 128, FIFO post-turn drain "A","B","C" replay with no merging) + UAT runbook `tests/session_queue_telegram_uat.md` (4 scenarios: silent busy enqueue, `/queue` depth-aware reply, cap-hit live verification including Telegram offset-advance no-re-delivery per Pitfall 6, `/new` clears queue); blocking-human checkpoint for live Telegram verification
+
 ### Phase 36.16: Small Model Mode (SMM) architecture port — mirror the smallcode JS reference architecture (System Overview / Component Responsibilities / Layers / Data Flow / Key Abstractions / Entry Points / Architectural Constraints / Anti-Patterns / Error Handling / Cross-Cutting Concerns) into ironhermes Rust; consumes 36.15's per-provider extra_request_options knob as one input; see 36.16-CONTEXT.md (from SmallModelMode_ARCHITECTURE.md) for the reference shape (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
