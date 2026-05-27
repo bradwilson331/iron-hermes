@@ -10,3 +10,5 @@ pub mod api;
 #[cfg(feature = "server")]
 pub mod state;
 pub mod ws;
+#[cfg(feature = "server")]
+pub mod logging;
