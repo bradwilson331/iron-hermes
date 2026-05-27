@@ -21,10 +21,12 @@ use crate::adapter::PlatformAdapter;
 use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal;
-use crate::session::SessionStore;
+use crate::session::{SessionKey, SessionStore};
+use crate::session_queue::{QueueError, SessionQueue};
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use ironhermes_cron::TgSendApi;
 use crate::user_queue::UserQueueManager;
+use ironhermes_core::MessageEvent;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
@@ -91,6 +93,13 @@ pub struct GatewayRunner {
     /// Populated by `set_skills_config` (called from run_gateway after `set_skill_registry`).
     /// `build_gateway_handler` passes it to the handler via `set_skills_config`.
     skills_config: Option<ironhermes_core::config::SkillsConfig>,
+    /// Phase 36.17.1: per-session FIFO queue (D-06, D-14). Always initialized.
+    /// Wrapped in Arc so `build_gateway_handler` can thread a clone to
+    /// `GatewayMessageHandler` (D-15, RESEARCH Open Q3 — Arc<SessionQueue>,
+    /// NOT Arc<GatewayRunner>, to avoid a circular reference). The raw
+    /// `SessionQueue` type is intentionally not exported in lib.rs — adapters
+    /// reach it only via the thin public API methods on this struct.
+    session_queue: Arc<SessionQueue>,
     cancel: CancellationToken,
 }
 
@@ -126,6 +135,10 @@ impl GatewayRunner {
             workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
             trajectory_root: None, // Phase 25.3-15 CR-02: wired by run_gateway before start()
             skills_config: None,   // Phase 21.8.2 D-02: wired by run_gateway before start()
+            // Phase 36.17.1 (D-06, D-14): always-initialized per-session FIFO queue.
+            // No `set_session_queue` method — the queue is owned by the runner from
+            // construction; `build_gateway_handler` clones the Arc into the handler.
+            session_queue: Arc::new(SessionQueue::new()),
             cancel: CancellationToken::new(),
         }
     }
@@ -276,6 +289,70 @@ impl GatewayRunner {
         >,
     ) {
         self.browser_session = Some(session);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 36.17.1: SessionQueue public API (D-15)
+    //
+    // Thin delegation layer over `Arc<SessionQueue>`. The raw `SessionQueue`
+    // type is intentionally not re-exported from lib.rs — adapters and other
+    // call sites reach the queue only through these methods. All methods are
+    // synchronous (D-17); the underlying `std::sync::Mutex` guard is dropped
+    // before any await on the caller's side.
+    // ---------------------------------------------------------------------
+
+    /// Push an event onto the per-session FIFO queue.
+    ///
+    /// Returns `Err(QueueError::CapacityReached)` when the session's queue
+    /// holds `MAX_QUEUE_DEPTH` events (D-09). Delegates to
+    /// `SessionQueue::try_push` (Python parity: `_enqueue_fifo`).
+    pub fn try_enqueue(
+        &self,
+        key: &SessionKey,
+        event: MessageEvent,
+    ) -> Result<(), QueueError> {
+        self.session_queue.try_push(key, event)
+    }
+
+    /// Pop the oldest queued event for the session, or `None` if empty.
+    ///
+    /// Delegates to `SessionQueue::pop` (Python parity: `_dequeue_pending_event`).
+    pub fn dequeue(&self, key: &SessionKey) -> Option<MessageEvent> {
+        self.session_queue.pop(key)
+    }
+
+    /// Current queue depth for the session (0 if no queue allocated).
+    ///
+    /// Delegates to `SessionQueue::len` (Python parity: `_queue_depth`).
+    pub fn queue_len(&self, key: &SessionKey) -> usize {
+        self.session_queue.len(key)
+    }
+
+    /// Drop every queued event for the session.
+    ///
+    /// Delegates to `SessionQueue::clear`. Called by `/new` and `/reset`
+    /// handlers BEFORE `SessionStore::remove` (RESEARCH Pitfall 5).
+    pub fn clear_queue(&self, key: &SessionKey) {
+        self.session_queue.clear(key);
+    }
+
+    /// Retain only events matching `predicate`, in arrival order.
+    ///
+    /// Delegates to `SessionQueue::retain`. The goal-continuation predicate
+    /// is deferred per D-04 — this method is the general mechanism.
+    pub fn retain_queue<F: Fn(&MessageEvent) -> bool>(
+        &self,
+        key: &SessionKey,
+        predicate: F,
+    ) {
+        self.session_queue.retain(key, predicate);
+    }
+
+    /// Phase 36.17.1: crate-private accessor for threading `Arc<SessionQueue>`
+    /// into the handler from `build_gateway_handler`. Plan 04 will reuse the
+    /// same accessor for drain-mode wiring.
+    pub(crate) fn session_queue(&self) -> Arc<SessionQueue> {
+        self.session_queue.clone()
     }
 
     /// Plan 03 (Phase 22.4.2.1): returns a clone of the runner's CancellationToken.
