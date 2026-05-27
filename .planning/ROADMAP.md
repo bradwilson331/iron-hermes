@@ -128,7 +128,7 @@ Plans:
 **Goal:** Port hermes-agent's per-session `/queue` FIFO mechanism (`gateway/run.py` §2304-2415) into IronHermes so messages arriving while a per-session agent is busy are queued in arrival order and replayed one full agent turn per queued item, with no merging. Ships Telegram-only (D-02): the queue data structure (single `Mutex<HashMap<SessionKey, VecDeque<MessageEvent>>>` on `GatewayRunner`, 128-message per-session cap with drop-newest + ❌ reaction + chat-reply UX on cap-hit, soft warn at 75%), `/queue` slash command (replaces broken stub at `handlers.rs:1607-1621` via new `CommandResult::Queued` variant), busy-agent enqueue (replacing the reject branch at `handler.rs:840-854`), post-turn drain loop (per-chat worker), `/new` + `/reset` clearing hooks (clear BEFORE `store.remove` per Pitfall 5), drain-mode flag (`is_draining: Arc<AtomicBool>` flipped before `self.cancel.cancel()` so the queue keeps accepting late arrivals in-process), and a `#[cfg(test)]`-isolated `SplitSlotQueue` parity mirror with proptest equivalence (1024 cases) against Python's `pending_slot + overflow_list` layout — zero runtime cost. Discord, Slack, web, and `/goal` continuation are out of scope (D-02, D-04, D-05).
 **Requirements**: TBD (phase partially anticipates GW-03 per CONTEXT.md but reqs are not pinned)
 **Depends on:** Phase 36.17
-**Plans:** 3/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 **Wave 1**
@@ -142,7 +142,7 @@ Plans:
 **Wave 3** *(parallel — 03 owns commands/mod.rs + commands/handlers.rs + handler.rs Queued arm; 04 owns runner.rs is_draining — zero overlap with 03 within runner.rs since 04 touches shutdown sequence + new accessor only)*
 
 - [x] 36.17.1-03-PLAN.md — `/queue` slash command parity: new `CommandResult::Queued { message: String }` variant + rewrite `cmd_queue` (drop the `ctx.agent_loop` gate per Pitfall 3); intercept `CommandResult::Queued` in gateway handler (synthesize `MessageEvent` inheriting platform/chat_id/sender_id from the triggering event, call `session_queue.try_push`, reply with depth-aware "Queued for the next turn." / "({n} queued)" or cap-hit UX); wire `/new` + `/reset` to call `session_queue.clear(&session_key)` BEFORE `session_store.remove(&session_key)` (Pitfall 5); verify `is_bypass("queue") == true`
-- [ ] 36.17.1-04-PLAN.md — Drain-mode preservation (D-03): add `is_draining: Arc<AtomicBool>` field on `GatewayRunner` + `drain_for_restart()` method that flips the flag BEFORE `self.cancel.cancel()` (atomic source-order, awk-checked); replace shutdown's `self.cancel.cancel()` (runner.rs:~902) with `self.drain_for_restart()`; contract: `try_push` does NOT consult `is_draining` (preserve AND accept new pushes during the in-process drain window); 4 unit tests close T-36.17.1-03
+- [x] 36.17.1-04-PLAN.md — Drain-mode preservation (D-03): add `is_draining: Arc<AtomicBool>` field on `GatewayRunner` + `drain_for_restart()` method that flips the flag BEFORE `self.cancel.cancel()` (atomic source-order, awk-checked); replace shutdown's `self.cancel.cancel()` (runner.rs:~902) with `self.drain_for_restart()`; contract: `try_push` does NOT consult `is_draining` (preserve AND accept new pushes during the in-process drain window); 4 unit tests close T-36.17.1-03
 
 **Wave 4** *(depends on Wave 2 + Wave 3)*
 
