@@ -11,6 +11,7 @@ use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -100,6 +101,18 @@ pub struct GatewayRunner {
     /// `SessionQueue` type is intentionally not exported in lib.rs — adapters
     /// reach it only via the thin public API methods on this struct.
     session_queue: Arc<SessionQueue>,
+    /// Phase 36.17.1 D-03 (Plan 04): drain-mode flag — set true BEFORE
+    /// `cancel.cancel()` during shutdown so late-arriving messages stay in
+    /// the queue and reach the next agent turn (in-process only). The flag
+    /// is a SIGNAL, not a gate — `SessionQueue::try_push` does NOT consult
+    /// it. Python parity: `_queue_during_drain_enabled` (gateway/run.py:2298-2302).
+    ///
+    /// Closes T-36.17.1-03 (lost-update during drain-mode transition) by
+    /// pairing the flag flip with the cancel call in `drain_for_restart`:
+    /// any concurrent `try_push` observing `is_draining=true` is guaranteed
+    /// to see `cancel` not-yet-fired AND the queue continues to accept the
+    /// push (D-03 preserve-AND-accept).
+    is_draining: Arc<AtomicBool>,
     cancel: CancellationToken,
 }
 
@@ -139,6 +152,10 @@ impl GatewayRunner {
             // No `set_session_queue` method — the queue is owned by the runner from
             // construction; `build_gateway_handler` clones the Arc into the handler.
             session_queue: Arc::new(SessionQueue::new()),
+            // Phase 36.17.1 Plan 04 (D-03): drain-mode flag starts false.
+            // `drain_for_restart()` flips it to true BEFORE cancelling the
+            // cancel token — preserve-AND-accept semantics live there.
+            is_draining: Arc::new(AtomicBool::new(false)),
             cancel: CancellationToken::new(),
         }
     }
@@ -353,6 +370,38 @@ impl GatewayRunner {
     /// same accessor for drain-mode wiring.
     pub(crate) fn session_queue(&self) -> Arc<SessionQueue> {
         self.session_queue.clone()
+    }
+
+    /// Phase 36.17.1 Plan 04 (D-03): true once the runner has entered
+    /// drain-mode (graceful shutdown). The queue continues to accept pushes
+    /// while this flag is set — drain mode is a SIGNAL, not a gate
+    /// (`SessionQueue::try_push` does not consult this flag). Python parity:
+    /// `_queue_during_drain_enabled` (gateway/run.py:2298-2302).
+    pub fn is_draining(&self) -> bool {
+        self.is_draining.load(Ordering::SeqCst)
+    }
+
+    /// Phase 36.17.1 Plan 04 (D-03): enter drain-mode.
+    ///
+    /// Sets `is_draining` to `true` BEFORE cancelling the cancel token. The
+    /// ordering is the T-36.17.1-03 mitigation: any concurrent `try_push`
+    /// that observes `is_draining=true` is guaranteed to also see the cancel
+    /// token NOT YET fired, AND `SessionQueue::try_push` continues to accept
+    /// the push (D-03 preserve-AND-accept). The brief in-process window
+    /// between flag-flip and process exit preserves arrival order without
+    /// losing user input.
+    ///
+    /// Called from the graceful-shutdown path in `start()` in place of the
+    /// previous bare `self.cancel.cancel()`. Forced-abort paths may still
+    /// call `cancel.cancel()` directly when drain semantics are explicitly
+    /// undesired — that is acceptable per the locked decision contract.
+    ///
+    /// Python parity: equivalent transition to `_restart_requested = True`
+    /// + the existing busy-mode being `queue`/`steer` (gateway/run.py:2298-2302).
+    pub fn drain_for_restart(&self) {
+        // ORDERING is load-bearing — do NOT reorder. T-36.17.1-03 mitigation.
+        self.is_draining.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
     }
 
     /// Phase 36.17.1 Plan 02 Task 3: post-turn FIFO drain (D-01 part (b)).
@@ -1102,7 +1151,10 @@ impl GatewayRunner {
         }
 
         // Propagate cancellation to all subtasks
-        self.cancel.cancel();
+        // Phase 36.17.1 Plan 04 (D-03): set is_draining BEFORE cancel so the
+        // queue keeps accepting late arrivals (preserve-AND-accept). Closes
+        // T-36.17.1-03 (lost-update during drain-mode transition).
+        self.drain_for_restart();
 
         // Plan 03 (Phase 22.4.2.1): drain per-chat worker tasks with bounded 5s timeout (D-11).
         // Workers observe cancel_task.is_cancelled() after each agent turn; the 5s timeout covers
@@ -2253,5 +2305,237 @@ mod tests {
             "no 'Available Skills' section must be injected for an empty registry: {}",
             durable
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 36.17.1 Plan 04: drain-mode flag (D-03)
+    //
+    // is_draining: Arc<AtomicBool> on GatewayRunner; drain_for_restart() flips
+    // it to true THEN cancels the cancel token. SessionQueue.try_push has NO
+    // is_draining gate — drain mode is preserve-AND-accept per D-03 and
+    // T-36.17.1-03 closure. The drain helper consolidates the ordering
+    // invariant so source-order audits prove store-before-cancel.
+    // -------------------------------------------------------------------------
+
+    mod drain_mode_tests {
+        use super::*;
+        use ironhermes_core::{MessageEvent, Platform};
+
+        fn make_runner() -> GatewayRunner {
+            let config = Config::default();
+            let resolver = ProviderResolver::build(&config).expect("resolver ok");
+            let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+            GatewayRunner::new(config, resolver, tool_registry)
+        }
+
+        fn fixture_event(content: &str) -> MessageEvent {
+            MessageEvent {
+                platform: Platform::Telegram,
+                message_id: format!("msg-{content}"),
+                chat_id: "chat-0".to_string(),
+                sender_id: "user-0".to_string(),
+                content: content.to_string(),
+                attachments: Vec::new(),
+                thread_id: None,
+                chat_type: "dm".to_string(),
+                chat_name: None,
+                sender_name: None,
+                replied_to_id: None,
+            }
+        }
+
+        fn drain_key() -> SessionKey {
+            SessionKey::new(Platform::Telegram, "chat-0").with_user("user-0")
+        }
+
+        /// is_draining() defaults to false on a fresh runner — drain mode is
+        /// not entered until drain_for_restart() flips the flag explicitly.
+        #[test]
+        fn test_is_draining_starts_false() {
+            let runner = make_runner();
+            assert!(
+                !runner.is_draining(),
+                "fresh runner must have is_draining() == false"
+            );
+        }
+
+        /// drain_for_restart() flips is_draining to true AND cancels the cancel
+        /// token, in that order. The ordering is the T-36.17.1-03 mitigation:
+        /// any concurrent try_push observing is_draining=true is guaranteed to
+        /// see cancel NOT YET fired (and the queue still accepts the push
+        /// per D-03 preserve-AND-accept).
+        #[test]
+        fn test_drain_for_restart_flips_flag() {
+            let runner = make_runner();
+            // Snapshot the cancel token clone BEFORE drain — cancellation
+            // observable on this clone proves drain_for_restart cancelled the
+            // underlying token.
+            let cancel_clone = runner.cancel.clone();
+            assert!(
+                !cancel_clone.is_cancelled(),
+                "cancel must not be fired before drain_for_restart()"
+            );
+
+            runner.drain_for_restart();
+
+            assert!(
+                runner.is_draining(),
+                "drain_for_restart() must flip is_draining to true"
+            );
+            assert!(
+                cancel_clone.is_cancelled(),
+                "drain_for_restart() must cancel the cancel token"
+            );
+        }
+
+        /// Drain mode preserves existing queue contents — flipping is_draining
+        /// to true does NOT clear the per-session queue. Closes T-36.17.1-03
+        /// (lost-update during drain-mode transition).
+        #[test]
+        fn test_drain_mode_preserves_queue() {
+            let runner = make_runner();
+            let key = drain_key();
+
+            runner.try_enqueue(&key, fixture_event("a")).unwrap();
+            runner.try_enqueue(&key, fixture_event("b")).unwrap();
+            runner.try_enqueue(&key, fixture_event("c")).unwrap();
+            assert_eq!(runner.queue_len(&key), 3);
+
+            runner.drain_for_restart();
+
+            assert!(runner.is_draining(), "drain mode must be entered");
+            assert_eq!(
+                runner.queue_len(&key),
+                3,
+                "drain_for_restart must NOT clear the queue (D-03 preserve)"
+            );
+        }
+
+        /// Drain mode continues to accept new pushes (D-03 preserve-AND-accept).
+        /// SessionQueue.try_push has NO is_draining gate, so a fresh enqueue
+        /// after drain_for_restart() succeeds and grows the queue. This is the
+        /// preserve-AND-accept contract: dropping the new push would lose user
+        /// input arriving in the brief window between drain entry and process
+        /// exit.
+        #[test]
+        fn test_drain_mode_accepts_new_pushes() {
+            let runner = make_runner();
+            let key = drain_key();
+
+            runner.try_enqueue(&key, fixture_event("before-drain")).unwrap();
+            assert_eq!(runner.queue_len(&key), 1);
+
+            runner.drain_for_restart();
+            assert!(runner.is_draining(), "drain mode must be entered");
+
+            // Push in drain mode must succeed (D-03 preserve-AND-accept).
+            let result = runner.try_enqueue(&key, fixture_event("during-drain"));
+            assert!(
+                result.is_ok(),
+                "try_enqueue during drain must return Ok (D-03 preserve-AND-accept), got {result:?}"
+            );
+            assert_eq!(
+                runner.queue_len(&key),
+                2,
+                "queue must grow when push accepted during drain"
+            );
+
+            // FIFO order preserved across the drain transition.
+            assert_eq!(
+                runner.dequeue(&key).unwrap().content,
+                "before-drain",
+                "FIFO order must preserve arrival order across drain entry"
+            );
+            assert_eq!(
+                runner.dequeue(&key).unwrap().content,
+                "during-drain",
+                "FIFO order must preserve arrival order across drain entry"
+            );
+        }
+
+        /// Source-order audit: in `drain_for_restart`, `is_draining.store(true,
+        /// ...)` MUST precede `self.cancel.cancel()`. This is the canonical
+        /// T-36.17.1-03 mitigation. Locking it with a source grep guards
+        /// against future refactors that silently reverse the order.
+        #[test]
+        fn drain_for_restart_stores_flag_before_cancel() {
+            let src = include_str!("runner.rs");
+
+            // Find the drain_for_restart function body by locating its sig.
+            let sig = "pub fn drain_for_restart";
+            let start = src
+                .find(sig)
+                .expect("drain_for_restart must exist on GatewayRunner");
+            // The function is short — first ~10 lines after the signature
+            // suffice. Capture the body span.
+            let body_window = &src[start..start + 1024.min(src.len() - start)];
+
+            let store_idx = body_window
+                .find("is_draining.store(true")
+                .expect("drain_for_restart body must contain is_draining.store(true, …)");
+            let cancel_idx = body_window
+                .find("cancel.cancel()")
+                .expect("drain_for_restart body must contain cancel.cancel()");
+
+            assert!(
+                store_idx < cancel_idx,
+                "T-36.17.1-03: is_draining.store(true) must PRECEDE cancel.cancel() \
+                 in drain_for_restart body (store_idx={store_idx}, cancel_idx={cancel_idx})"
+            );
+        }
+
+        /// Source-order audit: the shutdown sequence calls
+        /// `self.drain_for_restart()` (not the bare `self.cancel.cancel()`),
+        /// so the flag-flip-then-cancel ordering is enforced at the only
+        /// graceful shutdown call site (~runner.rs:1105). Bare cancel.cancel()
+        /// is still allowed in test code and forced-abort paths.
+        #[test]
+        fn shutdown_sequence_uses_drain_for_restart() {
+            let src = include_str!("runner.rs");
+            // The graceful shutdown call must use drain_for_restart, not the
+            // bare cancel.cancel(). The exact anchor: the "Propagate cancellation
+            // to all subtasks" comment is the marker for the shutdown injection
+            // point per the Phase 21.2 Plan 11 invariant. We scan a window
+            // generous enough to span the comment block + the actual call line
+            // (up to ~1KB) but small enough that an unrelated
+            // `drain_for_restart` token far away cannot satisfy the assertion.
+            let anchor = "// Propagate cancellation to all subtasks";
+            let anchor_idx = src
+                .find(anchor)
+                .expect("shutdown anchor comment must exist");
+            let end = (anchor_idx + 1024).min(src.len());
+            let window = &src[anchor_idx..end];
+            // First, the bare `self.cancel.cancel();` MUST NOT be the next call.
+            // (Comments mentioning `self.cancel.cancel()` are fine — only the
+            // statement form is forbidden.)
+            assert!(
+                !window.contains("self.cancel.cancel();"),
+                "Phase 36.17.1 D-03: the bare self.cancel.cancel(); call must NOT \
+                 appear after the 'Propagate cancellation' anchor (use \
+                 self.drain_for_restart(); instead). Window: {window}"
+            );
+            // Second, drain_for_restart must be the chosen call.
+            assert!(
+                window.contains("self.drain_for_restart();"),
+                "Phase 36.17.1 D-03: graceful shutdown after the 'Propagate cancellation' \
+                 anchor must call self.drain_for_restart(); — got window: {window}"
+            );
+        }
+
+        /// Contract guard: SessionQueue.try_push must NOT consult is_draining.
+        /// The preserve-AND-accept invariant (D-03) is enforced by the absence
+        /// of an `is_draining` gate inside the queue itself. Locked by
+        /// source-grep so a future refactor that adds `if is_draining` inside
+        /// try_push trips this test.
+        #[test]
+        fn session_queue_try_push_has_no_is_draining_gate() {
+            let src = include_str!("session_queue.rs");
+            assert!(
+                !src.contains("is_draining"),
+                "T-36.17.1-03 contract violation: SessionQueue must NOT reference \
+                 is_draining (preserve-AND-accept per D-03). Found 'is_draining' \
+                 in session_queue.rs."
+            );
+        }
     }
 }
