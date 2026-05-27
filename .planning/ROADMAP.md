@@ -110,12 +110,12 @@ Plans:
 
 - [x] 36-03-PLAN.md — Cleanup: delete stale "future enhancement" comment at handler.rs:377-380; flip REQUIREMENTS.md GW-05 to Complete + traceability row to "Phase 21.1 (dispatch) + Phase 36 (guard)"; update ROADMAP.md checkboxes; create 36-BACKLOG.md (web UI slash-interception gap; per-turn LLM cancel handler.rs:1032; CLI/gateway unified mechanism; /approve+/deny bypass when approval queue lands); Real-Telegram UAT checkpoint
 
-### Phase 36.17: iron_hermes_ui web logging in $IRONHERMES_HOME/logs (INSERTED)
+### Phase 36.17: iron_hermes_ui web logging in $IRONHERMES_HOME/logs (COMPLETE)
 
 **Goal:** Mirror the TUI file-logging pattern (commit eedb49e1) in the `iron_hermes_ui` server binary: daily-rolling `web.log` (app/agent tracing) and `web-access.log` (HTTP access via `tower_http::trace::TraceLayer`) under `$IRONHERMES_HOME/logs/`, with ANSI-stripped file output, non-blocking writers held across `axum::serve`, per-layer EnvFilters, and console behavior unchanged.
 **Requirements**: D-01..D-18 (see 36.17-CONTEXT.md — phase uses D-IDs in lieu of REQ-IDs)
 **Depends on:** Phase 36
-**Plans:** 4/4 plans complete
+**Plans:** 4/4 plans complete · UAT 5/5 green (2026-05-27) · post-execute fixes: `2df0ae60` (UAT public-dir precondition) · `2ab57e72` (production graceful-shutdown + startup INFO marker)
 
 Plans:
 - [x] 36.17-01-PLAN.md — Add `tower-http = { version = "0.6", features = ["trace"] }` to workspace deps; add `tracing-appender` + `tower-http` to `iron_hermes_ui` non-wasm32 deps (D-13/D-14)
