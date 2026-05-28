@@ -690,14 +690,26 @@ impl GatewayRunner {
         let whitelist = tg_config.whitelist.clone();
 
         // --- 6. Create handler (with gateway hygiene engine wired) and queue manager ---
-        let handler = self.build_gateway_handler();
-        let handler = Arc::new(handler);
-        // Phase 36.17.2 Plan 01: UQM constructor signature change — capacity arg removed,
-        // Arc<SessionQueue> passed instead (D-03: UQM holds Arc<SessionQueue>, not capacity).
+        //
+        // Phase 36.17.2.1 D-01/D-03: order matters — UQM must be constructed BEFORE
+        // the handler is Arc-wrapped so we can call handler.set_user_queue_manager(...)
+        // on the still-mutable owned `mut handler`. This wires the UQM into the
+        // handler's CoreCommandResult::Queued arm (handler.rs) so /queue events
+        // dispatch via UQM::dispatch (which calls notify_one() — user_queue.rs:154)
+        // instead of the direct session_queue.try_push path that has no wake protocol.
+        //
+        // Phase 36.17.2 Plan 01: UQM constructor signature — Arc<SessionQueue> arg
+        // (D-03: UQM holds Arc<SessionQueue>, not capacity).
         let user_queue = Arc::new(UserQueueManager::new(
             adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
             self.session_queue.clone(), // Arc<SessionQueue> already on GatewayRunner per 36.17.1-02
         ));
+        let mut handler = self.build_gateway_handler();
+        // Phase 36.17.2.1 D-01/D-03: install the same UQM Arc the dispatch loop uses
+        // (user_queue_dispatch downstream is a clone of this same Arc — both
+        // reference identical workers + pending_multimodal + session_queue state).
+        handler.set_user_queue_manager(user_queue.clone());
+        let handler = Arc::new(handler);
 
         let mut join_set: JoinSet<()> = JoinSet::new();
 
