@@ -381,7 +381,7 @@ impl Tool for CronjobTool {
                     },
                     "deliver": {
                         "type": "string",
-                        "description": "Delivery target. Default: 'local'."
+                        "description": "Delivery target. Use 'telegram:CHAT_ID' for an explicit Telegram chat (e.g. 'telegram:7018949547'), 'origin' to reply to the originating chat, 'all' for every configured home channel, or 'local' to save without delivering. Bare platform name (e.g. 'telegram') uses the TELEGRAM_HOME_CHANNEL env var. Do NOT pass a bare chat_id without a platform prefix — it will be silently dropped."
                     },
                     "skills": {
                         "type": "array",
