@@ -28,38 +28,10 @@ use ironhermes_tools::ToolRegistry;
 
 use crate::adapter::{MessageHandler, PlatformAdapter};
 use crate::multimodal::ProcessedAttachments;
-use crate::rate_limiter::PerUserRateLimiter;
+use crate::rate_limiter::{PerUserRateLimiter, with_rate_limit_retry};
 use crate::session::{SessionKey, SessionStore};
 use crate::session_queue::{QueueError, SessionQueue};
 use crate::stream_consumer::StreamConsumer;
-
-/// Retry wrapper for Telegram API calls that may hit 429 rate limits (D-19).
-async fn with_rate_limit_retry<F, Fut, T>(f: F) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-{
-    for attempt in 0..3u64 {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("429") || err_str.contains("Too Many Requests") {
-                    let wait = (attempt + 1) * 2; // 2s, 4s, 6s
-                    warn!(
-                        "Telegram rate limit hit, retrying in {}s (attempt {})",
-                        wait,
-                        attempt + 1
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                    continue;
-                }
-                return Err(e);
-            }
-        }
-    }
-    anyhow::bail!("Bot is being rate limited, please wait")
-}
 
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
