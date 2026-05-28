@@ -1004,7 +1004,7 @@ impl GatewayRunner {
                         match dispatch_result {
                             Ok(DispatchOutcome::Accepted) => {
                                 // Existing worker picked up the message via Notify wake.
-                                // 👁 fires when the worker pops (D-08). Nothing to do here.
+                                // 👀 fires when the worker pops (D-08). Nothing to do here.
                                 debug!(
                                     chat_id = %event_chat_id,
                                     "Dispatch: message accepted by existing worker (Phase 36.17.2 D-08)"
@@ -1057,20 +1057,20 @@ impl GatewayRunner {
                                             Err(_) => break, // semaphore closed on shutdown
                                         };
 
-                                        // D-06 step 3 + D-08: emit 👁 reaction inline before
-                                        // handle_with_multimodal. Inline await means "👁 reaches
+                                        // D-06 step 3 + D-08: emit 👀 reaction inline before
+                                        // handle_with_multimodal. Inline await means "👀 reaches
                                         // Telegram before the placeholder █ send" — strict ordering
                                         // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
                                         // D-09: warn-and-ignore on failure; must not block the turn.
                                         if let Err(e) = adapter_task
-                                            .add_reaction(&next_event.chat_id, &next_event.message_id, "👁")
+                                            .add_reaction(&next_event.chat_id, &next_event.message_id, "👀")
                                             .await
                                         {
                                             tracing::warn!(
                                                 chat_id = %next_event.chat_id,
                                                 message_id = %next_event.message_id,
                                                 error = %e,
-                                                "Worker: 👁 reaction emission failed; continuing (Phase 36.17.2 D-09)"
+                                                "Worker: 👀 reaction emission failed; continuing (Phase 36.17.2 D-09)"
                                             );
                                         }
 

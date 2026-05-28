@@ -30,7 +30,7 @@ pub enum DispatchOutcome {
 ///
 /// The `❌` cap-hit UX fires inside `dispatch` (D-11) so all transports get it for free.
 ///
-/// The `👁` reaction does NOT fire here — emission moves to the per-chat worker (D-08).
+/// The `👀` reaction does NOT fire here — emission moves to the per-chat worker (D-08).
 pub struct UserQueueManager {
     /// Worker presence + Notify wake-up registry, keyed by full SessionKey triple (D-13, D-19).
     workers: Mutex<HashMap<SessionKey, Arc<Notify>>>,
@@ -38,7 +38,7 @@ pub struct UserQueueManager {
     /// dispatched event in lockstep with SessionQueue. Worker calls take_multimodal() once per
     /// pop, restoring 1-to-1 FIFO ordering between event and payload (D-02 — multimodal
     /// pass-through MUST be preserved across the 36.17.1 → 36.17.2 architectural shift;
-    /// only 👁-timing and cap-hit signal are user-visible changes per CONTEXT.md).
+    /// only 👀-timing and cap-hit signal are user-visible changes per CONTEXT.md).
     pending_multimodal: Mutex<HashMap<SessionKey, VecDeque<(Option<String>, Option<String>)>>>,
     /// Shared SessionQueue handle (D-03 — UQM holds Arc<SessionQueue>, NOT Arc<GatewayRunner>).
     session_queue: Arc<SessionQueue>,
@@ -96,7 +96,7 @@ impl UserQueueManager {
     /// - `Ok(DispatchOutcome::Accepted)` — message landed; existing worker will wake via Notify.
     /// - `Err(QueueError::CapacityReached)` — queue full; ❌ reaction + chat reply already sent.
     ///
-    /// The 👁 reaction does NOT fire here — emission is Plan 02's exclusive responsibility (D-08).
+    /// The 👀 reaction does NOT fire here — emission is Plan 02's exclusive responsibility (D-08).
     pub async fn dispatch(
         &self,
         event: MessageEvent,
@@ -356,11 +356,11 @@ mod tests {
         let r2 = manager.dispatch(make_event("chat1", "msg2"), None, None).await;
         assert_eq!(r2, Ok(DispatchOutcome::Accepted));
 
-        // No 👁 reaction should have fired — that's Plan 02's job (D-08)
+        // No 👀 reaction should have fired — that's Plan 02's job (D-08)
         assert_eq!(
             adapter.reaction_count.load(Ordering::SeqCst),
             0,
-            "UQM must not emit 👁 reaction — that is Plan 02's responsibility"
+            "UQM must not emit 👀 reaction — that is Plan 02's responsibility"
         );
         assert_eq!(session_queue.len(&key), 2);
     }
