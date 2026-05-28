@@ -772,18 +772,34 @@ impl App {
                 if total_tokens > 0 {
                     self.status.tokens_used = total_tokens;
                 }
+                // Phase 36.17.3 (D-04): auto-drain next queued item, if any.
+                // Guards inside maybe_drain_queue (paused / in-flight) short-
+                // circuit if the conditions aren't right.
+                self.maybe_drain_queue();
             }
             StreamEvent::Error(e) => {
                 self.commit_assistant_buffer();
                 self.status.hint = format!("error: {e}");
                 self.pending_rx = None;
                 self.cancel_child = None;
+                // Phase 36.17.3 (Resolution 4): on stream error, set paused=true
+                // so the user sees the paused state and can /unpause to recover.
+                // The maybe_drain_queue call below is symmetric belt-and-
+                // suspenders — its first guard (paused) short-circuits the pop
+                // so no item is consumed by an errored turn.
+                self.queue_paused
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.maybe_drain_queue();
             }
             StreamEvent::Cancelled => {
                 self.commit_assistant_buffer();
                 self.status.hint = "cancelled".to_string();
                 self.pending_rx = None;
                 self.cancel_child = None;
+                // Phase 36.17.3: do NOT drain on cancel (RESEARCH Pitfall 1 —
+                // /stop clears queue before firing cancel; a drain here would
+                // be either a no-op (queue already empty) or a regression
+                // (drain pops a queued item after a deliberate hard-stop).
             }
         }
     }
@@ -794,6 +810,40 @@ impl App {
             if !buf.is_empty() {
                 self.history.push(assistant_message(buf));
             }
+        }
+    }
+
+    /// Phase 36.17.3 (D-04 / D-05 / T-04 mitigation): pop one queued item and
+    /// set up the next pending turn. Called from `handle_stream_event` on
+    /// `StreamEvent::Finished` (and defensively on `Error`).
+    ///
+    /// Guards (both mandatory — RESEARCH Pitfall 3 / Pitfall 6):
+    /// 1. `queue_paused.load(Relaxed)` → skip drain (D-06).
+    /// 2. `pending_tx.is_some()` → skip drain (T-04: prevents double-spawn
+    ///    deadlock if drain fires while a turn is still in flight).
+    ///
+    /// On Some(text): mirror `submit()`'s channel + cancel-token setup so the
+    /// event loop picks the queued item up as the next turn.
+    fn maybe_drain_queue(&mut self) {
+        // Guard 1 (D-06): paused → skip drain.
+        if self.queue_paused.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        // Guard 2 (RESEARCH Pitfall 3 — T-04 mitigation): turn already in
+        // flight → skip drain. Without this guard, a future double-Finished
+        // (or Finished racing a still-active turn) would double-spawn and
+        // deadlock the event loop on the second channel.
+        if self.pending_tx.is_some() {
+            return;
+        }
+        if let Some(text) = self.queue.pop(&self.queue_key) {
+            self.history.push(user_message(text));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+            self.pending_rx = Some(rx);
+            self.pending_tx = Some(tx);
+            self.cancel_child = Some(self.cancel_parent.child_token());
+            self.auto_follow = true;
+            self.assistant_buffer = None;
         }
     }
 
