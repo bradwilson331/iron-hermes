@@ -2,40 +2,18 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
-use ironhermes_core::{ChatMessage, Platform};
+use ironhermes_core::ChatMessage;
 use ironhermes_state::StateStore;
 use std::collections::HashMap;
 use tracing::{debug, warn};
 
-/// Unique key for a gateway session (platform + chat_id + optional user_id).
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct SessionKey {
-    pub platform: Platform,
-    pub chat_id: String,
-    pub user_id: Option<String>,
-}
-
-impl SessionKey {
-    pub fn new(platform: Platform, chat_id: impl Into<String>) -> Self {
-        Self {
-            platform,
-            chat_id: chat_id.into(),
-            user_id: None,
-        }
-    }
-
-    pub fn with_user(mut self, user_id: impl Into<String>) -> Self {
-        self.user_id = Some(user_id.into());
-        self
-    }
-
-    pub fn to_string_key(&self) -> String {
-        match &self.user_id {
-            Some(uid) => format!("{}:{}:{}", self.platform, self.chat_id, uid),
-            None => format!("{}:{}", self.platform, self.chat_id),
-        }
-    }
-}
+// Phase 36.17.3 (Resolution 3 / D-01): `SessionKey` was relocated into
+// `ironhermes-core::session` so every `MessageQueue<K>` consumer (gateway,
+// TUI, future web/Discord/Slack/REST) shares the same canonical key. The
+// re-export below preserves backward compatibility for the gateway-internal
+// `use crate::session::SessionKey;` call sites in `session_queue.rs` and
+// `user_queue.rs`, and for any downstream `use ironhermes_gateway::session::SessionKey;`.
+pub use ironhermes_core::session::SessionKey;
 
 /// An active gateway conversation session.
 ///

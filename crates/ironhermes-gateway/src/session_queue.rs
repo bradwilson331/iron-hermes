@@ -27,39 +27,20 @@ use tracing::warn;
 
 use crate::session::SessionKey;
 
-/// Per-session hard cap. Once a session's queue reaches this depth, further
-/// `try_push` calls return `Err(QueueError::CapacityReached)`.
-///
-/// **D-09:** Per-session, not global. A single attacker bucket is capped
-/// without starving other sessions. **D-10:** Drop-newest + reject — the
-/// oldest queued event is what the agent is about to act on; dropping it
-/// would break causal order. **T-36.17.1-01:** primary DoS mitigation.
-pub const MAX_QUEUE_DEPTH: usize = 128;
+// Phase 36.17.3 (Resolution 3 / D-01): the per-session cap and warn thresholds
+// were relocated into `ironhermes-core::queue` so every `MessageQueue<K>`
+// consumer enforces the same cap at compile time (T-01 / T-36.17.1-01
+// mitigation across all transports). The gateway re-exports them so all
+// existing `crate::session_queue::MAX_QUEUE_DEPTH` / `WARN_QUEUE_DEPTH` call
+// sites continue to compile unchanged.
+pub use ironhermes_core::queue::{MAX_QUEUE_DEPTH, WARN_QUEUE_DEPTH};
 
-/// Soft warning threshold — 75% of `MAX_QUEUE_DEPTH`. Once a session's queue
-/// reaches this depth on push, `try_push` emits a `tracing::warn!` with the
-/// session key and depth, but the push still succeeds.
-///
-/// **D-11:** Visible-but-not-yet-rejecting territory; gives operators
-/// observability before the hard cap fires.
-pub const WARN_QUEUE_DEPTH: usize = 96;
-
-/// Errors returned by `SessionQueue` operations.
-///
-/// Currently only `CapacityReached` is defined; future phases (e.g., drain-mode
-/// errors, webhook 429 handling) may add variants without breaking existing
-/// match sites (D-11/D-12 scope).
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum QueueError {
-    /// The per-session queue is full. The event was NOT pushed. The caller
-    /// is responsible for emitting cap-hit UX (D-13 for Telegram, HTTP 429
-    /// for webhook adapters per D-12).
-    #[error("Queue at capacity ({max}) for session {session_key}")]
-    CapacityReached {
-        session_key: String,
-        max: usize,
-    },
-}
+// Phase 36.17.3 (Resolution 3 / D-01): `QueueError` was relocated into
+// `ironhermes-core::queue` so every `MessageQueue<K>` consumer returns the
+// same error type. The gateway re-exports it so existing
+// `use ironhermes_gateway::session_queue::QueueError;` call sites continue
+// to compile unchanged.
+pub use ironhermes_core::queue::QueueError;
 
 /// Per-session FIFO message queue.
 ///
@@ -204,6 +185,60 @@ impl SessionQueue {
 impl Default for SessionQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =============================================================================
+// Phase 36.17.3 (D-01 / D-02 / Resolution 5): MessageQueue<SessionKey> adapter
+// =============================================================================
+//
+// `SessionQueue` implements the cross-consumer `ironhermes_core::queue::MessageQueue`
+// trait via a `String`->`MessageEvent` adapter. The trait surface uses `String`
+// so non-gateway consumers (TUI, future web/Discord/Slack/REST) don't have to
+// construct a gateway-specific `MessageEvent` — the wrapping is the gateway's
+// concern. Every existing concrete-API call site (handler.rs / user_queue.rs /
+// runner.rs / tests) continues to use `SessionQueue::try_push(&self, key,
+// MessageEvent)` unchanged — the trait impl is purely additive (T-03
+// mitigation). Per the threat model and Resolution 5.
+
+impl ironhermes_core::queue::MessageQueue<SessionKey> for SessionQueue {
+    fn try_push(
+        &self,
+        key: &SessionKey,
+        message: String,
+    ) -> Result<(), ironhermes_core::queue::QueueError> {
+        // Adapter: wrap the bare `String` into a minimal `MessageEvent`
+        // mirroring the field set the handler populates today. `sender_id`
+        // is sourced from `key.user_id` (empty when absent, matching the
+        // handler's behavior for non-user-keyed channels). All other fields
+        // are gateway-internal metadata that the trait surface deliberately
+        // does not carry.
+        let event = MessageEvent {
+            content: message,
+            platform: key.platform.clone(),
+            chat_id: key.chat_id.clone(),
+            sender_id: key.user_id.clone().unwrap_or_default(),
+            message_id: String::new(),
+            attachments: Vec::new(),
+            thread_id: None,
+            chat_type: "queue".to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        };
+        SessionQueue::try_push(self, key, event)
+    }
+
+    fn pop(&self, key: &SessionKey) -> Option<String> {
+        SessionQueue::pop(self, key).map(|e| e.content)
+    }
+
+    fn len(&self, key: &SessionKey) -> usize {
+        SessionQueue::len(self, key)
+    }
+
+    fn clear(&self, key: &SessionKey) {
+        SessionQueue::clear(self, key);
     }
 }
 

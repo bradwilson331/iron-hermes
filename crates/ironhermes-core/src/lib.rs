@@ -17,6 +17,7 @@ pub mod pricing_cache;
 pub mod profile;
 pub mod provider;
 pub mod queue;
+pub mod session;
 pub mod skills;
 pub mod ssrf;
 pub mod token_estimator;
@@ -52,6 +53,7 @@ pub use pricing::{PricingEntry, PricingRegistry, compute_cost_micros};
 pub use pricing_cache::{PricingCache, PricingCacheEntry};
 pub use provider::{ProviderResolver, ResolvedEndpoint, SummarizationClientHandle};
 pub use queue::{MAX_QUEUE_DEPTH, MessageQueue, QueueError, WARN_QUEUE_DEPTH};
+pub use session::SessionKey;
 pub use skills::{
     CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,
     SkillSource,
