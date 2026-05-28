@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: planning
-stopped_at: Phases 36.17.3 + 36.17.4 inserted — awaiting /gsd-plan-phase
-last_updated: "2026-05-28T17:50:00.000Z"
-last_activity: 2026-05-28 -- Phases 36.17.3 (TUI ↔ queue) and 36.17.4 (iron_hermes_ui ↔ queue) inserted
+status: executing
+stopped_at: Phase 36.17.1 context gathered
+last_updated: "2026-05-28T20:19:56.774Z"
+last_activity: 2026-05-28 -- Phase 36.17.3 planning complete
 progress:
-  total_phases: 44
+  total_phases: 43
   completed_phases: 10
-  total_plans: 44
+  total_plans: 50
   completed_plans: 44
   percent: 23
 ---
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 36.17.3 next-up (wire-up-tui-with-gateway-queue-and-slash-queue-commands) — INSERTED, NOT PLANNED
 Plan: 0 of N (run /gsd-plan-phase 36.17.3 to break down)
-Status: Phase 36.17.2.1 closed (PASS 11/11 + UAT PASS); 36.17.3 + 36.17.4 inserted for queue UI wire-up parity
-Last activity: 2026-05-28 -- Two sibling phases inserted: 36.17.3 (TUI), 36.17.4 (iron_hermes_ui)
+Status: Ready to execute
+Last activity: 2026-05-28 -- Phase 36.17.3 planning complete
 
 ## Phase 36.2 Closure Summary
 
