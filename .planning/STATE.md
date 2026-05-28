@@ -4,14 +4,14 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.17.1 context gathered
-last_updated: "2026-05-28T01:57:27.443Z"
+last_updated: "2026-05-28T15:56:21.178Z"
 last_activity: 2026-05-28 -- Phase 36.17.2 execution started
 progress:
-  total_phases: 40
-  completed_phases: 8
-  total_plans: 41
-  completed_plans: 36
-  percent: 20
+  total_phases: 41
+  completed_phases: 9
+  total_plans: 42
+  completed_plans: 42
+  percent: 22
 ---
 
 # Project State
@@ -509,6 +509,7 @@ Recent decisions affecting current work:
 - Phase 36.16 inserted after Phase 36: Small Model Mode architecture port (consumes 36.15 knob); seeded from SmallModelMode_ARCHITECTURE.md (URGENT)
 - Phase 36.17 inserted after Phase 36: iron_hermes_ui web logging in $IRONHERMES_HOME/logs (URGENT)
 - Phase 36.17.1 inserted after Phase 36.17: in-mem FIFO queuing parity of python deque for chat sessions (URGENT)
+- Phase 36.17.2.1 inserted after Phase 36.17.2: fix /queue slash-command failing to wake parked worker (regression from 36.17.2 mpsc→Notify switch) (URGENT)
 
 ### Pending Todos
 

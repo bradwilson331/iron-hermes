@@ -153,7 +153,7 @@ Plans:
 **Goal:** Make 36.17.1's `SessionQueue` reachable in production Telegram by collapsing `UserQueueManager`'s internal per-chat `mpsc` buffer into `SessionQueue`. UAT of 36.17.1 confirmed that messages 2..N of a per-chat burst sit in `UQM`'s `chat_rx` and never see `agent_running == true` at `handle_with_multimodal` entry — the busy-branch enqueue and post-turn `drain_pending` are dead code on the Telegram path. Locked architecture (option C): `UserQueueManager` keeps its public surface (`dispatch`, transport-layer 👁 reaction emitter, whitelist/`@mention`/multimodal hooks, post-turn `remove` lifecycle) but rips out the per-chat `mpsc` interior; `dispatch` pushes straight into `SessionQueue::try_push` with strict backpressure (full → drop + 429-class bubble to transport). The per-chat worker reads from `SessionQueue` and the old `drain_pending` collapses into the worker's natural pop loop. 👁 reaction is emitted **by the worker** when it pops a message and begins its turn — not when `dispatch` lands it on the queue — so the 👁 reflects actual processing, never buffer occupancy. `/queue` (slash command), `/new`/`/reset` queue-clear ordering (Pitfall 5), `is_draining` flag + `drain_for_restart`, and the cap-hit ❌+chat-reply UX from 36.17.1 are preserved unchanged. Discord/Slack/web/REST gateways re-use the new path automatically (they already flow through `UserQueueManager::dispatch`).
 **Requirements**: TBD (closes T-36.17.1 unreachability gap surfaced in 36.17.1-05 UAT — references locked decisions D-01..D-22 from 36.17.2-CONTEXT.md)
 **Depends on:** Phase 36.17.1
-**Plans:** 6/6 plans complete
+**Plans:** 5/5 plans complete
 
 Plans:
 - [x] 36.17.2-01-PLAN.md — UserQueueManager internal rewrite: replace mpsc::Sender map with SessionKey-keyed worker-presence + Notify map; dispatch returns Result<DispatchOutcome, QueueError>; cap-hit UX (❌+chat reply) migrates into dispatch; rekey by full SessionKey triple; multimodal sidecar (pending_multimodal); with_rate_limit_retry relocated to rate_limiter.rs (D-01..D-03, D-10, D-11, D-13, D-14, D-18, D-19)
@@ -161,6 +161,16 @@ Plans:
 - [x] 36.17.2-03-PLAN.md — Integration test tests/uqm_session_queue_unification.rs: 5 same-chat messages → 5 👁 at pop in FIFO order through real handle_with_multimodal; multimodal round-trip test; worker-exit/dispatch race coverage; verify 9 existing tests in session_queue_integration.rs still pass unchanged (D-20, D-21)
 - [x] 36.17.2-04-PLAN.md — Telegram live UAT runbook update + blocking-human checkpoint: rewrite session_queue_telegram_uat.md Scenario 1 (👁 at pop time, not dispatch); add Scenario 5 (T-36.17.2-01 worker-exit/dispatch race); add Scenario 6 (T-36.17.2-04 multimodal sidecar lockstep); D-12 deferred footnote; preserve cap-hit + /new + drain-mode scenarios verbatim; phase sign-off gated on user typing "approved" (D-22, T-36.17.2-01..04)
 - [x] 36.17.2-05-PLAN.md — Slash-command fast-path (closes second UAT failure): runner.rs dispatch loop branches on event.content.starts_with("/") BEFORE UQM.dispatch and tokio::spawns handler.handle_with_multimodal directly so commands bypass the per-chat worker; sem_dispatch permit acquired in spawn (T-36.17.2-06 storm-bypass mitigation); integration test test_slash_command_bypasses_per_chat_worker + live UAT Scenario 7 (D-23..D-27, T-36.17.2-05/06)
+
+### Phase 36.17.2.1: fix /queue slash-command failing to wake parked worker — regression from Phase 36.17.2's mpsc→Notify worker rewrite; /queue pushes to SessionQueue but does not call notify_one(), so 128/129 messages never reach the LLM (UAT 2026-05-28T15:36-15:38 UTC) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.17.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.17.2.1 to break down)
 
 ### Phase 36.16: Small Model Mode (SMM) architecture port — mirror the smallcode JS reference architecture (System Overview / Component Responsibilities / Layers / Data Flow / Key Abstractions / Entry Points / Architectural Constraints / Anti-Patterns / Error Handling / Cross-Cutting Concerns) into ironhermes Rust; consumes 36.15's per-provider extra_request_options knob as one input; see 36.16-CONTEXT.md (from SmallModelMode_ARCHITECTURE.md) for the reference shape (INSERTED)
 
