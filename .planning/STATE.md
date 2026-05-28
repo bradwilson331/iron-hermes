@@ -4,13 +4,13 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.17.1 context gathered
-last_updated: "2026-05-28T20:19:56.774Z"
+last_updated: "2026-05-28T23:17:00.362Z"
 last_activity: 2026-05-28 -- Phase 36.17.3 planning complete
 progress:
   total_phases: 43
   completed_phases: 10
   total_plans: 50
-  completed_plans: 44
+  completed_plans: 46
   percent: 23
 ---
 
@@ -199,6 +199,7 @@ Last activity: 2026-05-28 -- Phase 36.17.3 planning complete
 | Phase 26.2.1 P14 | 35min | 4 tasks | 5 files |
 | Phase 32.2 P02 | 18 | 2 tasks | 2 files |
 | Phase 32.2-subagent-delegation-parity P03 | 1105 | 2 tasks | 4 files |
+| Phase 36.17.3 P01 | 25min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -430,6 +431,7 @@ Recent decisions affecting current work:
 - [Phase 32.2-subagent-delegation-parity]: Depth threading via AgentSubagentRunner struct fields — SubagentRunner trait signature unchanged (RESEARCH Pitfall 6)
 - [Phase 35.1-05]: run_skills_section early-return guard removed — create_dir_all guarantees dir exists; SkillRegistry handles empty dir gracefully
 - [Phase 35.1-05]: find_project_skills_source checks IRONHERMES_SOURCE env var first, then walks current_exe() up to 10 levels — graceful None for production installs
+- [Phase ?]: 36.17.3-01: MessageQueue<K> trait + QueueError relocated to ironhermes-core; SessionKey moved to core with back-compat re-export from gateway; SessionQueue impls MessageQueue<SessionKey> via String->MessageEvent adapter (peek omitted per Resolution 3)
 
 ### Roadmap Evolution
 
@@ -535,6 +537,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-27T15:49:14.135Z
+Last session: 2026-05-28T23:16:54.151Z
 Stopped at: Phase 36.17.1 context gathered
-Resume file: .planning/phases/36.17.1-in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions/36.17.1-CONTEXT.md
+Resume file: None
