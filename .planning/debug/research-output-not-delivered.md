@@ -1,6 +1,6 @@
 ---
 slug: research-output-not-delivered
-status: investigating
+status: resolved
 trigger: agent completes a long-form research turn (≥4096 chars output) but the result never appears in the user's Telegram chat
 created: 2026-05-28
 updated: 2026-05-28
@@ -53,20 +53,86 @@ Possible failure modes (to test in order):
 
 ## Current Focus
 
-**hypothesis:** The `delegate_task` tool failure at 14:49:26Z (missing `task`/`tasks` argument) put the parent agent into a degenerate state — it consumed turns retrying the delegate or pivoting, eventually exhausted `max_iterations` or produced a response that went to a side-channel (e.g. internal log, not Telegram). The user-visible result vanished because the actual research output lived inside the failed-then-retried delegate path's transcript, never reaching the final Telegram send.
-**test:** Reproduce with a simpler long-form prompt that does NOT trigger `delegate_task` — e.g. "Write me a 4500-character story about queues with no external research." If THAT also fails to deliver, the bug is in the chunker / final-send path. If THAT delivers cleanly, the bug is in delegate_task semantics or the parent-loop's handling of sub-agent failure.
-**expecting:** Either (a) chunker / send-path drops long messages silently (then we fix the chunker error handling), or (b) delegate_task failure shape causes the parent agent to lose its response (then we fix the delegate_task tool definition and/or the parent's error handling).
-**next_action:** Read `handler.rs:handle_with_multimodal` end-to-end to map the final-response delivery path. Then read `stream_consumer.rs::push` and find_split_point. Then locate the `delegate_task` tool definition and its expected/actual schema.
+**hypothesis:** CONFIRMED — two independent bugs, both fixed.
+**next_action:** None — resolved.
 
 ## Evidence
 
-(none yet — session starting)
+- timestamp: 2026-05-28T15:30:00Z
+  file: crates/ironhermes-gateway/src/stream_consumer.rs
+  lines: 86-91
+  finding: |
+    BUG 1 (PRIMARY — root cause of missing delivery): The `flush(final_edit=true)` branch
+    directly calls `edit_message_markdown` with the full buffer content, with NO length check
+    and NO overflow chunking. The overflow chunker (lines 100-125) lives exclusively in the
+    `final_edit=false` branch.
+
+    When the agent produces a response ≥4096 chars, `flush(true)` sends the entire content
+    to Telegram's `editMessageText` API. Telegram rejects this with:
+      {"ok":false,"error_code":400,"description":"Bad Request: message is too long"}
+
+    The call site in handler.rs (lines 1162 and 1177) uses `let _ = consumer.flush(true).await`
+    — the error is silently discarded. The placeholder █ message never gets replaced, and
+    nothing arrives in Telegram. No log entry is emitted.
+
+    The streaming-partial path (flush(false)) correctly handles overflow by chunking at
+    paragraph boundaries during generation. The final-response path (flush(true)) was
+    missing this entirely — a code path divergence.
+
+- timestamp: 2026-05-28T15:35:00Z
+  file: crates/ironhermes-tools/src/delegate_task.rs
+  lines: 726, 732-734
+  finding: |
+    BUG 2 (SECONDARY — explains the delegate_task failure at 14:49:26Z): The JSON schema
+    exposed to the LLM uses `"required": []` (empty). Neither `task` nor `tasks` appears as
+    required at the schema level. The enforcement at line 732-734 is runtime-only:
+      if args.get("tasks").is_none() && args.get("task").is_none() {
+          anyhow::bail!("Either 'task' (single mode) or 'tasks' (batch mode) is required");
+      }
+
+    When the LLM calls `delegate_task` without providing `task` or `tasks` (e.g. with only
+    metadata fields like `toolsets`), the schema does not prevent it — only the runtime check
+    does. This produces the tool error seen in the UAT log at 14:49:26Z:
+      "Tool 'delegate_task' failed: Either 'task' (single mode) or 'tasks' (batch mode) is required"
+
+    The LLM then consumes turns recovering. Even after recovery, Bug 1 suppresses delivery.
 
 ## Eliminated
 
 - **Phase 36.17.2 regression** — ELIMINATED via the live UAT signoff (this issue exists independently of the queue refactor; the same outbound delivery path was used before 36.17.2 and would have failed identically).
 - **Telegram emoji reaction issue (Plan 06)** — ELIMINATED. The 👀 fix landed and zero `REACTION_INVALID` lines appear in the UAT log. Reactions are unrelated to message-body delivery.
+- **Chunker error-swallowing during streaming** — ELIMINATED. The non-final flush path correctly propagates errors from `send_message` via `?`. The bug is in the final-flush path only.
+- **Sub-agent results not surfacing** — ELIMINATED as the primary cause. The sub-agent output does reach the parent's final response text. Bug 1 then silently drops that text at delivery time.
+- **Streaming state machine corruption** — ELIMINATED. The channel close + `flush(true)` sequence is correct; the bug is inside `flush(true)` itself.
 
 ## Resolution
 
-(pending)
+**Root cause:**
+`StreamConsumer::flush(true)` (the final-edit path) called `edit_message_markdown` directly on the full buffer without checking length. Telegram rejects `editMessageText` with content > 4096 chars (HTTP 400). The error was silently discarded at the call site (`let _ = consumer.flush(true).await`), so the placeholder message was never replaced and nothing arrived in Telegram.
+
+**Fix applied:**
+
+1. `crates/ironhermes-gateway/src/stream_consumer.rs` — The `final_edit=true` branch now
+   chunks the buffer using the same `find_split_point` logic as the non-final path. The first
+   chunk edits the placeholder with plain text; each subsequent chunk is sent as a new
+   `send_message` call; the final chunk is edited with `edit_message_markdown`. A new
+   regression test `test_final_flush_overflow_chunks_long_content` covers the ≥4096-char
+   final-flush case.
+
+2. `crates/ironhermes-tools/src/delegate_task.rs` — The JSON schema now uses:
+   ```json
+   "oneOf": [
+     { "required": ["task"] },
+     { "required": ["tasks"] }
+   ]
+   ```
+   instead of `"required": []`. The LLM sees the constraint at schema parse time, not only
+   at runtime. The corresponding test was updated to verify the `oneOf` structure.
+
+**Verification:**
+- `cargo check -p ironhermes-gateway -p ironhermes-tools` — clean (pre-existing warnings only)
+- `cargo test -p ironhermes-gateway --lib -- stream_consumer` — 13/13 passed
+- `cargo test -p ironhermes-tools --lib -- delegate_task` — 50/50 passed
+
+**Post-fix UAT instruction:**
+Send a prompt that generates ≥4096 chars output (e.g. "Write 5000 words on the history of FIFO queues with citations."). Confirm that multiple Telegram messages arrive in order, the first replacing the █ placeholder, subsequent chunks appearing as new messages.

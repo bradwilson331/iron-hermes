@@ -659,6 +659,11 @@ impl Tool for DelegateTaskTool {
     }
 
     fn schema(&self) -> ToolSchema {
+        // Bug fix: the previous schema used `"required": []` with runtime-only
+        // enforcement, causing LLMs to call delegate_task with neither `task` nor
+        // `tasks`. The `oneOf` constraint makes the requirement schema-visible so
+        // the model knows at tool-definition parse time that exactly one of the two
+        // discriminator fields is required.
         ToolSchema::new(
             "delegate_task",
             self.description(),
@@ -667,7 +672,7 @@ impl Tool for DelegateTaskTool {
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "Clear description of the task for the child agent to complete."
+                        "description": "Single-task mode: clear description of the task for the child agent to complete. Required when not using 'tasks' (batch mode)."
                     },
                     "allowed_tools": {
                         "type": "array",
@@ -694,7 +699,7 @@ impl Tool for DelegateTaskTool {
                             },
                             "required": ["goal"]
                         },
-                        "description": "Array of tasks for parallel batch execution. Max 3 tasks. Mutually exclusive with 'task' param."
+                        "description": "Batch mode: array of tasks for parallel execution. Max 3 tasks. Required when not using 'task' (single mode). Mutually exclusive with 'task'."
                     },
                     "detach": {
                         "type": "boolean",
@@ -723,7 +728,14 @@ impl Tool for DelegateTaskTool {
                         "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth."
                     }
                 },
-                "required": []
+                // oneOf enforces that exactly one of `task` (single mode) or `tasks`
+                // (batch mode) is present. This constraint is schema-visible to the LLM
+                // at tool-definition parse time, preventing the "neither provided" failure
+                // that previously surfaced only as a runtime error.
+                "oneOf": [
+                    { "required": ["task"] },
+                    { "required": ["tasks"] }
+                ]
             }),
         )
     }
@@ -1206,17 +1218,27 @@ mod tests {
 
     #[test]
     fn test_delegate_task_schema_task_and_tasks_are_mutually_exclusive_optional() {
-        // Per WR-01 (commit bbf48db): `task` and `tasks` are mutually exclusive,
-        // so neither appears in `required`. Runtime validation in `execute()` enforces
-        // that at least one is present.
+        // Bug fix: schema now uses `oneOf` with `required: ["task"]` and
+        // `required: ["tasks"]` branches so the LLM sees the constraint at
+        // schema parse time. The top-level `required` array is absent (replaced
+        // by oneOf). Runtime validation in `execute()` still enforces mutual
+        // exclusivity as a defence-in-depth fallback.
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        let required = params["required"].as_array().unwrap();
-        assert!(
-            required.is_empty(),
-            "schema 'required' must be empty — mutual exclusivity is enforced at runtime"
-        );
+
+        // oneOf must be present with two branches
+        let one_of = params["oneOf"].as_array().expect("schema must have oneOf");
+        assert_eq!(one_of.len(), 2, "oneOf must have exactly 2 branches");
+        let branch_0_req = one_of[0]["required"].as_array().unwrap();
+        let branch_1_req = one_of[1]["required"].as_array().unwrap();
+        let all_required: Vec<&str> = branch_0_req.iter()
+            .chain(branch_1_req.iter())
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(all_required.contains(&"task"), "oneOf branch must require 'task'");
+        assert!(all_required.contains(&"tasks"), "oneOf branch must require 'tasks'");
+
         let props = &params["properties"];
         assert!(
             props.get("task").is_some(),

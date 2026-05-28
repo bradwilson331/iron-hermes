@@ -74,7 +74,9 @@ impl StreamConsumer {
     ///   interval hasn't elapsed, this is a no-op.
     /// - If `final_edit` is true, edits with Markdown parse mode and no cursor.
     /// - If content exceeds `MAX_MESSAGE_LEN`, splits at the best paragraph
-    ///   boundary and chains a new message.
+    ///   boundary and chains a new message. This applies to both final and
+    ///   intermediate flushes — Telegram rejects editMessageText calls with
+    ///   content > 4096 chars regardless of parse_mode.
     pub async fn flush(&mut self, final_edit: bool) -> Result<()> {
         let now = Instant::now();
 
@@ -84,11 +86,62 @@ impl StreamConsumer {
         }
 
         if final_edit {
-            // Final edit: Markdown mode, no cursor, no tool line
-            let content = self.buffer.clone();
-            self.adapter
-                .edit_message_markdown(&self.chat_id, &self.current_message_id, &content)
-                .await?;
+            // Final edit: Markdown mode, no cursor, no tool line.
+            // Must chunk at MAX_MESSAGE_LEN — Telegram rejects editMessageText
+            // with content > 4096 chars even in Markdown mode (Bug fix: the
+            // overflow check was previously only in the non-final branch, causing
+            // silent 400 errors and dropped long-form responses).
+            let mut remaining = self.buffer.clone();
+            let mut first_chunk = true;
+            loop {
+                if remaining.len() <= MAX_MESSAGE_LEN {
+                    // Last (or only) chunk: edit the current placeholder with Markdown
+                    self.adapter
+                        .edit_message_markdown(&self.chat_id, &self.current_message_id, &remaining)
+                        .await?;
+                    break;
+                }
+
+                // Content exceeds limit — split at best boundary
+                let split_point = find_split_point(&remaining, MAX_MESSAGE_LEN);
+                let chunk = remaining[..split_point].to_string();
+                let rest = remaining[split_point..].trim_start().to_string();
+
+                if first_chunk {
+                    // Finalize the placeholder message with the first chunk (plain
+                    // text, no Markdown, to avoid partial-markdown parse failures)
+                    self.adapter
+                        .edit_message(&self.chat_id, &self.current_message_id, &chunk)
+                        .await?;
+                    self.overflow_message_ids
+                        .push(self.current_message_id.clone());
+                    first_chunk = false;
+                } else {
+                    // Send additional overflow chunks as new plain-text messages
+                    let new_msg = self
+                        .adapter
+                        .send_message(&self.chat_id, &chunk, None)
+                        .await?;
+                    self.overflow_message_ids
+                        .push(self.current_message_id.clone());
+                    self.current_message_id = new_msg.message_id;
+                }
+
+                // Send the rest as a new message and continue the loop
+                let new_msg = self
+                    .adapter
+                    .send_message(&self.chat_id, &rest, None)
+                    .await?;
+                self.current_message_id = new_msg.message_id;
+                remaining = rest;
+
+                // If after sending the new message the remaining content fits,
+                // the loop will edit it with Markdown on the next iteration.
+                // Guard against infinite loops on empty remainder.
+                if remaining.is_empty() {
+                    break;
+                }
+            }
         } else {
             // Build display: buffer + optional tool line + cursor
             let mut display = self.buffer.clone();
@@ -394,6 +447,53 @@ mod tests {
             .count();
         assert_eq!(edit_count, 1, "Should finalize first message via edit");
         assert_eq!(send_count, 1, "Should send new message for overflow");
+    }
+
+    /// Regression test: final flush with content > 4096 chars must chunk, not
+    /// attempt a single editMessageText that Telegram would reject with 400.
+    #[tokio::test]
+    async fn test_final_flush_overflow_chunks_long_content() {
+        let (adapter, calls) = MockAdapter::new();
+        let mut sc = StreamConsumer::new(adapter, "chat1", "msg-1");
+
+        // Build content clearly over 4096 chars with a paragraph split point
+        let para1 = "A".repeat(2500);
+        let para2 = "B".repeat(2500);
+        let big_content = format!("{}\n\n{}", para1, para2);
+        assert!(big_content.len() > MAX_MESSAGE_LEN, "test content must exceed limit");
+
+        sc.push(&big_content);
+        sc.flush(true).await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        // First chunk: edit_message (plain text, no Markdown) on placeholder
+        let edit_plain_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::EditMessage { .. }))
+            .count();
+        // Continuation chunk(s): send_message
+        let send_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::SendMessage { .. }))
+            .count();
+        // Final chunk: edit_message_markdown on the last message id
+        let edit_md_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::EditMessageMarkdown { .. }))
+            .count();
+
+        assert!(
+            edit_plain_count >= 1,
+            "Should have at least one plain edit for the first chunk"
+        );
+        assert!(
+            send_count >= 1,
+            "Should send at least one new message for overflow content"
+        );
+        assert_eq!(
+            edit_md_count, 1,
+            "Should have exactly one final markdown edit for the last chunk"
+        );
     }
 
     #[tokio::test]
