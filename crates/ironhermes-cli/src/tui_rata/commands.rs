@@ -26,6 +26,7 @@ use ironhermes_core::commands::context::{
 use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
+use ironhermes_core::queue::QueueError;
 use ironhermes_core::types::Platform;
 
 use crate::tui_rata::app::App;
@@ -976,26 +977,30 @@ async fn handle_session_control(
             SlashOutcome::Handled(format!("Aside added: \"{message}\" (active next turn)"))
         }
         "queue" => {
-            // Queue a message for submission after the current turn.
+            // Phase 36.17.3 (D-09 + D-10): real push into the shared MessageQueue.
+            // Replaces the prior textarea-prepopulate placeholder. D-12 negative
+            // control precondition: the old TextArea-prepopulate mutation has
+            // been removed from this arm. Bell is OMITTED per Resolution 7.
             if args.is_empty() {
-                return SlashOutcome::Handled(
-                    "Usage: /queue <message> — add a message to the input queue.".to_string(),
-                );
+                return SlashOutcome::Handled("Usage: /queue <message>".to_string());
             }
             let message = args.join(" ");
-            // Pre-populate the textarea with the queued message; user can review/submit.
-            let mut ta = tui_textarea::TextArea::default();
-            ta.set_cursor_line_style(ratatui::style::Style::default());
-            ta.set_block(
-                ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::ALL)
-                    .title("Prompt"),
-            );
-            for c in message.chars() {
-                ta.insert_char(c);
+            match app.queue.try_push(&app.queue_key, message.clone()) {
+                Ok(()) => {
+                    let depth = app.queue.len(&app.queue_key);
+                    SlashOutcome::Handled(format!(
+                        "Queued: \"{}\" ({} in queue)",
+                        message, depth
+                    ))
+                }
+                Err(QueueError::CapacityReached { max, .. }) => {
+                    // D-10: cap-hit error rendered inline. T-01 mitigation = cap
+                    // enforced at SessionQueue source (Plan 01).
+                    SlashOutcome::Handled(format!(
+                        "Queue is full ({max}/{max}). /stop or /flush to drain."
+                    ))
+                }
             }
-            app.textarea = ta;
-            SlashOutcome::Handled(format!("Queued: \"{message}\" (press Enter to submit)"))
         }
         _ => map_core_to_slash_outcome(core_result.clone()),
     }
@@ -1120,10 +1125,10 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         ),
         CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
         CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
-        // Phase 36.17.1 Plan 03 Task 1: the SessionQueue lives on GatewayRunner
-        // only. tui_rata has no per-session FIFO yet (TUI queue wiring deferred
-        // per D-02). Map to a visible Handled outcome so the user gets feedback
-        // that the /queue command was understood.
+        // Phase 36.17.3: closed via handle_session_control's "queue" arm above;
+        // this fallback remains for non-TUI consumers (gateway adapters, the
+        // classic CLI REPL) which also emit `CommandResult::Queued` but do not
+        // route through `handle_session_control`.
         CommandResult::Queued { message } => {
             SlashOutcome::Handled(format!("Queued: {message}"))
         }
