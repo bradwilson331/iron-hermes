@@ -26,7 +26,7 @@ use crate::session::{SessionKey, SessionStore};
 use crate::session_queue::{QueueError, SessionQueue};
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use ironhermes_cron::TgSendApi;
-use crate::user_queue::UserQueueManager;
+use crate::user_queue::{DispatchOutcome, UserQueueManager};
 use ironhermes_core::MessageEvent;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
@@ -946,124 +946,142 @@ impl GatewayRunner {
                         let event_chat_id = event.chat_id.clone();
                         let event_sender_id = event.sender_id.clone();
 
-                        // Dispatch via per-user queue (Phase 36.17.2 Plan 01: now returns
-                        // Result<DispatchOutcome, QueueError> instead of Option<Receiver>).
+                        // Phase 36.17.2 Plan 02: full match on Result<DispatchOutcome, QueueError> (D-15).
                         // Cap-hit UX (❌ + chat reply) fires inside UQM::dispatch on Err — no
                         // additional handling needed here for the error path.
                         let dispatch_result = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
-                        if let Ok(crate::user_queue::DispatchOutcome::WorkerSpawned) = dispatch_result {
-                            // New worker needed for this chat.
-                            // NOTE: Plan 02 will rewrite this worker body to use Notify-based idle
-                            // wait (D-04, D-05, D-06). This transitional worker pops SessionQueue
-                            // directly and exits when the queue drains.
-                            let handler_task = handler_dispatch.clone();
-                            let adapter_task = adapter_dispatch.clone();
-                            let sem_task = semaphore_dispatch.clone();
-                            let cancel_task = cancel_dispatch.clone();
-                            let queue_task = user_queue_dispatch.clone();
-                            let session_queue_task = runner_dispatch.session_queue.clone();
-                            // Phase 36.17.2 Plan 01: SessionKey built from captured event fields.
-                            // chat_id_task → session_key_task (D-13).
-                            let session_key_task = SessionKey::new(event_platform, event_chat_id)
-                                .with_user(event_sender_id);
-                            // Phase 36.17.1 Plan 02 Task 3: Arc<GatewayRunner> for drain_pending.
-                            let runner_task = runner_dispatch.clone();
 
-                            // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
-                            // per-chat workers are tracked and drained on shutdown (D-10/D-11).
-                            // Plan 02 will rewrite this body to use SessionQueue::pop + Notify.
-                            worker_join_set_dispatch.lock().await.spawn(async move {
-                                // Phase 36.17.2 Plan 01 transitional worker: pop events from
-                                // SessionQueue directly (replaces chat_rx.recv()). Full Notify-
-                                // based idle wait is Plan 02 territory; this loop drains until
-                                // the queue is empty or cancelled.
-                                loop {
-                                    let queued_event = session_queue_task.pop(&session_key_task);
-                                    let queued_event = match queued_event {
-                                        Some(e) => e,
-                                        None => break, // queue drained — exit (Plan 02 adds Notify wait here)
-                                    };
+                        // SessionKey built from fields captured before event was moved into dispatch (D-14).
+                        let session_key_task = SessionKey::new(event_platform, &event_chat_id)
+                            .with_user(&event_sender_id);
 
-                                    // Acquire semaphore permit (bounded concurrency per TG-06)
-                                    let permit = match sem_task.acquire().await {
-                                        Ok(p) => p,
-                                        Err(_) => break, // semaphore closed
-                                    };
+                        match dispatch_result {
+                            Ok(DispatchOutcome::Accepted) => {
+                                // Existing worker picked up the message via Notify wake.
+                                // 👁 fires when the worker pops (D-08). Nothing to do here.
+                                debug!(
+                                    chat_id = %event_chat_id,
+                                    "Dispatch: message accepted by existing worker (Phase 36.17.2 D-08)"
+                                );
+                            }
+                            Ok(DispatchOutcome::WorkerSpawned) => {
+                                // New worker needed for this chat. Spawn the full Notify-based
+                                // pop-loop worker (D-04, D-05, D-06, D-08, D-09, D-16).
+                                let handler_task = handler_dispatch.clone();
+                                let adapter_task = adapter_dispatch.clone();
+                                let sem_task = semaphore_dispatch.clone();
+                                let cancel_task = cancel_dispatch.clone();
+                                let queue_task = user_queue_dispatch.clone();
+                                // Capture Arc<SessionQueue> via the session_queue field accessor
+                                // (runner_dispatch stays alive; Arc<SessionQueue> clone is cheap).
+                                let session_queue_task = runner_dispatch.session_queue.clone();
+                                let session_key_for_worker = session_key_task.clone();
 
-                                    // Retrieve multimodal payload from UQM sidecar (D-02).
-                                    let mm = queue_task.take_multimodal(&session_key_task).await;
-                                    let (text_prefix, image_data_uri) = mm.unwrap_or((None, None));
-                                    let processed = crate::multimodal::ProcessedAttachments {
-                                        text_prefix,
-                                        image_data_uri,
-                                    };
+                                // D-19 (M4 locked): notify_for is pub async fn; workers map uses
+                                // tokio::sync::Mutex. WorkerSpawned invariant guarantees Some here.
+                                let notify_task: std::sync::Arc<tokio::sync::Notify> = queue_task
+                                    .notify_for(&session_key_for_worker)
+                                    .await
+                                    .expect("notify_for must return Some immediately after WorkerSpawned (Plan 01 invariant)");
 
-                                    // Emit 👁 reaction before handle_with_multimodal (D-08, D-09).
-                                    {
-                                        let adapter_react = adapter_task.clone();
-                                        let cid = queued_event.chat_id.clone();
-                                        let mid = queued_event.message_id.clone();
-                                        tokio::spawn(async move {
-                                            if let Err(e) = adapter_react.add_reaction(&cid, &mid, "\u{1f440}").await {
-                                                tracing::warn!("Failed to add 👁 reaction: {}", e);
+                                // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
+                                // per-chat workers are tracked and drained on shutdown.
+                                worker_join_set_dispatch.lock().await.spawn(async move {
+                                    // Full Notify-based pop-loop (D-04, D-05, D-06).
+                                    loop {
+                                        // D-06 step 1+2: pop or wait for Notify wake / cancellation.
+                                        let next_event = match session_queue_task.pop(&session_key_for_worker) {
+                                            Some(ev) => ev,
+                                            None => {
+                                                // Queue empty — park until dispatch signals or cancel fires.
+                                                tokio::select! {
+                                                    _ = cancel_task.cancelled() => break,
+                                                    _ = notify_task.notified() => continue, // re-poll the queue
+                                                }
                                             }
-                                        });
+                                        };
+
+                                        // Cancellation check after pop (cancel may have fired between
+                                        // pop and this point — T-36.17.2-03 acknowledged, window is μs).
+                                        if cancel_task.is_cancelled() { break; }
+
+                                        // Acquire semaphore permit (TG-06 — bounded concurrency).
+                                        let permit = match sem_task.acquire().await {
+                                            Ok(p) => p,
+                                            Err(_) => break, // semaphore closed on shutdown
+                                        };
+
+                                        // D-06 step 3 + D-08: emit 👁 reaction inline before
+                                        // handle_with_multimodal. Inline await means "👁 reaches
+                                        // Telegram before the placeholder █ send" — strict ordering
+                                        // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
+                                        // D-09: warn-and-ignore on failure; must not block the turn.
+                                        if let Err(e) = adapter_task
+                                            .add_reaction(&next_event.chat_id, &next_event.message_id, "👁")
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                chat_id = %next_event.chat_id,
+                                                message_id = %next_event.message_id,
+                                                error = %e,
+                                                "Worker: 👁 reaction emission failed; continuing (Phase 36.17.2 D-09)"
+                                            );
+                                        }
+
+                                        // Reconstruct multimodal payload from UQM sidecar (M1 locked by Plan 01).
+                                        // FIFO lockstep with SessionQueue::pop — one take_multimodal per pop.
+                                        // None means plain-text message with no multimodal payload.
+                                        let (text_prefix, image_data_uri) = queue_task
+                                            .take_multimodal(&session_key_for_worker)
+                                            .await
+                                            .unwrap_or((None, None));
+                                        let processed = crate::multimodal::ProcessedAttachments {
+                                            text_prefix,
+                                            image_data_uri,
+                                        };
+
+                                        let result = handler_task
+                                            .handle_with_multimodal(
+                                                &next_event,
+                                                adapter_task.clone(),
+                                                cancel_task.child_token(),
+                                                processed,
+                                            )
+                                            .await;
+
+                                        if let Err(e) = result {
+                                            error!(
+                                                chat_id = %next_event.chat_id,
+                                                error = %e,
+                                                "Handler error for message (Phase 36.17.2 worker pop-loop)"
+                                            );
+                                        }
+
+                                        // D-07: post-turn drain_pending call removed.
+                                        // The next loop iteration pops the next event from
+                                        // session_queue_task if any arrived during the turn —
+                                        // that is the natural drain.
+
+                                        drop(permit);
+
+                                        // D-05: cancellation check between iterations.
+                                        if cancel_task.is_cancelled() { break; }
                                     }
 
-                                    let result = handler_task
-                                        .handle_with_multimodal(
-                                            &queued_event,
-                                            adapter_task.clone(),
-                                            cancel_task.child_token(),
-                                            processed,
-                                        )
-                                        .await;
-
-                                    if let Err(e) = result {
-                                        error!(
-                                            chat_id = %queued_event.chat_id,
-                                            error = %e,
-                                            "Handler error for message"
-                                        );
-                                    }
-
-                                    // Phase 36.17.1 Plan 02 Task 3 (D-01 part (b)):
-                                    // After each handler turn drain any events that arrived
-                                    // while the agent was busy. Under the unified SessionQueue
-                                    // model this is a no-op (drain_pending finds nothing because
-                                    // events go directly onto SessionQueue, and the loop above
-                                    // pops them). Retained for defensive correctness per D-07.
-                                    let drain_key = SessionKey::new(
-                                        queued_event.platform.clone(),
-                                        &queued_event.chat_id,
-                                    )
-                                    .with_user(&queued_event.sender_id);
-                                    if let Err(e) = runner_task
-                                        .drain_pending(
-                                            &drain_key,
-                                            handler_task.as_ref(),
-                                            adapter_task.clone(),
-                                            cancel_task.child_token(),
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            chat_id = %queued_event.chat_id,
-                                            error = %e,
-                                            "drain_pending error after turn (Phase 36.17.1)"
-                                        );
-                                    }
-
-                                    drop(permit);
-
-                                    // Check if we should stop
-                                    if cancel_task.is_cancelled() {
-                                        break;
-                                    }
-                                }
-                                // Worker done — remove from queue manager (D-13: SessionKey, not String)
-                                queue_task.remove(&session_key_task).await;
-                            });
+                                    // D-16: worker exits — clean up UQM map entry
+                                    // (workers + pending_multimodal both purged by remove).
+                                    queue_task.remove(&session_key_for_worker).await;
+                                });
+                            }
+                            Err(QueueError::CapacityReached { .. }) => {
+                                // Cap-hit UX (❌ + chat reply) already fired inside UQM::dispatch (D-11).
+                                // Dispatch loop's only job here is to log and continue.
+                                // Telegram offset already advanced (Pitfall 6) — no re-delivery risk.
+                                tracing::warn!(
+                                    chat_id = %event_chat_id,
+                                    "Dispatch: queue full, message dropped (Phase 36.17.2 D-11)"
+                                );
+                            }
                         }
                     }
                 }
