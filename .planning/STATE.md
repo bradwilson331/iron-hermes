@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: "Completed 36.17.3-03 (test scaffolding)"
-last_updated: "2026-05-28T23:29:12Z"
-last_activity: 2026-05-28 -- Phase 36.17.3 Plan 03 complete (test scaffolding)
+stopped_at: Phase 36.17.1 context gathered
+last_updated: "2026-05-28T23:56:01.755Z"
+last_activity: 2026-05-28 -- Phase 36.17.3 Plan 06 complete (TUI ↔ gateway queue wave 3 integration tests)
 progress:
   total_phases: 43
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 50
-  completed_plans: 48
-  percent: 23
+  completed_plans: 50
+  percent: 26
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.17.3 next-up (wire-up-tui-with-gateway-queue-and-slash-queue-commands) — INSERTED, NOT PLANNED
-Plan: 0 of N (run /gsd-plan-phase 36.17.3 to break down)
-Status: Ready to execute
-Last activity: 2026-05-28 -- Phase 36.17.3 planning complete
+Phase: 36.17.3 (wire-up-tui-with-gateway-queue-and-slash-queue-commands) — COMPLETE
+Plan: 6 of 6 (all plans executed; SUMMARYs present 01..06)
+Status: Phase complete — ready for verifier sweep or next phase
+Last activity: 2026-05-28 -- Phase 36.17.3 Plan 06 complete (TUI ↔ gateway queue wave 3 integration tests; full CLI + gateway suites green)
 
 ## Phase 36.2 Closure Summary
 
@@ -200,6 +200,7 @@ Last activity: 2026-05-28 -- Phase 36.17.3 planning complete
 | Phase 32.2 P02 | 18 | 2 tasks | 2 files |
 | Phase 32.2-subagent-delegation-parity P03 | 1105 | 2 tasks | 4 files |
 | Phase 36.17.3 P01 | 25min | 3 tasks | 5 files |
+| Phase 36.17.3 P06 | 10min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -537,6 +538,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-28T23:30:15.900Z
+Last session: 2026-05-28T23:56:01.749Z
 Stopped at: Phase 36.17.1 context gathered
 Resume file: None
