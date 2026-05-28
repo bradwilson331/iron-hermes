@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.17.2.1 closed — UAT PASS
-last_updated: "2026-05-28T17:30:00.000Z"
-last_activity: 2026-05-28 -- Phase 36.17.2.1 complete (verifier 11/11, live UAT PASS)
+status: planning
+stopped_at: Phases 36.17.3 + 36.17.4 inserted — awaiting /gsd-plan-phase
+last_updated: "2026-05-28T17:50:00.000Z"
+last_activity: 2026-05-28 -- Phases 36.17.3 (TUI ↔ queue) and 36.17.4 (iron_hermes_ui ↔ queue) inserted
 progress:
-  total_phases: 42
+  total_phases: 44
   completed_phases: 10
   total_plans: 44
   completed_plans: 44
-  percent: 24
+  percent: 23
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.2.1 closed — awaiting next phase selection (36.16 SMM port unplanned, 36.17.3+ pending)
+**Current focus:** Phase 36.17.3 (TUI ↔ gateway queue) and 36.17.4 (iron_hermes_ui ↔ gateway queue) — inserted, awaiting plan-phase
 
 ## Current Position
 
-Phase: 36.17.2.1 (fix-queue-slash-command-failing-to-wake-parked-worker-regres) — CLOSED
-Plan: 2 of 2 complete
-Status: Phase 36.17.2.1 verified PASS 11/11 + live UAT PASS (2026-05-28)
-Last activity: 2026-05-28 -- Phase 36.17.2.1 UAT PASS, queue wake confirmed (Telegram rate limits unrelated)
+Phase: 36.17.3 next-up (wire-up-tui-with-gateway-queue-and-slash-queue-commands) — INSERTED, NOT PLANNED
+Plan: 0 of N (run /gsd-plan-phase 36.17.3 to break down)
+Status: Phase 36.17.2.1 closed (PASS 11/11 + UAT PASS); 36.17.3 + 36.17.4 inserted for queue UI wire-up parity
+Last activity: 2026-05-28 -- Two sibling phases inserted: 36.17.3 (TUI), 36.17.4 (iron_hermes_ui)
 
 ## Phase 36.2 Closure Summary
 
@@ -510,6 +510,8 @@ Recent decisions affecting current work:
 - Phase 36.17 inserted after Phase 36: iron_hermes_ui web logging in $IRONHERMES_HOME/logs (URGENT)
 - Phase 36.17.1 inserted after Phase 36.17: in-mem FIFO queuing parity of python deque for chat sessions (URGENT)
 - Phase 36.17.2.1 inserted after Phase 36.17.2: fix /queue slash-command failing to wake parked worker (regression from 36.17.2 mpsc→Notify switch) (URGENT)
+- Phase 36.17.3 inserted after Phase 36.17: wire up TUI with gateway queue and slash queue commands (URGENT)
+- Phase 36.17.4 inserted after Phase 36.17: wire up iron_hermes_ui to the gateway queue + slash commands (URGENT)
 
 ### Pending Todos
 

@@ -123,6 +123,26 @@ Plans:
 - [x] 36.17-03-PLAN.md — Replace `tracing_subscriber::fmt().init()` in `main.rs` with `install_web_logger_subscriber()`; mount `TraceLayer::new_for_http().on_request(DefaultOnRequest::new().level(Level::INFO)).on_response(DefaultOnResponse::new().level(Level::INFO))` on the Axum router (D-01, D-07..D-12 + Q2 INFO-level fix)
 - [x] 36.17-04-PLAN.md — Create `scripts/uat/phase-36.17-web-logging.sh` UAT script (mktemp IRONHERMES_HOME, start server, curl, assert both files exist + non-empty + ANSI-free + `tower_http::trace` target present in access log); blocking-human verify (D-01..D-05, D-09, D-10, D-15, D-16)
 
+### Phase 36.17.4: wire up iron_hermes_ui to the gateway queue + slash commands (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.17
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.17.4 to break down)
+
+### Phase 36.17.3: wire up TUI with gateway queue and slash queue commands (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.17
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.17.3 to break down)
+
 ### Phase 36.17.1: in-mem FIFO queuing parity of python deque for chat sessions (INSERTED)
 
 **Goal:** Port hermes-agent's per-session `/queue` FIFO mechanism (`gateway/run.py` §2304-2415) into IronHermes so messages arriving while a per-session agent is busy are queued in arrival order and replayed one full agent turn per queued item, with no merging. Ships Telegram-only (D-02): the queue data structure (single `Mutex<HashMap<SessionKey, VecDeque<MessageEvent>>>` on `GatewayRunner`, 128-message per-session cap with drop-newest + ❌ reaction + chat-reply UX on cap-hit, soft warn at 75%), `/queue` slash command (replaces broken stub at `handlers.rs:1607-1621` via new `CommandResult::Queued` variant), busy-agent enqueue (replacing the reject branch at `handler.rs:840-854`), post-turn drain loop (per-chat worker), `/new` + `/reset` clearing hooks (clear BEFORE `store.remove` per Pitfall 5), drain-mode flag (`is_draining: Arc<AtomicBool>` flipped before `self.cancel.cancel()` so the queue keeps accepting late arrivals in-process), and a `#[cfg(test)]`-isolated `SplitSlotQueue` parity mirror with proptest equivalence (1024 cases) against Python's `pending_slot + overflow_list` layout — zero runtime cost. Discord, Slack, web, and `/goal` continuation are out of scope (D-02, D-04, D-05).
