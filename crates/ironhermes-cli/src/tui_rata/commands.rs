@@ -410,6 +410,14 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                             };
                             handle_session_control(app, route_name, &args_vec, &result).await
                         }
+                        // Phase 36.17.3 (D-07 + T-02 mitigation): /new (and the
+                        // /reset alias which resolves to canonical name "new")
+                        // must clear the queue and reset paused BEFORE the
+                        // session-clear path forwards to the ClearSession /
+                        // NewSession mapping in map_core_to_slash_outcome.
+                        "new" => {
+                            handle_session_control(app, def.name, &args_vec, &result).await
+                        }
                         // Subsystem mutators: model/fast (AnyClient rebuild) + personality/compress
                         "model" | "fast" | "personality" | "compress" => {
                             handle_subsystem_mutator(app, def.name, &args_vec, &result).await
@@ -853,6 +861,17 @@ async fn handle_session_control(
 ) -> SlashOutcome {
     match name {
         "stop" => {
+            // Phase 36.17.3 (D-08 + RESEARCH Pitfall 1): clear-then-cancel
+            // ordering is non-negotiable. The queue must be empty BEFORE
+            // `cancel_child.cancel()` fires so the eventual `StreamEvent::Cancelled`
+            // arm finds an empty queue (belt-and-suspenders alongside Plan 04 Task 2
+            // which already skips drain on Cancelled). Order: clear -> reset paused
+            // -> cancel in-flight turn -> forward to core (ProcessRegistry drain).
+            app.queue.clear(&app.queue_key);
+            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Some(tok) = app.cancel_child.take() {
+                tok.cancel();
+            }
             // /stop: ProcessRegistry is now threaded into ctx via build_command_context.
             // Core cmd_stop handles the drain-and-kill; trust core result.
             map_core_to_slash_outcome(core_result.clone())
@@ -1049,6 +1068,27 @@ async fn handle_session_control(
             } else {
                 SlashOutcome::Handled("Queue was not paused.".to_string())
             }
+        }
+        // Phase 36.17.3 (D-07 + T-02 mitigation): clear the queue and reset
+        // pause BEFORE forwarding to the session-clear path so the user never
+        // observes stale queued items firing against a fresh session.
+        // RESEARCH Pitfall 1 ordering: queue.clear -> queue_paused.store(false)
+        // -> session clear forwarding.
+        "new" => {
+            app.queue.clear(&app.queue_key);
+            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            map_core_to_slash_outcome(core_result.clone())
+        }
+        // Phase 36.17.3 (D-07 + T-02 mitigation): /reset is registered as an
+        // alias of /new in the core registry (resolves to canonical name "new"
+        // at dispatch time), so this arm is unreachable at runtime. It is
+        // retained as a defensive marker so any future refactor that distinguishes
+        // /reset from /new at the dispatch layer still clears the queue. The
+        // ordering matches the /new arm: clear -> reset paused -> forward.
+        "reset" => {
+            app.queue.clear(&app.queue_key);
+            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            map_core_to_slash_outcome(core_result.clone())
         }
         _ => map_core_to_slash_outcome(core_result.clone()),
     }
