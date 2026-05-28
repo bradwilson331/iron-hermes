@@ -980,6 +980,27 @@ impl App {
         app.history = msgs.into_iter().map(|(r, b)| test_message(r, b)).collect();
         app
     }
+
+    /// Construct an App with a caller-provided `MessageQueue` for integration
+    /// tests (Phase 36.17.3 Plan 03). Plan 06 fills in the test bodies that
+    /// drive this constructor; this signature is the harness anchor.
+    ///
+    /// Mirrors `new_test_empty` (same `test-support` gating, same `test_deps()`
+    /// factory) but swaps the default queue for the caller's instance so the
+    /// test can assert push/pop/len/clear behavior against a known queue.
+    #[cfg(feature = "test-support")]
+    pub fn new_test_with_queue(
+        queue: std::sync::Arc<
+            dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>,
+        >,
+    ) -> Self {
+        let mut app = Self::new(test_deps());
+        app.queue = queue;
+        app.queue_key =
+            ironhermes_core::session::SessionKey::new(ironhermes_core::Platform::Local, "local")
+                .with_user("local");
+        app
+    }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
