@@ -189,6 +189,21 @@ pub enum CommandResult {
     /// happens at the gateway boundary, mirroring how `NewSession` is
     /// intercepted by the gateway/TUI handlers.
     Queued { message: String },
+
+    /// Phase 36.17.3 (D-06 amended): `/pause` — toggle queue drain pause state.
+    /// TUI maps to AtomicBool flip in `handle_session_control` (Plan 05);
+    /// gateway and CLI REPL treat as no-op since they have no TUI-side queue
+    /// drain loop. Every match site on `CommandResult` must handle this
+    /// variant (alongside `UnpauseQueue`).
+    PauseQueue,
+
+    /// Phase 36.17.3 (D-06 amended): `/unpause` — explicit unpause (alias of
+    /// `/pause` set-to-false). Sets pause=false unconditionally. Same
+    /// consumer impact as `PauseQueue` — every match site must handle both.
+    /// The alias is `/unpause` (NOT `/resume`) to avoid collision with the
+    /// existing session-resume `/resume` command at
+    /// `commands::registry::build_registry` (RESEARCH Pitfall 4).
+    UnpauseQueue,
 }
 
 // =============================================================================

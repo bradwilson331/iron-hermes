@@ -81,6 +81,14 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("queue", "Queue a prompt for after current turn", Session)
             .args_hint("<prompt>")
             .platform(Universal),
+        // Phase 36.17.3 (D-06 amended): /pause toggles queue drain pause.
+        // Alias is /unpause (NOT /resume) — /resume already exists below as
+        // "Resume a previous session". CliOnly because the queue-drain
+        // pause/unpause flow is a TUI affordance; gateway adapters do not
+        // expose user-facing pause toggles (see RESEARCH Pitfall 4).
+        CommandDef::new("pause", "Pause or resume queue drain", Session)
+            .aliases(&["unpause"])
+            .platform(CliOnly),
         CommandDef::new("status", "Show current session status", Session).platform(Universal),
         CommandDef::new("sethome", "Set home channel for delivery", Session)
             .aliases(&["set-home"])
