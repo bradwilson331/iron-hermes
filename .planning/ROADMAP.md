@@ -148,6 +148,13 @@ Plans:
 
 - [x] 36.17.1-05-PLAN.md — Telegram cap-hit UX end-to-end integration tests (busy-enqueue silence, cap-hit ❌+chat-reply with cap held at 128, FIFO post-turn drain "A","B","C" replay with no merging) + UAT runbook `tests/session_queue_telegram_uat.md` (4 scenarios: silent busy enqueue, `/queue` depth-aware reply, cap-hit live verification including Telegram offset-advance no-re-delivery per Pitfall 6, `/new` clears queue); blocking-human checkpoint for live Telegram verification
 
+### Phase 36.17.2: unify session queue — replace UserQueueManager mpsc buffer with SessionQueue (INSERTED)
+
+**Goal:** Make 36.17.1's `SessionQueue` reachable in production Telegram by collapsing `UserQueueManager`'s internal per-chat `mpsc` buffer into `SessionQueue`. UAT of 36.17.1 confirmed that messages 2..N of a per-chat burst sit in `UQM`'s `chat_rx` and never see `agent_running == true` at `handle_with_multimodal` entry — the busy-branch enqueue and post-turn `drain_pending` are dead code on the Telegram path. Locked architecture (option C): `UserQueueManager` keeps its public surface (`dispatch`, transport-layer 👁 reaction emitter, whitelist/`@mention`/multimodal hooks, post-turn `remove` lifecycle) but rips out the per-chat `mpsc` interior; `dispatch` pushes straight into `SessionQueue::try_push` with strict backpressure (full → drop + 429-class bubble to transport). The per-chat worker reads from `SessionQueue` and the old `drain_pending` collapses into the worker's natural pop loop. 👁 reaction is emitted **by the worker** when it pops a message and begins its turn — not when `dispatch` lands it on the queue — so the 👁 reflects actual processing, never buffer occupancy. `/queue` (slash command), `/new`/`/reset` queue-clear ordering (Pitfall 5), `is_draining` flag + `drain_for_restart`, and the cap-hit ❌+chat-reply UX from 36.17.1 are preserved unchanged. Discord/Slack/web/REST gateways re-use the new path automatically (they already flow through `UserQueueManager::dispatch`).
+**Requirements**: TBD (closes T-36.17.1 unreachability gap surfaced in 36.17.1-05 UAT)
+**Depends on:** Phase 36.17.1
+**Plans:** TBD
+
 ### Phase 36.16: Small Model Mode (SMM) architecture port — mirror the smallcode JS reference architecture (System Overview / Component Responsibilities / Layers / Data Flow / Key Abstractions / Entry Points / Architectural Constraints / Anti-Patterns / Error Handling / Cross-Cutting Concerns) into ironhermes Rust; consumes 36.15's per-provider extra_request_options knob as one input; see 36.16-CONTEXT.md (from SmallModelMode_ARCHITECTURE.md) for the reference shape (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
