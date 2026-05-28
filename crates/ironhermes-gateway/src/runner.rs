@@ -692,9 +692,11 @@ impl GatewayRunner {
         // --- 6. Create handler (with gateway hygiene engine wired) and queue manager ---
         let handler = self.build_gateway_handler();
         let handler = Arc::new(handler);
+        // Phase 36.17.2 Plan 01: UQM constructor signature change — capacity arg removed,
+        // Arc<SessionQueue> passed instead (D-03: UQM holds Arc<SessionQueue>, not capacity).
         let user_queue = Arc::new(UserQueueManager::new(
             adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
-            16,
+            self.session_queue.clone(), // Arc<SessionQueue> already on GatewayRunner per 36.17.1-02
         ));
 
         let mut join_set: JoinSet<()> = JoinSet::new();
@@ -938,39 +940,79 @@ impl GatewayRunner {
                             (None, None)
                         };
 
-                        // Dispatch via per-user queue
-                        let maybe_rx = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
-                        if let Some(mut chat_rx) = maybe_rx {
-                            // New worker needed for this chat
+                        // Phase 36.17.2 Plan 01: capture session key fields BEFORE moving event
+                        // into dispatch (event is consumed by UQM::dispatch; D-14 triple).
+                        let event_platform = event.platform.clone();
+                        let event_chat_id = event.chat_id.clone();
+                        let event_sender_id = event.sender_id.clone();
+
+                        // Dispatch via per-user queue (Phase 36.17.2 Plan 01: now returns
+                        // Result<DispatchOutcome, QueueError> instead of Option<Receiver>).
+                        // Cap-hit UX (❌ + chat reply) fires inside UQM::dispatch on Err — no
+                        // additional handling needed here for the error path.
+                        let dispatch_result = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
+                        if let Ok(crate::user_queue::DispatchOutcome::WorkerSpawned) = dispatch_result {
+                            // New worker needed for this chat.
+                            // NOTE: Plan 02 will rewrite this worker body to use Notify-based idle
+                            // wait (D-04, D-05, D-06). This transitional worker pops SessionQueue
+                            // directly and exits when the queue drains.
                             let handler_task = handler_dispatch.clone();
                             let adapter_task = adapter_dispatch.clone();
                             let sem_task = semaphore_dispatch.clone();
                             let cancel_task = cancel_dispatch.clone();
                             let queue_task = user_queue_dispatch.clone();
-                            let chat_id_task = msg.chat.id.to_string();
-                            // Phase 36.17.1 Plan 02 Task 3: Arc<GatewayRunner> for
-                            // the post-turn `drain_pending` call after each turn.
+                            let session_queue_task = runner_dispatch.session_queue.clone();
+                            // Phase 36.17.2 Plan 01: SessionKey built from captured event fields.
+                            // chat_id_task → session_key_task (D-13).
+                            let session_key_task = SessionKey::new(event_platform, event_chat_id)
+                                .with_user(event_sender_id);
+                            // Phase 36.17.1 Plan 02 Task 3: Arc<GatewayRunner> for drain_pending.
                             let runner_task = runner_dispatch.clone();
 
                             // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
                             // per-chat workers are tracked and drained on shutdown (D-10/D-11).
-                            // Previously a bare tokio::spawn (detached) — replaced with tracked spawn.
+                            // Plan 02 will rewrite this body to use SessionQueue::pop + Notify.
                             worker_join_set_dispatch.lock().await.spawn(async move {
-                                while let Some(queued_msg) = chat_rx.recv().await {
+                                // Phase 36.17.2 Plan 01 transitional worker: pop events from
+                                // SessionQueue directly (replaces chat_rx.recv()). Full Notify-
+                                // based idle wait is Plan 02 territory; this loop drains until
+                                // the queue is empty or cancelled.
+                                loop {
+                                    let queued_event = session_queue_task.pop(&session_key_task);
+                                    let queued_event = match queued_event {
+                                        Some(e) => e,
+                                        None => break, // queue drained — exit (Plan 02 adds Notify wait here)
+                                    };
+
                                     // Acquire semaphore permit (bounded concurrency per TG-06)
                                     let permit = match sem_task.acquire().await {
                                         Ok(p) => p,
                                         Err(_) => break, // semaphore closed
                                     };
 
+                                    // Retrieve multimodal payload from UQM sidecar (D-02).
+                                    let mm = queue_task.take_multimodal(&session_key_task).await;
+                                    let (text_prefix, image_data_uri) = mm.unwrap_or((None, None));
                                     let processed = crate::multimodal::ProcessedAttachments {
-                                        text_prefix: queued_msg.text_prefix,
-                                        image_data_uri: queued_msg.image_data_uri,
+                                        text_prefix,
+                                        image_data_uri,
                                     };
+
+                                    // Emit 👁 reaction before handle_with_multimodal (D-08, D-09).
+                                    {
+                                        let adapter_react = adapter_task.clone();
+                                        let cid = queued_event.chat_id.clone();
+                                        let mid = queued_event.message_id.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = adapter_react.add_reaction(&cid, &mid, "\u{1f440}").await {
+                                                tracing::warn!("Failed to add 👁 reaction: {}", e);
+                                            }
+                                        });
+                                    }
 
                                     let result = handler_task
                                         .handle_with_multimodal(
-                                            &queued_msg.event,
+                                            &queued_event,
                                             adapter_task.clone(),
                                             cancel_task.child_token(),
                                             processed,
@@ -979,23 +1021,23 @@ impl GatewayRunner {
 
                                     if let Err(e) = result {
                                         error!(
-                                            chat_id = %queued_msg.event.chat_id,
+                                            chat_id = %queued_event.chat_id,
                                             error = %e,
                                             "Handler error for message"
                                         );
                                     }
 
                                     // Phase 36.17.1 Plan 02 Task 3 (D-01 part (b)):
-                                    // After each handler turn — whether it ran the
-                                    // agent or queued during a busy turn — drain any
-                                    // events that arrived while the agent was busy.
-                                    // The drain helper calls `run_agent` directly,
-                                    // bypassing the busy-guard (RESEARCH Pitfall 4).
+                                    // After each handler turn drain any events that arrived
+                                    // while the agent was busy. Under the unified SessionQueue
+                                    // model this is a no-op (drain_pending finds nothing because
+                                    // events go directly onto SessionQueue, and the loop above
+                                    // pops them). Retained for defensive correctness per D-07.
                                     let drain_key = SessionKey::new(
-                                        queued_msg.event.platform.clone(),
-                                        &queued_msg.event.chat_id,
+                                        queued_event.platform.clone(),
+                                        &queued_event.chat_id,
                                     )
-                                    .with_user(&queued_msg.event.sender_id);
+                                    .with_user(&queued_event.sender_id);
                                     if let Err(e) = runner_task
                                         .drain_pending(
                                             &drain_key,
@@ -1006,7 +1048,7 @@ impl GatewayRunner {
                                         .await
                                     {
                                         error!(
-                                            chat_id = %queued_msg.event.chat_id,
+                                            chat_id = %queued_event.chat_id,
                                             error = %e,
                                             "drain_pending error after turn (Phase 36.17.1)"
                                         );
@@ -1019,8 +1061,8 @@ impl GatewayRunner {
                                         break;
                                     }
                                 }
-                                // Worker done — remove from queue manager
-                                queue_task.remove(&chat_id_task).await;
+                                // Worker done — remove from queue manager (D-13: SessionKey, not String)
+                                queue_task.remove(&session_key_task).await;
                             });
                         }
                     }
