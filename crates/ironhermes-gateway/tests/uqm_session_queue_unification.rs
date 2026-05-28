@@ -2,13 +2,13 @@
 //!
 //! D-21: 5 same-chat messages dispatched through `UserQueueManager::dispatch` →
 //! `SessionQueue` → per-chat Notify-pop worker → `handle_with_multimodal` must
-//! produce exactly 5 `👁` reactions in FIFO arrival order.
+//! produce exactly 5 `👀` reactions in FIFO arrival order.
 //!
-//! These tests would have FAILED under the 36.17.1 architecture where `👁` was
+//! These tests would have FAILED under the 36.17.1 architecture where `👀` was
 //! emitted at dispatch time (violating D-08). They lock the architectural shift:
 //! - T-36.17.2-01: worker-exit/dispatch race — after worker cancel, redispatch
 //!   returns `WorkerSpawned` (not `Accepted`), proving the workers map is cleaned.
-//! - T-36.17.2-03: `👁` fires at pop time (worker side), not at dispatch time.
+//! - T-36.17.2-03: `👀` fires at pop time (worker side), not at dispatch time.
 //!
 //! # Helper note
 //!
@@ -52,7 +52,7 @@ use ironhermes_tools::ToolRegistry;
 //
 // Using a single adapter for BOTH the UQM cap-hit path AND the worker's handler
 // call gives us one observable log: reactions, send_log, edit_log. The reaction
-// log records `👁` (from the worker, D-08) and `❌` (from UQM dispatch, D-11)
+// log records `👀` (from the worker, D-08) and `❌` (from UQM dispatch, D-11)
 // at distinct emoji values, so tests can filter independently.
 
 pub struct RecordingFailingAdapter {
@@ -223,7 +223,7 @@ fn make_event_full(
 //
 // The ONLY intentional simplification vs. Plan 02 is omitting the semaphore
 // permit acquisition — that is bounded-concurrency guard, not behavioral
-// coverage for FIFO or 👁-at-pop semantics. The `handle_with_multimodal` call
+// coverage for FIFO or 👀-at-pop semantics. The `handle_with_multimodal` call
 // IS inside the loop body (M5 requirement: handler call ordering is observable).
 
 async fn spawn_test_worker(
@@ -259,12 +259,12 @@ async fn spawn_test_worker(
                 break;
             }
 
-            // D-06 step 3 + D-08: emit 👁 inline before handle_with_multimodal.
-            // This is the assertion target for T-36.17.2-03: if 👁 were emitted
+            // D-06 step 3 + D-08: emit 👀 inline before handle_with_multimodal.
+            // This is the assertion target for T-36.17.2-03: if 👀 were emitted
             // at dispatch time (36.17.1 regression), the reaction log would show
             // all 5 reactions before any handler calls.
             let _ = adapter
-                .add_reaction(&next_event.chat_id, &next_event.message_id, "👁")
+                .add_reaction(&next_event.chat_id, &next_event.message_id, "👀")
                 .await;
 
             // M1 sidecar consumption — one take_multimodal per pop (FIFO lockstep).
@@ -305,16 +305,16 @@ async fn spawn_test_worker(
 // ===========================================================================
 
 /// D-21 headline test — 5 same-chat messages in tight succession must produce
-/// exactly 5 `👁` reactions, one per popped message, in FIFO arrival order,
+/// exactly 5 `👀` reactions, one per popped message, in FIFO arrival order,
 /// observed through the REAL `GatewayMessageHandler::handle_with_multimodal`
 /// call path (checker M5).
 ///
-/// This test would have FAILED under the 36.17.1 architecture where `👁` was
+/// This test would have FAILED under the 36.17.1 architecture where `👀` was
 /// emitted inside UQM::dispatch. Under that regime the reaction log would show
 /// all 5 reactions before any `send_log` entry appears, and the reaction order
 /// would be dispatch order (which can race with queue pop order under load).
 ///
-/// Under 36.17.2: the worker emits `👁` inline before each handler call, so
+/// Under 36.17.2: the worker emits `👀` inline before each handler call, so
 /// the i-th reaction is causally ordered BEFORE the i-th `send_log` entry.
 /// The serial single-worker guarantees the reaction→send ordering is strict FIFO.
 #[tokio::test]
@@ -404,31 +404,31 @@ async fn test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_h
     cancel.cancel();
     let _ = worker.await;
 
-    // --- Assertion 1: exactly 5 👁 reactions on chat_burst ---
+    // --- Assertion 1: exactly 5 👀 reactions on chat_burst ---
     let reactions = adapter.reactions.lock().unwrap();
     let eye_reactions: Vec<&(String, String, String)> = reactions
         .iter()
-        .filter(|(c, _, e)| c == "chat_burst" && e == "👁")
+        .filter(|(c, _, e)| c == "chat_burst" && e == "👀")
         .collect();
     assert_eq!(
         eye_reactions.len(),
         5,
-        "Expected exactly 5 👁 reactions on chat_burst, got {}. Full log: {:?}",
+        "Expected exactly 5 👀 reactions on chat_burst, got {}. Full log: {:?}",
         eye_reactions.len(),
         *reactions
     );
 
-    // --- Assertion 2: each msg_1..msg_5 got exactly one 👁 ---
+    // --- Assertion 2: each msg_1..msg_5 got exactly one 👀 ---
     for i in 1..=5usize {
         let id = format!("msg_{}", i);
         let count = reactions
             .iter()
-            .filter(|(_, m, e)| *m == id && e == "👁")
+            .filter(|(_, m, e)| *m == id && e == "👀")
             .count();
         assert_eq!(
             count,
             1,
-            "msg_{} expected exactly 1 👁, got {}. Full reactions log: {:?}",
+            "msg_{} expected exactly 1 👀, got {}. Full reactions log: {:?}",
             i,
             count,
             *reactions
@@ -437,20 +437,20 @@ async fn test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_h
 
     // --- Assertion 3 (M5 + T-36.17.2-03): FIFO processing order via reaction sequence ---
     //
-    // The worker emits 👁 inline BEFORE each handler call. Because the worker is serial
+    // The worker emits 👀 inline BEFORE each handler call. Because the worker is serial
     // (single goroutine, processes one event at a time), the reaction sequence IS the
     // handler invocation sequence. msg_1..msg_5 pushed in arrival order → must be
-    // popped in FIFO order → 👁 sequence must be msg_1, msg_2, msg_3, msg_4, msg_5.
+    // popped in FIFO order → 👀 sequence must be msg_1, msg_2, msg_3, msg_4, msg_5.
     let eye_seq: Vec<&str> = reactions
         .iter()
-        .filter(|(c, _, e)| c == "chat_burst" && e == "👁")
+        .filter(|(c, _, e)| c == "chat_burst" && e == "👀")
         .map(|(_, m, _)| m.as_str())
         .collect();
     let expected: Vec<String> = (1..=5).map(|i| format!("msg_{}", i)).collect();
     let expected_refs: Vec<&str> = expected.iter().map(|s| s.as_str()).collect();
     assert_eq!(
         eye_seq, expected_refs,
-        "👁 reactions out of FIFO order — handler invocations also out of order (M5/T-36.17.2-03 regression)"
+        "👀 reactions out of FIFO order — handler invocations also out of order (M5/T-36.17.2-03 regression)"
     );
     drop(reactions);
 
@@ -566,19 +566,19 @@ async fn test_worker_exit_dispatch_race() {
     )
     .await;
 
-    // Wait for worker to process race_1 (👁 reaction is emitted before handle call).
+    // Wait for worker to process race_1 (👀 reaction is emitted before handle call).
     let start = Instant::now();
     while adapter
         .reactions
         .lock()
         .unwrap()
         .iter()
-        .filter(|(_, m, e)| m == "race_1" && e == "👁")
+        .filter(|(_, m, e)| m == "race_1" && e == "👀")
         .count()
         < 1
     {
         if start.elapsed() > Duration::from_secs(3) {
-            panic!("worker did not emit 👁 for race_1 within 3 s");
+            panic!("worker did not emit 👀 for race_1 within 3 s");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -611,7 +611,7 @@ async fn test_worker_exit_dispatch_race() {
 /// M1 multimodal sidecar round-trip through the full dispatch → pop → worker
 /// path. Dispatches 3 events with distinct (text_prefix, image_data_uri) payloads,
 /// runs a worker to drain them, and asserts:
-/// 1. All 3 `👁` reactions fired in FIFO order.
+/// 1. All 3 `👀` reactions fired in FIFO order.
 /// 2. The sidecar is empty after drain (`take_multimodal` returns `None`).
 /// 3. The session queue is empty after drain.
 ///
@@ -676,7 +676,7 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
         .unwrap();
     assert!(matches!(r3, DispatchOutcome::Accepted));
 
-    // Wait for worker to process all 3 events (3 × 👁 on chat_mm).
+    // Wait for worker to process all 3 events (3 × 👀 on chat_mm).
     let start = Instant::now();
     loop {
         let count = adapter
@@ -684,7 +684,7 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(c, _, e)| c == "chat_mm" && e == "👁")
+            .filter(|(c, _, e)| c == "chat_mm" && e == "👀")
             .count();
         if count >= 3 {
             break;
@@ -692,7 +692,7 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
         if start.elapsed() > Duration::from_secs(5) {
             panic!(
                 "worker did not process 3 multimodal events within 5 s; \
-                 only {} 👁 reactions recorded",
+                 only {} 👀 reactions recorded",
                 count
             );
         }
@@ -712,11 +712,11 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
         leftover
     );
 
-    // Assertion 2: 3 👁 reactions in FIFO arrival order.
+    // Assertion 2: 3 👀 reactions in FIFO arrival order.
     let reactions = adapter.reactions.lock().unwrap();
     let eye_seq: Vec<&str> = reactions
         .iter()
-        .filter(|(c, _, e)| c == "chat_mm" && e == "👁")
+        .filter(|(c, _, e)| c == "chat_mm" && e == "👀")
         .map(|(_, m, _)| m.as_str())
         .collect();
     assert_eq!(
