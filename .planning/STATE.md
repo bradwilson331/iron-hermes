@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.17.1 context gathered
-last_updated: "2026-05-28T15:56:21.178Z"
-last_activity: 2026-05-28 -- Phase 36.17.2 execution started
+stopped_at: Phase 36.17.2.1 closed — UAT PASS
+last_updated: "2026-05-28T17:30:00.000Z"
+last_activity: 2026-05-28 -- Phase 36.17.2.1 complete (verifier 11/11, live UAT PASS)
 progress:
-  total_phases: 41
-  completed_phases: 9
-  total_plans: 42
-  completed_plans: 42
-  percent: 22
+  total_phases: 42
+  completed_phases: 10
+  total_plans: 44
+  completed_plans: 44
+  percent: 24
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.2 — unify-session-queue-replace-uqm-mpsc-buffer
+**Current focus:** Phase 36.17.2.1 closed — awaiting next phase selection (36.16 SMM port unplanned, 36.17.3+ pending)
 
 ## Current Position
 
-Phase: 36.17.2 (unify-session-queue-replace-uqm-mpsc-buffer) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 36.17.2
-Last activity: 2026-05-28 -- Phase 36.17.2 execution started
+Phase: 36.17.2.1 (fix-queue-slash-command-failing-to-wake-parked-worker-regres) — CLOSED
+Plan: 2 of 2 complete
+Status: Phase 36.17.2.1 verified PASS 11/11 + live UAT PASS (2026-05-28)
+Last activity: 2026-05-28 -- Phase 36.17.2.1 UAT PASS, queue wake confirmed (Telegram rate limits unrelated)
 
 ## Phase 36.2 Closure Summary
 
