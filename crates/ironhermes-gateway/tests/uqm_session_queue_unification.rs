@@ -921,3 +921,265 @@ async fn test_slash_command_bypasses_per_chat_worker() {
         second.content
     );
 }
+
+/// Phase 36.17.2.1 D-07/D-08/D-09 regression test:
+/// `/queue` typed during a busy turn must wake the parked per-chat worker.
+///
+/// UAT FAILURE THIS TEST LOCKS: 2026-05-28T15:36-15:38 UTC, 128/129 `/queue` events
+/// stranded with zero 👀 reactions. Root cause: handler.rs:805 (pre-fix) called
+/// `session_queue.try_push` directly with NO `notify_one()` — so the worker, parked
+/// at `notify_task.notified().await` (runner.rs:1045 in production / line 252 in
+/// `spawn_test_worker` here), never woke. Messages piled up in `SessionQueue` and
+/// were stranded indefinitely.
+///
+/// Why every existing test in this file missed this: they all dispatch via
+/// `uqm.dispatch(...)` directly (e.g. `test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_handler`
+/// at line 321), and `UQM::dispatch` ALWAYS calls `notify_one()` on success
+/// (user_queue.rs:154). The only existing test that exercises the handler's
+/// fast-path `Queued` arm (`test_slash_command_bypasses_per_chat_worker` at line 835)
+/// does so against an EMPTY worker state — no `spawn_test_worker` is called, no real
+/// Notify-park happens, so the missing wake is silently invisible because there is
+/// nothing to wake.
+///
+/// What THIS test does differently:
+///   1. Pre-loads 1 free-text event via `uqm.dispatch` so the worker is registered.
+///   2. Spawns the test worker via `spawn_test_worker` — which immediately drains
+///      `free_1` and parks at `notify.notified().await`.
+///   3. Waits until `send_log.len() >= 1` — proving the worker reached
+///      `handle_with_multimodal` for `free_1` (the RecordingFailingAdapter records
+///      the placeholder send before returning Err, which fast-exits the agent loop).
+///   4. Dispatches 5 `/queue` events DIRECTLY through `handler.handle_with_multimodal`
+///      — exactly mirroring the runner.rs fast-path's `tokio::spawn(async move { handler.handle_with_multimodal(...).await })`
+///      body shape (runner.rs:943-967), but inline-awaited so the test thread can
+///      observe completion.
+///   5. Polls the count of 👀 reactions on synthesized message_ids `q_1..q_5` with
+///      a 5-second timeout. Under the fix the worker wakes, pops, emits 👀.
+///
+/// REGRESSION SIGNAL: Under the unfixed code, this test times out (5-second poll
+/// on the 👀 count). Under the fix (Plan 01), `handler.handle_with_multimodal`
+/// routes `/queue` → `handle_slash_command` → `cmd_queue` → handler's `Queued` arm
+/// → `uqm.dispatch(synthesized_event, None, None).await` → `notify_one()`
+/// (user_queue.rs:154) → worker wakes → pop → 👀 → handler → next iteration.
+///
+/// Harness design mirrors RESEARCH.md "Test Surface" section: reuses
+/// `RecordingFailingAdapter`, `build_test_handler_with_queue`, `make_event_full`,
+/// and `spawn_test_worker` verbatim. The ONE call this test adds that the parent
+/// `test_5_same_chat_messages` test does NOT make is `set_user_queue_manager` on
+/// the handler — required because Plan 01's fix only takes the `Some(uqm)` branch
+/// of the handler's Queued arm when UQM is wired (otherwise the legacy D-20
+/// fallback runs, which has the same wake-less bug and the test would time out for
+/// the wrong reason).
+#[tokio::test]
+async fn test_queue_command_wakes_parked_worker() {
+    let adapter = RecordingFailingAdapter::new();
+    let session_queue = Arc::new(SessionQueue::new());
+    let store = build_test_session_store();
+    let uqm = Arc::new(UserQueueManager::new(
+        adapter.clone() as Arc<dyn PlatformAdapter>,
+        session_queue.clone(),
+    ));
+
+    // Build the handler, wire UQM via Plan 01's new setter, THEN Arc-wrap.
+    // Without `set_user_queue_manager` the handler's Queued arm falls into the
+    // D-20 legacy fallback branch (direct try_push, no notify_one) — which has
+    // the same wake-less bug, meaning the test would time out for the wrong
+    // reason and not actually exercise Plan 01's fix.
+    let mut h = build_test_handler_with_queue(store.clone(), session_queue.clone());
+    h.set_user_queue_manager(uqm.clone());
+    let handler = Arc::new(h);
+
+    let session_key = SessionKey::new(Platform::Telegram, "chat_qw").with_user("u_qw");
+    let cancel = CancellationToken::new();
+
+    // Step 1 — Dispatch one free-text event via UQM. This must spawn the worker.
+    let outcome = uqm
+        .dispatch(
+            make_event_full("chat_qw", "free_1", "initial free-text body", "u_qw"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, DispatchOutcome::WorkerSpawned),
+        "First dispatch must spawn worker, got {:?}",
+        outcome
+    );
+
+    // Step 2 — Spawn the test worker. It will immediately pop free_1, emit 👀,
+    // call handle_with_multimodal (which fast-exits via RecordingFailingAdapter::send_message
+    // Err), then loop back, find the queue empty, and park at `notify.notified().await`.
+    let worker = spawn_test_worker(
+        session_queue.clone(),
+        uqm.clone(),
+        adapter.clone() as Arc<dyn PlatformAdapter>,
+        handler.clone(),
+        session_key.clone(),
+        cancel.clone(),
+    )
+    .await;
+
+    // Step 3 — Wait until the worker has drained free_1 and is parked.
+    // Evidence: send_log entry from RecordingFailingAdapter::send_message (the
+    // run_agent placeholder send) proves handle_with_multimodal was invoked for free_1.
+    let start = Instant::now();
+    loop {
+        let count = adapter.send_log.lock().unwrap().len();
+        if count >= 1 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "Worker did not drain free_1 within 5 s; send_log has {} entries: {:?}",
+                count,
+                *adapter.send_log.lock().unwrap()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Sanity: queue is empty (worker popped free_1) — worker is now parked at notify.notified().
+    assert_eq!(
+        session_queue.len(&session_key),
+        0,
+        "SessionQueue must be empty after worker pops free_1 (worker should be parked at notify.notified())"
+    );
+
+    let send_log_baseline = adapter.send_log.lock().unwrap().len();
+
+    // Step 4 — Dispatch 5 /queue events via handler.handle_with_multimodal directly.
+    // This is the EXACT code path that was broken (runner.rs fast-path tokio::spawn body shape).
+    // Each call must traverse: handle_with_multimodal → handle_slash_command → cmd_queue →
+    // CoreCommandResult::Queued arm → (Plan 01 fix) uqm.dispatch(queued_event, None, None).await →
+    // notify_one() → worker wakes → pop → 👀 emitted on synthesized message_id.
+    //
+    // Note: `ProcessedAttachments` is not `Clone`, so we rebuild it per iteration.
+    // For /queue text-only path both fields are always `None`, so this is observably
+    // identical to a clone.
+    for i in 1..=5usize {
+        let slash_event = make_event_full(
+            "chat_qw",
+            &format!("q_{}", i),
+            &format!("/queue body_{}", i),
+            "u_qw",
+        );
+        let processed = ironhermes_gateway::multimodal::ProcessedAttachments {
+            text_prefix: None,
+            image_data_uri: None,
+        };
+        let _ = handler
+            .handle_with_multimodal(
+                &slash_event,
+                adapter.clone() as Arc<dyn PlatformAdapter>,
+                cancel.child_token(),
+                processed,
+            )
+            .await;
+    }
+
+    // Step 5 — Poll until the worker has emitted 👀 on all 5 synthesized message_ids q_1..q_5.
+    // Under the fix this completes in ~200ms. Under the broken code this times out
+    // because the worker remains parked: try_push grows SessionQueue depth 1..5 but
+    // notify_one is never called.
+    let poll_start = Instant::now();
+    loop {
+        let count = adapter
+            .reactions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, m, e)| c == "chat_qw" && m.starts_with("q_") && e == "👀")
+            .count();
+        if count >= 5 {
+            break;
+        }
+        if poll_start.elapsed() > Duration::from_secs(5) {
+            let reactions = adapter.reactions.lock().unwrap();
+            let send_log = adapter.send_log.lock().unwrap();
+            panic!(
+                "REGRESSION SIGNAL — Phase 36.17.2.1 /queue wake-protocol broken.\n\
+                 Expected: 5 👀 reactions on synthesized message_ids q_1..q_5 within 5 s.\n\
+                 Actual: {} 👀 reactions on q_*; session_queue.len(&session_key) = {}; \
+                 send_log.len() = {}; reactions.len() = {}.\n\
+                 send_log (full): {:?}\n\
+                 reactions (full): {:?}\n\
+                 \n\
+                 This timeout means the per-chat worker is parked at \
+                 `notify.notified().await` and the handler's CoreCommandResult::Queued \
+                 arm did NOT call `uqm.dispatch(queued_event, None, None).await` — \
+                 which is the ONLY path that calls `notify_one()` (user_queue.rs:154) \
+                 to wake the parked worker.\n\
+                 \n\
+                 Look in handler.rs at the CoreCommandResult::Queued arm: the \
+                 production code path (when `self.user_queue_manager.is_some()`) MUST \
+                 delegate to `uqm.dispatch(queued_event, None, None).await`. If that \
+                 call has been replaced with a direct `session_queue.try_push(...)` \
+                 (the 36.17.1 legacy fallback), the wake is lost and the UAT \
+                 regression (2026-05-28T15:36-15:38 UTC, 128/129 stranded messages) \
+                 has recurred.",
+                count,
+                session_queue.len(&session_key),
+                send_log.len(),
+                reactions.len(),
+                *send_log,
+                *reactions,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    cancel.cancel();
+    let _ = worker.await;
+
+    // --- Assertion (A): each q_1..q_5 got exactly one 👀 reaction on chat_qw ---
+    let reactions = adapter.reactions.lock().unwrap();
+    for i in 1..=5usize {
+        let id = format!("q_{}", i);
+        let count = reactions
+            .iter()
+            .filter(|(c, m, e)| c == "chat_qw" && *m == id && e == "👀")
+            .count();
+        assert_eq!(
+            count, 1,
+            "q_{} expected exactly 1 👀 reaction, got {}. Full reactions log: {:?}",
+            i, count, *reactions
+        );
+    }
+
+    // --- Assertion (B): FIFO ordering of the 5 new 👀 reactions on q_1..q_5 ---
+    // The worker is serial, so the 👀 reaction sequence on synthesized message_ids
+    // IS the handler invocation order. The parent test pattern (line 444-454) uses
+    // the same approach.
+    let q_eye_seq: Vec<&str> = reactions
+        .iter()
+        .filter(|(c, m, e)| c == "chat_qw" && m.starts_with("q_") && e == "👀")
+        .map(|(_, m, _)| m.as_str())
+        .collect();
+    let expected: Vec<String> = (1..=5).map(|i| format!("q_{}", i)).collect();
+    let expected_refs: Vec<&str> = expected.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        q_eye_seq, expected_refs,
+        "/queue synthesized events processed out of FIFO order — worker pop or handler invocation order is broken"
+    );
+    drop(reactions);
+
+    // --- Assertion (C): SessionQueue is drained to empty ---
+    assert_eq!(
+        session_queue.len(&session_key),
+        0,
+        "SessionQueue must be empty after worker drains all 5 synthesized /queue events (worker may have stopped mid-drain)"
+    );
+
+    // --- Assertion (D): send_log grew by at least baseline+5 ---
+    // Each handle_with_multimodal call on a popped synthesized event reaches
+    // run_agent's placeholder send_message which the adapter records.
+    let send_log_final = adapter.send_log.lock().unwrap().len();
+    assert!(
+        send_log_final >= send_log_baseline + 5,
+        "send_log must grow by at least 5 from baseline (worker processed 5 popped /queue events). \
+         baseline = {}, final = {}, growth = {}",
+        send_log_baseline,
+        send_log_final,
+        send_log_final.saturating_sub(send_log_baseline)
+    );
+}
