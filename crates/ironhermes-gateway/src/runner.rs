@@ -924,6 +924,52 @@ impl GatewayRunner {
 
                         info!(chat_id = %event.chat_id, "Message passed all filters, dispatching");
 
+                        // Phase 36.17.2 Plan 05 (D-23, D-24, D-27): slash-command fast-path.
+                        // Commands bypass UserQueueManager entirely so they don't serialize behind
+                        // an in-flight free-text turn in the per-chat worker. The same handler entry
+                        // (handle_with_multimodal) is used — only the routing differs.
+                        //
+                        // D-24: strict prefix match, no whitespace trim — matches handler.rs:411 command parser.
+                        // D-26: state-mutation safety covered by SessionQueue mutex + SessionStore RwLock + AtomicBool.
+                        // T-36.17.2-06 mitigation: sem_dispatch permit acquired BEFORE handle call (TG-06 bound preserved).
+                        if event.content.starts_with('/') {
+                            let handler_cmd = handler_dispatch.clone();
+                            let adapter_cmd = adapter_dispatch.clone();
+                            let sem_cmd = semaphore_dispatch.clone();
+                            let cancel_cmd = cancel_dispatch.clone();
+                            let event_cmd = event.clone();
+                            // Detached spawn — commands are short-lived (D-27). Graceful shutdown
+                            // observes cancel_token via cancel.is_cancelled() inside the handler.
+                            tokio::spawn(async move {
+                                let permit = match sem_cmd.acquire().await {
+                                    Ok(p) => p,
+                                    Err(_) => return, // semaphore closed → shutdown in progress
+                                };
+                                // Commands are text-only by contract (D-27) — skip multimodal processing.
+                                let processed = crate::multimodal::ProcessedAttachments {
+                                    text_prefix: None,
+                                    image_data_uri: None,
+                                };
+                                if let Err(e) = handler_cmd
+                                    .handle_with_multimodal(
+                                        &event_cmd,
+                                        adapter_cmd,
+                                        cancel_cmd.child_token(),
+                                        processed,
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        chat_id = %event_cmd.chat_id,
+                                        error = %e,
+                                        "Slash-command fast-path handler error (Phase 36.17.2 Plan 05)"
+                                    );
+                                }
+                                drop(permit);
+                            });
+                            continue; // Skip the multimodal + UQM.dispatch path for this event
+                        }
+
                         // Process multimodal attachments (D-05 through D-08)
                         let (text_prefix, image_data_uri) = if !event.attachments.is_empty() {
                             match multimodal::process_attachments(&adapter_dispatch_mm, &msg).await {
