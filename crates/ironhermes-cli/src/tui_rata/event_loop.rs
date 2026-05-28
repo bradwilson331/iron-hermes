@@ -570,6 +570,13 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let fast_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let skin = Arc::new(std::sync::RwLock::new("default".to_string()));
 
+    // Phase 36.17.3 (D-03 / D-06 amended): TUI-owned queue + pause toggle.
+    // The TUI uses a single fixed SessionKey (Platform::Local / "local" / "local"),
+    // populated in App::new — only the queue + paused toggle flow through deps.
+    let queue: Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>> =
+        Arc::new(ironhermes_gateway::session_queue::SessionQueue::new());
+    let queue_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     Ok(AppDeps {
         agent_runtime,
         hook_registry,
@@ -597,6 +604,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         statusbar_enabled,
         debug_enabled,
         fast_enabled,
+        // Phase 36.17.3 (D-03 / D-06 amended): queue + paused toggle.
+        queue,
+        queue_paused,
         skin,
         // Phase 25.2 Plan 15 follow-up: the wireup the original plan missed
         toolset_session: Some(toolset_session),

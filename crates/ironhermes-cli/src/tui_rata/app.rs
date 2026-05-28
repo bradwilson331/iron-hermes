@@ -39,7 +39,9 @@ use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_core::ProviderResolver;
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_core::types::{ChatMessage, MessageContent, Role};
+use ironhermes_core::queue::MessageQueue;
+use ironhermes_core::session::SessionKey;
+use ironhermes_core::types::{ChatMessage, MessageContent, Platform, Role};
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
@@ -118,6 +120,14 @@ pub struct AppDeps {
     pub debug_enabled: Arc<AtomicBool>,
     /// `/fast` preset toggle (D-09).
     pub fast_enabled: Arc<AtomicBool>,
+    /// Phase 36.17.3 (D-03): shared FIFO queue keyed by SessionKey.
+    /// The TUI uses a single fixed `SessionKey` (Platform::Local + "local"
+    /// chat_id + "local" user_id); the App derives the key in `App::new`.
+    pub queue: Arc<dyn MessageQueue<SessionKey>>,
+    /// Phase 36.17.3 (D-06 amended): queue drain pause toggle.
+    /// Arc-wrapped per PATTERNS §2 / RESEARCH Pitfall 6 so slash handlers
+    /// running in shared-context closures can mutate without `&mut App`.
+    pub queue_paused: Arc<AtomicBool>,
     /// `/skin <name>` setter (D-09).
     pub skin: Arc<std::sync::RwLock<String>>,
 
@@ -210,6 +220,15 @@ pub struct App {
     pub debug_enabled: Arc<AtomicBool>,
     /// `/fast` preset toggle (D-09).
     pub fast_enabled: Arc<AtomicBool>,
+    /// Phase 36.17.3 (D-03): shared FIFO queue keyed by SessionKey.
+    pub queue: Arc<dyn MessageQueue<SessionKey>>,
+    /// Phase 36.17.3 (D-03): fixed TUI session key. Constructed in `App::new`
+    /// from `SessionKey::new(Platform::Local, "local").with_user("local")`
+    /// because the TUI never multiplexes chats — see RESEARCH §SessionKey Position.
+    pub queue_key: SessionKey,
+    /// Phase 36.17.3 (D-06 amended): when true, post-turn drain check skips
+    /// popping. Arc-wrapped per RESEARCH Pitfall 6.
+    pub queue_paused: Arc<AtomicBool>,
     /// `/skin <name>` setter (D-09).
     pub skin: Arc<std::sync::RwLock<String>>,
     /// Phase 36.1 (GW-05-TUI, D-08): persistent per-session running flag.
@@ -331,6 +350,10 @@ impl App {
             statusbar_enabled: deps.statusbar_enabled,
             debug_enabled: deps.debug_enabled,
             fast_enabled: deps.fast_enabled,
+            // Phase 36.17.3 (D-03): queue + fixed TUI key + Arc<AtomicBool> pause toggle.
+            queue: deps.queue,
+            queue_key: SessionKey::new(Platform::Local, "local").with_user("local"),
+            queue_paused: deps.queue_paused,
             skin: deps.skin,
             // Phase 36.1 (GW-05-TUI, D-08): persistent running flag — false at session start.
             agent_running: Arc::new(AtomicBool::new(false)),
@@ -1139,6 +1162,10 @@ fn test_deps() -> AppDeps {
         statusbar_enabled: Arc::new(AtomicBool::new(true)),
         debug_enabled: Arc::new(AtomicBool::new(false)),
         fast_enabled: Arc::new(AtomicBool::new(false)),
+        // Phase 36.17.3 (D-03 / D-06 amended): test queue + paused toggle.
+        queue: Arc::new(ironhermes_gateway::session_queue::SessionQueue::new())
+            as Arc<dyn MessageQueue<SessionKey>>,
+        queue_paused: Arc::new(AtomicBool::new(false)),
         skin: Arc::new(std::sync::RwLock::new("default".to_string())),
         // Phase 25.2 Plan 15 follow-up: tests don't exercise the toolset slash UI
         toolset_session: None,
