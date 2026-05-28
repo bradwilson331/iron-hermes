@@ -1127,5 +1127,12 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         CommandResult::Queued { message } => {
             SlashOutcome::Handled(format!("Queued: {message}"))
         }
+        // Phase 36.17.3 (D-06 amended): defensive no-op; active toggle lives in
+        // handle_session_control (Plan 05) BEFORE map_core_to_slash_outcome is
+        // called, so this arm is the fallback for any path that routes through
+        // here without interception (e.g., gateway shimming through the TUI
+        // mapper, or future surfaces without a queue-paused AtomicBool).
+        CommandResult::PauseQueue => SlashOutcome::Silent,
+        CommandResult::UnpauseQueue => SlashOutcome::Silent,
     }
 }

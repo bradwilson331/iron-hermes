@@ -156,6 +156,12 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         CoreCommandResult::Queued { message } => {
             CommandResult::Handled(format!("Queued: {message}"))
         }
+        // Phase 36.17.3 (D-06 amended): defensive no-op. /pause and /unpause
+        // are CliOnly + Session, but the classic legacy TUI has no queue-drain
+        // loop (the real toggle lives in tui_rata::handle_session_control —
+        // Plan 05). Map to Silent so the legacy REPL stays exhaustive without
+        // surfacing user-visible behavior change.
+        CoreCommandResult::PauseQueue | CoreCommandResult::UnpauseQueue => CommandResult::Silent,
     }
 }
 

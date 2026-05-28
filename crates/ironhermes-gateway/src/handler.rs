@@ -682,6 +682,15 @@ impl GatewayMessageHandler {
                         // Phase 22.3 D-06: TTY visual reset — not meaningful on the
                         // gateway (no TTY). Ignore silently. Added for exhaustiveness.
                     }
+                    // Phase 36.17.3 (D-06 amended): defensive no-op. /pause and
+                    // /unpause are CliOnly in the registry so a gateway adapter
+                    // will not reach this arm via resolve(), but exhaustiveness
+                    // requires the variants be matched. Active toggle wiring
+                    // lives in the TUI (Plan 05) — gateway has no queue-paused
+                    // flag because the gateway worker drain semantics differ.
+                    CoreCommandResult::PauseQueue | CoreCommandResult::UnpauseQueue => {
+                        // No-op on gateway (exhaustiveness only).
+                    }
                     ironhermes_core::commands::CommandResult::SkillsReload => {
                         // Phase 21.8.2 D-01..D-05: synchronous reload + D-03 atomic inner-Arc swap.
                         use std::collections::HashSet;
