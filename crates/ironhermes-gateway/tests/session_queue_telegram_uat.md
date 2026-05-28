@@ -1,16 +1,24 @@
-# Manual UAT: Phase 36.17.1 — in-mem FIFO Queuing (Telegram)
+# Manual UAT: Session Queue — Telegram Live UAT
 
-> **Phase reference:** `.planning/phases/36.17.1-in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions/`
+> **Phase reference:** Phase 36.17.2 (supersedes 36.17.1-05)
+> `.planning/phases/36.17.2-unify-session-queue-replace-uqm-mpsc-buffer/`
+>
+> **Architecture (locked):** UnifiedQueueing (Option C, D-01..D-22). UserQueueManager's per-chat mpsc buffer has been removed; SessionQueue is the single source of truth for buffered messages. 👁 transport reactions now fire AT POP TIME (the moment the worker begins processing each message), NOT at dispatch time (when the message lands on the queue). This is the only user-visible change from 36.17.1.
 >
 > **Locked decisions exercised here:**
 > - **D-01** — full `/queue` feature parity (queue type + gateway wiring + `/queue` + busy-agent enqueue + `/new`+`/reset` clearing + drain-mode).
 > - **D-02** — Telegram is the **only** wired platform in this phase. Discord, Slack, and `iron_hermes_ui` web wiring are deferred to follow-up phases.
-> - **D-03** — drain-mode preservation is **in-process only**. Cross-process restart preservation is out of scope (see §"Out of Scope" below).
+> - **D-03** (36.17.1) — drain-mode preservation is **in-process only**. Cross-process restart preservation is out of scope (see §"Out of Scope" below).
+> - **D-04** — Per-chat worker loop rewrites to poll `SessionQueue::pop` directly (Notify-based idle wait).
+> - **D-08** — 👁 transport reaction emission moves from `dispatch` to worker (fires at pop time, immediately before each `handle_with_multimodal` call).
+> - **D-11** — Cap-hit UX lives in `UserQueueManager::dispatch`. When `try_push` returns `CapacityReached`, UQM fires the ❌ reaction + chat reply directly; the Telegram dispatch loop does not need to handle it.
 > - **D-13** — Telegram cap-hit UX: `❌` reaction via `PlatformAdapter::add_reaction`, then a chat reply `⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.`
+> - **D-22** — Live Telegram UAT runbook gated as a `checkpoint:human-verify` task.
 >
 > **Why this runbook exists:** the automated suite in
-> `tests/session_queue_integration.rs` covers the in-process handler + drain
-> paths exhaustively. What automated tests **cannot** verify is:
+> `tests/session_queue_integration.rs` and `tests/uqm_session_queue_unification.rs`
+> covers the in-process handler + drain paths exhaustively. What automated tests
+> **cannot** verify is:
 >
 > 1. Whether Telegram actually renders the `❌` reaction on the dropped 129th
 >    message in the user's client.
@@ -22,8 +30,10 @@
 > 4. Whether the **Plan 04 in-process drain-mode flag** (`is_draining`) fires
 >    on a real `ctrl+c` / `SIGTERM` and visibly logs `is_draining=true` BEFORE
 >    the cancel-fired line.
+> 5. Whether 👁 reactions appear SEQUENTIALLY (one per message at pop time)
+>    rather than as a burst at dispatch time (D-08 regression detection).
 >
-> All four require a live Telegram bot, a live IRONHERMES_HOME, and visual
+> All five require a live Telegram bot, a live IRONHERMES_HOME, and visual
 > inspection of the chat.
 
 ---
@@ -35,15 +45,15 @@ Before running any scenario:
 | Item | Value | How to set |
 |------|-------|------------|
 | `TELEGRAM_BOT_TOKEN` | Your test bot's token from `@BotFather` | `export TELEGRAM_BOT_TOKEN=...` |
-| `IRONHERMES_HOME` | Test config dir — separate from your production home | `export IRONHERMES_HOME=/tmp/uat-36.17.1-home` |
+| `IRONHERMES_HOME` | Test config dir — separate from your production home | `export IRONHERMES_HOME=/tmp/uat-36.17.2-home` |
 | Test chat | A Telegram chat where the bot is admin'd; the bot must respond to free-text | Add bot, `/start`, send "hi" to confirm |
 | Agent config | Free-text messages must produce a real agent turn (so we can observe busy-vs-idle) | Pick a model in `cli-config.yaml`; verify the bot responds to "hi" with a real LLM reply |
-| Phase 36.17.1 plans 01–05 merged on `develop` | Required — earlier plans ship the SessionQueue, handler wiring, /queue intercept, /new clearing, drain-mode flag, and tests | `git log --oneline | grep 36.17.1` |
+| Phase 36.17.2 plans 01–04 merged | Required — earlier plans rewrite UQM internals, the per-chat worker pop-loop, and the integration tests | `git log --oneline | grep 36.17.2` |
 
 Start the gateway in a terminal you can `ctrl+c` later for Scenario 4b:
 
 ```bash
-cargo run --release --bin ironhermes -- gateway 2>&1 | tee /tmp/uat-36.17.1-gateway.log
+cargo run --release --bin ironhermes -- gateway 2>&1 | tee /tmp/uat-36.17.2-gateway.log
 ```
 
 Keep this terminal visible — Scenarios 3 and 4 read the log to verify the
@@ -53,54 +63,55 @@ Keep this terminal visible — Scenarios 3 and 4 read the log to verify the
 
 ## Scenario 1: Busy-enqueue silent path
 
-**What this verifies (D-01b + D-13 + Pitfall 1):** while the per-session
+**What this verifies (D-01b + D-08 + D-11 + Pitfall 1):** while the per-session
 agent is mid-turn, an incoming free-text Telegram message is enqueued onto
 the `SessionQueue` and replays automatically after the current turn ends.
-No extra "queued!" chat reply appears — the only visible signal is the
-existing UserQueueManager 👁 transport-layer reaction.
+No extra "queued!" chat reply appears. Under Phase 36.17.2, the 👁 transport
+reaction fires AT POP TIME (when the worker begins each turn), NOT at
+dispatch time. This scenario verifies the D-08 timing semantics.
 
 **Steps:**
 
-1. In your test chat, send a slow free-text prompt:
+1. In your test chat, send the following 5 messages in **rapid succession**
+   (less than 2 seconds between each — fast enough to enqueue messages 2..5
+   while the agent is still processing message 1):
 
-   ```
-   Write 1500 words about Soviet-era radio engineering, with citations.
-   ```
+   - Message 1: `"Write 1500 words about Soviet-era radio engineering, with citations."`
+   - Message 2: `"And include a paragraph about Popov."`
+   - Message 3: `"And a section on Lissajous figures in oscilloscopes."`
+   - Message 4: `"And a closing paragraph on wartime jamming techniques."`
+   - Message 5: `"And summarize with exactly three bullet points."`
 
-   Wait for the agent to begin streaming a reply (you should see typing
-   indicators or partial output).
+2. After sending all 5, observe the Telegram chat carefully.
 
-2. While the agent is still generating, send a follow-up free-text message
-   (no slash command):
+   - Watch for 👁 reactions appearing on each message. Note the TIMING:
+     does 👁 appear on messages 2..5 immediately after sending (dispatch
+     time), or later when each message's turn actually begins (pop time)?
+   - Under Phase 36.17.2 (unified architecture), 👁 appears at pop time —
+     NOT at dispatch time.
 
-   ```
-   And include a paragraph about Popov.
-   ```
+3. Wait for all 5 agent turns to complete.
 
-3. Observe the 👁 (eye) reaction appear on the second message within ~1s.
-   This is `UserQueueManager`'s transport-layer signal — it fires for any
-   message queued behind an in-flight per-chat worker run.
+**Expected (Phase 36.17.2 unified architecture):**
 
-4. Wait for the first turn to finish (the "Write 1500 words…" reply
-   completes).
+1. Message 1 starts processing immediately. You may see a 👁 reaction appear on message 1 BEFORE the agent begins (this is the worker emitting 👁 at the moment of pop — D-06 step 3, D-08). Note: the legacy 36.17.1 behavior emitted 👁 only on messages 2..N. Under 36.17.2, every message gets 👁 at the moment its turn begins, INCLUDING the first one.
+2. Messages 2..5 sit silently in the SessionQueue while message 1 is processed. NO 👁 reactions appear on messages 2..5 yet — they have not been popped.
+3. When message 1's agent turn completes, the worker pops message 2. A 👁 reaction appears on message 2 at THIS moment (not earlier). The agent begins processing message 2.
+4. Repeat for messages 3, 4, 5 — each gets a 👁 reaction at the moment of pop, sequentially.
+5. Final state: all 5 messages have been processed in FIFO order; each has a 👁 reaction; the SessionQueue depth for this session is 0.
 
-5. The second message ("And include a paragraph about Popov.") replays
-   automatically — the agent runs a fresh turn for it without you having
-   to resend.
+- **No** "Queued for the next turn." chat reply is sent for messages 2..5 — free-text enqueue is silent per D-13.
+- `/tmp/uat-36.17.2-gateway.log` shows sequential pop events (not a dispatch-time burst).
 
-**Expected:**
+**Regression signal:** If 👁 reactions appear on messages 2..5 BEFORE message 1's turn completes, the architecture has regressed — 👁 emission has moved back to dispatch (violating D-08). File a bug citing T-36.17.2-03 regression and DO NOT sign off on this scenario.
 
-- 👁 reaction is visible on the second message during the busy window.
-- After the first turn finishes, the second message produces its own
-  agent turn (in addition to the streamed first one).
-- **No** "Queued for the next turn." chat reply is sent for the second
-  message — free-text enqueue is silent per D-13.
-- `/tmp/uat-36.17.1-gateway.log` shows a `SessionQueue: enqueued event
-  while agent busy` debug line for the second message.
+**Architectural justification:** Under 36.17.1, 👁 emission was a dispatch-time signal ("UserQueueManager has accepted your message into its buffer"). Under 36.17.2, 👁 is a processing-start signal ("the agent has begun working on this specific message"). The new semantics align with user mental models: when 👁 appears, the agent is actually looking at the message.
 
 ---
 
 ## Scenario 2: `/queue` command path
+
+**Note (36.17.2):** /queue continues to write directly to SessionQueue via the gateway's handle_slash_command intercept. UQM::dispatch is bypassed for /queue (slash commands are not whitelist/dispatch-path messages). This scenario verifies the slash-command path is unaffected by the dispatch-path refactor.
 
 **What this verifies (D-08 + Plan 03):** the `/queue <text>` slash command
 unconditionally pushes onto the SessionQueue (regardless of agent_running
@@ -141,6 +152,8 @@ runs (per Plan 02 drain wiring — the drain helper fires after the next
 ---
 
 ## Scenario 3: Cap-hit UX (D-13 — Telegram-specific)
+
+**Note (36.17.2 internal migration):** The cap-hit UX literal (❌ reaction + "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more." chat reply) now fires from inside UserQueueManager::dispatch (D-11). User-visible behavior is identical to 36.17.1. If you see the cap-hit reply for messages that should NOT have hit cap (e.g., depth was <128), file a bug — the migration may have moved the emission to the wrong layer.
 
 **What this verifies (D-13 + T-36.17.1-01 + Pitfall 6):** when the queue
 hits the 128-message hard cap, the 129th attempt receives a `❌` reaction
@@ -201,18 +214,18 @@ offset BEFORE dispatch).
   (128 messages). Wait for the agent to drain before sending more.`
 - The currently-streaming "history of FIFO queues" turn continues normally
   — cap-hit MUST NOT interrupt the in-flight turn.
-- `/tmp/uat-36.17.1-gateway.log` shows a `SessionQueue: capacity reached,
+- `/tmp/uat-36.17.2-gateway.log` shows a `SessionQueue: capacity reached,
   message dropped` warn line tagged with the session key.
 
 4. **Pitfall 6 verification — no re-delivery:**
 
    Wait ~30 seconds. In your Telegram client, observe whether the 129th
    message receives ANY additional reactions or processing. Also check
-   `/tmp/uat-36.17.1-gateway.log` for any duplicate `msg_id 129`
+   `/tmp/uat-36.17.2-gateway.log` for any duplicate `msg_id 129`
    processing:
 
    ```bash
-   grep "msg 129\|msg_129\|<id_you_used_for_129>" /tmp/uat-36.17.1-gateway.log
+   grep "msg 129\|msg_129\|<id_you_used_for_129>" /tmp/uat-36.17.2-gateway.log
    ```
 
    **Expected:** exactly one cap-hit warn line for the 129th message; no
@@ -239,6 +252,8 @@ phase. Run them in order; reset state between them.
 
 ### Scenario 4a: `/new` clears queue (Pitfall 5)
 
+**Note (36.17.2):** /new behavior is unchanged. The clear-queue-before-remove ordering is preserved from 36.17.1-03 (handler.rs NewSession arm).
+
 **What this verifies (Plan 03 Task 2 + Pitfall 5):** running `/new` while
 the queue has items must CLEAR the queue BEFORE removing the session.
 The queued items MUST NOT replay after `/new`.
@@ -261,7 +276,7 @@ The queued items MUST NOT replay after `/new`.
 - After `/new`, the bot replies `Conversation cleared. Starting fresh.`
 - The `hi` message produces a single fresh agent turn — none of the
   three queued items (msg A / msg B / msg C) replay.
-- `/tmp/uat-36.17.1-gateway.log` shows session removal followed by no
+- `/tmp/uat-36.17.2-gateway.log` shows session removal followed by no
   further drain activity for that session_key.
 
 If any of the three queued items DO replay after `/new`, Pitfall 5 has
@@ -307,7 +322,7 @@ by design. See §"Out of Scope" below.
 
    ```bash
    grep -E "is_draining|drain_for_restart|cancel|Shutting down" \
-     /tmp/uat-36.17.1-gateway.log | tail -20
+     /tmp/uat-36.17.2-gateway.log | tail -20
    ```
 
 **Expected:**
@@ -336,6 +351,78 @@ by design. See §"Out of Scope" below.
   it is sufficient to confirm the `is_draining=true` log line appears
   AT ALL before exit. **In-process only**: once the process exits, queue
   contents are gone (see §"Out of Scope").
+
+---
+
+### Note on D-12 — HTTP 429 (deferred)
+
+CONTEXT.md D-12 specifies that HTTP-arrival platforms (future webhook/REST adapter, Discord/Slack when they flow through `UserQueueManager`) inherit the `Err(QueueError::CapacityReached)` signal at the dispatch boundary and respond with **HTTP 429 + `Retry-After: 5`** at the network edge.
+
+**Status in 36.17.2:** DEFERRED. Phase 36.17.2 only ships the Telegram path; the webhook/REST adapter (Phase 36.7.1+) does not yet flow through `UserQueueManager::dispatch`. The 429 path is wired ARCHITECTURALLY (the `Err(QueueError::CapacityReached)` return shape is in place) but no UAT scenario can exercise it without the adapter.
+
+**Verifier action:** None. This note exists so D-12 is not an orphan decision in the UAT sign-off — it is captured here as a deliberate future-phase deferral.
+
+---
+
+## Scenario 5 — Worker-exit/dispatch race (T-36.17.2-01)
+
+**Goal:** Verify that after a per-chat worker exits (queue drained to empty, worker calls UQM::remove and dies), a subsequent dispatch correctly spawns a fresh worker. This validates the mutex serialization in UserQueueManager between `dispatch` and `remove` (D-19 + T-36.17.2-01 mitigation).
+
+**Verifier steps:**
+
+1. Send a single message: `"first message after race test"`. Wait for the agent to fully complete its turn — confirm the agent has fully responded AND the 👁 reaction is visible AND no further activity is happening (look for the "agent finished" log line `tail -f` on the gateway logs, or just wait ~30 seconds after the agent's last visible reply).
+
+2. At this point, the per-chat worker for your SessionKey has exited (it popped the queue, found it empty, hit the cancel/notify select arm with no pending notification, and dropped through to the `queue_task.remove(&session_key_task).await` call at the bottom of the worker spawn closure).
+
+3. Wait at least 5 seconds AFTER the agent's final reply. This guarantees the worker has fully exited and released its Notify clone.
+
+4. Send a second message: `"second message after race test"`.
+
+5. Confirm: the second message is processed normally. A 👁 reaction appears on it. The agent responds.
+
+**Expected (Phase 36.17.2):**
+
+- The second message MUST be processed. If it sits in the queue indefinitely with no 👁 reaction, the dispatch-after-worker-exit path is broken (T-36.17.2-01 mitigation has regressed).
+- gateway logs MUST show TWO instances of "Per-chat worker exited" or equivalent debug line — one after each message's turn.
+- Each message MUST receive exactly one 👁 reaction (no duplicates from the race).
+
+**Regression signal:** If the second message is silently dropped, file T-36.17.2-01 regression. Likely causes: UQM::dispatch's lock re-check (after acquiring `workers.lock().await`) is failing to re-evaluate the map state correctly, OR the Arc<Notify> dropped before `dispatch`'s notify_one call.
+
+---
+
+## Scenario 6 — Multimodal payload preservation (M1 sidecar live evidence, T-36.17.2-04)
+
+**Goal:** Verify that the multimodal sidecar (`pending_multimodal` introduced in Plan 01) preserves `(text_prefix, image_data_uri)` payloads in FIFO lockstep with `SessionQueue`, so a burst of mixed photo/document/text messages reaches `handle_with_multimodal` with the correct attachments per message.
+
+**Background:** 36.17.1 stored multimodal payload inside `QueuedMessage` on the mpsc channel. 36.17.2 removes the mpsc and stores `MessageEvent` only in `SessionQueue`; multimodal payload moves to a separate `pending_multimodal` map indexed by `SessionKey` with `VecDeque` FIFO semantics. If the sidecar drifts out of lockstep with `SessionQueue` (e.g., a push to the queue with no matching `push_multimodal`, or two takes per pop), photos arrive misaligned to their captions and the agent sees the wrong attachment for each turn. This scenario is the live evidence that the lockstep holds.
+
+**Verifier steps:**
+
+1. Wait until the agent is idle for the test chat (no pending replies, queue depth 0).
+
+2. Send the following 5 messages in **rapid succession** (< 2 seconds between each — fast enough to enqueue messages 2..5 while the agent is still processing message 1):
+   - Message 1: text only, content `"first — text only"`.
+   - Message 2: a photo attachment (any JPEG/PNG, ≤ 1MB), with caption `"second — photo"`.
+   - Message 3: a document attachment (any PDF/txt, ≤ 1MB), with caption `"third — document"`.
+   - Message 4: a photo with caption `"fourth — photo with caption B"`.
+   - Message 5: text only, content `"fifth — text only"`.
+
+3. Wait for the agent to process all 5 messages (~30-90 seconds depending on response length). Observe the 👁 reactions appear sequentially at pop time (Scenario 1 behavior).
+
+4. Inspect each agent response in Telegram. For each, verify the agent's response references the CORRECT attachment for that turn — message 2's response talks about the photo, message 3's response talks about the document, etc.
+
+**Expected (Phase 36.17.2):**
+
+- 5 messages processed in FIFO order.
+- 5 👁 reactions at pop time (one per message, Scenario 1 behavior).
+- Each agent response correctly references its message's attachment (or lack thereof for text-only messages).
+- Message 1 and Message 5 (text-only) receive responses that do NOT reference any image/document.
+- Message 2 and Message 4 (photo) receive responses that reference the image content (e.g., describe what the photo shows).
+- Message 3 (document) receives a response that references the document content.
+
+**Regression signal:** If message 3's response talks about the photo (instead of the document), the sidecar has drifted by one position. If message 1 (text-only) receives a response describing a phantom image, the sidecar's pop returned a stale payload from a previous turn. Either case indicates `take_multimodal`/`push_multimodal` lockstep with `SessionQueue::try_push`/`SessionQueue::pop` has broken — file T-36.17.2-04 regression and DO NOT sign off on this scenario.
+
+**Note:** This scenario does NOT require the cap to be hit. It exercises sidecar ordering across the busy-enqueue path, which is the dispatch path the architectural shift made reachable. If Plan 03's `test_multimodal_payload_roundtrips_through_sidecar_to_handler` integration test passes, this live scenario should also pass — Scenario 6 is the human-side confirmation that automation + production behave consistently.
 
 ---
 
@@ -376,8 +463,7 @@ preservation as part of this phase's sign-off.**
 
 Run each scenario once on a live Telegram bot. Tick when verified.
 
-- [ ] **Scenario 1** — Busy-enqueue silent: 👁 reaction visible, second
-      message replays after first turn, no extra chat reply.
+- [ ] **Scenario 1** — Busy-enqueue silent path (36.17.2 unified): 👁 reactions appear sequentially at pop time, not at dispatch time. Second through fifth messages receive 👁 only when each turn begins. No extra chat reply for queued messages.
 - [ ] **Scenario 2** — `/queue` depth-aware reply: singular form at
       depth 1, plural with count at depth ≥ 2; drain fires on next
       free-text turn.
@@ -391,6 +477,8 @@ Run each scenario once on a live Telegram bot. Tick when verified.
       log line indicating drain-mode entry BEFORE the cancel-propagation
       line. In-process only — cross-process preservation NOT tested
       (see §"Out of Scope").
+- [ ] **Scenario 5** — Worker-exit/dispatch race (T-36.17.2-01): second-message-after-worker-exit processed normally. Two worker-exit log lines visible. No silently dropped messages.
+- [ ] **Scenario 6** — Multimodal payload preservation (T-36.17.2-04): photo/document burst preserves payload→message alignment FIFO. Message 3's response references the document (not the photo from message 2).
 
 Verifier (your name): ____________________
 
@@ -404,5 +492,12 @@ Notes / failures (attach screenshots + log excerpts if any scenario fails):
 
 ---
 
-*Phase: 36.17.1 — in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions*
-*Runbook authored: 2026-05-27*
+## Document History
+
+- **2026-05-27 (Phase 36.17.2-04):** Updated for unified architecture (D-01..D-22). Scenario 1's expected behavior rewrote — 👁 reactions now emit at pop time per D-08. Added Scenario 5 covering T-36.17.2-01 worker-exit/dispatch race. Added Scenario 6 covering T-36.17.2-04 multimodal sidecar lockstep (M1 sidecar live evidence). Added D-12 (HTTP 429) deferred-decision footnote. Other scenarios unchanged.
+- **2026-05-27 (Phase 36.17.1-05):** Initial runbook for the mpsc-buffer architecture.
+
+---
+
+*Phase: 36.17.2 — unify-session-queue-replace-uqm-mpsc-buffer (supersedes 36.17.1-05)*
+*Runbook updated: 2026-05-27*
