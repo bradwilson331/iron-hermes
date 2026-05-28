@@ -426,6 +426,37 @@ CONTEXT.md D-12 specifies that HTTP-arrival platforms (future webhook/REST adapt
 
 ---
 
+## Scenario 7 — Slash-command fast-path during busy turn (D-23, D-27, T-36.17.2-06)
+
+**Goal:** Verify that slash commands dispatched while the per-chat worker is mid-turn on a free-text event respond in sub-second wall-clock time, NOT after the in-flight turn completes. This is the second UAT failure mode surfaced after 36.17.2 Plans 01-04 shipped — Plans 01+02 unified free-text bursts, but slash commands were still serializing behind the worker until Plan 05 added the dispatch-loop fast-path.
+
+**Background:** Under 36.17.1 (and the post-Plan-02 / pre-Plan-05 state of 36.17.2), `/queue` typed during a long-running free-text turn waited for the in-flight `handle_with_multimodal` to return (~90s observed in UAT). Plan 05 (D-27) added a dispatch-loop branch at `runner.rs:~940` that bypasses `UserQueueManager::dispatch` for events where `event.content.starts_with('/')`. The fast-path `tokio::spawn`s the handler call directly, acquiring the per-chat `sem_dispatch` permit (T-36.17.2-06 mitigation — prevents command-storm bypass amplification) but skipping the SessionQueue / worker pop-loop entirely.
+
+**Verifier steps:**
+
+1. Send a free-text message that triggers a long agent turn (≥ 15 seconds). Example: `"Write a 500-word essay about Rust async runtime architecture."` Confirm 👁 appears at pop time and the agent begins streaming.
+
+2. While the agent is mid-stream (within the first 5-10 seconds, BEFORE the agent completes its turn), send `/queue some text for the next turn`.
+
+3. Observe Telegram. The bot MUST reply to `/queue` with `"Queued for the next turn."` (or `"Queued for the next turn. (N queued)"` depending on existing queue depth) within **~1 second** of sending the slash command — well before the in-flight free-text turn completes.
+
+4. Wait for the in-flight free-text turn to fully complete (agent finishes streaming, presumably 15+ more seconds).
+
+5. Confirm the `/queue` synthesized event ("some text for the next turn") is then processed AS THE NEXT FREE-TEXT TURN — the worker pops it from SessionQueue, emits 👁, and the agent processes it.
+
+**Expected (Phase 36.17.2 Plan 05):**
+
+- `/queue` reply appears within ~1 second of dispatch (sub-second is ideal; up to 2 seconds tolerable for network jitter).
+- The reply text is the depth-aware confirmation from cmd_queue (singular at depth 1, plural with `(N queued)` at depth > 1).
+- The in-flight free-text turn continues uninterrupted — no streaming corruption, no abrupt cancellation.
+- After the free-text turn finishes, the worker pops the `/queue` synthesized event and processes it as a normal turn.
+
+**Regression signal:** If bot waits the full duration of the in-flight turn before replying to `/queue`, the fast-path is not wired. File a 36.17.2 Plan 05 regression and DO NOT sign off on this scenario. Likely causes: (i) the `event.content.starts_with('/')` branch in `runner.rs` is positioned AFTER `user_queue_dispatch.dispatch(...)` instead of BEFORE; (ii) the branch's `continue;` is missing, falling through to the multimodal+UQM path; (iii) the spawn forgot to call `handle_with_multimodal` and instead called something that goes through the worker (e.g., `runner.try_enqueue`).
+
+**Bonus check (T-36.17.2-06 storm-bypass):** Optionally, type 10 slash commands in quick succession (e.g., `/help` × 10). Each command should respond, but if all 10 complete simultaneously with no observable serial delay (replies all arriving in the same instant with no semaphore-imposed staggering), the permit acquisition is suspect — investigate `sem_cmd.acquire().await` in the fast-path. The Task 1 grep gate (`grep -c "sem_cmd.acquire\|semaphore_dispatch.acquire"`) is the primary static evidence; this UAT bonus is a sanity check, not a hard pass/fail since the underlying semaphore capacity is typically 4-8 and 10 sub-second commands may legitimately fit within bursts.
+
+---
+
 ## Out of Scope — Cross-Process Drain Preservation
 
 Phase 36.17.1 is titled **"in-mem-fifo-queuing"**. The queue is held in
@@ -479,6 +510,7 @@ Run each scenario once on a live Telegram bot. Tick when verified.
       (see §"Out of Scope").
 - [ ] **Scenario 5** — Worker-exit/dispatch race (T-36.17.2-01): second-message-after-worker-exit processed normally. Two worker-exit log lines visible. No silently dropped messages.
 - [ ] **Scenario 6** — Multimodal payload preservation (T-36.17.2-04): photo/document burst preserves payload→message alignment FIFO. Message 3's response references the document (not the photo from message 2).
+- [ ] **Scenario 7** — Slash-command fast-path during busy turn (T-36.17.2-06): /queue replies in ~1s while free-text turn is in-flight; in-flight turn completes uninterrupted; synthesized /queue event processes next
 
 Verifier (your name): ____________________
 
@@ -494,6 +526,7 @@ Notes / failures (attach screenshots + log excerpts if any scenario fails):
 
 ## Document History
 
+- **2026-05-27 (Phase 36.17.2-05):** Added Scenario 7 (slash-command fast-path during busy turn) closing T-36.17.2-06 storm-bypass and D-23/D-27 fast-path live evidence. Existing scenarios unchanged.
 - **2026-05-27 (Phase 36.17.2-04):** Updated for unified architecture (D-01..D-22). Scenario 1's expected behavior rewrote — 👁 reactions now emit at pop time per D-08. Added Scenario 5 covering T-36.17.2-01 worker-exit/dispatch race. Added Scenario 6 covering T-36.17.2-04 multimodal sidecar lockstep (M1 sidecar live evidence). Added D-12 (HTTP 429) deferred-decision footnote. Other scenarios unchanged.
 - **2026-05-27 (Phase 36.17.1-05):** Initial runbook for the mpsc-buffer architecture.
 

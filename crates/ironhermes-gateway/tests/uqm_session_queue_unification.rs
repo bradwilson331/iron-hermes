@@ -815,3 +815,109 @@ async fn test_dispatch_returns_capacity_reached_at_128() {
         "Queue depth must remain at 128 after CapacityReached (T-36.17.1-01 regression)"
     );
 }
+
+/// Phase 36.17.2 Plan 05 (D-23, D-27, T-36.17.2-06):
+/// Verifies that a slash command dispatched on the fast-path does NOT wait for the
+/// per-chat worker's in-flight free-text turn to complete. The test simulates the
+/// dispatch-loop split: a free-text event has been try_push'd onto SessionQueue and
+/// is "occupying" the worker (no worker is actually spawned — we don't need one
+/// because the assertion is about the fast-path NOT touching UQM, not about
+/// worker behavior). A slash-command event is then dispatched via a direct
+/// handle_with_multimodal call (the test-equivalent of runner.rs's fast-path
+/// tokio::spawn body). The assertions prove:
+///   (a) the slash command's send_log entry appears in well under 500ms
+///       (no agent-loop entanglement with the queued free-text);
+///   (b) the slash command's synthesized event (for `/queue ...`) lands on
+///       SessionQueue via handler's existing intercept (handler.rs from 36.17.1-03);
+///   (c) the free-text event still sits in SessionQueue waiting for a worker
+///       (proving the fast-path did NOT route the slash through UQM).
+#[tokio::test]
+async fn test_slash_command_bypasses_per_chat_worker() {
+    let adapter = RecordingFailingAdapter::new();
+    let session_queue = Arc::new(SessionQueue::new());
+    let store = build_test_session_store();
+    let handler = Arc::new(build_test_handler_with_queue(store.clone(), session_queue.clone()));
+    let session_key = SessionKey::new(Platform::Telegram, "chat_fp").with_user("u_fp");
+
+    // Step 1 — Pre-load 1 free-text event into SessionQueue (would be popped by a worker if one existed).
+    // No worker is spawned, so this event sits idle. This represents an "in-flight turn" from the
+    // fast-path's perspective: any per-chat-worker-serialized routing would block behind this.
+    session_queue
+        .try_push(&session_key, make_event_full("chat_fp", "free_1", "free text waiting", "u_fp"))
+        .expect("free-text try_push must succeed (queue empty)");
+    assert_eq!(session_queue.len(&session_key), 1, "Free-text event must be in queue");
+
+    // Step 2 — Dispatch a slash command via the fast-path-equivalent direct call.
+    // This is exactly what runner.rs's fast-path branch does: build empty ProcessedAttachments
+    // and invoke handler.handle_with_multimodal(...).
+    let slash_event = make_event_full("chat_fp", "slash_1", "/queue interrupt this", "u_fp");
+    let cancel = CancellationToken::new();
+    let processed = ironhermes_gateway::multimodal::ProcessedAttachments {
+        text_prefix: None,
+        image_data_uri: None,
+    };
+
+    let start = Instant::now();
+    let _ = handler
+        .handle_with_multimodal(
+            &slash_event,
+            adapter.clone() as Arc<dyn PlatformAdapter>,
+            cancel.child_token(),
+            processed,
+        )
+        .await;
+    let elapsed = start.elapsed();
+
+    // Assertion (a) — slash command completes in well under 500ms.
+    // handle_with_multimodal routes /queue → handle_slash_command → cmd_queue →
+    // CommandResult::Queued intercept → session_queue.try_push + chat reply.
+    // No agent-loop is invoked (commands bypass run_agent via is_bypass(&def.name) at handler.rs:505).
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "Slash-command fast-path took {:?} — should be < 500ms (no agent-loop entanglement)",
+        elapsed
+    );
+
+    // Assertion (b) — /queue intercept synthesized an event into SessionQueue.
+    // The synthesized event has content == "interrupt this" (args joined; see cmd_queue at handlers.rs).
+    // Queue depth grew from 1 to 2 (free_1 still present + synthesized /queue event).
+    assert_eq!(
+        session_queue.len(&session_key),
+        2,
+        "/queue intercept must push synthesized event onto SessionQueue (was 1, expected 2). Actual len: {}",
+        session_queue.len(&session_key)
+    );
+
+    // Assertion (c) — RecordingFailingAdapter recorded the /queue chat reply.
+    // The handler's intercept emits "Queued for the next turn." (singular at depth 1) OR
+    // "Queued for the next turn. (N queued)" (plural at depth > 1). Either form is acceptable.
+    // Note: send_log entries are (chat_id, content) 2-tuples.
+    let send_log = adapter.send_log.lock().unwrap();
+    let queued_reply = send_log
+        .iter()
+        .filter(|(c, content)| c == "chat_fp" && content.starts_with("Queued for the next turn"))
+        .count();
+    assert!(
+        queued_reply >= 1,
+        "/queue intercept must send 'Queued for the next turn...' reply. send_log: {:?}",
+        *send_log
+    );
+    drop(send_log);
+
+    // Assertion (d) — free-text event (free_1) is still in queue (fast-path did NOT pop or process it).
+    // We can verify by popping it: it must still be `free_1`, not the synthesized /queue event.
+    // Note: SessionQueue is FIFO, so the first pop is free_1 (pushed first), the second pop is
+    // the /queue synthesized event (pushed by the intercept after).
+    let first = session_queue.pop(&session_key).expect("first pop must yield free_1");
+    assert_eq!(
+        first.message_id, "free_1",
+        "FIFO order broken: first pop should be free_1, got {}",
+        first.message_id
+    );
+    let second = session_queue.pop(&session_key).expect("second pop must yield /queue synthesized event");
+    assert_eq!(
+        second.content, "interrupt this",
+        "/queue intercept must synthesize event with content == args (got: {})",
+        second.content
+    );
+}
