@@ -164,13 +164,14 @@ Plans:
 
 ### Phase 36.17.2.1: fix /queue slash-command failing to wake parked worker — regression from Phase 36.17.2's mpsc→Notify worker rewrite; /queue pushes to SessionQueue but does not call notify_one(), so 128/129 messages never reach the LLM (UAT 2026-05-28T15:36-15:38 UTC) (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Restore the /queue slash-command's depth-128 buffering by routing the handler's CoreCommandResult::Queued arm through UQM::dispatch (Option B from RESEARCH.md) so push + notify_one() are atomic. Adds a regression integration test that exercises the EXACT production fast-path invocation (handler.handle_with_multimodal against a real parked worker) so this regression cannot recur silently in CI.
+**Requirements**: 36.17.2.1-D-01..D-09 (locked in plan frontmatter); closes the UAT failure 2026-05-28T15:36-15:38 UTC; inherits T-36.17.2-01/02/04 from parent phase and adds T-36.17.2.1-01..06.
 **Depends on:** Phase 36.17.2
-**Plans:** 0 plans
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.17.2.1 to break down)
+- [ ] 36.17.2.1-01-PLAN.md — Add Option<Arc<UserQueueManager>> field + set_user_queue_manager setter on GatewayMessageHandler; rewrite the CoreCommandResult::Queued arm to delegate to uqm.dispatch(queued_event, None, None).await so push + notify_one() are atomic (Option B from RESEARCH.md); preserve depth-aware reply via session_queue.len() AFTER dispatch; cap-hit UX deduplicated (UQM already fires ❌ + "Queue is full"); legacy direct-try_push fallback preserved when uqm field is None (D-20 contract); reorder runner.rs::run_gateway to construct UQM BEFORE handler Arc-wrap so setter can run on the mutable handler.
+- [ ] 36.17.2.1-02-PLAN.md — Append regression test test_queue_command_wakes_parked_worker to tests/uqm_session_queue_unification.rs that reuses RecordingFailingAdapter + spawn_test_worker + make_event_full; dispatches 1 free-text via uqm.dispatch to register the worker, polls until the worker drains it and parks at notify.notified(), then dispatches 5 /queue events via handler.handle_with_multimodal directly (the exact production fast-path invocation that exposed the bug); polls the 👀-reaction count on synthesized message_ids q_1..q_5 with a 5-second timeout; asserts 5 reactions in FIFO order + queue drained + send_log grew by baseline+5. Test times out under unfixed code; passes under Plan 01's fix.
 
 ### Phase 36.16: Small Model Mode (SMM) architecture port — mirror the smallcode JS reference architecture (System Overview / Component Responsibilities / Layers / Data Flow / Key Abstractions / Entry Points / Architectural Constraints / Anti-Patterns / Error Handling / Cross-Cutting Concerns) into ironhermes Rust; consumes 36.15's per-provider extra_request_options knob as one input; see 36.16-CONTEXT.md (from SmallModelMode_ARCHITECTURE.md) for the reference shape (INSERTED)
 
