@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: verifying
+status: executing
 stopped_at: Phase 36.17.1 context gathered
-last_updated: "2026-05-27T20:11:26.008Z"
-last_activity: 2026-05-27
+last_updated: "2026-05-28T01:57:27.443Z"
+last_activity: 2026-05-28 -- Phase 36.17.2 execution started
 progress:
-  total_phases: 39
+  total_phases: 40
   completed_phases: 8
-  total_plans: 36
+  total_plans: 41
   completed_plans: 36
-  percent: 21
+  percent: 20
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.1 — in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions
+**Current focus:** Phase 36.17.2 — unify-session-queue-replace-uqm-mpsc-buffer
 
 ## Current Position
 
-Phase: 36.17.1 (in-mem-fifo-queuing-parity-of-python-deque-for-chat-sessions) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
-Last activity: 2026-05-27
+Phase: 36.17.2 (unify-session-queue-replace-uqm-mpsc-buffer) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 36.17.2
+Last activity: 2026-05-28 -- Phase 36.17.2 execution started
 
 ## Phase 36.2 Closure Summary
 
