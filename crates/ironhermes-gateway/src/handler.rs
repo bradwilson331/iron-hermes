@@ -32,6 +32,7 @@ use crate::rate_limiter::{PerUserRateLimiter, with_rate_limit_retry};
 use crate::session::{SessionKey, SessionStore};
 use crate::session_queue::{QueueError, SessionQueue};
 use crate::stream_consumer::StreamConsumer;
+use crate::user_queue::{DispatchOutcome, UserQueueManager};
 
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
@@ -152,6 +153,20 @@ pub struct GatewayMessageHandler {
     /// than `Arc<GatewayRunner>` avoids the circular-reference trap noted in
     /// RESEARCH Open Q3.
     session_queue: Option<Arc<SessionQueue>>,
+
+    /// Phase 36.17.2.1 D-01/D-02: per-session UserQueueManager handle threaded
+    /// from `GatewayRunner::run_gateway` via `set_user_queue_manager`. Used by
+    /// the `CoreCommandResult::Queued` arm so the `/queue` synthesized event
+    /// goes through `UQM::dispatch` (which calls `notify_one()` to wake the
+    /// parked per-chat worker — user_queue.rs:154) instead of the direct
+    /// `session_queue.try_push` path that has no wake protocol. `Option`
+    /// preserves backward-compat for handlers built outside
+    /// `GatewayRunner::run_gateway` (e.g. Phase 36 GW-05 tests, the
+    /// `session_queue_integration.rs` harness that exercises the busy-branch
+    /// fallback per parent phase D-20 contract). When `None`, the `Queued`
+    /// arm falls back to the original direct-try_push code path (degraded —
+    /// no wake, but tests that hand-spawn workers do not depend on Notify).
+    user_queue_manager: Option<Arc<UserQueueManager>>,
 }
 
 impl GatewayMessageHandler {
@@ -201,6 +216,11 @@ impl GatewayMessageHandler {
             // tests that construct `GatewayMessageHandler::new` directly see
             // None here and fall through to the original reject path.
             session_queue: None,
+            // Phase 36.17.2.1 D-01: no UQM wired until
+            // `GatewayRunner::run_gateway` calls `set_user_queue_manager`.
+            // Handlers built via direct ::new() see None here and fall through
+            // to the legacy direct-try_push path in the Queued arm.
+            user_queue_manager: None,
         }
     }
 
@@ -324,6 +344,17 @@ impl GatewayMessageHandler {
     /// path for handlers built outside the runner (e.g. Phase 36 GW-05 tests).
     pub fn set_session_queue(&mut self, queue: Arc<SessionQueue>) {
         self.session_queue = Some(queue);
+    }
+
+    /// Phase 36.17.2.1 D-01/D-03: install the shared `Arc<UserQueueManager>`
+    /// threaded from `GatewayRunner::run_gateway`. Once set, the
+    /// `CoreCommandResult::Queued` arm delegates to `uqm.dispatch(...)` which
+    /// performs push + `notify_one()` atomically — fixing the regression where
+    /// `/queue` typed during a busy turn left the parked worker stranded
+    /// (UAT 2026-05-28T15:36-15:38 UTC). Unset preserves the legacy direct
+    /// `session_queue.try_push` path for backward-compat (D-20 from parent phase).
+    pub fn set_user_queue_manager(&mut self, uqm: Arc<UserQueueManager>) {
+        self.user_queue_manager = Some(uqm);
     }
 
     /// Set the hook registry for event emission.
@@ -797,11 +828,100 @@ impl GatewayMessageHandler {
                     // here. The borrow checker enforces that the guard is
                     // !Send so it cannot cross an await boundary.
                     CoreCommandResult::Queued { message } => {
+                        // Phase 36.17.2.1 D-02 (Option B from RESEARCH §Fix Space):
+                        // Replace direct session_queue.try_push with UQM::dispatch so push
+                        // + notify_one() happen atomically (user_queue.rs:154 IS the wake
+                        // primitive). The UAT failure (2026-05-28T15:36-15:38 UTC) was 128/129
+                        // /queue events stranded because handler-side try_push had no Notify.
+                        //
+                        // UQM::dispatch (user_queue.rs:100-165) performs:
+                        //   1. Builds SessionKey from event.platform/chat_id/sender_id — identical
+                        //      to the session_key built above (D-14 triple invariant).
+                        //   2. session_queue.try_push (the SAME Arc<SessionQueue> the handler
+                        //      holds — GatewayRunner threads one Arc into both via
+                        //      set_session_queue + set_user_queue_manager).
+                        //   3. On Err(CapacityReached): fires ❌ reaction + "⏳ Queue is full
+                        //      (128 messages). Wait for the agent to drain before sending more."
+                        //      (D-11 inherited from parent phase) and returns Err.
+                        //   4. On Ok: push_multimodal(&key, (None, None)) — text-only command,
+                        //      sidecar receives (None, None); worker's take_multimodal returns
+                        //      Some((None, None)) which unwrap_or normalizes — no FIFO skew
+                        //      (RESEARCH Pitfall 4).
+                        //   5. On Ok: notify_one() — wakes the parked worker (the FIX).
                         let queued_event = MessageEvent {
                             content: message.clone(),
                             ..event.clone()
                         };
-                        if let Some(queue) = self.session_queue.as_ref() {
+                        if let Some(uqm) = self.user_queue_manager.as_ref() {
+                            // Production path (handler wired via GatewayRunner::run_gateway).
+                            match uqm.dispatch(queued_event, None, None).await {
+                                Ok(outcome) => {
+                                    // Depth-aware reply preserved (context_lock #3):
+                                    // depth = session_queue.len(&session_key) computed AFTER
+                                    // dispatch (same Arc<SessionQueue> as UQM uses — D-20 invariant).
+                                    // The unwrap_or(1) fallback is unreachable in production
+                                    // because session_queue is wired alongside UQM by
+                                    // GatewayRunner::run_gateway, and uqm.dispatch above just
+                                    // succeeded — so a SessionQueue entry must exist.
+                                    let depth = self
+                                        .session_queue
+                                        .as_ref()
+                                        .map(|q| q.len(&session_key))
+                                        .unwrap_or(1);
+                                    let reply = if depth <= 1 {
+                                        "Queued for the next turn.".to_string()
+                                    } else {
+                                        format!("Queued for the next turn. ({depth} queued)")
+                                    };
+                                    with_rate_limit_retry(|| {
+                                        adapter.send_message(&event.chat_id, &reply, None)
+                                    })
+                                    .await?;
+                                    tracing::debug!(
+                                        session = %session_key.to_string_key(),
+                                        depth,
+                                        outcome = ?outcome,
+                                        "SessionQueue: /queue dispatched via UQM (Phase 36.17.2.1 D-02 — wake fix)"
+                                    );
+                                    // Phase 36.17.2.1 D-06 (scope boundary): if outcome is
+                                    // WorkerSpawned, UQM inserted a Notify but no worker task
+                                    // has been spawned for this SessionKey (the handler runs
+                                    // inside a detached fast-path tokio::spawn with no access
+                                    // to worker_join_set_dispatch). The synthesized event will
+                                    // wait until the next free-text message on this chat
+                                    // triggers worker spawn via runner.rs's normal dispatch
+                                    // loop. This is a known scope boundary — see
+                                    // RESEARCH.md Q2 and CONTEXT.md D-06. The UAT failure
+                                    // (wake-parked-worker) is fixed; fresh-chat /queue is a
+                                    // separate latent gap deferred to a follow-up.
+                                    if matches!(outcome, DispatchOutcome::WorkerSpawned) {
+                                        tracing::warn!(
+                                            session = %session_key.to_string_key(),
+                                            "Phase 36.17.2.1 D-06: /queue on fresh chat (no worker registered); \
+                                             synthesized event will wait for next free-text message to spawn worker. \
+                                             Out of scope for this fix — see RESEARCH.md Q2."
+                                        );
+                                    }
+                                }
+                                Err(QueueError::CapacityReached { .. }) => {
+                                    // Phase 36.17.2.1 D-04: UQM::dispatch already fired
+                                    // the ❌ reaction + "⏳ Queue is full" chat reply
+                                    // (user_queue.rs:115-138). The handler MUST NOT also
+                                    // emit them — double-reply hazard. Just return.
+                                    tracing::warn!(
+                                        session = %session_key.to_string_key(),
+                                        "SessionQueue: /queue cap reached via UQM (Phase 36.17.2.1 — UX fired by UQM::dispatch)"
+                                    );
+                                }
+                            }
+                        } else if let Some(queue) = self.session_queue.as_ref() {
+                            // Phase 36.17.2.1 D-04 fallback: handlers built outside
+                            // GatewayRunner::run_gateway (no UQM wired — e.g. Phase 36 GW-05
+                            // tests at tests/running_agent_guard_tests.rs, the
+                            // session_queue_integration.rs harness exercising the busy-branch
+                            // fallback per parent phase D-20). Original direct-try_push path
+                            // preserved — no wake, but these harnesses hand-spawn their own
+                            // workers and do not depend on Notify wake semantics.
                             match queue.try_push(&session_key, queued_event) {
                                 Ok(()) => {
                                     let depth = queue.len(&session_key);
@@ -817,7 +937,7 @@ impl GatewayMessageHandler {
                                     tracing::debug!(
                                         session = %session_key.to_string_key(),
                                         depth,
-                                        "SessionQueue: /queue dispatched, event enqueued (Phase 36.17.1)"
+                                        "SessionQueue: /queue dispatched via legacy direct try_push (no UQM wired — D-20 fallback)"
                                     );
                                 }
                                 Err(QueueError::CapacityReached { .. }) => {
@@ -839,15 +959,13 @@ impl GatewayMessageHandler {
                                     .await?;
                                     tracing::warn!(
                                         session = %session_key.to_string_key(),
-                                        "SessionQueue: /queue cap reached, message dropped (Phase 36.17.1)"
+                                        "SessionQueue: /queue cap reached on legacy fallback (no UQM wired)"
                                     );
                                 }
                             }
                         } else {
-                            // Degraded fallback: no per-session queue wired.
-                            // Send the depth-1 confirmation so the user gets
-                            // feedback even on handlers built outside
-                            // build_gateway_handler (e.g., legacy GW-05 tests).
+                            // Degraded-degraded: neither UQM nor SessionQueue wired.
+                            // Send the depth-1 confirmation so the user gets visible feedback.
                             with_rate_limit_retry(|| {
                                 adapter.send_message(
                                     &event.chat_id,
