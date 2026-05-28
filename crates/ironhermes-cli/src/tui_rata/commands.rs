@@ -389,6 +389,27 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         "stop" | "retry" | "undo" | "rollback" | "background" | "btw" | "queue" => {
                             handle_session_control(app, def.name, &args_vec, &result).await
                         }
+                        // Phase 36.17.3 (D-06 amended): `/pause` toggles queue
+                        // drain; `/unpause` (alias) explicitly sets paused=false.
+                        // Since the registry resolves the `/unpause` alias to
+                        // canonical name "pause", detect the typed alias from
+                        // the original input and route to the correct arm name.
+                        // These run BEFORE map_core_to_slash_outcome so the
+                        // defensive Silent fallback arms (Plan 02) never fire.
+                        "pause" => {
+                            let typed = input
+                                .trim_start()
+                                .split_whitespace()
+                                .next()
+                                .and_then(|s| s.strip_prefix('/'))
+                                .unwrap_or("pause");
+                            let route_name = if typed == "unpause" {
+                                "unpause"
+                            } else {
+                                "pause"
+                            };
+                            handle_session_control(app, route_name, &args_vec, &result).await
+                        }
                         // Subsystem mutators: model/fast (AnyClient rebuild) + personality/compress
                         "model" | "fast" | "personality" | "compress" => {
                             handle_subsystem_mutator(app, def.name, &args_vec, &result).await
@@ -1000,6 +1021,33 @@ async fn handle_session_control(
                         "Queue is full ({max}/{max}). /stop or /flush to drain."
                     ))
                 }
+            }
+        }
+        // Phase 36.17.3 (D-06 amended): /pause toggles `app.queue_paused`.
+        // `/unpause` is an alias of `/pause` in the registry (canonical name
+        // resolved to "pause"), so the dispatch layer above detects the typed
+        // alias from the original input and routes here with name = "unpause".
+        // These arms run BEFORE the catch-all _ => map_core_to_slash_outcome
+        // forwarder so the defensive Silent fallback (Plan 02) never fires.
+        "pause" => {
+            let was_paused = app.queue_paused.fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            let new_state = !was_paused;
+            let depth = app.queue.len(&app.queue_key);
+            SlashOutcome::Handled(format!(
+                "Queue drain: {}. ({} queued)",
+                if new_state { "paused" } else { "resumed" },
+                depth
+            ))
+        }
+        // Phase 36.17.3 (D-06 amended): /unpause explicit set-to-false; no-op
+        // (with informational message) when not currently paused.
+        "unpause" => {
+            let was_paused = app.queue_paused.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let depth = app.queue.len(&app.queue_key);
+            if was_paused {
+                SlashOutcome::Handled(format!("Queue resumed. ({} queued)", depth))
+            } else {
+                SlashOutcome::Handled("Queue was not paused.".to_string())
             }
         }
         _ => map_core_to_slash_outcome(core_result.clone()),
