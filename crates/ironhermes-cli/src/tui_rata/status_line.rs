@@ -51,6 +51,13 @@ pub struct StatusLineState {
     /// (`in + out + cache_read + cache_create`). Populated alongside
     /// `cost_usd_micros` from the same sessions-row read.
     pub session_total_tokens: usize,
+    /// Phase 36.17.3 (D-09): current queue depth read live each render.
+    /// Populated in `ui.rs` by `app.queue.len(&app.queue_key)` per frame
+    /// so the pill never goes stale by one tick (RESEARCH Pitfall 5).
+    pub queue_depth: usize,
+    /// Phase 36.17.3 (D-09): true when queue drain is paused. Populated in
+    /// `ui.rs` by `app.queue_paused.load(Relaxed)` per frame.
+    pub queue_paused: bool,
 }
 
 impl Default for StatusLineState {
@@ -68,6 +75,10 @@ impl Default for StatusLineState {
             // ticker can wake up before any usage_events row exists.
             cost_usd_micros: 0,
             session_total_tokens: 0,
+            // Phase 36.17.3 (D-09): hide-when-zero discipline → both default
+            // to falsy so the pill is absent at session start.
+            queue_depth: 0,
+            queue_paused: false,
         }
     }
 }
@@ -142,6 +153,17 @@ fn build_pills(state: &StatusLineState) -> (Vec<String>, Option<String>) {
             "{:.1}K tok",
             state.session_total_tokens as f64 / 1_000.0
         ));
+    }
+
+    // Phase 36.17.3 (D-09): queue-depth pill — hide-when-zero matching the
+    // `agents` and cost/token pill discipline. Renders as `Queue: {N}` or
+    // `Queue: {N} (paused)`; absent at depth==0 so idle sessions stay quiet.
+    if state.queue_depth > 0 {
+        if state.queue_paused {
+            pills.push(format!("Queue: {} (paused)", state.queue_depth));
+        } else {
+            pills.push(format!("Queue: {}", state.queue_depth));
+        }
     }
 
     let hint = if state.hint.is_empty() {

@@ -94,7 +94,16 @@ fn render_knight_rider(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let line = render_status_line_ratatui(&app.status);
+    // Phase 36.17.3 (D-09 / RESEARCH Pitfall 5): read queue depth + paused
+    // state LIVE per render pass — never cached in `app.status` because the
+    // cached value would drift by one tick. The clone is cheap (StatusLineState
+    // is Clone) and isolates the per-frame override from the persistent
+    // app.status fields owned by the rest of the system.
+    let mut state = app.status.clone();
+    let queue_paused_now = app.queue_paused.load(std::sync::atomic::Ordering::Relaxed);
+    state.queue_depth = app.queue.len(&app.queue_key);
+    state.queue_paused = queue_paused_now;
+    let line = render_status_line_ratatui(&state);
     frame.render_widget(Paragraph::new(line), area);
 }
 
