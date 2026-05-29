@@ -11,6 +11,8 @@ Hermes Kanban is a durable task board, shared across all your Hermes profiles, t
 
 ## Two surfaces: the model talks through tools, you talk through the CLI
 
+> **v1 NOTE:** IronHermes v1 ships 6 of the 9 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`. The remaining 3 — `kanban_heartbeat`, `kanban_link`, `kanban_unblock` — are deferred to Phase 36.3.7.1. The CLI surface is complete; only the LLM-tool surface is reduced.
+
 The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
 - **Agents drive the board through a dedicated `kanban_*` toolset** — `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_create`, `kanban_link`, `kanban_unblock`. The dispatcher spawns each worker with these tools already in its schema; orchestrator profiles can also enable the kanban toolset explicitly. The model reads and routes tasks by calling tools directly, not by shelling out to `hermes kanban`. See **How workers interact with the board** below.
@@ -65,6 +67,8 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 - **Tenant** — optional string namespace within a board. One specialist fleet can serve multiple businesses (`--tenant business-a`) with data isolation by workspace path and memory key prefix. Tenants are a soft filter; boards are the hard isolation boundary.
 
 ## Boards (multi-project)
+
+> **v1 NOTE:** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag are deferred to Phase 36.3.7.3. Only the `default` board is exercised in v1; the multi-board layout at `~/.ironhermes/kanban/boards/<slug>/kanban.db` is reserved but not populated.
 
 Boards let you separate unrelated streams of work — one per project, repo, or domain — into isolated queues. A new install has exactly one board called `default` (DB at `~/.hermes/kanban.db` for back-compat). Users who only want one stream of work never need to know about boards; the feature is opt-in.
 
@@ -197,11 +201,11 @@ Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker
 | `kanban_list` | List task summaries with filters for assignee, status, tenant, archived visibility, and limit. Intended for orchestrators discovering board work. | — |
 | `kanban_complete` | Finish with summary + metadata structured handoff. | at least one of `summary` / `result` |
 | `kanban_block` | Escalate for human input with a reason. | `reason` |
-| `kanban_heartbeat` | Signal liveness during long operations. Pure side-effect. | — |
+| `kanban_heartbeat` | Signal liveness during long operations. Pure side-effect. | — | *(deferred — placeholder only in v1; deferred to Phase 36.3.7.1)* |
 | `kanban_comment` | Append a durable note to the task thread. | `task_id`, `body` |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an assignee, optional parents, skills, etc. | `title`, `assignee` |
-| `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. | `parent_id`, `child_id` |
-| `kanban_unblock` | (Orchestrators) move a blocked task back to ready. | `task_id` |
+| `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. | `parent_id`, `child_id` | *(deferred to Phase 36.3.7.1; use `parents=[...]` on `kanban_create` instead)* |
+| `kanban_unblock` | (Orchestrators) move a blocked task back to ready. | `task_id` | *(deferred to Phase 36.3.7.1; use `ironhermes kanban unblock` CLI verb instead)* |
 
 A typical worker turn looks like:
 
@@ -380,6 +384,8 @@ For best results, pair it with a profile whose toolsets are restricted to board 
 
 ## Dashboard (GUI)
 
+> **v1 NOTE:** The dashboard plugin is deferred to Phase 36.3.7.4. The `/kanban` slash command and CLI surface described throughout this doc work today; the dashboard SPA / REST API / WebSocket live-update layer does not exist yet. The `hermes dashboard` command will open the Kanban tab once 36.3.7.4 ships.
+
 The `/kanban` CLI and slash command are enough to run the board headlessly, but a visual board is often the right interface for humans-in-the-loop: triage, cross-profile supervision, reading comment threads, and dragging cards between columns. Hermes ships this as a **bundled dashboard plugin** at `plugins/kanban/` — not a core feature, not a separate service — following the model laid out in **Extending the Dashboard**.
 
 Open it with:
@@ -415,6 +421,8 @@ Click a card (without shift/ctrl) to open a side drawer (Escape or click-outside
 Visually the target is the familiar Linear / Fusion layout: dark theme, column headers with counts, coloured status dots, pill chips for priority and tenant. The plugin reads only theme CSS vars (`--color-*`, `--radius`, `--font-mono`, ...), so it reskins automatically with whichever dashboard theme is active.
 
 ### Auto vs Manual orchestration
+
+> **v1 NOTE:** Auto-decompose / triage decomposer / specifier (`hermes kanban decompose`, `hermes kanban specify`, `kanban.auto_decompose`) are deferred to Phase 36.3.7.2. In v1, the `triage` column exists as a parking lot; transitions out of `triage` are operator-only (`hermes kanban assign` + manual status update). The **Orchestration: Auto/Manual** toggle does not exist yet.
 
 The kanban board has two ways to handle a task you drop into the Triage column:
 
@@ -651,6 +659,8 @@ All three are gated by the same dashboard plugin auth as the rest of the kanban 
 
 ### Kanban Swarm topology helper
 
+> **v1 NOTE:** `kanban swarm` is deferred to Phase 36.3.7.6. The command does not exist in v1.
+
 `hermes kanban swarm` creates a durable Kanban Swarm v1 graph in one shot: a completed root/blackboard card, N parallel worker cards, a verifier card gated on all workers, and a synthesizer card gated on the verifier. Shared swarm context (the "blackboard") is stored as structured JSON comments on the root card so any worker can read it.
 
 ```bash
@@ -690,6 +700,8 @@ This is the whole point of the separation:
 
 ### Auto-subscribe on `/kanban create` (gateway only)
 
+> **v1 NOTE:** Auto-subscribe and the `notification_sources` config key are deferred to Phase 36.3.7.5 (gateway notifier). The `notification_sources` key is RESERVED in `config.yaml` so no migration is needed when 36.3.7.5 ships. The description below reflects the planned behaviour, not the v1 implementation.
+
 When you create a task from the gateway with `/kanban create "…"`, the originating chat (platform + chat id + thread id) is automatically subscribed to that task's terminal events (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`). You'll get one message back per terminal event — including the first line of the worker's result `summary` on `completed` — without having to poll or remember the task id.
 
 ```text
@@ -724,10 +736,10 @@ The board supports these eight patterns without any new primitives:
 | P3 Voting / quorum | N siblings + 1 aggregator | 3 researchers → 1 reviewer picks |
 | P4 Long-running journal | same profile + shared dir + cron | Obsidian vault |
 | P5 Human-in-the-loop | worker blocks → user comments → unblock | ambiguous decisions |
-| P6 @mention | inline routing from prose | `@reviewer look at this` |
+| P6 @mention | inline routing from prose | `@reviewer look at this` | *(deferred to Phase 36.3.7.7 — @mention delegation parser not implemented in v1)* |
 | P7 Thread-scoped workspace | `/kanban here` in a thread | per-project gateway threads |
 | P8 Fleet farming | one profile, N subjects | 50 social accounts |
-| P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" |
+| P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" | *(deferred to Phase 36.3.7.2 — triage decomposer/specifier not implemented in v1)* |
 
 For worked examples of each, see `docs/hermes-kanban-v1-spec.pdf`.
 
@@ -745,6 +757,8 @@ hermes kanban create "monthly report" \
 Workers receive `$HERMES_TENANT` and namespace their memory writes by prefix. The board, the dispatcher, and the profile definitions are all shared; only the data is scoped.
 
 ## Gateway notifications
+
+> **v1 NOTE:** The gateway notifier (notify-subscribe / notify-list / notify-unsubscribe / auto-subscribe polling loop) is deferred to Phase 36.3.7.5. The `notification_sources` config key is RESERVED so the deferred phase needs no config migration. The `/kanban create` auto-subscribe behaviour described below is also deferred.
 
 When you run `/kanban create …` from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls `task_events` every few seconds and delivers one message per terminal event (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`) to that chat. Completed tasks also send the first line of the worker's `--result` so you see the outcome without having to `/kanban show`.
 
