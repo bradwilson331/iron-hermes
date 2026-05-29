@@ -30,6 +30,7 @@ pub mod pid;
 pub mod schema;
 pub mod skills_bundle;
 pub mod store;
+pub mod tools;
 pub mod types;
 pub mod worker_spawn;
 
@@ -57,6 +58,7 @@ pub use skills_bundle::{
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
 pub use types::{KanbanStatus, Task, TaskComment, TaskLink, TaskRun};
 pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker};
+pub use tools::register_kanban_tools;
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
 /// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).

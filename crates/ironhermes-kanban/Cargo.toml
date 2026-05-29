@@ -8,6 +8,7 @@ description = "Kanban work-queue kernel for IronHermes (Phase 36.3.7)"
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-tools = { path = "../ironhermes-tools" }
 rusqlite = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
