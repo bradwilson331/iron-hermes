@@ -4800,6 +4800,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironhermes-kanban"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "ironhermes-core",
+ "nix 0.29.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironhermes-mcp"
 version = "0.1.0"
 dependencies = [
