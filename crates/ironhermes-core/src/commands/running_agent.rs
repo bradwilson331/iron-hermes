@@ -43,7 +43,8 @@ impl Drop for RunningAgentGuard {
 /// "approve" and "deny" are intentionally excluded until the approval queue lands.
 pub fn is_bypass(name: &str) -> bool {
     // TODO(D-01): add "approve" | "deny" when approval queue lands
-    matches!(name, "stop" | "new" | "status" | "queue")
+    // Phase 36.17.4 (D-08): pause/unpause must bypass — they affect drain behavior, not the in-flight turn.
+    matches!(name, "stop" | "new" | "status" | "queue" | "pause" | "unpause")
 }
 
 #[cfg(test)]
