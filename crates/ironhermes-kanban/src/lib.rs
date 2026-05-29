@@ -25,6 +25,7 @@ pub mod config;
 pub mod dispatcher;
 pub mod error;
 pub mod events;
+pub mod kanban_guidance;
 pub mod paths;
 pub mod pid;
 pub mod schema;
@@ -63,7 +64,7 @@ pub use tools::register_kanban_tools;
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
 /// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).
 ///
-/// Plan 05 replaces this placeholder with the canonical block extracted
-/// from the upstream `agent/prompt_builder.py` /
-/// `kanban-worker-skill-upstream.md`.
-pub const KANBAN_GUIDANCE: &str = "";
+/// Sourced from upstream `agent/prompt_builder.py` and
+/// `kanban-worker-skill-upstream.md` preamble (Plan 05).
+/// See `kanban_guidance` module for the full constant and cache-stability doc.
+pub use kanban_guidance::KANBAN_GUIDANCE;
