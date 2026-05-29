@@ -27,6 +27,7 @@ pub mod events;
 pub mod paths;
 pub mod pid;
 pub mod schema;
+pub mod skills_bundle;
 pub mod store;
 pub mod types;
 
@@ -42,6 +43,11 @@ pub use paths::{
     kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
 };
 pub use pid::is_pid_alive;
+pub use skills_bundle::{
+    KANBAN_ORCHESTRATOR_SKILL_MD, KANBAN_ORCHESTRATOR_SKILL_NAME, KANBAN_WORKER_SKILL_MD,
+    KANBAN_WORKER_SKILL_NAME, SyncAction, SyncReport, restore_bundled_kanban_skill,
+    sync_bundled_kanban_skills,
+};
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
 pub use types::{KanbanStatus, Task, TaskComment, TaskLink, TaskRun};
 

@@ -594,6 +594,13 @@ fn ensure_home_dirs() -> Result<()> {
         std::fs::create_dir_all(home.join(sub))
             .with_context(|| format!("Failed to create {}/{}", home.display(), sub))?;
     }
+    // D-30 (Plan 07): sync bundled kanban skills into ~/.ironhermes/skills/ on
+    // first run.  Non-fatal — a warn is intentional so the operator can still
+    // use the CLI even if the skills sync fails (e.g. disk full).
+    let skills_root = home.join("skills");
+    if let Err(e) = ironhermes_kanban::sync_bundled_kanban_skills(&skills_root, /*force=*/ false) {
+        tracing::warn!(error = %e, "Failed to sync bundled kanban skills (non-fatal)");
+    }
     Ok(())
 }
 

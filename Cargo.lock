@@ -4594,6 +4594,7 @@ dependencies = [
  "ironhermes-gateway",
  "ironhermes-hooks",
  "ironhermes-hub",
+ "ironhermes-kanban",
  "ironhermes-mcp",
  "ironhermes-state",
  "ironhermes-tools",
