@@ -69,6 +69,7 @@ pub fn dispatch(
         "commands" => cmd_commands(args, ctx, router),
         "skills" => cmd_skills(args, ctx),
         "cron" => cmd_cron(args, ctx),
+        "kanban" => cmd_kanban(args, ctx), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command dispatch.
 
         // -------------------------------------------------------------------
         // Toolset slash command (Phase 25 Plan 04 — D-06 session-only)
@@ -1124,6 +1125,59 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 .map(|s| format!(" {}", s))
                 .unwrap_or_default();
             CommandResult::Error(format!("Unknown /cron subcommand: {}{}", other, suffix))
+        }
+    }
+}
+
+// Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command sub-dispatch.
+//
+// Mirrors `cmd_cron` (handlers.rs:1062). v1 active subverbs: list / show / tip.
+// Deferred operator-recovery subverbs route to a 'use the CLI verb directly' message —
+// NOT to `todo_stub` (which would hide receiver-end gaps per the 36.3.7.0 Meta-finding:
+// the catch-all `todo_stub` hid BUG-36.3.7-02 from grep-based verifiers).
+// All KanbanStore reads are sync (via Arc<Mutex<KanbanStore>>) — no async bridge needed.
+
+/// Deferred operator-recovery subverbs for `/kanban` slash command.
+/// These are KNOWN deferred names that route to a CLI-redirect message.
+/// UNKNOWN names fall through to typo-suggest (matching cmd_cron behavior).
+const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
+    "claim", "complete", "block", "unblock", "comment", "archive",
+    "reclaim", "reassign", "assign", "link", "unlink", "create",
+    "init", "tail", "watch", "runs", "assignees", "dispatch",
+    "stats", "log", "context", "gc", "daemon", "diagnostics",
+];
+
+fn cmd_kanban(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.kanban_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output("/kanban: kanban store not configured.".to_string()),
+    };
+    match args.first().copied() {
+        None | Some("list") => CommandResult::Output(store.list_text()),
+        Some("show") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/kanban show <id>: missing id".to_string()),
+            };
+            match store.show_text(id) {
+                Some(text) => CommandResult::Output(text),
+                None => CommandResult::Error(format!("No kanban task found: {}", id)),
+            }
+        }
+        Some("tip") => CommandResult::Output(store.tip_text()),
+        Some(other) => {
+            if DEFERRED_KANBAN_SUBVERBS.contains(&other) {
+                // Known deferred subverb — route to CLI-redirect message (NOT todo_stub).
+                // This distinct arm is GREPPABLE so future grep-based verifiers can find it.
+                CommandResult::Output(store.deferred_subverb_message(other))
+            } else {
+                // Unknown subverb — typo-suggest against the ACTIVE subverbs only.
+                let candidates: &[&str] = &["list", "show", "tip"];
+                let suffix = suggest_typo(other, candidates)
+                    .map(|s| format!(" {}", s))
+                    .unwrap_or_default();
+                CommandResult::Error(format!("Unknown /kanban subcommand: {}{}", other, suffix))
+            }
         }
     }
 }
