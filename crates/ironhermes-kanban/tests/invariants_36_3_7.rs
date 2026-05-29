@@ -178,6 +178,20 @@ fn kanban_is_in_bypass_list() {
 const GATEWAY_RUNNER_SOURCE: &str =
     include_str!("../../ironhermes-gateway/src/runner.rs");
 
+// ---------------------------------------------------------------------------
+// Plan 09 invariants: cross-plan composition regression gates (INV SG-06..10)
+// ---------------------------------------------------------------------------
+
+/// CLI main.rs source for plan 09 cross-plan invariants.
+const CLI_MAIN_SOURCE: &str = include_str!("../../ironhermes-cli/src/main.rs");
+
+/// Command registry source for plan 09 cross-plan invariants.
+const REGISTRY_SOURCE: &str =
+    include_str!("../../ironhermes-core/src/commands/registry.rs");
+
+/// Kanban guidance source for plan 09 cache-stability invariant.
+const KANBAN_GUIDANCE_SOURCE: &str = include_str!("../src/kanban_guidance.rs");
+
 /// INV-36.3.7-07: `ironhermes-gateway/src/runner.rs` must call
 /// `run_dispatch_loop` (D-09 gateway-embedded dispatcher). Without this call
 /// the gateway-embedded kanban dispatcher is not wired into the runtime.
@@ -188,5 +202,110 @@ fn gateway_runner_embeds_kanban_dispatcher() {
         "INV-36.3.7-07: runner.rs must call ironhermes_kanban::run_dispatch_loop \
          (D-09 gateway-embedded by default). If this fails, kanban dispatching \
          does not run inside the gateway process."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Plan 09 static-grep composition invariants (INV-36.3.7-SG-06 through SG-10)
+// ---------------------------------------------------------------------------
+
+/// INV-36.3.7-SG-06: `Commands::Kanban` must appear in the top-level CLI
+/// `main.rs` — proves plan 06's D-35 Kanban subcommand registration has not
+/// been removed and the CLI still recognises `ironhermes kanban ...`.
+#[test]
+fn kanban_subcommand_registered_in_main() {
+    assert!(
+        CLI_MAIN_SOURCE.contains("Commands::Kanban"),
+        "INV-36.3.7-SG-06: main.rs must dispatch Commands::Kanban (D-35). \
+         If this fails, `ironhermes kanban ...` is silently unreachable."
+    );
+}
+
+/// INV-36.3.7-SG-07: `CommandDef::new(\"kanban\"` AND `Universal` must appear
+/// in the command registry source within 200 characters of each other — proves
+/// plan 06's D-36 `/kanban` slash command is registered at Universal platform
+/// scope (CLI + gateway + TG/Discord/Slack) and cannot regress to a
+/// platform-narrower scope.
+///
+/// Note: the kanban entry uses `ToolsAndSkills` as the primary category and
+/// `.platform(Universal)` as a chain call on the same definition. The
+/// 200-char proximity check covers both lines without needing to parse AST.
+#[test]
+fn kanban_commanddef_universal() {
+    // Find the byte position of `CommandDef::new("kanban"` in the source.
+    let def_pos = REGISTRY_SOURCE
+        .find(r#"CommandDef::new("kanban""#)
+        .expect(
+            "INV-36.3.7-SG-07: registry.rs must contain CommandDef::new(\"kanban\" (D-36 \
+             /kanban slash command registration). If missing, /kanban is not accessible from \
+             any gateway platform.",
+        );
+
+    // Assert `Universal` appears within the next 200 bytes.
+    let window = &REGISTRY_SOURCE[def_pos..std::cmp::min(def_pos + 200, REGISTRY_SOURCE.len())];
+    assert!(
+        window.contains("Universal"),
+        "INV-36.3.7-SG-07: `Universal` platform must appear within 200 chars of \
+         CommandDef::new(\"kanban\" in registry.rs (D-36). If missing, /kanban will \
+         not be dispatched in gateway sessions."
+    );
+}
+
+/// INV-36.3.7-SG-08: `ironhermes-gateway/src/runner.rs` must call
+/// `ironhermes_kanban::run_dispatch_loop` — proves plan 08's D-09 gateway-embed
+/// wiring is present. Distinct from `gateway_runner_embeds_kanban_dispatcher`
+/// above (which checks the bare function name); this one checks the fully-qualified
+/// crate path so a rename of the local import can't silently satisfy the
+/// shorter check while the crate linkage is broken.
+#[test]
+fn kanban_dispatcher_spawned_in_gateway() {
+    assert!(
+        GATEWAY_RUNNER_SOURCE.contains("ironhermes_kanban::run_dispatch_loop")
+            || (GATEWAY_RUNNER_SOURCE.contains("ironhermes_kanban")
+                && GATEWAY_RUNNER_SOURCE.contains("run_dispatch_loop")),
+        "INV-36.3.7-SG-08: runner.rs must reference ironhermes_kanban::run_dispatch_loop \
+         (D-09). Both 'ironhermes_kanban' and 'run_dispatch_loop' must appear, proving \
+         the kanban crate is imported AND the loop is called."
+    );
+}
+
+/// INV-36.3.7-SG-09: `ironhermes-cli/src/main.rs` must declare the
+/// `chat -q/--query` flag — proves D-15 worker-spawn shape is preserved.
+/// The dispatcher calls `ironhermes --profile <P> --skills kanban-worker chat -q "work kanban task <id>"`;
+/// if the `-q` flag is removed, all worker spawns silently become no-ops.
+#[test]
+fn chat_subcommand_has_q_flag() {
+    assert!(
+        CLI_MAIN_SOURCE.contains(r#"long = "query""#),
+        "INV-36.3.7-SG-09a: main.rs must declare `long = \"query\"` on Chat subcommand \
+         (D-15 worker spawn shape). If missing, `chat -q` silently stops working."
+    );
+    assert!(
+        CLI_MAIN_SOURCE.contains("short = 'q'"),
+        "INV-36.3.7-SG-09b: main.rs must declare `short = 'q'` on Chat subcommand \
+         (D-15 worker spawn shape). If missing, `chat -q` silently stops working."
+    );
+}
+
+/// INV-36.3.7-SG-10: `kanban_guidance.rs` must declare `KANBAN_GUIDANCE` as a
+/// `pub const` (not a runtime-generated string) — proves D-26 cache-stability.
+/// The guidance block is injected into the PromptBuilder's cached prefix (slots
+/// 1–6); a runtime `format!` or `concat!` call would break prefix-cache hits.
+#[test]
+fn kanban_guidance_is_static_const() {
+    assert!(
+        KANBAN_GUIDANCE_SOURCE.contains("pub const KANBAN_GUIDANCE: &str"),
+        "INV-36.3.7-SG-10a: kanban_guidance.rs must declare `pub const KANBAN_GUIDANCE: &str` \
+         (D-26 cache-stability). A function or lazy_static would break PromptBuilder prefix cache."
+    );
+    assert!(
+        !KANBAN_GUIDANCE_SOURCE.contains("format!("),
+        "INV-36.3.7-SG-10b: kanban_guidance.rs must NOT use format!() — the guidance must be \
+         a compile-time static (D-26 cache-stability)."
+    );
+    assert!(
+        !KANBAN_GUIDANCE_SOURCE.contains("concat!("),
+        "INV-36.3.7-SG-10c: kanban_guidance.rs must NOT use concat!() — the guidance must be \
+         a compile-time string literal (D-26 cache-stability)."
     );
 }
