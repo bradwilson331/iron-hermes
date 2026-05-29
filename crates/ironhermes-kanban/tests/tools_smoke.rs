@@ -20,6 +20,20 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
+// Phase 36.3.7.x test-isolation hardening: `HERMES_KANBAN_TASK` /
+// `HERMES_PROFILE` are process-global env vars read by the kanban tools at
+// `execute()` time. Tests that manipulate them must serialize via this lock
+// or they race when cargo runs them in parallel (the failure shape is
+// `task not found: t_<other-test's-id>` because a sibling test overwrites
+// `HERMES_KANBAN_TASK` mid-execute). Each affected test takes the lock
+// before any `set_var` / `remove_var` / `tool.execute(...)` call.
+//
+// `unwrap_or_else(|e| e.into_inner())` recovers from poison: if a prior
+// test panicked while holding the lock, we still run, the stale env-var
+// state from that test would have been remove_var'd before the panic in
+// well-formed tests OR is overwritten by the new test's set_var.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -92,6 +106,7 @@ async fn kanban_show_available_with_explicit_enable() {
 
 #[tokio::test]
 async fn kanban_show_envelope_shape() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     // Create parent task, mark it done with a run that has summary+metadata.
@@ -158,6 +173,7 @@ async fn kanban_show_envelope_shape() {
 
 #[tokio::test]
 async fn kanban_complete_rejects_stale_run_id() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
@@ -186,6 +202,7 @@ async fn kanban_complete_rejects_stale_run_id() {
 
 #[tokio::test]
 async fn kanban_complete_rejects_phantom_created_cards() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
@@ -231,6 +248,7 @@ async fn kanban_complete_rejects_phantom_created_cards() {
 
 #[tokio::test]
 async fn kanban_complete_rejects_wrong_profile_card() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     // Create a child task owned by "other_profile".
@@ -273,6 +291,7 @@ async fn kanban_complete_rejects_wrong_profile_card() {
 
 #[tokio::test]
 async fn kanban_complete_accepts_valid_created_cards() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     // Bot creates child task.
@@ -422,6 +441,7 @@ async fn kanban_create_max_runtime_parses_human() {
 
 #[tokio::test]
 async fn kanban_block_with_review_required_prefix_logs_advisory() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
@@ -486,6 +506,7 @@ async fn kanban_list_returns_compact_summaries() {
 
 #[tokio::test]
 async fn kanban_comment_adds_comment_to_task() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     let task_id = {
