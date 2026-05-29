@@ -5,9 +5,42 @@
 //! used by the kanban subsystem (Phase 36.3.7).
 //!
 //! Plan 01 scaffolds the public type/path/event/config surface that
-//! downstream plans (02 store, 03 dispatcher, 04 tools, etc.) consume.
-//! Plan 01 Task 1 creates the crate + error type; Plan 01 Task 2 adds
-//! the types/paths/events/config/pid modules.
+//! downstream plans consume:
+//!
+//! - Plan 02 adds `store.rs` / `cas.rs` / `schema.rs` (SQLite owner).
+//! - Plan 03 adds `dispatcher.rs` / `worker_spawn.rs` (tokio task).
+//! - Plan 04 adds `tools/` (6 LLM Tool impls).
+//! - Plan 05 replaces the [`KANBAN_GUIDANCE`] placeholder with the
+//!   canonical block.
+//! - Plan 06 wires `running_agent::is_bypass()` to allow `kanban` mid-turn.
+//!
+//! All cross-crate types use plain `String` at the boundary per
+//! CONTEXT.md D-17 — [`KanbanStatus`] / [`KanbanEventKind`] live in this
+//! crate for internal type safety but [`Task::status`] /
+//! [`KanbanEvent::kind`] are plain `String` so consumer crates don't take
+//! a dep on us for the enum.
 
+pub mod config;
 pub mod error;
+pub mod events;
+pub mod paths;
+pub mod pid;
+pub mod types;
+
+pub use config::KanbanConfig;
 pub use error::{KanbanError, Result};
+pub use events::{KanbanEvent, KanbanEventKind, insert_event_sql};
+pub use paths::{
+    kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
+    kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
+};
+pub use pid::is_pid_alive;
+pub use types::{KanbanStatus, Task, TaskComment, TaskLink, TaskRun};
+
+/// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
+/// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).
+///
+/// Plan 05 replaces this placeholder with the canonical block extracted
+/// from the upstream `agent/prompt_builder.py` /
+/// `kanban-worker-skill-upstream.md`.
+pub const KANBAN_GUIDANCE: &str = "";
