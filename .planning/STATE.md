@@ -4,14 +4,14 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.17.4 context gathered
-last_updated: "2026-05-29T08:55:00.000Z"
-last_activity: 2026-05-29 -- Phase 36.3.7 (Kanban kernel) context gathered; Phase 36.17.4 still executing
+last_updated: "2026-05-29T10:55:54.464Z"
+last_activity: 2026-05-29
 progress:
   total_phases: 43
-  completed_phases: 11
-  total_plans: 56
-  completed_plans: 50
-  percent: 26
+  completed_phases: 12
+  total_plans: 65
+  completed_plans: 57
+  percent: 28
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.4 — wire-up-iron-hermes-ui-to-the-gateway-queue-slash-commands
+**Current focus:** Phase 36.3.7 — kanban-multi-agent-board-kanban-tools
 
 ## Current Position
 
-Phase: 36.17.4 (wire-up-iron-hermes-ui-to-the-gateway-queue-slash-commands) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 36.17.4
-Last activity: 2026-05-29 -- Phase 36.17.4 execution started
+Phase: 36.3.7 (kanban-multi-agent-board-kanban-tools) — EXECUTING
+Plan: 2 of 9
+Status: Ready to execute
+Last activity: 2026-05-29
 
 ## Phase 36.2 Closure Summary
 
