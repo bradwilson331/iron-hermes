@@ -1,0 +1,1085 @@
+//! Kanban dispatcher — 8-step tick loop (D-09 / D-10 / D-11 / D-12 / D-14).
+//!
+//! # Architecture
+//!
+//! The dispatcher is a tokio task hosted inside `ironhermes-gateway` (D-09).
+//! Plan 08 wires it via `run_dispatch_loop`; this module is testable
+//! standalone against a tempfile DB.
+//!
+//! # The 8-step tick (D-10)
+//!
+//! Each tick runs these steps **in order**. Failures in a step are logged
+//! and do not cascade — the next step still runs.
+//!
+//! 1. **detect_crashed_workers** — kill -0 on claim_pid; dead PID → `crashed`
+//!    event, release claim, increment consecutive_failures.
+//! 2. **extend_live_pid_claims** — alive PID whose claim_expires < now →
+//!    extend claim_expires by TTL, append `claim_extended` event.
+//! 3. **reclaim_stale_claims** — expired claim with dead or null PID →
+//!    reset to `ready`, append `reclaimed` event.
+//! 4. **enforce_max_runtime** — task running past max_runtime_seconds →
+//!    SIGTERM → 5s grace → SIGKILL → `timed_out` event.
+//! 5. **promote_ready** — `todo` tasks whose parents are all `done` →
+//!    `ready`, append `promoted` event.
+//! 6. **claim_ready_tasks** — `BEGIN IMMEDIATE` CAS claim up to
+//!    `max_in_progress` candidates; respects `scheduled_at`.
+//! 7. **respawn_guard_reason** — reject tasks whose last run was a 429/auth
+//!    error, or completed within 1h, or has an active PR; append
+//!    `respawn_guarded`.
+//! 8. **spawn_workers** — call `worker_spawn::spawn_worker` for each
+//!    survived candidate; on error apply failure_limit circuit breaker (D-12).
+//!
+//! # Circuit breaker (D-12)
+//!
+//! When `consecutive_failures >= effective_limit` (task.max_retries or
+//! config.failure_limit), the task is auto-blocked with a `gave_up` event.
+//! Operator must explicitly reset via plan 06 `unblock` verb.
+//!
+//! # Stranded-task diagnostic (D-14)
+//!
+//! `diagnose_stranded` is a separate helper consumed by
+//! `ironhermes kanban diagnostics` (plan 06). It is NOT called from the tick
+//! loop to avoid log spam.
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rusqlite::params;
+use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+
+use crate::cas::{DEFAULT_CLAIM_TTL_SECONDS, atomic_claim, build_claim_lock, release_claim};
+use crate::config::KanbanConfig;
+use crate::error::{KanbanError, Result};
+use crate::events::KanbanEventKind;
+use crate::pid::{Signal, is_pid_alive, kill_pid};
+use crate::store::{KanbanStore, ListFilters};
+use crate::types::{Task, TaskRun};
+
+// ---------------------------------------------------------------------------
+// BoxFuture alias (for spawn_fn testability)
+// ---------------------------------------------------------------------------
+
+type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+type SpawnFn = Arc<dyn Fn(Task, TaskRun, String) -> BoxFuture<Result<u32>> + Send + Sync>;
+
+// ---------------------------------------------------------------------------
+// DispatcherContext
+// ---------------------------------------------------------------------------
+
+/// Shared context passed to each dispatcher tick.
+///
+/// The `spawn_fn` field is injectable for testing — the default uses the real
+/// `worker_spawn::spawn_worker`; tests substitute a closure that returns a
+/// synthetic PID or an error without actually exec'ing `ironhermes`.
+pub struct DispatcherContext {
+    pub store: Arc<TokioMutex<KanbanStore>>,
+    pub config: KanbanConfig,
+    pub hostname: String,
+    pub dispatcher_pid: u32,
+    /// Injectable spawn function for tests. Default: `worker_spawn::spawn_worker`.
+    pub spawn_fn: SpawnFn,
+}
+
+impl DispatcherContext {
+    /// Create a context with the real `spawn_worker` function.
+    pub fn new(store: Arc<TokioMutex<KanbanStore>>, config: KanbanConfig) -> Self {
+        Self {
+            store,
+            config,
+            hostname: crate::pid::current_hostname(),
+            dispatcher_pid: std::process::id(),
+            spawn_fn: Arc::new(|task, run, workspace| {
+                Box::pin(async move { crate::worker_spawn::spawn_worker(&task, &run, &workspace).await })
+            }),
+        }
+    }
+
+    /// Create a context with an injectable spawn function (for tests).
+    pub fn with_spawn_fn(
+        store: Arc<TokioMutex<KanbanStore>>,
+        config: KanbanConfig,
+        spawn_fn: Arc<dyn Fn(Task, TaskRun, String) -> BoxFuture<Result<u32>> + Send + Sync>,
+    ) -> Self {
+        Self {
+            store,
+            config,
+            hostname: crate::pid::current_hostname(),
+            dispatcher_pid: std::process::id(),
+            spawn_fn,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_dispatch_loop
+// ---------------------------------------------------------------------------
+
+/// Run the dispatcher tick loop until `cancel` is signalled.
+///
+/// Ticks on `config.dispatch_interval_seconds` (min 1s). Each tick error is
+/// logged and the loop continues.
+pub async fn run_dispatch_loop(ctx: Arc<DispatcherContext>, cancel: CancellationToken) {
+    let interval_secs = ctx.config.dispatch_interval_seconds.max(1);
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("Kanban dispatch loop cancelled");
+                return;
+            }
+            _ = interval.tick() => {
+                let span = tracing::info_span!("kanban.dispatch.tick");
+                let _enter = span.enter();
+                if let Err(e) = run_dispatch_tick(&ctx).await {
+                    tracing::error!(error = %e, "Kanban dispatch tick error");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_dispatch_tick (8 steps)
+// ---------------------------------------------------------------------------
+
+/// Execute one full dispatcher tick (all 8 steps).
+///
+/// Steps are isolated — a failure in step N does not prevent step N+1.
+pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
+    let now = now_secs();
+
+    // Step 1: detect crashed workers.
+    {
+        let _span = tracing::info_span!("kanban.dispatch.step", step = "detect_crashed").entered();
+        if let Err(e) = detect_crashed_workers(ctx, now).await {
+            tracing::error!(error = %e, step = "detect_crashed", "dispatch step error");
+        }
+    }
+
+    // Step 2: extend claims for live PIDs at TTL expiry.
+    {
+        let _span = tracing::info_span!("kanban.dispatch.step", step = "extend_live").entered();
+        if let Err(e) = extend_live_pid_claims(ctx, now).await {
+            tracing::error!(error = %e, step = "extend_live", "dispatch step error");
+        }
+    }
+
+    // Step 3: reclaim stale claims (dead PID or null PID, expired TTL).
+    {
+        let _span = tracing::info_span!("kanban.dispatch.step", step = "reclaim_stale").entered();
+        if let Err(e) = reclaim_stale_claims(ctx, now).await {
+            tracing::error!(error = %e, step = "reclaim_stale", "dispatch step error");
+        }
+    }
+
+    // Step 4: enforce max runtime.
+    {
+        let _span =
+            tracing::info_span!("kanban.dispatch.step", step = "enforce_max_runtime").entered();
+        if let Err(e) = enforce_max_runtime(ctx, now).await {
+            tracing::error!(error = %e, step = "enforce_max_runtime", "dispatch step error");
+        }
+    }
+
+    // Step 5: promote ready tasks (todo → ready when all parents done).
+    {
+        let _span = tracing::info_span!("kanban.dispatch.step", step = "promote_ready").entered();
+        if let Err(e) = promote_ready(ctx, now).await {
+            tracing::error!(error = %e, step = "promote_ready", "dispatch step error");
+        }
+    }
+
+    // Steps 6–8: claim + guard + spawn.
+    {
+        let _span = tracing::info_span!("kanban.dispatch.step", step = "claim_and_spawn").entered();
+        if let Err(e) = claim_and_spawn(ctx, now).await {
+            tracing::error!(error = %e, step = "claim_and_spawn", "dispatch step error");
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step 1: detect_crashed_workers
+// ---------------------------------------------------------------------------
+
+async fn detect_crashed_workers(ctx: &DispatcherContext, now: f64) -> Result<()> {
+    let running_tasks = {
+        let store = ctx.store.lock().await;
+        store.list_tasks(ListFilters {
+            status: Some("running".to_string()),
+            ..Default::default()
+        })?
+    };
+
+    for task in running_tasks {
+        // Load the current task_run for this task.
+        let run = match task.current_run_id.as_deref() {
+            Some(run_id) => {
+                let store = ctx.store.lock().await;
+                let runs = store.get_runs(&task.id)?;
+                runs.into_iter().find(|r| r.id == run_id)
+            }
+            None => None,
+        };
+
+        let Some(run) = run else { continue };
+        let Some(pid) = run.claim_pid else { continue };
+
+        // Only process tasks where the PID is dead (crashed).
+        if is_pid_alive(pid) {
+            continue;
+        }
+
+        tracing::info!(
+            event = "crashed",
+            task_id = %task.id,
+            pid = pid,
+            "detected crashed worker"
+        );
+
+        // Close the run with outcome='crashed'.
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE task_runs SET outcome='crashed', ended_at=?1 WHERE id=?2",
+                params![now, run.id],
+            )?;
+        }
+
+        // Release the claim (reset to ready).
+        {
+            let mut store = ctx.store.lock().await;
+            let _ = release_claim(&mut store.conn, &task.id, &run.claim_lock, "crashed");
+        }
+
+        // Increment consecutive_failures.
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE tasks SET consecutive_failures = consecutive_failures + 1 WHERE id=?1",
+                params![task.id],
+            )?;
+        }
+
+        // Append crashed event.
+        {
+            let mut store = ctx.store.lock().await;
+            let payload = serde_json::json!({
+                "pid": pid,
+                "claimer": run.claim_lock,
+            });
+            store.append_event(
+                &task.id,
+                Some(&run.id),
+                KanbanEventKind::Crashed,
+                Some(&payload),
+            )?;
+        }
+
+        // Check for protocol violation (PID dead + task still running + consecutive_failures bump).
+        // v1 heuristic: if the worker exited cleanly (no signal) but task is still running,
+        // treat as protocol violation. We detect this by checking if the task status is still
+        // 'running' after the crashed detection (which means the release_claim succeeded).
+        // Note: release_claim resets to 'ready', so we check if it was in running state.
+        // The crashed path already handles this — we do NOT additionally block for protocol
+        // violations in step 1 to avoid double-blocking. Protocol violation is a separate
+        // heuristic applied below only when we can confirm exit code 0 semantics.
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: extend_live_pid_claims
+// ---------------------------------------------------------------------------
+
+async fn extend_live_pid_claims(ctx: &DispatcherContext, now: f64) -> Result<()> {
+    let running_tasks = {
+        let store = ctx.store.lock().await;
+        store.list_tasks(ListFilters {
+            status: Some("running".to_string()),
+            ..Default::default()
+        })?
+    };
+
+    for task in running_tasks {
+        // Only tasks whose claim has expired.
+        let claim_expires = match task.claim_expires {
+            Some(e) => e,
+            None => continue,
+        };
+        if claim_expires >= now {
+            continue; // Not expired yet.
+        }
+
+        // Only tasks with a live PID.
+        let run = match task.current_run_id.as_deref() {
+            Some(run_id) => {
+                let store = ctx.store.lock().await;
+                let runs = store.get_runs(&task.id)?;
+                runs.into_iter().find(|r| r.id == run_id)
+            }
+            None => None,
+        };
+        let Some(run) = run else { continue };
+        let Some(pid) = run.claim_pid else { continue };
+
+        if !is_pid_alive(pid) {
+            continue; // Dead PID handled by step 1 / step 3.
+        }
+
+        // Extend claim by TTL.
+        let new_expires = now + DEFAULT_CLAIM_TTL_SECONDS as f64;
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE tasks SET claim_expires=?1 WHERE id=?2",
+                params![new_expires, task.id],
+            )?;
+        }
+
+        tracing::info!(
+            event = "claim_extended",
+            task_id = %task.id,
+            pid = pid,
+            new_expires = new_expires,
+        );
+
+        {
+            let mut store = ctx.store.lock().await;
+            let payload = serde_json::json!({
+                "pid": pid,
+                "new_expires": new_expires,
+            });
+            store.append_event(
+                &task.id,
+                Some(&run.id),
+                KanbanEventKind::ClaimExtended,
+                Some(&payload),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step 3: reclaim_stale_claims
+// ---------------------------------------------------------------------------
+
+async fn reclaim_stale_claims(ctx: &DispatcherContext, now: f64) -> Result<()> {
+    let running_tasks = {
+        let store = ctx.store.lock().await;
+        store.list_tasks(ListFilters {
+            status: Some("running".to_string()),
+            ..Default::default()
+        })?
+    };
+
+    for task in running_tasks {
+        let claim_expires = match task.claim_expires {
+            Some(e) => e,
+            None => continue,
+        };
+        if claim_expires >= now {
+            continue; // Not expired yet.
+        }
+
+        // Check PID: null or dead → reclaim.
+        let run = match task.current_run_id.as_deref() {
+            Some(run_id) => {
+                let store = ctx.store.lock().await;
+                let runs = store.get_runs(&task.id)?;
+                runs.into_iter().find(|r| r.id == run_id)
+            }
+            None => None,
+        };
+
+        let pid_is_alive = run
+            .as_ref()
+            .and_then(|r| r.claim_pid)
+            .map(is_pid_alive)
+            .unwrap_or(false);
+
+        if pid_is_alive {
+            continue; // Live PID handled by step 2.
+        }
+
+        tracing::info!(
+            event = "reclaimed",
+            task_id = %task.id,
+            "reclaiming stale claim (TTL expired, PID dead or null)"
+        );
+
+        // Close the run if there is one.
+        if let Some(ref run) = run {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE task_runs SET outcome='reclaimed', ended_at=?1 WHERE id=?2",
+                params![now, run.id],
+            )?;
+        }
+
+        // Release claim (resets to ready).
+        {
+            let claim_lock = task
+                .claim_lock
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut store = ctx.store.lock().await;
+            let _ = release_claim(&mut store.conn, &task.id, &claim_lock, "ttl_expired");
+        }
+
+        // Increment consecutive_failures.
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE tasks SET consecutive_failures = consecutive_failures + 1 WHERE id=?1",
+                params![task.id],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step 4: enforce_max_runtime
+// ---------------------------------------------------------------------------
+
+async fn enforce_max_runtime(ctx: &DispatcherContext, now: f64) -> Result<()> {
+    let running_tasks = {
+        let store = ctx.store.lock().await;
+        store.list_tasks(ListFilters {
+            status: Some("running".to_string()),
+            ..Default::default()
+        })?
+    };
+
+    for task in running_tasks {
+        let max_runtime = match task.max_runtime_seconds {
+            Some(m) => m as f64,
+            None => continue,
+        };
+
+        let started_at = match task.started_at {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let elapsed = now - started_at;
+        if elapsed <= max_runtime {
+            continue;
+        }
+
+        // Load run + PID.
+        let run = match task.current_run_id.as_deref() {
+            Some(run_id) => {
+                let store = ctx.store.lock().await;
+                let runs = store.get_runs(&task.id)?;
+                runs.into_iter().find(|r| r.id == run_id)
+            }
+            None => None,
+        };
+
+        let Some(run) = run else { continue };
+        let Some(pid) = run.claim_pid else { continue };
+
+        tracing::warn!(
+            event = "max_runtime_exceeded",
+            task_id = %task.id,
+            pid = pid,
+            elapsed_seconds = elapsed,
+            limit_seconds = max_runtime,
+            "terminating worker: max runtime exceeded"
+        );
+
+        // Send SIGTERM.
+        let _ = kill_pid(pid, Signal::Term);
+
+        // 5-second grace period.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // Check if still alive, then SIGKILL.
+        let sigkill = is_pid_alive(pid);
+        if sigkill {
+            let _ = kill_pid(pid, Signal::Kill);
+        }
+
+        // Close the run.
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE task_runs SET outcome='timed_out', ended_at=?1 WHERE id=?2",
+                params![now, run.id],
+            )?;
+        }
+
+        // Reset task to ready, release claim.
+        {
+            let claim_lock = task
+                .claim_lock
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut store = ctx.store.lock().await;
+            let _ = release_claim(&mut store.conn, &task.id, &claim_lock, "timed_out");
+        }
+
+        // Increment consecutive_failures.
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE tasks SET consecutive_failures = consecutive_failures + 1 WHERE id=?1",
+                params![task.id],
+            )?;
+        }
+
+        // Append timed_out event.
+        {
+            let mut store = ctx.store.lock().await;
+            let payload = serde_json::json!({
+                "pid": pid,
+                "elapsed_seconds": elapsed,
+                "limit_seconds": max_runtime,
+                "sigkill": sigkill,
+            });
+            store.append_event(
+                &task.id,
+                Some(&run.id),
+                KanbanEventKind::TimedOut,
+                Some(&payload),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step 5: promote_ready (todo → ready when all parents done)
+// ---------------------------------------------------------------------------
+
+async fn promote_ready(ctx: &DispatcherContext, now: f64) -> Result<()> {
+    let todo_tasks = {
+        let store = ctx.store.lock().await;
+        store.list_tasks(ListFilters {
+            status: Some("todo".to_string()),
+            ..Default::default()
+        })?
+    };
+
+    for task in todo_tasks {
+        // Count undone parents: if zero, promote to ready.
+        let undone_parents: i64 = {
+            let store = ctx.store.lock().await;
+            store.conn.query_row(
+                "SELECT COUNT(*) FROM task_links \
+                 JOIN tasks ON task_links.parent_id = tasks.id \
+                 WHERE task_links.child_id = ?1 AND tasks.status != 'done'",
+                params![task.id],
+                |r| r.get(0),
+            )?
+        };
+
+        if undone_parents > 0 {
+            continue;
+        }
+
+        tracing::info!(
+            event = "promoted",
+            task_id = %task.id,
+            "promoting task to ready (all parents done)"
+        );
+
+        {
+            let store = ctx.store.lock().await;
+            store.conn.execute(
+                "UPDATE tasks SET status='ready' WHERE id=?1",
+                params![task.id],
+            )?;
+        }
+
+        {
+            let mut store = ctx.store.lock().await;
+            let payload = serde_json::json!({ "promoted_at": now });
+            store.append_event(&task.id, None, KanbanEventKind::Promoted, Some(&payload))?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Steps 6–8: claim_and_spawn (includes respawn guard)
+// ---------------------------------------------------------------------------
+
+async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
+    // Count currently running tasks.
+    let running_count: i64 = {
+        let store = ctx.store.lock().await;
+        store.conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status='running'",
+            [],
+            |r| r.get(0),
+        )?
+    };
+
+    // Enforce max_in_progress cap (D-11).
+    let cap = match ctx.config.max_in_progress {
+        None => None,
+        Some(0) => {
+            tracing::warn!("max_in_progress=0 is invalid, treating as unlimited (D-11)");
+            None
+        }
+        Some(n) => Some(n as i64),
+    };
+
+    if let Some(cap) = cap {
+        if running_count >= cap {
+            tracing::info!(
+                max_in_progress = cap,
+                running_count = running_count,
+                "max_in_progress reached, skipping spawn"
+            );
+            return Ok(());
+        }
+    }
+
+    // Determine how many slots are available.
+    let slots = cap.map(|c| (c - running_count) as usize).unwrap_or(usize::MAX);
+
+    // Fetch ready tasks ordered by priority DESC, created_at ASC (D-10).
+    let ready_tasks: Vec<Task> = {
+        let store = ctx.store.lock().await;
+        let limit = slots.min(100) as i64; // sanity cap
+        let mut stmt = store.conn.prepare(
+            "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+             idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+             max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+             current_step_key, created_by, created_at, started_at, ended_at \
+             FROM tasks \
+             WHERE status='ready' AND (scheduled_at IS NULL OR scheduled_at <= ?1) \
+             ORDER BY priority DESC, created_at ASC \
+             LIMIT ?2",
+        )?;
+        stmt.query_map(params![now, limit], |r| {
+            Ok(Task {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                body: r.get(2)?,
+                assignee: r.get(3)?,
+                status: r.get(4)?,
+                priority: r.get(5)?,
+                tenant: r.get(6)?,
+                workspace: r.get(7)?,
+                skills: r.get(8)?,
+                idempotency_key: r.get(9)?,
+                claim_lock: r.get(10)?,
+                claim_expires: r.get(11)?,
+                current_run_id: r.get(12)?,
+                consecutive_failures: r.get(13)?,
+                max_retries: r.get(14)?,
+                max_runtime_seconds: r.get(15)?,
+                scheduled_at: r.get(16)?,
+                workflow_template_id: r.get(17)?,
+                current_step_key: r.get(18)?,
+                created_by: r.get(19)?,
+                created_at: r.get(20)?,
+                started_at: r.get(21)?,
+                ended_at: r.get(22)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // For each ready task: check respawn guard, then atomic claim, then spawn.
+    for task in ready_tasks {
+        // Step 7: respawn guard.
+        let guard_reason = {
+            let store = ctx.store.lock().await;
+            respawn_guard_reason(&store, &task, now)?
+        };
+
+        if let Some(reason) = guard_reason {
+            tracing::info!(
+                event = "respawn_guarded",
+                task_id = %task.id,
+                reason = reason,
+            );
+            let mut store = ctx.store.lock().await;
+            let payload = serde_json::json!({ "reason": reason });
+            store.append_event(
+                &task.id,
+                None,
+                KanbanEventKind::RespawnGuarded,
+                Some(&payload),
+            )?;
+            continue;
+        }
+
+        // Step 6: atomic claim.
+        let run_id = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = build_claim_lock(&ctx.hostname, ctx.dispatcher_pid);
+
+        let won = {
+            let mut store = ctx.store.lock().await;
+            atomic_claim(
+                &mut store.conn,
+                &task.id,
+                &claim_lock,
+                ctx.dispatcher_pid,
+                DEFAULT_CLAIM_TTL_SECONDS,
+                now,
+                &run_id,
+            )?
+        };
+
+        if !won {
+            tracing::debug!(task_id = %task.id, "lost CAS race for task, skipping");
+            continue;
+        }
+
+        tracing::info!(
+            event = "claimed",
+            task_id = %task.id,
+            run_id = %run_id,
+            profile = %task.assignee,
+        );
+
+        // Determine workspace for this task (D-31).
+        let workspace = task
+            .workspace
+            .clone()
+            .unwrap_or_else(|| crate::paths::kanban_workspace_for(&task.id).to_string_lossy().into_owned());
+
+        // Resolve dir: prefix if present.
+        let workspace = if let Some(tail) = workspace.strip_prefix("dir:") {
+            tail.to_string()
+        } else {
+            workspace
+        };
+
+        // Load the freshly-inserted task_run row.
+        let run = {
+            let store = ctx.store.lock().await;
+            let runs = store.get_runs(&task.id)?;
+            runs.into_iter().find(|r| r.id == run_id).ok_or_else(|| {
+                KanbanError::Other(anyhow::anyhow!("task_run {run_id} not found after claim"))
+            })?
+        };
+
+        // Step 8: spawn worker.
+        let spawn_result = (ctx.spawn_fn)(task.clone(), run.clone(), workspace.clone()).await;
+
+        match spawn_result {
+            Ok(pid) => {
+                tracing::info!(
+                    event = "spawned",
+                    task_id = %task.id,
+                    run_id = %run_id,
+                    pid = pid,
+                );
+
+                // Store PID in task_runs.
+                {
+                    let store = ctx.store.lock().await;
+                    store.conn.execute(
+                        "UPDATE task_runs SET claim_pid=?1 WHERE id=?2",
+                        params![pid, run_id],
+                    )?;
+                }
+
+                // Append spawned event.
+                {
+                    let mut store = ctx.store.lock().await;
+                    let payload = serde_json::json!({ "pid": pid });
+                    store.append_event(
+                        &task.id,
+                        Some(&run_id),
+                        KanbanEventKind::Spawned,
+                        Some(&payload),
+                    )?;
+                }
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                tracing::error!(
+                    event = "spawn_failed",
+                    task_id = %task.id,
+                    run_id = %run_id,
+                    error = %error_msg,
+                );
+
+                // Close the run as spawn_failed.
+                {
+                    let store = ctx.store.lock().await;
+                    let now2 = now_secs();
+                    store.conn.execute(
+                        "UPDATE task_runs SET outcome='spawn_failed', error=?1, ended_at=?2 \
+                         WHERE id=?3",
+                        params![error_msg, now2, run_id],
+                    )?;
+                }
+
+                // Increment consecutive_failures.
+                {
+                    let store = ctx.store.lock().await;
+                    store.conn.execute(
+                        "UPDATE tasks SET consecutive_failures = consecutive_failures + 1 \
+                         WHERE id=?1",
+                        params![task.id],
+                    )?;
+                }
+
+                // Release claim (resets to ready so circuit breaker can block it).
+                {
+                    let mut store = ctx.store.lock().await;
+                    let _ = release_claim(
+                        &mut store.conn,
+                        &task.id,
+                        &claim_lock,
+                        "spawn_failed",
+                    );
+                }
+
+                // Append spawn_failed event.
+                {
+                    let new_failures: i64 = {
+                        let store = ctx.store.lock().await;
+                        store.conn.query_row(
+                            "SELECT consecutive_failures FROM tasks WHERE id=?1",
+                            params![task.id],
+                            |r| r.get(0),
+                        )?
+                    };
+
+                    let mut store = ctx.store.lock().await;
+                    let payload = serde_json::json!({
+                        "error": error_msg,
+                        "failures": new_failures,
+                    });
+                    store.append_event(
+                        &task.id,
+                        Some(&run_id),
+                        KanbanEventKind::SpawnFailed,
+                        Some(&payload),
+                    )?;
+                }
+
+                // Circuit breaker (D-12): block task if failure_limit reached.
+                apply_circuit_breaker(ctx, &task, &run_id, &error_msg, now).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Step 7: respawn_guard_reason
+// ---------------------------------------------------------------------------
+
+/// Check if a ready task should be skipped due to respawn guard conditions.
+///
+/// Returns `Some(reason)` if the task should be skipped:
+/// - `"blocker_auth"`: last run error matches 429/quota/auth pattern.
+/// - `"recent_success"`: last completed run ended within 3600 seconds.
+/// - `"active_pr"`: recent comment contains a GitHub PR URL.
+///
+/// Returns `None` if spawn should proceed.
+pub fn respawn_guard_reason(store: &KanbanStore, task: &Task, now: f64) -> Result<Option<&'static str>> {
+    // Check last closed run for blocker_auth.
+    let last_run: Option<TaskRun> = {
+        let runs = store.get_runs(&task.id)?;
+        runs.into_iter()
+            .filter(|r| r.ended_at.is_some())
+            .max_by(|a, b| a.started_at.partial_cmp(&b.started_at).unwrap_or(std::cmp::Ordering::Equal))
+    };
+
+    if let Some(ref run) = last_run {
+        // blocker_auth: last error matches 429/quota/auth/unauthorized.
+        if let Some(ref err) = run.error {
+            let lower = err.to_lowercase();
+            if lower.contains("429")
+                || lower.contains("quota")
+                || lower.contains("auth")
+                || lower.contains("unauthorized")
+            {
+                return Ok(Some("blocker_auth"));
+            }
+        }
+
+        // recent_success: last run completed within 3600 seconds.
+        if run.outcome.as_deref() == Some("completed") {
+            if let Some(ended_at) = run.ended_at {
+                if now - ended_at < 3600.0 {
+                    return Ok(Some("recent_success"));
+                }
+            }
+        }
+    }
+
+    // active_pr: any comment in the last 7 days with a GitHub PR URL.
+    let seven_days_ago = now - 7.0 * 24.0 * 3600.0;
+    let has_active_pr: bool = store.conn.query_row(
+        "SELECT COUNT(*) FROM task_comments \
+         WHERE task_id=?1 AND created_at >= ?2 \
+         AND body LIKE '%github.com%/pull/%'",
+        params![task.id, seven_days_ago],
+        |r| r.get::<_, i64>(0),
+    ).unwrap_or(0) > 0;
+
+    if has_active_pr {
+        return Ok(Some("active_pr"));
+    }
+
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breaker (D-12)
+// ---------------------------------------------------------------------------
+
+async fn apply_circuit_breaker(
+    ctx: &DispatcherContext,
+    task: &Task,
+    run_id: &str,
+    error_msg: &str,
+    _now: f64,
+) -> Result<()> {
+    let (consecutive_failures, effective_limit, limit_source) = {
+        let store = ctx.store.lock().await;
+        let failures: i64 = store.conn.query_row(
+            "SELECT consecutive_failures FROM tasks WHERE id=?1",
+            params![task.id],
+            |r| r.get(0),
+        )?;
+
+        let (limit, source) = if let Some(max_retries) = task.max_retries {
+            (max_retries, "task")
+        } else {
+            (ctx.config.failure_limit as i64, "config")
+        };
+
+        (failures, limit, source)
+    };
+
+    if consecutive_failures >= effective_limit {
+        tracing::warn!(
+            event = "gave_up",
+            task_id = %task.id,
+            failures = consecutive_failures,
+            effective_limit = effective_limit,
+            limit_source = limit_source,
+            "circuit breaker tripped — blocking task"
+        );
+
+        // Block the task.
+        {
+            let mut store = ctx.store.lock().await;
+            store.block_task(task.id.as_str(), error_msg, None)?;
+        }
+
+        // Append gave_up event.
+        {
+            let mut store = ctx.store.lock().await;
+            let payload = serde_json::json!({
+                "failures": consecutive_failures,
+                "effective_limit": effective_limit,
+                "limit_source": limit_source,
+                "error": error_msg,
+            });
+            store.append_event(
+                &task.id,
+                Some(run_id),
+                KanbanEventKind::GaveUp,
+                Some(&payload),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stranded-task diagnostic (D-14)
+// ---------------------------------------------------------------------------
+
+/// Severity level for stranded task reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrandedSeverity {
+    /// Age > 1× threshold (default: > 30 min).
+    Warn,
+    /// Age > 2× threshold (default: > 60 min).
+    Error,
+    /// Age > 6× threshold (default: > 3 h).
+    Critical,
+}
+
+/// A report of a `ready` task that has been waiting longer than the
+/// `stranded_threshold_seconds` without being claimed (D-14).
+#[derive(Debug, Clone)]
+pub struct StrandedReport {
+    pub task_id: String,
+    pub assignee: String,
+    pub age_seconds: f64,
+    pub severity: StrandedSeverity,
+}
+
+/// Find all `ready` tasks that have been unclaimed past the stranded
+/// threshold (D-14). Returns a severity-escalated report for each.
+///
+/// Severity bands:
+/// - `Warn`: age > 1× threshold
+/// - `Error`: age > 2× threshold
+/// - `Critical`: age > 6× threshold
+///
+/// Tasks below the threshold are excluded from the result.
+pub fn diagnose_stranded(store: &KanbanStore, threshold_secs: u64) -> Result<Vec<StrandedReport>> {
+    let now = now_secs();
+    let threshold = threshold_secs as f64;
+
+    let tasks = store.list_tasks(ListFilters {
+        status: Some("ready".to_string()),
+        ..Default::default()
+    })?;
+
+    let mut reports = Vec::new();
+    for task in tasks {
+        let age = now - task.created_at;
+        if age <= threshold {
+            continue; // Not stranded.
+        }
+
+        let severity = if age > 6.0 * threshold {
+            StrandedSeverity::Critical
+        } else if age > 2.0 * threshold {
+            StrandedSeverity::Error
+        } else {
+            StrandedSeverity::Warn
+        };
+
+        reports.push(StrandedReport {
+            task_id: task.id,
+            assignee: task.assignee,
+            age_seconds: age,
+            severity,
+        });
+    }
+
+    Ok(reports)
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn now_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}

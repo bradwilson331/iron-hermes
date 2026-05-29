@@ -65,7 +65,13 @@ pub struct ListFilters {
 
 /// Durable SQLite store for the kanban kernel.
 pub struct KanbanStore {
-    pub(crate) conn: Connection,
+    /// The raw rusqlite connection.
+    ///
+    /// `pub` to allow integration tests (in `tests/`) to seed state that
+    /// cannot be expressed via the public CRUD API (backdating timestamps,
+    /// inserting bare `task_runs` rows, etc.). Production callers should use
+    /// the typed methods instead.
+    pub conn: Connection,
 }
 
 impl KanbanStore {
