@@ -4,14 +4,14 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: ready
 stopped_at: null
-last_updated: "2026-05-29T17:30:00.000Z"
-last_activity: 2026-05-29 -- Phase 36.17.4 retroactively confirmed Complete (all 6 plans + 6 SUMMARYs + VERIFICATION.md); Phase 36.3.7.0 shipped; LEARNINGS captured; phases 36.3.7.1 + 36.X.0 (delegate_task schema fix) queued
+last_updated: "2026-05-29T18:39:33.491Z"
+last_activity: 2026-05-29 -- Phase 36.3.7.2 shipped (PASS-WITH-NOTES); delegate_task tool-schema-compat unblocked for Anthropic-routed workers; next: 36.3.7.1 (breaker wiring) or 36.X.0 / cli CFG-03 doc-comment regression
 progress:
-  total_phases: 48
-  completed_phases: 13
-  total_plans: 71
-  completed_plans: 70
-  percent: 27
+  total_phases: 50
+  completed_phases: 14
+  total_plans: 73
+  completed_plans: 72
+  percent: 28
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Between phases — choose next from queue: 36.3.7.1 (dispatcher follow-up: wire breaker into reclaim_stale_claims + enforce_max_runtime) OR 36.X.0 (delegate_task tool-schema-compat fix — HIGH severity, blocks all kanban workers via Anthropic).
+**Current focus:** Between phases — choose next from queue: 36.3.7.1 (dispatcher follow-up: wire breaker into reclaim_stale_claims + enforce_max_runtime) OR 36.X.0 (cli CFG-03 doc-comment scan-window regression introduced by 36.3.7.0 commit `c453411f`, surfaced by verifier on 36.3.7.2).
 
 ## Current Position
 
 Phase: (none active) — ready for next selection
-Status: 2 phases just shipped (36.17.4 confirmed Complete; 36.3.7.0 Complete with PASS-WITH-NOTES); kanban kernel proven end-to-end through 9/10 UAT stages
-Last activity: 2026-05-29 -- Phase 36.3.7.0 close-out + STATE rationalization + LEARNINGS captured
+Status: 3 phases shipped this session (36.17.4 confirmed Complete; 36.3.7.0 PASS-WITH-NOTES; 36.3.7.2 PASS-WITH-NOTES). Kanban worker path now schema-clean for Anthropic; tool-registry has receiver-end lock against future top-level boolean combinators.
+Last activity: 2026-05-29 -- Phase 36.3.7.2 shipped + post-merge `required: []` regression fixed bilaterally + verifier PASS-WITH-NOTES (5/5 gates)
 
 ## Recent close-out summary (2026-05-29)
 
@@ -37,7 +37,9 @@ Last activity: 2026-05-29 -- Phase 36.3.7.0 close-out + STATE rationalization + 
 
 **Phase 36.17.4 (iron_hermes_ui queue wiring):** confirmed Complete in this rationalization pass — all 6 plans had SUMMARYs + a VERIFICATION.md from earlier work; STATE was just stale.
 
-**Meta-finding (captured in `.planning/LEARNINGS.md`):** bilateral-tracing rule for future verifier prompts — for every wire-up claim, trace BOTH producer AND consumer ends.
+**Phase 36.3.7.2 (delegate_task tool-schema-compat — drop top-level oneOf):** 2/2 plans shipped + 1 post-merge regression fix. Plan 01 dropped the `oneOf` block; Plan 02 added the system-level receiver-end lock test (`crates/ironhermes-tools/tests/no_top_level_schema_combinators.rs`) that walks every registered tool's schema. Post-merge regression: Plan 01 had also removed the `"required": []` field entirely — pre-existing `tests/delegate_task_timeout_cancel.rs::schema_exposes_timeout_seconds_field` unwrapped `parameters["required"].as_array()` and panicked. Fixed in commit `1448c441` by restoring `"required": []` as a sibling of `properties` (CONTEXT explicitly allowed both forms). Verifier (commit `bb12e47e`) confirmed PASS-WITH-NOTES (5/5 gates) and traced 7 in-tree consumers + 1 cross-crate consumer (anthropic_client.rs::adapt_tools — the original bilateral receiver). Forward-flagged for follow-up: `crates/ironhermes-cli/tests/invariants_26_4_1_cfg_03.rs::phase_amendment_doc_comment_present` is now failing — root cause is Phase 36.3.7.0 commit `c453411f` rewriting a comment block above `run_preflight`, pushing the original CFG-03 amendment doc-comment outside the test's 1500-char scan window. Untouched by 36.3.7.2.
+
+**Meta-finding (captured in `.planning/LEARNINGS.md`):** bilateral-tracing rule for future verifier prompts — for every wire-up claim, trace BOTH producer AND consumer ends. Phase 36.3.7.2 re-demonstrated the rule twice in one phase: (a) Plan 01's grep audit covered `src/` producers but missed `tests/` consumers reading `parameters["required"]` — caught only at the post-merge full-suite run, fixed bilaterally in commit `1448c441`; (b) verifier dispatch with explicit bilateral-tracing emphasis was the only reason the 8th consumer (anthropic_client.rs::adapt_tools — the cross-crate one) was named.
 
 ## Phase 36.2 Closure Summary
 
