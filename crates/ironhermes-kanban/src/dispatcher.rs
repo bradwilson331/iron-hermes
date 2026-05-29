@@ -297,6 +297,14 @@ async fn detect_crashed_workers(ctx: &DispatcherContext, now: f64) -> Result<()>
             )?;
         }
 
+        // Phase 36.3.7.0 BUG-36.3.7-03: circuit breaker on crashed-detection path.
+        // The bump above set consecutive_failures += 1; check the limit on the same
+        // tick to match operator semantics (D-12 clarified by 36.3.7.0-03).
+        {
+            let error_msg = format!("worker process crashed (pid={pid})");
+            apply_circuit_breaker(ctx, &task, &run.id, &error_msg, now).await?;
+        }
+
         // Check for protocol violation (PID dead + task still running + consecutive_failures bump).
         // v1 heuristic: if the worker exited cleanly (no signal) but task is still running,
         // treat as protocol violation. We detect this by checking if the task status is still
@@ -985,6 +993,10 @@ async fn apply_circuit_breaker(
         (failures, limit, source)
     };
 
+    // D-12 (clarified by 36.3.7.0-03): `failure_limit = N` means stop AT N
+    // failures, on the same tick the limit is reached (regardless of failure
+    // source: spawn_failed / crashed / timed_out / reclaimed). The breaker is
+    // invoked from each bump site; do NOT change `>=` to `>`.
     if consecutive_failures >= effective_limit {
         tracing::warn!(
             event = "gave_up",

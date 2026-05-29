@@ -484,6 +484,172 @@ async fn circuit_breaker_after_failure_limit() {
     }
 }
 
+/// D-12 circuit breaker (crashed-detection path, BUG-36.3.7-03):
+/// A task with `consecutive_failures = failure_limit - 1 = 1` and a dead PID
+/// reaches exactly `failure_limit = 2` via `detect_crashed_workers`, which
+/// must invoke `apply_circuit_breaker` on the same tick → task blocked,
+/// `gave_up` event emitted.
+#[tokio::test]
+async fn circuit_breaker_trips_on_crashed_detection_path() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    let dead_pid: u32 = 999_999_999; // guaranteed dead
+    let task_id;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "crashed-breaker trip task",
+                "alice",
+                CreateTaskOptions::default(),
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_cb_trip", dead_pid);
+
+        // Seed as running with a dead PID.
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            dead_pid as i64,
+            now + 900.0,
+            &rid,
+            now,
+        );
+
+        // Pre-seed consecutive_failures = failure_limit - 1 = 1.
+        // detect_crashed_workers will bump to 2 (== failure_limit), tripping the breaker.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET consecutive_failures = 1 WHERE id = ?1",
+                params![task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+    }
+
+    // Config: failure_limit = 2 (default).
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    // Use ok_spawn so that the spawner doesn't interfere — the task should be
+    // blocked by the circuit breaker before any new spawn happens.
+    let ctx = make_ctx_ok_spawn(store_arc.clone(), config, 12345);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.status, "blocked",
+            "task must be blocked when crashed-detection path hits failure_limit"
+        );
+
+        let events = store.get_events(&task_id).unwrap();
+        let crashed = events.iter().find(|e| e.kind == "crashed");
+        assert!(crashed.is_some(), "crashed event must be appended");
+        let gave_up = events.iter().find(|e| e.kind == "gave_up");
+        assert!(
+            gave_up.is_some(),
+            "gave_up event must be appended on the same tick the limit is reached"
+        );
+    }
+}
+
+/// D-12 circuit breaker (crashed-detection path, BUG-36.3.7-03):
+/// A task with `consecutive_failures = 0` and a dead PID bumps to 1 via
+/// `detect_crashed_workers` — below `failure_limit = 2` — so the circuit
+/// breaker must NOT fire. Task must be `ready` (claim released), `crashed`
+/// event present, and NO `gave_up` event emitted.
+#[tokio::test]
+async fn circuit_breaker_does_not_trip_below_limit_on_crashed_path() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    let dead_pid: u32 = 999_999_998; // guaranteed dead (different PID from sibling test)
+    let task_id;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "crashed-breaker no-trip task",
+                "alice",
+                CreateTaskOptions::default(),
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_cb_notrip", dead_pid);
+
+        // Seed as running with a dead PID.
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            dead_pid as i64,
+            now + 900.0,
+            &rid,
+            now,
+        );
+
+        // consecutive_failures starts at 0 (default). detect_crashed_workers bumps to 1,
+        // which is below failure_limit = 2, so the breaker must NOT fire.
+
+        // Set scheduled_at to a future time so the dispatcher does NOT re-claim the
+        // task in the same tick (prevents the spawn-failure path from also bumping
+        // consecutive_failures and tripping the breaker at 2).
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now_secs() + 3600.0, task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+    }
+
+    // Config: failure_limit = 2 (default).
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    let ctx = make_ctx_failing_spawn(store_arc.clone(), config);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.status, "ready",
+            "task must be ready (claim released, not blocked) when below failure_limit"
+        );
+        assert_eq!(
+            task.consecutive_failures, 1,
+            "consecutive_failures must be 1 after one crash (below limit)"
+        );
+
+        let events = store.get_events(&task_id).unwrap();
+        let crashed = events.iter().find(|e| e.kind == "crashed");
+        assert!(crashed.is_some(), "crashed event must be appended");
+        let gave_up = events.iter().any(|e| e.kind == "gave_up");
+        assert!(
+            !gave_up,
+            "gave_up event must NOT be emitted when consecutive_failures < failure_limit"
+        );
+    }
+}
+
 /// Step 2: A running task with alive PID and expired claim → `claim_extended`
 /// event, claim_expires updated, task still running.
 #[tokio::test]
