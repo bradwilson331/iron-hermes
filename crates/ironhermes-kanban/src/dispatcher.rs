@@ -592,6 +592,17 @@ async fn enforce_max_runtime(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 Some(&payload),
             )?;
         }
+
+        // Phase 36.3.7.1 BUG-36.3.7.1-02: circuit breaker on max-runtime-exceeded path.
+        // The bump above set consecutive_failures += 1 and the TimedOut event was just
+        // appended; check the limit on the same tick to match operator semantics
+        // (D-12 clarified by 36.3.7.0-03).
+        {
+            let error_msg = format!(
+                "max runtime exceeded ({elapsed}s > {max_runtime}s limit, sigkill={sigkill})"
+            );
+            apply_circuit_breaker(ctx, &task, &run.id, &error_msg, now).await?;
+        }
     }
 
     Ok(())
