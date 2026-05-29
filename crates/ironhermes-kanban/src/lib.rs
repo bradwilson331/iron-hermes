@@ -22,6 +22,7 @@
 
 pub mod cas;
 pub mod config;
+pub mod dispatcher;
 pub mod error;
 pub mod events;
 pub mod paths;
@@ -30,6 +31,7 @@ pub mod schema;
 pub mod skills_bundle;
 pub mod store;
 pub mod types;
+pub mod worker_spawn;
 
 pub use cas::{
     DEFAULT_CLAIM_TTL_SECONDS, assert_claim_lock, assert_run_id, atomic_claim, build_claim_lock,
@@ -42,6 +44,10 @@ pub use paths::{
     kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
     kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
 };
+pub use dispatcher::{
+    DispatcherContext, StrandedReport, StrandedSeverity, diagnose_stranded, run_dispatch_loop,
+    run_dispatch_tick,
+};
 pub use pid::is_pid_alive;
 pub use skills_bundle::{
     KANBAN_ORCHESTRATOR_SKILL_MD, KANBAN_ORCHESTRATOR_SKILL_NAME, KANBAN_WORKER_SKILL_MD,
@@ -50,6 +56,7 @@ pub use skills_bundle::{
 };
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
 pub use types::{KanbanStatus, Task, TaskComment, TaskLink, TaskRun};
+pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker};
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
 /// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).

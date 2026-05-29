@@ -31,18 +31,14 @@
 // Plan 02 landed cas.rs — use the real source file.
 const CAS_SOURCE_PLACEHOLDER: &str = include_str!("../src/cas.rs");
 
-// PLAN 03 will swap these for `include_str!("../src/dispatcher.rs")` and
-// `include_str!("../src/worker_spawn.rs")` and add at least one test that
-// exercises DISPATCHER_SOURCE_PLACEHOLDER. Allow the unused constant in
-// the interim — removing it would force plan 03 to re-add it.
-#[allow(dead_code)]
-const DISPATCHER_SOURCE_PLACEHOLDER: &str = include_str!("../src/error.rs");
-const WORKER_SPAWN_SOURCE_PLACEHOLDER: &str = include_str!("../src/error.rs");
+// Plan 03 landed dispatcher.rs and worker_spawn.rs — use the real source files.
+const DISPATCHER_SOURCE: &str = include_str!("../src/dispatcher.rs");
+const WORKER_SPAWN_SOURCE: &str = include_str!("../src/worker_spawn.rs");
 
 // PLAN 06 will swap this for
 // `include_str!("../../ironhermes-core/src/commands/running_agent.rs")`
 // once `kanban` is added to `is_bypass()`.
-const RUNNING_AGENT_SOURCE_PLACEHOLDER: &str = include_str!("../src/error.rs");
+const RUNNING_AGENT_SOURCE: &str = include_str!("../src/error.rs");
 
 // PID-liveness lives in this crate already (plan 01 Task 0 + Task 2). The
 // invariant is non-ignored because the file exists.
@@ -113,13 +109,35 @@ fn cas_inserts_task_run_in_same_transaction() {
 // Plan 03 invariants (dispatcher.rs / worker_spawn.rs)
 // ---------------------------------------------------------------------------
 
+/// INV-36.3.7-06: dispatcher must contain all 8 step helper functions
+/// from D-10 — detect_crashed, extend claims, reclaim stale, max-runtime,
+/// promote ready, claim_and_spawn, respawn_guard_reason, circuit breaker.
+#[test]
+fn dispatcher_has_all_eight_step_helpers() {
+    for helper in &[
+        "detect_crashed_workers",
+        "extend_live_pid_claims",
+        "reclaim_stale_claims",
+        "enforce_max_runtime",
+        "promote_ready",
+        "claim_and_spawn",
+        "respawn_guard_reason",
+        "apply_circuit_breaker",
+    ] {
+        assert!(
+            DISPATCHER_SOURCE.contains(helper),
+            "INV-36.3.7-06: dispatcher.rs must contain helper function '{helper}' \
+             (D-10 8-step tick loop)"
+        );
+    }
+}
+
 /// INV-36.3.7-02: worker spawn must call `build_kanban_worker_env` before
 /// `exec` — env scrub policy (D-18).
 #[test]
-#[ignore = "PLAN 03 unblocks this — worker_spawn.rs does not yet exist"]
 fn dispatcher_calls_build_kanban_worker_env() {
     assert!(
-        WORKER_SPAWN_SOURCE_PLACEHOLDER.contains("build_kanban_worker_env"),
+        WORKER_SPAWN_SOURCE.contains("build_kanban_worker_env"),
         "INV-36.3.7-02: worker spawn must call build_kanban_worker_env before \
          exec (env scrub policy D-18). Inheriting the dispatcher's env leaks \
          shell secrets into the worker."
@@ -129,10 +147,9 @@ fn dispatcher_calls_build_kanban_worker_env() {
 /// INV-36.3.7-05: worker spawn must call `env_clear` so only the
 /// allowlist-built env reaches the subprocess (D-18 / Pitfall env-leak).
 #[test]
-#[ignore = "PLAN 03 unblocks this — worker_spawn.rs does not yet exist"]
 fn worker_spawn_calls_env_clear() {
     assert!(
-        WORKER_SPAWN_SOURCE_PLACEHOLDER.contains("env_clear"),
+        WORKER_SPAWN_SOURCE.contains("env_clear"),
         "INV-36.3.7-05: tokio::process::Command must call env_clear() before \
          envs(build_kanban_worker_env(…)) so only the allowlist reaches the \
          worker (D-18)."
@@ -149,7 +166,7 @@ fn worker_spawn_calls_env_clear() {
 #[ignore = "PLAN 06 unblocks this — is_bypass() does not yet contain \"kanban\""]
 fn kanban_is_in_bypass_list() {
     assert!(
-        RUNNING_AGENT_SOURCE_PLACEHOLDER.contains("\"kanban\""),
+        RUNNING_AGENT_SOURCE.contains("\"kanban\""),
         "INV-36.3.7-03: 'kanban' must appear in is_bypass() (D-36 mid-run \
          safety). The /kanban slash command must bypass the running-agent \
          guard for all subcommands."
