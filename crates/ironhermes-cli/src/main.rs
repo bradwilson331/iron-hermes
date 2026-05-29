@@ -412,6 +412,7 @@ async fn main() -> Result<()> {
         &cli.command,
         Some(Commands::Chat { query: Some(_), .. })
     );
+    // Phase 26.4.1 CFG-03: run_preflight gate widening — see doc-comment block above for full rationale.
     let run_preflight = matches!(
         cli.command,
         Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None
