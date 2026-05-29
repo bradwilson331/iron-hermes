@@ -106,6 +106,18 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                 info!("websocket chat connection established");
                 let mut in_flight_turn: Option<InFlightTurn> = None;
 
+                // Phase 36.17.4 (D-01): canonical SessionKey for every queue
+                // call site in this connection. `web_key(session_id)` returns
+                // a key with platform=Web, chat_id=session_id, user_id="web"
+                // per the must_have invariant. Used at 6+ call sites below.
+                fn web_key(session_id: &str) -> ironhermes_core::session::SessionKey {
+                    ironhermes_core::session::SessionKey {
+                        platform: ironhermes_core::types::Platform::Web,
+                        chat_id: session_id.to_string(),
+                        user_id: Some("web".into()),
+                    }
+                }
+
                 let mut keepalive = tokio::time::interval(WS_KEEPALIVE_INTERVAL);
                 keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 // Skip first tick so we don't Ping immediately on connect.
@@ -201,23 +213,73 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 }
                             }
 
-                            if in_flight_turn.is_some() {
-                                let busy = ChatStreamEvent::Error {
-                                    message: "Another request is already in progress".to_string(),
-                                };
-                                let _ = socket
-                                    .send_raw(Message::Text(
-                                        serde_json::to_string(&busy).unwrap_or_default(),
-                                    ))
-                                    .await;
-                                continue;
-                            }
-
                             let (tx, rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
                             let app_state = app_state.clone();
                             let session_id = req.session_id;
                             let session_id_for_turn = session_id.clone();
                             let message = req.message;
+
+                            // Phase 36.17.4 (D-01 / D-03 / D-06): replace the
+                            // legacy hard reject with FIFO push. Free-text
+                            // messages during an in-flight turn now enqueue
+                            // instead of erroring; slash commands fall through
+                            // to the slash interception block below so
+                            // bypass-listed commands (stop/new/status/queue/
+                            // pause/unpause — Plan 01 extended is_bypass) are
+                            // still dispatched even mid-turn. This block uses
+                            // its own (tx_q, rx_q) pair so the primary (tx, rx)
+                            // remains untouched for the slash/spawn paths below
+                            // — note: when we `continue`, the primary tx/rx are
+                            // dropped together (mpsc cleanup), which is fine.
+                            if in_flight_turn.is_some() && !message.starts_with('/') {
+                                let key = web_key(&session_id);
+                                let paused_flag =
+                                    app_state.get_or_create_paused_flag(&session_id);
+                                let paused_snapshot = paused_flag
+                                    .load(std::sync::atomic::Ordering::SeqCst);
+                                let (tx_q, rx_q) =
+                                    mpsc::unbounded_channel::<ChatStreamEvent>();
+                                match app_state.queue.try_push(&key, message.clone()) {
+                                    Ok(()) => {
+                                        let depth = app_state.queue.len(&key) as u32;
+                                        let _ = tx_q.send(ChatStreamEvent::Delta {
+                                            text: format!(
+                                                "Queued: \"{}\" ({} in queue)\n",
+                                                message, depth
+                                            ),
+                                        });
+                                        let _ = tx_q.send(ChatStreamEvent::QueueUpdated {
+                                            depth,
+                                            paused: paused_snapshot,
+                                        });
+                                    }
+                                    Err(
+                                        ironhermes_core::queue::QueueError::CapacityReached {
+                                            max,
+                                            ..
+                                        },
+                                    ) => {
+                                        let _ = tx_q.send(ChatStreamEvent::Delta {
+                                            text: format!(
+                                                "Queue is full ({max}/{max}). /stop or /flush to drain.\n"
+                                            ),
+                                        });
+                                    }
+                                }
+                                let _ = tx_q.send(ChatStreamEvent::Finished {
+                                    total_tokens: 0,
+                                });
+                                drop(tx_q);
+                                let mut qrx = rx_q;
+                                while let Some(ev) = qrx.recv().await {
+                                    let json = serde_json::to_string(&ev)
+                                        .unwrap_or_default();
+                                    let _ = socket
+                                        .send_raw(Message::Text(json))
+                                        .await;
+                                }
+                                continue;
+                            }
 
                             // Phase 36.1 D-03/D-04/D-05/D-06 (Pitfall 4, Pitfall 7):
                             // Slash-command interception BEFORE run_web_turn.
@@ -293,18 +355,231 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             running_flag,
                                         )
                                         .with_state_store(store_handle);
+
+                                        // Phase 36.17.4 (D-04a / D-05): /stop
+                                        // early-intercept BEFORE dispatch. The
+                                        // canonical post-resolution name is
+                                        // `def.name` (Pitfall 4: never on raw
+                                        // input). Sequence: queue.clear →
+                                        // paused.store(false) → QueueUpdated →
+                                        // Delta → Finished → drain. NO
+                                        // JoinHandle::abort and NO
+                                        // CancellationToken (D-05 documented
+                                        // divergence): the in-flight turn (if
+                                        // any) completes naturally; its
+                                        // eventual `None =>` arm will see an
+                                        // empty queue and not re-drain.
+                                        if def.name == "stop" {
+                                            let key = web_key(&session_id);
+                                            app_state.queue.clear(&key);
+                                            app_state
+                                                .get_or_create_paused_flag(&session_id)
+                                                .store(
+                                                    false,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                            let _ = tx.send(ChatStreamEvent::QueueUpdated {
+                                                depth: 0,
+                                                paused: false,
+                                            });
+                                            let _ = tx.send(ChatStreamEvent::Delta {
+                                                text:
+                                                    "Queue cleared. Current turn finishing.\n"
+                                                        .to_string(),
+                                            });
+                                            let _ = tx.send(ChatStreamEvent::Finished {
+                                                total_tokens: 0,
+                                            });
+                                            drop(tx);
+                                            let mut slash_rx = rx;
+                                            while let Some(ev) = slash_rx.recv().await {
+                                                let json = serde_json::to_string(&ev)
+                                                    .unwrap_or_default();
+                                                let _ = socket
+                                                    .send_raw(Message::Text(json))
+                                                    .await;
+                                            }
+                                            continue;
+                                        }
+
                                         let result = ironhermes_core::commands::handlers::dispatch(
                                             &def,
                                             &args,
                                             &ctx,
                                             &app_state.command_router,
                                         );
+
+                                        // Phase 36.17.4 (D-01 / D-03 / D-06):
+                                        // dedicated arms for Queued /
+                                        // PauseQueue / UnpauseQueue. Each
+                                        // performs its own complete emit
+                                        // sequence + drain + continue (bypasses
+                                        // the shared Delta/Finished delivery
+                                        // below) so the QueueUpdated event can
+                                        // be interleaved between Delta and
+                                        // Finished per the must_have invariant.
+                                        match result {
+                                            CommandResult::Queued { message: queued_msg } => {
+                                                let key = web_key(&session_id);
+                                                let paused_flag = app_state
+                                                    .get_or_create_paused_flag(&session_id);
+                                                let paused_snapshot = paused_flag.load(
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                match app_state
+                                                    .queue
+                                                    .try_push(&key, queued_msg.clone())
+                                                {
+                                                    Ok(()) => {
+                                                        let depth =
+                                                            app_state.queue.len(&key) as u32;
+                                                        let _ = tx.send(ChatStreamEvent::Delta {
+                                                            text: format!(
+                                                                "Queued: \"{}\" ({} in queue)\n",
+                                                                queued_msg, depth
+                                                            ),
+                                                        });
+                                                        let _ = tx.send(ChatStreamEvent::QueueUpdated {
+                                                            depth,
+                                                            paused: paused_snapshot,
+                                                        });
+                                                    }
+                                                    Err(
+                                                        ironhermes_core::queue::QueueError::CapacityReached {
+                                                            max,
+                                                            ..
+                                                        },
+                                                    ) => {
+                                                        let _ = tx.send(ChatStreamEvent::Delta {
+                                                            text: format!(
+                                                                "Queue is full ({max}/{max}). /stop or /flush to drain.\n"
+                                                            ),
+                                                        });
+                                                    }
+                                                }
+                                                let _ = tx.send(ChatStreamEvent::Finished {
+                                                    total_tokens: 0,
+                                                });
+                                                drop(tx);
+                                                let mut slash_rx = rx;
+                                                while let Some(ev) = slash_rx.recv().await {
+                                                    let json = serde_json::to_string(&ev)
+                                                        .unwrap_or_default();
+                                                    let _ = socket
+                                                        .send_raw(Message::Text(json))
+                                                        .await;
+                                                }
+                                                continue;
+                                            }
+                                            CommandResult::PauseQueue => {
+                                                let paused_flag = app_state
+                                                    .get_or_create_paused_flag(&session_id);
+                                                let was_paused = paused_flag.fetch_xor(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                let new_paused = !was_paused;
+                                                let key = web_key(&session_id);
+                                                let depth =
+                                                    app_state.queue.len(&key) as u32;
+                                                let _ = tx.send(ChatStreamEvent::QueueUpdated {
+                                                    depth,
+                                                    paused: new_paused,
+                                                });
+                                                let _ = tx.send(ChatStreamEvent::Delta {
+                                                    text: if new_paused {
+                                                        format!(
+                                                            "Queue paused. ({} queued)\n",
+                                                            depth
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "Queue resumed. ({} queued)\n",
+                                                            depth
+                                                        )
+                                                    },
+                                                });
+                                                let _ = tx.send(ChatStreamEvent::Finished {
+                                                    total_tokens: 0,
+                                                });
+                                                drop(tx);
+                                                let mut slash_rx = rx;
+                                                while let Some(ev) = slash_rx.recv().await {
+                                                    let json = serde_json::to_string(&ev)
+                                                        .unwrap_or_default();
+                                                    let _ = socket
+                                                        .send_raw(Message::Text(json))
+                                                        .await;
+                                                }
+                                                continue;
+                                            }
+                                            CommandResult::UnpauseQueue => {
+                                                let paused_flag = app_state
+                                                    .get_or_create_paused_flag(&session_id);
+                                                let was_paused = paused_flag.swap(
+                                                    false,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                let key = web_key(&session_id);
+                                                let depth =
+                                                    app_state.queue.len(&key) as u32;
+                                                let _ = tx.send(ChatStreamEvent::QueueUpdated {
+                                                    depth,
+                                                    paused: false,
+                                                });
+                                                let _ = tx.send(ChatStreamEvent::Delta {
+                                                    text: if was_paused {
+                                                        "Queue resumed.\n".to_string()
+                                                    } else {
+                                                        "Queue was not paused.\n".to_string()
+                                                    },
+                                                });
+                                                let _ = tx.send(ChatStreamEvent::Finished {
+                                                    total_tokens: 0,
+                                                });
+                                                drop(tx);
+                                                let mut slash_rx = rx;
+                                                while let Some(ev) = slash_rx.recv().await {
+                                                    let json = serde_json::to_string(&ev)
+                                                        .unwrap_or_default();
+                                                    let _ = socket
+                                                        .send_raw(Message::Text(json))
+                                                        .await;
+                                                }
+                                                continue;
+                                            }
+                                            _ => {}
+                                        }
+
                                         let text = match result {
                                             CommandResult::Output(t) => t,
                                             CommandResult::Error(e) => {
                                                 format!("Command error: {e}")
                                             }
                                             CommandResult::NewSession { message: m } => {
+                                                // Phase 36.17.4 (D-04): ordering
+                                                // invariant — queue.clear →
+                                                // paused.store(false) →
+                                                // QueueUpdated → reset_web_session
+                                                // → emit message. QueueUpdated
+                                                // pushed into the same `tx`
+                                                // (mpsc FIFO) BEFORE the shared
+                                                // delivery's Delta(text), so
+                                                // the client sees the pill
+                                                // reset before the
+                                                // confirmation Delta.
+                                                let key = web_key(&session_id);
+                                                app_state.queue.clear(&key);
+                                                app_state
+                                                    .get_or_create_paused_flag(&session_id)
+                                                    .store(
+                                                        false,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                let _ = tx.send(ChatStreamEvent::QueueUpdated {
+                                                    depth: 0,
+                                                    paused: false,
+                                                });
                                                 app_state.reset_web_session(&session_id);
                                                 m
                                             }
@@ -485,13 +760,173 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 }
                                 None => {
                                     if let Some(turn) = in_flight_turn.take() {
+                                        // Phase 36.17.4 (D-02): WS recv-loop
+                                        // self-drain. Capture session_id
+                                        // BEFORE the .await consumes `turn` so
+                                        // the value survives for the drain
+                                        // check that follows.
+                                        let session_id_done = turn.session_id.clone();
                                         if let Err(err) = turn.handle.await {
                                             warn!(
-                                                session_id = %turn.session_id,
+                                                session_id = %session_id_done,
                                                 reason = %err,
                                                 in_flight = false,
                                                 "turn task join failed"
                                             );
+                                        }
+                                        // D-02: after the in-flight turn
+                                        // completes (Ok or Err), check the
+                                        // per-session paused flag and the
+                                        // queue. If !paused AND queue has a
+                                        // message, emit QueueUpdated to the
+                                        // socket BEFORE spawning the next turn
+                                        // (D-03 ordering: pill update first,
+                                        // then Delta stream), then spawn a new
+                                        // run_web_turn mirroring the primary
+                                        // spawn block above.
+                                        let key = web_key(&session_id_done);
+                                        let paused_now = app_state
+                                            .get_or_create_paused_flag(&session_id_done)
+                                            .load(std::sync::atomic::Ordering::SeqCst);
+                                        if !paused_now {
+                                            if let Some(next_text) =
+                                                app_state.queue.pop(&key)
+                                            {
+                                                let depth_after =
+                                                    app_state.queue.len(&key) as u32;
+                                                let qu_event =
+                                                    ChatStreamEvent::QueueUpdated {
+                                                        depth: depth_after,
+                                                        paused: false,
+                                                    };
+                                                let _ = socket
+                                                    .send_raw(Message::Text(
+                                                        serde_json::to_string(&qu_event)
+                                                            .unwrap_or_default(),
+                                                    ))
+                                                    .await;
+                                                let (tx_drain, rx_drain) =
+                                                    mpsc::unbounded_channel::<ChatStreamEvent>();
+                                                let app_state_drain = app_state.clone();
+                                                let session_id_spawn =
+                                                    session_id_done.clone();
+                                                let next_text_owned = next_text;
+                                                let drain_handle = tokio::spawn(async move {
+                                                    // Mirrors the primary
+                                                    // spawn block: scrubber +
+                                                    // 3 callbacks + slot
+                                                    // install via RAII guard +
+                                                    // run_web_turn + flush +
+                                                    // Finished/Error emit.
+                                                    let scrubber_ws =
+                                                        std::sync::Arc::new(std::sync::Mutex::new(
+                                                            ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
+                                                        ));
+                                                    let scrubber_ws_cb =
+                                                        std::sync::Arc::clone(&scrubber_ws);
+                                                    let tx_stream = tx_drain.clone();
+                                                    let stream_callback:
+                                                        ironhermes_agent::agent_loop::StreamCallback =
+                                                        Box::new(move |delta: &str| {
+                                                            let visible = scrubber_ws_cb
+                                                                .lock()
+                                                                .unwrap()
+                                                                .feed(delta);
+                                                            if !visible.is_empty() {
+                                                                let _ = tx_stream.send(
+                                                                    ChatStreamEvent::Delta {
+                                                                        text: visible,
+                                                                    },
+                                                                );
+                                                            }
+                                                        });
+
+                                                    let tx_tool = tx_drain.clone();
+                                                    let tool_progress_callback:
+                                                        ironhermes_agent::agent_loop::ToolProgressCallback =
+                                                        Box::new(move |name: &str, args: &str| {
+                                                            let _ = tx_tool.send(
+                                                                ChatStreamEvent::ToolCallStart {
+                                                                    name: name.to_string(),
+                                                                    args: args.to_string(),
+                                                                },
+                                                            );
+                                                        });
+
+                                                    let tx_tool_result = tx_drain.clone();
+                                                    let tool_result_callback:
+                                                        ironhermes_agent::agent_loop::ToolResultCallback =
+                                                        Box::new(move |name: &str, success: bool| {
+                                                            let _ = tx_tool_result.send(
+                                                                ChatStreamEvent::ToolCallEnd {
+                                                                    name: name.to_string(),
+                                                                    success,
+                                                                },
+                                                            );
+                                                        });
+
+                                                    let tx_subagent = tx_drain.clone();
+                                                    {
+                                                        let mut guard = app_state_drain
+                                                            .subagent_callback_slot
+                                                            .lock()
+                                                            .await;
+                                                        *guard = Some(tx_subagent);
+                                                    }
+                                                    let _slot_guard = SubagentCallbackSlotGuard {
+                                                        slot: app_state_drain
+                                                            .subagent_callback_slot
+                                                            .clone(),
+                                                    };
+
+                                                    let result = app_state_drain
+                                                        .run_web_turn(
+                                                            &session_id_spawn,
+                                                            &next_text_owned,
+                                                            stream_callback,
+                                                            Some(tool_progress_callback),
+                                                            Some(tool_result_callback),
+                                                        )
+                                                        .await;
+
+                                                    let tail =
+                                                        scrubber_ws.lock().unwrap().flush();
+                                                    if !tail.is_empty() {
+                                                        let _ = tx_drain.send(
+                                                            ChatStreamEvent::Delta {
+                                                                text: tail,
+                                                            },
+                                                        );
+                                                    }
+
+                                                    match result {
+                                                        Ok(agent_result) => {
+                                                            let _ = tx_drain.send(
+                                                                ChatStreamEvent::Finished {
+                                                                    total_tokens: agent_result
+                                                                        .total_usage
+                                                                        .total_tokens
+                                                                        as u32,
+                                                                },
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_drain.send(
+                                                                ChatStreamEvent::Error {
+                                                                    message: format!(
+                                                                        "Agent error: {e}"
+                                                                    ),
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                                in_flight_turn = Some(InFlightTurn {
+                                                    session_id: session_id_done,
+                                                    rx: rx_drain,
+                                                    handle: drain_handle,
+                                                });
+                                            }
                                         }
                                     }
                                 }

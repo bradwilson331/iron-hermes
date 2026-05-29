@@ -276,12 +276,19 @@ fn busy_gate_opportunistically_clears_finished_turn() {
     let finished_pos = ws
         .find("turn.handle.is_finished()")
         .expect("ws_chat must check turn.handle.is_finished() to opportunistically clear finished turns (WR-02)");
-    // Use the full `if in_flight_turn.is_some() {` form to anchor to the busy-gate
-    // branch specifically (not the telemetry `let in_flight = in_flight_turn.is_some();`
-    // lines that appear earlier in the file).
+    // Phase 36.17.4 D-01: the busy-gate evolved from the original Phase 36.1
+    // hard-reject `if in_flight_turn.is_some() {` shape into the FIFO-push
+    // guard `if in_flight_turn.is_some() && !message.starts_with('/') {`
+    // (free-text enqueues; slash commands fall through to the slash
+    // interception block). Either form satisfies WR-02 — what matters is
+    // that the busy-gate (whatever its body) appears AFTER the
+    // opportunistic finished-handle clear.
     let busy_pos = ws
-        .find("if in_flight_turn.is_some() {")
-        .expect("ws_chat must keep the `if in_flight_turn.is_some() {` busy-gate check");
+        .find("if in_flight_turn.is_some() && !message.starts_with('/')")
+        .or_else(|| ws.find("if in_flight_turn.is_some() {"))
+        .expect(
+            "ws_chat must keep an `if in_flight_turn.is_some()` busy-gate check (Phase 36.1 WR-02 / Phase 36.17.4 D-01)",
+        );
     assert!(
         finished_pos < busy_pos,
         "WR-02: turn.handle.is_finished() opportunistic clear must appear BEFORE the in_flight_turn.is_some() busy-gate (file offsets: finished={finished_pos}, busy={busy_pos})"
