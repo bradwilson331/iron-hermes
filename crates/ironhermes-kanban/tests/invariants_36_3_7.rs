@@ -169,3 +169,24 @@ fn kanban_is_in_bypass_list() {
          guard for all subcommands."
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plan 08 invariant (gateway runner embed)
+// ---------------------------------------------------------------------------
+
+/// Source constant for the gateway runner (plan 08 embed verification).
+const GATEWAY_RUNNER_SOURCE: &str =
+    include_str!("../../ironhermes-gateway/src/runner.rs");
+
+/// INV-36.3.7-07: `ironhermes-gateway/src/runner.rs` must call
+/// `run_dispatch_loop` (D-09 gateway-embedded dispatcher). Without this call
+/// the gateway-embedded kanban dispatcher is not wired into the runtime.
+#[test]
+fn gateway_runner_embeds_kanban_dispatcher() {
+    assert!(
+        GATEWAY_RUNNER_SOURCE.contains("run_dispatch_loop"),
+        "INV-36.3.7-07: runner.rs must call ironhermes_kanban::run_dispatch_loop \
+         (D-09 gateway-embedded by default). If this fails, kanban dispatching \
+         does not run inside the gateway process."
+    );
+}

@@ -1239,7 +1239,61 @@ impl GatewayRunner {
             info!("Cron tick task started (60s interval, delegating to ironhermes-cron-runner)");
         }
 
-        // --- 11. Run dispatch loop concurrently with shutdown signal ---
+        // --- Step 11 (Phase 36.3.7 D-09): kanban dispatcher ---
+        //
+        // Deserialize the raw `config.kanban` serde_yaml::Value into
+        // KanbanConfig. Uses all-defaults if the field is absent/null (pre-36.3.7
+        // configs). The gateway's `ironhermes-core` Config stores it as
+        // serde_yaml::Value to avoid a circular crate dependency (ironhermes-kanban
+        // already depends on ironhermes-core).
+        let kanban_config: ironhermes_kanban::KanbanConfig =
+            if self.config.kanban.is_null() {
+                ironhermes_kanban::KanbanConfig::default()
+            } else {
+                match serde_yaml::from_value::<ironhermes_kanban::KanbanConfig>(
+                    self.config.kanban.clone(),
+                ) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        warn!("Failed to parse kanban config; using defaults: {e}");
+                        ironhermes_kanban::KanbanConfig::default()
+                    }
+                }
+            };
+        let dispatch_in_gw_env = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if kanban_config.dispatch_in_gateway && dispatch_in_gw_env {
+            let kanban_cancel = self.cancel.clone();
+            let interval_secs = kanban_config.dispatch_interval_seconds;
+            match ironhermes_kanban::KanbanStore::open_default() {
+                Ok(store) => {
+                    let kanban_store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                    let dispatcher_ctx =
+                        std::sync::Arc::new(ironhermes_kanban::DispatcherContext::new(
+                            kanban_store,
+                            kanban_config,
+                        ));
+                    join_set.spawn(async move {
+                        ironhermes_kanban::run_dispatch_loop(dispatcher_ctx, kanban_cancel).await;
+                    });
+                    info!("Kanban dispatch task started ({}s interval)", interval_secs);
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Failed to open kanban.db; kanban dispatcher will NOT start (gateway continues)"
+                    );
+                }
+            }
+        } else if !dispatch_in_gw_env {
+            info!("Kanban dispatcher disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY=0");
+        } else {
+            // dispatch_in_gateway = false in config
+            debug!("Kanban dispatcher disabled via config (dispatch_in_gateway = false)");
+        }
+
+        // --- 12. Run dispatch loop concurrently with shutdown signal ---
         // dispatch_future processes messages; ctrl+c or cancel token stops everything.
         tokio::select! {
             _ = dispatch_future => {
