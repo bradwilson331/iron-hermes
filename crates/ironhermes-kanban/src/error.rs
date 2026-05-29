@@ -62,6 +62,11 @@ pub enum KanbanError {
         wrong_profile: Vec<String>,
     },
 
+    /// Bundled skill name not recognised (e.g. passed to
+    /// `restore_bundled_kanban_skill` with an unknown name).
+    #[error("unknown bundled skill: {0}")]
+    UnknownSkill(String),
+
     /// Generic fallback for ad-hoc errors carried from `anyhow`.
     #[error("{0}")]
     Other(#[from] anyhow::Error),
