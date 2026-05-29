@@ -672,7 +672,7 @@ impl Tool for DelegateTaskTool {
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "Single-task mode: clear description of the task for the child agent to complete. Required when not using 'tasks' (batch mode)."
+                        "description": "Single-task mode: clear description of the task for the child agent to complete. Required when not using 'tasks' (batch mode). Mutually exclusive with `tasks` — provide exactly one of `task` (single mode) or `tasks` (batch mode)."
                     },
                     "allowed_tools": {
                         "type": "array",
@@ -699,7 +699,7 @@ impl Tool for DelegateTaskTool {
                             },
                             "required": ["goal"]
                         },
-                        "description": "Batch mode: array of tasks for parallel execution. Max 3 tasks. Required when not using 'task' (single mode). Mutually exclusive with 'task'."
+                        "description": "Batch mode: array of tasks for parallel execution. Max 3 tasks. Required when not using 'task' (single mode). Mutually exclusive with `task` — provide exactly one of `tasks` (batch mode) or `task` (single mode)."
                     },
                     "detach": {
                         "type": "boolean",
@@ -727,16 +727,13 @@ impl Tool for DelegateTaskTool {
                         "default": "leaf",
                         "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth."
                     }
-                },
-                // oneOf enforces that exactly one of `task` (single mode) or `tasks`
-                // (batch mode) is present. This constraint is schema-visible to the LLM
-                // at tool-definition parse time, preventing the "neither provided" failure
-                // that previously surfaced only as a runtime error.
-                "oneOf": [
-                    { "required": ["task"] },
-                    { "required": ["tasks"] }
-                ]
+                }
             }),
+            // Mutual-exclusion of `task` vs `tasks` is enforced at runtime in execute()
+            // (see line 745). The schema-level oneOf was dropped per
+            // BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01 because Anthropic's tool API rejects
+            // top-level boolean schema combinators. The LLM continues to see the mutex
+            // constraint through the `task` and `tasks` property descriptions.
         )
     }
 
@@ -1217,37 +1214,38 @@ mod tests {
     }
 
     #[test]
-    fn test_delegate_task_schema_task_and_tasks_are_mutually_exclusive_optional() {
-        // Bug fix: schema now uses `oneOf` with `required: ["task"]` and
-        // `required: ["tasks"]` branches so the LLM sees the constraint at
-        // schema parse time. The top-level `required` array is absent (replaced
-        // by oneOf). Runtime validation in `execute()` still enforces mutual
-        // exclusivity as a defence-in-depth fallback.
+    fn test_delegate_task_schema_has_no_top_level_boolean_combinator() {
+        // BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01: top-level boolean schema
+        // combinators are rejected by Anthropic's tool API. The schema is now flat
+        // (no top-level oneOf/allOf/anyOf) and the mutex constraint between `task`
+        // and `tasks` lives in (a) the runtime check in execute() at line 745 and
+        // (b) the prose descriptions of the two properties.
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let params = &schema.function.parameters;
 
-        // oneOf must be present with two branches
-        let one_of = params["oneOf"].as_array().expect("schema must have oneOf");
-        assert_eq!(one_of.len(), 2, "oneOf must have exactly 2 branches");
-        let branch_0_req = one_of[0]["required"].as_array().unwrap();
-        let branch_1_req = one_of[1]["required"].as_array().unwrap();
-        let all_required: Vec<&str> = branch_0_req.iter()
-            .chain(branch_1_req.iter())
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert!(all_required.contains(&"task"), "oneOf branch must require 'task'");
-        assert!(all_required.contains(&"tasks"), "oneOf branch must require 'tasks'");
+        assert!(
+            params.get("oneOf").is_none(),
+            "schema MUST NOT have top-level oneOf per BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01 (Anthropic rejects top-level boolean combinators)"
+        );
+        assert!(
+            params.get("allOf").is_none(),
+            "schema MUST NOT have top-level allOf per BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01"
+        );
+        assert!(
+            params.get("anyOf").is_none(),
+            "schema MUST NOT have top-level anyOf per BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01"
+        );
 
         let props = &params["properties"];
-        assert!(
-            props.get("task").is_some(),
-            "schema should expose 'task' property"
-        );
-        assert!(
-            props.get("tasks").is_some(),
-            "schema should expose 'tasks' property"
-        );
+        assert!(props.get("task").is_some(), "schema should expose 'task' property");
+        assert!(props.get("tasks").is_some(), "schema should expose 'tasks' property");
+
+        let task_desc = props["task"]["description"].as_str().expect("task description must be a string");
+        assert!(task_desc.contains("Mutually exclusive"), "task description must mention mutual exclusion; got: {}", task_desc);
+
+        let tasks_desc = props["tasks"]["description"].as_str().expect("tasks description must be a string");
+        assert!(tasks_desc.contains("Mutually exclusive"), "tasks description must mention mutual exclusion; got: {}", tasks_desc);
     }
 
     #[tokio::test]
