@@ -557,10 +557,11 @@ Plans:
 **Goal:** Close the out-of-scope blocker discovered during Phase 36.3.7.0 UAT-09-A re-run #5 (see `.planning/phases/36.3.7.0-kanban-v1-uat-discovered-fixes-inserted/36.3.7.0-04-UAT-EVIDENCE.md` section "Discovered: Bug #5"). `crates/ironhermes-tools/src/delegate_task.rs:735` uses top-level `oneOf` to enforce mutual exclusion of `task` vs `tasks` at the JSON Schema level. Anthropic's tool API rejects top-level `oneOf` / `allOf` / `anyOf` in tool `input_schema`, so EVERY worker subprocess routed through Anthropic-via-OpenRouter crashes at the first LLM call with `400: input_schema does not support oneOf, allOf, or anyOf at the top level`. Comments at delegate_task.rs:1221-1239 already note that runtime validation in `execute()` enforces mutual exclusion — the schema-level `oneOf` is redundant safety that can be removed without losing runtime correctness. This phase belongs to `ironhermes-tools` (Phase 21.7-class infrastructure), NOT kanban — it predates 36.3.7 and is exposed by the kanban worker path only because that path is the first end-to-end exerciser of `delegate_task` via Anthropic. HIGH severity (blocks ALL kanban workers via Anthropic-via-OpenRouter routing).
 **Requirements**: BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01 (drop top-level `oneOf` from `delegate_task` input_schema at delegate_task.rs:735; preserve runtime validation in `execute()` per existing comments at lines 1221-1239; update unit tests at lines 1230-1239 that currently assert on the `oneOf` shape); BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-02 (audit all other tools in `crates/ironhermes-tools/src/` for top-level `oneOf` / `allOf` / `anyOf` — at minimum a static-grep pass + cite findings in SUMMARY; expand fix surface only if grep returns more hits); BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-03 (receiver-end test: synthesize the worker's tool registry, render each tool's `input_schema`, assert no top-level `oneOf` / `allOf` / `anyOf` — locks the regression for ALL future tool additions, not just `delegate_task`).
 **Depends on:** Phase 36.3.7
-**Plans:** 0 plans (run /gsd-plan-phase 36.3.7.2 to break down)
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.2 to break down)
+- [ ] 36.3.7.2-01-PLAN.md — Drop top-level oneOf from delegate_task input_schema, rewrite mutex prose, invert existing test, audit ironhermes-tools/src/ for other hits (BUG-COMPAT-01 + 02)
+- [ ] 36.3.7.2-02-PLAN.md — System-level receiver-end test asserting no tool's input_schema has a top-level boolean combinator (BUG-COMPAT-03)
 
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 
