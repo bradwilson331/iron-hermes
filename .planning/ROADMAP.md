@@ -540,6 +540,27 @@ Plans:
 - [x] 36.3.7.0-02-PLAN.md — Add cmd_kanban handler + dispatch arm + KanbanStoreReader trait + KanbanStoreReaderImpl + build_cmd_ctx wiring + receiver dispatch-chain test (Wave 1)
 - [x] 36.3.7.0-03-PLAN.md — D-12 determination commit + hook apply_circuit_breaker into detect_crashed_workers path + 2 receiver-end tests on the crashed path (Wave 1)
 - [x] 36.3.7.0-04-PLAN.md — Re-run UAT-09-A + UAT-09-B against post-fix binary; capture evidence; write phase-close SUMMARY with Meta-learning receiver-end-gap rule (Wave 2, human-verify checkpoint)
+- [x] 36.3.7.0-05-PLAN.md — UAT-discovered inline: preflight gate excludes chat -q at both run_preflight and is_interactive_repl sites + 3 static-grep regression tests (BUG-36.3.7-04)
+
+### Phase 36.3.7.1: Kanban dispatcher — extend circuit breaker to remaining failure paths (INSERTED)
+
+**Goal:** Close the two structurally-identical receiver-end gaps that Phase 36.3.7.0 Plan 03 explicitly punted: `reclaim_stale_claims` and `enforce_max_runtime` in `crates/ironhermes-kanban/src/dispatcher.rs` both bump `consecutive_failures` but never invoke `apply_circuit_breaker`. Same pattern as BUG-36.3.7-03 on a different code path; the determination doc in `36.3.7.0-03-D12-DETERMINATION.md` already named these as 36.3.7.1 candidates. Fix is mechanical (call the breaker after the bump, mirroring the lines 305 and 899 patterns from 36.3.7.0-03) plus receiver-end tests covering both new paths × both sides of the failure_limit bound.
+**Requirements**: BUG-36.3.7.1-01 (wire `apply_circuit_breaker` into `reclaim_stale_claims` path around dispatcher.rs ~line 458 — match the call shape used at lines 305/899); BUG-36.3.7.1-02 (wire `apply_circuit_breaker` into `enforce_max_runtime` path around dispatcher.rs ~line 553); BUG-36.3.7.1-03 (4 receiver-end tests in `dispatcher_logic.rs` covering both new paths × `consecutive_failures` at `failure_limit` and below `failure_limit - 1`, mirroring the test shapes 36.3.7.0-03 used).
+**Depends on:** Phase 36.3.7.0
+**Plans:** 0 plans (run /gsd-plan-phase 36.3.7.1 to break down)
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.1 to break down)
+
+### Phase 36.3.7.2: Tool-schema compatibility — drop top-level oneOf from delegate_task (INSERTED)
+
+**Goal:** Close the out-of-scope blocker discovered during Phase 36.3.7.0 UAT-09-A re-run #5 (see `.planning/phases/36.3.7.0-kanban-v1-uat-discovered-fixes-inserted/36.3.7.0-04-UAT-EVIDENCE.md` section "Discovered: Bug #5"). `crates/ironhermes-tools/src/delegate_task.rs:735` uses top-level `oneOf` to enforce mutual exclusion of `task` vs `tasks` at the JSON Schema level. Anthropic's tool API rejects top-level `oneOf` / `allOf` / `anyOf` in tool `input_schema`, so EVERY worker subprocess routed through Anthropic-via-OpenRouter crashes at the first LLM call with `400: input_schema does not support oneOf, allOf, or anyOf at the top level`. Comments at delegate_task.rs:1221-1239 already note that runtime validation in `execute()` enforces mutual exclusion — the schema-level `oneOf` is redundant safety that can be removed without losing runtime correctness. This phase belongs to `ironhermes-tools` (Phase 21.7-class infrastructure), NOT kanban — it predates 36.3.7 and is exposed by the kanban worker path only because that path is the first end-to-end exerciser of `delegate_task` via Anthropic. HIGH severity (blocks ALL kanban workers via Anthropic-via-OpenRouter routing).
+**Requirements**: BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01 (drop top-level `oneOf` from `delegate_task` input_schema at delegate_task.rs:735; preserve runtime validation in `execute()` per existing comments at lines 1221-1239; update unit tests at lines 1230-1239 that currently assert on the `oneOf` shape); BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-02 (audit all other tools in `crates/ironhermes-tools/src/` for top-level `oneOf` / `allOf` / `anyOf` — at minimum a static-grep pass + cite findings in SUMMARY; expand fix surface only if grep returns more hits); BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-03 (receiver-end test: synthesize the worker's tool registry, render each tool's `input_schema`, assert no top-level `oneOf` / `allOf` / `anyOf` — locks the regression for ALL future tool additions, not just `delegate_task`).
+**Depends on:** Phase 36.3.7
+**Plans:** 0 plans (run /gsd-plan-phase 36.3.7.2 to break down)
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.2 to break down)
 
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 

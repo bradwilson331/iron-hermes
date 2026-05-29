@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: completed
-stopped_at: Phase 36.17.4 context gathered
-last_updated: "2026-05-29T17:25:51.079Z"
-last_activity: 2026-05-29 -- Phase 36.3.7.0 marked complete
+status: ready
+stopped_at: null
+last_updated: "2026-05-29T17:30:00.000Z"
+last_activity: 2026-05-29 -- Phase 36.17.4 retroactively confirmed Complete (all 6 plans + 6 SUMMARYs + VERIFICATION.md); Phase 36.3.7.0 shipped; LEARNINGS captured; phases 36.3.7.1 + 36.X.0 (delegate_task schema fix) queued
 progress:
   total_phases: 48
   completed_phases: 13
@@ -21,14 +21,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.0 — kanban-v1-uat-discovered-fixes-inserted
+**Current focus:** Between phases — choose next from queue: 36.3.7.1 (dispatcher follow-up: wire breaker into reclaim_stale_claims + enforce_max_runtime) OR 36.X.0 (delegate_task tool-schema-compat fix — HIGH severity, blocks all kanban workers via Anthropic).
 
 ## Current Position
 
-Phase: 36.3.7.0 — COMPLETE
-Plan: 4 of 4
-Status: Phase 36.3.7.0 complete
-Last activity: 2026-05-29 -- Phase 36.3.7.0 marked complete
+Phase: (none active) — ready for next selection
+Status: 2 phases just shipped (36.17.4 confirmed Complete; 36.3.7.0 Complete with PASS-WITH-NOTES); kanban kernel proven end-to-end through 9/10 UAT stages
+Last activity: 2026-05-29 -- Phase 36.3.7.0 close-out + STATE rationalization + LEARNINGS captured
+
+## Recent close-out summary (2026-05-29)
+
+**Phase 36.3.7 (Kanban kernel v1):** 9/9 plans shipped, 76 tests, INV-36.3.7.md ledger established. Live UAT-09-A/B surfaced 3 receiver-end bugs that the gsd-verifier's 17/17 PASS missed.
+
+**Phase 36.3.7.0 (UAT-discovered fixes):** 5/5 plans shipped (Plan 05 added inline during UAT). 4 receiver-end bugs closed bilaterally. UAT-09-A runtime-PASS through 9/10 stages; stage 7 blocked by out-of-scope Bug #5 (delegate_task schema vs Anthropic) — queued as a new phase.
+
+**Phase 36.17.4 (iron_hermes_ui queue wiring):** confirmed Complete in this rationalization pass — all 6 plans had SUMMARYs + a VERIFICATION.md from earlier work; STATE was just stale.
+
+**Meta-finding (captured in `.planning/LEARNINGS.md`):** bilateral-tracing rule for future verifier prompts — for every wire-up claim, trace BOTH producer AND consumer ends.
 
 ## Phase 36.2 Closure Summary
 
