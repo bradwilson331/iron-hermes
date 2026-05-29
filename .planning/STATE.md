@@ -4,13 +4,13 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.17.4 context gathered
-last_updated: "2026-05-29T11:23:06.012Z"
+last_updated: "2026-05-29T12:00:46.773Z"
 last_activity: 2026-05-29
 progress:
   total_phases: 43
   completed_phases: 12
   total_plans: 65
-  completed_plans: 59
+  completed_plans: 61
   percent: 28
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 36.3.7 (kanban-multi-agent-board-kanban-tools) — EXECUTING
-Plan: 4 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-05-29
 
