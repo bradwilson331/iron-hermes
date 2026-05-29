@@ -1,0 +1,30 @@
+[package]
+name = "ironhermes-kanban"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Kanban work-queue kernel for IronHermes (Phase 36.3.7)"
+
+[dependencies]
+ironhermes-core = { path = "../ironhermes-core" }
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+# Phase 36.3.7 Plan 01 Task 0 decision (recorded in SUMMARY): nix for PID-liveness.
+# Errno-discriminating is_pid_alive() needs `signal` feature (kill + Errno).
+# nix is already used by ironhermes-gateway; no new workspace dep introduced.
+nix = { workspace = true, features = ["signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Plan 01 Task 2: config.rs unit tests parse a YAML snippet.
+serde_yaml = { workspace = true }
