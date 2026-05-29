@@ -122,6 +122,20 @@ ironhermes status
 
 Prints the active provider, model, and session store path.
 
+**Queue and pacing controls (TUI):**
+
+While a turn is streaming, queue follow-ups so the agent picks them up FIFO when the current turn finishes — without waiting in a blank prompt.
+
+| Command | Effect |
+|---------|--------|
+| `/queue <message>` | Push a prompt onto the session queue. Drained automatically when the in-flight turn finishes. Cap is 128 items (oldest survives — drop-newest). |
+| `/pause` | Toggle the drain pause. Queued items stay buffered until you `/unpause`. |
+| `/unpause` | Resume drain. Informational no-op if not paused. |
+| `/new` (alias `/reset`) | Clear the queue and reset pause state before starting a new session. |
+| `/stop` | Clear the queue first, then cancel the in-flight turn. |
+
+The status bar shows a `Queue: N` pill (or `Queue: N (paused)`) when N > 0, read live each frame from the underlying queue. On a streaming error, drain auto-pauses so the next `/unpause` is an explicit confirm.
+
 ---
 
 ## Configuration

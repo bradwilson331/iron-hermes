@@ -59,6 +59,9 @@ ironhermes/
 | `MemoryProvider` / `MemoryStore` / `MemoryTarget` | trait + structs | Memory backend abstraction and store wrapper |
 | `CommandContext` | struct | Per-command execution context threaded through slash commands |
 | `CommandRouter` / `CommandDef` / `CommandCategory` | structs | Slash-command registration and routing |
+| `MessageQueue<K>` | trait | Cross-consumer FIFO abstraction: `try_push` / `pop` / `len` / `clear`. Implemented by `ironhermes-gateway::SessionQueue` and consumed by the TUI for `/queue`. Generic key bound `Hash + Eq + Clone + Send + Sync + 'static` so downstream channels (web UI, Discord, Slack) can pick their own keying scheme (Phase 36.17.3, D-01) |
+| `QueueError` / `MAX_QUEUE_DEPTH` / `WARN_QUEUE_DEPTH` | enum + consts | `CapacityReached { session_key, max }` plus the cap=128 / warn=96 constants enforced at the `try_push` source (Phase 36.17.3, T-01 mitigation) |
+| `SessionKey` | struct | Per-session FIFO key: `Platform` + chat id + optional user id. Lives in core so every queue consumer references the same key shape; re-exported from `ironhermes-gateway::session` for back-compat (Phase 36.17.3, D-03) |
 | `TokenEstimator` / `init_global_estimator` | struct + fn | tiktoken-rs token counting with singleton warm-up |
 | `HermesError` / `Result` | type aliases | Unified error type |
 | `Workspace` / `resolve_workspace_from_cwd` | struct + fn | Walk-up cwd resolver for workspace root detection |
@@ -398,6 +401,7 @@ Tool modules (each exports one or more `Tool` implementations):
 | `GatewaySession` | struct | Per-user session state and message history |
 | `StreamConsumer` | struct | Consumes streaming LLM responses and accumulates text |
 | `UserQueueManager` | struct | Per-user message queues with backpressure |
+| `SessionQueue` | struct | Per-session FIFO buffer keyed by `SessionKey`. Implements `ironhermes_core::queue::MessageQueue<SessionKey>` via a `String`→`MessageEvent` adapter so the TUI (and future web/Discord/Slack queues) share one trait surface; the concrete `try_push(&SessionKey, MessageEvent)` API stays unchanged for gateway call sites (Phase 36.17.3, D-02) |
 | `BackoffState` | struct | Exponential backoff for long-polling errors |
 | `GatewayPidRecord` / `PidLockGuard` / `acquire_pid_lock` / `read_gateway_pid` / `write_gateway_pid` / `is_pid_alive` / `PidLiveness` | struct + fns | PID file management for single-instance enforcement |
 
