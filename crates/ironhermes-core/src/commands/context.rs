@@ -201,6 +201,31 @@ pub trait CronJobReader: Send + Sync {
 }
 
 // =============================================================================
+// KanbanStoreReader trait — Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
+// =============================================================================
+
+/// Trait for reading kanban board state from the `/kanban` slash command handler.
+///
+/// Mirrors CronJobReader (Phase 22.4.2.1 Plan 01) for cycle-break — declared here
+/// in ironhermes-core so CommandContext can hold a kanban store handle without core
+/// depending on ironhermes-kanban (which depends on ironhermes-core, creating a cycle).
+///
+/// The concrete implementation `KanbanStoreReaderImpl` lives in `ironhermes-cli`
+/// (the leaf crate) and wraps `Arc<Mutex<KanbanStore>>`.
+pub trait KanbanStoreReader: Send + Sync {
+    /// Returns the CLI table format for all tasks (columns: ID STATUS ASSIGNEE PRI TITLE).
+    fn list_text(&self) -> String;
+    /// Returns the multi-line detail view for a specific task ID.
+    /// Returns None if the task does not exist.
+    fn show_text(&self, id: &str) -> Option<String>;
+    /// Returns the scratch-workspace discoverability tip text.
+    fn tip_text(&self) -> String;
+    /// Returns a message directing the user to use the CLI for a deferred subverb.
+    /// Format: "/kanban {name}: use 'ironhermes kanban {name}' from the CLI for v1."
+    fn deferred_subverb_message(&self, name: &str) -> String;
+}
+
+// =============================================================================
 // ToolsetSessionHandle trait — Phase 25 Plan 04 (D-06)
 // =============================================================================
 
@@ -447,6 +472,10 @@ pub struct CommandContext {
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-cron.
     pub cron_store: Option<Arc<dyn CronJobReader>>,
 
+    /// Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader handle for `/kanban` slash UI.
+    /// Option<Arc<dyn>> to avoid circular dep with ironhermes-kanban.
+    pub kanban_store: Option<Arc<dyn KanbanStoreReader>>,
+
     /// Phase 25 Plan 04 (D-06): ToolsetSessionHandle for `/toolset` session-only mutations.
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-tools.
     /// Slash command enable/disable mutate ONLY the session's live toolset config; they do
@@ -494,6 +523,8 @@ impl CommandContext {
             agent_loop: None,
             // Phase 22.4.2.1 Plan 01: CronJobReader for /cron slash UI.
             cron_store: None,
+            // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader for /kanban slash UI.
+            kanban_store: None,
             // Phase 25 Plan 04 (D-06): ToolsetSessionHandle for /toolset slash UI.
             toolset_session: None,
             // Phase 25.3 D-W-2: Workspace newtype for /sessions filter + Curator output destination.
@@ -602,6 +633,13 @@ impl CommandContext {
     /// Builder: attach a CronJobReader handle for `/cron` slash UI (Phase 22.4.2.1 Plan 01).
     pub fn with_cron_store(mut self, store: Arc<dyn CronJobReader>) -> Self {
         self.cron_store = Some(store);
+        self
+    }
+
+    /// Builder: attach a KanbanStoreReader handle for `/kanban` slash UI
+    /// (Phase 36.3.7.0 Plan 02 — BUG-36.3.7-02). Mirrors `with_cron_store` cycle-break pattern.
+    pub fn with_kanban_store(mut self, store: Arc<dyn KanbanStoreReader>) -> Self {
+        self.kanban_store = Some(store);
         self
     }
 
