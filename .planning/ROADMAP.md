@@ -533,13 +533,13 @@ Plans:
 **Goal:** Close the three live-runtime bugs surfaced by 36.3.7's deferred UAT-09-A and UAT-09-B (see `.planning/phases/36.3.7-kanban-multi-agent-board-kanban-tools/36.3.7-09-SUMMARY.md` Addendum). All three are wire-up gaps the automated test surface and gsd-verifier missed: receiver-end of `--skills`, missing handler for `/kanban` slash, and off-by-one in failure circuit-breaker.
 **Requirements**: BUG-36.3.7-01 (drop `--skills kanban-worker` auto-pass from `worker_spawn.rs:183` — plan 05's env-gated injection already handles tool registration); BUG-36.3.7-02 (add `cmd_kanban` handler in `crates/ironhermes-core/src/commands/handlers.rs` mirroring `cmd_cron` at line 1062, route subverbs to in-process `KanbanStore`, add `"kanban" =>` dispatch arm); BUG-36.3.7-03 (confirm D-12 intent then change `>` to `>=` in dispatcher.rs failure-limit check); re-run UAT-09-A end-to-end (worker reaches `done`) and UAT-09-B (`/kanban list` in interactive `chat` prints CLI table, sub-second, no LLM tokens).
 **Depends on:** Phase 36.3.7
-**Plans:** 3/4 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 - [x] 36.3.7.0-01-PLAN.md — Drop `--skills` argv from worker_spawn.rs; add HERMES_KANBAN_TASK_SKILLS env carrier; receiver-end test (Wave 1)
 - [x] 36.3.7.0-02-PLAN.md — Add cmd_kanban handler + dispatch arm + KanbanStoreReader trait + KanbanStoreReaderImpl + build_cmd_ctx wiring + receiver dispatch-chain test (Wave 1)
 - [x] 36.3.7.0-03-PLAN.md — D-12 determination commit + hook apply_circuit_breaker into detect_crashed_workers path + 2 receiver-end tests on the crashed path (Wave 1)
-- [ ] 36.3.7.0-04-PLAN.md — Re-run UAT-09-A + UAT-09-B against post-fix binary; capture evidence; write phase-close SUMMARY with Meta-learning receiver-end-gap rule (Wave 2, human-verify checkpoint)
+- [x] 36.3.7.0-04-PLAN.md — Re-run UAT-09-A + UAT-09-B against post-fix binary; capture evidence; write phase-close SUMMARY with Meta-learning receiver-end-gap rule (Wave 2, human-verify checkpoint)
 
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 
