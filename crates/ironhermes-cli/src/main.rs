@@ -27,6 +27,12 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+// Phase 36.3.7 Plan 05 (D-26/D-20): Kanban worker prompt injection + tool registration.
+// When HERMES_KANBAN_TASK is present at process start, inject KANBAN_GUIDANCE into the
+// PromptBuilder and register the 6 kanban_* tools on the session's ToolRegistry.
+use ironhermes_kanban::{KANBAN_GUIDANCE, KanbanStore};
+use ironhermes_kanban::tools::register_kanban_tools;
+
 mod batch;
 mod config_cli;
 mod cron;
@@ -254,6 +260,57 @@ fn should_use_classic_tui(cli: &Cli) -> bool {
         return true;
     }
     false
+}
+
+/// Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE into the PromptBuilder
+/// when the process was spawned as a Kanban worker (HERMES_KANBAN_TASK is set).
+///
+/// Must be called AFTER `load_skills()` and BEFORE `build_system_message()` so the
+/// overlay is included in the cached prefix (slots 1-6) but does not affect
+/// non-worker sessions (zero footprint guarantee per D-26).
+fn inject_kanban_guidance_if_worker(prompt_builder: &mut PromptBuilder) {
+    if std::env::var("HERMES_KANBAN_TASK").is_ok() {
+        // activate_skill prepends (name, body) to skill_overlays which are
+        // injected into the system message in build_system_message().
+        prompt_builder.activate_skill("KANBAN_GUIDANCE", KANBAN_GUIDANCE);
+        tracing::debug!("KANBAN_GUIDANCE overlay applied for worker session");
+    }
+}
+
+/// Phase 36.3.7 Plan 05 (D-20): Register the 6 kanban_* tools on `registry`
+/// when the process is a Kanban worker (HERMES_KANBAN_TASK present) or when the
+/// "kanban" toolset is explicitly enabled in profile config.
+///
+/// Worker mode (HERMES_KANBAN_TASK set): opens kanban.db and registers with
+/// `explicit_enable = false` — the tools gate on the env var themselves.
+///
+/// Orchestrator mode (config.toolsets contains "kanban"): registers with
+/// `explicit_enable = true` so the 6 tools are visible without the env var.
+async fn register_kanban_tools_if_applicable(
+    registry: &Arc<RwLock<ToolRegistry>>,
+    toolsets: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    let orchestrator_mode = toolsets.contains("kanban");
+
+    if worker_mode || orchestrator_mode {
+        let store = match KanbanStore::open_default() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to open kanban.db — kanban tools unavailable");
+                return Ok(());
+            }
+        };
+        let store_arc = Arc::new(tokio::sync::Mutex::new(store));
+        let explicit_enable = orchestrator_mode && !worker_mode;
+        register_kanban_tools(&mut *registry.write().await, store_arc, explicit_enable);
+        tracing::debug!(
+            worker_mode,
+            orchestrator_mode,
+            "Kanban tools registered on session ToolRegistry"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -766,6 +823,14 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
+    // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
+    inject_kanban_guidance_if_worker(&mut prompt_builder);
+    // Phase 36.3.7 Plan 05 (D-20): Register kanban tools when worker/orchestrator mode.
+    register_kanban_tools_if_applicable(
+        runtime.registry(),
+        &runtime.merged_tools().enabled_toolset_names(),
+    )
+    .await?;
     let system_msg = prompt_builder.build_system_message();
 
     let user_msg = ChatMessage::user(prompt);
@@ -1356,6 +1421,14 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
+    // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
+    inject_kanban_guidance_if_worker(&mut prompt_builder);
+    // Phase 36.3.7 Plan 05 (D-20): Register kanban tools when worker/orchestrator mode.
+    register_kanban_tools_if_applicable(
+        &registry,
+        &runtime.merged_tools().enabled_toolset_names(),
+    )
+    .await?;
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];
