@@ -1,0 +1,794 @@
+//! `KanbanStore` — durable SQLite store for the kanban kernel (Plan 02, D-04).
+//!
+//! Mirrors the `ironhermes-state` `StateStore` open/migration idiom:
+//! - `create_dir_all` parent on open
+//! - `busy_timeout(5000 ms)`
+//! - `execute_batch(SCHEMA_SQL)` (idempotent DDL)
+//! - schema_version row check → insert on first run / migrate on upgrade
+//!
+//! All write operations use `rusqlite::params!` bindings — no `format!`-
+//! interpolated SQL (T-36.3.7-02-05 / Threat Register).
+
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Context as _;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
+
+use crate::error::{KanbanError, Result};
+use crate::events::KanbanEventKind;
+use crate::paths::validate_dir_workspace;
+use crate::schema::{SCHEMA_SQL, SCHEMA_VERSION, run_migrations};
+use crate::types::{KanbanStatus, Task, TaskComment, TaskRun};
+
+// ---------------------------------------------------------------------------
+// Public option / filter types
+// ---------------------------------------------------------------------------
+
+/// Options for [`KanbanStore::create_task`].
+#[derive(Debug, Clone, Default)]
+pub struct CreateTaskOptions {
+    pub body: Option<String>,
+    /// Parent task ids. Links are inserted (with tenant check) after the task row.
+    pub parents: Vec<String>,
+    pub tenant: Option<String>,
+    pub workspace: Option<String>,
+    pub skills: Option<Vec<String>>,
+    pub priority: Option<i64>,
+    /// When set, `create_task` short-circuits to the existing task if the key
+    /// already exists (D-24).
+    pub idempotency_key: Option<String>,
+    pub scheduled_at: Option<f64>,
+    pub max_runtime_seconds: Option<i64>,
+    pub max_retries: Option<i64>,
+    /// Put task in `triage` status instead of `ready` (D-06).
+    pub triage: bool,
+    /// Profile slug that created the task (D-22 `created_cards` gate).
+    pub created_by: Option<String>,
+}
+
+/// Filters for [`KanbanStore::list_tasks`].
+#[derive(Debug, Clone, Default)]
+pub struct ListFilters {
+    pub assignee: Option<String>,
+    pub status: Option<String>,
+    pub tenant: Option<String>,
+    /// When false (default) archived tasks are excluded.
+    pub archived: bool,
+    pub limit: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// KanbanStore
+// ---------------------------------------------------------------------------
+
+/// Durable SQLite store for the kanban kernel.
+pub struct KanbanStore {
+    pub(crate) conn: Connection,
+}
+
+impl KanbanStore {
+    /// Open (or create) a database at `path`.
+    ///
+    /// - Creates parent directories if missing.
+    /// - Applies `PRAGMA journal_mode=WAL` and `foreign_keys=ON`.
+    /// - Runs the migration ladder if the DB was opened before.
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create kanban dir {}", parent.display()))?;
+        }
+
+        let conn = Connection::open(path)
+            .with_context(|| format!("open kanban DB at {}", path.display()))?;
+
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+
+        let mut store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    /// Open the default board DB at `~/.ironhermes/kanban.db`.
+    pub fn open_default() -> Result<Self> {
+        Self::new(crate::paths::kanban_db_path())
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema management
+    // -----------------------------------------------------------------------
+
+    fn init_schema(&mut self) -> Result<()> {
+        // Idempotent DDL — CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS.
+        self.conn.execute_batch(SCHEMA_SQL)?;
+
+        let current: Option<i64> = self
+            .conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+
+        match current {
+            None => {
+                self.conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
+            Some(v) => {
+                run_migrations(&mut self.conn, v)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    fn now() -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    }
+
+    fn new_id(prefix: &str) -> String {
+        // `t_` + first 16 hex chars of a v4 UUID (no hyphens).
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        format!("{prefix}_{}", &id[..16])
+    }
+
+    fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+        Ok(Task {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            body: row.get(2)?,
+            assignee: row.get(3)?,
+            status: row.get(4)?,
+            priority: row.get(5)?,
+            tenant: row.get(6)?,
+            workspace: row.get(7)?,
+            skills: row.get(8)?,
+            idempotency_key: row.get(9)?,
+            claim_lock: row.get(10)?,
+            claim_expires: row.get(11)?,
+            current_run_id: row.get(12)?,
+            consecutive_failures: row.get(13)?,
+            max_retries: row.get(14)?,
+            max_runtime_seconds: row.get(15)?,
+            scheduled_at: row.get(16)?,
+            workflow_template_id: row.get(17)?,
+            current_step_key: row.get(18)?,
+            created_by: row.get(19)?,
+            created_at: row.get(20)?,
+            started_at: row.get(21)?,
+            ended_at: row.get(22)?,
+        })
+    }
+
+    /// Append an event row and return the new auto-increment id.
+    fn append_event_internal(
+        conn: &Connection,
+        task_id: &str,
+        run_id: Option<&str>,
+        kind: KanbanEventKind,
+        payload: Option<&Value>,
+        now: f64,
+    ) -> Result<i64> {
+        let payload_str = payload.map(|v| v.to_string());
+        conn.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, run_id, kind.as_str(), payload_str, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    // -----------------------------------------------------------------------
+    // Public CRUD
+    // -----------------------------------------------------------------------
+
+    /// Create a new task. Respects idempotency_key short-circuit (D-24).
+    pub fn create_task(
+        &mut self,
+        title: &str,
+        assignee: &str,
+        opts: CreateTaskOptions,
+    ) -> Result<Task> {
+        // Assignee validation (D-17 / CONTEXT.md code_context).
+        ironhermes_core::profile::validate_profile_name(assignee)
+            .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+
+        // Workspace validation for dir: prefix (D-31 / Pitfall 6).
+        if let Some(ref ws) = opts.workspace {
+            validate_dir_workspace(ws)?;
+        }
+
+        // Idempotency short-circuit (D-24).
+        if let Some(ref key) = opts.idempotency_key {
+            if let Some(existing) = self.find_by_idempotency_key(key)? {
+                return Ok(existing);
+            }
+        }
+
+        let now = Self::now();
+        let id = Self::new_id("t");
+
+        // Determine initial status (D-06).
+        let status = if opts.triage {
+            KanbanStatus::Triage.as_str()
+        } else if opts.parents.is_empty() {
+            KanbanStatus::Ready.as_str()
+        } else {
+            KanbanStatus::Todo.as_str()
+        };
+
+        let skills_json = opts
+            .skills
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()?;
+
+        self.conn.execute(
+            "INSERT INTO tasks \
+             (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+              idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
+              scheduled_at, created_by, created_at) \
+             VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                id,
+                title,
+                opts.body,
+                assignee,
+                status,
+                opts.priority.unwrap_or(0),
+                opts.tenant,
+                opts.workspace,
+                skills_json,
+                opts.idempotency_key,
+                opts.max_retries,
+                opts.max_runtime_seconds,
+                opts.scheduled_at,
+                opts.created_by,
+                now,
+            ],
+        )?;
+
+        // Insert parent links (honors D-39 tenant check inside insert_link).
+        for parent_id in &opts.parents {
+            self.insert_link(parent_id, &id)?;
+        }
+
+        // Append `created` event.
+        let payload = serde_json::json!({
+            "assignee": assignee,
+            "status": status,
+            "parents": opts.parents,
+            "tenant": opts.tenant,
+        });
+        Self::append_event_internal(&self.conn, &id, None, KanbanEventKind::Created, Some(&payload), now)?;
+
+        self.get_task(&id)
+    }
+
+    /// Look up a task by id. Returns `KanbanError::TaskNotFound` on miss.
+    pub fn get_task(&self, id: &str) -> Result<Task> {
+        self.conn
+            .query_row(
+                "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                 idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+                 max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+                 current_step_key, created_by, created_at, started_at, ended_at \
+                 FROM tasks WHERE id = ?1",
+                params![id],
+                Self::row_to_task,
+            )
+            .optional()?
+            .ok_or_else(|| KanbanError::TaskNotFound(id.to_string()))
+    }
+
+    /// List tasks with optional filters.
+    ///
+    /// `archived` tasks are excluded by default unless `filters.archived = true`.
+    pub fn list_tasks(&self, filters: ListFilters) -> Result<Vec<Task>> {
+        let mut sql = String::from(
+            "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+             idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+             max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+             current_step_key, created_by, created_at, started_at, ended_at \
+             FROM tasks WHERE 1=1",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut idx = 1usize;
+
+        if !filters.archived {
+            sql.push_str(" AND status != 'archived'");
+        }
+        if let Some(ref a) = filters.assignee {
+            sql.push_str(&format!(" AND assignee = ?{idx}"));
+            args.push(Box::new(a.clone()));
+            idx += 1;
+        }
+        if let Some(ref s) = filters.status {
+            sql.push_str(&format!(" AND status = ?{idx}"));
+            args.push(Box::new(s.clone()));
+            idx += 1;
+        }
+        if let Some(ref t) = filters.tenant {
+            sql.push_str(&format!(" AND tenant = ?{idx}"));
+            args.push(Box::new(t.clone()));
+            idx += 1;
+        }
+
+        sql.push_str(" ORDER BY created_at ASC");
+
+        if let Some(limit) = filters.limit {
+            sql.push_str(&format!(" LIMIT ?{idx}"));
+            args.push(Box::new(limit));
+        }
+
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let tasks = stmt
+            .query_map(refs.as_slice(), Self::row_to_task)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tasks)
+    }
+
+    /// Add a comment to a task. Returns the new `TaskComment`.
+    pub fn add_comment(&mut self, task_id: &str, author: &str, body: &str) -> Result<TaskComment> {
+        // Verify task exists.
+        self.get_task(task_id)?;
+
+        let id = Self::new_id("c");
+        let now = Self::now();
+
+        self.conn.execute(
+            "INSERT INTO task_comments (id, task_id, author, body, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, task_id, author, body, now],
+        )?;
+
+        Ok(TaskComment {
+            id,
+            task_id: task_id.to_string(),
+            author: author.to_string(),
+            body: body.to_string(),
+            created_at: now,
+        })
+    }
+
+    /// Insert a parent→child dependency link (D-39 tenant check).
+    ///
+    /// Rejects with `TenantMismatch` when **both** tasks have a non-NULL,
+    /// non-equal tenant (D-39: "use a tenant-less parent if cross-tenant fanout
+    /// is needed").
+    pub fn insert_link(&mut self, parent_id: &str, child_id: &str) -> Result<()> {
+        let parent_tenant: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT tenant FROM tasks WHERE id = ?1",
+                params![parent_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        let child_tenant: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT tenant FROM tasks WHERE id = ?1",
+                params![child_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        // D-39: reject only when BOTH are Some and unequal.
+        if let (Some(p), Some(c)) = (&parent_tenant, &child_tenant) {
+            if p != c {
+                return Err(KanbanError::TenantMismatch {
+                    parent: p.clone(),
+                    child: c.clone(),
+                });
+            }
+        }
+
+        let now = Self::now();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+             VALUES (?1, ?2, ?3)",
+            params![parent_id, child_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Append an event row for a task and return the new event id.
+    pub fn append_event(
+        &mut self,
+        task_id: &str,
+        run_id: Option<&str>,
+        kind: KanbanEventKind,
+        payload: Option<&Value>,
+    ) -> Result<i64> {
+        let now = Self::now();
+        Self::append_event_internal(&self.conn, task_id, run_id, kind, payload, now)
+    }
+
+    /// Return the existing task whose `idempotency_key` matches, or `None`.
+    pub fn find_by_idempotency_key(&self, key: &str) -> Result<Option<Task>> {
+        self.conn
+            .query_row(
+                "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                 idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+                 max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+                 current_step_key, created_by, created_at, started_at, ended_at \
+                 FROM tasks WHERE idempotency_key = ?1",
+                params![key],
+                Self::row_to_task,
+            )
+            .optional()
+            .map_err(KanbanError::from)
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle mutations
+    // -----------------------------------------------------------------------
+
+    /// Complete a task (D-22 dual-gate + created_cards + hallucinated_ref scan).
+    ///
+    /// Runs inside a `BEGIN IMMEDIATE` transaction for the `expected_run_id`
+    /// assertion + status update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_task(
+        &mut self,
+        task_id: &str,
+        summary: Option<&str>,
+        metadata: Option<&Value>,
+        result: Option<&str>,
+        expected_run_id: Option<&str>,
+        created_cards: Option<&[String]>,
+        current_profile: &str,
+    ) -> Result<()> {
+        use rusqlite::TransactionBehavior;
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Self::now();
+
+        // (a) Load task.
+        let task: Task = tx
+            .query_row(
+                "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                 idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+                 max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+                 current_step_key, created_by, created_at, started_at, ended_at \
+                 FROM tasks WHERE id = ?1",
+                params![task_id],
+                Self::row_to_task,
+            )
+            .optional()?
+            .ok_or_else(|| KanbanError::TaskNotFound(task_id.to_string()))?;
+
+        // (b) expected_run_id gate (D-22, D-41).
+        if let Some(eid) = expected_run_id {
+            crate::cas::assert_run_id_tx(&tx, task_id, eid)?;
+        }
+
+        // (c) created_cards validation (D-22).
+        if let Some(cards) = created_cards {
+            let mut phantom_ids: Vec<String> = Vec::new();
+            let mut wrong_profile_ids: Vec<String> = Vec::new();
+
+            for card_id in cards {
+                let row: Option<Option<String>> = tx
+                    .query_row(
+                        "SELECT created_by FROM tasks WHERE id = ?1",
+                        params![card_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+
+                match row {
+                    None => phantom_ids.push(card_id.clone()),
+                    Some(created_by) => {
+                        if created_by.as_deref() != Some(current_profile) {
+                            wrong_profile_ids.push(card_id.clone());
+                        }
+                    }
+                }
+            }
+
+            if !phantom_ids.is_empty() || !wrong_profile_ids.is_empty() {
+                // Permanent completion_rejected event (D-22).
+                let payload = serde_json::json!({
+                    "phantom_ids": phantom_ids,
+                    "wrong_profile_ids": wrong_profile_ids,
+                });
+                tx.execute(
+                    "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) \
+                     VALUES (?1, ?2, 'completion_rejected', ?3, ?4)",
+                    params![task_id, task.current_run_id, payload.to_string(), now],
+                )?;
+                tx.commit()?;
+                return Err(KanbanError::CreatedCardsRejected {
+                    phantom: phantom_ids,
+                    wrong_profile: wrong_profile_ids,
+                });
+            }
+        }
+
+        // (d) Advisory free-form prose scan for unresolved t_<hex> references.
+        if let Some(s) = summary {
+            let re = regex::Regex::new(r"t_[0-9a-f]{8,}").unwrap();
+            let unresolved: Vec<String> = re
+                .find_iter(s)
+                .map(|m| m.as_str().to_string())
+                .filter(|id| {
+                    tx.query_row(
+                        "SELECT COUNT(*) FROM tasks WHERE id = ?1",
+                        params![id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                        == 0
+                })
+                .collect();
+
+            if !unresolved.is_empty() {
+                let payload = serde_json::json!({ "unresolved_ids": unresolved });
+                tx.execute(
+                    "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) \
+                     VALUES (?1, ?2, 'hallucinated_ref', ?3, ?4)",
+                    params![task_id, task.current_run_id, payload.to_string(), now],
+                )?;
+            }
+        }
+
+        // (e) Set status = 'done', ended_at = now.
+        tx.execute(
+            "UPDATE tasks SET status='done', ended_at=?1 WHERE id=?2",
+            params![now, task_id],
+        )?;
+
+        // (f) Close current run row.
+        let metadata_str = metadata.map(|v| v.to_string());
+        if let Some(ref run_id) = task.current_run_id {
+            tx.execute(
+                "UPDATE task_runs SET outcome='completed', summary=?1, metadata=?2, ended_at=?3 \
+                 WHERE id=?4",
+                params![summary, metadata_str, now, run_id],
+            )?;
+        }
+
+        // (g) Synthesize a zero-duration run if task was never claimed.
+        if task.current_run_id.is_none()
+            && (summary.is_some() || metadata.is_some() || result.is_some())
+        {
+            let synth_id = format!("r_{}", uuid::Uuid::new_v4().simple());
+            tx.execute(
+                "INSERT INTO task_runs (id, task_id, claim_lock, started_at, ended_at, \
+                 outcome, summary, metadata) \
+                 VALUES (?1, ?2, 'synthetic', ?3, ?3, 'completed', ?4, ?5)",
+                params![synth_id, task_id, now, summary, metadata_str],
+            )?;
+        }
+
+        // (h) Clear current_run_id.
+        tx.execute(
+            "UPDATE tasks SET current_run_id=NULL WHERE id=?1",
+            params![task_id],
+        )?;
+
+        // (i) Append completed event.
+        let result_len = result.map(|r| r.len()).unwrap_or(0);
+        let summary_preview = summary
+            .map(|s| s.lines().next().unwrap_or("").chars().take(400).collect::<String>())
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "result_len": result_len,
+            "summary": summary_preview,
+        });
+        tx.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) \
+             VALUES (?1, ?2, 'completed', ?3, ?4)",
+            params![task_id, task.current_run_id, payload.to_string(), now],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Block a task with a reason (D-23 / D-22 expected_run_id gate).
+    pub fn block_task(
+        &mut self,
+        task_id: &str,
+        reason: &str,
+        expected_run_id: Option<&str>,
+    ) -> Result<()> {
+        use rusqlite::TransactionBehavior;
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Self::now();
+
+        let task: Task = tx
+            .query_row(
+                "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                 idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+                 max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+                 current_step_key, created_by, created_at, started_at, ended_at \
+                 FROM tasks WHERE id = ?1",
+                params![task_id],
+                Self::row_to_task,
+            )
+            .optional()?
+            .ok_or_else(|| KanbanError::TaskNotFound(task_id.to_string()))?;
+
+        if let Some(eid) = expected_run_id {
+            crate::cas::assert_run_id_tx(&tx, task_id, eid)?;
+        }
+
+        tx.execute(
+            "UPDATE tasks SET status='blocked' WHERE id=?1",
+            params![task_id],
+        )?;
+
+        if let Some(ref run_id) = task.current_run_id {
+            tx.execute(
+                "UPDATE task_runs SET outcome='blocked', error=?1, ended_at=?2 WHERE id=?3",
+                params![reason, now, run_id],
+            )?;
+        }
+
+        // Synthesize run if never claimed but summary/reason provided.
+        if task.current_run_id.is_none() {
+            let synth_id = format!("r_{}", uuid::Uuid::new_v4().simple());
+            tx.execute(
+                "INSERT INTO task_runs (id, task_id, claim_lock, started_at, ended_at, \
+                 outcome, error) \
+                 VALUES (?1, ?2, 'synthetic', ?3, ?3, 'blocked', ?4)",
+                params![synth_id, task_id, now, reason],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE tasks SET current_run_id=NULL WHERE id=?1",
+            params![task_id],
+        )?;
+
+        let payload = serde_json::json!({ "reason": reason });
+        tx.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) \
+             VALUES (?1, ?2, 'blocked', ?3, ?4)",
+            params![task_id, task.current_run_id, payload.to_string(), now],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Unblock a task — resets to `ready`, clears claim fields.
+    pub fn unblock_task(&mut self, task_id: &str) -> Result<()> {
+        let now = Self::now();
+        self.conn.execute(
+            "UPDATE tasks SET status='ready', claim_lock=NULL, current_run_id=NULL, \
+             claim_expires=NULL WHERE id=?1",
+            params![task_id],
+        )?;
+        Self::append_event_internal(&self.conn, task_id, None, KanbanEventKind::Unblocked, None, now)?;
+        Ok(())
+    }
+
+    /// Archive a task. If the task is currently `running`, closes the active
+    /// run with outcome='reclaimed' and emits a `reclaimed` event first
+    /// (reference.md "Reclaimed runs from status changes").
+    pub fn archive_task(&mut self, task_id: &str) -> Result<()> {
+        let now = Self::now();
+        let task = self.get_task(task_id)?;
+
+        if task.status == KanbanStatus::Running.as_str() {
+            // Close current run as reclaimed.
+            if let Some(ref run_id) = task.current_run_id {
+                self.conn.execute(
+                    "UPDATE task_runs SET outcome='reclaimed', ended_at=?1 WHERE id=?2",
+                    params![now, run_id],
+                )?;
+            }
+            let payload = serde_json::json!({ "stale_lock": task.claim_lock });
+            Self::append_event_internal(
+                &self.conn,
+                task_id,
+                task.current_run_id.as_deref(),
+                KanbanEventKind::Reclaimed,
+                Some(&payload),
+                now,
+            )?;
+        }
+
+        self.conn.execute(
+            "UPDATE tasks SET status='archived', claim_lock=NULL, current_run_id=NULL, \
+             claim_expires=NULL WHERE id=?1",
+            params![task_id],
+        )?;
+        Self::append_event_internal(&self.conn, task_id, None, KanbanEventKind::Archived, None, now)?;
+        Ok(())
+    }
+
+    /// Assign a task to a new profile (validates via `validate_profile_name`).
+    pub fn assign_task(&mut self, task_id: &str, new_assignee: &str) -> Result<()> {
+        ironhermes_core::profile::validate_profile_name(new_assignee)
+            .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+        let now = Self::now();
+        self.conn.execute(
+            "UPDATE tasks SET assignee=?1 WHERE id=?2",
+            params![new_assignee, task_id],
+        )?;
+        let payload = serde_json::json!({ "assignee": new_assignee });
+        Self::append_event_internal(
+            &self.conn,
+            task_id,
+            None,
+            KanbanEventKind::Assigned,
+            Some(&payload),
+            now,
+        )?;
+        Ok(())
+    }
+
+    /// Return all events for a task ordered by id (insertion order).
+    pub fn get_events(&self, task_id: &str) -> Result<Vec<crate::events::KanbanEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, run_id, kind, payload, created_at \
+             FROM task_events WHERE task_id = ?1 ORDER BY id ASC",
+        )?;
+        let events = stmt
+            .query_map(params![task_id], |r| {
+                Ok(crate::events::KanbanEvent {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    run_id: r.get(2)?,
+                    kind: r.get(3)?,
+                    payload: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
+    /// Return all runs for a task ordered by started_at.
+    pub fn get_runs(&self, task_id: &str) -> Result<Vec<TaskRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, claim_lock, claim_pid, started_at, ended_at, \
+             outcome, summary, metadata, error, log_path \
+             FROM task_runs WHERE task_id = ?1 ORDER BY started_at ASC",
+        )?;
+        let runs = stmt
+            .query_map(params![task_id], |r| {
+                Ok(TaskRun {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    claim_lock: r.get(2)?,
+                    claim_pid: r.get(3)?,
+                    started_at: r.get(4)?,
+                    ended_at: r.get(5)?,
+                    outcome: r.get(6)?,
+                    summary: r.get(7)?,
+                    metadata: r.get(8)?,
+                    error: r.get(9)?,
+                    log_path: r.get(10)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(runs)
+    }
+}

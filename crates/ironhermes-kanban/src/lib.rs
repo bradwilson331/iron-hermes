@@ -20,13 +20,20 @@
 //! [`KanbanEvent::kind`] are plain `String` so consumer crates don't take
 //! a dep on us for the enum.
 
+pub mod cas;
 pub mod config;
 pub mod error;
 pub mod events;
 pub mod paths;
 pub mod pid;
+pub mod schema;
+pub mod store;
 pub mod types;
 
+pub use cas::{
+    DEFAULT_CLAIM_TTL_SECONDS, assert_claim_lock, assert_run_id, atomic_claim, build_claim_lock,
+    release_claim, worker_write_gated,
+};
 pub use config::KanbanConfig;
 pub use error::{KanbanError, Result};
 pub use events::{KanbanEvent, KanbanEventKind, insert_event_sql};
@@ -35,6 +42,7 @@ pub use paths::{
     kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
 };
 pub use pid::is_pid_alive;
+pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
 pub use types::{KanbanStatus, Task, TaskComment, TaskLink, TaskRun};
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
