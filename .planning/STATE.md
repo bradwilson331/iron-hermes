@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.17.1 context gathered
-last_updated: "2026-05-28T23:56:01.755Z"
-last_activity: 2026-05-28 -- Phase 36.17.3 Plan 06 complete (TUI ↔ gateway queue wave 3 integration tests)
+status: verifying
+stopped_at: Phase 36.17.4 context gathered
+last_updated: "2026-05-29T01:25:09.690Z"
+last_activity: 2026-05-28 -- Phase 36.17.3 Plan 06 complete (TUI ↔ gateway queue wave 3 integration tests; full CLI + gateway suites green)
 progress:
   total_phases: 43
   completed_phases: 11
@@ -538,6 +538,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-28T23:56:01.749Z
-Stopped at: Phase 36.17.1 context gathered
-Resume file: None
+Last session: 2026-05-29T01:25:09.683Z
+Stopped at: Phase 36.17.4 context gathered
+Resume file: .planning/phases/36.17.4-wire-up-iron-hermes-ui-to-the-gateway-queue-slash-commands/36.17.4-CONTEXT.md
