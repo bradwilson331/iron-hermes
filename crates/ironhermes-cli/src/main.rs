@@ -125,6 +125,14 @@ enum Commands {
     Chat {
         /// Initial message to send
         message: Option<String>,
+        /// Phase 36.3.7 (D-15): run a single non-interactive prompt
+        /// (worker-spawn shape for kanban). Functionally equivalent to the
+        /// top-level `-e/--execute` flag — the dispatcher uses this form
+        /// (`ironhermes --profile P chat -q "work kanban task <id>"`) to
+        /// match upstream `hermes -p P chat -q` verbatim. Wins over
+        /// `message` when both are supplied.
+        #[arg(short = 'q', long = "query")]
+        query: Option<String>,
         /// Phase 21.7 Plan 08 (D-11 / D-12): enable autonomous (yolo) mode
         /// for this chat session. OR'd with the top-level `--yolo` flag and
         /// `autonomous.yolo` config key; CLI wins over config (D-12).
@@ -374,6 +382,7 @@ async fn main() -> Result<()> {
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat {
             ref message,
+            ref query,
             yolo: ref chat_yolo,
         }) => {
             // Phase 21.7 Plan 08 (D-12): OR top-level + subcommand yolo flags.
@@ -381,6 +390,15 @@ async fn main() -> Result<()> {
             // `hermes chat --yolo ...`. Either path reaches the REPL with the
             // same effective state.
             let cli_yolo_flag = cli.yolo || *chat_yolo;
+            // Phase 36.3.7 (D-15): `chat -q/--query <PROMPT>` runs the same
+            // non-interactive single-shot path as the top-level `-e/--execute`
+            // flag (worker-spawn shape: `ironhermes --profile P chat -q "..."`).
+            // When `query` is set, short-circuit through `run_single` and skip
+            // the interactive REPL entirely. `-e` on the top-level still wins
+            // when both are supplied to preserve back-compat for scripted callers.
+            if let Some(prompt) = query.clone() {
+                return run_single(&cli, prompt, cli_yolo_flag).await;
+            }
             // Phase 22.4 D-03/D-04: default to ratatui REPL; classic opt-out via
             // --classic-tui flag, IRONHERMES_CLASSIC_TUI=1 env var, or non-TTY.
             if should_use_classic_tui(&cli) {
