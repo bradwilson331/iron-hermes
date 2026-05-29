@@ -66,20 +66,29 @@ fn sibling_gates_not_widened_to_gateway() {
     );
 }
 
-/// CFG-03 INV-03: amendment doc comment present near the gate.
+/// CFG-03 INV-03: amendment doc comment present in the enclosing `async fn main` scope.
+///
+/// Phase 36.3.7.3 BUG-CLI-CFG-03-DOC-COMMENT-02: previously this test used a
+/// 1500-char window before the gate; Phase 36.3.7.0 Plan 05 added a
+/// legitimate comment block between the original CFG-03 marker and the
+/// gate, pushing the marker out of the window. The right semantic anchor
+/// is the function that contains the gate, not a byte distance.
 #[test]
 fn phase_amendment_doc_comment_present() {
     let gate_idx = MAIN_RS
         .find("Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None")
         .expect("widened gate must exist");
-    // Look at the 1500 chars preceding the gate (the doc-comment block).
-    let start = gate_idx.saturating_sub(1500);
-    let preamble = &MAIN_RS[start..gate_idx];
+    let fn_main_idx = MAIN_RS[..gate_idx]
+        .rfind("async fn main")
+        .expect("async fn main must exist before the gate");
+    let scope = &MAIN_RS[fn_main_idx..gate_idx];
     assert!(
-        preamble.contains("Phase 26.4.1") || preamble.contains("CFG-03"),
-        "Phase 26.4.1 CFG-03: expected an amendment doc comment referencing \
-         'Phase 26.4.1' or 'CFG-03' within the 1500 chars preceding the widened \
-         gate. Preamble was:\n{}",
-        preamble
+        scope.contains("Phase 26.4.1") && scope.contains("CFG-03"),
+        "Phase 26.4.1 CFG-03 (BUG-CLI-CFG-03-DOC-COMMENT-02): \
+         the CFG-03 amendment marker must appear inside the `async fn main` \
+         body that contains the widened gate. The slice from `async fn main` \
+         to the gate did not contain both 'Phase 26.4.1' and 'CFG-03'. \
+         Scope length: {} bytes.",
+        scope.len()
     );
 }
