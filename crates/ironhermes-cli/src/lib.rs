@@ -8,6 +8,7 @@
 //! genuinely need. Do NOT `pub use` internals that shouldn't become
 //! API.
 
+pub mod kanban;
 pub mod memory_cmd;
 pub mod setup;
 pub mod skills_cmd;

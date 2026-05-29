@@ -1,0 +1,827 @@
+//! Per-verb implementations for the `kanban` CLI subcommand.
+//!
+//! Each `cmd_<verb>` function opens `KanbanStore::open_default()` and
+//! calls the appropriate store method — no raw SQL in this file.
+//!
+//! Return value: `Result<i32>` where the integer is the process exit code
+//! (0 = success, 1 = error, 2 = D-34 bulk-summary refusal).
+
+use anyhow::{Context, Result, anyhow};
+use ironhermes_kanban::{
+    DispatcherContext, KanbanConfig, KanbanStore, StrandedReport, diagnose_stranded,
+    run_dispatch_tick,
+};
+use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
+use ironhermes_kanban::cas::{atomic_claim, build_claim_lock, release_claim};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
+
+use ironhermes_kanban::types::TaskComment;
+
+use super::format::{
+    format_assignees, format_diagnostics, format_event_line, format_runs_table, format_stats,
+    format_task_detail, format_task_json, format_task_table,
+};
+
+// ---------------------------------------------------------------------------
+// Helper: open the default store
+// ---------------------------------------------------------------------------
+
+fn open_store() -> Result<KanbanStore> {
+    KanbanStore::open_default().context("Failed to open kanban.db")
+}
+
+fn profile_from_env() -> String {
+    std::env::var("HERMES_PROFILE").unwrap_or_else(|_| "operator".to_string())
+}
+
+/// Fetch all comments for a task — not yet on KanbanStore public API; use raw conn.
+fn get_comments(store: &KanbanStore, task_id: &str) -> Result<Vec<TaskComment>> {
+    let mut stmt = store.conn.prepare(
+        "SELECT id, task_id, author, body, created_at \
+         FROM task_comments WHERE task_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![task_id], |row| {
+        Ok(TaskComment {
+            id: row.get(0)?,
+            task_id: row.get(1)?,
+            author: row.get(2)?,
+            body: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Delete a parent→child link — not yet on KanbanStore public API.
+fn delete_link(store: &mut KanbanStore, parent_id: &str, child_id: &str) -> Result<()> {
+    store.conn.execute(
+        "DELETE FROM task_links WHERE parent_id = ?1 AND child_id = ?2",
+        rusqlite::params![parent_id, child_id],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cmd_init
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_init() -> Result<i32> {
+    let path = ironhermes_kanban::kanban_db_path();
+    KanbanStore::open_default().context("Failed to initialize kanban DB")?;
+    println!("Initialized kanban DB at {}", path.display());
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_create
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_create(
+    title: String,
+    assignee: String,
+    body: Option<String>,
+    parents: Vec<String>,
+    tenant: Option<String>,
+    workspace: Option<String>,
+    skills: Vec<String>,
+    priority: Option<i64>,
+    triage: bool,
+    idempotency_key: Option<String>,
+    max_runtime: Option<String>,
+    max_retries: Option<i64>,
+    scheduled_at: Option<String>,
+    branch: Option<String>,
+    json: bool,
+) -> Result<i32> {
+    let mut store = open_store()?;
+
+    // Parse max_runtime (e.g. "30m", "3600")
+    let max_runtime_seconds: Option<i64> = max_runtime.as_deref().map(parse_duration_secs).transpose()?;
+
+    // Handle --branch: append as marker to body
+    let effective_body = match (body, branch) {
+        (Some(b), Some(br)) => Some(format!("{}\n\nbranch: {}", b, br)),
+        (None, Some(br)) => Some(format!("branch: {}", br)),
+        (b, None) => b,
+    };
+
+    let opts = CreateTaskOptions {
+        body: effective_body,
+        parents,
+        tenant,
+        workspace,
+        skills: if skills.is_empty() { None } else { Some(skills) },
+        priority,
+        idempotency_key,
+        scheduled_at: scheduled_at.as_deref().map(parse_timestamp).transpose()?,
+        max_runtime_seconds,
+        max_retries,
+        triage,
+        created_by: Some(profile_from_env()),
+    };
+
+    let task = store.create_task(&title, &assignee, opts)
+        .context("Failed to create task")?;
+
+    if json {
+        println!("{}", serde_json::json!({
+            "task_id": task.id,
+            "status": task.status,
+            "assignee": task.assignee,
+        }));
+    } else {
+        println!("{}", task.id);
+    }
+    Ok(0)
+}
+
+/// Parse a duration string like "30m", "2h", "3600" into seconds.
+fn parse_duration_secs(s: &str) -> Result<i64> {
+    if let Some(mins) = s.strip_suffix('m') {
+        return Ok(mins.parse::<i64>().context("Invalid minutes value")? * 60);
+    }
+    if let Some(hours) = s.strip_suffix('h') {
+        return Ok(hours.parse::<i64>().context("Invalid hours value")? * 3600);
+    }
+    s.parse::<i64>().context("Invalid duration (use e.g. '30m', '2h', or seconds)")
+}
+
+/// Parse an ISO-like timestamp or unix epoch string into epoch float.
+fn parse_timestamp(s: &str) -> Result<f64> {
+    // Try as plain float first
+    if let Ok(f) = s.parse::<f64>() {
+        return Ok(f);
+    }
+    Err(anyhow!("Could not parse timestamp '{}' — use a unix epoch float", s))
+}
+
+// ---------------------------------------------------------------------------
+// cmd_list
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_list(
+    mine: bool,
+    assignee: Option<String>,
+    status: Option<String>,
+    tenant: Option<String>,
+    archived: bool,
+    json: bool,
+) -> Result<i32> {
+    let store = open_store()?;
+
+    let effective_assignee = if mine {
+        Some(profile_from_env())
+    } else {
+        assignee
+    };
+
+    let filters = ListFilters {
+        assignee: effective_assignee,
+        status,
+        tenant,
+        archived,
+        limit: None,
+    };
+
+    let tasks = store.list_tasks(filters).context("Failed to list tasks")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
+    } else {
+        print!("{}", format_task_table(&tasks));
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_show
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_show(id: String, json: bool) -> Result<i32> {
+    let store = open_store()?;
+    let task = store.get_task(&id).context("Task not found")?;
+    let runs = store.get_runs(&id).context("Failed to load runs")?;
+    let events = store.get_events(&id).context("Failed to load events")?;
+    let comments = get_comments(&store, &id).unwrap_or_default();
+
+    if json {
+        println!("{}", format_task_json(&task, &runs, &events, &comments));
+    } else {
+        print!("{}", format_task_detail(&task, &runs, &events, &comments));
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_assign
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_assign(id: String, profile: String) -> Result<i32> {
+    let mut store = open_store()?;
+    // "none" sentinel → unassign (set to empty string)
+    let assignee = if profile.eq_ignore_ascii_case("none") { "" } else { &profile };
+    store.assign_task(&id, assignee).context("Failed to assign task")?;
+    println!("Assigned {} to '{}'", id, assignee);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_link / cmd_unlink
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_link(parent_id: String, child_id: String) -> Result<i32> {
+    let mut store = open_store()?;
+    store.insert_link(&parent_id, &child_id).context("Failed to create link")?;
+    println!("Linked {} → {}", parent_id, child_id);
+    Ok(0)
+}
+
+pub async fn cmd_unlink(parent_id: String, child_id: String) -> Result<i32> {
+    let mut store = open_store()?;
+    delete_link(&mut store, &parent_id, &child_id).context("Failed to delete link")?;
+    println!("Unlinked {} → {}", parent_id, child_id);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_claim
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_claim(id: String, ttl: Option<u64>) -> Result<i32> {
+    let mut store = open_store()?;
+    let hostname = ironhermes_kanban::pid::current_hostname();
+    let pid = std::process::id();
+    let lock = build_claim_lock(&hostname, pid);
+    let ttl_secs = ttl.unwrap_or(ironhermes_kanban::DEFAULT_CLAIM_TTL_SECONDS);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+
+    let won = atomic_claim(&mut store.conn, &id, &lock, pid, ttl_secs, now, &run_id)
+        .context("Failed to claim task")?;
+
+    if won {
+        println!("Claimed {} — run_id: {} lock: {}", id, run_id, lock);
+    } else {
+        eprintln!("Failed to claim {} (already claimed or not ready)", id);
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_comment
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_comment(id: String, body: String, author: Option<String>) -> Result<i32> {
+    let mut store = open_store()?;
+    let author = author.unwrap_or_else(|| profile_from_env());
+    store.add_comment(&id, &author, &body).context("Failed to add comment")?;
+    println!("Comment added to {}", id);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_complete
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_complete(
+    ids: Vec<String>,
+    result: Option<String>,
+    summary: Option<String>,
+    metadata: Option<String>,
+) -> Result<i32> {
+    // D-34: bulk complete with --summary/--metadata refused
+    if ids.len() > 1 && (summary.is_some() || metadata.is_some()) {
+        eprintln!(
+            "bulk complete with --summary/--metadata refused per D-34 — \
+             handoff is per-run; use individual complete calls or omit \
+             summary/metadata for bulk admin-close"
+        );
+        return Ok(2);
+    }
+
+    let mut store = open_store()?;
+    let profile = profile_from_env();
+    let metadata_val: Option<serde_json::Value> = metadata
+        .as_deref()
+        .map(|s| serde_json::from_str(s).context("--metadata must be valid JSON"))
+        .transpose()?;
+
+    let mut any_err = false;
+    for id in &ids {
+        match store.complete_task(
+            id,
+            summary.as_deref(),
+            metadata_val.as_ref(),
+            result.as_deref(),
+            None,
+            None,
+            &profile,
+        ) {
+            Ok(()) => println!("{}: completed", id),
+            Err(e) => {
+                eprintln!("{}: error: {}", id, e);
+                any_err = true;
+            }
+        }
+    }
+
+    Ok(if any_err { 1 } else { 0 })
+}
+
+// ---------------------------------------------------------------------------
+// cmd_block
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_block(id: String, reason: String, extra_ids: Vec<String>) -> Result<i32> {
+    let mut store = open_store()?;
+    let mut all_ids = vec![id];
+    all_ids.extend(extra_ids);
+
+    let mut any_err = false;
+    for id in &all_ids {
+        match store.block_task(id, &reason, None) {
+            Ok(()) => println!("{}: blocked", id),
+            Err(e) => {
+                eprintln!("{}: error: {}", id, e);
+                any_err = true;
+            }
+        }
+    }
+    Ok(if any_err { 1 } else { 0 })
+}
+
+// ---------------------------------------------------------------------------
+// cmd_unblock
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_unblock(ids: Vec<String>, _json: bool) -> Result<i32> {
+    let mut store = open_store()?;
+    let mut any_err = false;
+    for id in &ids {
+        match store.unblock_task(id) {
+            Ok(()) => println!("{}: unblocked", id),
+            Err(e) => {
+                eprintln!("{}: error: {}", id, e);
+                any_err = true;
+            }
+        }
+    }
+    Ok(if any_err { 1 } else { 0 })
+}
+
+// ---------------------------------------------------------------------------
+// cmd_archive
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_archive(ids: Vec<String>, _json: bool) -> Result<i32> {
+    let mut store = open_store()?;
+    let mut any_err = false;
+    for id in &ids {
+        match store.archive_task(id) {
+            Ok(()) => println!("{}: archived", id),
+            Err(e) => {
+                eprintln!("{}: error: {}", id, e);
+                any_err = true;
+            }
+        }
+    }
+    Ok(if any_err { 1 } else { 0 })
+}
+
+// ---------------------------------------------------------------------------
+// cmd_tail
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_tail(id: String) -> Result<i32> {
+    use std::time::Duration;
+    let store = open_store()?;
+    let mut last_id: i64 = {
+        let events = store.get_events(&id).context("Failed to load events")?;
+        events.last().map(|e| e.id).unwrap_or(0)
+    };
+
+    println!("Tailing events for {} (Ctrl-C to stop)...", id);
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let events = store.get_events(&id).unwrap_or_default();
+        let new_events: Vec<_> = events.into_iter().filter(|e| e.id > last_id).collect();
+        for e in &new_events {
+            print!("{}", format_event_line(e));
+        }
+        if let Some(e) = new_events.last() {
+            last_id = e.id;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cmd_watch
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_watch(
+    assignee: Option<String>,
+    _tenant: Option<String>,
+    _kinds: Option<String>,
+    interval: Option<u64>,
+) -> Result<i32> {
+    use std::time::Duration;
+    let interval_secs = interval.unwrap_or(2);
+
+    println!("Watching board events (Ctrl-C to stop)...");
+    let mut last_id: i64 = {
+        let store = open_store()?;
+        let tasks = store.list_tasks(ListFilters {
+            assignee: assignee.clone(),
+            ..Default::default()
+        })?;
+        let mut max_id: i64 = 0;
+        for t in &tasks {
+            let events = store.get_events(&t.id).unwrap_or_default();
+            if let Some(e) = events.last() {
+                max_id = max_id.max(e.id);
+            }
+        }
+        max_id
+    };
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+        let store = open_store()?;
+        let tasks = store.list_tasks(ListFilters {
+            assignee: assignee.clone(),
+            ..Default::default()
+        })?;
+        for t in &tasks {
+            let events = store.get_events(&t.id).unwrap_or_default();
+            let new_events: Vec<_> = events.into_iter().filter(|e| e.id > last_id).collect();
+            for e in &new_events {
+                println!("[{}] {}", t.id, format_event_line(e).trim_end());
+            }
+            if let Some(e) = new_events.last() {
+                last_id = e.id;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cmd_runs
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_runs(id: String, json: bool) -> Result<i32> {
+    let store = open_store()?;
+    let runs = store.get_runs(&id).context("Failed to load runs")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&runs)?);
+    } else {
+        print!("{}", format_runs_table(&runs));
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_assignees
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_assignees(json: bool) -> Result<i32> {
+    let store = open_store()?;
+    // Get all tasks and aggregate by assignee
+    let tasks = store.list_tasks(ListFilters {
+        archived: true, // include all
+        ..Default::default()
+    })?;
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for t in &tasks {
+        *counts.entry(t.assignee.clone()).or_insert(0) += 1;
+    }
+
+    let mut rows: Vec<(String, usize)> = counts.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    if json {
+        let val: Vec<_> = rows.iter().map(|(a, c)| serde_json::json!({"assignee": a, "count": c})).collect();
+        println!("{}", serde_json::to_string_pretty(&val)?);
+    } else {
+        print!("{}", format_assignees(&rows));
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_dispatch(
+    dry_run: bool,
+    _max: Option<usize>,
+    failure_limit: Option<usize>,
+    json: bool,
+) -> Result<i32> {
+    if dry_run {
+        eprintln!("--dry-run not yet implemented for dispatch; proceeding with live dispatch");
+    }
+
+    let store = KanbanStore::open_default().context("Failed to open kanban.db")?;
+
+    let mut config = KanbanConfig::default();
+    if let Some(fl) = failure_limit {
+        config.failure_limit = fl as u32;
+    }
+
+    let store_arc = Arc::new(TokioMutex::new(store));
+    let ctx = DispatcherContext::new(store_arc, config);
+
+    run_dispatch_tick(&ctx).await.context("Dispatch tick failed")?;
+
+    if json {
+        println!("{}", serde_json::json!({"status": "ok"}));
+    } else {
+        println!("Dispatch tick completed.");
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_stats
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_stats(json: bool) -> Result<i32> {
+    let store = open_store()?;
+    let tasks = store.list_tasks(ListFilters {
+        archived: true,
+        ..Default::default()
+    })?;
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for t in &tasks {
+        *counts.entry(t.status.clone()).or_insert(0) += 1;
+    }
+
+    let mut rows: Vec<(String, usize)> = counts.into_iter().collect();
+    rows.sort_by_key(|(s, _)| s.clone());
+
+    if json {
+        let val: Vec<_> = rows.iter().map(|(s, c)| serde_json::json!({"status": s, "count": c})).collect();
+        println!("{}", serde_json::to_string_pretty(&val)?);
+    } else {
+        print!("{}", format_stats(&rows));
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_log
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_log(id: String, tail_bytes: Option<u64>) -> Result<i32> {
+    let stdout_path = ironhermes_kanban::kanban_log_stdout(&id);
+    let stderr_path = ironhermes_kanban::kanban_log_stderr(&id);
+
+    for (label, path) in &[("STDOUT", &stdout_path), ("STDERR", &stderr_path)] {
+        if path.exists() {
+            println!("--- {} ---", label);
+            let content = std::fs::read(path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let slice = if let Some(n) = tail_bytes {
+                let n = n as usize;
+                if content.len() > n {
+                    &content[content.len() - n..]
+                } else {
+                    &content
+                }
+            } else {
+                &content
+            };
+            print!("{}", String::from_utf8_lossy(slice));
+        } else {
+            println!("--- {} (no log file) ---", label);
+        }
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_context
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_context(id: String) -> Result<i32> {
+    let store = open_store()?;
+    let task = store.get_task(&id).context("Task not found")?;
+    let runs = store.get_runs(&id).context("Failed to load runs")?;
+    let events = store.get_events(&id).context("Failed to load events")?;
+    let comments = get_comments(&store, &id).unwrap_or_default();
+
+    let ctx = serde_json::json!({
+        "task_id": task.id,
+        "title": task.title,
+        "body": task.body,
+        "assignee": task.assignee,
+        "status": task.status,
+        "workspace": task.workspace,
+        "tenant": task.tenant,
+        "prior_runs": runs.iter().map(|r| serde_json::json!({
+            "id": r.id,
+            "outcome": r.outcome,
+            "summary": r.summary,
+            "error": r.error,
+        })).collect::<Vec<_>>(),
+        "comments": comments.iter().map(|c| serde_json::json!({
+            "author": c.author,
+            "body": c.body,
+        })).collect::<Vec<_>>(),
+        "events_tail": events.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().map(|e| serde_json::json!({
+            "kind": e.kind,
+            "payload": e.payload,
+        })).collect::<Vec<_>>(),
+    });
+
+    println!("{}", serde_json::to_string_pretty(&ctx)?);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_gc
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_gc(
+    event_retention_days: Option<u64>,
+    log_retention_days: Option<u64>,
+) -> Result<i32> {
+    let mut store = open_store()?;
+    let event_days = event_retention_days.unwrap_or(30);
+    let log_days = log_retention_days.unwrap_or(30);
+
+    // Delete old task_events (older than event_retention_days)
+    let cutoff = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        now - (event_days as f64 * 86400.0)
+    };
+
+    let deleted = store.conn.execute(
+        "DELETE FROM task_events WHERE created_at < ?1",
+        rusqlite::params![cutoff],
+    ).context("Failed to delete old events")?;
+    println!("GC: deleted {} old events (older than {} days)", deleted, event_days);
+
+    // Remove old log files
+    let logs_dir = ironhermes_kanban::kanban_logs_dir();
+    if logs_dir.exists() {
+        let log_cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(log_days * 86400);
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&logs_dir).context("Failed to read logs dir")? {
+            let entry = entry?;
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified < log_cutoff {
+                        if std::fs::remove_file(entry.path()).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!("GC: removed {} old log files (older than {} days)", removed, log_days);
+    }
+
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_reclaim
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_reclaim(id: String) -> Result<i32> {
+    let mut store = open_store()?;
+    let task = store.get_task(&id).context("Task not found")?;
+
+    if task.status != "running" {
+        eprintln!("{} is not running (status: {})", id, task.status);
+        return Ok(1);
+    }
+
+    let lock = task.claim_lock.as_deref().unwrap_or("");
+    let rows = release_claim(&mut store.conn, &id, lock, "operator_reclaim")
+        .context("Failed to release claim")?;
+
+    if rows == 0 {
+        eprintln!("{}: lock mismatch — claim may have been superseded", id);
+        return Ok(1);
+    }
+    println!("{}: claim released (operator_reclaim)", id);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_reassign
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_reassign(id: String, new_profile: String, reclaim: bool) -> Result<i32> {
+    let mut store = open_store()?;
+
+    if reclaim {
+        let task = store.get_task(&id).context("Task not found")?;
+        if task.status == "running" {
+            let lock = task.claim_lock.as_deref().unwrap_or("");
+            release_claim(&mut store.conn, &id, lock, "operator_reclaim")
+                .context("Failed to release claim before reassign")?;
+            // rows returned is usize; we continue regardless (operator intent wins)
+        }
+    }
+
+    store.assign_task(&id, &new_profile).context("Failed to reassign task")?;
+    println!("{}: reassigned to '{}'", id, new_profile);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_diagnostics
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_diagnostics(json: bool) -> Result<i32> {
+    let store = open_store()?;
+    let config = KanbanConfig::default();
+    let threshold = config.stranded_threshold_seconds;
+
+    let reports: Vec<StrandedReport> = diagnose_stranded(&store, threshold)
+        .context("Failed to run diagnostics")?;
+
+    if json {
+        let val: Vec<_> = reports.iter().map(|r| serde_json::json!({
+            "task_id": r.task_id,
+            "assignee": r.assignee,
+            "age_seconds": r.age_seconds,
+            "severity": format!("{:?}", r.severity),
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&val)?);
+    } else {
+        print!("{}", format_diagnostics(&reports));
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_daemon (deprecated — D-09)
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_daemon(
+    failure_limit: Option<usize>,
+    pidfile: Option<String>,
+) -> Result<i32> {
+    use ironhermes_kanban::run_dispatch_loop;
+    use tokio_util::sync::CancellationToken;
+
+    eprintln!(
+        "WARNING: `kanban daemon --force` is deprecated (D-09). \
+         The dispatcher is embedded in ironhermes-gateway by default. \
+         Running both simultaneously is not supported."
+    );
+
+    let store = KanbanStore::open_default().context("Failed to open kanban.db")?;
+    let mut config = KanbanConfig::default();
+    if let Some(fl) = failure_limit {
+        config.failure_limit = fl as u32;
+    }
+
+    // Write pidfile if requested
+    if let Some(ref pidfile_path) = pidfile {
+        std::fs::write(pidfile_path, format!("{}", std::process::id()))
+            .with_context(|| format!("Failed to write pidfile {}", pidfile_path))?;
+    }
+
+    let store_arc = Arc::new(TokioMutex::new(store));
+    let ctx = Arc::new(DispatcherContext::new(store_arc, config));
+    let cancel = CancellationToken::new();
+    let cancel_for_signal = cancel.clone();
+
+    // Spawn Ctrl-C watcher
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel_for_signal.cancel();
+    });
+
+    println!("Kanban daemon running. Press Ctrl-C to stop.");
+    run_dispatch_loop(ctx, cancel).await;
+    println!("Kanban daemon stopped.");
+
+    // Remove pidfile on exit
+    if let Some(ref pidfile_path) = pidfile {
+        let _ = std::fs::remove_file(pidfile_path);
+    }
+
+    Ok(0)
+}

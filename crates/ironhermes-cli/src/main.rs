@@ -37,6 +37,7 @@ mod batch;
 mod config_cli;
 mod cron;
 mod doctor;
+mod kanban;
 mod mcp_config;
 mod memory_cmd;
 mod memory_setup;
@@ -222,6 +223,11 @@ enum Commands {
     Session {
         #[command(subcommand)]
         subcommand: session_cmd::SessionSubcommand,
+    },
+    /// Manage kanban board and tasks (Phase 36.3.7).
+    Kanban {
+        #[command(subcommand)]
+        command: kanban::KanbanCommands,
     },
 }
 
@@ -550,6 +556,19 @@ async fn main() -> Result<()> {
         Some(Commands::Session { subcommand }) => {
             // Phase 25.3 Plan 11 (D-F-1 / D-F-2): single + bulk session export.
             session_cmd::handle_session_command(subcommand).await
+        }
+        Some(Commands::Kanban { command }) => {
+            // Phase 36.3.7 (D-33/D-34/D-35): full kanban CLI verb surface.
+            match kanban::handle_kanban_command(command).await {
+                Ok(0) => Ok(()),
+                Ok(code) => {
+                    std::process::exit(code);
+                }
+                Err(e) => {
+                    eprintln!("{}: {}", "Error".red().bold(), e);
+                    std::process::exit(1);
+                }
+            }
         }
         None => {
             if let Some(ref prompt) = cli.execute {

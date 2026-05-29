@@ -1,0 +1,461 @@
+//! Kanban board CLI subcommand (Phase 36.3.7, D-33/D-34/D-35).
+//!
+//! Mirrors the `cron` module structure: a `KanbanCommands` clap-derive enum
+//! plus a `handle_kanban_command` dispatcher that routes to per-verb
+//! implementations in `commands.rs`.
+//!
+//! All verbs route through `KanbanStore` — no raw SQL in this module.
+
+pub mod commands;
+pub mod format;
+
+use anyhow::Result;
+use clap::Subcommand;
+
+// ---------------------------------------------------------------------------
+// KanbanCommands enum
+// ---------------------------------------------------------------------------
+
+/// Kanban board management commands (Phase 36.3.7 D-33).
+///
+/// Operator-facing (read + write):
+///   init, create, list, show, assign, link, unlink, claim, comment,
+///   complete, block, unblock, archive, tail, watch, runs, assignees,
+///   dispatch, stats, log, context, gc
+///
+/// Operator-recovery:
+///   reclaim, reassign, diagnostics, daemon
+#[derive(Subcommand)]
+pub enum KanbanCommands {
+    /// Initialize the kanban DB at ~/.ironhermes/kanban.db
+    #[command(name = "init")]
+    Init,
+
+    /// Create a new task
+    #[command(name = "create")]
+    Create {
+        /// Task title
+        title: String,
+        /// Assignee profile name
+        #[arg(long)]
+        assignee: String,
+        /// Task body/description
+        #[arg(long)]
+        body: Option<String>,
+        /// Parent task IDs (repeatable)
+        #[arg(long = "parent")]
+        parents: Vec<String>,
+        /// Tenant name
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Workspace spec (scratch | dir:<abs-path> | worktree)
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Skills to attach (repeatable)
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        /// Task priority (default 0, higher = higher priority)
+        #[arg(long)]
+        priority: Option<i64>,
+        /// Put task in triage status instead of ready
+        #[arg(long)]
+        triage: bool,
+        /// Idempotency key — short-circuits to existing task if key already exists
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Max runtime per attempt (e.g. "30m", "2h", or seconds)
+        #[arg(long)]
+        max_runtime: Option<String>,
+        /// Max retries before circuit breaker trips
+        #[arg(long)]
+        max_retries: Option<i64>,
+        /// Schedule start time (unix epoch float or ISO-like string)
+        #[arg(long)]
+        scheduled_at: Option<String>,
+        /// Branch hint for worktree workspaces (stored as marker on task)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Output created task as JSON {task_id, status, assignee}
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List tasks on the board
+    #[command(name = "list")]
+    List {
+        /// Filter to your own profile (HERMES_PROFILE env)
+        #[arg(long)]
+        mine: bool,
+        /// Filter by assignee
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Filter by status (triage|todo|ready|running|blocked|done|archived)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by tenant
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Include archived tasks
+        #[arg(long)]
+        archived: bool,
+        /// Output as JSON array
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show full details for a task
+    #[command(name = "show")]
+    Show {
+        /// Task ID
+        id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Assign a task to a profile (use "none" to unassign)
+    #[command(name = "assign")]
+    Assign {
+        /// Task ID
+        id: String,
+        /// Profile name (or "none" to unassign)
+        profile: String,
+    },
+
+    /// Link a child task to a parent
+    #[command(name = "link")]
+    Link {
+        /// Parent task ID
+        parent_id: String,
+        /// Child task ID
+        child_id: String,
+    },
+
+    /// Remove a parent→child dependency link
+    #[command(name = "unlink")]
+    Unlink {
+        /// Parent task ID
+        parent_id: String,
+        /// Child task ID
+        child_id: String,
+    },
+
+    /// Manually claim a task (operator debugging)
+    #[command(name = "claim")]
+    Claim {
+        /// Task ID
+        id: String,
+        /// Claim TTL in seconds (default: 900)
+        #[arg(long)]
+        ttl: Option<u64>,
+    },
+
+    /// Add a comment to a task
+    #[command(name = "comment")]
+    Comment {
+        /// Task ID
+        id: String,
+        /// Comment body
+        body: String,
+        /// Author name (default: HERMES_PROFILE env or "operator")
+        #[arg(long)]
+        author: Option<String>,
+    },
+
+    /// Mark one or more tasks complete
+    ///
+    /// D-34: bulk complete with --summary or --metadata is REFUSED (exit code 2).
+    /// Use individual calls or omit summary/metadata for bulk admin-close.
+    #[command(name = "complete")]
+    Complete {
+        /// Task ID(s) to complete
+        ids: Vec<String>,
+        /// Outcome label (e.g. "success", "partial")
+        #[arg(long)]
+        result: Option<String>,
+        /// Handoff summary (per-run; refused if multiple ids given)
+        #[arg(long)]
+        summary: Option<String>,
+        /// Free-form JSON metadata dict (per-run; refused if multiple ids given)
+        #[arg(long)]
+        metadata: Option<String>,
+    },
+
+    /// Block a task with a reason
+    #[command(name = "block")]
+    Block {
+        /// Primary task ID
+        id: String,
+        /// Block reason
+        reason: String,
+        /// Additional task IDs to block
+        #[arg(long = "id")]
+        extra_ids: Vec<String>,
+    },
+
+    /// Unblock one or more tasks (return to ready)
+    #[command(name = "unblock")]
+    Unblock {
+        /// Task ID(s) to unblock
+        ids: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Archive one or more tasks
+    #[command(name = "archive")]
+    Archive {
+        /// Task ID(s) to archive
+        ids: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Tail events for a specific task (Ctrl-C to stop)
+    #[command(name = "tail")]
+    Tail {
+        /// Task ID
+        id: String,
+    },
+
+    /// Watch board-wide events (Ctrl-C to stop)
+    #[command(name = "watch")]
+    Watch {
+        /// Filter by assignee
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Filter by tenant
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Comma-separated event kinds to show
+        #[arg(long)]
+        kinds: Option<String>,
+        /// Poll interval in seconds (default: 2)
+        #[arg(long)]
+        interval: Option<u64>,
+    },
+
+    /// Show run history for a task
+    #[command(name = "runs")]
+    Runs {
+        /// Task ID
+        id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List all assignees and their task counts
+    #[command(name = "assignees")]
+    Assignees {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run one dispatcher tick (one-shot; gates on DB)
+    #[command(name = "dispatch")]
+    Dispatch {
+        /// Preview what would be claimed (not yet implemented; logs a warning)
+        #[arg(long)]
+        dry_run: bool,
+        /// Maximum tasks to claim this tick
+        #[arg(long)]
+        max: Option<usize>,
+        /// Circuit breaker failure limit override
+        #[arg(long)]
+        failure_limit: Option<usize>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show board statistics (task counts by status)
+    #[command(name = "stats")]
+    Stats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show stdout/stderr logs for a task
+    #[command(name = "log")]
+    Log {
+        /// Task ID
+        id: String,
+        /// Show only the last N bytes of each log file
+        #[arg(long)]
+        tail: Option<u64>,
+    },
+
+    /// Show the worker context envelope for a task
+    #[command(name = "context")]
+    Context {
+        /// Task ID
+        id: String,
+    },
+
+    /// Garbage-collect old events and log files
+    #[command(name = "gc")]
+    Gc {
+        /// Delete events older than N days (default: 30)
+        #[arg(long)]
+        event_retention_days: Option<u64>,
+        /// Delete log files older than N days (default: 30)
+        #[arg(long)]
+        log_retention_days: Option<u64>,
+    },
+
+    // ---------------------------------------------------------------------------
+    // Operator-recovery verbs (D-33)
+    // ---------------------------------------------------------------------------
+
+    /// Force-release a task's claim (operator emergency)
+    #[command(name = "reclaim")]
+    Reclaim {
+        /// Task ID
+        id: String,
+    },
+
+    /// Reassign a task (optionally releasing its current claim)
+    #[command(name = "reassign")]
+    Reassign {
+        /// Task ID
+        id: String,
+        /// New profile name
+        new_profile: String,
+        /// Release existing claim before reassigning
+        #[arg(long)]
+        reclaim: bool,
+    },
+
+    /// Show stranded-task diagnostic report
+    #[command(name = "diagnostics")]
+    Diagnostics {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run the dispatcher as a long-lived process (DEPRECATED — use gateway instead)
+    #[command(name = "daemon")]
+    Daemon {
+        /// Required flag to acknowledge deprecated usage
+        #[arg(long)]
+        force: bool,
+        /// Circuit breaker failure limit override
+        #[arg(long)]
+        failure_limit: Option<usize>,
+        /// Path to write PID file (removed on exit)
+        #[arg(long)]
+        pidfile: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// handle_kanban_command
+// ---------------------------------------------------------------------------
+
+/// Dispatch a `KanbanCommands` variant to the appropriate handler.
+///
+/// Returns an exit code (0 = success, 1 = error, 2 = D-34 bulk refusal).
+pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
+    match cmd {
+        KanbanCommands::Init => commands::cmd_init().await,
+        KanbanCommands::Create {
+            title,
+            assignee,
+            body,
+            parents,
+            tenant,
+            workspace,
+            skills,
+            priority,
+            triage,
+            idempotency_key,
+            max_runtime,
+            max_retries,
+            scheduled_at,
+            branch,
+            json,
+        } => {
+            commands::cmd_create(
+                title, assignee, body, parents, tenant, workspace, skills,
+                priority, triage, idempotency_key, max_runtime, max_retries,
+                scheduled_at, branch, json,
+            )
+            .await
+        }
+        KanbanCommands::List {
+            mine,
+            assignee,
+            status,
+            tenant,
+            archived,
+            json,
+        } => commands::cmd_list(mine, assignee, status, tenant, archived, json).await,
+        KanbanCommands::Show { id, json } => commands::cmd_show(id, json).await,
+        KanbanCommands::Assign { id, profile } => commands::cmd_assign(id, profile).await,
+        KanbanCommands::Link {
+            parent_id,
+            child_id,
+        } => commands::cmd_link(parent_id, child_id).await,
+        KanbanCommands::Unlink {
+            parent_id,
+            child_id,
+        } => commands::cmd_unlink(parent_id, child_id).await,
+        KanbanCommands::Claim { id, ttl } => commands::cmd_claim(id, ttl).await,
+        KanbanCommands::Comment { id, body, author } => {
+            commands::cmd_comment(id, body, author).await
+        }
+        KanbanCommands::Complete {
+            ids,
+            result,
+            summary,
+            metadata,
+        } => commands::cmd_complete(ids, result, summary, metadata).await,
+        KanbanCommands::Block {
+            id,
+            reason,
+            extra_ids,
+        } => commands::cmd_block(id, reason, extra_ids).await,
+        KanbanCommands::Unblock { ids, json } => commands::cmd_unblock(ids, json).await,
+        KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json).await,
+        KanbanCommands::Tail { id } => commands::cmd_tail(id).await,
+        KanbanCommands::Watch {
+            assignee,
+            tenant,
+            kinds,
+            interval,
+        } => commands::cmd_watch(assignee, tenant, kinds, interval).await,
+        KanbanCommands::Runs { id, json } => commands::cmd_runs(id, json).await,
+        KanbanCommands::Assignees { json } => commands::cmd_assignees(json).await,
+        KanbanCommands::Dispatch {
+            dry_run,
+            max,
+            failure_limit,
+            json,
+        } => commands::cmd_dispatch(dry_run, max, failure_limit, json).await,
+        KanbanCommands::Stats { json } => commands::cmd_stats(json).await,
+        KanbanCommands::Log { id, tail } => commands::cmd_log(id, tail).await,
+        KanbanCommands::Context { id } => commands::cmd_context(id).await,
+        KanbanCommands::Gc {
+            event_retention_days,
+            log_retention_days,
+        } => commands::cmd_gc(event_retention_days, log_retention_days).await,
+        KanbanCommands::Reclaim { id } => commands::cmd_reclaim(id).await,
+        KanbanCommands::Reassign {
+            id,
+            new_profile,
+            reclaim,
+        } => commands::cmd_reassign(id, new_profile, reclaim).await,
+        KanbanCommands::Diagnostics { json } => commands::cmd_diagnostics(json).await,
+        KanbanCommands::Daemon {
+            force: _,
+            failure_limit,
+            pidfile,
+        } => commands::cmd_daemon(failure_limit, pidfile).await,
+    }
+}
