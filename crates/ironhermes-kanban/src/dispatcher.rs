@@ -467,6 +467,19 @@ async fn reclaim_stale_claims(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 params![task.id],
             )?;
         }
+
+        // Phase 36.3.7.1 BUG-36.3.7.1-01: circuit breaker on reclaim-stale-claims path.
+        // The bump above set consecutive_failures += 1; check the limit on the same
+        // tick to match operator semantics (D-12 clarified by 36.3.7.0-03). The run_id
+        // sentinel "reclaimed-no-run" is used when no current run is associated.
+        {
+            let run_id_arg = run
+                .as_ref()
+                .map(|r| r.id.as_str())
+                .unwrap_or("reclaimed-no-run");
+            let error_msg = format!("claim TTL expired with dead or null PID");
+            apply_circuit_breaker(ctx, &task, run_id_arg, &error_msg, now).await?;
+        }
     }
 
     Ok(())
