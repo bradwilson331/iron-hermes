@@ -528,6 +528,16 @@ Plans:
 - [x] 36.3.7-08-PLAN.md — Gateway-embedded dispatcher spawn (step 11 in GatewayRunner::start join_set) + HERMES_KANBAN_DISPATCH_IN_GATEWAY=0 override + clean shutdown via CancellationToken (Wave 5)
 - [x] 36.3.7-09-PLAN.md — End-to-end lifecycle test (stub spawn_fn) + protocol-violation test + invariants finalization (10 critical + 10 static-grep) + INV-36.3.7.md ledger + docs/kanban/reference.md v1-scope reconciliation + 2 manual checkpoints (live worker spawn + live /kanban bypass) (Wave 6)
 
+### Phase 36.3.7.0: Kanban v1 — UAT-discovered fixes (INSERTED)
+
+**Goal:** Close the three live-runtime bugs surfaced by 36.3.7's deferred UAT-09-A and UAT-09-B (see `.planning/phases/36.3.7-kanban-multi-agent-board-kanban-tools/36.3.7-09-SUMMARY.md` Addendum). All three are wire-up gaps the automated test surface and gsd-verifier missed: receiver-end of `--skills`, missing handler for `/kanban` slash, and off-by-one in failure circuit-breaker.
+**Requirements**: BUG-36.3.7-01 (drop `--skills kanban-worker` auto-pass from `worker_spawn.rs:183` — plan 05's env-gated injection already handles tool registration); BUG-36.3.7-02 (add `cmd_kanban` handler in `crates/ironhermes-core/src/commands/handlers.rs` mirroring `cmd_cron` at line 1062, route subverbs to in-process `KanbanStore`, add `"kanban" =>` dispatch arm); BUG-36.3.7-03 (confirm D-12 intent then change `>` to `>=` in dispatcher.rs failure-limit check); re-run UAT-09-A end-to-end (worker reaches `done`) and UAT-09-B (`/kanban list` in interactive `chat` prints CLI table, sub-second, no LLM tokens).
+**Depends on:** Phase 36.3.7
+**Plans:** 0 plans (run /gsd-plan-phase 36.3.7.0 to break down)
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.0 to break down)
+
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
