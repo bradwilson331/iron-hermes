@@ -884,3 +884,235 @@ fn stranded_task_diagnostic_severity_escalation() {
         "critical-band task must have Critical severity"
     );
 }
+
+/// D-12 circuit breaker (reclaim-stale-claims path, BUG-36.3.7.1-01):
+/// A task with `consecutive_failures = failure_limit - 1 = 1`, an expired
+/// `claim_expires`, and a NULL `claim_pid` reaches exactly `failure_limit = 2`
+/// via `reclaim_stale_claims`, which must invoke `apply_circuit_breaker` on
+/// the same tick → task blocked, `gave_up` event emitted.
+///
+/// Mirrors `circuit_breaker_trips_on_crashed_detection_path` (the 36.3.7.0-03
+/// canonical receiver-end shape) with the path-specific seed differences
+/// required to drive the reclaim branch rather than the crashed branch.
+///
+/// Producer-targeting design (Rule-1 deviation, see 36.3.7.1-01-SUMMARY.md):
+/// `detect_crashed_workers` (Step 1) catches dead-but-non-null PIDs first and
+/// would invoke ITS OWN breaker call at dispatcher.rs:305, masking the NEW
+/// line-481 reclaim-path breaker. To prove the NEW breaker actually fires
+/// (and not the line-305 site), we NULL out `claim_pid` after `seed_running`
+/// — Step 1 skips tasks with `run.claim_pid == None` (dispatcher.rs:247),
+/// so Step 3's `reclaim_stale_claims` is the only path that can bump
+/// consecutive_failures and tip the limit. The plan's error_msg ("claim TTL
+/// expired with dead or null PID") explicitly names this null-PID case.
+#[tokio::test]
+async fn circuit_breaker_trips_on_reclaim_path() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Use a distinct dead PID from the two crashed-path tests (999_999_999,
+    // 999_999_998) to avoid accidental coupling — even though we NULL it
+    // below, the value is still seeded so any escape is traceable.
+    let dead_pid: u32 = 999_999_997;
+    let task_id;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "reclaim-breaker trip task",
+                "alice",
+                CreateTaskOptions::default(),
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_cb_reclaim_trip", dead_pid);
+
+        // Seed as running with an EXPIRED claim (claim_expires strictly < now)
+        // so `reclaim_stale_claims` (Step 3) actually fires the reclaim branch
+        // — unlike the crashed-path tests which use now + 900.0 (future).
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            dead_pid as i64,
+            now - 1.0,
+            &rid,
+            now,
+        );
+
+        // NULL claim_pid on the run row so Step 1 (detect_crashed_workers)
+        // skips this task (its filter requires `run.claim_pid.is_some()` —
+        // dispatcher.rs:247). This isolates the new reclaim-path breaker at
+        // dispatcher.rs:481 as the sole producer for this assertion. The
+        // reclaim path treats null PID as "not alive" (dispatcher.rs:427-431).
+        store
+            .conn
+            .execute(
+                "UPDATE task_runs SET claim_pid = NULL WHERE id = ?1",
+                params![rid],
+            )
+            .unwrap();
+
+        // Pre-seed consecutive_failures = failure_limit - 1 = 1.
+        // reclaim_stale_claims will bump to 2 (== failure_limit), tripping the
+        // new line-481 breaker on the same tick.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET consecutive_failures = 1 WHERE id = ?1",
+                params![task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+    }
+
+    // Config: failure_limit = 2 (default).
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    // Use ok_spawn so that the spawner doesn't interfere — the task should be
+    // blocked by the circuit breaker before any new spawn happens. Mirrors
+    // the crashed-path trip test's choice.
+    let ctx = make_ctx_ok_spawn(store_arc.clone(), config, 12345);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.status, "blocked",
+            "reclaim_stale_claims path: breaker did not fire at failure_limit (BUG-36.3.7.1-01)"
+        );
+        assert_eq!(
+            task.consecutive_failures, 2,
+            "reclaim_stale_claims path: consecutive_failures must be 2 after bump at failure_limit (BUG-36.3.7.1-01)"
+        );
+
+        let events = store.get_events(&task_id).unwrap();
+        let gave_up = events.iter().find(|e| e.kind == "gave_up");
+        assert!(
+            gave_up.is_some(),
+            "reclaim_stale_claims path: gave_up event must be appended on the same tick the limit is reached (BUG-36.3.7.1-01)"
+        );
+    }
+}
+
+/// D-12 circuit breaker (reclaim-stale-claims path, BUG-36.3.7.1-01):
+/// A task with `consecutive_failures = 0`, an expired `claim_expires`, and a
+/// NULL `claim_pid` bumps to 1 via `reclaim_stale_claims` — below
+/// `failure_limit = 2` — so the circuit breaker must NOT fire. Task must be
+/// `ready` (claim released), `consecutive_failures = 1`, and NO `gave_up`
+/// event emitted.
+///
+/// Mirrors `circuit_breaker_does_not_trip_below_limit_on_crashed_path` with
+/// the path-specific seed differences. Same null-PID isolation rationale as
+/// the trip test's docstring: NULL `claim_pid` so Step 1 skips, ensuring the
+/// new line-481 reclaim-path breaker is the ONLY potential producer (so this
+/// negative test actually locks the new producer's no-fire behavior, not
+/// Step 1's). The `scheduled_at = now + 3600.0` guard prevents step-6
+/// re-claim from tipping the spawn-failure breaker (same workaround as the
+/// crashed-path no-trip test at lines 608-617).
+///
+/// Latent-finding lock (CONTEXT.md, 36.3.7.1-01-SUMMARY.md):
+/// `reclaim_stale_claims` currently emits NO `Reclaimed` event — only a
+/// `tracing::info!(event = "reclaimed", ...)` at dispatcher.rs:437-441.
+/// dispatcher.rs:19's doc comment says the function "appends a `reclaimed`
+/// event" but no `store.append_event(KanbanEventKind::Reclaimed)` call
+/// exists. This is intentionally OUT OF SCOPE for Plan 01 — `apply_circuit_breaker`
+/// does NOT depend on the event. We document the absence by asserting NO
+/// `gave_up` event (the only event this path would emit, via the breaker).
+#[tokio::test]
+async fn circuit_breaker_does_not_trip_below_limit_on_reclaim_path() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Distinct dead PID from the trip test and the two crashed-path tests
+    // (NULLed below — value retained for traceability only).
+    let dead_pid: u32 = 999_999_996;
+    let task_id;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "reclaim-breaker no-trip task",
+                "alice",
+                CreateTaskOptions::default(),
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_cb_reclaim_notrip", dead_pid);
+
+        // Seed as running with an EXPIRED claim.
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            dead_pid as i64,
+            now - 1.0,
+            &rid,
+            now,
+        );
+
+        // NULL claim_pid (same producer-isolation rationale as the trip test).
+        store
+            .conn
+            .execute(
+                "UPDATE task_runs SET claim_pid = NULL WHERE id = ?1",
+                params![rid],
+            )
+            .unwrap();
+
+        // consecutive_failures starts at 0 (default). reclaim_stale_claims bumps
+        // to 1, which is below failure_limit = 2, so the new line-481 breaker
+        // must NOT fire.
+
+        // Set scheduled_at to a future time so the dispatcher does NOT re-claim
+        // the task in the same tick (prevents the spawn-failure path from also
+        // bumping consecutive_failures and tripping the breaker at 2). Same
+        // workaround as `circuit_breaker_does_not_trip_below_limit_on_crashed_path`.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now_secs() + 3600.0, task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+    }
+
+    // Config: failure_limit = 2 (default).
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    let ctx = make_ctx_failing_spawn(store_arc.clone(), config);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.status, "ready",
+            "reclaim_stale_claims path: breaker fired below failure_limit (BUG-36.3.7.1-01 over-fire)"
+        );
+        assert_eq!(
+            task.consecutive_failures, 1,
+            "reclaim_stale_claims path: consecutive_failures must be 1 after one reclaim (below limit)"
+        );
+
+        let events = store.get_events(&task_id).unwrap();
+        let gave_up = events.iter().any(|e| e.kind == "gave_up");
+        assert!(
+            !gave_up,
+            "reclaim_stale_claims path: gave_up event must NOT be emitted when consecutive_failures < failure_limit"
+        );
+    }
+}
