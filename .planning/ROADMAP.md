@@ -569,10 +569,10 @@ Plans:
 **Goal:** Close the regression flagged by the Phase 36.3.7.2 verifier (see `.planning/phases/36.3.7.2-tool-schema-compatibility-drop-top-level-oneof-from-delegate/36.3.7.2-VERIFICATION.md` — "Forward-flagged" section). `crates/ironhermes-cli/tests/invariants_26_4_1_cfg_03.rs::phase_amendment_doc_comment_present` is failing because Phase 36.3.7.0 commit `c453411f` rewrote the comment block above the `run_preflight` gate in `crates/ironhermes-cli/src/main.rs`, pushing the original CFG-03 amendment doc-comment outside the test's 1500-char scan window. Test is a pre-existing static-grep regression-lock from Phase 26.4.1; the comment it scans for still exists in the file but is now beyond the position the test reads. Fix is mechanical: either (a) re-add the CFG-03 doc-comment near the run_preflight gate so it falls inside the scan window, OR (b) widen the test's scan window so it finds the comment at its current position — both options preserve the original CFG-03 intent. CONTEXT must lock the choice + add a receiver-end test that asserts the CFG-03 amendment doc-comment is present REGARDLESS of unrelated comment rewrites (search anchored on the BUG-CFG-03 marker, not position). MEDIUM severity (no runtime impact, but blocks `cargo test -p ironhermes-cli` from a green run).
 **Requirements**: BUG-CLI-CFG-03-DOC-COMMENT-01 (restore the CFG-03 amendment doc-comment so `tests/invariants_26_4_1_cfg_03.rs::phase_amendment_doc_comment_present` passes again — choose between re-adding the comment near `run_preflight` OR widening the test's scan window in CONTEXT planning); BUG-CLI-CFG-03-DOC-COMMENT-02 (harden the receiver: rewrite the test to anchor on the `BUG-CFG-03` marker/grep instead of a 1500-char window so future unrelated comment rewrites don't trigger false regressions).
 **Depends on:** Phase 36.3.7.0
-**Plans:** 0 plans (run /gsd-plan-phase 36.3.7.3 to break down)
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.3 to break down)
+- [x] 36.3.7.3-PLAN.md — Restore CFG-03 marker line + harden test to anchor on async fn main scope (BUG-01 + BUG-02)
 
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 

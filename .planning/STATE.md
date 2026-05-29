@@ -4,14 +4,14 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: ready
 stopped_at: null
-last_updated: "2026-05-29T18:39:33.491Z"
-last_activity: 2026-05-29 -- Phase 36.3.7.2 shipped (PASS-WITH-NOTES); delegate_task tool-schema-compat unblocked for Anthropic-routed workers; next: 36.3.7.1 (breaker wiring) or 36.X.0 / cli CFG-03 doc-comment regression
+last_updated: "2026-05-29T19:48:59.030Z"
+last_activity: 2026-05-29 -- Phases 36.3.7.1 + 36.3.7.3 both shipped (PASS). Kanban dispatcher fully breaker-guarded on all 4 failure paths + CLI CFG-03 static-grep test hardened. Next: UAT-09-A re-run #6 (bilateral consumer of 36.3.7.0 + 36.3.7.1 + 36.3.7.2 + 36.3.7.3 fixes)
 progress:
-  total_phases: 50
-  completed_phases: 14
-  total_plans: 73
-  completed_plans: 72
-  percent: 28
+  total_phases: 51
+  completed_phases: 16
+  total_plans: 77
+  completed_plans: 76
+  percent: 31
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Between phases — choose next from queue: 36.3.7.1 (dispatcher follow-up: wire breaker into reclaim_stale_claims + enforce_max_runtime) OR 36.X.0 (cli CFG-03 doc-comment scan-window regression introduced by 36.3.7.0 commit `c453411f`, surfaced by verifier on 36.3.7.2).
+**Current focus:** UAT-09-A re-run #6 — the bilateral end-to-end consumer of the 36.3.7.x cascade. First live kanban worker run with all four companion fixes landed: 36.3.7.0 (UAT-discovered fixes), 36.3.7.1 (dispatcher breaker on all 4 failure paths), 36.3.7.2 (delegate_task schema Anthropic-clean), 36.3.7.3 (CLI CFG-03 test hardened).
 
 ## Current Position
 
-Phase: (none active) — ready for next selection
-Status: 3 phases shipped this session (36.17.4 confirmed Complete; 36.3.7.0 PASS-WITH-NOTES; 36.3.7.2 PASS-WITH-NOTES). Kanban worker path now schema-clean for Anthropic; tool-registry has receiver-end lock against future top-level boolean combinators.
-Last activity: 2026-05-29 -- Phase 36.3.7.2 shipped + post-merge `required: []` regression fixed bilaterally + verifier PASS-WITH-NOTES (5/5 gates)
+Phase: (none active) — ready for UAT-09-A re-run #6 OR next-queue selection
+Status: 5 phases shipped this session (36.17.4 confirmed Complete; 36.3.7.0 + 36.3.7.2 + 36.3.7.1 PASS; 36.3.7.3 PASS). All known automated-test gates green.
+Last activity: 2026-05-29 -- Phase 36.3.7.3 shipped (6/6 gates PASS); 36.3.7.x cascade hanging threads all resolved; UAT-09-A re-run #6 queued
 
 ## Recent close-out summary (2026-05-29)
 
@@ -40,6 +40,10 @@ Last activity: 2026-05-29 -- Phase 36.3.7.2 shipped + post-merge `required: []` 
 **Phase 36.3.7.2 (delegate_task tool-schema-compat — drop top-level oneOf):** 2/2 plans shipped + 1 post-merge regression fix. Plan 01 dropped the `oneOf` block; Plan 02 added the system-level receiver-end lock test (`crates/ironhermes-tools/tests/no_top_level_schema_combinators.rs`) that walks every registered tool's schema. Post-merge regression: Plan 01 had also removed the `"required": []` field entirely — pre-existing `tests/delegate_task_timeout_cancel.rs::schema_exposes_timeout_seconds_field` unwrapped `parameters["required"].as_array()` and panicked. Fixed in commit `1448c441` by restoring `"required": []` as a sibling of `properties` (CONTEXT explicitly allowed both forms). Verifier (commit `bb12e47e`) confirmed PASS-WITH-NOTES (5/5 gates) and traced 7 in-tree consumers + 1 cross-crate consumer (anthropic_client.rs::adapt_tools — the original bilateral receiver). Forward-flagged for follow-up: `crates/ironhermes-cli/tests/invariants_26_4_1_cfg_03.rs::phase_amendment_doc_comment_present` is now failing — root cause is Phase 36.3.7.0 commit `c453411f` rewriting a comment block above `run_preflight`, pushing the original CFG-03 amendment doc-comment outside the test's 1500-char scan window. Untouched by 36.3.7.2.
 
 **Meta-finding (captured in `.planning/LEARNINGS.md`):** bilateral-tracing rule for future verifier prompts — for every wire-up claim, trace BOTH producer AND consumer ends. Phase 36.3.7.2 re-demonstrated the rule twice in one phase: (a) Plan 01's grep audit covered `src/` producers but missed `tests/` consumers reading `parameters["required"]` — caught only at the post-merge full-suite run, fixed bilaterally in commit `1448c441`; (b) verifier dispatch with explicit bilateral-tracing emphasis was the only reason the 8th consumer (anthropic_client.rs::adapt_tools — the cross-crate one) was named.
+
+**Phase 36.3.7.1 (dispatcher breaker on remaining failure paths):** 2/2 plans shipped (8 commits on develop). Plan 01 wired `apply_circuit_breaker` into `reclaim_stale_claims` at dispatcher.rs:481; Plan 02 wired it into `enforce_max_runtime` at dispatcher.rs:604. Both used the canonical line 305 bump → event → breaker pattern from 36.3.7.0-03. 4 receiver-end tests added to `crates/ironhermes-kanban/tests/dispatcher_logic.rs` (2 per path × 2 sides of `failure_limit` bound). Verifier (commit `cea58ace`) returned PASS (8/8 gates). Latent finding from Plan 01 SUMMARY: `reclaim_stale_claims` doc-comment promises a `KanbanEventKind::Reclaimed` event but only emits `tracing::info!` — out-of-scope per CONTEXT, queued for a future "dispatcher events parity" phase. **Operational note:** both Plan 01 and Plan 02 executors hit cwd-drift bug #3097 — `cd /absolute/path` in Bash calls landed commits on develop rather than the spawn-time worktree branches. Orchestrator authorized Option B (continue on develop directly); verifier audited and confirmed: monotone commit order per plan, contiguous test-file appends, scope-fenced diffs, provenance-prefixed messages.
+
+**Phase 36.3.7.3 (CLI CFG-03 doc-comment scan-window regression):** 1/1 plan shipped (5 commits, orchestrator-inline execution per CONTEXT decision). Producer fix: 1-line CFG-03 marker added at main.rs:414. Consumer fix: `phase_amendment_doc_comment_present` test rewritten to anchor on the enclosing `async fn main` scope rather than a 1500-char byte window, AND tightened `||` to `&&` (both `"Phase 26.4.1"` AND `"CFG-03"` must appear together — original CFG-03 contract). Inline orchestrator execution mirrored Phase 36.3.7.0 Plan 05 — no worktree, no subagent, no cwd-drift risk. All 6 phase-level gates PASS. Forward note: hardened scope-anchor approach eliminates the entire class of "marker pushed out of window" regressions; future legitimate comment additions near `run_preflight` no longer require auditing the static-grep tests.
 
 ## Phase 36.2 Closure Summary
 
