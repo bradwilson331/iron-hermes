@@ -36,6 +36,11 @@ pub enum ChatStreamEvent {
     /// `ScreenAgents`' use_effect call `agents_resource.restart()` — same code
     /// path as the periodic poll, no divergent diff logic.
     SubagentEvent {},
+    /// Phase 36.17.4 (D-03): queue depth + paused state snapshot. JSON shape
+    /// (external tagging): {"QueueUpdated":{"depth":3,"paused":false}}. Emitted
+    /// on every push, pop, pause toggle, unpause, and queue clear. Client
+    /// updates Signal<(u32, bool)> for the status-bar Queue: N pill.
+    QueueUpdated { depth: u32, paused: bool },
 }
 
 #[cfg(test)]
@@ -55,6 +60,49 @@ mod tests {
         assert!(
             matches!(parsed, ChatStreamEvent::SubagentEvent {}),
             "round-trip must reconstruct SubagentEvent variant"
+        );
+    }
+
+    /// Phase 36.17.4 Plan 02 (D-11): QueueUpdated wire-format lock.
+    /// External-tagged struct variant must serialize to
+    /// {"QueueUpdated":{"depth":3,"paused":false}}.
+    /// Both paused=false and paused=true cases asserted; round-trip preserved.
+    #[test]
+    fn test_queue_updated_json_shape() {
+        // depth=3, paused=false: literal wire-format lock.
+        let ev = ChatStreamEvent::QueueUpdated {
+            depth: 3,
+            paused: false,
+        };
+        let json = serde_json::to_string(&ev).expect("serialize QueueUpdated");
+        assert_eq!(
+            json, r#"{"QueueUpdated":{"depth":3,"paused":false}}"#,
+            "D-11: QueueUpdated must serialize to external-tagged struct shape"
+        );
+
+        // Round-trip: deserialize back into the variant.
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                parsed,
+                ChatStreamEvent::QueueUpdated {
+                    depth: 3,
+                    paused: false,
+                }
+            ),
+            "round-trip must reconstruct QueueUpdated {{ depth: 3, paused: false }}"
+        );
+
+        // paused=true variant: separate shape lock.
+        let ev_paused = ChatStreamEvent::QueueUpdated {
+            depth: 7,
+            paused: true,
+        };
+        let json_paused =
+            serde_json::to_string(&ev_paused).expect("serialize paused QueueUpdated");
+        assert_eq!(
+            json_paused, r#"{"QueueUpdated":{"depth":7,"paused":true}}"#,
+            "D-11: paused=true variant must serialize correctly"
         );
     }
 }
