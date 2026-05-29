@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: verifying
+status: executing
 stopped_at: Phase 36.17.4 context gathered
-last_updated: "2026-05-29T01:25:09.690Z"
-last_activity: 2026-05-28 -- Phase 36.17.3 Plan 06 complete (TUI ↔ gateway queue wave 3 integration tests; full CLI + gateway suites green)
+last_updated: "2026-05-29T03:07:13.344Z"
+last_activity: 2026-05-29 -- Phase 36.17.4 execution started
 progress:
   total_phases: 43
   completed_phases: 11
-  total_plans: 50
+  total_plans: 56
   completed_plans: 50
   percent: 26
 ---
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.3 (TUI ↔ gateway queue) and 36.17.4 (iron_hermes_ui ↔ gateway queue) — inserted, awaiting plan-phase
+**Current focus:** Phase 36.17.4 — wire-up-iron-hermes-ui-to-the-gateway-queue-slash-commands
 
 ## Current Position
 
-Phase: 36.17.3 (wire-up-tui-with-gateway-queue-and-slash-queue-commands) — COMPLETE
-Plan: 6 of 6 (all plans executed; SUMMARYs present 01..06)
-Status: Phase complete — ready for verifier sweep or next phase
-Last activity: 2026-05-28 -- Phase 36.17.3 Plan 06 complete (TUI ↔ gateway queue wave 3 integration tests; full CLI + gateway suites green)
+Phase: 36.17.4 (wire-up-iron-hermes-ui-to-the-gateway-queue-slash-commands) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 36.17.4
+Last activity: 2026-05-29 -- Phase 36.17.4 execution started
 
 ## Phase 36.2 Closure Summary
 
