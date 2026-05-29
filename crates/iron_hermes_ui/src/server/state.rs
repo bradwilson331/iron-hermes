@@ -47,6 +47,17 @@ pub struct AppState {
     ///
     /// Map grows unbounded (Pitfall 5 accepted tradeoff — matches nudge_turns precedent).
     pub running_agents: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Phase 36.17.4 (D-01a): per-session queue-drain paused flags.
+    /// Arc<Mutex<HashMap>> mirrors `running_agents` above. std::sync::Mutex
+    /// — never held across `.await`. Map grows unbounded (accepted tradeoff,
+    /// matches `running_agents` + `nudge_turns` precedent).
+    pub queue_paused: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Phase 36.17.4 (D-01): shared FIFO queue for all sessions, keyed by
+    /// `SessionKey`. Single `SessionQueue` instance; each WS connection
+    /// constructs its own `SessionKey { platform: Platform::Web, chat_id,
+    /// user_id: Some("web") }` at call sites. Queue survives WS
+    /// disconnect/reconnect; two browser tabs on the same session_id share it.
+    pub queue: Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>>,
     /// Phase 32.3 Plan 04 (D-08): subagent registry Arc — same handle threaded
     /// into the AgentRuntime via `subagent_registry`. Held on
     /// AppState so the four `/api/agents/*` endpoints can read it for status
@@ -173,6 +184,14 @@ impl AppState {
             // Phase 36.1 (GW-05-WEB, D-03): per-session running-agent flag map.
             // std::sync::Mutex matches nudge_turns precedent; Arc for Clone.
             running_agents: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 36.17.4 (D-01a): per-session queue-drain paused flags —
+            // same shape as running_agents, mirrored byte-for-byte.
+            queue_paused: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 36.17.4 (D-01): single shared SessionQueue instance keyed
+            // by SessionKey. Explicit `as Arc<dyn ...>` widens the concrete
+            // Arc<SessionQueue> to the trait-object field type.
+            queue: Arc::new(ironhermes_gateway::session_queue::SessionQueue::new())
+                as Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>>,
             // Phase 32.3 Plan 04: subagent_registry + shrike — same Arcs the
             // delegate-task runner uses, so the four `/api/agents/*` endpoints
             // operate on the live registry.
@@ -232,6 +251,21 @@ impl AppState {
         session_id: &str,
     ) -> Arc<std::sync::atomic::AtomicBool> {
         let mut map = self.running_agents.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// Phase 36.17.4 (D-01a): mirror of `get_or_create_running_flag` above.
+    /// Entry-or-insert under std::sync::Mutex — Mutex must NEVER be held
+    /// across `.await`. Returns the SAME `Arc<AtomicBool>` on repeat lookups
+    /// for the same session_id (idempotent), and distinct `Arc`s for distinct
+    /// session_ids (session isolation).
+    pub fn get_or_create_paused_flag(
+        &self,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut map = self.queue_paused.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(session_id.to_string())
             .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .clone()
@@ -679,6 +713,95 @@ mod phase_36_1_02_state_tests {
         assert!(
             !flag.load(Ordering::SeqCst),
             "flag must be false after guard drops (RAII discipline)"
+        );
+    }
+
+    // =========================================================================
+    // Phase 36.17.4 Plan 03 (D-01a) — queue_paused helper unit tests
+    // Mirror the running_agents helper tests above byte-for-byte (same
+    // entry-or-insert under std::sync::Mutex), just operating on the
+    // queue_paused map shape.
+    // =========================================================================
+
+    /// Helper: build an empty queue_paused map for unit testing — same shape
+    /// as `make_running_agents` above, namespaced for paused-flag tests.
+    fn make_queue_paused()
+        -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>
+    {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// get_or_create_paused_flag free-fn equivalent — mirrors the method body
+    /// in `AppState::get_or_create_paused_flag` byte-for-byte so unit tests
+    /// don't need to build a full AppState.
+    fn get_or_create_paused(
+        map: &Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// Phase 36.17.4 Plan 03 (D-01a behavior): a freshly created session's
+    /// paused flag starts as false.
+    #[test]
+    fn paused_flag_starts_false() {
+        let map = make_queue_paused();
+        let flag = get_or_create_paused(&map, "session-A");
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "A freshly created paused flag must start as false"
+        );
+    }
+
+    /// Phase 36.17.4 Plan 03 (D-01a behavior): get-OR-create semantics — two
+    /// lookups with the same session_id must return handles to the SAME
+    /// AtomicBool (Arc::ptr_eq), AND mutations via the first handle must be
+    /// visible through the second.
+    #[test]
+    fn paused_flag_persists_across_lookups() {
+        let map = make_queue_paused();
+        let first = get_or_create_paused(&map, "session-A");
+        first.store(true, Ordering::SeqCst);
+
+        let second = get_or_create_paused(&map, "session-A");
+        assert!(
+            second.load(Ordering::SeqCst),
+            "Second lookup must observe the store(true) via the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "Idempotent get_or_create must return the SAME Arc<AtomicBool> — \
+             not a fresh allocation"
+        );
+    }
+
+    /// Phase 36.17.4 Plan 03 (D-01a behavior): per-session isolation — two
+    /// different session_ids produce two independent `Arc<AtomicBool>`
+    /// instances. Setting session A's paused flag must NOT affect session B.
+    #[test]
+    fn paused_flag_session_isolation() {
+        let map = make_queue_paused();
+        let flag_a = get_or_create_paused(&map, "session-A");
+        flag_a.store(true, Ordering::SeqCst);
+
+        let flag_b = get_or_create_paused(&map, "session-B");
+        assert!(
+            !flag_b.load(Ordering::SeqCst),
+            "Session B's paused flag must remain false after session A's is set"
+        );
+        assert!(
+            flag_a.load(Ordering::SeqCst),
+            "Session A's paused flag must still be true (mutating B does not \
+             reset A)"
+        );
+        assert!(
+            !Arc::ptr_eq(&flag_a, &flag_b),
+            "Distinct session_ids must produce distinct Arc<AtomicBool> \
+             instances (no cross-session bleed)"
         );
     }
 }

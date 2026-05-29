@@ -4510,6 +4510,7 @@ dependencies = [
  "ironhermes-agent",
  "ironhermes-core",
  "ironhermes-exec",
+ "ironhermes-gateway",
  "ironhermes-hooks",
  "ironhermes-state",
  "ironhermes-tools",
