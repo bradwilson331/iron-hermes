@@ -209,6 +209,12 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("cron", "Manage cron jobs", ToolsAndSkills)
             .args_hint("[subcommand]")
             .platform(CliOnly),
+        // Phase 36.3.7 (D-35/D-36): /kanban slash command registered with Universal
+        // platform so it propagates to TG/Discord/Slack/UI via CommandRouter. NOT
+        // CliOnly (unlike cron) — D-36 requires mid-run bypass to work on gateway+UI.
+        CommandDef::new("kanban", "Manage kanban board and tasks", ToolsAndSkills)
+            .args_hint("[subcommand]")
+            .platform(Universal),
         CommandDef::new("reload-mcp", "Reload MCP servers", ToolsAndSkills)
             .aliases(&["reload_mcp"])
             .platform(Universal),

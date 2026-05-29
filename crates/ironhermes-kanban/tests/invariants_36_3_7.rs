@@ -35,10 +35,8 @@ const CAS_SOURCE_PLACEHOLDER: &str = include_str!("../src/cas.rs");
 const DISPATCHER_SOURCE: &str = include_str!("../src/dispatcher.rs");
 const WORKER_SPAWN_SOURCE: &str = include_str!("../src/worker_spawn.rs");
 
-// PLAN 06 will swap this for
-// `include_str!("../../ironhermes-core/src/commands/running_agent.rs")`
-// once `kanban` is added to `is_bypass()`.
-const RUNNING_AGENT_SOURCE: &str = include_str!("../src/error.rs");
+// Plan 06 landed: `kanban` is now in `is_bypass()`.
+const RUNNING_AGENT_SOURCE: &str = include_str!("../../ironhermes-core/src/commands/running_agent.rs");
 
 // PID-liveness lives in this crate already (plan 01 Task 0 + Task 2). The
 // invariant is non-ignored because the file exists.
@@ -163,7 +161,6 @@ fn worker_spawn_calls_env_clear() {
 /// INV-36.3.7-03: `"kanban"` must appear in `is_bypass()` so the
 /// `/kanban` slash command bypasses the running-agent guard (D-36).
 #[test]
-#[ignore = "PLAN 06 unblocks this — is_bypass() does not yet contain \"kanban\""]
 fn kanban_is_in_bypass_list() {
     assert!(
         RUNNING_AGENT_SOURCE.contains("\"kanban\""),
