@@ -727,7 +727,8 @@ impl Tool for DelegateTaskTool {
                         "default": "leaf",
                         "description": "Child role; orchestrators may spawn further children up to delegation.max_spawn_depth."
                     }
-                }
+                },
+                "required": []
             }),
             // Mutual-exclusion of `task` vs `tasks` is enforced at runtime in execute()
             // (see line 745). The schema-level oneOf was dropped per
