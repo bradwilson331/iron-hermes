@@ -1116,3 +1116,235 @@ async fn circuit_breaker_does_not_trip_below_limit_on_reclaim_path() {
         );
     }
 }
+
+/// D-12 circuit breaker (max-runtime-exceeded path, BUG-36.3.7.1-02):
+/// A task whose worker exceeded `max_runtime_seconds` AND whose
+/// `consecutive_failures = failure_limit - 1 = 1` reaches exactly
+/// `failure_limit = 2` via `enforce_max_runtime`, which must invoke
+/// `apply_circuit_breaker` on the same tick → task blocked,
+/// `timed_out` event emitted, `gave_up` event emitted.
+#[tokio::test]
+async fn circuit_breaker_trips_on_max_runtime_path() {
+    // Note: this test takes ~6 seconds wall-clock due to the SIGTERM grace
+    // sleep at dispatcher.rs (tokio::time::sleep(Duration::from_secs(5))).
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Spawn a real `sleep 120` child so the PID is alive. Plan's dead-PID
+    // approach is incompatible: step 1 (detect_crashed_workers) gates on
+    // dead-PID and would intercept the task BEFORE step 4 (enforce_max_runtime)
+    // sees it. SIGTERM/SIGKILL from the dispatcher safely targets our owned
+    // child, not the test runner. See SUMMARY's deviation section.
+    let mut child = std::process::Command::new("sleep")
+        .arg("120")
+        .spawn()
+        .expect("spawn sleep child for max_runtime trip test");
+    let live_pid: u32 = child.id();
+    let task_id;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "max-runtime-breaker trip task",
+                "alice",
+                CreateTaskOptions {
+                    max_runtime_seconds: Some(60),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_mr_trip", live_pid);
+
+        // Seed as running with the live child PID; claim_expires FUTURE so
+        // reclaim_stale_claims and extend_live_pid_claims do NOT fire (both
+        // gate on claim_expires < now). detect_crashed_workers gates on
+        // dead PID — alive PID skips it.
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            live_pid as i64,
+            now + 900.0,
+            &rid,
+            now,
+        );
+
+        // Overwrite started_at to 2 hours ago so elapsed = 7200 > 60 = max_runtime,
+        // triggering the enforce_max_runtime branch. seed_running uses COALESCE so
+        // we must overwrite via direct SQL UPDATE.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET started_at = ?1 WHERE id = ?2",
+                params![now - 7200.0, task.id],
+            )
+            .unwrap();
+
+        // Pre-seed consecutive_failures = failure_limit - 1 = 1.
+        // enforce_max_runtime will bump to 2 (== failure_limit), tripping the breaker.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET consecutive_failures = 1 WHERE id = ?1",
+                params![task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+    }
+
+    // Config: failure_limit = 2 (default).
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    // Use ok_spawn so that the spawner doesn't interfere — the task should be
+    // blocked by the circuit breaker before any new spawn happens.
+    let ctx = make_ctx_ok_spawn(store_arc.clone(), config, 12345);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    // Reap the child (dispatcher SIGTERM'd it during enforce_max_runtime).
+    // Avoids leaving a zombie even if SIGKILL also fired.
+    let _ = child.wait();
+
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.status, "blocked",
+            "enforce_max_runtime path: breaker did not fire at failure_limit (BUG-36.3.7.1-02)"
+        );
+
+        let events = store.get_events(&task_id).unwrap();
+        let timed_out = events.iter().find(|e| e.kind == "timed_out");
+        assert!(
+            timed_out.is_some(),
+            "enforce_max_runtime path: timed_out event must be appended (BUG-36.3.7.1-02)"
+        );
+        let gave_up = events.iter().find(|e| e.kind == "gave_up");
+        assert!(
+            gave_up.is_some(),
+            "enforce_max_runtime path: gave_up event must be appended on the same tick the limit is reached (BUG-36.3.7.1-02)"
+        );
+    }
+}
+
+/// D-12 circuit breaker (max-runtime-exceeded path, BUG-36.3.7.1-02):
+/// A task whose worker exceeded `max_runtime_seconds` AND whose
+/// `consecutive_failures = 0` bumps to 1 via `enforce_max_runtime` — below
+/// `failure_limit = 2` — so the circuit breaker must NOT fire. Task must be
+/// `ready` (claim released), `timed_out` event present, and NO `gave_up`
+/// event emitted.
+#[tokio::test]
+async fn circuit_breaker_does_not_trip_below_limit_on_max_runtime_path() {
+    // Note: this test takes ~6 seconds wall-clock due to the SIGTERM grace
+    // sleep at dispatcher.rs (tokio::time::sleep(Duration::from_secs(5))).
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Spawn a real `sleep 120` child so the PID is alive — same rationale as
+    // the at-limit test. See SUMMARY's deviation section.
+    let mut child = std::process::Command::new("sleep")
+        .arg("120")
+        .spawn()
+        .expect("spawn sleep child for max_runtime no-trip test");
+    let live_pid: u32 = child.id();
+    let task_id;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "max-runtime-breaker no-trip task",
+                "alice",
+                CreateTaskOptions {
+                    max_runtime_seconds: Some(60),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_mr_notrip", live_pid);
+
+        // Seed as running with the live child PID; claim_expires FUTURE so
+        // reclaim_stale_claims and extend_live_pid_claims do NOT fire.
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            live_pid as i64,
+            now + 900.0,
+            &rid,
+            now,
+        );
+
+        // Overwrite started_at to 2 hours ago so elapsed = 7200 > 60 = max_runtime,
+        // triggering the enforce_max_runtime branch.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET started_at = ?1 WHERE id = ?2",
+                params![now - 7200.0, task.id],
+            )
+            .unwrap();
+
+        // consecutive_failures starts at 0 (default). enforce_max_runtime bumps to 1,
+        // which is below failure_limit = 2, so the breaker must NOT fire.
+
+        // Set scheduled_at to a future time so the dispatcher does NOT re-claim the
+        // task in the same tick (prevents the spawn-failure path from also bumping
+        // consecutive_failures and tripping the breaker at 2). Same workaround as
+        // circuit_breaker_does_not_trip_below_limit_on_crashed_path.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now_secs() + 3600.0, task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+    }
+
+    // Config: failure_limit = 2 (default).
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    let ctx = make_ctx_failing_spawn(store_arc.clone(), config);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    // Reap the child (dispatcher SIGTERM'd it during enforce_max_runtime).
+    let _ = child.wait();
+
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.status, "ready",
+            "enforce_max_runtime path: breaker fired below failure_limit (BUG-36.3.7.1-02 over-fire)"
+        );
+        assert_eq!(
+            task.consecutive_failures, 1,
+            "enforce_max_runtime path: consecutive_failures must be 1 after one timeout (below limit)"
+        );
+
+        let events = store.get_events(&task_id).unwrap();
+        let timed_out = events.iter().find(|e| e.kind == "timed_out");
+        assert!(
+            timed_out.is_some(),
+            "enforce_max_runtime path: timed_out event must be appended (BUG-36.3.7.1-02)"
+        );
+        let gave_up = events.iter().any(|e| e.kind == "gave_up");
+        assert!(
+            !gave_up,
+            "enforce_max_runtime path: gave_up event must NOT be emitted when consecutive_failures < failure_limit (BUG-36.3.7.1-02)"
+        );
+    }
+}
