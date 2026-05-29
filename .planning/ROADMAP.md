@@ -547,10 +547,11 @@ Plans:
 **Goal:** Close the two structurally-identical receiver-end gaps that Phase 36.3.7.0 Plan 03 explicitly punted: `reclaim_stale_claims` and `enforce_max_runtime` in `crates/ironhermes-kanban/src/dispatcher.rs` both bump `consecutive_failures` but never invoke `apply_circuit_breaker`. Same pattern as BUG-36.3.7-03 on a different code path; the determination doc in `36.3.7.0-03-D12-DETERMINATION.md` already named these as 36.3.7.1 candidates. Fix is mechanical (call the breaker after the bump, mirroring the lines 305 and 899 patterns from 36.3.7.0-03) plus receiver-end tests covering both new paths × both sides of the failure_limit bound.
 **Requirements**: BUG-36.3.7.1-01 (wire `apply_circuit_breaker` into `reclaim_stale_claims` path around dispatcher.rs ~line 458 — match the call shape used at lines 305/899); BUG-36.3.7.1-02 (wire `apply_circuit_breaker` into `enforce_max_runtime` path around dispatcher.rs ~line 553); BUG-36.3.7.1-03 (4 receiver-end tests in `dispatcher_logic.rs` covering both new paths × `consecutive_failures` at `failure_limit` and below `failure_limit - 1`, mirroring the test shapes 36.3.7.0-03 used).
 **Depends on:** Phase 36.3.7.0
-**Plans:** 0 plans (run /gsd-plan-phase 36.3.7.1 to break down)
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.1 to break down)
+- [ ] 36.3.7.1-01-PLAN.md — Wire apply_circuit_breaker into reclaim_stale_claims path + 2 receiver-end tests (Wave 1)
+- [ ] 36.3.7.1-02-PLAN.md — Wire apply_circuit_breaker into enforce_max_runtime path + 2 receiver-end tests (Wave 1)
 
 ### Phase 36.3.7.2: Tool-schema compatibility — drop top-level oneOf from delegate_task (INSERTED)
 
