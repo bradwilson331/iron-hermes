@@ -247,6 +247,13 @@ pub fn HermesApp() -> Element {
                                 let cur = *subagent_events.read();
                                 subagent_events.set(cur + 1);
                             }
+                            crate::protocol::ChatStreamEvent::QueueUpdated { .. } => {
+                                // Phase 36.17.4 Plan 02: minimal exhaustive-match closure for the
+                                // new variant added by this plan. Plan 05 replaces this arm with
+                                // `queue_state.set((depth, paused))` to drive the status-bar pill
+                                // (D-03a). Recv-loop must stay exhaustive; ignoring here is safe
+                                // because no consumer renders queue state yet in Wave 1.
+                            }
                         }
                     }
                     Ok(dioxus_fullstack::Message::Close { .. }) => {
