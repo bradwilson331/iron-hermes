@@ -28,9 +28,8 @@
 // Source constants
 // ---------------------------------------------------------------------------
 
-// PLAN 02 will swap these placeholders for `include_str!("../src/cas.rs")`
-// and the actual cas.rs source once it lands.
-const CAS_SOURCE_PLACEHOLDER: &str = include_str!("../src/error.rs");
+// Plan 02 landed cas.rs — use the real source file.
+const CAS_SOURCE_PLACEHOLDER: &str = include_str!("../src/cas.rs");
 
 // PLAN 03 will swap these for `include_str!("../src/dispatcher.rs")` and
 // `include_str!("../src/worker_spawn.rs")` and add at least one test that
@@ -90,7 +89,6 @@ fn pid_liveness_handles_eperm() {
 /// dispatcher instances both read `status='ready'` before either locks
 /// and both succeed the UPDATE (Pitfall 1 / D-40).
 #[test]
-#[ignore = "PLAN 02 unblocks this — cas.rs does not yet exist"]
 fn atomic_claim_uses_begin_immediate() {
     assert!(
         CAS_SOURCE_PLACEHOLDER.contains("Immediate"),
@@ -103,7 +101,6 @@ fn atomic_claim_uses_begin_immediate() {
 /// transaction as the CAS UPDATE so pointer + run row are coherent by
 /// construction (D-40).
 #[test]
-#[ignore = "PLAN 02 unblocks this — cas.rs does not yet exist"]
 fn cas_inserts_task_run_in_same_transaction() {
     assert!(
         CAS_SOURCE_PLACEHOLDER.contains("task_runs"),
