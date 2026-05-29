@@ -515,15 +515,15 @@ Plans:
 **Goal:** Ship the IronHermes Kanban v1 kernel — a durable `~/.ironhermes/kanban.db` SQLite board (5 tables, WAL, atomic CAS claim), a gateway-embedded dispatcher with 8-step tick + live-PID detection + respawn-guard + failure circuit-breaker, full-OS-process worker spawn (`ironhermes --profile P --skills kanban-worker chat -q "..."`) with env scrub and 9-env-var contract, a 6-tool LLM surface (`kanban_show/list/complete/block/comment/create`) gated by `HERMES_KANBAN_TASK`, `KANBAN_GUIDANCE` prompt injection, two bundled skills (`kanban-worker` v2.0.0 + `kanban-orchestrator` v3.0.0) synced via `ensure_home_dirs()` + `skills update`, full `ironhermes kanban` CLI + `/kanban` slash command (Universal platform; mid-run bypass), and 10 critical protocol-correctness invariants under automated test. Deferred to 36.3.7.x: heartbeat/link/unblock tools, triage decomposer, multi-board, dashboard plugin, gateway notifier, swarm helper, @mention parser, portable profiles, external CLI lanes.
 **Requirements**: D-01..D-41 (CONTEXT.md locked decisions; 41 design decisions across schema/dispatcher/worker-spawn/tools/protocol/skills/workspaces/CLI/gateway/multi-tenant/concurrency)
 **Depends on:** Phase 36.3
-**Plans:** 5/9 plans executed
+**Plans:** 7/9 plans executed
 
 Plans:
 - [x] 36.3.7-01-PLAN.md — Crate skeleton + types/paths/events/config + `chat -q` flag + invariants test scaffold + sysinfo checkpoint (Wave 0)
 - [x] 36.3.7-02-PLAN.md — Schema (5 tables + WAL + migrations) + KanbanStore CRUD + atomic CAS claim (BEGIN IMMEDIATE) + claim_lock/expected_run_id gates + concurrency test (Wave 1)
 - [x] 36.3.7-03-PLAN.md — PID liveness + worker env scrub (build_kanban_worker_env) + spawn_worker + 8-step dispatcher tick (detect-crashed → live-PID extension → reclaim → max-runtime → ready-promotion → atomic-claim → respawn-guard → spawn) + failure circuit-breaker (Wave 2)
 - [x] 36.3.7-04-PLAN.md — 6 LLM tools (show/list/comment/complete/block/create) with HERMES_KANBAN_TASK gating + protocol-terminator guards (expected_run_id + created_cards) + idempotency_key dedup + workspace validation (Wave 3)
-- [ ] 36.3.7-05-PLAN.md — KANBAN_GUIDANCE static const + add_skill_overlay hook + register_kanban_tools wiring in CLI Chat handler (Wave 3)
-- [ ] 36.3.7-06-PLAN.md — Full CLI verb surface (24+ verbs) + KanbanCommands enum + CommandDef registry (Universal platform) + is_bypass extension (D-36 mid-run /kanban) + iron_hermes_ui regression test (Wave 4)
+- [x] 36.3.7-05-PLAN.md — KANBAN_GUIDANCE static const + add_skill_overlay hook + register_kanban_tools wiring in CLI Chat handler (Wave 3)
+- [x] 36.3.7-06-PLAN.md — Full CLI verb surface (24+ verbs) + KanbanCommands enum + CommandDef registry (Universal platform) + is_bypass extension (D-36 mid-run /kanban) + iron_hermes_ui regression test (Wave 4)
 - [x] 36.3.7-07-PLAN.md — Bundle skills/kanban-worker + skills/kanban-orchestrator (byte-for-byte upstream with `hermes -p`→`ironhermes --profile`, `~/.hermes/`→`~/.ironhermes/`) + sync via ensure_home_dirs + skills update + skills reset --restore (Wave 4)
 - [ ] 36.3.7-08-PLAN.md — Gateway-embedded dispatcher spawn (step 11 in GatewayRunner::start join_set) + HERMES_KANBAN_DISPATCH_IN_GATEWAY=0 override + clean shutdown via CancellationToken (Wave 5)
 - [ ] 36.3.7-09-PLAN.md — End-to-end lifecycle test (stub spawn_fn) + protocol-violation test + invariants finalization (10 critical + 10 static-grep) + INV-36.3.7.md ledger + docs/kanban/reference.md v1-scope reconciliation + 2 manual checkpoints (live worker spawn + live /kanban bypass) (Wave 6)
