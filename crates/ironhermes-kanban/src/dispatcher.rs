@@ -47,6 +47,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::params;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::cas::{DEFAULT_CLAIM_TTL_SECONDS, atomic_claim, build_claim_lock, release_claim};
 use crate::config::KanbanConfig;
@@ -129,11 +130,17 @@ pub async fn run_dispatch_loop(ctx: Arc<DispatcherContext>, cancel: Cancellation
                 return;
             }
             _ = interval.tick() => {
+                // Use .instrument() instead of .enter() so the future stays
+                // Send — EnteredSpan is !Send and cannot be held across awaits
+                // in a tokio::spawn context (gateway JoinSet requires Send).
                 let span = tracing::info_span!("kanban.dispatch.tick");
-                let _enter = span.enter();
-                if let Err(e) = run_dispatch_tick(&ctx).await {
-                    tracing::error!(error = %e, "Kanban dispatch tick error");
+                async {
+                    if let Err(e) = run_dispatch_tick(&ctx).await {
+                        tracing::error!(error = %e, "Kanban dispatch tick error");
+                    }
                 }
+                .instrument(span)
+                .await;
             }
         }
     }
@@ -150,53 +157,64 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
     let now = now_secs();
 
     // Step 1: detect crashed workers.
-    {
-        let _span = tracing::info_span!("kanban.dispatch.step", step = "detect_crashed").entered();
+    // Use .instrument() instead of .entered() so the future stays Send —
+    // EnteredSpan is !Send and cannot be held across await points in a
+    // tokio::spawn context. This pattern applies to all steps below.
+    async {
         if let Err(e) = detect_crashed_workers(ctx, now).await {
             tracing::error!(error = %e, step = "detect_crashed", "dispatch step error");
         }
     }
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "detect_crashed"))
+    .await;
 
     // Step 2: extend claims for live PIDs at TTL expiry.
-    {
-        let _span = tracing::info_span!("kanban.dispatch.step", step = "extend_live").entered();
+    async {
         if let Err(e) = extend_live_pid_claims(ctx, now).await {
             tracing::error!(error = %e, step = "extend_live", "dispatch step error");
         }
     }
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "extend_live"))
+    .await;
 
     // Step 3: reclaim stale claims (dead PID or null PID, expired TTL).
-    {
-        let _span = tracing::info_span!("kanban.dispatch.step", step = "reclaim_stale").entered();
+    async {
         if let Err(e) = reclaim_stale_claims(ctx, now).await {
             tracing::error!(error = %e, step = "reclaim_stale", "dispatch step error");
         }
     }
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "reclaim_stale"))
+    .await;
 
     // Step 4: enforce max runtime.
-    {
-        let _span =
-            tracing::info_span!("kanban.dispatch.step", step = "enforce_max_runtime").entered();
+    async {
         if let Err(e) = enforce_max_runtime(ctx, now).await {
             tracing::error!(error = %e, step = "enforce_max_runtime", "dispatch step error");
         }
     }
+    .instrument(tracing::info_span!(
+        "kanban.dispatch.step",
+        step = "enforce_max_runtime"
+    ))
+    .await;
 
     // Step 5: promote ready tasks (todo → ready when all parents done).
-    {
-        let _span = tracing::info_span!("kanban.dispatch.step", step = "promote_ready").entered();
+    async {
         if let Err(e) = promote_ready(ctx, now).await {
             tracing::error!(error = %e, step = "promote_ready", "dispatch step error");
         }
     }
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "promote_ready"))
+    .await;
 
     // Steps 6–8: claim + guard + spawn.
-    {
-        let _span = tracing::info_span!("kanban.dispatch.step", step = "claim_and_spawn").entered();
+    async {
         if let Err(e) = claim_and_spawn(ctx, now).await {
             tracing::error!(error = %e, step = "claim_and_spawn", "dispatch step error");
         }
     }
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "claim_and_spawn"))
+    .await;
 
     Ok(())
 }

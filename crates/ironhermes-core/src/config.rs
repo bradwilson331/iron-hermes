@@ -352,6 +352,18 @@ pub struct Config {
     /// Pre-36.2 configs parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub prompt_caching: PromptCachingConfig,
+    /// Phase 36.3.7 (D-09): kanban subsystem configuration.
+    ///
+    /// Stored as raw `serde_yaml::Value` (same pattern as `mcp_servers`) to
+    /// avoid a circular crate dependency — `ironhermes-kanban` already depends
+    /// on `ironhermes-core`, so `ironhermes-core` cannot depend on
+    /// `ironhermes-kanban`. The gateway runner deserializes this value into
+    /// `ironhermes_kanban::KanbanConfig` at the task-spawn site.
+    ///
+    /// Pre-36.3.7 configs parse cleanly with a `Null` value, which the
+    /// gateway runner treats as all-defaults.
+    #[serde(default)]
+    pub kanban: serde_yaml::Value,
 }
 
 // =============================================================================
