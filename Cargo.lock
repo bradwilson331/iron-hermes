@@ -4808,6 +4808,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ironhermes-core",
+ "ironhermes-tools",
  "nix 0.29.0",
  "regex",
  "rusqlite",
