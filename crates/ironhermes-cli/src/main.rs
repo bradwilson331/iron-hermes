@@ -1027,6 +1027,9 @@ fn build_cmd_ctx(
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
     // Phase 21.8.2: skill_registry so /skills list shows catalog and /skills reload works.
     skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
+    // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader handle for /kanban slash UI.
+    // Best-effort — None when kanban DB is unavailable (matches cmd_cron fallback pattern).
+    kanban_store: Option<Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>>,
 ) -> CommandContext {
     let base = CommandContext::new(Platform::Local, session_id.to_string(), agent_running);
     let base = if let Some(mgr) = mcp_manager {
@@ -1068,8 +1071,15 @@ fn build_cmd_ctx(
     };
     // Phase 21.8.2: wire skill_registry so /skills list shows catalog and
     // /skills reload returns SkillsReload for the REPL loop to process.
-    if let Some(sr) = skill_registry {
+    let ctx = if let Some(sr) = skill_registry {
         ctx.with_skill_registry(sr)
+    } else {
+        ctx
+    };
+    // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): wire KanbanStoreReader so /kanban
+    // slash dispatch reaches the kanban board. Best-effort — None if store unavailable.
+    if let Some(handle) = kanban_store {
+        ctx.with_kanban_store(handle)
     } else {
         ctx
     }
@@ -1456,6 +1466,18 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     let command_router = CommandRouter::new(build_command_registry());
     let agent_running = Arc::new(AtomicBool::new(false));
 
+    // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): open KanbanStore once at session start
+    // for /kanban slash dispatch. Best-effort — failure logs a warning and leaves the
+    // field None (cmd_kanban returns "not configured" in that case, matching cmd_cron).
+    let kanban_store_handle: Option<Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>> =
+        match crate::kanban::KanbanStoreReaderImpl::open_default() {
+            Ok(imp) => Some(Arc::new(imp) as Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>),
+            Err(e) => {
+                tracing::warn!(error = %e, "kanban store unavailable for /kanban slash dispatch");
+                None
+            }
+        };
+
     // Plan 11 spawn relocated earlier in run_chat (before the
     // SubagentProgressCallback construction) so the ExternalPrinterHandle
     // is available when the callback captures its printer clone. See the
@@ -1634,6 +1656,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         workspace.clone(),
                         trajectory_writer.clone(),
                         Some(skill_registry.clone()),
+                        kanban_store_handle.clone(), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
                     );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -2030,6 +2053,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                         workspace.clone(),
                                         trajectory_writer.clone(),
                                         Some(skill_registry.clone()),
+                                        kanban_store_handle.clone(), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
                                     );
                                     match dispatch_command(
                                         tui.extensions(),

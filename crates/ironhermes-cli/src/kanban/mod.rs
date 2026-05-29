@@ -8,6 +8,9 @@
 
 pub mod commands;
 pub mod format;
+pub mod store_reader_impl;
+
+pub use store_reader_impl::KanbanStoreReaderImpl;
 
 use anyhow::Result;
 use clap::Subcommand;
