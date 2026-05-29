@@ -17,6 +17,8 @@ use dioxus::prelude::*;
 #[component]
 pub fn AppFooter() -> Element {
     let active_screen = use_context::<Signal<Screen>>();
+    // Phase 36.17.4 (D-03a): queue pill state provided by HermesApp.
+    let queue_state = use_context::<Signal<(u32, bool)>>();
     let mut clock = use_signal(now_time_utc);
 
     // 1Hz ticker — `use_future` runs forever bound to this component's
@@ -39,6 +41,8 @@ pub fn AppFooter() -> Element {
 
     let label = screen_label(*active_screen.read());
     let clock_str = clock.read().clone();
+    // Phase 36.17.4: read into Copy locals before RSX (clippy.toml: signal borrow must not span RSX).
+    let (queue_depth, queue_paused) = *queue_state.read();
 
     rsx! {
         div { class: "app-footer",
@@ -47,6 +51,19 @@ pub fn AppFooter() -> Element {
             span { "SCREEN " span { id: "ft-screen", class: "v", "{label}" } }
             span { class: "sep" }
             span { "AGENT " span { class: "v", "DEFAULT" } }
+            // Phase 36.17.4 (D-03a / D-03b): queue pill — hide-when-zero. Placed in
+            // the left run after AGENT for visual parity with the TUI status_line.rs.
+            if queue_depth > 0 {
+                span { class: "sep" }
+                span {
+                    "QUEUE "
+                    if queue_paused {
+                        span { class: "v", "{queue_depth} (paused)" }
+                    } else {
+                        span { class: "v", "{queue_depth}" }
+                    }
+                }
+            }
             div { class: "app-footer-right",
                 span { "MEM " span { class: "v", "412 / ∞" } }
                 span { class: "sep" }

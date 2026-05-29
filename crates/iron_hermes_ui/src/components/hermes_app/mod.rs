@@ -131,6 +131,11 @@ pub fn HermesApp() -> Element {
     let mut subagent_events = use_signal(|| 0u64);
     let mut is_ws_connected = use_signal(|| false);
 
+    // Phase 36.17.4 (D-03a): queue pill state — (depth, paused). Updated on every
+    // QueueUpdated event from the server (Plan 02 protocol variant). Consumed by
+    // AppFooter via use_context.
+    let mut queue_state = use_signal(|| (0u32, false));
+
     // Bootstrap the chat session via the existing server fn from
     // Phase 25.5 (D-02 — no edits to the server file). Mirrors
     // warp_hermes.rs:104-129 adapted for the new bubble shape.
@@ -247,12 +252,9 @@ pub fn HermesApp() -> Element {
                                 let cur = *subagent_events.read();
                                 subagent_events.set(cur + 1);
                             }
-                            crate::protocol::ChatStreamEvent::QueueUpdated { .. } => {
-                                // Phase 36.17.4 Plan 02: minimal exhaustive-match closure for the
-                                // new variant added by this plan. Plan 05 replaces this arm with
-                                // `queue_state.set((depth, paused))` to drive the status-bar pill
-                                // (D-03a). Recv-loop must stay exhaustive; ignoring here is safe
-                                // because no consumer renders queue state yet in Wave 1.
+                            // Phase 36.17.4 (D-03a): (u32, bool) is Copy — direct .set call satisfies signal-borrow-across-await clippy rule (no .await in this arm).
+                            crate::protocol::ChatStreamEvent::QueueUpdated { depth, paused } => {
+                                queue_state.set((depth, paused));
                             }
                         }
                     }
@@ -340,6 +342,8 @@ pub fn HermesApp() -> Element {
     // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08). subagent_events drives push-restart in Plan 02; is_ws_connected drives dynamic poll cadence.
     use_context_provider(|| subagent_events);
     use_context_provider(|| is_ws_connected);
+    // Phase 36.17.4 (D-03a): expose queue_state to AppFooter via context.
+    use_context_provider(|| queue_state);
 
     rsx! {
         hud_chrome::HudChrome {}
