@@ -164,7 +164,7 @@ ironhermes kanban --profile testbanner dispatch --max 1 2>&1 | tee /tmp/uat09a-r
 
 **PASS signals to look for (in the dispatcher.log):**
 - `event="claimed" task_id=t_<your-id> run_id=r_<16-hex> profile=testbanner` → **Stage 1+2 PASS** (atomic claim + spawn)
-- `event="spawned" pid=<N> workspace="~/.ironhermes/kanban/workspaces/t_<id>"` → **Stage 2 PASS** (real subprocess)
+- `event="spawned" pid=<N> workspace="~/.ironhermes/profiles/testbanner/kanban/workspaces/t_<id>"` → **Stage 2 PASS** (real subprocess)
 - NO `error: unexpected argument` line → **Stage 3 PASS** (argparse — was Run #1's blocker)
 - NO `EOF on stdin` line → **Stage 4 PASS** (preflight gate — was Run #3's blocker)
 
@@ -182,7 +182,7 @@ The tick returns once the dispatch loop completes one pass — the worker keeps 
 The worker is doing its LLM round-trip now. Tail its stderr:
 
 ```bash
-tail -f ~/.ironhermes/logs/kanban/${TASK_ID}.stderr.log
+tail -f ~/.ironhermes/profiles/testbanner/logs/kanban/${TASK_ID}.stderr.log
 ```
 
 **PASS signals to look for (in stderr) — the headline check for THIS run:**
@@ -228,7 +228,7 @@ ironhermes kanban --profile testbanner show "$TASK_ID" 2>&1 | tee /tmp/uat09a-re
 - A `claimed` event AND a `completed` event both reference the same `run_id` → **INV-36.3.7-01 + INV-36.3.7-02 runtime PASS** (the canonical 10-invariant check)
 
 **FAIL signals:**
-- Task status still `running`: the worker didn't call `kanban_complete`. Check the worker's stdout log (`~/.ironhermes/logs/kanban/${TASK_ID}.stdout.log`) for what it actually did. Paste the last 50 lines back to me.
+- Task status still `running`: the worker didn't call `kanban_complete`. Check the worker's stdout log (`~/.ironhermes/profiles/testbanner/logs/kanban/${TASK_ID}.stdout.log`) for what it actually did. Paste the last 50 lines back to me.
 - Task status `blocked` with a `gave_up` event: the breaker fired. This SHOULD only happen if something else (LLM auth, schema, etc.) made the worker fail and the failure_limit (2) was exceeded. Paste the `gave_up` event payload back to me — that's the breaker working as designed; we just need to understand what tripped it.
 
 ---
@@ -248,8 +248,8 @@ grep -r "$SENTINEL" ~/.ironhermes/logs ~/.ironhermes/kanban 2>&1 | head -20
 ## Stage 7 — Workspace + log path checks (Stages 9 + 10 of original UAT-09-A — 10 seconds, no tokens)
 
 ```bash
-ls -la ~/.ironhermes/kanban/workspaces/${TASK_ID}/ 2>&1
-ls -la ~/.ironhermes/logs/kanban/${TASK_ID}.stdout.log ~/.ironhermes/logs/kanban/${TASK_ID}.stderr.log 2>&1
+ls -la ~/.ironhermes/profiles/testbanner/kanban/workspaces/${TASK_ID}/ 2>&1
+ls -la ~/.ironhermes/profiles/testbanner/logs/kanban/${TASK_ID}.stdout.log ~/.ironhermes/profiles/testbanner/logs/kanban/${TASK_ID}.stderr.log 2>&1
 ```
 
 **PASS signal:** workspace dir exists + both log files exist.
