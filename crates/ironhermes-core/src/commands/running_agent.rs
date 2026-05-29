@@ -43,7 +43,8 @@ impl Drop for RunningAgentGuard {
 /// "approve" and "deny" are intentionally excluded until the approval queue lands.
 pub fn is_bypass(name: &str) -> bool {
     // TODO(D-01): add "approve" | "deny" when approval queue lands
-    matches!(name, "stop" | "new" | "status" | "queue")
+    // Phase 36.17.4 (D-08): pause/unpause must bypass — they affect drain behavior, not the in-flight turn.
+    matches!(name, "stop" | "new" | "status" | "queue" | "pause" | "unpause")
 }
 
 #[cfg(test)]
@@ -53,7 +54,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Test 1: The bypass list contains exactly the four D-01 commands and is case-sensitive.
+    /// Test 1: The bypass list contains exactly the six D-01 + D-08 commands and is case-sensitive.
     #[test]
     fn is_bypass_locked_list() {
         // Members — all must return true
@@ -61,6 +62,8 @@ mod tests {
         assert!(is_bypass("new"), "new must bypass");
         assert!(is_bypass("status"), "status must bypass");
         assert!(is_bypass("queue"), "queue must bypass");
+        assert!(is_bypass("pause"), "pause must bypass (Phase 36.17.4 D-08)");
+        assert!(is_bypass("unpause"), "unpause must bypass (Phase 36.17.4 D-08)");
 
         // Non-members — all must return false
         assert!(!is_bypass("model"), "model must not bypass");
@@ -69,6 +72,7 @@ mod tests {
         assert!(!is_bypass("deny"), "deny must not bypass");
         assert!(!is_bypass(""), "empty string must not bypass");
         assert!(!is_bypass("STOP"), "STOP (uppercase) must not bypass — case-sensitive (D-01)");
+        assert!(!is_bypass("PAUSE"), "PAUSE (uppercase) must not bypass — case-sensitive (D-01)");
     }
 
     /// Test 2: The flag is set to true when the guard is constructed.
