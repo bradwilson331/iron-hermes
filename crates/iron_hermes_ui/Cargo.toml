@@ -50,6 +50,9 @@ ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 36.17.4 Plan 03 (D-01): need SessionQueue from gateway — the concrete
+# MessageQueue<SessionKey> implementor instantiated in AppState::init.
+ironhermes-gateway = { path = "../ironhermes-gateway" }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
