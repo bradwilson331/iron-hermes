@@ -397,10 +397,26 @@ async fn main() -> Result<()> {
     // running daemon, not an interactive REPL, and must keep the
     // `ironhermes=info` log filter (otherwise startup diagnostics get
     // suppressed for operators following the canonical onboarding).
+    // Phase 36.3.7.0 Plan 05 (BUG-36.3.7-04): `chat -q "..."` is functionally
+    // equivalent to `-e/--execute` (both short-circuit through `run_single` —
+    // see the Chat match arm at line ~430 below). The original preflight gate
+    // (added in Phase 36.3.7 Plan 01 alongside the `-q` flag) only excluded
+    // the `cli.execute.is_some()` non-interactive path and forgot the new
+    // `chat -q` non-interactive path, so worker subprocesses spawned by the
+    // kanban dispatcher (which use `chat -q`) tried to launch the FirstRun /
+    // FixMode wizard, hit `EOF on stdin`, and died. Exclude `chat -q` here
+    // and at the sibling `is_interactive_repl` gate below so both paths
+    // (preflight wizard + interactive-log-filter) correctly recognize
+    // `chat -q` as a non-interactive entry.
+    let chat_has_query = matches!(
+        &cli.command,
+        Some(Commands::Chat { query: Some(_), .. })
+    );
     let run_preflight = matches!(
         cli.command,
         Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None
-    ) && cli.execute.is_none();
+    ) && cli.execute.is_none()
+      && !chat_has_query;
     if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
@@ -413,8 +429,11 @@ async fn main() -> Result<()> {
     // RUST_LOG in the environment ALWAYS wins (via EnvFilter::try_from_default_env).
     // Interactive = `hermes chat` subcommand, OR bare `hermes` with no `-e/--execute` flag.
     // `hermes -e "prompt"` enters `run_single` via the `None` arm — that's batch, NOT interactive.
+    // Phase 36.3.7.0 Plan 05 (BUG-36.3.7-04): `chat -q "..."` is ALSO non-interactive.
     let is_interactive_repl =
-        matches!(cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
+        matches!(cli.command, Some(Commands::Chat { .. }) | None)
+        && cli.execute.is_none()
+        && !chat_has_query;
     let env_filter = match std::env::var("RUST_LOG") {
         Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
         Err(_) if is_interactive_repl => tracing_subscriber::EnvFilter::new("error"),
