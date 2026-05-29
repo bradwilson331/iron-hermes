@@ -39,6 +39,29 @@ pub enum KanbanError {
     #[error("kanban protocol violation: {0}")]
     ProtocolViolation(String),
 
+    /// `expected_run_id` mismatch — write rejected because the worker's run
+    /// was superseded by a reclaim + respawn (D-22 / D-41).
+    #[error("stale run id: expected={expected}, actual={actual}")]
+    StaleRunId {
+        expected: String,
+        actual: String,
+    },
+
+    /// `claim_lock` mismatch — worker write gated out (D-41).
+    #[error("claim expired for task {task_id}: presented lock={presented_lock}")]
+    ClaimExpired {
+        task_id: String,
+        presented_lock: String,
+    },
+
+    /// `created_cards` validation failed — phantom ids or wrong-profile ids
+    /// were passed to `kanban_complete` (D-22). The rejection is permanent.
+    #[error("created_cards rejected: phantom={phantom:?}, wrong_profile={wrong_profile:?}")]
+    CreatedCardsRejected {
+        phantom: Vec<String>,
+        wrong_profile: Vec<String>,
+    },
+
     /// Generic fallback for ad-hoc errors carried from `anyhow`.
     #[error("{0}")]
     Other(#[from] anyhow::Error),

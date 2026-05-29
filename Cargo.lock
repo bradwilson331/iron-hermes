@@ -4808,6 +4808,7 @@ dependencies = [
  "chrono",
  "ironhermes-core",
  "nix 0.29.0",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
