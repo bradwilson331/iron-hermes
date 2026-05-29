@@ -34,7 +34,7 @@
 //! ## Spawn shape (D-15 / D-28)
 //!
 //! ```text
-//! ironhermes --profile <assignee> --skills kanban-worker [--skills <extra>...]
+//! ironhermes --profile <assignee>
 //!            chat -q "work kanban task <id>"
 //! ```
 //!
@@ -87,6 +87,9 @@ pub const SAFE_SYSTEM_VARS: &[&str] = &[
 ///   in the current process env).
 /// - 8 always-present kanban vars.
 /// - `HERMES_TENANT` only when `task.tenant` is `Some`.
+/// - `HERMES_KANBAN_TASK_SKILLS` only when `task.skills` is `Some` and
+///   decodes to a non-empty `Vec<String>` (forward-compatible carrier for
+///   skill extras; replaces the dropped `--skills` argv path, BUG-36.3.7-01).
 ///
 /// # What is excluded
 ///
@@ -129,6 +132,17 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str) -> V
     if let Some(ref t) = task.tenant {
         env.push(("HERMES_TENANT".into(), t.clone()));
     }
+    // HERMES_KANBAN_TASK_SKILLS — forward-compatible carrier for task-level
+    // skill extras (D-28 / BUG-36.3.7-01). Emitted only when task.skills is
+    // Some AND decodes to a non-empty Vec<String>. Receiver-side consumption
+    // is out of scope for 36.3.7.0 (see 36.3.7.0-01-SKILLS-EXTRAS-AUDIT.md).
+    if let Some(ref skills_json) = task.skills {
+        if let Ok(extras) = serde_json::from_str::<Vec<String>>(skills_json) {
+            if !extras.is_empty() {
+                env.push(("HERMES_KANBAN_TASK_SKILLS".into(), skills_json.clone()));
+            }
+        }
+    }
 
     env
 }
@@ -139,9 +153,10 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str) -> V
 
 /// Spawn a kanban worker subprocess for a task.
 ///
-/// Builds the `ironhermes --profile <P> --skills kanban-worker [extras]
-/// chat -q "work kanban task <id>"` command (D-15 / D-28), applies the env
-/// scrub via `.env_clear()` + `.envs(build_kanban_worker_env(...))` (D-18 /
+/// Builds the `ironhermes --profile <P> chat -q "work kanban task <id>"`
+/// command (D-15; D-28 superseded by 36.3.7.0 BUG-01 — extras now carried
+/// via HERMES_KANBAN_TASK_SKILLS env), applies the env scrub via
+/// `.env_clear()` + `.envs(build_kanban_worker_env(...))` (D-18 /
 /// INV-36.3.7-05), and redirects stdout/stderr to per-task log files (D-19).
 ///
 /// Returns the spawned child PID on success.
@@ -178,18 +193,6 @@ pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result
         })?;
     }
 
-    // Build --skills args: always include kanban-worker (D-28); append
-    // task-level extras from task.skills (JSON array of skill slugs).
-    let mut skill_args: Vec<String> = vec!["--skills".into(), "kanban-worker".into()];
-    if let Some(ref skills_json) = task.skills {
-        if let Ok(extras) = serde_json::from_str::<Vec<String>>(skills_json) {
-            for s in extras {
-                skill_args.push("--skills".into());
-                skill_args.push(s);
-            }
-        }
-    }
-
     // Open log files.
     let stdout_file = std::fs::File::create(&stdout_log).map_err(|e| {
         KanbanError::Other(anyhow::anyhow!(
@@ -205,15 +208,17 @@ pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result
     })?;
 
     // Assemble command (D-15):
-    //   ironhermes --profile <assignee> --skills kanban-worker [extras]
-    //              chat -q "work kanban task <id>"
+    //   ironhermes --profile <assignee> chat -q "work kanban task <id>"
+    //
+    // No --skills flag: kanban tools are registered env-gated via
+    // HERMES_KANBAN_TASK (Plan 05 / register_kanban_tools_if_applicable).
+    // Skill extras ride HERMES_KANBAN_TASK_SKILLS env var (BUG-36.3.7-01).
     //
     // CRITICAL: .env_clear() BEFORE .envs(...) ensures no inherited shell
     // secrets reach the worker process (D-18 / INV-36.3.7-05).
     let child = Command::new("ironhermes")
         .arg("--profile")
         .arg(&task.assignee)
-        .args(&skill_args)
         .arg("chat")
         .arg("-q")
         .arg(format!("work kanban task {}", task.id))
