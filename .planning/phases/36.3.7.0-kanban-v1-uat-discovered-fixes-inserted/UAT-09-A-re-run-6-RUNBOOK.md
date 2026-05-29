@@ -122,21 +122,30 @@ echo "$OPENAI_API_KEY" > /tmp/uat09a-rerun6-sentinel.txt
 
 ## Stage 2 — Create a kanban task (1 minute, no tokens)
 
+The binary's actual `kanban create` shape (per `--help`):
+- `--assignee <NAME>` is REQUIRED (this is the profile the dispatcher will spawn the worker under)
+- `<TITLE>` is the positional, must be SHORT (one line)
+- `--body <BODY>` carries the long-form prompt the worker actually sees
+
 ```bash
 cd /Users/twilson/code/ironhermes
 
-ironhermes --profile testbanner kanban create \
-    "UAT-09-A re-run #6 — verify Anthropic schema fix end-to-end. \
-     Briefly acknowledge the task with one sentence then call kanban_complete \
-     with summary='re-run 6 acknowledged' and any small metadata payload." \
+ironhermes kanban --profile testbanner create \
+    --assignee testbanner \
     --workspace scratch \
-    --tenant t-test
+    --tenant t-test \
+    --body "Briefly acknowledge this task with one sentence, then call the kanban_complete tool with summary='re-run 6 acknowledged' and any small metadata payload like {\"check\":\"schema-fix\"}." \
+    --json \
+    "UAT-09-A re-run #6 — verify Anthropic schema fix end-to-end"
 ```
 
-**PASS signal:** stdout contains a `t_<16-hex>` task id. Save it:
+**PASS signal:** stdout is a JSON object containing `"task_id":"t_<16-hex>"` and `"status":"ready"`. Save it:
 ```bash
-export TASK_ID=t_<paste-the-id-here>
+export TASK_ID=$(ironhermes kanban --profile testbanner list --json 2>/dev/null | grep -o 't_[a-f0-9]\{16\}' | tail -1)
+# OR just paste the task_id from the JSON output:
+# export TASK_ID=t_<paste-the-id>
 echo "$TASK_ID" > /tmp/uat09a-rerun6-task-id.txt
+echo "Captured: $TASK_ID"
 ```
 
 **FAIL signal:** any error → halt + paste stdout/stderr.
@@ -147,8 +156,10 @@ echo "$TASK_ID" > /tmp/uat09a-rerun6-task-id.txt
 
 This claims the task, spawns the worker. The worker will then go out to Anthropic-via-OpenRouter — that's the first paid step.
 
+The dispatch subcommand is one-shot by default (no `--once` flag). Use `--max <N>` to cap how many tasks are claimed per tick.
+
 ```bash
-ironhermes --profile testbanner kanban dispatch --once --max-parallel 1 2>&1 | tee /tmp/uat09a-rerun6-dispatcher.log
+ironhermes kanban --profile testbanner dispatch --max 1 2>&1 | tee /tmp/uat09a-rerun6-dispatcher.log
 ```
 
 **PASS signals to look for (in the dispatcher.log):**
@@ -201,13 +212,13 @@ ps -p <PID-from-dispatcher.log>     # should report "No such process" once the w
 Run another single tick so the dispatcher picks up the worker's `kanban_complete` call and marks the task done:
 
 ```bash
-ironhermes --profile testbanner kanban dispatch --once --max-parallel 1 2>&1 | tee /tmp/uat09a-rerun6-dispatcher-tick2.log
+ironhermes kanban --profile testbanner dispatch --max 1 2>&1 | tee /tmp/uat09a-rerun6-dispatcher-tick2.log
 ```
 
 Then verify task state:
 
 ```bash
-ironhermes --profile testbanner kanban show "$TASK_ID" 2>&1 | tee /tmp/uat09a-rerun6-task-show.log
+ironhermes kanban --profile testbanner show "$TASK_ID" 2>&1 | tee /tmp/uat09a-rerun6-task-show.log
 ```
 
 **PASS signals:**
