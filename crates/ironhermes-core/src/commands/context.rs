@@ -226,6 +226,77 @@ pub trait KanbanStoreReader: Send + Sync {
 }
 
 // =============================================================================
+// KanbanStoreWriter trait — Phase 36.3.7.5 BUG-36.3.7.5-06
+// =============================================================================
+//
+// Writer-side sibling of `KanbanStoreReader`. Closes the `/kanban create` slash
+// arm + auto-subscribe hook by giving `cmd_kanban` the minimum write surface it
+// needs (create_task_simple + append_subscription) without dragging the full
+// `ironhermes_kanban::KanbanStore` type into `ironhermes-core`.
+//
+// Returns `Result<_, String>` at the boundary so the trait stays free of any
+// kanban-crate error type — preserves the leaf-crate status of ironhermes-core.
+// The concrete impl `KanbanStoreWriterImpl` lives in `ironhermes-cli` (sibling
+// of `store_reader_impl.rs`).
+
+/// Flat boundary view of a `kanban_subscriptions` row.
+///
+/// Lives in ironhermes-core so `KanbanStoreWriter::list_*` can return rows
+/// without forcing the caller to import `ironhermes_kanban::Subscription`.
+/// Field-compatible with `ironhermes_kanban::Subscription` (D-17 plain-string
+/// boundary). Phase 36.3.7.5 BUG-36.3.7.5-06.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscriptionView {
+    pub id: i64,
+    pub task_id: String,
+    pub platform: String,
+    pub chat_id: String,
+    pub thread_id: String,
+    pub source: String,
+    pub created_at: f64,
+}
+
+/// Trait for writing kanban tasks + subscriptions from the `/kanban` slash
+/// command handler (`cmd_kanban` Create arm + auto-subscribe hook).
+///
+/// Phase 36.3.7.5 BUG-36.3.7.5-06 — writer-side sibling of KanbanStoreReader.
+/// Concrete impl `KanbanStoreWriterImpl` lives in `ironhermes-cli`.
+pub trait KanbanStoreWriter: Send + Sync {
+    /// Create a task with the simplest possible field set (title + assignee).
+    /// Returns the new task_id on success, or a human-readable error string.
+    /// The `json` flag is a hint — the writer impl typically ignores it (the
+    /// `--json` output is handled by the dispatcher arm above), but it's passed
+    /// through for any writer that wants to vary behavior.
+    fn create_task_simple(&self, title: &str, assignee: &str, json: bool) -> Result<String, String>;
+
+    /// Append a subscription row. Mirrors the underlying KanbanStore method but
+    /// returns a string error so the trait stays free of any kanban-crate error
+    /// type (preserves the leaf-crate status of ironhermes-core).
+    fn append_subscription(
+        &self,
+        task_id: &str,
+        platform: &str,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        source: &str,
+    ) -> Result<i64, String>;
+
+    /// List subscriptions for a task — used by `cmd_notify_list` and tests.
+    fn list_subscriptions_for_task(&self, task_id: &str) -> Result<Vec<SubscriptionView>, String>;
+
+    /// List ALL subscriptions (no task filter) — used by `cmd_notify_list` with no id arg.
+    fn list_all_subscriptions(&self) -> Result<Vec<SubscriptionView>, String>;
+
+    /// Remove subscriptions — mirrors the underlying remove_subscriptions API.
+    fn remove_subscriptions(
+        &self,
+        task_id: &str,
+        platform: Option<&str>,
+        chat_id: Option<&str>,
+    ) -> Result<usize, String>;
+}
+
+// =============================================================================
 // ToolsetSessionHandle trait — Phase 25 Plan 04 (D-06)
 // =============================================================================
 
@@ -476,6 +547,21 @@ pub struct CommandContext {
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-kanban.
     pub kanban_store: Option<Arc<dyn KanbanStoreReader>>,
 
+    /// Phase 36.3.7.5 BUG-36.3.7.5-06: write-capable kanban handle for the
+    /// `/kanban create` slash arm + the 3 `notify-*` CLI verbs' future
+    /// gateway-side wiring.
+    pub kanban_store_writer: Option<Arc<dyn KanbanStoreWriter>>,
+
+    /// Phase 36.3.7.5 BUG-36.3.7.5-06: originating chat id when CommandContext
+    /// is built by the gateway's `handle_slash_command`. None when the context
+    /// is built by the CLI / TUI (which don't have a chat origin).
+    pub chat_id: Option<String>,
+
+    /// Phase 36.3.7.5 BUG-36.3.7.5-06: originating thread id for platforms that
+    /// support threads (Telegram super-group topic, Discord thread). None when
+    /// the chat has no thread or the platform doesn't support them.
+    pub thread_id: Option<String>,
+
     /// Phase 25 Plan 04 (D-06): ToolsetSessionHandle for `/toolset` session-only mutations.
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-tools.
     /// Slash command enable/disable mutate ONLY the session's live toolset config; they do
@@ -525,6 +611,10 @@ impl CommandContext {
             cron_store: None,
             // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader for /kanban slash UI.
             kanban_store: None,
+            // Phase 36.3.7.5 BUG-36.3.7.5-06.
+            kanban_store_writer: None,
+            chat_id: None,
+            thread_id: None,
             // Phase 25 Plan 04 (D-06): ToolsetSessionHandle for /toolset slash UI.
             toolset_session: None,
             // Phase 25.3 D-W-2: Workspace newtype for /sessions filter + Curator output destination.
@@ -668,6 +758,27 @@ impl CommandContext {
     /// CommandContext-construction sites.
     pub fn with_trajectory_writer(mut self, handle: Arc<dyn TrajectoryWriterHandle>) -> Self {
         self.trajectory_writer = Some(handle);
+        self
+    }
+
+    /// Builder: attach a KanbanStoreWriter trait-object handle
+    /// (Phase 36.3.7.5 BUG-36.3.7.5-06).
+    pub fn with_kanban_store_writer(mut self, writer: Arc<dyn KanbanStoreWriter>) -> Self {
+        self.kanban_store_writer = Some(writer);
+        self
+    }
+
+    /// Builder: attach the originating chat-origin tuple
+    /// (Phase 36.3.7.5 BUG-36.3.7.5-06). `chat_id` is always present at the
+    /// gateway boundary; `thread_id` is `None` unless the platform-event
+    /// carried one.
+    pub fn with_chat_origin(
+        mut self,
+        chat_id: impl Into<String>,
+        thread_id: Option<impl Into<String>>,
+    ) -> Self {
+        self.chat_id = Some(chat_id.into());
+        self.thread_id = thread_id.map(|t| t.into());
         self
     }
 }
