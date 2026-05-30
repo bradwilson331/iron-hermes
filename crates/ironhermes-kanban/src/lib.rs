@@ -73,7 +73,7 @@ pub use types::{
     TaskComment, TaskLink, TaskRun,
 };
 pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker};
-pub use tools::register_kanban_tools;
+pub use tools::{register_kanban_tools, KanbanSwarmTool};
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
 /// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).
