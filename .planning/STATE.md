@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: ready
 stopped_at: null
-last_updated: "2026-05-29T19:48:59.030Z"
-last_activity: 2026-05-29 -- Phases 36.3.7.1 + 36.3.7.3 both shipped (PASS). Kanban dispatcher fully breaker-guarded on all 4 failure paths + CLI CFG-03 static-grep test hardened. Next: UAT-09-A re-run #6 (bilateral consumer of 36.3.7.0 + 36.3.7.1 + 36.3.7.2 + 36.3.7.3 fixes)
+last_updated: "2026-05-30T00:30:00.000Z"
+last_activity: 2026-05-30 -- UAT-09-A Run #6 PASS-WITH-NOTES. 36.3.7.x cascade fully closed bilaterally (automated tests + verifier verdicts + live UAT + live breaker runtime evidence). Schema-fix headline PASS reproducible 2x. Two bonus live breaker confirmations (detect_crashed + reclaim_stale_claims). Provider-side 500 documented as upstream, not ours.
 progress:
   total_phases: 51
   completed_phases: 16
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** UAT-09-A re-run #6 — the bilateral end-to-end consumer of the 36.3.7.x cascade. First live kanban worker run with all four companion fixes landed: 36.3.7.0 (UAT-discovered fixes), 36.3.7.1 (dispatcher breaker on all 4 failure paths), 36.3.7.2 (delegate_task schema Anthropic-clean), 36.3.7.3 (CLI CFG-03 test hardened).
+**Current focus:** Between phases. 36.3.7.x cascade closed. Next-queue candidates: (a) operator follow-up on the OpenRouter 500 (config/model audit; non-code); (b) dispatcher events parity (latent: `reclaim_stale_claims` doc claims `KanbanEventKind::Reclaimed` event, implementation only emits `tracing::info!`); (c) plain backlog selection.
 
 ## Current Position
 
-Phase: (none active) — ready for UAT-09-A re-run #6 OR next-queue selection
-Status: 5 phases shipped this session (36.17.4 confirmed Complete; 36.3.7.0 + 36.3.7.2 + 36.3.7.1 PASS; 36.3.7.3 PASS). All known automated-test gates green.
-Last activity: 2026-05-29 -- Phase 36.3.7.3 shipped (6/6 gates PASS); 36.3.7.x cascade hanging threads all resolved; UAT-09-A re-run #6 queued
+Phase: (none active) — ready for next-queue selection
+Status: 5 phases shipped + UAT-09-A Run #6 closed this session (36.17.4 confirmed Complete; 36.3.7.0 + 36.3.7.2 + 36.3.7.1 + 36.3.7.3 PASS; cascade live UAT PASS-WITH-NOTES; tools_smoke env-var race fixed side-quest).
+Last activity: 2026-05-30 -- UAT-09-A re-run #6 closed PASS-WITH-NOTES; Run #6 evidence committed at `5737b64a`; tools_smoke env-var race fix at `4208bc28`
 
 ## Recent close-out summary (2026-05-29)
 
@@ -44,6 +44,10 @@ Last activity: 2026-05-29 -- Phase 36.3.7.3 shipped (6/6 gates PASS); 36.3.7.x c
 **Phase 36.3.7.1 (dispatcher breaker on remaining failure paths):** 2/2 plans shipped (8 commits on develop). Plan 01 wired `apply_circuit_breaker` into `reclaim_stale_claims` at dispatcher.rs:481; Plan 02 wired it into `enforce_max_runtime` at dispatcher.rs:604. Both used the canonical line 305 bump → event → breaker pattern from 36.3.7.0-03. 4 receiver-end tests added to `crates/ironhermes-kanban/tests/dispatcher_logic.rs` (2 per path × 2 sides of `failure_limit` bound). Verifier (commit `cea58ace`) returned PASS (8/8 gates). Latent finding from Plan 01 SUMMARY: `reclaim_stale_claims` doc-comment promises a `KanbanEventKind::Reclaimed` event but only emits `tracing::info!` — out-of-scope per CONTEXT, queued for a future "dispatcher events parity" phase. **Operational note:** both Plan 01 and Plan 02 executors hit cwd-drift bug #3097 — `cd /absolute/path` in Bash calls landed commits on develop rather than the spawn-time worktree branches. Orchestrator authorized Option B (continue on develop directly); verifier audited and confirmed: monotone commit order per plan, contiguous test-file appends, scope-fenced diffs, provenance-prefixed messages.
 
 **Phase 36.3.7.3 (CLI CFG-03 doc-comment scan-window regression):** 1/1 plan shipped (5 commits, orchestrator-inline execution per CONTEXT decision). Producer fix: 1-line CFG-03 marker added at main.rs:414. Consumer fix: `phase_amendment_doc_comment_present` test rewritten to anchor on the enclosing `async fn main` scope rather than a 1500-char byte window, AND tightened `||` to `&&` (both `"Phase 26.4.1"` AND `"CFG-03"` must appear together — original CFG-03 contract). Inline orchestrator execution mirrored Phase 36.3.7.0 Plan 05 — no worktree, no subagent, no cwd-drift risk. All 6 phase-level gates PASS. Forward note: hardened scope-anchor approach eliminates the entire class of "marker pushed out of window" regressions; future legitimate comment additions near `run_preflight` no longer require auditing the static-grep tests.
+
+**UAT-09-A Run #6 (2026-05-30, ~3.5 hours elapsed across two attempts):** the 36.3.7.x cascade's live bilateral consumer signal — first end-to-end kanban worker round-trip after all 4 companion phases landed. **Stage 7 PASS reproducible 2x**: zero `400: input_schema does not support oneOf` errors across both attempts, confirming the 36.3.7.2 schema unblock works end-to-end through Anthropic-via-OpenRouter. **Two bonus live breaker confirmations** from the dispatcher event log + tick stderr: (1) `detect_crashed_workers → apply_circuit_breaker` (36.3.7.0-03 wiring) — `gave_up failures=2 effective_limit=2` log line; (2) `reclaim_stale_claims → apply_circuit_breaker` (36.3.7.1-01 wiring) — `reclaimed {reason: "crashed"}` event entry. Both worker runs hit an upstream `500 Internal Server Error` on the SECOND streaming completion (after the first tool result returned) — reproducible across two attempts → provider-side, not a 36.3.7.x regression; documented for operator follow-up. Stages 1-8 + 10 + 2 bonus all green; Stage 9 (workspace dir D-31) N/A by design (`--workspace scratch` is a pass-through marker per `paths.rs::non_dir_workspaces_pass_through`). Operational corrections to the runbook (commit `e4452f0c` + `c2c90b3d`): `kanban create` requires `--assignee <NAME>` + `--body <PROMPT>` + short positional TITLE; `kanban dispatch` is one-shot by default (no `--once`); worker logs + workspaces resolve under profile-scoped HERMES_HOME (`~/.ironhermes/profiles/testbanner/...`, not the global root). Evidence appended at `5737b64a` to `36.3.7.0-04-UAT-EVIDENCE.md`.
+
+**Side-quest (UAT prep): tools_smoke env-var race (commit `4208bc28`).** While dry-running the UAT runbook, the operator hit `panic: task not found: t_547330196a6c44b6` from `kanban_complete_rejects_stale_run_id`. Root cause: 7 tests in `crates/ironhermes-kanban/tests/tools_smoke.rs` set process-global `HERMES_KANBAN_TASK` / `HERMES_PROFILE` then call `tool.execute()`. Cargo runs the tests in parallel, they race — test A's tool reads test B's task_id, looks for it in test A's in-memory store, panics. Producer-side correctness unchanged (the dispatcher's `worker_spawn` correctly sets these per-subprocess); the bug is purely a test-harness in-process shared-namespace issue. Fix: `static ENV_LOCK: std::sync::Mutex<()>` + `let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())` at the top of each of the 7 affected tests. Poison-tolerant (a prior-test panic doesn't deadlock the next one). 21 LOC, no new deps. Verified race-free via 3 consecutive full-suite runs: 14 passed / 0 failed across all 3. Reinforces the bilateral-tracing meta-rule — producer/consumer integrity holds in production, but the test harness can violate the implicit single-writer assumption that the env-var-as-channel pattern depends on.
 
 ## Phase 36.2 Closure Summary
 
