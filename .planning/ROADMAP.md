@@ -625,10 +625,10 @@ Plans:
 
 **Requirements**: TBD (run /gsd-plan-phase 36.3.7.7 to break down — research should confirm whether `KanbanStore::create_tasks_batch` exists or needs to be added as a new transactional primitive; check whether existing `create_task` can be loop-called inside a `BEGIN IMMEDIATE` transaction or whether batch-insert performance matters for v1; verify reference.md §664 wording for any locked semantics)
 **Depends on:** Phase 36.3.7.6 (CLOSED — 9-tool LLM surface stable; pattern for tool registration in `tools/mod.rs` proven)
-**Plans:** TBD
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.7 to break down)
+- [x] TBD (run /gsd-plan-phase 36.3.7.7 to break down) (completed 2026-05-30)
 
 ### Phase 36.3.7.8: @mention delegation parser — inline routing from prose (INSERTED 2026-05-30)
 

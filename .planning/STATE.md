@@ -4,14 +4,14 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.3.7.7 context gathered
-last_updated: "2026-05-30T16:40:08.300Z"
-last_activity: 2026-05-30 -- Phase 36.3.7.7 planning complete
+last_updated: "2026-05-30T20:59:12.011Z"
+last_activity: 2026-05-30 -- Phase 36.3.7.7 execution started
 progress:
   total_phases: 55
-  completed_phases: 17
+  completed_phases: 18
   total_plans: 85
-  completed_plans: 81
-  percent: 31
+  completed_plans: 82
+  percent: 33
 ---
 
 # Project State
@@ -21,13 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.6 (Kanban LLM-tool surface completion — heartbeat / link / unblock) — **COMPLETE end-to-end.** Single-plan phase closed PASS 2026-05-30. The 9-tool LLM surface promised in `docs/kanban/reference.md` §200-208 is now fully shipped: `kanban_heartbeat` (append-event semantics per D-heartbeat-impl), `kanban_link` (WITH RECURSIVE descendant-walk cycle detection inside BEGIN IMMEDIATE per D-link-cycle-detection; new sibling `insert_link_checked` method + new `KanbanError::LinkCycle` variant; existing `insert_link` UNCHANGED), `kanban_unblock` (handler-side status-precondition gate per D-unblock-status-precondition; existing `store.unblock_task` UNCHANGED). CLI parity verb `hermes kanban heartbeat <id> [--note]` closes the long-standing `reference.md:583` doc-vs-impl gap. Bilateral-tracing satisfied (LEARNINGS 2026-05-30) — every BUG ships producer + consumer in same commit set. Crate-isolation fence still held — zero `ironhermes-gateway` dep declarations in `ironhermes-kanban/Cargo.toml`; the 3 new tools mount the store directly per D-tool-surface-mounts-store-directly. Next: milestone-v3.0 backlog has 12 more parity phases; pick the next one to plan/execute.
+**Current focus:** Phase 36.3.7.7 — kanban-swarm-helper-multi-task-fan-out-for-orchestrators
 
 ## Current Position
 
-Phase: 36.3.7.6 (CLOSED PASS — 13/13 phase-level gates PASS, bilateral-tracing 5 BUGs × 2 ends + D-cli-heartbeat-parity, store.insert_link + store.unblock_task signatures byte-stable, DEFERRED_KANBAN_SUBVERBS untouched, crate-isolation fence held) — 1 plan, 1 wave, develop-direct strategy
-Status: Ready to execute
-Last activity: 2026-05-30 -- Phase 36.3.7.7 planning complete
+Phase: 36.3.7.7 (kanban-swarm-helper-multi-task-fan-out-for-orchestrators) — EXECUTING
+Plan: 1 of 1
+Status: Executing Phase 36.3.7.7
+Last activity: 2026-05-30 -- Phase 36.3.7.7 execution started
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
