@@ -594,6 +594,8 @@ hermes kanban daemon --force                           # DEPRECATED — standalo
 hermes kanban stats [--json]                           # per-status + per-assignee counts
 hermes kanban log <id> [--tail BYTES]                  # worker log from ~/.hermes/kanban/logs/
 
+# Shipped in Phase 36.3.7.5: gateway notifier subscriptions (operator-explicit CLI surface).
+# Auto-subscribe also fires on /kanban create from the gateway when --json is absent.
 hermes kanban notify-subscribe <id>                    # gateway bridge hook (used by /kanban in the gateway)
         --platform <name> --chat-id <id> [--thread-id <id>] [--user-id <id>]
 hermes kanban notify-list [<id>] [--json]
@@ -700,7 +702,7 @@ This is the whole point of the separation:
 
 ### Auto-subscribe on `/kanban create` (gateway only)
 
-> **v1 NOTE:** Auto-subscribe and the `notification_sources` config key are deferred to Phase 36.3.7.5 (gateway notifier). The `notification_sources` key is RESERVED in `config.yaml` so no migration is needed when 36.3.7.5 ships. The description below reflects the planned behaviour, not the v1 implementation.
+> **Shipped in Phase 36.3.7.5.** Auto-subscribe runs automatically when `/kanban create` is invoked from the gateway (Telegram, Discord, Slack). Set `kanban.notification_sources: ["telegram"]` (or any subset of enabled platforms) in `config.yaml` to enable the polling-loop delivery; default remains `None` (off-by-default). `--json` callers skip auto-subscribe and manage subscriptions explicitly via `notify-subscribe`.
 
 When you create a task from the gateway with `/kanban create "…"`, the originating chat (platform + chat id + thread id) is automatically subscribed to that task's terminal events (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`). You'll get one message back per terminal event — including the first line of the worker's result `summary` on `completed` — without having to poll or remember the task id.
 
@@ -758,7 +760,7 @@ Workers receive `$HERMES_TENANT` and namespace their memory writes by prefix. Th
 
 ## Gateway notifications
 
-> **v1 NOTE:** The gateway notifier (notify-subscribe / notify-list / notify-unsubscribe / auto-subscribe polling loop) is deferred to Phase 36.3.7.5. The `notification_sources` config key is RESERVED so the deferred phase needs no config migration. The `/kanban create` auto-subscribe behaviour described below is also deferred.
+> **Shipped in Phase 36.3.7.5.** The gateway notifier runs as a background polling loop in the gateway runner when `kanban.notification_sources` is set to a non-empty list AND at least one named platform is enabled in `gateway.platforms`. Default-off preserved: `notification_sources` defaults to `None`. See the `notify-subscribe` / `notify-list` / `notify-unsubscribe` verbs above for explicit subscription management; auto-subscribe on `/kanban create` is described in the previous section.
 
 When you run `/kanban create …` from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls `task_events` every few seconds and delivers one message per terminal event (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`) to that chat. Completed tasks also send the first line of the worker's `--result` so you see the outcome without having to `/kanban show`.
 
