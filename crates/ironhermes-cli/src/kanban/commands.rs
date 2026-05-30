@@ -8,8 +8,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use ironhermes_kanban::{
-    DispatcherContext, KanbanConfig, KanbanStore, StrandedReport, diagnose_stranded,
-    run_dispatch_tick,
+    DispatcherContext, KanbanConfig, KanbanStore, KanbanWorkerSpec, StrandedReport, SwarmGraphSpec,
+    diagnose_stranded, run_dispatch_tick,
 };
 use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
 use ironhermes_kanban::cas::{atomic_claim, build_claim_lock, release_claim};
@@ -408,6 +408,142 @@ pub async fn cmd_heartbeat(id: String, note: Option<String>) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// cmd_swarm (Phase 36.3.7.7 BUG-36.3.7.7-01 D-cli-verb-shape)
+// ---------------------------------------------------------------------------
+
+/// Create an atomic multi-card swarm graph for orchestrator fan-out.
+///
+/// Resolves the `--workers` vs `--workers-json` union (mutually exclusive at
+/// parse time via clap `conflicts_with`; at least one must be present —
+/// runtime check), resolves the `--blackboard` vs `--blackboard-file` union
+/// (also conflicts_with; file is read to memory before building the spec per
+/// Pitfall 6), builds a `SwarmGraphSpec`, and calls `store.create_swarm`.
+///
+/// Pretty output:
+///   `Created swarm {root_id}: {N} workers[, verifier {vid}][, synth {sid}][ (+blackboard)]`
+///
+/// JSON output (`--json`): full `SwarmGraphIds` envelope.
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_swarm(
+    goal: String,
+    workers: Option<String>,
+    workers_json: Option<String>,
+    verifier: Option<String>,
+    synthesizer: Option<String>,
+    blackboard: Option<String>,
+    blackboard_file: Option<std::path::PathBuf>,
+    workspace: Option<String>,
+    skills: Vec<String>,
+    tenant: Option<String>,
+    priority: Option<i64>,
+    max_runtime: Option<String>,
+    max_retries: Option<i64>,
+    idempotency_key: Option<String>,
+    json: bool,
+) -> Result<i32> {
+    let mut store = open_store()?;
+
+    // Worker normalization — Pitfall 5: clap does NOT comma-split; we do it here.
+    let worker_specs: Vec<KanbanWorkerSpec> = match (workers, workers_json) {
+        (Some(flat), None) => flat
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| KanbanWorkerSpec {
+                assignee: s.to_string(),
+                title: None,
+                body: None,
+            })
+            .collect(),
+        (None, Some(rich)) => {
+            serde_json::from_str::<Vec<KanbanWorkerSpec>>(&rich).context("Invalid --workers-json")?
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "--workers and --workers-json are mutually exclusive"
+            ));
+        }
+        (None, None) => return Err(anyhow!("--workers or --workers-json is required")),
+    };
+
+    if worker_specs.is_empty() {
+        return Err(anyhow!("workers must contain at least one entry"));
+    }
+
+    // Blackboard normalization — Pitfall 6: file is read before building spec.
+    let blackboard_value: Option<serde_json::Value> = match (blackboard, blackboard_file) {
+        (Some(s), None) => Some(serde_json::from_str(&s).context("Invalid --blackboard JSON")?),
+        (None, Some(path)) => {
+            let file = std::fs::File::open(&path)
+                .with_context(|| format!("Failed to open --blackboard-file {}", path.display()))?;
+            Some(serde_json::from_reader(file).context("Invalid JSON in --blackboard-file")?)
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "--blackboard and --blackboard-file are mutually exclusive"
+            ));
+        }
+        (None, None) => None,
+    };
+
+    let max_runtime_seconds: Option<i64> = max_runtime
+        .as_deref()
+        .map(parse_duration_secs)
+        .transpose()?;
+
+    let created_by = profile_from_env();
+
+    let spec = SwarmGraphSpec {
+        goal,
+        workers: worker_specs,
+        verifier,
+        synthesizer,
+        blackboard: blackboard_value,
+        workspace,
+        skills: if skills.is_empty() { None } else { Some(skills) },
+        tenant,
+        priority,
+        max_runtime_seconds,
+        max_retries,
+        idempotency_key,
+        created_by: Some(created_by),
+        body: None,
+    };
+
+    let ids = store.create_swarm(spec).context("Failed to create swarm")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ids)?);
+    } else {
+        let mut suffix_parts: Vec<String> = Vec::new();
+        if let Some(ref vid) = ids.verifier_id {
+            suffix_parts.push(format!("verifier {vid}"));
+        }
+        if let Some(ref sid) = ids.synthesizer_id {
+            suffix_parts.push(format!("synth {sid}"));
+        }
+        let suffix = if suffix_parts.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", suffix_parts.join(", "))
+        };
+        let bb = if ids.blackboard_event_id.is_some() {
+            " (+blackboard)"
+        } else {
+            ""
+        };
+        println!(
+            "Created swarm {}: {} workers{}{}",
+            ids.root_id,
+            ids.worker_ids.len(),
+            suffix,
+            bb
+        );
+    }
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------
