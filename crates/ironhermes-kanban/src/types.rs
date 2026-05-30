@@ -224,3 +224,107 @@ mod tests {
         assert!(KanbanStatus::from_str("bogus").is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.7 — Swarm graph types (D-topology-shapes / D-worker-shape /
+// D-blackboard-init). Used by `KanbanStore::create_swarm` (store.rs) and the
+// `KanbanSwarmTool` LLM tool (tools/swarm.rs) and the `hermes kanban swarm`
+// CLI verb (ironhermes-cli/src/kanban/commands.rs).
+// ---------------------------------------------------------------------------
+
+/// Per-worker carrier accepted by `KanbanStore::create_swarm`. Holds the
+/// minimum info needed to materialize a worker card.
+///
+/// Two source shapes normalize into this type at the LLM-tool and CLI-verb
+/// layers (Phase 36.3.7.7 D-worker-shape):
+///
+/// - **Flat form** (`Array<String>`): each string is an assignee slug. `title`
+///   and `body` are both `None`; the store auto-generates a per-card title
+///   `"<goal> — worker {i+1} of {N}"` and inherits the shared `body` from
+///   [`SwarmGraphSpec::body`].
+/// - **Rich form** (`Array<Object>`): each element is `{assignee, title?,
+///   body?}`. Missing `title` falls back to the auto-generated form; missing
+///   `body` falls back to the shared `SwarmGraphSpec::body`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KanbanWorkerSpec {
+    /// Worker assignee slug — validated via
+    /// `ironhermes_core::profile::validate_profile_name` before any INSERT.
+    pub assignee: String,
+    /// Per-card title override. `None` → auto-generated.
+    pub title: Option<String>,
+    /// Per-card body override. `None` → inherits `SwarmGraphSpec::body`.
+    pub body: Option<String>,
+}
+
+/// Input to [`crate::store::KanbanStore::create_swarm`]. Mirrors
+/// [`crate::store::CreateTaskOptions`] for the shared per-card fields, plus
+/// the swarm-specific topology (workers / verifier / synthesizer / blackboard).
+///
+/// Per Phase 36.3.7.7 D-shared-vs-per-card-fields: `workspace`, `skills`,
+/// `tenant`, `priority`, `max_runtime_seconds`, `max_retries` are SHARED
+/// across all swarm cards (root + workers + verifier + synthesizer) and set
+/// once at the tool level. `title` and `body` are PER-CARD (rich-form only).
+/// `verifier` and `synthesizer` are PER-ROLE — one assignee each.
+#[derive(Debug, Clone)]
+pub struct SwarmGraphSpec {
+    /// Shared goal / task description for the swarm. Auto-generated worker
+    /// titles use this when no per-card title is supplied.
+    pub goal: String,
+    /// Worker carriers (>=1). Empty `workers` → store returns an error.
+    pub workers: Vec<KanbanWorkerSpec>,
+    /// Optional verifier assignee. When present, verifier card's `parents`
+    /// are all worker IDs (Shape 2 or Shape 3).
+    pub verifier: Option<String>,
+    /// Optional synthesizer assignee. When present, synthesizer card's
+    /// `parents` are the verifier (if present, Shape 3) or all workers
+    /// (if no verifier, Shape 4 / P3 quorum).
+    pub synthesizer: Option<String>,
+    /// Opaque blackboard JSON. When `Some`, persisted as exactly one
+    /// `task_comments` row on the root card with `author='swarm'` and
+    /// `body=serde_json::to_string(&blackboard)?`. Per
+    /// Phase 36.3.7.7 D-no-blackboard-validation, the store does NOT validate
+    /// or impose any structure on this value.
+    pub blackboard: Option<serde_json::Value>,
+    /// Shared workspace path across all cards (per D-shared-vs-per-card-fields).
+    pub workspace: Option<String>,
+    /// Shared skills set across all cards.
+    pub skills: Option<Vec<String>>,
+    /// Shared tenant id across all cards.
+    pub tenant: Option<String>,
+    /// Shared priority across all cards.
+    pub priority: Option<i64>,
+    /// Shared max-runtime cap (seconds) across all cards.
+    pub max_runtime_seconds: Option<i64>,
+    /// Shared max-retries cap across all cards.
+    pub max_retries: Option<i64>,
+    /// Optional idempotency key. Per Phase 36.3.7.7 D-idempotency-suffix-scheme,
+    /// per-card keys derive as `k:root`, `k:worker:{i}` (0-indexed),
+    /// `k:verifier`, `k:synthesizer`. Re-invocation short-circuits via
+    /// `find_by_idempotency_key("k:root")`.
+    pub idempotency_key: Option<String>,
+    /// Required orchestrator profile slug — populated from `$HERMES_PROFILE`
+    /// at the tool/CLI layer (per D-root-assignee). Used as both the root
+    /// card's `assignee` and the shared `created_by` for every card.
+    pub created_by: Option<String>,
+    /// Shared body fallback for flat-form workers (Claude's Discretion — the
+    /// rich form's per-card `body` always wins when supplied).
+    pub body: Option<String>,
+}
+
+/// Output of [`crate::store::KanbanStore::create_swarm`]. Tool/CLI consumers
+/// serialize this struct directly as the success envelope.
+///
+/// Per Phase 36.3.7.7 D-idempotency-suffix-scheme, idempotency-replay
+/// reconstructs this struct by reading the root card via the `k:root` key,
+/// then walking `task_links` to gather worker/verifier/synthesizer IDs —
+/// never inserting any new rows.
+#[derive(Debug, Clone, Serialize)]
+pub struct SwarmGraphIds {
+    pub root_id: String,
+    pub worker_ids: Vec<String>,
+    pub verifier_id: Option<String>,
+    pub synthesizer_id: Option<String>,
+    /// `rowid` of the inserted `task_comments` blackboard row, or `None`
+    /// when `SwarmGraphSpec.blackboard` was `None`.
+    pub blackboard_event_id: Option<i64>,
+}

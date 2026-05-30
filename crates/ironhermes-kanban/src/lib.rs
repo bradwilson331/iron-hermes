@@ -68,7 +68,10 @@ pub use skills_bundle::{
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
 // Phase 36.3.7.5 BUG-36.3.7.5-06.
 pub use store_writer_impl::KanbanStoreWriterImpl;
-pub use types::{KanbanStatus, Subscription, Task, TaskComment, TaskLink, TaskRun};
+pub use types::{
+    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task,
+    TaskComment, TaskLink, TaskRun,
+};
 pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker};
 pub use tools::register_kanban_tools;
 
