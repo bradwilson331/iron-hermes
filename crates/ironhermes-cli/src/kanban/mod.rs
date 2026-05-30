@@ -9,8 +9,10 @@
 pub mod commands;
 pub mod format;
 pub mod store_reader_impl;
+pub mod store_writer_impl;
 
 pub use store_reader_impl::KanbanStoreReaderImpl;
+pub use store_writer_impl::KanbanStoreWriterImpl;
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -355,6 +357,55 @@ pub enum KanbanCommands {
         #[arg(long)]
         pidfile: Option<String>,
     },
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.3.7.5 — notifier subscriptions (BUG-36.3.7.5-05)
+    // ---------------------------------------------------------------------------
+
+    /// Subscribe a chat to a task's terminal events (gateway bridge hook)
+    #[command(name = "notify-subscribe")]
+    NotifySubscribe {
+        /// Task ID
+        task_id: String,
+        /// Platform name (telegram | discord | slack | ...)
+        #[arg(long)]
+        platform: String,
+        /// Chat ID on the platform
+        #[arg(long = "chat-id")]
+        chat_id: String,
+        /// Optional thread ID (Telegram super-group topic, Discord thread)
+        #[arg(long = "thread-id")]
+        thread_id: Option<String>,
+        /// Optional user ID (informational; not stored separately in v1)
+        #[arg(long = "user-id")]
+        user_id: Option<String>,
+    },
+
+    /// List subscriptions (all, or filtered by task)
+    #[command(name = "notify-list")]
+    NotifyList {
+        /// Optional task ID to filter by
+        task_id: Option<String>,
+        /// Output as JSON array
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove subscription(s) — all for a task by default, optionally filtered
+    #[command(name = "notify-unsubscribe")]
+    NotifyUnsubscribe {
+        /// Task ID
+        task_id: String,
+        /// Optional platform filter
+        #[arg(long)]
+        platform: Option<String>,
+        /// Optional chat-id filter
+        #[arg(long = "chat-id")]
+        chat_id: Option<String>,
+        /// Optional thread-id filter (informational; v1 ignores for filtering)
+        #[arg(long = "thread-id")]
+        thread_id: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -460,5 +511,24 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             failure_limit,
             pidfile,
         } => commands::cmd_daemon(failure_limit, pidfile).await,
+        // ---------------------------------------------------------------------
+        // Phase 36.3.7.5 BUG-36.3.7.5-05 — notifier subscriptions
+        // ---------------------------------------------------------------------
+        KanbanCommands::NotifySubscribe {
+            task_id,
+            platform,
+            chat_id,
+            thread_id,
+            user_id: _,
+        } => commands::cmd_notify_subscribe(task_id, platform, chat_id, thread_id).await,
+        KanbanCommands::NotifyList { task_id, json } => {
+            commands::cmd_notify_list(task_id, json).await
+        }
+        KanbanCommands::NotifyUnsubscribe {
+            task_id,
+            platform,
+            chat_id,
+            thread_id: _,
+        } => commands::cmd_notify_unsubscribe(task_id, platform, chat_id).await,
     }
 }

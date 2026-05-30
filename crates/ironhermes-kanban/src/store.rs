@@ -594,6 +594,34 @@ impl KanbanStore {
         self.remove_subscriptions(task_id, None, None)
     }
 
+    /// List ALL subscription rows across every task, ordered by `id ASC`.
+    ///
+    /// Supports `cmd_notify_list` without a task filter (the operator-side
+    /// "show me everything" view). Phase 36.3.7.5 BUG-36.3.7.5-05 — supports
+    /// cmd_notify_list without a task filter.
+    pub fn list_all_subscriptions(&self) -> Result<Vec<Subscription>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, platform, chat_id, thread_id, source, created_at \
+             FROM kanban_subscriptions ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Subscription {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                platform: row.get(2)?,
+                chat_id: row.get(3)?,
+                thread_id: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Return the existing task whose `idempotency_key` matches, or `None`.
     pub fn find_by_idempotency_key(&self, key: &str) -> Result<Option<Task>> {
         self.conn

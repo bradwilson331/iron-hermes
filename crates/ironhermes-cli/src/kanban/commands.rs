@@ -825,3 +825,130 @@ pub async fn cmd_daemon(
 
     Ok(0)
 }
+
+// ---------------------------------------------------------------------------
+// Notify subscriptions (Phase 36.3.7.5 BUG-36.3.7.5-05)
+// ---------------------------------------------------------------------------
+
+/// `hermes kanban notify-subscribe <task-id> --platform P --chat-id C [--thread-id T]`
+///
+/// Records an EXPLICIT subscription (source='explicit') for the originating
+/// chat. Auto-subscriptions from /kanban create use source='auto'.
+pub async fn cmd_notify_subscribe(
+    task_id: String,
+    platform: String,
+    chat_id: String,
+    thread_id: Option<String>,
+) -> anyhow::Result<i32> {
+    let mut store = match ironhermes_kanban::KanbanStore::open_default() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot open kanban DB: {}", e);
+            return Ok(1);
+        }
+    };
+    match store.append_subscription(
+        &task_id,
+        &platform,
+        &chat_id,
+        thread_id.as_deref(),
+        "explicit",
+    ) {
+        Ok(id) => {
+            println!(
+                "Subscribed chat {} ({}) to task {} (subscription id {})",
+                chat_id, platform, task_id, id
+            );
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("error: notify-subscribe: {}", e);
+            Ok(1)
+        }
+    }
+}
+
+/// `hermes kanban notify-list [<task-id>] [--json]`
+///
+/// Lists all subscriptions, or filters by task_id. `--json` emits a serde
+/// JSON array (Subscription's derive(Serialize)).
+pub async fn cmd_notify_list(task_id: Option<String>, json: bool) -> anyhow::Result<i32> {
+    let store = match ironhermes_kanban::KanbanStore::open_default() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot open kanban DB: {}", e);
+            return Ok(1);
+        }
+    };
+    let subs = match &task_id {
+        Some(t) => store.list_subscriptions_for_task(t),
+        None => store.list_all_subscriptions(),
+    };
+    let subs = match subs {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: notify-list: {}", e);
+            return Ok(1);
+        }
+    };
+    if json {
+        match serde_json::to_string(&subs) {
+            Ok(s) => println!("{}", s),
+            Err(e) => {
+                eprintln!("error: serialize: {}", e);
+                return Ok(1);
+            }
+        }
+    } else if subs.is_empty() {
+        println!("No subscriptions found.");
+    } else {
+        println!(
+            "{:<6} {:<14} {:<10} {:<16} {:<10} {:<10}",
+            "ID", "TASK", "PLATFORM", "CHAT_ID", "THREAD", "SOURCE"
+        );
+        for s in &subs {
+            println!(
+                "{:<6} {:<14} {:<10} {:<16} {:<10} {:<10}",
+                s.id,
+                s.task_id,
+                s.platform,
+                s.chat_id,
+                if s.thread_id.is_empty() {
+                    "-"
+                } else {
+                    s.thread_id.as_str()
+                },
+                s.source
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// `hermes kanban notify-unsubscribe <task-id> [--platform P] [--chat-id C]`
+///
+/// Removes subscription rows for a task. Without filters, removes ALL rows
+/// for the task (operator emergency). With filters, scopes the delete.
+pub async fn cmd_notify_unsubscribe(
+    task_id: String,
+    platform: Option<String>,
+    chat_id: Option<String>,
+) -> anyhow::Result<i32> {
+    let mut store = match ironhermes_kanban::KanbanStore::open_default() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot open kanban DB: {}", e);
+            return Ok(1);
+        }
+    };
+    match store.remove_subscriptions(&task_id, platform.as_deref(), chat_id.as_deref()) {
+        Ok(n) => {
+            println!("Removed {} subscription(s) for task {}.", n, task_id);
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("error: notify-unsubscribe: {}", e);
+            Ok(1)
+        }
+    }
+}
