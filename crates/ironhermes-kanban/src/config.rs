@@ -12,6 +12,7 @@
 //! | `dispatch_stale_timeout_seconds` | `14400` | reference.md (4 h) |
 //! | `default_workdir` | `None` | D-32 (no board-level default) |
 //! | `notification_sources` | `None` | D-37 (RESERVED for deferred notifier phase) |
+//! | `notifier_poll_seconds` | `3` | Phase 36.3.7.5 BUG-36.3.7.5-03 |
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,6 +62,12 @@ pub struct KanbanConfig {
     /// no config migration; the v1 dispatcher does not read this field.
     #[serde(default)]
     pub notification_sources: Option<Vec<String>>,
+
+    /// Tick period for the gateway notifier loop (Phase 36.3.7.5 BUG-36.3.7.5-03).
+    /// Default 3 seconds — small enough that operators don't feel the lag, large enough
+    /// to keep the polling cost trivial vs. dispatcher tick (60s).
+    #[serde(default = "default_notifier_poll_seconds")]
+    pub notifier_poll_seconds: u64,
 }
 
 impl Default for KanbanConfig {
@@ -74,6 +81,7 @@ impl Default for KanbanConfig {
             dispatch_stale_timeout_seconds: default_dispatch_stale_timeout_seconds(),
             default_workdir: None,
             notification_sources: None,
+            notifier_poll_seconds: default_notifier_poll_seconds(),
         }
     }
 }
@@ -106,6 +114,10 @@ fn default_dispatch_stale_timeout_seconds() -> u64 {
     14400
 }
 
+fn default_notifier_poll_seconds() -> u64 {
+    3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +133,7 @@ mod tests {
         assert_eq!(cfg.dispatch_stale_timeout_seconds, 14400);
         assert!(cfg.default_workdir.is_none());
         assert!(cfg.notification_sources.is_none());
+        assert_eq!(cfg.notifier_poll_seconds, 3);
     }
 
     #[test]
