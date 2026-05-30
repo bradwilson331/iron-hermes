@@ -125,6 +125,32 @@ pub struct TaskComment {
 }
 
 // ---------------------------------------------------------------------------
+// Subscription (Phase 36.3.7.5 BUG-36.3.7.5-01)
+// ---------------------------------------------------------------------------
+
+/// A `kanban_subscriptions` row. One per (task, platform, chat_id, thread_id) tuple.
+///
+/// `source` is plain `String` at the boundary per D-17 — internal callers can match
+/// against the CHECK constraint values `"auto"` and `"explicit"`. New sources MUST
+/// be added to the CHECK in `schema.rs` first.
+///
+/// `thread_id` is stored as plain `String` (not `Option<String>`) because the schema
+/// uses an empty-string default — SQLite `UNIQUE` treats `NULL` as distinct, which
+/// would break the `(task_id, platform, chat_id, thread_id)` unique key for
+/// thread-less chats. Callers pass `Option<&str>` at the CRUD boundary and the
+/// store substitutes `""` for `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    pub id: i64,
+    pub task_id: String,
+    pub platform: String,
+    pub chat_id: String,
+    pub thread_id: String,
+    pub source: String,
+    pub created_at: f64,
+}
+
+// ---------------------------------------------------------------------------
 // KanbanStatus
 // ---------------------------------------------------------------------------
 

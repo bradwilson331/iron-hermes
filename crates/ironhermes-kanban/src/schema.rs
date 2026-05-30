@@ -107,6 +107,24 @@ CREATE TABLE IF NOT EXISTS task_runs (
 );
 
 -- -----------------------------------------------------------------------
+-- kanban_subscriptions  (Phase 36.3.7.5 BUG-36.3.7.5-01 — gateway notifier subscriptions)
+-- -----------------------------------------------------------------------
+-- One row per (task, chat-origin) pair. Auto-subscriptions from /kanban create
+-- have source='auto'; explicit notify-subscribe verbs have source='explicit'.
+-- thread_id defaults to '' (NOT NULL) so the UNIQUE constraint covers thread-less
+-- chats (SQLite UNIQUE treats NULL as distinct, which would break our key).
+CREATE TABLE IF NOT EXISTS kanban_subscriptions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     TEXT NOT NULL,
+    platform    TEXT NOT NULL,
+    chat_id     TEXT NOT NULL,
+    thread_id   TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL CHECK (source IN ('auto', 'explicit')),
+    created_at  REAL NOT NULL,
+    UNIQUE (task_id, platform, chat_id, thread_id)
+);
+
+-- -----------------------------------------------------------------------
 -- Indexes
 -- -----------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_tasks_status_assignee
@@ -121,6 +139,12 @@ CREATE INDEX IF NOT EXISTS idx_task_events_task
 
 CREATE INDEX IF NOT EXISTS idx_task_runs_task
     ON task_runs(task_id, started_at);
+
+CREATE INDEX IF NOT EXISTS idx_subs_task_id
+    ON kanban_subscriptions(task_id);
+
+CREATE INDEX IF NOT EXISTS idx_subs_chat
+    ON kanban_subscriptions(platform, chat_id, thread_id);
 ";
 
 /// Migration ladder. Called on re-open when schema_version row already exists.

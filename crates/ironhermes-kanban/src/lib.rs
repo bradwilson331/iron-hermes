@@ -57,7 +57,7 @@ pub use skills_bundle::{
     sync_bundled_kanban_skills,
 };
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
-pub use types::{KanbanStatus, Task, TaskComment, TaskLink, TaskRun};
+pub use types::{KanbanStatus, Subscription, Task, TaskComment, TaskLink, TaskRun};
 pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker};
 pub use tools::register_kanban_tools;
 
