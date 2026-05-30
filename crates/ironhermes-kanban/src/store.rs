@@ -627,17 +627,24 @@ impl KanbanStore {
             if let Some(existing_root) = self.find_by_idempotency_key(kr)? {
                 let root_id = existing_root.id.clone();
 
-                // Worker IDs in insertion order — order by `created_at` to match
-                // the linear loop order at first-write time.
-                let worker_ids: Vec<String> = {
-                    let mut stmt = self.conn.prepare(
-                        "SELECT child_id FROM task_links \
-                         WHERE parent_id = ?1 \
-                         ORDER BY created_at ASC, child_id ASC",
-                    )?;
-                    let rows = stmt.query_map(params![&root_id], |r| r.get::<_, String>(0))?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                };
+                // Worker IDs in insertion order — look up each per-card key
+                // (`k:worker:0`, `k:worker:1`, ...) in order. This matches the
+                // first-write linear loop and is independent of SQL ORDER BY
+                // tie-break behavior on equal `created_at` timestamps.
+                let mut worker_ids: Vec<String> = Vec::new();
+                if let Some(ref base) = spec.idempotency_key {
+                    let mut i = 0usize;
+                    loop {
+                        let kw = format!("{base}:worker:{i}");
+                        match self.find_by_idempotency_key(&kw)? {
+                            Some(t) => {
+                                worker_ids.push(t.id);
+                                i += 1;
+                            }
+                            None => break,
+                        }
+                    }
+                }
 
                 let verifier_id = match key_verifier.as_deref() {
                     Some(k) => self.find_by_idempotency_key(k)?.map(|t| t.id),
