@@ -23,6 +23,7 @@ pub mod heartbeat;
 pub mod link;
 pub mod list;
 pub mod show;
+pub mod swarm;
 pub mod unblock;
 
 pub use block::KanbanBlockTool;
