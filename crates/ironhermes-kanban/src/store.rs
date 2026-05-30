@@ -20,7 +20,7 @@ use crate::error::{KanbanError, Result};
 use crate::events::KanbanEventKind;
 use crate::paths::validate_dir_workspace;
 use crate::schema::{SCHEMA_SQL, SCHEMA_VERSION, run_migrations};
-use crate::types::{KanbanStatus, Task, TaskComment, TaskRun};
+use crate::types::{KanbanStatus, Subscription, Task, TaskComment, TaskRun};
 
 // ---------------------------------------------------------------------------
 // Public option / filter types
@@ -425,6 +425,173 @@ impl KanbanStore {
     ) -> Result<i64> {
         let now = Self::now();
         Self::append_event_internal(&self.conn, task_id, run_id, kind, payload, now)
+    }
+
+    // -----------------------------------------------------------------------
+    // Subscriptions CRUD (Phase 36.3.7.5 BUG-36.3.7.5-02)
+    // -----------------------------------------------------------------------
+    //
+    // Five methods on `KanbanStore` that the gateway notifier loop (Plan 02),
+    // the gateway runner's spawn gate (Plan 03), and the auto-subscribe hook +
+    // 3 CLI verbs (Plan 04) all consume. `thread_id: Option<&str>` is the
+    // caller-facing form; `None` is substituted with `""` at the SQL boundary
+    // because the schema's UNIQUE constraint would otherwise treat `NULL` as
+    // distinct (locked CONTEXT decision). All methods propagate UNIQUE / CHECK
+    // violations as `KanbanError::Db(rusqlite::Error)` via `?`.
+
+    /// Append a `kanban_subscriptions` row and return its new `id`.
+    ///
+    /// `thread_id` `None` is stored as `''` per the locked empty-string
+    /// substitution. Returns `Err(KanbanError::Db(_))` on a UNIQUE violation
+    /// (duplicate `(task_id, platform, chat_id, thread_id)` tuple) or a CHECK
+    /// violation (source not in `('auto', 'explicit')`). (Phase 36.3.7.5 BUG-36.3.7.5-02)
+    pub fn append_subscription(
+        &mut self,
+        task_id: &str,
+        platform: &str,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        source: &str,
+    ) -> Result<i64> {
+        let thread = thread_id.unwrap_or("");
+        let now = Self::now();
+        self.conn.execute(
+            "INSERT INTO kanban_subscriptions \
+             (task_id, platform, chat_id, thread_id, source, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![task_id, platform, chat_id, thread, source, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List all subscriptions for a task, ordered by `id ASC` (deterministic).
+    ///
+    /// Returns an empty `Vec` when no rows match. (Phase 36.3.7.5 BUG-36.3.7.5-02)
+    pub fn list_subscriptions_for_task(&self, task_id: &str) -> Result<Vec<Subscription>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, platform, chat_id, thread_id, source, created_at \
+             FROM kanban_subscriptions WHERE task_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], |row| {
+            Ok(Subscription {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                platform: row.get(2)?,
+                chat_id: row.get(3)?,
+                thread_id: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// List subscriptions for a `(platform, chat_id, thread_id)` triple with
+    /// strict thread-id filtering.
+    ///
+    /// `thread_id` semantics:
+    /// - `None` → matches rows where `thread_id = ''` (the empty-string default
+    ///   stored when callers pass `None` to `append_subscription`).
+    /// - `Some(t)` → matches rows where `thread_id = t` exactly.
+    ///
+    /// Empty string and `"7"` are therefore distinct keys, matching the UNIQUE
+    /// constraint's view of the world. Ordered by `id ASC`. (Phase 36.3.7.5 BUG-36.3.7.5-02)
+    pub fn list_subscriptions_for_chat(
+        &self,
+        platform: &str,
+        chat_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<Vec<Subscription>> {
+        let row_to_sub = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Subscription> {
+            Ok(Subscription {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                platform: row.get(2)?,
+                chat_id: row.get(3)?,
+                thread_id: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        };
+        let mut out = Vec::new();
+        match thread_id {
+            Some(t) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, task_id, platform, chat_id, thread_id, source, created_at \
+                     FROM kanban_subscriptions \
+                     WHERE platform = ?1 AND chat_id = ?2 AND thread_id = ?3 \
+                     ORDER BY id ASC",
+                )?;
+                let rows = stmt.query_map(params![platform, chat_id, t], row_to_sub)?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, task_id, platform, chat_id, thread_id, source, created_at \
+                     FROM kanban_subscriptions \
+                     WHERE platform = ?1 AND chat_id = ?2 AND thread_id = '' \
+                     ORDER BY id ASC",
+                )?;
+                let rows = stmt.query_map(params![platform, chat_id], row_to_sub)?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Remove subscription rows for a task, optionally filtered by platform
+    /// and / or chat_id. Returns the number of rows deleted.
+    ///
+    /// Filter cases:
+    /// - `(task, None, None)` → delete ALL rows for the task.
+    /// - `(task, Some(p), None)` → delete rows for `task AND platform=p`.
+    /// - `(task, None, Some(c))` → delete rows for `task AND chat_id=c`.
+    /// - `(task, Some(p), Some(c))` → delete rows for `task AND platform=p AND chat_id=c`.
+    ///
+    /// Returns `0` when nothing matched. (Phase 36.3.7.5 BUG-36.3.7.5-02)
+    pub fn remove_subscriptions(
+        &mut self,
+        task_id: &str,
+        platform: Option<&str>,
+        chat_id: Option<&str>,
+    ) -> Result<usize> {
+        let n = match (platform, chat_id) {
+            (None, None) => self.conn.execute(
+                "DELETE FROM kanban_subscriptions WHERE task_id = ?1",
+                params![task_id],
+            )?,
+            (Some(p), None) => self.conn.execute(
+                "DELETE FROM kanban_subscriptions WHERE task_id = ?1 AND platform = ?2",
+                params![task_id, p],
+            )?,
+            (None, Some(c)) => self.conn.execute(
+                "DELETE FROM kanban_subscriptions WHERE task_id = ?1 AND chat_id = ?2",
+                params![task_id, c],
+            )?,
+            (Some(p), Some(c)) => self.conn.execute(
+                "DELETE FROM kanban_subscriptions \
+                 WHERE task_id = ?1 AND platform = ?2 AND chat_id = ?3",
+                params![task_id, p, c],
+            )?,
+        };
+        Ok(n)
+    }
+
+    /// Convenience alias: delete ALL subscription rows for a task.
+    ///
+    /// Equivalent to `remove_subscriptions(task_id, None, None)`. The notifier
+    /// loop (Plan 02) calls this after delivering the terminal-event message
+    /// to every subscriber. (Phase 36.3.7.5 BUG-36.3.7.5-02)
+    pub fn remove_all_subscriptions_for_task(&mut self, task_id: &str) -> Result<usize> {
+        self.remove_subscriptions(task_id, None, None)
     }
 
     /// Return the existing task whose `idempotency_key` matches, or `None`.
