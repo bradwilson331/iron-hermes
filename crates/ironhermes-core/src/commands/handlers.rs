@@ -1142,10 +1142,19 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
 /// UNKNOWN names fall through to typo-suggest (matching cmd_cron behavior).
 const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
     "claim", "complete", "block", "unblock", "comment", "archive",
-    "reclaim", "reassign", "assign", "link", "unlink", "create",
+    "reclaim", "reassign", "assign", "link", "unlink",
     "init", "tail", "watch", "runs", "assignees", "dispatch",
     "stats", "log", "context", "gc", "daemon", "diagnostics",
 ];
+
+/// Map ironhermes-core's Platform enum to the lowercase string form used by
+/// kanban subscriptions + the gateway's notification_sources config.
+/// Phase 36.3.7.5 BUG-36.3.7.5-06.
+fn platform_to_str(p: &crate::types::Platform) -> String {
+    // Platform implements Display with lowercase strings ("telegram", "discord",
+    // "slack", "local", etc.) matching the notification_sources contract verbatim.
+    p.to_string()
+}
 
 fn cmd_kanban(args: &[&str], ctx: &CommandContext) -> CommandResult {
     let store = match &ctx.kanban_store {
@@ -1165,6 +1174,113 @@ fn cmd_kanban(args: &[&str], ctx: &CommandContext) -> CommandResult {
             }
         }
         Some("tip") => CommandResult::Output(store.tip_text()),
+        // Phase 36.3.7.5 BUG-36.3.7.5-06: gateway-side /kanban create arm with
+        // auto-subscribe hook. Replaces the deferred-subverb routing for "create"
+        // (which used to fall into DEFERRED_KANBAN_SUBVERBS).
+        //
+        // Auto-subscribe: if CommandContext carries chat_id AND --json is NOT set,
+        // append a source='auto' subscription so the gateway notifier (Phase 36.3.7.5)
+        // delivers terminal events to the originating chat.
+        Some("create") => {
+            // Parse: args[1] = title; subsequent args = --assignee NAME, --json.
+            let title = match args.get(1) {
+                Some(t) => *t,
+                None => {
+                    return CommandResult::Error(
+                        "/kanban create <title> --assignee <name> [--json]: missing title"
+                            .to_string(),
+                    );
+                }
+            };
+            let mut assignee: Option<&str> = None;
+            let mut json = false;
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i] {
+                    "--assignee" => {
+                        assignee = args.get(i + 1).copied();
+                        i += 2;
+                    }
+                    "--json" => {
+                        json = true;
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let assignee = match assignee {
+                Some(a) => a,
+                None => {
+                    return CommandResult::Error(
+                        "/kanban create: --assignee <name> is required".to_string(),
+                    );
+                }
+            };
+            let writer = match &ctx.kanban_store_writer {
+                Some(w) => w.clone(),
+                None => {
+                    return CommandResult::Output(
+                        "/kanban create: kanban store writer not configured.".to_string(),
+                    );
+                }
+            };
+            let task_id = match writer.create_task_simple(title, assignee, json) {
+                Ok(id) => id,
+                Err(e) => return CommandResult::Error(format!("/kanban create: {}", e)),
+            };
+            // Auto-subscribe hook (skip if --json per CONTEXT.md locked decision +
+            // docs/kanban/reference.md:718). Failures here are logged but do NOT
+            // fail the whole arm — the task was successfully created.
+            if !json {
+                if let Some(chat_id) = ctx.chat_id.as_deref() {
+                    let platform = platform_to_str(&ctx.platform);
+                    match writer.append_subscription(
+                        &task_id,
+                        &platform,
+                        chat_id,
+                        ctx.thread_id.as_deref(),
+                        "auto",
+                    ) {
+                        Ok(_) => {
+                            tracing::debug!(
+                                task_id = %task_id,
+                                platform = %platform,
+                                chat_id = chat_id,
+                                "auto-subscribed origin chat to task"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                error = %e,
+                                "auto-subscribe failed; task created OK but notifier won't deliver"
+                            );
+                        }
+                    }
+                }
+            }
+            if json {
+                CommandResult::Output(format!(
+                    "{{\"task_id\":\"{}\",\"status\":\"ready\",\"assignee\":\"{}\"}}",
+                    task_id, assignee
+                ))
+            } else {
+                let subscribed_note = if ctx.chat_id.is_some() {
+                    format!(
+                        "\n(subscribed — you'll be notified when {} completes or blocks)",
+                        task_id
+                    )
+                } else {
+                    String::new()
+                };
+                CommandResult::Output(format!(
+                    "Created {} (ready, assignee={}){}",
+                    task_id, assignee, subscribed_note
+                ))
+            }
+        }
         Some(other) => {
             if DEFERRED_KANBAN_SUBVERBS.contains(&other) {
                 // Known deferred subverb — route to CLI-redirect message (NOT todo_stub).
@@ -1172,7 +1288,7 @@ fn cmd_kanban(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 CommandResult::Output(store.deferred_subverb_message(other))
             } else {
                 // Unknown subverb — typo-suggest against the ACTIVE subverbs only.
-                let candidates: &[&str] = &["list", "show", "tip"];
+                let candidates: &[&str] = &["list", "show", "tip", "create"];
                 let suffix = suggest_typo(other, candidates)
                     .map(|s| format!(" {}", s))
                     .unwrap_or_default();
