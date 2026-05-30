@@ -592,7 +592,7 @@ Plans:
 **Plans:** 4 plans (overview at 36.3.7.5-PLAN.md + 4 sub-plans, develop-direct strategy, 2 waves)
 
 Plans:
-- [ ] 36.3.7.5-01-PLAN.md — Wave 1. kanban_subscriptions schema + 5 store CRUD APIs + Subscription type + 8 receiver tests (BUG-01, -02, -07a)
+- [x] 36.3.7.5-01-PLAN.md — Wave 1. kanban_subscriptions schema + 5 store CRUD APIs + Subscription type + 8 receiver tests (BUG-01, -02, -07a). PASS 2026-05-30. 4 commits: `fcdab1a8` schema+type, `dd59715f` 5 CRUD methods, `8519279d` 8 receiver tests, `072c3afd` SUMMARY. All 8 Task-5 gates green. ironhermes-kanban suite 115/0. Bilateral-tracing satisfied per LEARNINGS 2026-05-29. See SUMMARY.md.
 - [ ] 36.3.7.5-02-PLAN.md — Wave 1. NEW notifier.rs with run_notifier_loop + run_notifier_tick + send_fn injection + notifier_poll_seconds config + 5 polling-loop receiver tests (BUG-03, -07b)
 - [ ] 36.3.7.5-03-PLAN.md — Wave 2. Gateway runner spawn + notifier_gating helper + send-closure builder + 3 gating receiver tests (BUG-04, -07c)
 - [ ] 36.3.7.5-04-PLAN.md — Wave 2. 3 notify-* CLI verbs + KanbanStoreWriter trait/impl + CommandContext chat-origin extension + cmd_kanban Create arm + auto-subscribe hook + gateway handler attach + 9 dispatch + lifecycle e2e tests + docs/kanban/reference.md v1-NOTE reconciliation (BUG-05, -06, -07d)
