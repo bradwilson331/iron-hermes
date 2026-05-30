@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: ready
-stopped_at: null
-last_updated: "2026-05-30T18:00:00.000Z"
-last_activity: 2026-05-30 -- Phase 36.3.7.6 Plan 01 (3 v1-deferred LLM tools — kanban_heartbeat append-event per D-heartbeat-impl + kanban_link with WITH RECURSIVE descendant-walk cycle detection inside BEGIN IMMEDIATE per D-link-cycle-detection + kanban_unblock with handler-side status-precondition gate per D-unblock-status-precondition + insert_link_checked sibling method + LinkCycle error variant + hermes kanban heartbeat CLI verb + 4 docs/kanban/reference.md v1-NOTE reconciliation) closed PASS — Phase 36.3.7.6 COMPLETE; the 9-tool LLM surface in docs/kanban/reference.md §200-208 is now fully shipped. 7 commits on develop: 4a11d30c add kanban_heartbeat LLM tool + 2 tests, 3530f52a add kanban_link + insert_link_checked + LinkCycle variant + 3 tests, cfb7c144 add kanban_unblock + handler-side gate + 2 tests, 78f798db add hermes kanban heartbeat CLI verb + 2 parity tests, 11ed521e docs/kanban/reference.md reconciliation (Gate 11 = 0 hits), 90793e58 SUMMARY with bilateral-tracing table, (pending Task 9 state close-out). All 13 phase-close gates green. ironhermes-kanban tools_smoke 14 → 21 tests; ironhermes-cli heartbeat_cli +2 parity tests. **Crate-isolation fence STILL HELD** — zero ironhermes-gateway dep declarations in ironhermes-kanban/Cargo.toml. **D-tool-surface-mounts-store-directly enforced** — the 3 new tools each own Arc<TokioMutex<KanbanStore>> directly (matching the existing 6-tool pattern); KanbanStoreWriter trait (36.3.7.5) NOT extended. **D-no-deferred-subverbs-change enforced** — DEFERRED_KANBAN_SUBVERBS at handlers.rs:1143-1148 untouched. store.insert_link + store.unblock_task signatures byte-stable. Bilateral-tracing satisfied per LEARNINGS 2026-05-30 — every BUG ships producer + consumer in same commit set. One Rule-3 fix-up (heartbeat_cli.rs TestSub Debug derive dropped because pre-existing KanbanCommands enum doesn't derive Debug — out-of-scope to add).
+status: "7 phases shipped this session-stream (36.3.7 kernel → 36.3.7.0 UAT-fix → 36.3.7.1 dispatcher-breaker → 36.3.7.2 schema-compat → 36.3.7.3 doc-comment scan-window → 36.3.7.4 dispatcher events parity → 36.3.7.5 gateway notifier → 36.3.7.6 LLM-tool surface completion). Latest 7 commits on develop (Phase 36.3.7.6 Plan 01): `4a11d30c` add kanban_heartbeat LLM tool + 2 tests, `3530f52a` add kanban_link LLM tool with cycle detection + 3 tests (includes insert_link_checked + LinkCycle variant), `cfb7c144` add kanban_unblock LLM tool with status-precondition gate + 2 tests, `78f798db` add hermes kanban heartbeat CLI verb + 2 CLI parity tests, `11ed521e` docs/kanban/reference.md v1-NOTE reconciliation (Gate 11 = 0 hits), `90793e58` SUMMARY with bilateral-tracing table, (Task 9 state close-out is this commit)."
+stopped_at: Phase 36.3.7.7 context gathered
+last_updated: "2026-05-30T14:37:59.517Z"
+last_activity: "2026-05-30 -- Phase 36.3.7.6 (Kanban LLM-tool surface completion: heartbeat / link / unblock) closed PASS. Single-plan phase; 9 tasks; 7 commits; ironhermes-kanban tools_smoke test count 14 → 21 (delta +7); ironhermes-cli heartbeat_cli +2 new parity tests. All 13 phase-level gates green. **Phase 36.3.7.6 now COMPLETE end-to-end** — the v1 narrative "IronHermes ships 6 of the 9 LLM tools listed below ... The remaining 3 — kanban_heartbeat, kanban_link, kanban_unblock — are deferred to Phase 36.3.7.1" is now closed at every site in `docs/kanban/reference.md` (`grep -c 'deferred to Phase 36.3.7.1'` = 0 vs. 4 pre-phase; 4 "Shipped in Phase 36.3.7.6" annotations). One Rule-3 fix-up applied (heartbeat_cli.rs TestSub Debug derive dropped because pre-existing KanbanCommands enum doesn't derive Debug — scope-fenced out of expanding to the enum itself)."
 progress:
-  total_phases: 51
-  completed_phases: 19
-  total_plans: 80
-  completed_plans: 80
-  percent: 37
+  total_phases: 55
+  completed_phases: 17
+  total_plans: 84
+  completed_plans: 81
+  percent: 31
 ---
 
 # Project State
@@ -577,6 +577,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-29T01:25:09.683Z
-Stopped at: Phase 36.17.4 context gathered
-Resume file: .planning/phases/36.17.4-wire-up-iron-hermes-ui-to-the-gateway-queue-slash-commands/36.17.4-CONTEXT.md
+Last session: 2026-05-30T14:37:59.510Z
+Stopped at: Phase 36.3.7.7 context gathered
+Resume file: .planning/phases/36.3.7.7-kanban-swarm-helper-multi-task-fan-out-for-orchestrators/36.3.7.7-CONTEXT.md
