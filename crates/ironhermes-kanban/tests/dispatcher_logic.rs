@@ -1348,3 +1348,119 @@ async fn circuit_breaker_does_not_trip_below_limit_on_max_runtime_path() {
         );
     }
 }
+
+/// BUG-36.3.7.4-02 receiver-end lock: the TTL-expiry reclaim path MUST persist
+/// a `reclaimed` row to `task_events` (not just emit a `tracing::info!`),
+/// closing the latent bilateral doc/impl gap flagged by Phase 36.3.7.1 Plan 01
+/// (see docstring at lines 1020-1027 of this file).
+///
+/// Phase 36.3.7.4 Task 1 verification revealed the row IS already written —
+/// not by a direct `store.append_event` call in `reclaim_stale_claims` (as the
+/// dispatcher.rs:19 doc-comment implies) but by `cas::release_claim` at
+/// cas.rs:114-145 via direct SQL INSERT into `task_events` (lines 136-140),
+/// called from dispatcher.rs:459 with `reason="ttl_expired"`. The doc-comment
+/// is factually correct (an event IS appended); the implementation path is
+/// indirect through `release_claim`. This test locks the bilateral invariant
+/// regardless of whether a future refactor moves the emission inline.
+///
+/// Mirrors the seed pattern from `circuit_breaker_does_not_trip_below_limit_on_reclaim_path`
+/// (failure_limit=2 headroom, NULL claim_pid, scheduled_at far future) so the
+/// only producer of the `reclaimed` event on this tick is the TTL-expiry reclaim
+/// path — Step 1 detect_crashed_workers skips (NULL pid) and Step 6 re-claim
+/// skips (future scheduled_at).
+#[tokio::test]
+async fn reclaim_stale_claims_appends_reclaimed_event_to_task_events() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Distinct dead PID from all other reclaim-path tests in this file.
+    let dead_pid: u32 = 999_999_995;
+    let task_id;
+    let claim_lock_seeded;
+
+    {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "reclaim event-row receiver test",
+                "alice",
+                CreateTaskOptions::default(),
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:{}:uuid_reclaim_event_test", dead_pid);
+
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            dead_pid as i64,
+            now - 1.0,
+            &rid,
+            now,
+        );
+
+        // NULL claim_pid so Step 1 detect_crashed_workers skips this run; the
+        // Step 3 reclaim_stale_claims path becomes the only producer of the
+        // `reclaimed` event row on this tick.
+        store
+            .conn
+            .execute(
+                "UPDATE task_runs SET claim_pid = NULL WHERE id = ?1",
+                params![rid],
+            )
+            .unwrap();
+
+        // Far-future scheduled_at prevents Step 6 re-claim from re-emitting on
+        // the same tick.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now_secs() + 3600.0, task.id],
+            )
+            .unwrap();
+
+        task_id = task.id;
+        claim_lock_seeded = claim_lock;
+    }
+
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    let ctx = make_ctx_failing_spawn(store_arc.clone(), config);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    {
+        let store = store_arc.lock().await;
+        let events = store.get_events(&task_id).unwrap();
+        let reclaimed_count = events.iter().filter(|e| e.kind == "reclaimed").count();
+        assert!(
+            reclaimed_count >= 1,
+            "reclaim_stale_claims path: must append `reclaimed` row to task_events \
+             (BUG-36.3.7.4-02 — closes 36.3.7.1 FN-1 latent finding). Found {reclaimed_count} \
+             `reclaimed` events; events on task: {:?}",
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+
+        let reclaimed = events
+            .iter()
+            .find(|e| e.kind == "reclaimed")
+            .expect("just asserted reclaimed_count >= 1");
+        let payload_str = reclaimed.payload.as_deref().unwrap_or("");
+        assert!(
+            payload_str.contains("ttl_expired"),
+            "reclaim_stale_claims path: reclaimed event payload must contain reason=ttl_expired \
+             (BUG-36.3.7.4-02). Payload was: {payload_str}"
+        );
+        assert!(
+            payload_str.contains(&claim_lock_seeded),
+            "reclaim_stale_claims path: reclaimed event payload must carry the stale_lock \
+             (BUG-36.3.7.4-02). Payload was: {payload_str}; expected to contain seeded lock \
+             {claim_lock_seeded}"
+        );
+    }
+}
