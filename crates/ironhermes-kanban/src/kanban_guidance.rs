@@ -87,6 +87,16 @@ permanently and are recorded on the task's event log.
 - Never create follow-up tasks assigned to yourself — assign to the right
   specialist profile.
 - Never complete a task you did not actually finish. Block it instead.
+
+### Swarm graph root discovery
+
+Workers in a swarm graph discover the root card by calling `kanban_show()` with
+their own task id and reading the `parent_handoffs` field. The root card is the
+parent of each worker (1 hop). Workers can then call `kanban_show(<root_id>)` to
+read the shared blackboard from the `comments` field (the first comment is the
+swarm blackboard, author `swarm`). Verifier and synthesizer cards are 2 hops from
+root (via any worker for verifier, via verifier for synth in the 4-tier shape).
+No spawn-env contract change — the existing 9-env worker contract still applies.
 "#;
 
 #[cfg(test)]
