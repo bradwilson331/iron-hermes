@@ -868,3 +868,61 @@ async fn kanban_unblock_rejects_wrong_status() {
         "BUG-36.3.7.6-03: no unblocked event appended"
     );
 }
+
+// ---------------------------------------------------------------------------
+// kanban_swarm tests (Phase 36.3.7.7 BUG-36.3.7.7-01)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_fan_out_only_creates_root_and_workers() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_with_verifier_gates_on_all_workers() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_full_4_tier_matches_reference_md_664() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_with_synth_no_verifier_gates_synth_on_workers() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_blackboard_arg_seeds_initial_comment_on_root() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_idempotency_key_replays_return_same_graph() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_invalid_assignee_rolls_back_whole_graph() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_rich_worker_form_accepts_per_card_title_and_body() {
+    panic!("Wave 0 scaffold");
+}
+
+#[tokio::test]
+#[ignore = "Wave 0 scaffold - implemented in Wave 6"]
+async fn swarm_flat_worker_form_auto_titles_each_card() {
+    panic!("Wave 0 scaffold");
+}
