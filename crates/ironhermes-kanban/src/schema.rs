@@ -107,6 +107,18 @@ CREATE TABLE IF NOT EXISTS task_runs (
 );
 
 -- -----------------------------------------------------------------------
+-- Orphan removal (post-Phase-36.3.7.6 housekeeping 2026-05-30)
+-- -----------------------------------------------------------------------
+-- During Phase 36.3.7.5 planning the gateway-notifier subscriptions table
+-- went through an intermediate name `kanban_notify_subs` before the locked
+-- D-table-name decision renamed it to `kanban_subscriptions`. Any DB
+-- created against a pre-rename build retains the orphan with 0 rows.
+-- `DROP TABLE IF EXISTS` is idempotent and ~microseconds per open; safe for
+-- installs that never had the orphan (no-op) and corrective for installs
+-- that did.
+DROP TABLE IF EXISTS kanban_notify_subs;
+
+-- -----------------------------------------------------------------------
 -- kanban_subscriptions  (Phase 36.3.7.5 BUG-36.3.7.5-01 — gateway notifier subscriptions)
 -- -----------------------------------------------------------------------
 -- One row per (task, chat-origin) pair. Auto-subscriptions from /kanban create

@@ -306,3 +306,93 @@ fn empty_thread_id_distinct_from_seven() {
         "'' and '7' are distinct keys — both rows must persist (BUG-36.3.7.5-01)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Post-Phase-36.3.7.6 housekeeping (2026-05-30): orphan table removal.
+// ---------------------------------------------------------------------------
+// During Phase 36.3.7.5 planning the subscriptions table went through an
+// intermediate name `kanban_notify_subs` before the locked D-table-name
+// decision renamed it to `kanban_subscriptions`. Any DB created against a
+// pre-rename build retains the orphan (live observation on 2026-05-30 against
+// ~/.ironhermes/kanban.db). This test seeds a fresh DB with the orphan and
+// asserts KanbanStore::new drops it via the DROP TABLE IF EXISTS line added
+// to SCHEMA_SQL.
+
+#[test]
+fn orphaned_kanban_notify_subs_table_is_dropped_on_open() {
+    use rusqlite::Connection;
+
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("kanban.db");
+
+    // Seed the DB with the orphan table to simulate a pre-rename install.
+    {
+        let conn = Connection::open(&db_path).expect("open raw conn for seed");
+        conn.execute_batch(
+            "CREATE TABLE kanban_notify_subs (
+                task_id       TEXT NOT NULL,
+                platform      TEXT NOT NULL,
+                chat_id       TEXT NOT NULL,
+                thread_id     TEXT NOT NULL DEFAULT '',
+                user_id       TEXT,
+                notifier_profile TEXT,
+                created_at    INTEGER NOT NULL,
+                last_event_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (task_id, platform, chat_id, thread_id)
+            );",
+        )
+        .expect("seed orphan");
+    }
+
+    // Sanity: confirm the orphan is present before KanbanStore opens.
+    {
+        let conn = Connection::open(&db_path).expect("re-open for sanity");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type='table' AND name='kanban_notify_subs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pre-open count");
+        assert_eq!(count, 1, "seed must create the orphan table");
+    }
+
+    // Open KanbanStore — SCHEMA_SQL runs including DROP TABLE IF EXISTS kanban_notify_subs.
+    let _store = KanbanStore::new(&db_path).expect("open store");
+
+    // The orphan is gone.
+    {
+        let conn = Connection::open(&db_path).expect("re-open for verify");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type='table' AND name='kanban_notify_subs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("post-open count");
+        assert_eq!(
+            count, 0,
+            "DROP TABLE IF EXISTS kanban_notify_subs must remove the orphan (2026-05-30 housekeeping)"
+        );
+    }
+
+    // The new kanban_subscriptions table must still be created normally
+    // (the rest of SCHEMA_SQL keeps running after the DROP).
+    {
+        let conn = Connection::open(&db_path).expect("re-open for kanban_subscriptions check");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type='table' AND name='kanban_subscriptions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("subs count");
+        assert_eq!(count, 1, "kanban_subscriptions must still be created normally");
+    }
+
+    // And re-opening is idempotent (DROP runs again, still no-op).
+    let _store2 = KanbanStore::new(&db_path).expect("idempotent re-open");
+}
