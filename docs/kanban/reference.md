@@ -11,7 +11,7 @@ Hermes Kanban is a durable task board, shared across all your Hermes profiles, t
 
 ## Two surfaces: the model talks through tools, you talk through the CLI
 
-> **v1 NOTE:** IronHermes v1 ships 6 of the 9 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`. The remaining 3 — `kanban_heartbeat`, `kanban_link`, `kanban_unblock` — are deferred to Phase 36.3.7.1. The CLI surface is complete; only the LLM-tool surface is reduced.
+> **v1 NOTE:** Shipped in Phase 36.3.7.6 — IronHermes now ships all 9 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`, `kanban_heartbeat`, `kanban_link`, `kanban_unblock`. The full LLM-tool surface matches the CLI surface.
 
 The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
@@ -201,11 +201,11 @@ Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker
 | `kanban_list` | List task summaries with filters for assignee, status, tenant, archived visibility, and limit. Intended for orchestrators discovering board work. | — |
 | `kanban_complete` | Finish with summary + metadata structured handoff. | at least one of `summary` / `result` |
 | `kanban_block` | Escalate for human input with a reason. | `reason` |
-| `kanban_heartbeat` | Signal liveness during long operations. Pure side-effect. | — | *(deferred — placeholder only in v1; deferred to Phase 36.3.7.1)* |
+| `kanban_heartbeat` | Signal liveness during long operations. Appends a `heartbeat` event row; the dispatcher reads these to compute `heartbeat_age_seconds` for staleness reclaim. | optional `task_id` (defaults to `$HERMES_KANBAN_TASK`), optional `note` | Shipped in Phase 36.3.7.6. |
 | `kanban_comment` | Append a durable note to the task thread. | `task_id`, `body` |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an assignee, optional parents, skills, etc. | `title`, `assignee` |
-| `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. | `parent_id`, `child_id` | *(deferred to Phase 36.3.7.1; use `parents=[...]` on `kanban_create` instead)* |
-| `kanban_unblock` | (Orchestrators) move a blocked task back to ready. | `task_id` | *(deferred to Phase 36.3.7.1; use `ironhermes kanban unblock` CLI verb instead)* |
+| `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. Rejects cycles (descendant-walk via `WITH RECURSIVE` CTE) and cross-tenant links. | `parent_id`, `child_id` | Shipped in Phase 36.3.7.6. |
+| `kanban_unblock` | (Orchestrators) move a blocked task back to ready. Fails closed if the task is not currently in `blocked` status (prevents accidentally reviving `done`/`running` tasks via the LLM-tool surface). | `task_id` (defaults to `$HERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.6. |
 
 A typical worker turn looks like:
 
