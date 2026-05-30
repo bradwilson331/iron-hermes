@@ -141,15 +141,38 @@ pub async fn cmd_create(
     Ok(0)
 }
 
-/// Parse a duration string like "30m", "2h", "3600" into seconds.
+/// Parse a duration string like "30s", "30m", "2h", "1d", or "3600" into seconds.
+///
+/// CR-01 (Phase 36.3.7.7 code review): kept aligned with the tool-surface
+/// `parse_max_runtime` (in `crates/ironhermes-kanban/src/tools/create.rs`)
+/// so CLI <-> tool stay byte-for-byte compatible — `--max-runtime 30s` and
+/// `--max-runtime 1d` are now accepted at the CLI surface, matching the tool.
 fn parse_duration_secs(s: &str) -> Result<i64> {
-    if let Some(mins) = s.strip_suffix('m') {
-        return Ok(mins.parse::<i64>().context("Invalid minutes value")? * 60);
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("empty duration"));
     }
-    if let Some(hours) = s.strip_suffix('h') {
-        return Ok(hours.parse::<i64>().context("Invalid hours value")? * 3600);
+    let split_pos = trimmed.find(|c: char| !c.is_ascii_digit());
+    match split_pos {
+        None => trimmed
+            .parse::<i64>()
+            .context("Invalid duration (use e.g. '30s', '30m', '2h', '1d', or seconds)"),
+        Some(pos) => {
+            let (num_str, suffix) = trimmed.split_at(pos);
+            let n: i64 = num_str
+                .parse()
+                .context("Invalid numeric prefix in duration")?;
+            match suffix {
+                "s" => Ok(n),
+                "m" => Ok(n * 60),
+                "h" => Ok(n * 3600),
+                "d" => Ok(n * 86400),
+                other => Err(anyhow!(
+                    "Unknown duration suffix '{other}' (expected s/m/h/d)"
+                )),
+            }
+        }
     }
-    s.parse::<i64>().context("Invalid duration (use e.g. '30m', '2h', or seconds)")
 }
 
 /// Parse an ISO-like timestamp or unix epoch string into epoch float.
