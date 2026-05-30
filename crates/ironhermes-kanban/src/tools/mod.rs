@@ -20,6 +20,7 @@ pub mod comment;
 pub mod complete;
 pub mod create;
 pub mod heartbeat;
+pub mod link;
 pub mod list;
 pub mod show;
 
@@ -28,6 +29,7 @@ pub use comment::KanbanCommentTool;
 pub use complete::KanbanCompleteTool;
 pub use create::KanbanCreateTool;
 pub use heartbeat::KanbanHeartbeatTool;
+pub use link::KanbanLinkTool;
 pub use list::KanbanListTool;
 pub use show::KanbanShowTool;
 
@@ -63,6 +65,11 @@ pub fn register_kanban_tools(
     registry.register(Box::new(KanbanCreateTool::new(store.clone(), explicit_enable)));
     // Phase 36.3.7.6 BUG-36.3.7.6-01 — kanban_heartbeat (D-heartbeat-impl: event row).
     registry.register(Box::new(KanbanHeartbeatTool::new(
+        store.clone(),
+        explicit_enable,
+    )));
+    // Phase 36.3.7.6 BUG-36.3.7.6-02 — kanban_link (D-link-cycle-detection: WITH RECURSIVE).
+    registry.register(Box::new(KanbanLinkTool::new(
         store.clone(),
         explicit_enable,
     )));

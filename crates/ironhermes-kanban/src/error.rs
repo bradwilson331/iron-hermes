@@ -62,6 +62,16 @@ pub enum KanbanError {
         wrong_profile: Vec<String>,
     },
 
+    /// Cycle detected when inserting a `task_links` row via the LLM-tool
+    /// surface — proposed `parent_id` is already a transitive descendant of
+    /// `child_id`. Detected by `KanbanStore::insert_link_checked`
+    /// (Phase 36.3.7.6 BUG-36.3.7.6-02, D-link-cycle-detection).
+    #[error("link cycle detected: parent={parent_id}, child={child_id}")]
+    LinkCycle {
+        parent_id: String,
+        child_id: String,
+    },
+
     /// Bundled skill name not recognised (e.g. passed to
     /// `restore_bundled_kanban_skill` with an unknown name).
     #[error("unknown bundled skill: {0}")]

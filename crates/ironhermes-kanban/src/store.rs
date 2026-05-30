@@ -415,6 +415,115 @@ impl KanbanStore {
         Ok(())
     }
 
+    /// Sibling of [`insert_link`](Self::insert_link) that runs `WITH RECURSIVE`
+    /// descendant-walk cycle detection + the existing tenant gate (D-39) inside
+    /// a single `BEGIN IMMEDIATE` transaction (Phase 36.3.7.6 BUG-36.3.7.6-02,
+    /// D-link-cycle-detection).
+    ///
+    /// Rejects with:
+    /// - [`KanbanError::TaskNotFound`] when either id is absent from `tasks`.
+    /// - [`KanbanError::LinkCycle`] when `parent_id` is already a transitive
+    ///   descendant of `child_id` (i.e., the new link would close a cycle).
+    /// - [`KanbanError::TenantMismatch`] per D-39 (same as `insert_link`).
+    ///
+    /// The CTE walks descendants of the proposed `child_id` and rejects if the
+    /// proposed `parent_id` appears in the descendant set. The underlying SQL
+    /// uses SQLite's `WITH RECURSIVE` (supported since 3.8.3) against the
+    /// existing PRIMARY KEY `(parent_id, child_id)` index on `task_links`, so
+    /// no new index is required. The `BEGIN IMMEDIATE` transaction matches the
+    /// pattern used by `block_task` (this file) — TOCTOU-safe under WAL-mode
+    /// concurrent writers.
+    ///
+    /// `insert_link` is left unchanged so the existing `kanban_create::parents`
+    /// path keeps the legacy (cycle-impossible-by-construction) behavior. Only
+    /// new writes via the LLM-tool `kanban_link` surface are cycle-checked.
+    pub fn insert_link_checked(&mut self, parent_id: &str, child_id: &str) -> Result<()> {
+        use rusqlite::TransactionBehavior;
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Phantom-id pre-check: friendlier than letting the FK trigger.
+        let parent_exists: Option<String> = tx
+            .query_row(
+                "SELECT id FROM tasks WHERE id = ?1",
+                params![parent_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if parent_exists.is_none() {
+            return Err(KanbanError::TaskNotFound(parent_id.to_string()));
+        }
+        let child_exists: Option<String> = tx
+            .query_row(
+                "SELECT id FROM tasks WHERE id = ?1",
+                params![child_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if child_exists.is_none() {
+            return Err(KanbanError::TaskNotFound(child_id.to_string()));
+        }
+
+        // Tenant gate (D-39 — same logic as insert_link).
+        let parent_tenant: Option<String> = tx
+            .query_row(
+                "SELECT tenant FROM tasks WHERE id = ?1",
+                params![parent_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let child_tenant: Option<String> = tx
+            .query_row(
+                "SELECT tenant FROM tasks WHERE id = ?1",
+                params![child_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let (Some(p), Some(c)) = (&parent_tenant, &child_tenant) {
+            if p != c {
+                return Err(KanbanError::TenantMismatch {
+                    parent: p.clone(),
+                    child: c.clone(),
+                });
+            }
+        }
+
+        // Cycle gate: walk descendants of child; reject if parent appears.
+        let cycle: Option<i64> = tx
+            .query_row(
+                "WITH RECURSIVE descendants(id) AS ( \
+                    SELECT child_id FROM task_links WHERE parent_id = ?1 \
+                    UNION \
+                    SELECT tl.child_id FROM task_links tl JOIN descendants d ON tl.parent_id = d.id \
+                 ) \
+                 SELECT 1 FROM descendants WHERE id = ?2 LIMIT 1",
+                params![child_id, parent_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if cycle.is_some() {
+            return Err(KanbanError::LinkCycle {
+                parent_id: parent_id.to_string(),
+                child_id: child_id.to_string(),
+            });
+        }
+
+        // Write.
+        let now = Self::now();
+        tx.execute(
+            "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+             VALUES (?1, ?2, ?3)",
+            params![parent_id, child_id, now],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Append an event row for a task and return the new event id.
     pub fn append_event(
         &mut self,

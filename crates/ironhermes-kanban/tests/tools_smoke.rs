@@ -13,7 +13,7 @@ use std::sync::Arc;
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::tools::{
     KanbanBlockTool, KanbanCommentTool, KanbanCompleteTool, KanbanCreateTool, KanbanHeartbeatTool,
-    KanbanListTool, KanbanShowTool,
+    KanbanLinkTool, KanbanListTool, KanbanShowTool,
 };
 use ironhermes_tools::Tool;
 use rusqlite::params;
@@ -612,4 +612,135 @@ async fn kanban_heartbeat_missing_task_id_errors_without_env() {
         "BUG-36.3.7.6-01: missing task id rejected"
     );
     assert_eq!(v["reason"].as_str().unwrap(), "missing_task_id");
+}
+
+// ---------------------------------------------------------------------------
+// kanban_link tests (Phase 36.3.7.6 BUG-36.3.7.6-02 + BUG-36.3.7.6-04)
+// ---------------------------------------------------------------------------
+
+/// Helper for non-running tasks (no run_id / claim_lock). Shared by kanban_link
+/// and kanban_unblock tests; declared at module scope so both sections can use
+/// it without redeclaration. (NIT-2 from plan-checker.)
+fn seed_plain_task(store: &mut KanbanStore, title: &str) -> String {
+    let opts = CreateTaskOptions::default();
+    store.create_task(title, "alice", opts).unwrap().id
+}
+
+#[tokio::test]
+async fn kanban_link_happy_path_inserts_row() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let (a, b) = {
+        let mut s = store.lock().await;
+        (seed_plain_task(&mut s, "A"), seed_plain_task(&mut s, "B"))
+    };
+
+    let tool = KanbanLinkTool::new(store.clone(), true);
+    let result = tool
+        .execute(json!({"parent_id": &a, "child_id": &b}))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(
+        v["status"].as_str().unwrap(),
+        "ok",
+        "BUG-36.3.7.6-02: link happy path"
+    );
+    assert_eq!(v["parent_id"].as_str().unwrap(), a);
+    assert_eq!(v["child_id"].as_str().unwrap(), b);
+
+    let s = store.lock().await;
+    let count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE parent_id = ?1 AND child_id = ?2",
+            params![&a, &b],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "BUG-36.3.7.6-02: one row written on happy path");
+}
+
+#[tokio::test]
+async fn kanban_link_rejects_cycle() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let (a, b) = {
+        let mut s = store.lock().await;
+        (seed_plain_task(&mut s, "A"), seed_plain_task(&mut s, "B"))
+    };
+
+    let tool = KanbanLinkTool::new(store.clone(), true);
+
+    // Step 1: A → B is fine.
+    let r1 = tool
+        .execute(json!({"parent_id": &a, "child_id": &b}))
+        .await
+        .unwrap();
+    let v1: Value = serde_json::from_str(&r1).unwrap();
+    assert_eq!(v1["status"].as_str().unwrap(), "ok");
+
+    // Step 2: B → A would close the cycle.
+    let r2 = tool
+        .execute(json!({"parent_id": &b, "child_id": &a}))
+        .await
+        .unwrap();
+    let v2: Value = serde_json::from_str(&r2).unwrap();
+    assert_eq!(
+        v2["status"].as_str().unwrap(),
+        "rejected",
+        "BUG-36.3.7.6-02: cycle rejected"
+    );
+    assert_eq!(v2["reason"].as_str().unwrap(), "link_cycle");
+    assert_eq!(v2["parent_id"].as_str().unwrap(), b);
+    assert_eq!(v2["child_id"].as_str().unwrap(), a);
+
+    let s = store.lock().await;
+    let count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE parent_id = ?1 AND child_id = ?2",
+            params![&b, &a],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "BUG-36.3.7.6-02: no cycle row written");
+}
+
+#[tokio::test]
+async fn kanban_link_phantom_id_rejected() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let b = {
+        let mut s = store.lock().await;
+        seed_plain_task(&mut s, "B")
+    };
+
+    let tool = KanbanLinkTool::new(store.clone(), true);
+    let result = tool
+        .execute(json!({"parent_id": "t_phantom", "child_id": &b}))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(
+        v["status"].as_str().unwrap(),
+        "rejected",
+        "BUG-36.3.7.6-02: phantom rejected"
+    );
+    assert_eq!(v["reason"].as_str().unwrap(), "task_not_found");
+    assert_eq!(v["id"].as_str().unwrap(), "t_phantom");
+
+    // No row written.
+    let s = store.lock().await;
+    let count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE child_id = ?1",
+            params![&b],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
 }
