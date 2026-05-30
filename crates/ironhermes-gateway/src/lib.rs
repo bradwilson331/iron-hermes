@@ -3,6 +3,9 @@ pub mod backoff;
 pub mod discord; // Phase 34 — D-10
 pub mod handler;
 pub mod multimodal;
+// Phase 36.3.7.5 BUG-36.3.7.5-04: pure-function notifier-spawn gate. `pub` is for
+// receiver-end integration tests only (see `tests/notifier_spawn_gating.rs`).
+pub mod notifier_gating;
 pub mod pid;
 pub mod rate_limiter;
 pub mod runner;

@@ -1263,34 +1263,128 @@ impl GatewayRunner {
         let dispatch_in_gw_env = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY")
             .map(|v| v != "0")
             .unwrap_or(true);
-        if kanban_config.dispatch_in_gateway && dispatch_in_gw_env {
-            let kanban_cancel = self.cancel.clone();
-            let interval_secs = kanban_config.dispatch_interval_seconds;
-            match ironhermes_kanban::KanbanStore::open_default() {
-                Ok(store) => {
-                    let kanban_store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+
+        // -----------------------------------------------------------------------
+        // Phase 36.3.7.5 BUG-36.3.7.5-04: store-arc lift.
+        //
+        // Both the dispatcher (Phase 36.3.7) AND the notifier (Phase 36.3.7.5)
+        // need an Arc<TokioMutex<KanbanStore>>. The dispatcher's previous block
+        // opened the store INSIDE its own gating check; the notifier needs the
+        // SAME Arc. Hoist `KanbanStore::open_default()` to a single site above
+        // both spawns so each branch can call `.clone()` on the shared Arc.
+        //
+        // This is a SEMANTICS-PRESERVING refactor for the dispatcher: the runtime
+        // behavior of `run_dispatch_loop(...)` is unchanged. Only the construction
+        // site of the Arc moves. The dispatcher's `dispatch_in_gateway` gate +
+        // env-flag gate + interval-seconds log line are preserved verbatim.
+        // -----------------------------------------------------------------------
+        match ironhermes_kanban::KanbanStore::open_default() {
+            Ok(store) => {
+                let kanban_store_arc =
+                    std::sync::Arc::new(tokio::sync::Mutex::new(store));
+
+                // --- 11a. Kanban dispatcher (Phase 36.3.7 D-09) ---
+                if kanban_config.dispatch_in_gateway && dispatch_in_gw_env {
+                    let kanban_cancel = self.cancel.clone();
+                    let interval_secs = kanban_config.dispatch_interval_seconds;
                     let dispatcher_ctx =
                         std::sync::Arc::new(ironhermes_kanban::DispatcherContext::new(
-                            kanban_store,
-                            kanban_config,
+                            kanban_store_arc.clone(),
+                            kanban_config.clone(),
                         ));
                     join_set.spawn(async move {
                         ironhermes_kanban::run_dispatch_loop(dispatcher_ctx, kanban_cancel).await;
                     });
                     info!("Kanban dispatch task started ({}s interval)", interval_secs);
+                } else if !dispatch_in_gw_env {
+                    info!("Kanban dispatcher disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY=0");
+                } else {
+                    // dispatch_in_gateway = false in config
+                    debug!("Kanban dispatcher disabled via config (dispatch_in_gateway = false)");
                 }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "Failed to open kanban.db; kanban dispatcher will NOT start (gateway continues)"
-                    );
+
+                // -----------------------------------------------------------------------
+                // Phase 36.3.7.5 BUG-36.3.7.5-04: Gateway notifier spawn (gated on config).
+                //
+                // Mirrors the dispatcher spawn shape above (canonical).
+                // - Gate: notification_sources = Some(non_empty) AND at least one
+                //   platform in that list intersects with the enabled gateway
+                //   platforms set (case-insensitive). Default-off preserved.
+                // - On gate-fail: log ONE info line + skip; gateway continues
+                //   without the notifier loop.
+                // - On gate-pass: spawn run_notifier_loop into join_set with a
+                //   send_fn closure wrapping the enabled adapters by platform.
+                //
+                // The send_fn is the kanban->gateway boundary closure — keeps the
+                // ironhermes-kanban crate free of any compile-time dep on
+                // ironhermes-gateway. See Plan 02 SUMMARY crate-isolation audit.
+                // -----------------------------------------------------------------------
+                let enabled_platforms: Vec<String> =
+                    collect_enabled_platform_names(&self.config, &adapter);
+                let gate = crate::notifier_gating::compute_notifier_gate(
+                    kanban_config.notification_sources.as_deref(),
+                    &enabled_platforms,
+                );
+                match gate {
+                    crate::notifier_gating::NotifierGate::DisabledNoSources => {
+                        info!(
+                            "kanban notifier disabled (notification_sources not configured)"
+                        );
+                    }
+                    crate::notifier_gating::NotifierGate::DisabledNoOverlap {
+                        wanted,
+                        enabled,
+                    } => {
+                        info!(
+                            wanted = ?wanted,
+                            enabled = ?enabled,
+                            "kanban notifier disabled (no enabled platform overlap)"
+                        );
+                    }
+                    crate::notifier_gating::NotifierGate::Enabled { sources } => {
+                        // Build the send_fn closure: take an owned snapshot of the
+                        // gateway's adapter handles at spawn time. The notifier
+                        // loop's lifetime can outlive `start()`'s stack frame, so
+                        // capturing references would not work — Arcs only.
+                        let adapter_snapshot: Vec<(
+                            String,
+                            std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+                        )> = build_adapter_snapshot(&adapter);
+                        let send_fn = build_notifier_send_fn(adapter_snapshot);
+                        let poll_seconds = kanban_config.notifier_poll_seconds;
+                        let notifier_ctx = std::sync::Arc::new(
+                            ironhermes_kanban::NotifierContext::new(
+                                kanban_store_arc.clone(),
+                                poll_seconds,
+                                send_fn,
+                            ),
+                        );
+                        let notifier_cancel = self.cancel.clone();
+                        join_set.spawn(async move {
+                            ironhermes_kanban::run_notifier_loop(
+                                notifier_ctx,
+                                notifier_cancel,
+                            )
+                            .await;
+                        });
+                        info!(
+                            sources = ?sources,
+                            poll_seconds = poll_seconds,
+                            "kanban notifier loop started"
+                        );
+                    }
                 }
             }
-        } else if !dispatch_in_gw_env {
-            info!("Kanban dispatcher disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY=0");
-        } else {
-            // dispatch_in_gateway = false in config
-            debug!("Kanban dispatcher disabled via config (dispatch_in_gateway = false)");
+            Err(e) => {
+                // Preserves INV-36.3.7-08-05 (tests/kanban_dispatcher_spawned.rs:159) —
+                // the substring "kanban dispatcher will NOT start" must remain present
+                // so the non-fatal path is greppable. Notifier shares the same store
+                // and is also skipped here (Phase 36.3.7.5 BUG-36.3.7.5-04 store-arc lift).
+                warn!(
+                    error = %e,
+                    "Failed to open kanban.db; kanban dispatcher will NOT start (gateway continues; notifier also skipped)"
+                );
+            }
         }
 
         // --- 12. Run dispatch loop concurrently with shutdown signal ---
@@ -1493,6 +1587,117 @@ fn resolve_token_with_env(token: &Option<String>, env_var: &str) -> Option<Strin
         }
     }
     std::env::var(env_var).ok()
+}
+
+// -------------------------------------------------------------------------
+// Phase 36.3.7.5 BUG-36.3.7.5-04: notifier-spawn support helpers.
+//
+// `collect_enabled_platform_names` reads the gateway's `Config` + the live
+// Telegram adapter Arc to compute the set of enabled-platform names used by
+// the spawn-gating check (`compute_notifier_gate`).
+//
+// `build_adapter_snapshot` produces an owned `Vec<(String, Arc<dyn PlatformAdapter>)>`
+// for the `SendFn` closure — captured by value so the closure can outlive
+// `start()`'s stack frame. Currently includes ONLY the Telegram adapter
+// (Discord/Slack adapters are constructed inside their own spawned tasks and
+// are not retained as runner-scope Arcs in this iteration; subscriptions
+// naming those platforms will hit the "platform not enabled in gateway" arm
+// of the send_fn closure and the notifier will log + drop per locked policy).
+//
+// `build_notifier_send_fn` constructs the `ironhermes_kanban::SendFn`
+// trait-object closure: case-insensitive string match on `platform`, route
+// to the matching `PlatformAdapter::send_message`, or return `Err` so the
+// notifier's log-and-drop policy applies.
+// -------------------------------------------------------------------------
+
+/// Enumerate the gateway's enabled platform names from the parsed `Config`.
+///
+/// "Enabled" = the platform appears in `config.gateway.platforms`. The Telegram
+/// adapter is ALWAYS enabled (constructed at `start()` entry); Discord/Slack
+/// are enabled iff their config sections AND token environments resolve at
+/// startup. Conservative semantics: include any platform key present in the
+/// platforms map so the gate check sees the operator's intent.
+fn collect_enabled_platform_names(
+    config: &ironhermes_core::Config,
+    _telegram_adapter: &std::sync::Arc<crate::telegram::TelegramAdapter>,
+) -> Vec<String> {
+    // Start from the configured platforms map. Telegram is the canonical
+    // entry — if the operator wrote `platforms.telegram`, the platform is
+    // enabled by the time we reach this point (start() would have failed
+    // earlier if the token were unresolvable). Discord/Slack are enabled
+    // when their config sections exist.
+    let mut names: Vec<String> = config
+        .gateway
+        .platforms
+        .keys()
+        .map(|k| k.to_string())
+        .collect();
+    // Always include "telegram" — start() unconditionally builds the
+    // TelegramAdapter, so it is the always-on adapter even if the config
+    // platforms map is missing the explicit `telegram:` key (the
+    // tg_config default-clone above tolerates absence).
+    if !names.iter().any(|n| n.eq_ignore_ascii_case("telegram")) {
+        names.push("telegram".to_string());
+    }
+    names
+}
+
+/// Build an owned snapshot of platform-name → `Arc<dyn PlatformAdapter>` pairs
+/// for the `SendFn` closure. Currently only the Telegram adapter is reachable
+/// as a runner-scope Arc; Discord/Slack adapters live inside their own tokio
+/// tasks (constructed after socket connect). Subscriptions that name a
+/// platform NOT in this snapshot will receive `Err("platform X not enabled
+/// in gateway")` from the closure and the notifier will log+drop the message
+/// per locked policy D-log-and-drop-on-fail.
+fn build_adapter_snapshot(
+    telegram_adapter: &std::sync::Arc<crate::telegram::TelegramAdapter>,
+) -> Vec<(String, std::sync::Arc<dyn crate::adapter::PlatformAdapter>)> {
+    vec![(
+        "telegram".to_string(),
+        telegram_adapter.clone() as std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+    )]
+}
+
+/// Construct the `ironhermes_kanban::SendFn` trait-object closure.
+///
+/// The closure captures the adapter snapshot by value (owned `Arc<Vec<...>>`).
+/// On each call, performs a case-insensitive linear search for the platform
+/// name; if a match is found, awaits `send_message`; otherwise returns
+/// `Err("platform {p} not enabled in gateway")` which the notifier loop logs
+/// and drops per locked policy.
+fn build_notifier_send_fn(
+    adapters: Vec<(String, std::sync::Arc<dyn crate::adapter::PlatformAdapter>)>,
+) -> ironhermes_kanban::SendFn {
+    let adapters = std::sync::Arc::new(adapters);
+    std::sync::Arc::new(
+        move |platform: &str,
+              chat_id: &str,
+              thread_id_opt: Option<&str>,
+              message: &str| {
+            let adapters = adapters.clone();
+            let platform = platform.to_string();
+            let chat_id = chat_id.to_string();
+            let thread_id_opt = thread_id_opt.map(|s| s.to_string());
+            let message = message.to_string();
+            Box::pin(async move {
+                let adapter = adapters
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(&platform))
+                    .map(|(_, a)| a.clone());
+                match adapter {
+                    Some(a) => a
+                        .send_message(&chat_id, &message, thread_id_opt.as_deref())
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| anyhow::anyhow!(e)),
+                    None => Err(anyhow::anyhow!(
+                        "platform {} not enabled in gateway",
+                        platform
+                    )),
+                }
+            })
+        },
+    )
 }
 
 #[cfg(test)]
