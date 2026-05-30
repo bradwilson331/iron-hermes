@@ -39,8 +39,11 @@ model:
 
 # --- Agent Configuration ---
 agent:
-  # Maximum agent loop iterations per turn (default: 90)
-  # max_turns: 90
+  # Maximum agent loop iterations per turn (default: 50)
+  # Lowered from 90 to bound runaway-delegation cost — pairs with the
+  # AgentLoop's consecutive-failure circuit breaker. Raise deliberately
+  # if you need longer multi-step reasoning chains.
+  # max_turns: 50
 
   # Context compression ratio (default: 0.5)
   # context_compression: 0.5
@@ -269,9 +272,10 @@ delegation:
   # Oversize batches return a tool error rather than silently truncating
   # max_concurrent_children: 3
 
-  # Maximum LLM iterations per child agent (default: 50)
-  # Per-call `max_iterations` in the delegate_task tool args overrides this
-  # max_iterations: 50
+  # Maximum LLM iterations per child agent (default: 20)
+  # Lowered from 50 to bound runaway-delegation cost (supersedes D-08).
+  # Per-call `max_iterations` in the delegate_task tool args overrides this.
+  # max_iterations: 20
 
   # Maximum spawn depth for `orchestrator`-role children (default: 1 = flat, no nesting)
   # 1 → only root agents can delegate (orchestrator children are downgraded to leaf)

@@ -140,7 +140,7 @@ delegate_task(
 
 ### `max_iterations` — per-call override
 
-Override the number of LLM iterations allowed for this specific call. Falls back to `delegation.max_iterations` from config (default 50).
+Override the number of LLM iterations allowed for this specific call. Falls back to `delegation.max_iterations` from config (default 20; lowered from 50 to bound runaway-delegation cost — supersedes D-08).
 
 ```
 delegate_task(
@@ -562,8 +562,9 @@ delegation:
   # Maximum concurrent children per batch (default: 3)
   max_concurrent_children: 3
 
-  # Maximum LLM iterations per child agent (default: 50)
-  max_iterations: 50
+  # Maximum LLM iterations per child agent (default: 20; lowered from 50 to
+  # bound runaway-delegation cost — supersedes D-08)
+  max_iterations: 20
 
   # Maximum spawn depth for orchestrator children (default: 1 = flat)
   # 1 → only root agents can delegate (orchestrator children are downgraded to leaf)
@@ -616,7 +617,7 @@ Resolved in Phase 35 (supersedes the historical PROV-10 shared parent↔child co
 
 > **Maximum tree-wide iterations = `max_spawn_depth` × `max_concurrent_children` × `max_iterations`**
 >
-> = 1 × 3 × 50 = **150** at default config.
+> = 1 × 3 × 20 = **60** at default config (was 150 before the runaway-delegation guard lowered `max_iterations` 50 → 20).
 
 Both depth and concurrency guards (Phase 32.2) remain in effect; raising `max_spawn_depth` or `max_concurrent_children` raises this ceiling multiplicatively. No separate tree-wide aggregate counter exists — the depth × concurrency × per-subagent product is the security boundary.
 
@@ -653,7 +654,7 @@ subagent:
 delegation:
   child_timeout_seconds: 300
   max_concurrent_children: 3
-  max_iterations: 50
+  max_iterations: 20
   max_spawn_depth: 1
   orchestrator_enabled: true
   default_toolsets: ["terminal", "file", "web"]
@@ -665,7 +666,7 @@ Field rename summary:
 |-----------|-----------|-------|
 | `timeout_secs` | `child_timeout_seconds` | Same semantics |
 | `max_subagents` | `max_concurrent_children` | Same semantics |
-| `max_iterations` | `max_iterations` | Default changed: 10 → 50 |
+| `max_iterations` | `max_iterations` | Default history: 10 → 50 (D-08) → 20 (runaway-delegation guard, current). |
 | _(new)_ | `max_spawn_depth` | Default: 1 (flat) |
 | _(new)_ | `orchestrator_enabled` | Default: true |
 | _(new — Phase 32.3)_ | `stale_warn_seconds` | Default: 120. Soft-warn threshold; absent in pre-32.3 configs is treated as 120 via serde default. Per-call override on `delegate_task`. |

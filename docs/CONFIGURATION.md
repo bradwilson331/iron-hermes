@@ -180,7 +180,7 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 
 | Key | Default | Description |
 |---|---|---|
-| `agent.max_iterations` | `90` | Canonical per-turn cap — sizes both the `AgentLoop` iteration limit and the `BudgetHandle` it builds. Read by `AgentRuntime::from_config` (Phase 28.1) |
+| `agent.max_iterations` | `50` | Canonical per-turn cap — sizes both the `AgentLoop` iteration limit and the `BudgetHandle` it builds. Lowered from 90 by the runaway-delegation guard (commit `aaa1b0ac`); pairs with the consecutive-failure circuit breaker in `AgentLoop`. Read by `AgentRuntime::from_config` (Phase 28.1) |
 | `agent.max_turns` | _(deprecated alias)_ | Deprecated in Phase 28.1. If present, `AgentConfig::normalize()` folds it onto `max_iterations` and emits a `warn!`. Remove from new configs |
 | `agent.context_compression` | `0.5` | Context compression ratio |
 | `agent.tool_delay_secs` | `1.0` | Delay between tool calls in seconds |

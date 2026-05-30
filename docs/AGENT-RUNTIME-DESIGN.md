@@ -15,7 +15,8 @@ Author: pairing session, 2026-05-21.
   budget-exhausting conversation) independent of the refactor. **Removed once the
   gateway migrates to `run_turn` (§5 stage 2).**
 - **`e4c2ca48` — config collapse.** `config.agent.max_iterations` is now the
-  single canonical per-turn cap (default unified to `DEFAULT_MAX_ITERATIONS`=90);
+  single canonical per-turn cap (default unified to `DEFAULT_MAX_ITERATIONS`=50,
+  lowered from 90 by the runaway-delegation guard — see commit `aaa1b0ac`);
   `agent.max_turns` is a deprecated alias folded in by `AgentConfig::normalize()`
   with a warning. (Decision §6.1.)
 - **`0f8807c6` — `AgentRuntime` built.** New `crates/ironhermes-agent/src/agent_runtime.rs`:
@@ -286,7 +287,7 @@ parent↔child subagent wiring.
 
 ### Clamp-to-ceiling policy (D-03)
 
-`config.delegation.max_iterations` (default 50) is a hard **ceiling** on the
+`config.delegation.max_iterations` (default 20, lowered from 50 to bound runaway-delegation cost) is a hard **ceiling** on the
 per-child budget. The `delegate_task` tool's `execute` / `execute_batch` paths
 resolve an `effective_max_iterations` value:
 
@@ -305,7 +306,7 @@ shifts DoS containment to the **reference-style structural bound**:
 
 > **Maximum tree-wide iterations = `max_spawn_depth` × `max_concurrent_children` × `max_iterations`**
 >
-> = 1 × 3 × 50 = **150** (default config values).
+> = 1 × 3 × 20 = **60** (default config values; was 150 before the runaway-delegation guard).
 
 Both `max_spawn_depth` (default 1, `config.rs:994-997`) and
 `max_concurrent_children` (default 3, `config.rs:981`) guards were enforced in
