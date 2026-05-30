@@ -1069,7 +1069,10 @@ pub struct SubagentConfig {
     /// Maximum concurrent child agents. Default: 3.
     /// (D-07: renamed from `max_subagents`)
     pub max_concurrent_children: usize,
-    /// Maximum LLM iterations per child agent. Default: 50 (D-08: raised from 10).
+    /// Maximum LLM iterations per child agent. Default: 20 (lowered from 50 to
+    /// bound the cost when a failing child loops on tool errors; D-08 had raised
+    /// from 10 to 50 but the worst case there pairs with the parent budget for a
+    /// multi-hour grind on a single bad delegation).
     pub max_iterations: usize,
     /// Default toolset groups for child agents (D-01). Default: ["terminal", "file", "web"].
     pub default_toolsets: Vec<String>,
@@ -1099,7 +1102,7 @@ impl Default for SubagentConfig {
             // D-07 confirmed no-op: child_timeout_seconds stays at 300.
             stale_warn_seconds: 120,
             max_concurrent_children: 3,
-            max_iterations: 50,
+            max_iterations: 20,
             default_toolsets: vec!["terminal".into(), "file".into(), "web".into()],
             model: None,
             provider: None,
@@ -1475,8 +1478,8 @@ model:
         let default = SubagentConfig::default();
         assert_eq!(default.child_timeout_seconds, 300);
         assert_eq!(default.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(default.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(default.max_iterations, 20);
         // Phase 32.3 Plan 01 (D-05): stale_warn_seconds defaults to 120.
         assert_eq!(
             default.stale_warn_seconds, 120,
@@ -1515,8 +1518,8 @@ model:
         let config = Config::default();
         assert_eq!(config.delegation.child_timeout_seconds, 300);
         assert_eq!(config.delegation.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(config.delegation.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(config.delegation.max_iterations, 20);
     }
 
     #[test]
@@ -1529,8 +1532,8 @@ model:
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
         assert_eq!(config.delegation.child_timeout_seconds, 300);
         assert_eq!(config.delegation.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(config.delegation.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(config.delegation.max_iterations, 20);
     }
 
     #[test]
@@ -1558,8 +1561,8 @@ model:
         // D-32.2 new fields
         assert_eq!(default.max_spawn_depth, 1, "max_spawn_depth must default to 1");
         assert!(default.orchestrator_enabled, "orchestrator_enabled must default to true");
-        // D-08: raised from 10 to 50
-        assert_eq!(default.max_iterations, 50, "max_iterations must default to 50 per D-08");
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(default.max_iterations, 20, "max_iterations must default to 20 (runaway-delegation guard)");
         // Phase 32.3 Plan 01 (D-05): new soft-stale warn threshold field.
         assert_eq!(
             default.stale_warn_seconds, 120,
@@ -1577,8 +1580,8 @@ delegation:
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
         assert_eq!(config.delegation.child_timeout_seconds, 600);
         assert_eq!(config.delegation.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(config.delegation.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(config.delegation.max_iterations, 20);
         assert_eq!(
             config.delegation.default_toolsets,
             vec![
