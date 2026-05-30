@@ -617,14 +617,38 @@ impl KanbanStore {
             .as_ref()
             .map(|k| format!("{k}:synthesizer"));
 
-        // ---------------- Idempotency replay (before opening tx) ----------------
+        // ---------------- Open transaction --------------------------------------
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // ---------------- Idempotency replay (INSIDE transaction) ---------------
+        //
+        // WR-01 (Phase 36.3.7.7 code review): the lookup MUST happen inside
+        // `BEGIN IMMEDIATE` so a concurrent first-create race resolves
+        // deterministically. If T1 commits its root row first, T2 (which
+        // blocked on BEGIN IMMEDIATE) then observes the row and replays
+        // instead of trying its own INSERT and failing with a UNIQUE-
+        // constraint Sqlite error.
         //
         // If the root already exists under `k:root`, the whole graph already
         // exists (atomic-transaction guarantee — fully-present-or-fully-absent).
-        // Walk `task_links` from root to gather worker IDs in their original
-        // insertion order, then look up verifier/synthesizer keys explicitly.
+        // Walk per-card idempotency keys to gather worker / verifier / synth
+        // IDs in their original insertion order.
         if let Some(ref kr) = key_root {
-            if let Some(existing_root) = self.find_by_idempotency_key(kr)? {
+            let existing: Option<Task> = tx
+                .query_row(
+                    "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                     idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
+                     max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
+                     current_step_key, created_by, created_at, started_at, ended_at \
+                     FROM tasks WHERE idempotency_key = ?1",
+                    params![kr],
+                    Self::row_to_task,
+                )
+                .optional()?;
+            if let Some(existing_root) = existing {
                 let root_id = existing_root.id.clone();
 
                 // Worker IDs in insertion order — look up each per-card key
@@ -636,9 +660,16 @@ impl KanbanStore {
                     let mut i = 0usize;
                     loop {
                         let kw = format!("{base}:worker:{i}");
-                        match self.find_by_idempotency_key(&kw)? {
-                            Some(t) => {
-                                worker_ids.push(t.id);
+                        let row: Option<String> = tx
+                            .query_row(
+                                "SELECT id FROM tasks WHERE idempotency_key = ?1",
+                                params![&kw],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        match row {
+                            Some(id) => {
+                                worker_ids.push(id);
                                 i += 1;
                             }
                             None => break,
@@ -646,34 +677,54 @@ impl KanbanStore {
                     }
                 }
 
-                let verifier_id = match key_verifier.as_deref() {
-                    Some(k) => self.find_by_idempotency_key(k)?.map(|t| t.id),
+                let verifier_id: Option<String> = match key_verifier.as_deref() {
+                    Some(k) => tx
+                        .query_row(
+                            "SELECT id FROM tasks WHERE idempotency_key = ?1",
+                            params![k],
+                            |r| r.get(0),
+                        )
+                        .optional()?,
                     None => None,
                 };
-                let synthesizer_id = match key_synth.as_deref() {
-                    Some(k) => self.find_by_idempotency_key(k)?.map(|t| t.id),
+                let synthesizer_id: Option<String> = match key_synth.as_deref() {
+                    Some(k) => tx
+                        .query_row(
+                            "SELECT id FROM tasks WHERE idempotency_key = ?1",
+                            params![k],
+                            |r| r.get(0),
+                        )
+                        .optional()?,
                     None => None,
                 };
 
-                // The blackboard event id is NOT recoverable from replay (it is
-                // a `task_comments` rowid emitted only at first creation). Return
-                // `None` — callers re-using `idempotency_key` are expected to
-                // ignore this field on replay.
+                // WR-02 (Phase 36.3.7.7 code review): recover the blackboard
+                // `task_comments` rowid by looking up the first author='swarm'
+                // comment on the root card. This makes the replay envelope
+                // shape-identical to the first-create envelope, so an
+                // orchestrator that re-uses `idempotency_key` to reach the
+                // blackboard via `blackboard_event_id` keeps working.
+                let blackboard_event_id: Option<i64> = tx
+                    .query_row(
+                        "SELECT MIN(id) FROM task_comments WHERE task_id = ?1 AND author = 'swarm'",
+                        params![&root_id],
+                        |r| r.get::<_, Option<i64>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+
+                // Reads only — no rows mutated. Drop the tx via commit (no-op).
+                tx.commit()?;
+
                 return Ok(SwarmGraphIds {
                     root_id,
                     worker_ids,
                     verifier_id,
                     synthesizer_id,
-                    blackboard_event_id: None,
+                    blackboard_event_id,
                 });
             }
         }
-
-        // ---------------- Open transaction --------------------------------------
-
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let skills_json: Option<String> = spec
             .skills
