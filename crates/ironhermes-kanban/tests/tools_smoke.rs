@@ -13,8 +13,9 @@ use std::sync::Arc;
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::tools::{
     KanbanBlockTool, KanbanCommentTool, KanbanCompleteTool, KanbanCreateTool, KanbanHeartbeatTool,
-    KanbanLinkTool, KanbanListTool, KanbanShowTool, KanbanUnblockTool,
+    KanbanLinkTool, KanbanListTool, KanbanShowTool, KanbanSwarmTool, KanbanUnblockTool,
 };
+use ironhermes_kanban::{KanbanWorkerSpec, SwarmGraphIds, SwarmGraphSpec};
 use ironhermes_tools::Tool;
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -866,5 +867,575 @@ async fn kanban_unblock_rejects_wrong_status() {
     assert_eq!(
         unblocked_count, 0,
         "BUG-36.3.7.6-03: no unblocked event appended"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// kanban_swarm tests (Phase 36.3.7.7 BUG-36.3.7.7-01)
+// ---------------------------------------------------------------------------
+//
+// Receiver-end tests for the new `KanbanStore::create_swarm` sibling primitive
+// + the `KanbanSwarmTool` LLM tool registered as the 10th tool. Most tests
+// drive `store.create_swarm(spec)` directly to assert DB-level shape (rows in
+// tasks/task_links/task_events/task_comments) and atomic rollback on failure.
+// The flat-worker auto-title test covers the per-card title format.
+
+/// Helper that builds a minimal SwarmGraphSpec with a flat-form worker set,
+/// no verifier, no synth, no blackboard.
+fn seed_swarm_graph(
+    store: &mut KanbanStore,
+    goal: &str,
+    workers: &[&str],
+) -> SwarmGraphIds {
+    let spec = SwarmGraphSpec {
+        goal: goal.to_string(),
+        workers: workers
+            .iter()
+            .map(|w| KanbanWorkerSpec {
+                assignee: (*w).to_string(),
+                title: None,
+                body: None,
+            })
+            .collect(),
+        verifier: None,
+        synthesizer: None,
+        blackboard: None,
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+    store.create_swarm(spec).unwrap()
+}
+
+#[tokio::test]
+async fn swarm_fan_out_only_creates_root_and_workers() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let ids = seed_swarm_graph(&mut s, "fan-out goal", &["bob", "carol", "dave"]);
+
+    assert_eq!(ids.worker_ids.len(), 3);
+    assert!(ids.verifier_id.is_none());
+    assert!(ids.synthesizer_id.is_none());
+    assert!(ids.blackboard_event_id.is_none());
+
+    // Root card: status=done + ended_at=Some + assignee=alice
+    let root = s.get_task(&ids.root_id).unwrap();
+    assert_eq!(root.status, "done", "root card status must be 'done'");
+    assert!(
+        root.ended_at.is_some(),
+        "root card ended_at must be set (D-root-ended-at)"
+    );
+    assert_eq!(root.assignee, "alice");
+
+    // Workers: status=todo
+    for wid in &ids.worker_ids {
+        let w = s.get_task(wid).unwrap();
+        assert_eq!(w.status, "todo");
+        assert!(w.ended_at.is_none());
+    }
+
+    // task_links: exactly 3 rows from root -> each worker.
+    let link_count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE parent_id = ?1",
+            params![&ids.root_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(link_count, 3);
+
+    // Created events: 1 root + 3 workers = 4 rows.
+    let event_count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_events WHERE kind = 'created'",
+            params![],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(event_count, 4);
+
+    // No comments seeded.
+    let comment_count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_comments",
+            params![],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(comment_count, 0);
+}
+
+#[tokio::test]
+async fn swarm_with_verifier_gates_on_all_workers() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let spec = SwarmGraphSpec {
+        goal: "verify goal".to_string(),
+        workers: ["bob", "carol", "dave"]
+            .iter()
+            .map(|w| KanbanWorkerSpec {
+                assignee: (*w).to_string(),
+                title: None,
+                body: None,
+            })
+            .collect(),
+        verifier: Some("eve".to_string()),
+        synthesizer: None,
+        blackboard: None,
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let ids = s.create_swarm(spec).unwrap();
+    let vid = ids.verifier_id.clone().expect("verifier_id must be Some");
+    assert!(ids.synthesizer_id.is_none());
+
+    let v = s.get_task(&vid).unwrap();
+    assert_eq!(v.status, "todo");
+    assert_eq!(v.assignee, "eve");
+
+    // 3 worker->verifier links + 3 root->worker links = 6 task_links total.
+    let total_links: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total_links, 6);
+
+    let verifier_inbound: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE child_id = ?1",
+            params![&vid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(verifier_inbound, 3, "verifier parents = all workers");
+}
+
+#[tokio::test]
+async fn swarm_full_4_tier_matches_reference_md_664() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let spec = SwarmGraphSpec {
+        goal: "Design a multi-region failover plan".to_string(),
+        workers: ["researcher", "architect", "sre"]
+            .iter()
+            .map(|w| KanbanWorkerSpec {
+                assignee: (*w).to_string(),
+                title: None,
+                body: None,
+            })
+            .collect(),
+        verifier: Some("reviewer".to_string()),
+        synthesizer: Some("writer".to_string()),
+        blackboard: None,
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let ids = s.create_swarm(spec).unwrap();
+    let vid = ids.verifier_id.clone().unwrap();
+    let sid = ids.synthesizer_id.clone().unwrap();
+
+    // 5 cards total: root + 3 workers + verifier + synthesizer.
+    let task_count: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    assert_eq!(task_count, 6);
+
+    // 3 root->worker + 3 worker->verifier + 1 verifier->synth = 7 task_links.
+    let link_count: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    assert_eq!(link_count, 7);
+
+    let synth_inbound: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE child_id = ?1",
+            params![&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(synth_inbound, 1, "synth's only parent is verifier");
+
+    let synth_parent: String = s
+        .conn
+        .query_row(
+            "SELECT parent_id FROM task_links WHERE child_id = ?1",
+            params![&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(synth_parent, vid);
+}
+
+#[tokio::test]
+async fn swarm_with_synth_no_verifier_gates_synth_on_workers() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let spec = SwarmGraphSpec {
+        goal: "quorum goal".to_string(),
+        workers: ["bob", "carol", "dave"]
+            .iter()
+            .map(|w| KanbanWorkerSpec {
+                assignee: (*w).to_string(),
+                title: None,
+                body: None,
+            })
+            .collect(),
+        verifier: None,
+        synthesizer: Some("eve".to_string()),
+        blackboard: None,
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let ids = s.create_swarm(spec).unwrap();
+    let sid = ids.synthesizer_id.clone().unwrap();
+    assert!(ids.verifier_id.is_none());
+
+    let synth_inbound: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_links WHERE child_id = ?1",
+            params![&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(synth_inbound, 3, "synth's parents are all workers (P3 quorum)");
+}
+
+#[tokio::test]
+async fn swarm_blackboard_arg_seeds_initial_comment_on_root() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let seeded = json!({
+        "shared_context": "multi-region failover",
+        "nested": { "a": 1, "b": [1, 2, 3] },
+        "flag": true
+    });
+
+    let spec = SwarmGraphSpec {
+        goal: "blackboard goal".to_string(),
+        workers: vec![KanbanWorkerSpec {
+            assignee: "bob".to_string(),
+            title: None,
+            body: None,
+        }],
+        verifier: None,
+        synthesizer: None,
+        blackboard: Some(seeded.clone()),
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let ids = s.create_swarm(spec).unwrap();
+    assert!(ids.blackboard_event_id.is_some());
+
+    // Exactly one task_comments row on the root with author='swarm'.
+    let (author, body): (String, String) = s
+        .conn
+        .query_row(
+            "SELECT author, body FROM task_comments WHERE task_id = ?1",
+            params![&ids.root_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(author, "swarm");
+    let round_trip: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(round_trip, seeded);
+}
+
+#[tokio::test]
+async fn swarm_idempotency_key_replays_return_same_graph() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let build_spec = || SwarmGraphSpec {
+        goal: "idempotent goal".to_string(),
+        workers: ["bob", "carol"]
+            .iter()
+            .map(|w| KanbanWorkerSpec {
+                assignee: (*w).to_string(),
+                title: None,
+                body: None,
+            })
+            .collect(),
+        verifier: Some("eve".to_string()),
+        synthesizer: None,
+        blackboard: None,
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: Some("k".to_string()),
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let first = s.create_swarm(build_spec()).unwrap();
+
+    let task_count_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_count_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let event_count_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
+        .unwrap();
+
+    let second = s.create_swarm(build_spec()).unwrap();
+
+    assert_eq!(first.root_id, second.root_id);
+    assert_eq!(first.worker_ids, second.worker_ids);
+    assert_eq!(first.verifier_id, second.verifier_id);
+    assert_eq!(first.synthesizer_id, second.synthesizer_id);
+
+    // No new rows after replay.
+    let task_count_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_count_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let event_count_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
+        .unwrap();
+    assert_eq!(task_count_before, task_count_after);
+    assert_eq!(link_count_before, link_count_after);
+    assert_eq!(event_count_before, event_count_after);
+}
+
+#[tokio::test]
+async fn swarm_invalid_assignee_rolls_back_whole_graph() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    // Snapshot baselines (the empty DB still has 0 rows everywhere).
+    let task_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let event_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
+        .unwrap();
+    let comment_before: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_comments",
+            params![],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let spec = SwarmGraphSpec {
+        goal: "bad goal".to_string(),
+        workers: vec![
+            KanbanWorkerSpec {
+                assignee: "bob".to_string(),
+                title: None,
+                body: None,
+            },
+            KanbanWorkerSpec {
+                assignee: "bad@@user".to_string(),
+                title: None,
+                body: None,
+            },
+        ],
+        verifier: None,
+        synthesizer: None,
+        blackboard: Some(json!({"x": 1})),
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let result = s.create_swarm(spec);
+    assert!(
+        result.is_err(),
+        "invalid assignee must cause create_swarm to error"
+    );
+
+    let task_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let event_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
+        .unwrap();
+    let comment_after: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_comments",
+            params![],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(task_before, task_after, "no tasks rows on rollback");
+    assert_eq!(link_before, link_after, "no task_links rows on rollback");
+    assert_eq!(event_before, event_after, "no task_events rows on rollback");
+    assert_eq!(
+        comment_before, comment_after,
+        "no task_comments rows on rollback"
+    );
+}
+
+#[tokio::test]
+async fn swarm_rich_worker_form_accepts_per_card_title_and_body() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let spec = SwarmGraphSpec {
+        goal: "rich goal".to_string(),
+        workers: vec![
+            KanbanWorkerSpec {
+                assignee: "bob".to_string(),
+                title: Some("Research vendor A".to_string()),
+                body: Some("Detailed body A".to_string()),
+            },
+            KanbanWorkerSpec {
+                assignee: "carol".to_string(),
+                title: Some("Research vendor B".to_string()),
+                body: Some("Detailed body B".to_string()),
+            },
+        ],
+        verifier: None,
+        synthesizer: None,
+        blackboard: None,
+        workspace: None,
+        skills: None,
+        tenant: None,
+        priority: None,
+        max_runtime_seconds: None,
+        max_retries: None,
+        idempotency_key: None,
+        created_by: Some("alice".to_string()),
+        body: None,
+    };
+
+    let ids = s.create_swarm(spec).unwrap();
+    let w0 = s.get_task(&ids.worker_ids[0]).unwrap();
+    let w1 = s.get_task(&ids.worker_ids[1]).unwrap();
+
+    assert_eq!(w0.title, "Research vendor A");
+    assert_eq!(w0.body.as_deref(), Some("Detailed body A"));
+    assert_eq!(w1.title, "Research vendor B");
+    assert_eq!(w1.body.as_deref(), Some("Detailed body B"));
+}
+
+#[tokio::test]
+async fn swarm_flat_worker_form_auto_titles_each_card() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let ids = seed_swarm_graph(&mut s, "flat-title goal", &["bob", "carol", "dave"]);
+
+    let titles: Vec<String> = ids
+        .worker_ids
+        .iter()
+        .map(|wid| s.get_task(wid).unwrap().title)
+        .collect();
+
+    assert_eq!(titles[0], "flat-title goal — worker 1 of 3");
+    assert_eq!(titles[1], "flat-title goal — worker 2 of 3");
+    assert_eq!(titles[2], "flat-title goal — worker 3 of 3");
+}
+
+#[tokio::test]
+async fn swarm_root_card_has_ended_at_set() {
+    // Risk 1 mitigation — explicit invariant lock for D-root-ended-at.
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let ids = seed_swarm_graph(&mut s, "ended_at goal", &["bob"]);
+    let root = s.get_task(&ids.root_id).unwrap();
+    assert!(
+        root.ended_at.is_some(),
+        "root card MUST have ended_at set (D-root-ended-at; Pitfall 1)"
+    );
+    assert!(
+        root.ended_at.unwrap() >= root.created_at,
+        "ended_at must be >= created_at"
     );
 }

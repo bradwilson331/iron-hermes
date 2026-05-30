@@ -223,6 +223,61 @@ pub enum KanbanCommands {
         note: Option<String>,
     },
 
+    /// Create an atomic multi-card swarm graph for orchestrator fan-out (Phase 36.3.7.7).
+    ///
+    /// Materializes a root + N worker cards + optional verifier + optional
+    /// synthesizer + optional blackboard comment in one BEGIN IMMEDIATE
+    /// transaction. See docs/kanban/reference.md §664 for canonical semantics
+    /// and graph topology shapes (P1 fan-out, fan-out+verify, full 4-tier,
+    /// P3 quorum).
+    #[command(name = "swarm")]
+    Swarm {
+        /// Shared goal / task description for the entire swarm.
+        goal: String,
+        /// Worker assignees, comma-separated (mutually exclusive with --workers-json).
+        #[arg(long, conflicts_with = "workers_json")]
+        workers: Option<String>,
+        /// Worker specs as JSON array `[{assignee, title?, body?}, ...]` (mutually exclusive with --workers).
+        #[arg(long, conflicts_with = "workers")]
+        workers_json: Option<String>,
+        /// Verifier assignee (optional). When present, verifier card's parents are all worker IDs.
+        #[arg(long)]
+        verifier: Option<String>,
+        /// Synthesizer assignee (optional). Parents are [verifier] when verifier present, else all workers.
+        #[arg(long)]
+        synthesizer: Option<String>,
+        /// Blackboard JSON to seed as comment on root card (mutually exclusive with --blackboard-file).
+        #[arg(long, conflicts_with = "blackboard_file")]
+        blackboard: Option<String>,
+        /// Path to JSON file for blackboard (mutually exclusive with --blackboard).
+        #[arg(long, conflicts_with = "blackboard")]
+        blackboard_file: Option<std::path::PathBuf>,
+        /// Shared workspace spec for all cards (scratch | dir:<abs-path> | worktree).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Shared skills to attach (repeatable).
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        /// Shared tenant id across all cards.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Shared priority across all cards (default 0).
+        #[arg(long)]
+        priority: Option<i64>,
+        /// Shared max runtime per attempt (e.g. "30m", "2h", or seconds).
+        #[arg(long)]
+        max_runtime: Option<String>,
+        /// Shared max retries cap.
+        #[arg(long)]
+        max_retries: Option<i64>,
+        /// Idempotency key — per-card suffixes derive as k:root / k:worker:{i} / k:verifier / k:synthesizer.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Output result as JSON {root_id, worker_ids, verifier_id, synthesizer_id, blackboard_event_id}.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Archive one or more tasks
     #[command(name = "archive")]
     Archive {
@@ -493,6 +548,43 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
         KanbanCommands::Unblock { ids, json } => commands::cmd_unblock(ids, json).await,
         // Phase 36.3.7.6 D-cli-heartbeat-parity — closes reference.md:583 doc-vs-impl gap.
         KanbanCommands::Heartbeat { id, note } => commands::cmd_heartbeat(id, note).await,
+        // Phase 36.3.7.7 BUG-36.3.7.7-01 — kanban swarm (D-topology-shapes).
+        KanbanCommands::Swarm {
+            goal,
+            workers,
+            workers_json,
+            verifier,
+            synthesizer,
+            blackboard,
+            blackboard_file,
+            workspace,
+            skills,
+            tenant,
+            priority,
+            max_runtime,
+            max_retries,
+            idempotency_key,
+            json,
+        } => {
+            commands::cmd_swarm(
+                goal,
+                workers,
+                workers_json,
+                verifier,
+                synthesizer,
+                blackboard,
+                blackboard_file,
+                workspace,
+                skills,
+                tenant,
+                priority,
+                max_runtime,
+                max_retries,
+                idempotency_key,
+                json,
+            )
+            .await
+        }
         KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json).await,
         KanbanCommands::Tail { id } => commands::cmd_tail(id).await,
         KanbanCommands::Watch {

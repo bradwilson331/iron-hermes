@@ -23,6 +23,7 @@ pub mod heartbeat;
 pub mod link;
 pub mod list;
 pub mod show;
+pub mod swarm;
 pub mod unblock;
 
 pub use block::KanbanBlockTool;
@@ -33,6 +34,7 @@ pub use heartbeat::KanbanHeartbeatTool;
 pub use link::KanbanLinkTool;
 pub use list::KanbanListTool;
 pub use show::KanbanShowTool;
+pub use swarm::KanbanSwarmTool;
 pub use unblock::KanbanUnblockTool;
 
 use std::sync::Arc;
@@ -40,7 +42,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::store::KanbanStore;
 
-/// Register all 6 kanban tools onto `registry`.
+/// Register all 10 kanban tools onto `registry`.
 ///
 /// Each tool shares the same `store` Arc for direct in-process DB access (D-20
 /// backend portability — no CLI shelling).
@@ -77,6 +79,11 @@ pub fn register_kanban_tools(
     )));
     // Phase 36.3.7.6 BUG-36.3.7.6-03 — kanban_unblock (D-unblock-status-precondition: handler-side gate).
     registry.register(Box::new(KanbanUnblockTool::new(
+        store.clone(),
+        explicit_enable,
+    )));
+    // Phase 36.3.7.7 BUG-36.3.7.7-01 — kanban_swarm (D-topology-shapes: atomic fan-out graph).
+    registry.register(Box::new(KanbanSwarmTool::new(
         store.clone(),
         explicit_enable,
     )));

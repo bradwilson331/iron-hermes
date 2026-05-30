@@ -11,7 +11,7 @@ Hermes Kanban is a durable task board, shared across all your Hermes profiles, t
 
 ## Two surfaces: the model talks through tools, you talk through the CLI
 
-> **v1 NOTE:** Shipped in Phase 36.3.7.6 — IronHermes now ships all 9 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`, `kanban_heartbeat`, `kanban_link`, `kanban_unblock`. The full LLM-tool surface matches the CLI surface.
+> **v1 NOTE:** Shipped in Phase 36.3.7.7 — IronHermes now ships all 10 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`, `kanban_heartbeat`, `kanban_link`, `kanban_unblock`, `kanban_swarm`. The full LLM-tool surface matches the CLI surface.
 
 The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
@@ -206,6 +206,7 @@ Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker
 | `kanban_create` | (Orchestrators) fan out into child tasks with an assignee, optional parents, skills, etc. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. Rejects cycles (descendant-walk via `WITH RECURSIVE` CTE) and cross-tenant links. | `parent_id`, `child_id` | Shipped in Phase 36.3.7.6. |
 | `kanban_unblock` | (Orchestrators) move a blocked task back to ready. Fails closed if the task is not currently in `blocked` status (prevents accidentally reviving `done`/`running` tasks via the LLM-tool surface). | `task_id` (defaults to `$HERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.6. |
+| `kanban_swarm` | (Orchestrators) create N parallel worker cards + optional verifier + optional synthesizer + blackboard root, in one atomic transaction. Implements the multi-agent patterns documented at §740 (P1 fan-out, fan-out+verify, full 4-tier §664 example, P3 quorum). | `goal`, `workers` | Shipped in Phase 36.3.7.7. |
 
 A typical worker turn looks like:
 
@@ -661,7 +662,7 @@ All three are gated by the same dashboard plugin auth as the rest of the kanban 
 
 ### Kanban Swarm topology helper
 
-> **v1 NOTE:** `kanban swarm` is deferred to Phase 36.3.7.7 (re-homed 2026-05-30 from the defunct Phase 36.3.7.6 assignment, which shipped the 3 remaining LLM tools — `kanban_heartbeat`, `kanban_link`, `kanban_unblock` — completing the 9-tool surface instead). The command does not exist in v1.
+> **v1 NOTE:** Shipped in Phase 36.3.7.7.
 
 `hermes kanban swarm` creates a durable Kanban Swarm v1 graph in one shot: a completed root/blackboard card, N parallel worker cards, a verifier card gated on all workers, and a synthesizer card gated on the verifier. Shared swarm context (the "blackboard") is stored as structured JSON comments on the root card so any worker can read it.
 
