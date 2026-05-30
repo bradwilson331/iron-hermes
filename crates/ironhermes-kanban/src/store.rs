@@ -20,7 +20,10 @@ use crate::error::{KanbanError, Result};
 use crate::events::KanbanEventKind;
 use crate::paths::validate_dir_workspace;
 use crate::schema::{SCHEMA_SQL, SCHEMA_VERSION, run_migrations};
-use crate::types::{KanbanStatus, Subscription, Task, TaskComment, TaskRun};
+use crate::types::{
+    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task,
+    TaskComment, TaskRun,
+};
 
 // ---------------------------------------------------------------------------
 // Public option / filter types
@@ -522,6 +525,409 @@ impl KanbanStore {
 
         tx.commit()?;
         Ok(())
+    }
+
+    /// Materialize a multi-card swarm graph atomically (Phase 36.3.7.7 D-topology-shapes,
+    /// D-atomic-transaction, D-no-create-task-reuse, D-idempotency-suffix-scheme).
+    ///
+    /// Sibling of [`create_task`](Self::create_task) — never re-enters it; INSERT
+    /// statements are inlined directly inside the transaction handle so the
+    /// outer `BEGIN IMMEDIATE` boundary stays clean (an outer tx that called
+    /// `create_task` would deadlock or break atomicity since `create_task`
+    /// takes `&mut self` and runs its own autocommit per statement).
+    ///
+    /// Graph shape (per D-topology-shapes — 4 supported topologies):
+    /// 1. Fan-out only:           `root → [w_1..w_N]`           (verifier=None, synth=None)
+    /// 2. Fan-out + verifier:     `root → [w_1..w_N] → verifier` (verifier=Some, synth=None)
+    /// 3. Full 4-tier:            `root → [w_1..w_N] → verifier → synthesizer`
+    /// 4. P3 quorum:              `root → [w_1..w_N] → synthesizer` (no verifier)
+    ///
+    /// Row writes inside one `BEGIN IMMEDIATE`:
+    /// - 1 root card (`status='done'`, `ended_at=now`, `assignee=spec.created_by`)
+    ///   + Created event row.
+    /// - N worker cards (`status='todo'`, `ended_at=NULL`) + N Created event rows
+    ///   + N task_links rows `(root → w_i)`.
+    /// - 0..1 verifier card (`status='todo'`) + 0..1 Created event row
+    ///   + N task_links rows `(w_i → verifier)` when present.
+    /// - 0..1 synthesizer card (`status='todo'`) + 0..1 Created event row
+    ///   + 1 task_links row `(verifier → synth)` when verifier present
+    ///     OR N task_links rows `(w_i → synth)` when no verifier.
+    /// - 0..1 `task_comments` row on root (`author='swarm'`) when blackboard provided.
+    ///
+    /// On any insert error: explicit transaction drop triggers automatic rollback
+    /// (`?` propagation). Receiver test
+    /// `swarm_invalid_assignee_rolls_back_whole_graph` locks this guarantee.
+    ///
+    /// Per-card idempotency key suffixes (D-idempotency-suffix-scheme): when
+    /// `spec.idempotency_key = Some("k")`, root gets `k:root`, worker i gets
+    /// `k:worker:{i}` (0-indexed), verifier gets `k:verifier`, synthesizer gets
+    /// `k:synthesizer`. Re-invocation with the same key short-circuits via
+    /// [`find_by_idempotency_key`](Self::find_by_idempotency_key) on `k:root` —
+    /// the whole graph is then reconstructed by walking `task_links` from root.
+    ///
+    /// Cycle detection: plain `INSERT OR IGNORE INTO task_links` is sufficient
+    /// because all swarm node IDs are freshly minted within this transaction
+    /// (no pre-existing edges can connect to them).
+    pub fn create_swarm(&mut self, spec: SwarmGraphSpec) -> Result<SwarmGraphIds> {
+        use rusqlite::TransactionBehavior;
+
+        // ---------------- Pre-flight validation (before opening tx) -------------
+
+        if spec.workers.is_empty() {
+            return Err(KanbanError::Other(anyhow::anyhow!("empty workers")));
+        }
+
+        let root_assignee = spec
+            .created_by
+            .clone()
+            .ok_or_else(|| KanbanError::Other(anyhow::anyhow!("created_by required")))?;
+
+        // Validate every assignee (root, each worker, optional verifier, optional
+        // synthesizer) BEFORE opening the tx — matches `create_task:210-211`.
+        ironhermes_core::profile::validate_profile_name(&root_assignee)
+            .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+        for w in &spec.workers {
+            ironhermes_core::profile::validate_profile_name(&w.assignee)
+                .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+        }
+        if let Some(ref v) = spec.verifier {
+            ironhermes_core::profile::validate_profile_name(v)
+                .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+        }
+        if let Some(ref s) = spec.synthesizer {
+            ironhermes_core::profile::validate_profile_name(s)
+                .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+        }
+
+        // Workspace validation (D-31 / Pitfall 6).
+        if let Some(ref ws) = spec.workspace {
+            validate_dir_workspace(ws)?;
+        }
+
+        let now = Self::now();
+        let n = spec.workers.len();
+
+        let key_root = spec.idempotency_key.as_ref().map(|k| format!("{k}:root"));
+        let key_verifier = spec
+            .idempotency_key
+            .as_ref()
+            .map(|k| format!("{k}:verifier"));
+        let key_synth = spec
+            .idempotency_key
+            .as_ref()
+            .map(|k| format!("{k}:synthesizer"));
+
+        // ---------------- Idempotency replay (before opening tx) ----------------
+        //
+        // If the root already exists under `k:root`, the whole graph already
+        // exists (atomic-transaction guarantee — fully-present-or-fully-absent).
+        // Walk `task_links` from root to gather worker IDs in their original
+        // insertion order, then look up verifier/synthesizer keys explicitly.
+        if let Some(ref kr) = key_root {
+            if let Some(existing_root) = self.find_by_idempotency_key(kr)? {
+                let root_id = existing_root.id.clone();
+
+                // Worker IDs in insertion order — order by `created_at` to match
+                // the linear loop order at first-write time.
+                let worker_ids: Vec<String> = {
+                    let mut stmt = self.conn.prepare(
+                        "SELECT child_id FROM task_links \
+                         WHERE parent_id = ?1 \
+                         ORDER BY created_at ASC, child_id ASC",
+                    )?;
+                    let rows = stmt.query_map(params![&root_id], |r| r.get::<_, String>(0))?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                };
+
+                let verifier_id = match key_verifier.as_deref() {
+                    Some(k) => self.find_by_idempotency_key(k)?.map(|t| t.id),
+                    None => None,
+                };
+                let synthesizer_id = match key_synth.as_deref() {
+                    Some(k) => self.find_by_idempotency_key(k)?.map(|t| t.id),
+                    None => None,
+                };
+
+                // The blackboard event id is NOT recoverable from replay (it is
+                // a `task_comments` rowid emitted only at first creation). Return
+                // `None` — callers re-using `idempotency_key` are expected to
+                // ignore this field on replay.
+                return Ok(SwarmGraphIds {
+                    root_id,
+                    worker_ids,
+                    verifier_id,
+                    synthesizer_id,
+                    blackboard_event_id: None,
+                });
+            }
+        }
+
+        // ---------------- Open transaction --------------------------------------
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let skills_json: Option<String> = spec
+            .skills
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()?;
+
+        // ---------------- Root card (status='done', ended_at=now) ---------------
+
+        let root_id = Self::new_id("t");
+        let root_status = KanbanStatus::Done.as_str();
+
+        // Root has the extra `ended_at` column (Pitfall 1 — `create_task` omits it,
+        // we add it as ?16 here so root's done-state has a valid end-time).
+        tx.execute(
+            "INSERT INTO tasks \
+             (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+              idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
+              scheduled_at, created_by, created_at, ended_at) \
+             VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                root_id,
+                spec.goal,
+                spec.body,
+                root_assignee,
+                root_status,
+                spec.priority.unwrap_or(0),
+                spec.tenant,
+                spec.workspace,
+                skills_json,
+                key_root,
+                spec.max_retries,
+                spec.max_runtime_seconds,
+                Option::<f64>::None, // scheduled_at
+                spec.created_by,
+                now,
+                now, // ended_at — root ships pre-done (D-root-ended-at)
+            ],
+        )?;
+        let root_payload = serde_json::json!({
+            "assignee": root_assignee,
+            "status": root_status,
+            "parents": Vec::<String>::new(),
+            "tenant": spec.tenant,
+        });
+        Self::append_event_internal(
+            &tx,
+            &root_id,
+            None,
+            KanbanEventKind::Created,
+            Some(&root_payload),
+            now,
+        )?;
+
+        // ---------------- Worker cards (status='todo', parents=[root]) ----------
+
+        let worker_status = KanbanStatus::Todo.as_str();
+        let mut worker_ids: Vec<String> = Vec::with_capacity(n);
+        let worker_specs: &Vec<KanbanWorkerSpec> = &spec.workers;
+
+        for (i, w) in worker_specs.iter().enumerate() {
+            let wid = Self::new_id("t");
+            let title = w
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("{} — worker {} of {}", spec.goal, i + 1, n));
+            let body = w.body.clone().or_else(|| spec.body.clone());
+            let key_worker = spec
+                .idempotency_key
+                .as_ref()
+                .map(|k| format!("{k}:worker:{i}"));
+
+            tx.execute(
+                "INSERT INTO tasks \
+                 (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                  idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
+                  scheduled_at, created_by, created_at) \
+                 VALUES \
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    wid,
+                    title,
+                    body,
+                    w.assignee,
+                    worker_status,
+                    spec.priority.unwrap_or(0),
+                    spec.tenant,
+                    spec.workspace,
+                    skills_json,
+                    key_worker,
+                    spec.max_retries,
+                    spec.max_runtime_seconds,
+                    Option::<f64>::None, // scheduled_at
+                    spec.created_by,
+                    now,
+                ],
+            )?;
+            let payload = serde_json::json!({
+                "assignee": w.assignee,
+                "status": worker_status,
+                "parents": vec![root_id.clone()],
+                "tenant": spec.tenant,
+            });
+            Self::append_event_internal(
+                &tx,
+                &wid,
+                None,
+                KanbanEventKind::Created,
+                Some(&payload),
+                now,
+            )?;
+            // Plain INSERT OR IGNORE — cycles impossible for freshly-minted IDs.
+            tx.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+                 VALUES (?1, ?2, ?3)",
+                params![&root_id, &wid, now],
+            )?;
+            worker_ids.push(wid);
+        }
+
+        // ---------------- Verifier card (optional) ------------------------------
+
+        let verifier_id: Option<String> = if let Some(ref v_assignee) = spec.verifier {
+            let vid = Self::new_id("t");
+            tx.execute(
+                "INSERT INTO tasks \
+                 (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                  idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
+                  scheduled_at, created_by, created_at) \
+                 VALUES \
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    vid,
+                    format!("{} — verifier", spec.goal),
+                    spec.body,
+                    v_assignee,
+                    worker_status,
+                    spec.priority.unwrap_or(0),
+                    spec.tenant,
+                    spec.workspace,
+                    skills_json,
+                    key_verifier,
+                    spec.max_retries,
+                    spec.max_runtime_seconds,
+                    Option::<f64>::None,
+                    spec.created_by,
+                    now,
+                ],
+            )?;
+            let payload = serde_json::json!({
+                "assignee": v_assignee,
+                "status": worker_status,
+                "parents": worker_ids.clone(),
+                "tenant": spec.tenant,
+            });
+            Self::append_event_internal(
+                &tx,
+                &vid,
+                None,
+                KanbanEventKind::Created,
+                Some(&payload),
+                now,
+            )?;
+            for wid in &worker_ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+                     VALUES (?1, ?2, ?3)",
+                    params![wid, &vid, now],
+                )?;
+            }
+            Some(vid)
+        } else {
+            None
+        };
+
+        // ---------------- Synthesizer card (optional) ---------------------------
+
+        let synthesizer_id: Option<String> = if let Some(ref s_assignee) = spec.synthesizer {
+            let sid = Self::new_id("t");
+            let synth_parents: Vec<String> = match &verifier_id {
+                Some(vid) => vec![vid.clone()],
+                None => worker_ids.clone(),
+            };
+            tx.execute(
+                "INSERT INTO tasks \
+                 (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                  idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
+                  scheduled_at, created_by, created_at) \
+                 VALUES \
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    sid,
+                    format!("{} — synthesizer", spec.goal),
+                    spec.body,
+                    s_assignee,
+                    worker_status,
+                    spec.priority.unwrap_or(0),
+                    spec.tenant,
+                    spec.workspace,
+                    skills_json,
+                    key_synth,
+                    spec.max_retries,
+                    spec.max_runtime_seconds,
+                    Option::<f64>::None,
+                    spec.created_by,
+                    now,
+                ],
+            )?;
+            let payload = serde_json::json!({
+                "assignee": s_assignee,
+                "status": worker_status,
+                "parents": synth_parents.clone(),
+                "tenant": spec.tenant,
+            });
+            Self::append_event_internal(
+                &tx,
+                &sid,
+                None,
+                KanbanEventKind::Created,
+                Some(&payload),
+                now,
+            )?;
+            for pid in &synth_parents {
+                tx.execute(
+                    "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+                     VALUES (?1, ?2, ?3)",
+                    params![pid, &sid, now],
+                )?;
+            }
+            Some(sid)
+        } else {
+            None
+        };
+
+        // ---------------- Blackboard task_comments row (optional) ---------------
+
+        let blackboard_event_id: Option<i64> = if let Some(ref bb) = spec.blackboard {
+            // "swarm" is a literal author sentinel — `task_comments.author` is a
+            // free-text column with no validation (verified in RESEARCH §A1).
+            let comment_id = Self::new_id("c");
+            let bb_str = serde_json::to_string(bb)?;
+            tx.execute(
+                "INSERT INTO task_comments (id, task_id, author, body, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![comment_id, &root_id, "swarm", bb_str, now],
+            )?;
+            Some(tx.last_insert_rowid())
+        } else {
+            None
+        };
+
+        tx.commit()?;
+
+        Ok(SwarmGraphIds {
+            root_id,
+            worker_ids,
+            verifier_id,
+            synthesizer_id,
+            blackboard_event_id,
+        })
     }
 
     /// Append an event row for a task and return the new event id.
