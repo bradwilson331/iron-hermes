@@ -634,12 +634,16 @@ Plans:
 
 **Goal:** Implement the `@mention` delegation parser referenced at `docs/kanban/reference.md` §741 ("P6 @mention: inline routing from prose, e.g. `@reviewer look at this`"). A worker or orchestrator can include `@<assignee>` mentions inside task bodies / comments and the dispatcher (or a dedicated handler) extracts them, creates child tasks routed to the named assignee, and threads them into the task graph. Requires: a parser for `@<word>` patterns inside Markdown bodies (with fence-escape rules — don't parse inside code blocks); an assignee resolver (map `@reviewer` to an actual assignee string); a child-task creation path that mirrors `kanban_create` but with auto-derived parent_id; and CLI/LLM hooks. Was originally reserved at "Phase 36.3.7.7" in reference.md §741; that number is now Kanban swarm helper, so this work moves down one slot. Stretches the LLM-tool surface or the dispatcher-side handler (planner decides).
 
-**Requirements**: TBD (run /gsd-plan-phase 36.3.7.8 to break down — planner should decide whether @mention parsing lives in the dispatcher tick OR in a new LLM tool surface OR both; whether the parser is a pure function with unit tests or a streaming Markdown walker; how the assignee resolver maps `@<word>` to known assignees including a fallback for unknown handles; cycle detection — what if a child @mentions back to the parent?)
-**Depends on:** Phase 36.3.7.6 (CLOSED — tool registration pattern stable) AND Phase 36.3.7.7 (TBD — overlap with swarm batch-create if @mention also creates multiple tasks; planner should sequence accordingly)
-**Plans:** TBD
+**Requirements**: REQ-36.3.7.8-01..16 (see .planning/REQUIREMENTS.md §Phase 36.3.7.8). Decisions D-01..D-04 finalized 2026-05-30: D-01 LLM tool + CLI verb only (no dispatcher-tick scan); D-02 pure regex + fence-state machine (no pulldown-cmark/comrak); D-03 three-stage resolver (lowercase → validate_profile_name → existence gate) with three fallback policies (skip/pending/error); D-04 two-layer cycle defense (self-mention quick reject + ancestor-chain walk capped at MAX_MENTION_CHAIN_DEPTH=4).
+**Depends on:** Phase 36.3.7.6 (CLOSED — tool registration pattern stable). No hard dep on Phase 36.3.7.7 — only soft coordination on docs/kanban/reference.md §14 tool-count narrative.
+**Plans:** 0/5 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.8 to break down)
+- [ ] 36.3.7.8-01-PLAN.md — mention module: parser + resolver pure functions (Wave 1)
+- [ ] 36.3.7.8-02-PLAN.md — store sibling primitive: create_mention_children + ancestor-walk cycle check + idempotency replay (Wave 1, parallel with 01)
+- [ ] 36.3.7.8-03-PLAN.md — KanbanMentionTool (11th LLM tool) + register_kanban_tools wiring (Wave 2, depends on 01+02)
+- [ ] 36.3.7.8-04-PLAN.md — CLI verb `hermes kanban mention` + DEFERRED_KANBAN_SUBVERBS entry + ≥4 clap parity tests (Wave 2, depends on 01+02)
+- [ ] 36.3.7.8-05-PLAN.md — ≥15 receiver tests in tools_smoke.rs + docs/kanban/reference.md §14/§200/§741 reconciliation + REQUIREMENTS.md anchor section (Wave 3, depends on 01+02+03)
 
 ### Phase 36.3.7.9: Multi-board CLI — `boards list/create/switch/show/rename/rm` + `--board <slug>` flag (INSERTED 2026-05-30)
 
