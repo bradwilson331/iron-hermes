@@ -12,5 +12,8 @@
   "research_depth": "full",
   "roadmap_strategy": "risk",
   "brownfield": true,
-  "codebase_mapped": true
+  "codebase_mapped": true,
+  "graphify": {
+    "enabled": true
+  }
 }

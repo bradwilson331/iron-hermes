@@ -4,6 +4,37 @@ Cross-phase patterns, meta-rules, and decisions worth keeping. Each entry cites 
 
 ---
 
+## 2026-05-30 — Bilateral-tracing-by-construction validated at scale
+
+**Source:** Phase 36.3.7.5 (gateway notifier — auto-subscribe + polling loop + 3 notify-* CLI verbs)
+
+**Pattern observed:** First at-scale application of the 2026-05-29 bilateral-tracing rule. Phase 36.3.7.5 was structured "by construction" — every BUG row in the phase plan paired a producer site with a named consumer test, and plan execution shipped both ends in the same commit set. 4 plans, 22 commits, 25 new tests, **zero receiver-end bugs surfaced by gsd-verifier or any of the 13 phase-level gates**. Compare to Phases 36.3.7 + 36.3.7.0 where producer-only verification left 5 live UAT bugs.
+
+**What the planner did differently:**
+- Frontmatter `must_haves.key_links` listed every producer→consumer linkage with a grep-able `pattern` field.
+- The phase PLAN.md "Gate 9: Bilateral-tracing self-audit" table enumerated all 7 BUGs with both endpoints named *before* execution started, so each plan's SUMMARY just had to fill in evidence rows.
+- The verifier prompt used the literal Gate 9 table as a template — no room for "I checked the producer" pass-throughs.
+
+**Reusable structural patterns surfaced (worth lifting to future phases):**
+
+1. **Store-arc lift refactor** (Plan 03): when two spawn blocks need the same `Arc<TokioMutex<KanbanStore>>`, hoist `KanbanStore::open_default()` ABOVE both gating checks rather than duplicating the open. The dispatcher branch and the notifier branch share the same Arc via `.clone()`. Semantics-preserving (cargo test -p ironhermes-kanban delta = 0); structural lift only. Lift+share pattern applies whenever a runner gains a second consumer of a shared resource.
+
+2. **Pure-function gate extracted to its own module** (Plan 03): `notifier_gating.rs` contains only `pub fn compute_notifier_gate(notification_sources, enabled_platforms) -> NotifierGate`. Pure, testable, reachable from integration tests without `#[cfg(test)]` re-exports. The "Option 1" pattern in the Plan 03 task description — extract any pure decision function with a small enum return type into a sibling module, then `use` it from the runner. Beats both `pub(crate)` (untestable from integration crate) and `pub` at lib.rs root (untyped surface area).
+
+3. **Trait-object closure as cross-crate boundary** (Plan 02 + Plan 03): `SendFn = Arc<dyn Fn(&str, &str, Option<&str>, &str) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>`. The kanban crate publishes the alias; the gateway crate constructs the closure at spawn time, capturing its `Arc<dyn PlatformAdapter>` set. **Zero compile-time dep on the gateway crate from kanban** (`grep -E '^ironhermes-gateway\s*=' crates/ironhermes-kanban/Cargo.toml` == 0). Same shape mirrors the dispatcher's existing `spawn_fn` injection — when adding a new spawn-time injection point, look for the nearest existing one and copy its shape.
+
+4. **NEW write trait sibling to existing read trait** (Plan 04): `KanbanStoreReader` already existed as a read-only abstraction. Plan 04 introduced `KanbanStoreWriter` as its sibling — additive, forward-compatible for future `/kanban comment`, `/kanban complete` arms without touching the reader. When extending command surface, sibling-trait extension beats expanding the existing trait (no churn for unaffected callers).
+
+5. **Conditional-gate task** (Plan 01 was the model, Plan 02 reused): a "Task N" in a plan can be a read-only verification step whose outcome turns "Task N+1" into a no-op if pre-existing code already satisfies the contract. Phase 36.3.7.4 used this to skip its producer fix; Phase 36.3.7.5 used variants for several "extend existing" tasks. Pattern: read-first, fix-only-if-needed, document either way.
+
+**Forward note flagged during Plan 03 verification:** `build_notifier_send_fn` only retains the Telegram `Arc<dyn PlatformAdapter>` at runner scope — Discord and Slack adapters live inside their own spawned tasks (Discord wraps a Serenity Context post-handshake; Slack constructs inside its socket-mode runner). Subscriptions naming `discord` or `slack` fall through to the closure's `"platform X not enabled in gateway"` branch, which matches the locked `D-log-and-drop-on-fail` policy. This is a **documented forward-compat gap**, NOT a verification failure. Future phase can hoist adapter constructions out of their tasks OR add a delivery-dispatch indirection — both forward-compatible refactors. Capture this as the kickoff context for whichever phase first needs cross-platform notifier delivery.
+
+**Counter-pattern to avoid (from this phase's anomaly log):** when crafting verifier prompts, do NOT hardcode counter deltas (`total_plans 78→82`) — let the verifier compute live deltas from STATE.md frontmatter. Pre-computed deltas in the prompt drift relative to ground truth (verifier had to override mine; the real delta was phases-only `17→18` because plans were already individually closed). Rule: prompts encode policy + structure, not numbers.
+
+**Operational takeaway:** when a phase is structured for bilateral-tracing-by-construction (every BUG paired with a named consumer test before plan execution starts), the verification phase is fast and gates rarely surprise. The expensive work is at PLAN time, not VERIFY time. Future phases that touch wire-ups (gateway/notifier/dispatcher/handler/CLI surface) SHOULD adopt this structure.
+
+---
+
 ## 2026-05-29 — Bilateral-tracing rule for wire-up verification
 
 **Source:** Phase 36.3.7 + Phase 36.3.7.0
