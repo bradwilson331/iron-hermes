@@ -23,6 +23,7 @@ pub mod heartbeat;
 pub mod link;
 pub mod list;
 pub mod show;
+pub mod unblock;
 
 pub use block::KanbanBlockTool;
 pub use comment::KanbanCommentTool;
@@ -32,6 +33,7 @@ pub use heartbeat::KanbanHeartbeatTool;
 pub use link::KanbanLinkTool;
 pub use list::KanbanListTool;
 pub use show::KanbanShowTool;
+pub use unblock::KanbanUnblockTool;
 
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
@@ -70,6 +72,11 @@ pub fn register_kanban_tools(
     )));
     // Phase 36.3.7.6 BUG-36.3.7.6-02 — kanban_link (D-link-cycle-detection: WITH RECURSIVE).
     registry.register(Box::new(KanbanLinkTool::new(
+        store.clone(),
+        explicit_enable,
+    )));
+    // Phase 36.3.7.6 BUG-36.3.7.6-03 — kanban_unblock (D-unblock-status-precondition: handler-side gate).
+    registry.register(Box::new(KanbanUnblockTool::new(
         store.clone(),
         explicit_enable,
     )));

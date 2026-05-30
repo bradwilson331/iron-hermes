@@ -13,7 +13,7 @@ use std::sync::Arc;
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::tools::{
     KanbanBlockTool, KanbanCommentTool, KanbanCompleteTool, KanbanCreateTool, KanbanHeartbeatTool,
-    KanbanLinkTool, KanbanListTool, KanbanShowTool,
+    KanbanLinkTool, KanbanListTool, KanbanShowTool, KanbanUnblockTool,
 };
 use ironhermes_tools::Tool;
 use rusqlite::params;
@@ -743,4 +743,128 @@ async fn kanban_link_phantom_id_rejected() {
         )
         .unwrap();
     assert_eq!(count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// kanban_unblock tests (Phase 36.3.7.6 BUG-36.3.7.6-03 + BUG-36.3.7.6-04)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn kanban_unblock_happy_path_from_blocked() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let task_id = {
+        let mut s = store.lock().await;
+        let id = seed_plain_task(&mut s, "Blockable");
+        // Drop to a known blocked state via direct UPDATE — simpler than
+        // running through block_task (which requires a synthetic run).
+        s.conn
+            .execute(
+                "UPDATE tasks SET status = 'blocked' WHERE id = ?1",
+                params![&id],
+            )
+            .unwrap();
+        id
+    };
+
+    let tool = KanbanUnblockTool::new(store.clone(), true);
+    let result = tool
+        .execute(json!({"task_id": &task_id}))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(
+        v["status"].as_str().unwrap(),
+        "ok",
+        "BUG-36.3.7.6-03: unblock happy path"
+    );
+    assert_eq!(v["task_id"].as_str().unwrap(), task_id);
+
+    // Status now ready; one `unblocked` event row.
+    let s = store.lock().await;
+    let status: String = s
+        .conn
+        .query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            params![&task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "ready");
+
+    let unblocked_count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_events WHERE task_id = ?1 AND kind = 'unblocked'",
+            params![&task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unblocked_count, 1,
+        "BUG-36.3.7.6-03: one unblocked event appended"
+    );
+}
+
+#[tokio::test]
+async fn kanban_unblock_rejects_wrong_status() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let task_id = {
+        let mut s = store.lock().await;
+        let id = seed_plain_task(&mut s, "Done");
+        s.conn
+            .execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?1",
+                params![&id],
+            )
+            .unwrap();
+        id
+    };
+
+    let tool = KanbanUnblockTool::new(store.clone(), true);
+    let result = tool
+        .execute(json!({"task_id": &task_id}))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(
+        v["status"].as_str().unwrap(),
+        "rejected",
+        "BUG-36.3.7.6-03: wrong status rejected"
+    );
+    assert_eq!(v["reason"].as_str().unwrap(), "invalid_status");
+    assert_eq!(v["task_id"].as_str().unwrap(), task_id);
+    assert_eq!(v["current"].as_str().unwrap(), "done");
+    assert_eq!(v["expected"].as_str().unwrap(), "blocked");
+
+    // Side effects: status unchanged; NO `unblocked` event row.
+    let s = store.lock().await;
+    let status: String = s
+        .conn
+        .query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            params![&task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "done",
+        "BUG-36.3.7.6-03: status not silently moved"
+    );
+
+    let unblocked_count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_events WHERE task_id = ?1 AND kind = 'unblocked'",
+            params![&task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unblocked_count, 0,
+        "BUG-36.3.7.6-03: no unblocked event appended"
+    );
 }
