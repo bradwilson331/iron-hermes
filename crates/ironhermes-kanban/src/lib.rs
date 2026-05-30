@@ -32,6 +32,11 @@ pub mod pid;
 pub mod schema;
 pub mod skills_bundle;
 pub mod store;
+// Phase 36.3.7.5 BUG-36.3.7.5-06: production KanbanStoreWriter trait impl,
+// consumed by the gateway's handle_slash_command attach site (handler.rs:430).
+// Lives in ironhermes-kanban (not ironhermes-cli) because ironhermes-cli
+// depends on ironhermes-gateway — reverse dep would be circular.
+pub mod store_writer_impl;
 pub mod tools;
 pub mod types;
 pub mod worker_spawn;
@@ -61,6 +66,8 @@ pub use skills_bundle::{
     sync_bundled_kanban_skills,
 };
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
+// Phase 36.3.7.5 BUG-36.3.7.5-06.
+pub use store_writer_impl::KanbanStoreWriterImpl;
 pub use types::{KanbanStatus, Subscription, Task, TaskComment, TaskLink, TaskRun};
 pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker};
 pub use tools::register_kanban_tools;

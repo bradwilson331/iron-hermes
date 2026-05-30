@@ -492,6 +492,24 @@ impl GatewayMessageHandler {
         // record trajectory entries; if Phase 25.4 needs that, it can pull
         // the per-session handle out of `SessionStore` here.
 
+        // Phase 36.3.7.5 BUG-36.3.7.5-06: attach chat-origin so /kanban create's
+        // auto-subscribe hook can write the originating chat to kanban_subscriptions.
+        // thread_id is platform-dependent: Telegram super-group topics carry it;
+        // other platforms pass None.
+        let ctx = ctx.with_chat_origin(event.chat_id.clone(), event.thread_id.clone());
+
+        // Phase 36.3.7.5 BUG-36.3.7.5-06: attach the KanbanStoreWriter so the
+        // /kanban create slash arm can actually create tasks + write
+        // subscriptions. KanbanStoreWriterImpl lives in ironhermes-kanban
+        // (not ironhermes-cli — the latter depends on ironhermes-gateway, so
+        // a gateway -> cli dep would be circular).
+        let ctx = {
+            use ironhermes_core::commands::context::KanbanStoreWriter;
+            let writer: std::sync::Arc<dyn KanbanStoreWriter> =
+                std::sync::Arc::new(ironhermes_kanban::KanbanStoreWriterImpl::new());
+            ctx.with_kanban_store_writer(writer)
+        };
+
         let parts: Vec<&str> = command_input.split_whitespace().collect();
         let args: Vec<&str> = if parts.len() > 1 {
             parts[1..].to_vec()

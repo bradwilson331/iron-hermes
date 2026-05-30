@@ -9,10 +9,12 @@
 pub mod commands;
 pub mod format;
 pub mod store_reader_impl;
-pub mod store_writer_impl;
 
 pub use store_reader_impl::KanbanStoreReaderImpl;
-pub use store_writer_impl::KanbanStoreWriterImpl;
+// Phase 36.3.7.5 BUG-36.3.7.5-06: KanbanStoreWriterImpl is published from
+// ironhermes-kanban (gateway needs it; gateway has no dep on ironhermes-cli;
+// reverse dep is circular). Re-export here for ergonomic discoverability.
+pub use ironhermes_kanban::KanbanStoreWriterImpl;
 
 use anyhow::Result;
 use clap::Subcommand;

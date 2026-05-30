@@ -1,13 +1,17 @@
 //! Phase 36.3.7.5 BUG-36.3.7.5-06: production KanbanStoreWriter impl.
 //!
+//! Lives in ironhermes-kanban (NOT ironhermes-cli) because the gateway needs
+//! to construct it at CommandContext build-time and ironhermes-cli already
+//! depends on ironhermes-gateway (the reverse direction would be circular).
+//!
 //! Each method opens a fresh `KanbanStore::open_default()` and discards it
 //! after the call. Stateless; safe to clone the trait-object Arc into multiple
 //! contexts; no shared mutable state at the impl layer.
-//!
-//! Sibling of `store_reader_impl.rs` — same crate, same pattern.
 
 use ironhermes_core::commands::context::{KanbanStoreWriter, SubscriptionView};
-use ironhermes_kanban::{CreateTaskOptions, KanbanStore, Subscription};
+
+use crate::store::{CreateTaskOptions, KanbanStore};
+use crate::types::Subscription;
 
 /// Production impl that opens the default kanban DB per call.
 /// Phase 36.3.7.5 BUG-36.3.7.5-06.
@@ -49,9 +53,6 @@ impl KanbanStoreWriter for KanbanStoreWriterImpl {
         _json: bool,
     ) -> Result<String, String> {
         let mut store = open_store()?;
-        // CreateTaskOptions derives Default; v1 keeps it minimal (no body, no
-        // tenant, no workspace, no skills, ready status). The 3 notify-* CLI
-        // verbs do NOT invoke this — only the gateway slash arm does.
         let opts = CreateTaskOptions::default();
         store
             .create_task(title, assignee, opts)
