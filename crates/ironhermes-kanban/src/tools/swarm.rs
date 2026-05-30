@@ -336,7 +336,22 @@ impl Tool for KanbanSwarmTool {
                 };
                 return Ok(reject(reason, &msg));
             }
-            Err(e) => return Ok(reject("store_error", &format!("{e}"))),
+            // WR-04 (Phase 36.3.7.7 code review): map the typed KanbanError
+            // variants create_swarm can return to specific rejection-reason
+            // codes so orchestrators can pattern-match on the envelope.
+            // Mirrors the discipline of sibling per-tool envelopes
+            // (KanbanLinkTool maps LinkCycle → "link_cycle", KanbanUnblockTool
+            // maps RelativeDirWorkspace → "invalid_workspace", etc.).
+            Err(e) => {
+                let reason = match &e {
+                    crate::error::KanbanError::RelativeDirWorkspace(_) => "invalid_workspace",
+                    crate::error::KanbanError::TenantMismatch { .. } => "tenant_mismatch",
+                    crate::error::KanbanError::LinkCycle { .. } => "link_cycle",
+                    crate::error::KanbanError::TaskNotFound(_) => "task_not_found",
+                    _ => "store_error",
+                };
+                return Ok(reject(reason, &format!("{e}")));
+            }
         };
 
         // 11. success envelope
