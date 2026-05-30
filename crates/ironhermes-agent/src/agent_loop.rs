@@ -68,6 +68,16 @@ pub(crate) fn is_delegation_failure_result(result: &str) -> bool {
         || result.starts_with("Error: ")
 }
 
+/// Return true when a `delegate_task` tool-result string indicates the child
+/// was cancelled — operator-initiated `/agents kill <id>` is the canonical
+/// trigger. This is treated as a hard user-stop signal: one occurrence is
+/// enough to bail the parent loop on the same turn, distinct from the
+/// two-strike threshold for max_iterations / timeout / error.
+pub(crate) fn is_delegation_kill_result(result: &str) -> bool {
+    result.contains("[subagent-failure: cancelled")
+        || result.contains("Cancelled by parent")
+}
+
 /// Result of an agent loop execution.
 #[derive(Debug)]
 pub struct AgentResult {
@@ -1353,8 +1363,15 @@ impl AgentLoop {
         // delegation; when it crosses `MAX_CONSECUTIVE_DELEGATION_FAILURES` we
         // break the loop with a final response to the user instead of letting
         // the parent model keep re-delegating until `max_iterations`.
+        //
+        // `delegation_kill_detected` short-circuits the counter: an explicit
+        // user kill (`/agents kill <id>`) is a hard stop signal — one
+        // occurrence stops the parent immediately on this turn rather than
+        // waiting for a second strike. Lets a single Telegram kill terminate
+        // the whole reasoning chain instead of just one worker.
         let mut consecutive_delegation_failures: usize = 0;
         let mut delegation_failure_stop = false;
+        let mut delegation_kill_detected = false;
         // Phase 25.1 GAP-7 follow-up: track messages appended by THIS run so the
         // gateway/REPL persistence path can include matching tool results without
         // a Role-based filter (which would drop Role::Tool and re-persist prior
@@ -1766,8 +1783,17 @@ impl AgentLoop {
                 // carries a subagent-failure marker bumps the counter; a
                 // successful delegation resets it. Non-`delegate_task` tool
                 // calls do not touch the counter.
+                //
+                // An explicit user kill ("Cancelled by parent" in the result)
+                // is a HARD stop — we set the counter to the threshold so the
+                // post-tool-loop check fires this turn, and flag the reason
+                // so the final response says "you killed the subagent" rather
+                // than "consecutive failures".
                 if tool_call.function.name == "delegate_task" {
-                    if is_delegation_failure_result(&result) {
+                    if is_delegation_kill_result(&result) {
+                        delegation_kill_detected = true;
+                        consecutive_delegation_failures = MAX_CONSECUTIVE_DELEGATION_FAILURES;
+                    } else if is_delegation_failure_result(&result) {
                         consecutive_delegation_failures =
                             consecutive_delegation_failures.saturating_add(1);
                     } else {
@@ -1787,14 +1813,21 @@ impl AgentLoop {
             if consecutive_delegation_failures >= MAX_CONSECUTIVE_DELEGATION_FAILURES {
                 warn!(
                     consecutive_failed_delegations = consecutive_delegation_failures,
-                    "stopping parent loop after consecutive delegation failures"
+                    kill_signaled = delegation_kill_detected,
+                    "stopping parent loop after delegation failures"
                 );
-                final_response = Some(format!(
-                    "Stopped after {} consecutive failed delegations. \
-                     The subagents kept maxing out, getting cancelled, or erroring. \
-                     Reply if you want me to try a different approach.",
-                    consecutive_delegation_failures
-                ));
+                final_response = Some(if delegation_kill_detected {
+                    "Stopped — you killed the subagent. Reply if you want me to \
+                     try a different approach."
+                        .to_string()
+                } else {
+                    format!(
+                        "Stopped after {} consecutive failed delegations. \
+                         The subagents kept maxing out, timing out, or erroring. \
+                         Reply if you want me to try a different approach.",
+                        consecutive_delegation_failures
+                    )
+                });
                 delegation_failure_stop = true;
                 break;
             }
@@ -3127,6 +3160,30 @@ mod delegation_failure_tests {
         // mid-string must still trip the guard.
         let batch = "Task 1: ok\nTask 2: [subagent-failure: max_iterations] partial\nTask 3: ok";
         assert!(is_delegation_failure_result(batch));
+    }
+
+    use super::is_delegation_kill_result;
+
+    #[test]
+    fn kill_detector_matches_cancelled_marker_and_legacy_string() {
+        assert!(is_delegation_kill_result(
+            "[subagent-failure: cancelled] Cancelled by parent"
+        ));
+        // Legacy raw string (before the marker rewrite) still recognised.
+        assert!(is_delegation_kill_result("Cancelled by parent"));
+    }
+
+    #[test]
+    fn kill_detector_ignores_other_failure_modes() {
+        assert!(!is_delegation_kill_result(
+            "[subagent-failure: max_iterations] partial"
+        ));
+        assert!(!is_delegation_kill_result(
+            "[subagent-failure: budget_exhausted] (no text response)"
+        ));
+        assert!(!is_delegation_kill_result("Subagent timed out after 300s"));
+        assert!(!is_delegation_kill_result("Error: run_child failed"));
+        assert!(!is_delegation_kill_result("Done — wrote summary"));
     }
 }
 
