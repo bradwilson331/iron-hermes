@@ -917,6 +917,59 @@ impl KanbanStore {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 36.3.7.5 BUG-36.3.7.5-03 — notifier helpers
+    // -----------------------------------------------------------------------
+    //
+    // Two read-only helpers consumed by the gateway notifier loop
+    // (`notifier::run_notifier_tick` + `notifier::init_watermark`). They are
+    // shaped to keep the notifier module FREE of raw rusqlite access — the
+    // store owns the connection; the notifier owns the polling logic.
+
+    /// Return all `task_events` rows whose `id > watermark` AND whose `kind`
+    /// is in the notifier's terminal set (`completed`, `blocked`, `gave_up`,
+    /// `crashed`, `timed_out`). Ordered by `id ASC` so the notifier's watermark
+    /// advance is monotonic. (Phase 36.3.7.5 BUG-36.3.7.5-03 — notifier helper)
+    pub fn list_terminal_events_after(
+        &self,
+        watermark: i64,
+    ) -> Result<Vec<crate::events::KanbanEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, run_id, kind, payload, created_at \
+             FROM task_events \
+             WHERE id > ?1 \
+               AND kind IN ('completed', 'blocked', 'gave_up', 'crashed', 'timed_out') \
+             ORDER BY id ASC",
+        )?;
+        let events = stmt
+            .query_map(params![watermark], |r| {
+                Ok(crate::events::KanbanEvent {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    run_id: r.get(2)?,
+                    kind: r.get(3)?,
+                    payload: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
+    /// Return `MAX(id) FROM task_events`, or `0` when the table is empty.
+    ///
+    /// Used by the notifier loop at startup to initialize its in-memory
+    /// watermark (locked CONTEXT decision: in-memory only; gateway-downtime
+    /// loss accepted for v1). (Phase 36.3.7.5 BUG-36.3.7.5-03 — notifier helper)
+    pub fn max_event_id(&self) -> Result<i64> {
+        let max: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM task_events", [], |r| {
+                r.get(0)
+            })?;
+        Ok(max)
+    }
+
     /// Return all events for a task ordered by id (insertion order).
     pub fn get_events(&self, task_id: &str) -> Result<Vec<crate::events::KanbanEvent>> {
         let mut stmt = self.conn.prepare(

@@ -26,6 +26,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod events;
 pub mod kanban_guidance;
+pub mod notifier;
 pub mod paths;
 pub mod pid;
 pub mod schema;
@@ -49,6 +50,9 @@ pub use paths::{
 pub use dispatcher::{
     DispatcherContext, StrandedReport, StrandedSeverity, diagnose_stranded, run_dispatch_loop,
     run_dispatch_tick,
+};
+pub use notifier::{
+    NotifierContext, NotifierTickReport, SendFn, run_notifier_loop, run_notifier_tick,
 };
 pub use pid::is_pid_alive;
 pub use skills_bundle::{
