@@ -380,6 +380,37 @@ pub async fn cmd_unblock(ids: Vec<String>, _json: bool) -> Result<i32> {
 }
 
 // ---------------------------------------------------------------------------
+// cmd_heartbeat (Phase 36.3.7.6 D-cli-heartbeat-parity)
+// ---------------------------------------------------------------------------
+
+/// Append a `heartbeat` event row for a task. Mirrors the kanban_heartbeat
+/// LLM tool's append-event path; the dispatcher's staleness reader at
+/// reference.md:869 is the single consumer of these rows.
+pub async fn cmd_heartbeat(id: String, note: Option<String>) -> Result<i32> {
+    use ironhermes_kanban::KanbanEventKind;
+
+    let mut store = open_store()?;
+    let run_id_env = std::env::var("HERMES_KANBAN_RUN_ID").ok();
+    let payload = note.as_ref().map(|n| serde_json::json!({ "note": n }));
+
+    match store.append_event(
+        &id,
+        run_id_env.as_deref(),
+        KanbanEventKind::Heartbeat,
+        payload.as_ref(),
+    ) {
+        Ok(event_id) => {
+            println!("heartbeat sent for {id} (event_id={event_id})");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cmd_archive
 // ---------------------------------------------------------------------------
 

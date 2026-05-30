@@ -210,6 +210,19 @@ pub enum KanbanCommands {
         json: bool,
     },
 
+    /// Signal worker liveness during long operations (Phase 36.3.7.6 D-cli-heartbeat-parity).
+    ///
+    /// Appends a `heartbeat` event row to `task_events`. Workers running > 1 hour
+    /// should call this at least hourly to avoid dispatcher staleness reclaim.
+    #[command(name = "heartbeat")]
+    Heartbeat {
+        /// Task id to heartbeat.
+        id: String,
+        /// Optional free-form progress note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+
     /// Archive one or more tasks
     #[command(name = "archive")]
     Archive {
@@ -478,6 +491,8 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             extra_ids,
         } => commands::cmd_block(id, reason, extra_ids).await,
         KanbanCommands::Unblock { ids, json } => commands::cmd_unblock(ids, json).await,
+        // Phase 36.3.7.6 D-cli-heartbeat-parity — closes reference.md:583 doc-vs-impl gap.
+        KanbanCommands::Heartbeat { id, note } => commands::cmd_heartbeat(id, note).await,
         KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json).await,
         KanbanCommands::Tail { id } => commands::cmd_tail(id).await,
         KanbanCommands::Watch {
