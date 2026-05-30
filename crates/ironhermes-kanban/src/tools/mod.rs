@@ -19,6 +19,7 @@ pub mod block;
 pub mod comment;
 pub mod complete;
 pub mod create;
+pub mod heartbeat;
 pub mod list;
 pub mod show;
 
@@ -26,6 +27,7 @@ pub use block::KanbanBlockTool;
 pub use comment::KanbanCommentTool;
 pub use complete::KanbanCompleteTool;
 pub use create::KanbanCreateTool;
+pub use heartbeat::KanbanHeartbeatTool;
 pub use list::KanbanListTool;
 pub use show::KanbanShowTool;
 
@@ -59,4 +61,9 @@ pub fn register_kanban_tools(
     )));
     registry.register(Box::new(KanbanBlockTool::new(store.clone(), explicit_enable)));
     registry.register(Box::new(KanbanCreateTool::new(store.clone(), explicit_enable)));
+    // Phase 36.3.7.6 BUG-36.3.7.6-01 — kanban_heartbeat (D-heartbeat-impl: event row).
+    registry.register(Box::new(KanbanHeartbeatTool::new(
+        store.clone(),
+        explicit_enable,
+    )));
 }

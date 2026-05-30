@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::tools::{
-    KanbanBlockTool, KanbanCommentTool, KanbanCompleteTool, KanbanCreateTool, KanbanListTool,
-    KanbanShowTool,
+    KanbanBlockTool, KanbanCommentTool, KanbanCompleteTool, KanbanCreateTool, KanbanHeartbeatTool,
+    KanbanListTool, KanbanShowTool,
 };
 use ironhermes_tools::Tool;
 use rusqlite::params;
@@ -543,4 +543,73 @@ async fn kanban_comment_adds_comment_to_task() {
         )
         .unwrap();
     assert_eq!(count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// kanban_heartbeat tests (Phase 36.3.7.6 BUG-36.3.7.6-01 + BUG-36.3.7.6-04)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn kanban_heartbeat_appends_event_row() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let task_id = {
+        let mut s = store.lock().await;
+        seed_running_task(&mut s, "Long Op", "alice", "r_hb", Some("alice"))
+    };
+
+    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
+    unsafe { std::env::set_var("HERMES_KANBAN_RUN_ID", "r_hb"); }
+
+    let tool = KanbanHeartbeatTool::new(store.clone(), false);
+    let result = tool.execute(json!({"note": "halfway"})).await.unwrap();
+
+    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID"); }
+
+    let v: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(
+        v["status"].as_str().unwrap(),
+        "ok",
+        "BUG-36.3.7.6-01: heartbeat happy path"
+    );
+    assert!(v["event_id"].as_i64().unwrap() > 0);
+    assert_eq!(v["task_id"].as_str().unwrap(), task_id);
+
+    // Assert exactly one heartbeat event row exists for this task.
+    let s = store.lock().await;
+    let count: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM task_events WHERE task_id = ?1 AND kind = 'heartbeat'",
+            params![&task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "BUG-36.3.7.6-01: exactly one heartbeat row appended"
+    );
+}
+
+#[tokio::test]
+async fn kanban_heartbeat_missing_task_id_errors_without_env() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+
+    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID"); }
+
+    // explicit_enable=true so is_available() is true even without the env var;
+    // we want the execute() path to be the one that rejects.
+    let tool = KanbanHeartbeatTool::new(store.clone(), true);
+    let result = tool.execute(json!({})).await.unwrap();
+    let v: Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(
+        v["status"].as_str().unwrap(),
+        "rejected",
+        "BUG-36.3.7.6-01: missing task id rejected"
+    );
+    assert_eq!(v["reason"].as_str().unwrap(), "missing_task_id");
 }
