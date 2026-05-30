@@ -619,6 +619,61 @@ Plans:
 
 **Phase verdict:** Phase 36.3.7.6 CLOSED PASS. 13/13 phase-level gates verified. All 5 BUGs (heartbeat / link / unblock / receiver tests / docs reconciliation) + D-cli-heartbeat-parity ship producer + consumer in the same commit set per LEARNINGS 2026-05-30 bilateral-tracing-by-construction. All 8 locked CONTEXT decisions materially observable at file:line. All scope-fences upheld (no gateway-side slash arms; DEFERRED_KANBAN_SUBVERBS untouched; no new KanbanEventKind variants; store.insert_link / store.unblock_task signatures byte-stable; KanbanStoreWriter trait NOT extended; no tasks.last_heartbeat_at column; no external crate deps). docs/kanban/reference.md Gate 11 = 0 hits + 4 "Shipped in Phase 36.3.7.6" annotations. Crate-isolation fence held. The 9-tool LLM surface in reference.md §200-208 is now fully shipped — the v1 narrative that "IronHermes ships 6 of 9 LLM tools" is now closed; all 9 are live.
 
+### Phase 36.3.7.7: Kanban swarm helper — multi-task fan-out for orchestrators (INSERTED 2026-05-30)
+
+**Goal:** Ship `kanban swarm` as both a CLI verb (`hermes kanban swarm`) and an LLM tool (`kanban_swarm`) — a multi-task fan-out helper for orchestrators that creates N child tasks from a single dispatch with shared metadata (assignee defaulting per task, shared parent, shared skills set, shared workspace). Currently referenced at `docs/kanban/reference.md` §664 as deferred. Use case: an orchestrator processes a backlog of similar items (10 PRs to review, 50 docs to ingest, 20 tasks to triage) and wants atomic batch-create instead of N individual `kanban_create` calls. Includes idempotency key support (per-child suffix) and a single-transaction insert path through `KanbanStore`. Stretches the existing 9-tool surface to 10 LLM tools / matching CLI surface.
+
+**Requirements**: TBD (run /gsd-plan-phase 36.3.7.7 to break down — research should confirm whether `KanbanStore::create_tasks_batch` exists or needs to be added as a new transactional primitive; check whether existing `create_task` can be loop-called inside a `BEGIN IMMEDIATE` transaction or whether batch-insert performance matters for v1; verify reference.md §664 wording for any locked semantics)
+**Depends on:** Phase 36.3.7.6 (CLOSED — 9-tool LLM surface stable; pattern for tool registration in `tools/mod.rs` proven)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.7 to break down)
+
+### Phase 36.3.7.8: @mention delegation parser — inline routing from prose (INSERTED 2026-05-30)
+
+**Goal:** Implement the `@mention` delegation parser referenced at `docs/kanban/reference.md` §741 ("P6 @mention: inline routing from prose, e.g. `@reviewer look at this`"). A worker or orchestrator can include `@<assignee>` mentions inside task bodies / comments and the dispatcher (or a dedicated handler) extracts them, creates child tasks routed to the named assignee, and threads them into the task graph. Requires: a parser for `@<word>` patterns inside Markdown bodies (with fence-escape rules — don't parse inside code blocks); an assignee resolver (map `@reviewer` to an actual assignee string); a child-task creation path that mirrors `kanban_create` but with auto-derived parent_id; and CLI/LLM hooks. Was originally reserved at "Phase 36.3.7.7" in reference.md §741; that number is now Kanban swarm helper, so this work moves down one slot. Stretches the LLM-tool surface or the dispatcher-side handler (planner decides).
+
+**Requirements**: TBD (run /gsd-plan-phase 36.3.7.8 to break down — planner should decide whether @mention parsing lives in the dispatcher tick OR in a new LLM tool surface OR both; whether the parser is a pure function with unit tests or a streaming Markdown walker; how the assignee resolver maps `@<word>` to known assignees including a fallback for unknown handles; cycle detection — what if a child @mentions back to the parent?)
+**Depends on:** Phase 36.3.7.6 (CLOSED — tool registration pattern stable) AND Phase 36.3.7.7 (TBD — overlap with swarm batch-create if @mention also creates multiple tasks; planner should sequence accordingly)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.8 to break down)
+
+### Phase 36.3.7.9: Multi-board CLI — `boards list/create/switch/show/rename/rm` + `--board <slug>` flag (INSERTED 2026-05-30)
+
+**Goal:** Implement the multi-board CLI surface referenced at `docs/kanban/reference.md` §71 ("Multi-board CLI [...] are deferred to Phase 36.3.7.3"). The current v1 surface only exercises the `default` board at `~/.ironhermes/kanban.db`; the multi-board layout at `~/.ironhermes/kanban/boards/<slug>/kanban.db` is reserved but not populated. Ship: `hermes kanban boards list/create/switch/show/rename/rm` + a `--board <slug>` flag on existing `kanban` subcommands; a `current_board` cursor (in a small config file OR an env var) so single-board callers don't need `--board` on every invocation; migration of the existing `~/.ironhermes/kanban.db` into `~/.ironhermes/kanban/boards/default/kanban.db` (or symlink for backward compat); per-board schema versioning (each board carries its own schema_version row). LLM-tool side: the existing 9 kanban_* tools gain an optional `board: Option<String>` param defaulting to the current board cursor; tool surfaces are NOT renumbered.
+
+**Requirements**: TBD (run /gsd-plan-phase 36.3.7.9 to break down — planner must decide migration strategy for existing `~/.ironhermes/kanban.db` (symlink, copy, in-place rename, leave-as-default-only); whether `current_board` is config-file-backed, env-var-only, or both; whether the 36.3.7.5 notifier polling loop iterates over all boards or just the current; whether the dispatcher claims tasks across boards or per-board; cycle-detection scope — `task_links` cycles within a board, or across boards?)
+**Depends on:** Phase 36.3.7.6 (CLOSED — full LLM-tool surface; multi-board adds a `board` param uniformly across all 9 tools)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.9 to break down)
+
+### Phase 36.3.7.10: Auto-decompose / triage decomposer / specifier (INSERTED 2026-05-30)
+
+**Goal:** Implement the `hermes kanban decompose` + `hermes kanban specify` CLI verbs + `kanban.auto_decompose` config knob referenced at `docs/kanban/reference.md` §425 ("Auto-decompose / triage decomposer / specifier [...] are deferred to Phase 36.3.7.2") and §744 (same feature, alternate naming "Triage specifier"). In v1, the `triage` column is a parking lot — transitions out are operator-only via `hermes kanban assign` + manual status update; the **Orchestration: Auto/Manual** toggle does not exist. Ship: an LLM-driven decomposer that takes a one-line task (`"add Stripe payments"`) and emits a body with structured fields (acceptance criteria, work-breakdown, risk register, suggested skill set); an auto-mode that runs the decomposer on `triage→todo` transitions when `kanban.auto_decompose=true`; an `Orchestration: Auto/Manual` config toggle; CLI verb that lets operators run the decomposer manually. Likely uses the `AgentRuntime` + a dedicated `decompose` skill or a delegate_task call.
+
+**Requirements**: TBD (run /gsd-plan-phase 36.3.7.10 to break down — planner must decide: which model is the decomposer (config-driven? hardcoded?); whether decompose uses a kanban-specific skill or a generic delegate_task; whether the decomposer writes its output directly to `tasks.body` or emits a comment + leaves the body untouched; whether auto-mode triggers on dispatcher tick or on operator `kanban triage` invocation; how to handle decomposer failures (retain in triage? log + drop? backoff?))
+**Depends on:** Phase 36.3.7.6 (CLOSED — kanban_create + kanban_comment tools available for decomposer to invoke). Possibly Phase 36.3.7.7 (TBD — swarm batch-create might be used by decomposer to fan out work-breakdown subtasks; planner decides)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.10 to break down)
+
+### Phase 36.3.7.11: Dashboard plugin — SPA + REST + WebSocket live-update for hermes dashboard Kanban tab (INSERTED 2026-05-30)
+
+**Goal:** Implement the dashboard plugin referenced at `docs/kanban/reference.md` §387 ("The dashboard plugin is deferred to Phase 36.3.7.4. [...] The `hermes dashboard` command will open the Kanban tab once 36.3.7.4 ships."). The `/kanban` slash command + CLI surface work today; the dashboard SPA / REST API / WebSocket live-update layer does not exist. Ship: a Kanban tab in `iron_hermes_ui` (HermesApp — see project memory) backed by a REST API exposing the existing 9 kanban_* tool surface PLUS a `tasks/list` + `tasks/get` + `events/poll` endpoint set; a WebSocket subscription that pushes `task_events` rows live as the dispatcher emits them (the 36.3.7.5 notifier is already polling, but the dashboard wants pub/sub semantics not poll); a Kanban-board view (4-column ready/running/blocked/done with drag-to-status); a per-task detail view with the same `worker_context` shape that `kanban_show` returns. Large scope — likely a multi-plan phase (REST layer + WebSocket + UI components + integration).
+
+**Requirements**: TBD (run /gsd-plan-phase 36.3.7.11 to break down — planner must choose framework split: does the REST API live in `crates/ironhermes-ui-server` (extending the existing in-process UI server) or a new crate? WebSocket pub/sub: leverage the 36.3.7.5 notifier infrastructure (tap into `task_events` via a different consumer) or build separate pubsub? UI framework: dioxus matching the existing UI stack? Auth: read-only by default, write-back through existing handler dispatch? Multi-tenancy: scope to one user or expose per-tenant views?)
+**Depends on:** Phase 36.3.7.6 (CLOSED — full 9-tool LLM surface available for REST exposure). Also Phase 36.3.7.9 (TBD — if multi-board ships before this, dashboard needs per-board scoping)
+**Plans:** TBD
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.11 to break down)
+
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 
 **Goal:** [Urgent work - to be planned]

@@ -68,7 +68,7 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 
 ## Boards (multi-project)
 
-> **v1 NOTE:** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag are deferred to Phase 36.3.7.3. Only the `default` board is exercised in v1; the multi-board layout at `~/.ironhermes/kanban/boards/<slug>/kanban.db` is reserved but not populated.
+> **v1 NOTE:** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag are deferred to Phase 36.3.7.9 (re-homed 2026-05-30 from the defunct Phase 36.3.7.3 assignment, which shipped the CLI CFG-03 doc-comment scan-window fix instead). Only the `default` board is exercised in v1; the multi-board layout at `~/.ironhermes/kanban/boards/<slug>/kanban.db` is reserved but not populated.
 
 Boards let you separate unrelated streams of work — one per project, repo, or domain — into isolated queues. A new install has exactly one board called `default` (DB at `~/.hermes/kanban.db` for back-compat). Users who only want one stream of work never need to know about boards; the feature is opt-in.
 
@@ -384,7 +384,7 @@ For best results, pair it with a profile whose toolsets are restricted to board 
 
 ## Dashboard (GUI)
 
-> **v1 NOTE:** The dashboard plugin is deferred to Phase 36.3.7.4. The `/kanban` slash command and CLI surface described throughout this doc work today; the dashboard SPA / REST API / WebSocket live-update layer does not exist yet. The `hermes dashboard` command will open the Kanban tab once 36.3.7.4 ships.
+> **v1 NOTE:** The dashboard plugin is deferred to Phase 36.3.7.11 (re-homed 2026-05-30 from the defunct Phase 36.3.7.4 assignment, which shipped the dispatcher Reclaimed-event parity fix instead). The `/kanban` slash command and CLI surface described throughout this doc work today; the dashboard SPA / REST API / WebSocket live-update layer does not exist yet. The `hermes dashboard` command will open the Kanban tab once 36.3.7.11 ships.
 
 The `/kanban` CLI and slash command are enough to run the board headlessly, but a visual board is often the right interface for humans-in-the-loop: triage, cross-profile supervision, reading comment threads, and dragging cards between columns. Hermes ships this as a **bundled dashboard plugin** at `plugins/kanban/` — not a core feature, not a separate service — following the model laid out in **Extending the Dashboard**.
 
@@ -422,7 +422,7 @@ Visually the target is the familiar Linear / Fusion layout: dark theme, column h
 
 ### Auto vs Manual orchestration
 
-> **v1 NOTE:** Auto-decompose / triage decomposer / specifier (`hermes kanban decompose`, `hermes kanban specify`, `kanban.auto_decompose`) are deferred to Phase 36.3.7.2. In v1, the `triage` column exists as a parking lot; transitions out of `triage` are operator-only (`hermes kanban assign` + manual status update). The **Orchestration: Auto/Manual** toggle does not exist yet.
+> **v1 NOTE:** Auto-decompose / triage decomposer / specifier (`hermes kanban decompose`, `hermes kanban specify`, `kanban.auto_decompose`) are deferred to Phase 36.3.7.10 (re-homed 2026-05-30 from the defunct Phase 36.3.7.2 assignment, which shipped the delegate_task `oneOf` tool-schema fix instead). In v1, the `triage` column exists as a parking lot; transitions out of `triage` are operator-only (`hermes kanban assign` + manual status update). The **Orchestration: Auto/Manual** toggle does not exist yet.
 
 The kanban board has two ways to handle a task you drop into the Triage column:
 
@@ -661,7 +661,7 @@ All three are gated by the same dashboard plugin auth as the rest of the kanban 
 
 ### Kanban Swarm topology helper
 
-> **v1 NOTE:** `kanban swarm` is deferred to Phase 36.3.7.6. The command does not exist in v1.
+> **v1 NOTE:** `kanban swarm` is deferred to Phase 36.3.7.7 (re-homed 2026-05-30 from the defunct Phase 36.3.7.6 assignment, which shipped the 3 remaining LLM tools — `kanban_heartbeat`, `kanban_link`, `kanban_unblock` — completing the 9-tool surface instead). The command does not exist in v1.
 
 `hermes kanban swarm` creates a durable Kanban Swarm v1 graph in one shot: a completed root/blackboard card, N parallel worker cards, a verifier card gated on all workers, and a synthesizer card gated on the verifier. Shared swarm context (the "blackboard") is stored as structured JSON comments on the root card so any worker can read it.
 
@@ -738,10 +738,10 @@ The board supports these eight patterns without any new primitives:
 | P3 Voting / quorum | N siblings + 1 aggregator | 3 researchers → 1 reviewer picks |
 | P4 Long-running journal | same profile + shared dir + cron | Obsidian vault |
 | P5 Human-in-the-loop | worker blocks → user comments → unblock | ambiguous decisions |
-| P6 @mention | inline routing from prose | `@reviewer look at this` | *(deferred to Phase 36.3.7.7 — @mention delegation parser not implemented in v1)* |
+| P6 @mention | inline routing from prose | `@reviewer look at this` | *(deferred to Phase 36.3.7.8 — @mention delegation parser not implemented in v1; re-homed 2026-05-30 from 36.3.7.7 which now hosts `kanban swarm`)* |
 | P7 Thread-scoped workspace | `/kanban here` in a thread | per-project gateway threads |
 | P8 Fleet farming | one profile, N subjects | 50 social accounts |
-| P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" | *(deferred to Phase 36.3.7.2 — triage decomposer/specifier not implemented in v1)* |
+| P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" | *(deferred to Phase 36.3.7.10 — triage decomposer/specifier not implemented in v1; re-homed 2026-05-30 from the defunct 36.3.7.2 assignment which shipped the delegate_task `oneOf` tool-schema fix instead)* |
 
 For worked examples of each, see `docs/hermes-kanban-v1-spec.pdf`.
 
