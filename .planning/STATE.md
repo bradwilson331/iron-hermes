@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: "7 phases shipped this session-stream (36.3.7 kernel → 36.3.7.0 UAT-fix → 36.3.7.1 dispatcher-breaker → 36.3.7.2 schema-compat → 36.3.7.3 doc-comment scan-window → 36.3.7.4 dispatcher events parity → 36.3.7.5 gateway notifier → 36.3.7.6 LLM-tool surface completion). Latest 7 commits on develop (Phase 36.3.7.6 Plan 01): `4a11d30c` add kanban_heartbeat LLM tool + 2 tests, `3530f52a` add kanban_link LLM tool with cycle detection + 3 tests (includes insert_link_checked + LinkCycle variant), `cfb7c144` add kanban_unblock LLM tool with status-precondition gate + 2 tests, `78f798db` add hermes kanban heartbeat CLI verb + 2 CLI parity tests, `11ed521e` docs/kanban/reference.md v1-NOTE reconciliation (Gate 11 = 0 hits), `90793e58` SUMMARY with bilateral-tracing table, (Task 9 state close-out is this commit)."
+status: executing
 stopped_at: Phase 36.3.7.7 context gathered
-last_updated: "2026-05-30T14:37:59.517Z"
-last_activity: "2026-05-30 -- Phase 36.3.7.6 (Kanban LLM-tool surface completion: heartbeat / link / unblock) closed PASS. Single-plan phase; 9 tasks; 7 commits; ironhermes-kanban tools_smoke test count 14 → 21 (delta +7); ironhermes-cli heartbeat_cli +2 new parity tests. All 13 phase-level gates green. **Phase 36.3.7.6 now COMPLETE end-to-end** — the v1 narrative "IronHermes ships 6 of the 9 LLM tools listed below ... The remaining 3 — kanban_heartbeat, kanban_link, kanban_unblock — are deferred to Phase 36.3.7.1" is now closed at every site in `docs/kanban/reference.md` (`grep -c 'deferred to Phase 36.3.7.1'` = 0 vs. 4 pre-phase; 4 "Shipped in Phase 36.3.7.6" annotations). One Rule-3 fix-up applied (heartbeat_cli.rs TestSub Debug derive dropped because pre-existing KanbanCommands enum doesn't derive Debug — scope-fenced out of expanding to the enum itself)."
+last_updated: "2026-05-30T16:40:08.300Z"
+last_activity: 2026-05-30 -- Phase 36.3.7.7 planning complete
 progress:
   total_phases: 55
   completed_phases: 17
-  total_plans: 84
+  total_plans: 85
   completed_plans: 81
   percent: 31
 ---
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 36.3.7.6 (CLOSED PASS — 13/13 phase-level gates PASS, bilateral-tracing 5 BUGs × 2 ends + D-cli-heartbeat-parity, store.insert_link + store.unblock_task signatures byte-stable, DEFERRED_KANBAN_SUBVERBS untouched, crate-isolation fence held) — 1 plan, 1 wave, develop-direct strategy
-Status: 7 phases shipped this session-stream (36.3.7 kernel → 36.3.7.0 UAT-fix → 36.3.7.1 dispatcher-breaker → 36.3.7.2 schema-compat → 36.3.7.3 doc-comment scan-window → 36.3.7.4 dispatcher events parity → 36.3.7.5 gateway notifier → 36.3.7.6 LLM-tool surface completion). Latest 7 commits on develop (Phase 36.3.7.6 Plan 01): `4a11d30c` add kanban_heartbeat LLM tool + 2 tests, `3530f52a` add kanban_link LLM tool with cycle detection + 3 tests (includes insert_link_checked + LinkCycle variant), `cfb7c144` add kanban_unblock LLM tool with status-precondition gate + 2 tests, `78f798db` add hermes kanban heartbeat CLI verb + 2 CLI parity tests, `11ed521e` docs/kanban/reference.md v1-NOTE reconciliation (Gate 11 = 0 hits), `90793e58` SUMMARY with bilateral-tracing table, (Task 9 state close-out is this commit).
-Last activity: 2026-05-30 -- Phase 36.3.7.6 (Kanban LLM-tool surface completion: heartbeat / link / unblock) closed PASS. Single-plan phase; 9 tasks; 7 commits; ironhermes-kanban tools_smoke test count 14 → 21 (delta +7); ironhermes-cli heartbeat_cli +2 new parity tests. All 13 phase-level gates green. **Phase 36.3.7.6 now COMPLETE end-to-end** — the v1 narrative "IronHermes ships 6 of the 9 LLM tools listed below ... The remaining 3 — kanban_heartbeat, kanban_link, kanban_unblock — are deferred to Phase 36.3.7.1" is now closed at every site in `docs/kanban/reference.md` (`grep -c 'deferred to Phase 36.3.7.1'` = 0 vs. 4 pre-phase; 4 "Shipped in Phase 36.3.7.6" annotations). One Rule-3 fix-up applied (heartbeat_cli.rs TestSub Debug derive dropped because pre-existing KanbanCommands enum doesn't derive Debug — scope-fenced out of expanding to the enum itself).
+Status: Ready to execute
+Last activity: 2026-05-30 -- Phase 36.3.7.7 planning complete
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
