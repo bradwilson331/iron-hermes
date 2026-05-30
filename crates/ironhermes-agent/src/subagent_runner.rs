@@ -348,8 +348,31 @@ impl SubagentRunner for AgentSubagentRunner {
             .unwrap_or(false);
 
         // Emit terminal transcript line (D-05 normal / D-07 cancel) + unregister.
+        // Runaway-delegation guard: when the child loop did NOT finish naturally,
+        // rewrite `final_response` to carry a substring marker the parent's
+        // delegation circuit breaker matches on. Without this, a child that
+        // hits `max_iterations` returns whatever text the model last emitted,
+        // which is indistinguishable from a normal completion at the parent's
+        // tool-result layer.
         let (final_response, outcome) = match run_result {
-            Ok(result) => (result.final_response, Ok::<(), anyhow::Error>(())),
+            Ok(result) => {
+                let rewritten = if matches!(result.stop_reason, crate::agent_loop::StopReason::Natural) {
+                    result.final_response
+                } else {
+                    let reason = match result.stop_reason {
+                        crate::agent_loop::StopReason::MaxIterations => "max_iterations",
+                        crate::agent_loop::StopReason::Cancelled => "cancelled",
+                        crate::agent_loop::StopReason::BudgetExhausted => "budget_exhausted",
+                        crate::agent_loop::StopReason::DelegationFailures => "delegation_failures",
+                        crate::agent_loop::StopReason::Natural => unreachable!(),
+                    };
+                    let body = result
+                        .final_response
+                        .unwrap_or_else(|| "(no text response)".to_string());
+                    Some(format!("[subagent-failure: {reason}] {body}"))
+                };
+                (rewritten, Ok::<(), anyhow::Error>(()))
+            }
             Err(e) => (None, Err(e)),
         };
 

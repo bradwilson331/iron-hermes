@@ -37,6 +37,35 @@ pub enum StopReason {
     BudgetExhausted,
     /// Cancellation token fired (operator / parent stop).
     Cancelled,
+    /// Runaway-delegation guard: parent loop stopped after
+    /// [`MAX_CONSECUTIVE_DELEGATION_FAILURES`] consecutive `delegate_task`
+    /// tool calls returned a subagent-failure marker. Prevents a small parent
+    /// model from re-delegating forever when child max-out / kill / timeout
+    /// keeps recurring.
+    DelegationFailures,
+}
+
+/// Maximum consecutive `delegate_task` failures the parent loop tolerates
+/// before bailing with `StopReason::DelegationFailures`. Each successful
+/// delegation resets the counter.
+pub const MAX_CONSECUTIVE_DELEGATION_FAILURES: usize = 2;
+
+/// Substring marker that [`crate::subagent_runner::AgentSubagentRunner`] prepends
+/// to a child's `final_response` whenever the child loop stopped for a non-natural
+/// reason (max_iterations, cancelled, budget exhausted, …). The parent's
+/// runaway-delegation guard substring-matches on this, plus the timeout / error
+/// strings emitted by `delegate_task` itself.
+pub const SUBAGENT_FAILURE_MARKER: &str = "[subagent-failure:";
+
+/// Return true when a `delegate_task` tool-result string carries any known
+/// subagent-failure signal. Matched on substring (not equality) because batch
+/// `delegate_task` joins per-child results into a single string — any failing
+/// child contributes the marker to the joined output.
+pub(crate) fn is_delegation_failure_result(result: &str) -> bool {
+    result.contains(SUBAGENT_FAILURE_MARKER)
+        || result.contains("Subagent timed out")
+        || result.contains("Cancelled by parent")
+        || result.starts_with("Error: ")
 }
 
 /// Result of an agent loop execution.
@@ -1319,6 +1348,13 @@ impl AgentLoop {
         let mut turns_used = 0;
         let mut total_usage = AggregatedUsage::default();
         let mut final_response = None;
+        // Runaway-delegation guard: counts consecutive `delegate_task` results
+        // that carry a subagent-failure signal. Reset to 0 on any successful
+        // delegation; when it crosses `MAX_CONSECUTIVE_DELEGATION_FAILURES` we
+        // break the loop with a final response to the user instead of letting
+        // the parent model keep re-delegating until `max_iterations`.
+        let mut consecutive_delegation_failures: usize = 0;
+        let mut delegation_failure_stop = false;
         // Phase 25.1 GAP-7 follow-up: track messages appended by THIS run so the
         // gateway/REPL persistence path can include matching tool results without
         // a Role-based filter (which would drop Role::Tool and re-persist prior
@@ -1726,9 +1762,41 @@ impl AgentLoop {
 
             for tool_call in tool_calls {
                 let result = self.execute_tool_call(tool_call).await;
+                // Runaway-delegation guard: any `delegate_task` result that
+                // carries a subagent-failure marker bumps the counter; a
+                // successful delegation resets it. Non-`delegate_task` tool
+                // calls do not touch the counter.
+                if tool_call.function.name == "delegate_task" {
+                    if is_delegation_failure_result(&result) {
+                        consecutive_delegation_failures =
+                            consecutive_delegation_failures.saturating_add(1);
+                    } else {
+                        consecutive_delegation_failures = 0;
+                    }
+                }
                 let tool_msg = ChatMessage::tool_result(&tool_call.id, result);
                 messages.push(tool_msg.clone());
                 appended.push(tool_msg);
+            }
+
+            // Runaway-delegation guard: after executing every tool call in
+            // this turn, bail if the parent has accumulated too many
+            // back-to-back failed delegations. The parent model (often a
+            // small/cheap router) cannot be relied on to give up on its own
+            // when subagents keep maxing out or being killed.
+            if consecutive_delegation_failures >= MAX_CONSECUTIVE_DELEGATION_FAILURES {
+                warn!(
+                    consecutive_failed_delegations = consecutive_delegation_failures,
+                    "stopping parent loop after consecutive delegation failures"
+                );
+                final_response = Some(format!(
+                    "Stopped after {} consecutive failed delegations. \
+                     The subagents kept maxing out, getting cancelled, or erroring. \
+                     Reply if you want me to try a different approach.",
+                    consecutive_delegation_failures
+                ));
+                delegation_failure_stop = true;
+                break;
             }
 
             // Phase 25.3 D-T-1: increment per-turn counter AFTER tool calls execute.
@@ -1744,12 +1812,14 @@ impl AgentLoop {
         // (handler.rs for Telegram, runner.rs for cron) which knows the real platform
         // and chat_id. Firing it here would produce duplicate events (Issue #4 fix).
 
-        let finished_naturally = turns_used < self.max_iterations;
-        let stop_reason = if finished_naturally {
-            StopReason::Natural
-        } else {
+        let stop_reason = if delegation_failure_stop {
+            StopReason::DelegationFailures
+        } else if turns_used >= self.max_iterations {
             StopReason::MaxIterations
+        } else {
+            StopReason::Natural
         };
+        let finished_naturally = matches!(stop_reason, StopReason::Natural);
         // Phase 36.2 Plan 08 (D-CACHE-03): drain any pending cache-break
         // warnings into AgentResult.context_warnings so the surfaces (CLI /
         // TUI / gateway / web UI) render them on the same out-of-band channel
@@ -2988,6 +3058,75 @@ mod hooks_ordering_tests {
             result, "mock result",
             "tool result must pass through unchanged"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: runaway-delegation guard helper
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod delegation_failure_tests {
+    use super::{
+        MAX_CONSECUTIVE_DELEGATION_FAILURES, SUBAGENT_FAILURE_MARKER,
+        is_delegation_failure_result,
+    };
+
+    #[test]
+    fn marker_string_is_stable() {
+        // Locks the literal so subagent_runner.rs and any downstream surfaces
+        // stay in sync. If you rename the marker, update both crates.
+        assert_eq!(SUBAGENT_FAILURE_MARKER, "[subagent-failure:");
+    }
+
+    #[test]
+    fn threshold_is_two() {
+        // Lock the threshold — two consecutive failures is the intended
+        // user-visible behavior. Change deliberately if tuning.
+        assert_eq!(MAX_CONSECUTIVE_DELEGATION_FAILURES, 2);
+    }
+
+    #[test]
+    fn detects_subagent_failure_marker() {
+        assert!(is_delegation_failure_result(
+            "[subagent-failure: max_iterations] partial work"
+        ));
+        assert!(is_delegation_failure_result(
+            "[subagent-failure: cancelled] Cancelled by parent"
+        ));
+        assert!(is_delegation_failure_result(
+            "[subagent-failure: budget_exhausted] (no text response)"
+        ));
+    }
+
+    #[test]
+    fn detects_timeout_and_error_and_cancel_legacy_strings() {
+        assert!(is_delegation_failure_result(
+            "Subagent timed out after 300s"
+        ));
+        assert!(is_delegation_failure_result("Error: run_child failed"));
+        assert!(is_delegation_failure_result("Cancelled by parent"));
+    }
+
+    #[test]
+    fn does_not_flag_natural_completions() {
+        assert!(!is_delegation_failure_result(
+            "Done — wrote summary to /tmp/out.md"
+        ));
+        assert!(!is_delegation_failure_result("(no response)"));
+        // Marker-shaped substring inside legitimate text should not false-positive
+        // unless it actually contains the prefix.
+        assert!(!is_delegation_failure_result(
+            "The user mentioned 'subagent failure' as an example."
+        ));
+    }
+
+    #[test]
+    fn detects_marker_anywhere_in_batch_output() {
+        // delegate_task batch joins per-child outputs. A single failing child
+        // mid-string must still trip the guard.
+        let batch = "Task 1: ok\nTask 2: [subagent-failure: max_iterations] partial\nTask 3: ok";
+        assert!(is_delegation_failure_result(batch));
     }
 }
 
