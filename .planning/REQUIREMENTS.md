@@ -203,6 +203,23 @@ The Learning Loop is the unifying philosophy of v2.1 — Skills + Memory + Sessi
 - [x] **HXP-NAV-04**: Buzzer on/off
 - [x] **HXP-DOC-01**: Skill doc at `skills/hexapod/DESCRIPTION.md` with full protocol reference (all CMD_* strings, wire format, action list, blocked commands)
 
+### Phase 36.3.7.7 - Kanban swarm helper
+
+Multi-task fan-out for orchestrators — the 10th LLM tool + `hermes kanban swarm` CLI verb + new `KanbanStore::create_swarm` sibling primitive. Each REQ anchors to one or more D-XX decisions from `.planning/phases/36.3.7.7-kanban-swarm-helper-multi-task-fan-out-for-orchestrators/36.3.7.7-CONTEXT.md`.
+
+- [ ] **REQ-36.3.7.7-01**: 4 topology shapes create correct DAGs — P1 fan-out (root + N workers), fan-out + verifier, full 4-tier (reference.md §664), P3 quorum (root + N workers + synthesizer, no verifier). Anchors: D-topology-shapes, D-atomic-transaction, D-root-status-done, D-root-ended-at.
+- [ ] **REQ-36.3.7.7-02**: Blackboard arg seeds exactly one `task_comments` row on the root card with `author='swarm'` and `body=serde_json::to_string(&blackboard)?`. Anchors: D-blackboard-init, D-no-blackboard-validation.
+- [ ] **REQ-36.3.7.7-03**: Idempotency replay returns the same `SwarmGraphIds` — re-invocation with the same `idempotency_key` re-reads root + walks `task_links` to reconstruct worker_ids, verifier_id, synthesizer_id without inserting new rows. Anchors: D-idempotency-suffix-scheme, D-atomic-transaction.
+- [ ] **REQ-36.3.7.7-04**: Invalid assignee on any card rolls back the whole graph — zero rows in `tasks`, `task_links`, `task_events`, `task_comments` after a failed call. Anchors: D-atomic-transaction, D-no-create-task-reuse.
+- [ ] **REQ-36.3.7.7-05**: Rich worker form (`Array<Object>`) accepts per-card `title` and `body` overrides; created cards have those exact strings, not auto-generated. Anchors: D-worker-shape, D-shared-vs-per-card-fields.
+- [ ] **REQ-36.3.7.7-06**: Flat worker form (`Array<String>`) auto-titles each card as `"<goal> — worker {i+1} of {N}"` (1-indexed). Anchors: D-worker-shape.
+- [ ] **REQ-36.3.7.7-07**: CLI flat-form (`--workers a,b,c`) and rich-form (`--workers-json '[{...}]'`) parse correctly; the two flags are mutually exclusive at parse time. Anchors: D-cli-verb-shape, D-cli-worker-flags.
+- [ ] **REQ-36.3.7.7-08**: `/kanban swarm` from any gateway slash surface routes to the deferred-subverb message — `"swarm"` appears in `DEFERRED_KANBAN_SUBVERBS` at `crates/ironhermes-core/src/commands/handlers.rs`. Anchors: D-slash-deferred.
+- [ ] **REQ-36.3.7.7-09**: `docs/kanban/reference.md` grep gates pass — `grep -c 'deferred to Phase 36.3.7.7'` returns 0, `grep -c 'all 10 LLM tools'` returns ≥ 1, `grep -c 'kanban_swarm'` returns ≥ 2. Anchors: D-docs-reconciliation.
+- [ ] **REQ-36.3.7.7-10**: spawn-contract file unchanged — `grep -c 'HERMES_KANBAN_SWARM_ROOT' crates/ironhermes-kanban/src/worker_spawn.rs` returns 0; the 9-env-var worker spawn contract is preserved. Anchors: D-root-discovery, INV-36.3.7-07.
+- [ ] **REQ-36.3.7.7-11**: `crates/ironhermes-kanban/src/store.rs::create_task` is byte-unchanged on its existing signature line — `create_swarm` is a sibling primitive, never a re-entrant caller. Anchors: D-no-create-task-reuse.
+- [ ] **REQ-36.3.7.7-12**: Tool count is exactly 10 — `grep -c 'registry.register(Box::new(' crates/ironhermes-kanban/src/tools/mod.rs` returns 10. Anchors: D-tool-surface-mounts-store-directly, D-docs-reconciliation.
+
 ## Future Requirements
 
 Deferred to v2.2+. Tracked but not in current roadmap. CLI-03..CLI-08 (ACP adapter) were moved BACK to v2.1 active scope on 2026-04-27 — see "Current Milestone: v2.1 Carry-Overs" at the top of this file.
@@ -403,6 +420,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HXP-NAV-03 | Phase 27.1.2 | Complete |
 | HXP-NAV-04 | Phase 27.1.2 | Complete |
 | HXP-DOC-01 | Phase 27.1.3 | Complete |
+| REQ-36.3.7.7-01 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-02 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-03 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-04 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-05 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-06 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-07 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-08 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-09 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-10 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-11 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.7-12 | Phase 36.3.7.7 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)
