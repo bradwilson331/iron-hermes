@@ -470,17 +470,24 @@ pub async fn cmd_swarm(
     let mut store = open_store()?;
 
     // Worker normalization — Pitfall 5: clap does NOT comma-split; we do it here.
+    //
+    // WR-07 (Phase 36.3.7.7 code review): trim ONLY a single trailing comma
+    // (forgiving "alice,bob," → 2 workers), but DO NOT filter empty middle
+    // entries — let them flow through to validate_profile_name so
+    // "alice,,bob" surfaces as a clear "invalid assignee" rejection
+    // instead of silently producing 2 workers when the user typed 3.
     let worker_specs: Vec<KanbanWorkerSpec> = match (workers, workers_json) {
-        (Some(flat), None) => flat
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| KanbanWorkerSpec {
-                assignee: s.to_string(),
-                title: None,
-                body: None,
-            })
-            .collect(),
+        (Some(flat), None) => {
+            let stripped = flat.strip_suffix(',').unwrap_or(&flat);
+            stripped
+                .split(',')
+                .map(|s| KanbanWorkerSpec {
+                    assignee: s.trim().to_string(),
+                    title: None,
+                    body: None,
+                })
+                .collect()
+        }
         (None, Some(rich)) => {
             serde_json::from_str::<Vec<KanbanWorkerSpec>>(&rich).context("Invalid --workers-json")?
         }
