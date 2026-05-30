@@ -1145,6 +1145,7 @@ const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
     "reclaim", "reassign", "assign", "link", "unlink",
     "init", "tail", "watch", "runs", "assignees", "dispatch",
     "stats", "log", "context", "gc", "daemon", "diagnostics",
+    "swarm",
 ];
 
 /// Map ironhermes-core's Platform enum to the lowercase string form used by
