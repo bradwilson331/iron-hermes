@@ -756,9 +756,14 @@ pub async fn cmd_mention(
 
     // 11. Output.
     if json {
+        // WR-08 (Phase 36.3.7.8 code review): include "status":"ok" so
+        // downstream parsers can disambiguate success vs. rejection envelopes
+        // by a single discriminator field instead of testing for the presence
+        // of `reason` vs. `children_created`.
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
                 "task_id": task_id,
                 "mentions_parsed": spans.len(),
                 "children_created": result.children.iter().map(|c| serde_json::json!({

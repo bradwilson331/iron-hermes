@@ -363,7 +363,11 @@ impl Tool for KanbanMentionTool {
             })
             .collect();
 
+        // WR-08 (Phase 36.3.7.8 code review): include "status":"ok" so the
+        // tool's success envelope can be disambiguated from the reject()
+        // envelope by a single discriminator field.
         Ok(serde_json::to_string_pretty(&json!({
+            "status": "ok",
             "task_id": task_id,
             "mentions_parsed": spans.len(),
             "children_created": children_created,
