@@ -176,13 +176,48 @@ fn like_escape(s: &str) -> String {
 }
 
 impl KanbanStore {
-    /// Open (or create) a database at `path`.
+    /// Open (or create) a database at `path`. No slug label — migration banner
+    /// uses `"default"` if it ever fires.
     ///
     /// - Creates parent directories if missing.
     /// - Applies `PRAGMA journal_mode=WAL` and `foreign_keys=ON`.
-    /// - Runs the migration ladder if the DB was opened before.
+    /// - Runs the migration ladder if the DB schema is behind the binary.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::new_inner(path.as_ref(), None)
+    }
+
+    /// Open (or create) a database at `path` with `slug` used in the D-06
+    /// migration banner so the user sees which board was migrated.
+    pub fn open_labeled(path: impl AsRef<Path>, slug: &str) -> Result<Self> {
+        Self::new_inner(path.as_ref(), Some(slug))
+    }
+
+    /// Open the default board DB at `~/.ironhermes/kanban.db` (D-01 back-compat).
+    pub fn open_default() -> Result<Self> {
+        Self::open(crate::paths::kanban_db_path())
+    }
+
+    /// Open a board's DB by slug. Resolves the path via
+    /// `paths::board_db_path_for_slug`: `"default"` → legacy `kanban.db`;
+    /// any other slug → `boards/<slug>/kanban.db` (D-01).
+    pub fn open_for_board(slug: &str) -> Result<Self> {
+        let path = crate::paths::board_db_path_for_slug(slug);
+        Self::open_labeled(path, slug)
+    }
+
+    /// Back-compat alias for [`KanbanStore::open`].
+    ///
+    /// Existing callers (`KanbanStore::new(path)`) continue to work unchanged.
+    /// New code should prefer the explicit `open` / `open_for_board` surface.
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open(path)
+    }
+
+    // -----------------------------------------------------------------------
+    // Private open implementation
+    // -----------------------------------------------------------------------
+
+    fn new_inner(path: &Path, slug_hint: Option<&str>) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create kanban dir {}", parent.display()))?;
@@ -194,20 +229,33 @@ impl KanbanStore {
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
         let mut store = Self { conn };
-        store.init_schema()?;
+        store.init_schema(slug_hint)?;
         Ok(store)
-    }
-
-    /// Open the default board DB at `~/.ironhermes/kanban.db`.
-    pub fn open_default() -> Result<Self> {
-        Self::new(crate::paths::kanban_db_path())
     }
 
     // -----------------------------------------------------------------------
     // Schema management
     // -----------------------------------------------------------------------
 
-    fn init_schema(&mut self) -> Result<()> {
+    /// Format the D-06 migration banner string (pure helper — no I/O).
+    ///
+    /// The banner is emitted to stderr by `init_schema` when a board's
+    /// `schema_version` row is behind the binary's `SCHEMA_VERSION`. This
+    /// pure helper exists so tests can lock the format byte-stably without
+    /// needing to capture stderr.
+    ///
+    /// The format is the D-06 banner: `migrated board '<label>' from v<old> to v<new>`,
+    /// prefixed with the `[kanban]` tag. No trailing punctuation; `eprintln!` adds the newline.
+    pub fn format_migration_banner(
+        slug: Option<&str>,
+        old: i64,
+        new: i64,
+    ) -> String {
+        let label = slug.unwrap_or("default");
+        format!("[kanban] migrated board '{}' from v{} to v{}", label, old, new)
+    }
+
+    fn init_schema(&mut self, slug_hint: Option<&str>) -> Result<()> {
         // Idempotent DDL — CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS.
         self.conn.execute_batch(SCHEMA_SQL)?;
 
@@ -220,13 +268,47 @@ impl KanbanStore {
 
         match current {
             None => {
+                // Fresh DB: insert the current schema version. No banner.
                 self.conn.execute(
                     "INSERT INTO schema_version (version) VALUES (?1)",
                     params![SCHEMA_VERSION],
                 )?;
             }
-            Some(v) => {
-                run_migrations(&mut self.conn, v)?;
+            Some(v) if v < SCHEMA_VERSION => {
+                // Migration needed. Wrap run_migrations + UPDATE in BEGIN/COMMIT
+                // so a crash rolls back rather than leaving a partial-migrated DB
+                // with an un-bumped version row (T-4 mitigation).
+                self.conn.execute("BEGIN", [])?;
+                let result = (|| -> Result<()> {
+                    run_migrations(&mut self.conn, v)?;
+                    let banner = Self::format_migration_banner(slug_hint, v, SCHEMA_VERSION);
+                    eprintln!("{}", banner);
+                    self.conn.execute(
+                        "UPDATE schema_version SET version = ?1",
+                        params![SCHEMA_VERSION],
+                    )?;
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => {
+                        self.conn.execute("COMMIT", [])?;
+                    }
+                    Err(e) => {
+                        let _ = self.conn.execute("ROLLBACK", []);
+                        return Err(e);
+                    }
+                }
+            }
+            Some(v) if v > SCHEMA_VERSION => {
+                // Board was opened with a newer binary — refuse to downgrade.
+                return Err(KanbanError::Other(anyhow::anyhow!(
+                    "board schema version {} is newer than binary supports ({}); upgrade binary",
+                    v,
+                    SCHEMA_VERSION
+                )));
+            }
+            Some(_) => {
+                // v == SCHEMA_VERSION: happy path, nothing to do (Pitfall 6).
             }
         }
 

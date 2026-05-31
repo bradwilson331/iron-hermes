@@ -167,6 +167,16 @@ CREATE INDEX IF NOT EXISTS idx_subs_chat
 ///
 /// v1 is the initial schema — no migration steps yet. The function shape is
 /// here so v2 has a landing place.
+///
+/// # Atomicity (T-4)
+///
+/// Callers **must** wrap `run_migrations(conn, current)` **and** the
+/// subsequent `UPDATE schema_version SET version = ?` inside a single
+/// `BEGIN` / `COMMIT` transaction. A crash between the two statements would
+/// leave the DB migrated but with the old `schema_version`, causing the next
+/// open to re-run the migration and potentially fail on already-applied ALTERs.
+/// `KanbanStore::init_schema` satisfies this invariant via explicit
+/// `BEGIN`/`COMMIT`/`ROLLBACK` guards around the `v < SCHEMA_VERSION` arm.
 pub fn run_migrations(conn: &mut Connection, current: i64) -> Result<()> {
     // v1 is the baseline — no ALTER statements needed.
     // Example for v2 (add a column):
