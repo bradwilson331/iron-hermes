@@ -37,6 +37,7 @@ pub mod store;
 // Lives in ironhermes-kanban (not ironhermes-cli) because ironhermes-cli
 // depends on ironhermes-gateway — reverse dep would be circular.
 pub mod store_writer_impl;
+pub mod mention;
 pub mod tools;
 pub mod types;
 pub mod worker_spawn;
