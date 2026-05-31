@@ -665,12 +665,17 @@ pub async fn cmd_mention(
 
     for (mention_index, span) in spans.iter().enumerate() {
         match resolve_mention(&span.handle, &ctx) {
+            // WR-07 (Phase 36.3.7.8 code review): preserve original-case
+            // `span.handle` in the child title (REQ-04 — MentionSpan.handle is
+            // raw-cased prose). Mirrors tools/mention.rs:255,264 — operators
+            // triaging child cards can see whether the prose said @Reviewer,
+            // @reviewer, or @REVIEWER.
             Resolution::Resolved(assignee) => {
                 children.push(MentionChildSpec {
                     handle: span.handle.clone(),
                     assignee,
                     mention_index,
-                    title: format!("@{} mention from {}", span.handle.to_lowercase(), task_id),
+                    title: format!("@{} mention from {}", span.handle, task_id),
                     body: None,
                 });
             }
@@ -679,7 +684,7 @@ pub async fn cmd_mention(
                     handle: span.handle.clone(),
                     assignee,
                     mention_index,
-                    title: format!("@{} mention from {}", span.handle.to_lowercase(), task_id),
+                    title: format!("@{} mention from {}", span.handle, task_id),
                     body: None,
                 });
             }
