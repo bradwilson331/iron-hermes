@@ -90,3 +90,20 @@ pub use tools::{register_kanban_tools, KanbanSwarmTool};
 /// `kanban-worker-skill-upstream.md` preamble (Plan 05).
 /// See `kanban_guidance` module for the full constant and cache-stability doc.
 pub use kanban_guidance::KANBAN_GUIDANCE;
+
+/// Process-wide mutex serialising all env-mutating unit tests in this binary.
+///
+/// Every `#[test]` that calls `std::env::set_var` / `remove_var` for
+/// `HERMES_KANBAN_TASK`, `HERMES_KANBAN_BOARD`, or `IRONHERMES_HOME` MUST
+/// acquire this lock first:
+///
+/// ```ignore
+/// let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+/// ```
+///
+/// Using a single static here — rather than one per module — guarantees that
+/// tests across *different* modules serialise with each other inside the same
+/// `--lib` binary (module-local statics are independent objects and therefore
+/// cannot provide cross-module serialisation).
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

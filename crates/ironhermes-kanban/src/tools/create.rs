@@ -9,6 +9,12 @@
 //! - `max_runtime` accepts integer seconds OR human-readable strings ("30m", "2h", "1d").
 //! - Tenant passed as-given from args — no auto-inherit per D-38 (explicit-is-better-than-implicit).
 //! - `created_by` set to `$HERMES_PROFILE` env (D-22 created_cards verification basis).
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Creates the task in the resolved board's DB.
+//! Injects `board` + `board_source` into the success envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -22,6 +28,7 @@ use crate::store::{CreateTaskOptions, KanbanStore};
 
 /// LLM tool: create a new kanban task.
 pub struct KanbanCreateTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -150,6 +157,10 @@ impl Tool for KanbanCreateTool {
                         "type": "boolean",
                         "description": "When true, task starts in 'triage' status (needs manual specification).",
                         "default": false
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["title", "assignee"]
@@ -162,17 +173,37 @@ impl Tool for KanbanCreateTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
-        let title = args
-            .get("title")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("title is required"))?
-            .to_string();
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
 
-        let assignee = args
-            .get("assignee")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("assignee is required"))?
-            .to_string();
+        let title = match args.get("title").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_required_arg",
+                    "title is required",
+                    Some(&board_ctx),
+                ));
+            }
+        };
+
+        let assignee = match args.get("assignee").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_required_arg",
+                    "assignee is required",
+                    Some(&board_ctx),
+                ));
+            }
+        };
 
         // Validate assignee (D-17 / D-20).
         ironhermes_core::profile::validate_profile_name(&assignee).map_err(|e| {
@@ -240,13 +271,15 @@ impl Tool for KanbanCreateTool {
             created_by: std::env::var("HERMES_PROFILE").ok(),
         };
 
-        let mut store = self.store.lock().await;
+        // Open per-board store (D-08: create task in the resolved board's DB).
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
         let task = store.create_task(&title, &assignee, opts)?;
 
-        Ok(serde_json::to_string_pretty(&json!({
+        crate::tools::common::ok_with_board(json!({
             "task_id": task.id,
             "status": task.status,
-        }))?)
+        }), &board_ctx)
     }
 }
 
@@ -294,5 +327,13 @@ mod tests {
 
         let tool3 = KanbanCreateTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanCreateTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

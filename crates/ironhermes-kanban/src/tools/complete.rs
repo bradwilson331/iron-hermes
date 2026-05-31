@@ -11,6 +11,12 @@
 //!
 //! `expected_run_id` defaults to `$HERMES_KANBAN_RUN_ID` env when the caller
 //! omits it — defense-in-depth so workers don't have to thread it explicitly.
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! every success and rejection envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -25,6 +31,7 @@ use crate::store::KanbanStore;
 
 /// LLM tool: complete a kanban task (protocol terminator).
 pub struct KanbanCompleteTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -86,6 +93,10 @@ impl Tool for KanbanCompleteTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Task IDs created by this worker during this run. Each must exist and have created_by matching $HERMES_PROFILE."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": []
@@ -98,6 +109,16 @@ impl Tool for KanbanCompleteTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // Resolve task_id.
         let task_id = args
             .get("task_id")
@@ -138,7 +159,9 @@ impl Tool for KanbanCompleteTool {
                     .collect()
             });
 
-        let mut store = self.store.lock().await;
+        // Open per-board store (D-08).
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         match store.complete_task(
             &task_id,
@@ -149,20 +172,20 @@ impl Tool for KanbanCompleteTool {
             created_cards.as_deref(),
             &current_profile,
         ) {
-            Ok(()) => Ok(serde_json::to_string_pretty(&json!({
+            Ok(()) => crate::tools::common::ok_with_board(json!({
                 "status": "ok",
                 "task_id": task_id,
-            }))?),
+            }), &board_ctx),
 
             Err(KanbanError::StaleRunId { expected, actual }) => {
                 // Structured rejection — return Ok so the LLM can read and decide.
-                Ok(serde_json::to_string_pretty(&json!({
+                crate::tools::common::ok_with_board(json!({
                     "status": "rejected",
                     "reason": "stale_run_id",
                     "task_id": task_id,
                     "expected": expected,
                     "actual": actual,
-                }))?)
+                }), &board_ctx)
             }
 
             Err(KanbanError::CreatedCardsRejected {
@@ -170,13 +193,13 @@ impl Tool for KanbanCompleteTool {
                 wrong_profile,
             }) => {
                 // Structured rejection — permanent completion_rejected event already written.
-                Ok(serde_json::to_string_pretty(&json!({
+                crate::tools::common::ok_with_board(json!({
                     "status": "rejected",
                     "reason": "created_cards",
                     "task_id": task_id,
                     "phantom_ids": phantom,
                     "wrong_profile_ids": wrong_profile,
-                }))?)
+                }), &board_ctx)
             }
 
             Err(other) => Err(other.into()),
@@ -209,5 +232,13 @@ mod tests {
 
         let tool3 = KanbanCompleteTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanCompleteTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

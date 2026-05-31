@@ -13,6 +13,12 @@
 //! tool: the status precondition is the structural safeguard. A worker calling
 //! unblock on its own currently-`running` task hits the wrong-status rejection;
 //! a worker calling unblock on a foreign `blocked` task is a feature.
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! every success and rejection envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -27,6 +33,7 @@ use crate::store::KanbanStore;
 
 /// LLM tool: move a blocked task back to ready (handler-side precondition).
 pub struct KanbanUnblockTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -66,6 +73,10 @@ impl Tool for KanbanUnblockTool {
                     "task_id": {
                         "type": "string",
                         "description": "Task ID to unblock. Omit to use $HERMES_KANBAN_TASK."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": []
@@ -78,6 +89,16 @@ impl Tool for KanbanUnblockTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // Resolve task_id from arg, then from env.
         let task_id = args
             .get("task_id")
@@ -88,45 +109,51 @@ impl Tool for KanbanUnblockTool {
         let task_id = match task_id {
             Some(t) => t,
             None => {
-                return Ok(serde_json::to_string(&json!({
-                    "status": "rejected",
-                    "reason": "missing_task_id",
-                }))?);
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_task_id",
+                    "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    Some(&board_ctx),
+                ));
             }
         };
 
-        let mut store = self.store.lock().await;
+        // Open per-board store (D-08).
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         // Read current status. TaskNotFound surfaces as a structured rejection.
         let task = match store.get_task(&task_id) {
             Ok(t) => t,
             Err(KanbanError::TaskNotFound(_)) => {
-                return Ok(serde_json::to_string(&json!({
-                    "status": "rejected",
-                    "reason": "task_not_found",
-                    "task_id": task_id,
-                }))?);
+                return Ok(crate::tools::common::reject_with_board(
+                    "task_not_found",
+                    &format!("task '{}' not found", task_id),
+                    Some(&board_ctx),
+                ));
             }
             Err(other) => return Err(other.into()),
         };
 
         // D-unblock-status-precondition: status MUST be exactly "blocked".
         if task.status != "blocked" {
-            return Ok(serde_json::to_string(&json!({
-                "status": "rejected",
-                "reason": "invalid_status",
-                "task_id": task_id,
-                "current": task.status,
-                "expected": "blocked",
-            }))?);
+            return crate::tools::common::reject_value_with_board(
+                json!({
+                    "status": "rejected",
+                    "reason": "invalid_status",
+                    "task_id": task_id,
+                    "current": task.status,
+                    "expected": "blocked",
+                }),
+                Some(&board_ctx),
+            );
         }
 
         // Status is `blocked` — delegate to the unchanged store method.
         match store.unblock_task(&task_id) {
-            Ok(()) => Ok(serde_json::to_string(&json!({
+            Ok(()) => crate::tools::common::ok_with_board(json!({
                 "status": "ok",
                 "task_id": task_id,
-            }))?),
+            }), &board_ctx),
             Err(other) => Err(other.into()),
         }
     }
@@ -145,6 +172,7 @@ mod tests {
 
     #[test]
     fn is_available_respects_env() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
         let store = make_store();
         let tool = KanbanUnblockTool::new(store.clone(), false);
@@ -157,5 +185,13 @@ mod tests {
 
         let tool3 = KanbanUnblockTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanUnblockTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

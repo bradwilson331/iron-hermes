@@ -42,11 +42,21 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Create a test store backed by a fresh tempdir.
+///
+/// Phase 36.3.7.9 Plan 07: tools now use `KanbanStore::open_for_board("default")` so
+/// they resolve the DB path via `IRONHERMES_HOME`. This helper sets `IRONHERMES_HOME`
+/// to the tempdir and opens `KanbanStore::open_default()` so both the seeding code
+/// (via the returned Arc) and the tools (via `open_for_board("default")`) hit the
+/// same on-disk file. Callers MUST hold `ENV_LOCK` before calling this function to
+/// prevent IRONHERMES_HOME from racing between tests.
 fn make_store() -> Arc<TokioMutex<KanbanStore>> {
     let dir = tempfile::tempdir().unwrap();
-    let store = KanbanStore::new(dir.path().join("test.db")).unwrap();
+    // Redirect IRONHERMES_HOME so open_for_board("default") inside tools hits this dir.
+    unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
     // Leak tempdir so the DB file survives the test.
     std::mem::forget(dir);
+    let store = KanbanStore::open_default().unwrap();
     Arc::new(TokioMutex::new(store))
 }
 
@@ -94,6 +104,7 @@ fn seed_running_task(
 
 #[tokio::test]
 async fn kanban_show_unavailable_without_env() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
     let store = make_store();
     let tool = KanbanShowTool::new(store, false);
@@ -102,6 +113,7 @@ async fn kanban_show_unavailable_without_env() {
 
 #[tokio::test]
 async fn kanban_show_available_with_explicit_enable() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
     let store = make_store();
     let tool = KanbanShowTool::new(store, true);
@@ -340,6 +352,7 @@ async fn kanban_complete_accepts_valid_created_cards() {
 
 #[tokio::test]
 async fn kanban_create_idempotency_key_dedups() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     let tool = KanbanCreateTool::new(store.clone(), true);
@@ -383,6 +396,7 @@ async fn kanban_create_idempotency_key_dedups() {
 
 #[tokio::test]
 async fn kanban_create_with_parents_starts_in_todo() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     // Create a ready parent.
@@ -412,6 +426,7 @@ async fn kanban_create_with_parents_starts_in_todo() {
 
 #[tokio::test]
 async fn kanban_create_rejects_relative_dir_workspace() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
     let tool = KanbanCreateTool::new(store, true);
 
@@ -480,6 +495,7 @@ async fn kanban_block_with_review_required_prefix_logs_advisory() {
 
 #[tokio::test]
 async fn kanban_list_returns_compact_summaries() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
 
     // Seed a few tasks.
@@ -493,8 +509,8 @@ async fn kanban_list_returns_compact_summaries() {
     let result = tool.execute(json!({})).await.unwrap();
     let v: Value = serde_json::from_str(&result).unwrap();
 
-    assert!(v.is_array());
-    let tasks = v.as_array().unwrap();
+    // Plan 07: list now returns {"tasks": [...], "board": ..., "board_source": ...}.
+    let tasks = v["tasks"].as_array().expect("expected tasks array in envelope");
     assert!(tasks.len() >= 2);
     // Compact shape: must have id, title, status — must NOT have body.
     let first = &tasks[0];
@@ -2220,6 +2236,7 @@ async fn mention_unique_collision_rolls_back_first_child() {
 
 #[tokio::test]
 async fn mention_registered_eleventh_tool() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use ironhermes_kanban::tools::register_kanban_tools;
     use ironhermes_tools::ToolRegistry;
 

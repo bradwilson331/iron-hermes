@@ -11,6 +11,12 @@
 //! Per D-link-cycle-detection, the existing `store.insert_link` stays unchanged
 //! for the legacy `kanban_create::parents` path (cycles impossible by
 //! construction at create time).
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! every success and rejection envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -25,6 +31,7 @@ use crate::store::KanbanStore;
 
 /// LLM tool: add a parent → child dependency link with cycle detection.
 pub struct KanbanLinkTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -68,6 +75,10 @@ impl Tool for KanbanLinkTool {
                     "child_id": {
                         "type": "string",
                         "description": "Child task ID."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["parent_id", "child_id"]
@@ -80,56 +91,77 @@ impl Tool for KanbanLinkTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         let parent_id = match args.get("parent_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {
-                return Ok(serde_json::to_string(&json!({
-                    "status": "rejected",
-                    "reason": "missing_required_arg",
-                    "arg": "parent_id",
-                }))?);
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_required_arg",
+                    "parent_id is required",
+                    Some(&board_ctx),
+                ));
             }
         };
         let child_id = match args.get("child_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {
-                return Ok(serde_json::to_string(&json!({
-                    "status": "rejected",
-                    "reason": "missing_required_arg",
-                    "arg": "child_id",
-                }))?);
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_required_arg",
+                    "child_id is required",
+                    Some(&board_ctx),
+                ));
             }
         };
 
-        let mut store = self.store.lock().await;
+        // Open per-board store (D-08).
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         match store.insert_link_checked(&parent_id, &child_id) {
-            Ok(()) => Ok(serde_json::to_string(&json!({
+            Ok(()) => crate::tools::common::ok_with_board(json!({
                 "status": "ok",
                 "parent_id": parent_id,
                 "child_id": child_id,
-            }))?),
+            }), &board_ctx),
             Err(KanbanError::LinkCycle {
                 parent_id: p,
                 child_id: c,
-            }) => Ok(serde_json::to_string(&json!({
-                "status": "rejected",
-                "reason": "link_cycle",
-                "parent_id": p,
-                "child_id": c,
-            }))?),
-            Err(KanbanError::TaskNotFound(id)) => Ok(serde_json::to_string(&json!({
-                "status": "rejected",
-                "reason": "task_not_found",
-                "id": id,
-            }))?),
-            Err(KanbanError::TenantMismatch { parent, child }) => {
-                Ok(serde_json::to_string(&json!({
+            }) => crate::tools::common::reject_value_with_board(
+                json!({
                     "status": "rejected",
-                    "reason": "tenant_mismatch",
-                    "parent": parent,
-                    "child": child,
-                }))?)
+                    "reason": "link_cycle",
+                    "parent_id": p,
+                    "child_id": c,
+                }),
+                Some(&board_ctx),
+            ),
+            Err(KanbanError::TaskNotFound(id)) => crate::tools::common::reject_value_with_board(
+                json!({
+                    "status": "rejected",
+                    "reason": "task_not_found",
+                    "id": id,
+                }),
+                Some(&board_ctx),
+            ),
+            Err(KanbanError::TenantMismatch { parent, child }) => {
+                crate::tools::common::reject_value_with_board(
+                    json!({
+                        "status": "rejected",
+                        "reason": "tenant_mismatch",
+                        "parent": parent,
+                        "child": child,
+                    }),
+                    Some(&board_ctx),
+                )
             }
             Err(other) => Err(other.into()),
         }
@@ -161,5 +193,13 @@ mod tests {
 
         let tool3 = KanbanLinkTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanLinkTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

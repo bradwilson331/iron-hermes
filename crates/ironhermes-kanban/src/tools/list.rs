@@ -3,6 +3,12 @@
 //! Returns a compact JSON array of task summaries (id, title, status, assignee,
 //! tenant, priority, created_at) — deliberately omits body/comments to keep
 //! the response token-efficient per D-25.
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! the success envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -16,6 +22,7 @@ use crate::store::{KanbanStore, ListFilters};
 
 /// LLM tool: list tasks with optional filters.
 pub struct KanbanListTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -72,6 +79,10 @@ impl Tool for KanbanListTool {
                         "type": "integer",
                         "description": "Maximum number of tasks to return (default 50).",
                         "default": 50
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": []
@@ -84,6 +95,16 @@ impl Tool for KanbanListTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         let filters = ListFilters {
             assignee: args
                 .get("assignee")
@@ -107,7 +128,9 @@ impl Tool for KanbanListTool {
                 .or(Some(50)),
         };
 
-        let store = self.store.lock().await;
+        // Open the per-board store (D-08: always use the resolved board's DB).
+        let store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
         let tasks = store.list_tasks(filters)?;
 
         // Return compact summaries — omit body/comments per D-25.
@@ -126,7 +149,8 @@ impl Tool for KanbanListTool {
             })
             .collect();
 
-        Ok(serde_json::to_string_pretty(&summaries)?)
+        // Wrap in an object so inject_board_fields can add board/board_source at the same level.
+        crate::tools::common::ok_with_board(json!({"tasks": summaries}), &board_ctx)
     }
 }
 
@@ -155,5 +179,13 @@ mod tests {
 
         let tool3 = KanbanListTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanListTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

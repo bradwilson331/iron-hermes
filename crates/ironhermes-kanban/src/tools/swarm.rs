@@ -24,6 +24,13 @@
 //! Reference example from `docs/kanban/reference.md` §664:
 //! `hermes kanban swarm "Design a multi-region failover plan" --workers
 //! researcher,architect,sre --verifier reviewer --synthesizer writer`
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Creates the swarm graph in the resolved
+//! board's DB. Injects `board` + `board_source` into every success and rejection
+//! envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -39,6 +46,7 @@ use crate::types::{KanbanWorkerSpec, SwarmGraphSpec};
 
 /// LLM tool: materialize a multi-card swarm graph atomically.
 pub struct KanbanSwarmTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -52,17 +60,6 @@ impl KanbanSwarmTool {
     }
 }
 
-/// Build the locked rejection JSON envelope (matches sibling 9-tool pattern).
-fn reject(reason: &str, detail: &str) -> String {
-    // Sanitize detail to keep it valid inside a JSON string literal.
-    let safe_detail = detail.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(
-        r#"{{"status":"rejected","reason":"{reason}","detail":"{safe_detail}"}}"#,
-        reason = reason,
-        safe_detail = safe_detail,
-    )
-}
-
 /// Normalize the `workers` arg from either `Array<String>` (flat form) or
 /// `Array<Object>` (rich form). Mixed arrays are rejected.
 ///
@@ -70,15 +67,23 @@ fn reject(reason: &str, detail: &str) -> String {
 /// - `Ok(specs)` on success (non-empty),
 /// - `Err(rejection_json_string)` on shape error (empty / mixed / non-array
 ///   / object missing required `assignee`).
-fn normalize_workers(v: &Value) -> Result<Vec<KanbanWorkerSpec>, String> {
-    let arr = v
-        .as_array()
-        .ok_or_else(|| reject("invalid_workers_shape", "workers must be an array"))?;
+fn normalize_workers(
+    v: &Value,
+    board_ctx: &crate::board::BoardContext,
+) -> Result<Vec<KanbanWorkerSpec>, String> {
+    let arr = v.as_array().ok_or_else(|| {
+        crate::tools::common::reject_with_board(
+            "invalid_workers_shape",
+            "workers must be an array",
+            Some(board_ctx),
+        )
+    })?;
 
     if arr.is_empty() {
-        return Err(reject(
+        return Err(crate::tools::common::reject_with_board(
             "empty_workers",
             "workers array must contain at least one entry",
+            Some(board_ctx),
         ));
     }
 
@@ -98,24 +103,27 @@ fn normalize_workers(v: &Value) -> Result<Vec<KanbanWorkerSpec>, String> {
         let mut specs = Vec::with_capacity(arr.len());
         for (i, e) in arr.iter().enumerate() {
             let spec: KanbanWorkerSpec = serde_json::from_value(e.clone()).map_err(|err| {
-                reject(
+                crate::tools::common::reject_with_board(
                     "invalid_workers_shape",
                     &format!("workers[{i}] failed to parse as object: {err}"),
+                    Some(board_ctx),
                 )
             })?;
             if spec.assignee.is_empty() {
-                return Err(reject(
+                return Err(crate::tools::common::reject_with_board(
                     "invalid_workers_shape",
                     &format!("workers[{i}].assignee is required"),
+                    Some(board_ctx),
                 ));
             }
             specs.push(spec);
         }
         Ok(specs)
     } else {
-        Err(reject(
+        Err(crate::tools::common::reject_with_board(
             "invalid_workers_shape",
             "workers array must be all-strings or all-objects (not mixed)",
+            Some(board_ctx),
         ))
     }
 }
@@ -209,6 +217,10 @@ impl Tool for KanbanSwarmTool {
                     "idempotency_key": {
                         "type": "string",
                         "description": "When provided, re-invocation with the same key short-circuits to the existing graph IDs without inserting new rows."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["goal", "workers"]
@@ -221,18 +233,40 @@ impl Tool for KanbanSwarmTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // 1. goal (required)
         let goal = match args.get("goal").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => return Ok(reject("invalid_arg", "goal is required")),
+            _ => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "invalid_arg",
+                    "goal is required",
+                    Some(&board_ctx),
+                ));
+            }
         };
 
         // 2. workers (required, union of two array shapes)
         let workers_val = match args.get("workers") {
             Some(v) => v,
-            None => return Ok(reject("invalid_arg", "workers is required")),
+            None => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "invalid_arg",
+                    "workers is required",
+                    Some(&board_ctx),
+                ));
+            }
         };
-        let worker_specs = match normalize_workers(workers_val) {
+        let worker_specs = match normalize_workers(workers_val, &board_ctx) {
             Ok(v) => v,
             Err(envelope) => return Ok(envelope),
         };
@@ -276,31 +310,48 @@ impl Tool for KanbanSwarmTool {
         let created_by = match std::env::var("HERMES_PROFILE").ok() {
             Some(p) if !p.is_empty() => p,
             _ => {
-                return Ok(reject(
+                return Ok(crate::tools::common::reject_with_board(
                     "missing_profile",
                     "HERMES_PROFILE env var is required to set root card assignee",
+                    Some(&board_ctx),
                 ));
             }
         };
 
-        // 8. validate every assignee (matches create.rs:178-183 shape)
+        // 8. validate every assignee (matches create.rs shape)
         for w in &worker_specs {
             if let Err(e) = ironhermes_core::profile::validate_profile_name(&w.assignee) {
-                return Ok(reject("invalid_assignee", &format!("{e}")));
+                return Ok(crate::tools::common::reject_with_board(
+                    "invalid_assignee",
+                    &format!("{e}"),
+                    Some(&board_ctx),
+                ));
             }
         }
         if let Some(ref v) = verifier {
             if let Err(e) = ironhermes_core::profile::validate_profile_name(v) {
-                return Ok(reject("invalid_assignee", &format!("{e}")));
+                return Ok(crate::tools::common::reject_with_board(
+                    "invalid_assignee",
+                    &format!("{e}"),
+                    Some(&board_ctx),
+                ));
             }
         }
         if let Some(ref s) = synthesizer {
             if let Err(e) = ironhermes_core::profile::validate_profile_name(s) {
-                return Ok(reject("invalid_assignee", &format!("{e}")));
+                return Ok(crate::tools::common::reject_with_board(
+                    "invalid_assignee",
+                    &format!("{e}"),
+                    Some(&board_ctx),
+                ));
             }
         }
         if let Err(e) = ironhermes_core::profile::validate_profile_name(&created_by) {
-            return Ok(reject("invalid_assignee", &format!("{e}")));
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_assignee",
+                &format!("{e}"),
+                Some(&board_ctx),
+            ));
         }
 
         // 9. build SwarmGraphSpec
@@ -321,8 +372,9 @@ impl Tool for KanbanSwarmTool {
             body: None,
         };
 
-        // 10. store lock + create_swarm
-        let mut store = self.store.lock().await;
+        // 10. open per-board store + create_swarm (D-08)
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
         let ids = match store.create_swarm(spec) {
             Ok(v) => v,
             Err(crate::error::KanbanError::Other(e)) => {
@@ -334,14 +386,12 @@ impl Tool for KanbanSwarmTool {
                 } else {
                     "store_error"
                 };
-                return Ok(reject(reason, &msg));
+                return Ok(crate::tools::common::reject_with_board(
+                    reason,
+                    &msg,
+                    Some(&board_ctx),
+                ));
             }
-            // WR-04 (Phase 36.3.7.7 code review): map the typed KanbanError
-            // variants create_swarm can return to specific rejection-reason
-            // codes so orchestrators can pattern-match on the envelope.
-            // Mirrors the discipline of sibling per-tool envelopes
-            // (KanbanLinkTool maps LinkCycle → "link_cycle", KanbanUnblockTool
-            // maps RelativeDirWorkspace → "invalid_workspace", etc.).
             Err(e) => {
                 let reason = match &e {
                     crate::error::KanbanError::RelativeDirWorkspace(_) => "invalid_workspace",
@@ -350,18 +400,22 @@ impl Tool for KanbanSwarmTool {
                     crate::error::KanbanError::TaskNotFound(_) => "task_not_found",
                     _ => "store_error",
                 };
-                return Ok(reject(reason, &format!("{e}")));
+                return Ok(crate::tools::common::reject_with_board(
+                    reason,
+                    &format!("{e}"),
+                    Some(&board_ctx),
+                ));
             }
         };
 
-        // 11. success envelope
-        Ok(serde_json::to_string_pretty(&json!({
+        // 11. success envelope with board provenance.
+        crate::tools::common::ok_with_board(json!({
             "root_id": ids.root_id,
             "worker_ids": ids.worker_ids,
             "verifier_id": ids.verifier_id,
             "synthesizer_id": ids.synthesizer_id,
             "blackboard_event_id": ids.blackboard_event_id,
-        }))?)
+        }), &board_ctx)
     }
 }
 
@@ -389,5 +443,13 @@ mod tests {
         assert!(!tool.is_available());
         let tool2 = KanbanSwarmTool::new(make_store(), true);
         assert!(tool2.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanSwarmTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }
