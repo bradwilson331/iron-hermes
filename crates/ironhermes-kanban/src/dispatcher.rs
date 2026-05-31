@@ -81,6 +81,10 @@ pub struct DispatcherContext {
     pub dispatcher_pid: u32,
     /// Injectable spawn function for tests. Default: `worker_spawn::spawn_worker`.
     pub spawn_fn: SpawnFn,
+    /// Phase 36.3.7.10 — optional decomposer injection. None = auto_decompose has no
+    /// effect (graceful degradation). Production: wired by CLI cmd_decompose or a future
+    /// gateway runner update. Tests: inject a mock closure via `with_decompose_fn`.
+    pub decompose_fn: Option<crate::decomposer::DecomposeFn>,
 }
 
 impl DispatcherContext {
@@ -96,6 +100,7 @@ impl DispatcherContext {
                     crate::worker_spawn::spawn_worker_for_board(&task, &run, &workspace, &board_slug).await
                 })
             }),
+            decompose_fn: None,
         }
     }
 
@@ -111,6 +116,7 @@ impl DispatcherContext {
             hostname: crate::pid::current_hostname(),
             dispatcher_pid: std::process::id(),
             spawn_fn,
+            decompose_fn: None,
         }
     }
 }
@@ -187,8 +193,8 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
             }
         };
 
-        // Build a per-board context that shares config + spawn_fn from the
-        // outer DispatcherContext but uses the per-board store.
+        // Build a per-board context that shares config + spawn_fn + decompose_fn
+        // from the outer DispatcherContext but uses the per-board store.
         let board_ctx = DispatcherContext {
             store: board_store_arc,
             config: ctx.config.clone(),
@@ -202,6 +208,7 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
                     outer_spawn_fn(task, run, workspace, slug.clone())
                 }
             }),
+            decompose_fn: ctx.decompose_fn.clone(),
         };
 
         run_dispatch_tick_for_board(&board_ctx, &slug).await;
