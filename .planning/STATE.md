@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
+status: completed
 stopped_at: Phase 36.3.7.7 context gathered
-last_updated: "2026-05-31T05:55:05.317Z"
-last_activity: 2026-05-31 -- Phase 36.3.7.8 execution started
+last_updated: "2026-05-31T08:33:03.623Z"
+last_activity: 2026-05-31 -- Phase 36.3.7.8 marked complete
 progress:
-  total_phases: 55
+  total_phases: 59
   completed_phases: 18
-  total_plans: 90
-  completed_plans: 82
-  percent: 33
+  total_plans: 91
+  completed_plans: 87
+  percent: 31
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.3.7.8 (mention-delegation-parser-inline-routing-from-prose) — EXECUTING
+Phase: 36.3.7.8 — COMPLETE
 Plan: 1 of 5
-Status: Executing Phase 36.3.7.8
-Last activity: 2026-05-31 -- Phase 36.3.7.8 execution started
+Status: Phase 36.3.7.8 complete
+Last activity: 2026-05-31 -- Phase 36.3.7.8 marked complete
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
