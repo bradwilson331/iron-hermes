@@ -11,12 +11,17 @@ use ironhermes_kanban::{
     DispatcherContext, KanbanConfig, KanbanStore, KanbanWorkerSpec, StrandedReport, SwarmGraphSpec,
     diagnose_stranded, run_dispatch_tick,
 };
+use ironhermes_kanban::decomposer::{
+    DecomposeFn, DecomposeOutput, DecomposeRequest, ChildSpec,
+    decompose_triage_task, specify_triage_task,
+};
 use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
 use ironhermes_kanban::cas::{atomic_claim, build_claim_lock, release_claim};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 use ironhermes_kanban::types::TaskComment;
+use ironhermes_core::config::Config;
 
 use super::format::{
     format_assignees, format_diagnostics, format_event_line, format_runs_table, format_stats,
@@ -1367,6 +1372,426 @@ pub async fn cmd_notify_list(task_id: Option<String>, json: bool, board: Option<
         }
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.10 — hermes kanban decompose / specify CLI verbs
+// ---------------------------------------------------------------------------
+
+/// Load the operator's KanbanConfig from the main config.yaml's `kanban:` block.
+///
+/// Fails gracefully: if `config.yaml` is missing or the `kanban:` block is absent,
+/// returns `KanbanConfig::default()` (all defaults). This mirrors the gateway runner's
+/// behavior.
+fn load_kanban_config(main_config: &Config) -> KanbanConfig {
+    serde_yaml::from_value(main_config.kanban.clone()).unwrap_or_default()
+}
+
+/// Build the production DecomposeFn from operator config.
+///
+/// Three-tier cascade (RESEARCH §Q1):
+///   Tier 1: `kanban_config.decomposer_model` — kanban-local override (non-empty wins).
+///   Tier 2: `main_config.model.roles["kanban_decomposer"].model` — per-role override.
+///   Tier 3: `main_config.model.default` — main provider's default model.
+///
+/// The resulting closure builds a system prompt encoding the canonical Markdown
+/// body schema (RESEARCH §Q8), builds a user message with the task's title + body,
+/// calls the provider's text-completion endpoint via `LlmClient::chat_completion`,
+/// and parses the response as JSON into `DecomposeOutput`.
+///
+/// Returns `Err` if no provider can be constructed (e.g., no API key set), with
+/// a clear message naming the config keys the operator must set.
+fn build_runtime_decompose_fn(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+) -> anyhow::Result<DecomposeFn> {
+    use ironhermes_agent::client::LlmClient;
+    use ironhermes_core::provider::ProviderResolver;
+    use ironhermes_core::ChatMessage;
+
+    // Tier 1: kanban-local model override.
+    // Tier 2: model.roles["kanban_decomposer"].model.
+    // Tier 3: main provider's default model.
+    let registry = ProviderResolver::build(main_config)?;
+
+    // Resolve endpoint + model per the three-tier cascade.
+    let (endpoint, resolved_model): (_, String) = if !kanban_config.decomposer_model.is_empty() {
+        // Tier 1: kanban.decomposer_model is set — use main provider with this model.
+        let ep = registry.resolve_for_main().clone();
+        let model = kanban_config.decomposer_model.clone();
+        (ep, model)
+    } else if let Some(ep) = registry.resolve_role("kanban_decomposer") {
+        // Tier 2: model.roles["kanban_decomposer"] resolves (carries endpoint + model).
+        let model = ep.default_model.clone();
+        (ep, model)
+    } else {
+        // Tier 3: fall back to main provider's default model.
+        let ep = registry.resolve_for_main().clone();
+        let model = ep.default_model.clone();
+        (ep, model)
+    };
+
+    // Verify we have an API key (empty key → reject clearly).
+    let api_key = endpoint.api_key.clone().unwrap_or_default();
+    if api_key.is_empty() && endpoint.base_url.starts_with("https://") {
+        anyhow::bail!(
+            "decomposer model not configured — set `kanban.decomposer_model` in config.yaml \
+             OR `auxiliary.kanban_decomposer` OR ensure `model.default` is set with a valid API key"
+        );
+    }
+
+    let base_url = endpoint.base_url.clone();
+    let model_for_closure: String = resolved_model;
+
+    // Build the closure (captures owned data — no lifetime issues).
+    let decompose_fn: DecomposeFn = Arc::new(move |req: DecomposeRequest| {
+        let base_url = base_url.clone();
+        let api_key = api_key.clone();
+        let model = model_for_closure.clone();
+
+        Box::pin(async move {
+            let client = LlmClient::new(&base_url, &api_key, &model);
+
+            // System prompt: instructs the LLM to produce JSON output per the
+            // canonical Markdown body schema (RESEARCH §Q8).
+            // T-36.3.7.10-05-01: system prompt is TRUSTED (not user-supplied);
+            // task title/body below is UNTRUSTED and treated as user message content.
+            let system_prompt = "You are a kanban task decomposer. \
+                Given a one-line triage task, produce a detailed task specification as JSON. \
+                The JSON must have EXACTLY these fields:\n\
+                {\n\
+                  \"new_title\": \"<concise rewritten title (≤ 60 chars)>\",\n\
+                  \"new_body\": \"<Markdown body with sections: ## Goal, ## Approach, ## Acceptance Criteria, ## Work Breakdown, ## Risk Register, ## Suggested Skills>\",\n\
+                  \"children\": [\n\
+                    {\"title\": \"<child task title>\", \"assignee\": \"\", \"body\": null}\n\
+                  ]\n\
+                }\n\
+                `children` may be an empty array for the specify path.\n\
+                Respond with ONLY the JSON object — no prose, no markdown fences.";
+
+            let user_prompt = format!(
+                "Task ID: {}\nTitle: {}\nBody: {}\nAssignee: {}",
+                req.task_id,
+                req.title,
+                req.body.as_deref().unwrap_or("(none)"),
+                req.assignee,
+            );
+
+            let messages = vec![
+                ChatMessage::system(system_prompt),
+                ChatMessage::user(&user_prompt),
+            ];
+
+            let response = client
+                .chat_completion(&messages, None, None, Some(4096), Some(0.2), None)
+                .await
+                .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!("{}", e)))?;
+
+            // Extract text content from the first choice.
+            let raw_text = response
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_ref())
+                .and_then(|mc| mc.as_text())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            // Parse JSON response → DecomposeOutput.
+            // On parse failure → Err so kernel appends DecomposeFailed event.
+            let parsed: serde_json::Value = serde_json::from_str(&raw_text)
+                .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                    "parse_error: LLM response is not valid JSON: {} (raw: {})",
+                    e,
+                    &raw_text[..raw_text.len().min(200)]
+                )))?;
+
+            let new_title = parsed["new_title"]
+                .as_str()
+                .unwrap_or("(untitled)")
+                .to_string();
+            let new_body = parsed["new_body"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            let empty_vec = vec![];
+            let children: Vec<ChildSpec> = parsed["children"]
+                .as_array()
+                .unwrap_or(&empty_vec)
+                .iter()
+                .map(|c| ChildSpec {
+                    title: c["title"].as_str().unwrap_or("(child)").to_string(),
+                    assignee: c["assignee"].as_str().unwrap_or("").to_string(),
+                    body: c["body"].as_str().map(|s: &str| s.to_string()),
+                })
+                .collect();
+
+            Ok(DecomposeOutput { new_title, new_body, children })
+        })
+    });
+
+    Ok(decompose_fn)
+}
+
+/// `hermes kanban decompose [<id>] [--all] [--tenant T] [--json] [--board <slug>]`
+///
+/// LLM-driven decomposer: fan a triage task into a child swarm.
+/// Production DecomposeFn is constructed via `build_runtime_decompose_fn` using the
+/// three-tier cascade (kanban.decomposer_model > model.roles.kanban_decomposer > main provider).
+pub async fn cmd_decompose(
+    id: Option<String>,
+    all: bool,
+    tenant: Option<String>,
+    json: bool,
+    board: Option<&str>,
+) -> anyhow::Result<i32> {
+    let store = open_store_for_board(board)?;
+    // CR-WARNING-5 sourcing seam: KanbanStore::config() returns a KanbanConfig.
+    // We also load the main config so we can do the three-tier model cascade.
+    let _kanban_config_from_store = store.config();
+    let main_config = Config::load().unwrap_or_default();
+    let kanban_config = load_kanban_config(&main_config);
+
+    let store_arc = Arc::new(TokioMutex::new(store));
+
+    let decompose_fn = match build_runtime_decompose_fn(&kanban_config, &main_config) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Decomposer not configured: {}", e);
+            return Ok(1);
+        }
+    };
+
+    if all {
+        // T-36.3.7.10-05-03 (DoS / cost): cap at auto_decompose_per_tick.
+        let cap = kanban_config.auto_decompose_per_tick as usize;
+        let triage_tasks = {
+            let store = store_arc.lock().await;
+            store.list_tasks(ListFilters {
+                status: Some("triage".to_string()),
+                tenant: tenant.clone(),
+                ..Default::default()
+            }).context("Failed to list triage tasks")?
+        };
+
+        let mut any_err = false;
+        let mut output_rows: Vec<serde_json::Value> = Vec::new();
+
+        for task in triage_tasks.into_iter().take(cap) {
+            let task_id = task.id.clone();
+            match decompose_triage_task(
+                store_arc.clone(),
+                &task_id,
+                &decompose_fn,
+                &kanban_config,
+            ).await {
+                Ok(ids) => {
+                    if json {
+                        output_rows.push(serde_json::json!({
+                            "ok": true,
+                            "task_id": task_id,
+                            "reason": serde_json::Value::Null,
+                            "fanout": ids.child_ids.len(),
+                            "child_ids": ids.child_ids,
+                            "new_title": task.title,
+                        }));
+                    } else {
+                        println!("[{}] decomposed (children: {})", task_id, ids.child_ids.len());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[{}] decompose failed: {}", task_id, e);
+                    any_err = true;
+                    if json {
+                        output_rows.push(serde_json::json!({
+                            "ok": false,
+                            "task_id": task_id,
+                            "reason": e.to_string(),
+                            "fanout": 0,
+                            "child_ids": [],
+                            "new_title": task.title,
+                        }));
+                    }
+                }
+            }
+        }
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&output_rows)?);
+        }
+        Ok(if any_err { 1 } else { 0 })
+    } else {
+        // Single-id mode: require explicit id.
+        let task_id = id.ok_or_else(|| anyhow!("task id required when --all is not set"))?;
+
+        match decompose_triage_task(
+            store_arc.clone(),
+            &task_id,
+            &decompose_fn,
+            &kanban_config,
+        ).await {
+            Ok(ids) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "task_id": task_id,
+                        "reason": serde_json::Value::Null,
+                        "fanout": ids.child_ids.len(),
+                        "child_ids": ids.child_ids,
+                        "new_title": "",
+                    }))?);
+                } else {
+                    println!("[{}] decomposed (children: {})", task_id, ids.child_ids.len());
+                }
+                Ok(0)
+            }
+            Err(e) => {
+                eprintln!("[{}] decompose failed: {}", task_id, e);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": false,
+                        "task_id": task_id,
+                        "reason": e.to_string(),
+                        "fanout": 0,
+                        "child_ids": [],
+                        "new_title": "",
+                    }))?);
+                }
+                Ok(1)
+            }
+        }
+    }
+}
+
+/// `hermes kanban specify [<id>] [--all] [--tenant T] [--author NAME] [--json] [--board <slug>]`
+///
+/// LLM-driven specifier: rewrite triage task body + promote to todo.
+/// Same shape as `cmd_decompose` but calls `specify_triage_task` (no fan-out).
+/// The `--author` arg is threaded via the `author` field in the `HERMES_PROFILE`
+/// environment variable override (passed to DecomposeRequest.config.orchestrator_profile
+/// for author attribution in the `specified` event).
+pub async fn cmd_specify(
+    id: Option<String>,
+    all: bool,
+    tenant: Option<String>,
+    author: Option<String>,
+    json: bool,
+    board: Option<&str>,
+) -> anyhow::Result<i32> {
+    let store = open_store_for_board(board)?;
+    // CR-WARNING-5 sourcing seam: KanbanStore::config() returns a KanbanConfig.
+    let _kanban_config_from_store = store.config();
+    let main_config = Config::load().unwrap_or_default();
+    let mut kanban_config = load_kanban_config(&main_config);
+
+    // Thread author into orchestrator_profile if explicitly provided.
+    if let Some(ref a) = author {
+        kanban_config.orchestrator_profile = a.clone();
+    } else if kanban_config.orchestrator_profile.is_empty() {
+        kanban_config.orchestrator_profile = profile_from_env();
+    }
+
+    let store_arc = Arc::new(TokioMutex::new(store));
+
+    let decompose_fn = match build_runtime_decompose_fn(&kanban_config, &main_config) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Decomposer not configured: {}", e);
+            return Ok(1);
+        }
+    };
+
+    if all {
+        // T-36.3.7.10-05-03: cap at auto_decompose_per_tick.
+        let cap = kanban_config.auto_decompose_per_tick as usize;
+        let triage_tasks = {
+            let store = store_arc.lock().await;
+            store.list_tasks(ListFilters {
+                status: Some("triage".to_string()),
+                tenant: tenant.clone(),
+                ..Default::default()
+            }).context("Failed to list triage tasks")?
+        };
+
+        let mut any_err = false;
+        let mut output_rows: Vec<serde_json::Value> = Vec::new();
+
+        for task in triage_tasks.into_iter().take(cap) {
+            let task_id = task.id.clone();
+            match specify_triage_task(
+                store_arc.clone(),
+                &task_id,
+                &decompose_fn,
+                &kanban_config,
+            ).await {
+                Ok(_ids) => {
+                    if json {
+                        output_rows.push(serde_json::json!({
+                            "ok": true,
+                            "task_id": task_id,
+                            "reason": serde_json::Value::Null,
+                            "new_title": task.title,
+                        }));
+                    } else {
+                        println!("[{}] specified (promoted to todo)", task_id);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[{}] specify failed: {}", task_id, e);
+                    any_err = true;
+                    if json {
+                        output_rows.push(serde_json::json!({
+                            "ok": false,
+                            "task_id": task_id,
+                            "reason": e.to_string(),
+                            "new_title": task.title,
+                        }));
+                    }
+                }
+            }
+        }
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&output_rows)?);
+        }
+        Ok(if any_err { 1 } else { 0 })
+    } else {
+        let task_id = id.ok_or_else(|| anyhow!("task id required when --all is not set"))?;
+
+        match specify_triage_task(
+            store_arc.clone(),
+            &task_id,
+            &decompose_fn,
+            &kanban_config,
+        ).await {
+            Ok(_ids) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "task_id": task_id,
+                        "reason": serde_json::Value::Null,
+                        "new_title": "",
+                    }))?);
+                } else {
+                    println!("[{}] specified (promoted to todo)", task_id);
+                }
+                Ok(0)
+            }
+            Err(e) => {
+                eprintln!("[{}] specify failed: {}", task_id, e);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": false,
+                        "task_id": task_id,
+                        "reason": e.to_string(),
+                        "new_title": "",
+                    }))?);
+                }
+                Ok(1)
+            }
+        }
+    }
 }
 
 /// `hermes kanban notify-unsubscribe <task-id> [--platform P] [--chat-id C]`
