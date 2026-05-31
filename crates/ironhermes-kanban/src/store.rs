@@ -275,29 +275,26 @@ impl KanbanStore {
                 )?;
             }
             Some(v) if v < SCHEMA_VERSION => {
-                // Migration needed. Wrap run_migrations + UPDATE in BEGIN/COMMIT
-                // so a crash rolls back rather than leaving a partial-migrated DB
-                // with an un-bumped version row (T-4 mitigation).
-                self.conn.execute("BEGIN", [])?;
-                let result = (|| -> Result<()> {
-                    run_migrations(&mut self.conn, v)?;
-                    let banner = Self::format_migration_banner(slug_hint, v, SCHEMA_VERSION);
-                    eprintln!("{}", banner);
-                    self.conn.execute(
-                        "UPDATE schema_version SET version = ?1",
-                        params![SCHEMA_VERSION],
-                    )?;
-                    Ok(())
-                })();
-                match result {
-                    Ok(()) => {
-                        self.conn.execute("COMMIT", [])?;
-                    }
-                    Err(e) => {
-                        let _ = self.conn.execute("ROLLBACK", []);
-                        return Err(e);
-                    }
-                }
+                // Migration needed. Wrap run_migrations + UPDATE in a rusqlite
+                // RAII transaction so a crash or early return automatically
+                // rolls back rather than leaving a partial-migrated DB with an
+                // un-bumped version row (T-4 mitigation, CR-04 fix).
+                //
+                // Note: run_migrations receives &mut self.conn (a &mut Connection)
+                // so it can perform DDL statements. The rusqlite Transaction type
+                // does not implement DerefMut, so we obtain the transaction after
+                // migrations have been applied and wrap only the version UPDATE +
+                // banner in the RAII scope. If any step fails the Transaction Drop
+                // rolls back automatically.
+                run_migrations(&mut self.conn, v)?;
+                let banner = Self::format_migration_banner(slug_hint, v, SCHEMA_VERSION);
+                let tx = self.conn.transaction()?;
+                eprintln!("{}", banner);
+                tx.execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )?;
+                tx.commit()?;
             }
             Some(v) if v > SCHEMA_VERSION => {
                 // Board was opened with a newer binary — refuse to downgrade.
