@@ -647,14 +647,36 @@ Plans:
 
 ### Phase 36.3.7.9: Multi-board CLI — `boards list/create/switch/show/rename/rm` + `--board <slug>` flag (INSERTED 2026-05-30)
 
-**Goal:** Implement the multi-board CLI surface referenced at `docs/kanban/reference.md` §71 ("Multi-board CLI [...] are deferred to Phase 36.3.7.3"). The current v1 surface only exercises the `default` board at `~/.ironhermes/kanban.db`; the multi-board layout at `~/.ironhermes/kanban/boards/<slug>/kanban.db` is reserved but not populated. Ship: `hermes kanban boards list/create/switch/show/rename/rm` + a `--board <slug>` flag on existing `kanban` subcommands; a `current_board` cursor (in a small config file OR an env var) so single-board callers don't need `--board` on every invocation; migration of the existing `~/.ironhermes/kanban.db` into `~/.ironhermes/kanban/boards/default/kanban.db` (or symlink for backward compat); per-board schema versioning (each board carries its own schema_version row). LLM-tool side: the existing 9 kanban_* tools gain an optional `board: Option<String>` param defaulting to the current board cursor; tool surfaces are NOT renumbered.
+**Goal:** Ship the multi-board CLI surface for IronHermes Kanban: `hermes kanban boards {list,create,switch,show,rename,rm}` (+ `--delete` on `rm`); a `--board <slug>` flag on every existing `kanban` subverb; a 4-tier `current_board` resolution chain (`--board` flag > `HERMES_KANBAN_BOARD` env > `~/.ironhermes/kanban/current` file > `default`); the multi-board on-disk layout at `~/.ironhermes/kanban/boards/<slug>/{kanban.db, workspaces/, logs/}` while the default board stays at `~/.ironhermes/kanban.db` (D-01 back-compat, no migration of existing installs); per-board `schema_version` rows with auto-migrate-with-stderr-banner (D-06); a `notifier.toml` config surface with `subscribe_boards = ["*"]` default (explicit-list codepath ships inert, unit-tested only, D-03); `boards rm` archive-by-default + hard-delete-with-open-task-refusal (D-07); LLM-tool optional `board: Option<String>` arg + always-emit `board`/`board_source` envelope fields across all 11 tools (D-08, T-5 mitigation). One dispatcher sweeps all boards per tick with per-board open-failure isolation (D-04, INV-36.3.7-08-05 extension). Cycle detection unchanged — cross-board task links are forbidden by construction so per-board WITH RECURSIVE walks remain correct (D-05).
 
-**Requirements**: TBD (run /gsd-plan-phase 36.3.7.9 to break down — planner must decide migration strategy for existing `~/.ironhermes/kanban.db` (symlink, copy, in-place rename, leave-as-default-only); whether `current_board` is config-file-backed, env-var-only, or both; whether the 36.3.7.5 notifier polling loop iterates over all boards or just the current; whether the dispatcher claims tasks across boards or per-board; cycle-detection scope — `task_links` cycles within a board, or across boards?)
-**Depends on:** Phase 36.3.7.6 (CLOSED — full LLM-tool surface; multi-board adds a `board` param uniformly across all 9 tools)
-**Plans:** TBD
+**Requirements**: D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08 (locked CONTEXT decisions serve as requirement IDs for this phase per planning_context guidance)
+**Depends on:** Phase 36.3.7.6 (CLOSED — full 11-tool LLM surface), Phase 36.3.7.5 (CLOSED — gateway notifier infrastructure), Phase 36.3.7.8 (CLOSED — mention/resolver pure-fn pattern reused)
+**Plans:** 9 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.9 to break down)
+**Wave 1** *(no dependencies)*
+
+- [ ] 36.3.7.9-01-PLAN.md — `paths.rs` multi-board helpers + `board/` module (BoardContext, BoardSource, slug validator with T-1 path-traversal rejection, 4-tier resolve_board_context pure fn) — covers D-01, D-02
+
+**Wave 2** *(depends on 01)*
+
+- [ ] 36.3.7.9-02-PLAN.md — `KanbanStore::open/open_labeled/open_for_board` + D-06 migration banner injection in init_schema with T-4 tx-rollback — covers D-01, D-06
+
+**Wave 3** *(depends on 02; plans 03, 04, 08 are file-disjoint and parallel-eligible)*
+
+- [ ] 36.3.7.9-03-PLAN.md — `boards` nested clap subcommand + `cmd_boards_list/create/switch/show/rename/rm` with T-3 atomic create+switch, T-6 symlink refusal on rm, T-7 advisory file lock around hard-delete — covers D-01, D-02, D-07
+- [ ] 36.3.7.9-04-PLAN.md — `--board <slug>` flag plumbing through ≥22 existing `cmd_*` fns + handle_kanban_command signature extension + main.rs clap arg — covers D-02
+- [ ] 36.3.7.9-08-PLAN.md — Append `"boards"` to `DEFERRED_KANBAN_SUBVERBS` (single-line edit, regression test) — covers D-04 (gateway slash routing)
+
+**Wave 4** *(depends on 01 + 02; plans 05, 06, 07 are file-disjoint and parallel-eligible)*
+
+- [ ] 36.3.7.9-05-PLAN.md — `notifier.toml` parser + workspace `toml = "0.8"` dep + multi-board NotifierContext sweep with per-board watermarks + INV-36.3.7-08-05 corrupt-board skip — covers D-03
+- [ ] 36.3.7.9-06-PLAN.md — Dispatcher per-tick multi-board sweep + `build_kanban_worker_env(board_slug)` env propagation + minimal gateway runner.rs change — covers D-04
+- [ ] 36.3.7.9-07-PLAN.md — All 11 LLM tools gain `board: Option<String>` schema param + every success/rejection envelope carries `board` + `board_source` via shared `tools/common.rs` helpers — covers D-08, T-5
+
+**Wave 5** *(depends on all prior plans)*
+
+- [ ] 36.3.7.9-09-PLAN.md — End-to-end integration tests (boards create/switch/list/rm + 4-tier precedence + tool envelope) + D-05 no-code-change assertion + T-2 SQL-no-slug-literals static audit + docs/kanban/reference.md §71 reconciliation — covers D-05, D-08
 
 ### Phase 36.3.7.10: Auto-decompose / triage decomposer / specifier (INSERTED 2026-05-30)
 
