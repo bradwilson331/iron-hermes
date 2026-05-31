@@ -682,12 +682,31 @@ Plans:
 
 **Goal:** Implement the `hermes kanban decompose` + `hermes kanban specify` CLI verbs + `kanban.auto_decompose` config knob referenced at `docs/kanban/reference.md` §425 ("Auto-decompose / triage decomposer / specifier [...] are deferred to Phase 36.3.7.2") and §744 (same feature, alternate naming "Triage specifier"). In v1, the `triage` column is a parking lot — transitions out are operator-only via `hermes kanban assign` + manual status update; the **Orchestration: Auto/Manual** toggle does not exist. Ship: an LLM-driven decomposer that takes a one-line task (`"add Stripe payments"`) and emits a body with structured fields (acceptance criteria, work-breakdown, risk register, suggested skill set); an auto-mode that runs the decomposer on `triage→todo` transitions when `kanban.auto_decompose=true`; an `Orchestration: Auto/Manual` config toggle; CLI verb that lets operators run the decomposer manually. Likely uses the `AgentRuntime` + a dedicated `decompose` skill or a delegate_task call.
 
-**Requirements**: TBD (run /gsd-plan-phase 36.3.7.10 to break down — planner must decide: which model is the decomposer (config-driven? hardcoded?); whether decompose uses a kanban-specific skill or a generic delegate_task; whether the decomposer writes its output directly to `tasks.body` or emits a comment + leaves the body untouched; whether auto-mode triggers on dispatcher tick or on operator `kanban triage` invocation; how to handle decomposer failures (retain in triage? log + drop? backoff?))
-**Depends on:** Phase 36.3.7.6 (CLOSED — kanban_create + kanban_comment tools available for decomposer to invoke). Possibly Phase 36.3.7.7 (TBD — swarm batch-create might be used by decomposer to fan out work-breakdown subtasks; planner decides)
-**Plans:** TBD
+**Requirements**: REQ-36.3.7.10-01 (decomposer module), REQ-36.3.7.10-02 (CLI decompose verb), REQ-36.3.7.10-03 (CLI specify verb), REQ-36.3.7.10-04 (auto_decompose config knob), REQ-36.3.7.10-05 (dispatcher Step 0), REQ-36.3.7.10-06 (failure-mode policy + DecomposeFailed event), REQ-36.3.7.10-07 (KanbanDecomposeTool + KanbanSpecifyTool LLM tools), REQ-36.3.7.10-08 (kanban_decomposer reserved role), REQ-36.3.7.10-09 (DEFERRED_KANBAN_SUBVERBS extension), REQ-36.3.7.10-10 (docs/kanban/reference.md reconciliation). Derived from ROADMAP goal + RESEARCH §Acceptance Criteria; full list in 36.3.7.10-01-PLAN.md §Requirements (Derived).
+**Depends on:** Phase 36.3.7.6 (CLOSED — kanban_create + kanban_comment tools available), Phase 36.3.7.9 (CLOSED — multi-board CLI + --board flag + tools/common.rs envelope helpers + DEFERRED_KANBAN_SUBVERBS pattern). NOT dependent on Phase 36.3.7.7 (swarm) — RESEARCH §Q8 + §Assumptions A3 show decompose-children land via a new store.apply_decompose mirroring create_swarm's atomic-tx shape but NOT calling create_swarm directly (the "root" is a pre-existing triage task, not a new card).
+**Plans:** 6 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 36.3.7.10 to break down)
+**Wave 1** *(no dependencies)*
+
+- [ ] 36.3.7.10-01-PLAN.md — Foundations: KanbanConfig +6 fields + KanbanEventKind +3 variants + RESERVED_ROLE_NAMES 7→8 (`kanban_decomposer`) + DEFERRED_KANBAN_SUBVERBS 26→28 (`decompose`/`specify`) — covers REQ-04, REQ-06 (event variant), REQ-08, REQ-09
+
+**Wave 2** *(depends on 01)*
+
+- [ ] 36.3.7.10-02-PLAN.md — Decomposer kernel: NEW decomposer.rs (DecomposeFn typedef + 4 data structs + specify_triage_task + decompose_triage_task) + 2 new store helpers (apply_specify + apply_decompose with WHERE status='triage' guard + BEGIN IMMEDIATE) + lib.rs re-exports + 6 receiver tests (DEC-01..06) — covers REQ-01, REQ-06 (policy wired)
+
+**Wave 3** *(depends on 02; plans 03 + 04 are file-disjoint and parallel-eligible)*
+
+- [ ] 36.3.7.10-03-PLAN.md — LLM tool surface: NEW tools/decompose.rs + tools/specify.rs (KanbanDecomposeTool + KanbanSpecifyTool mirror tools/create.rs shape; v1 returns no_aux_client envelope per crate-isolation fence) + register_kanban_tools tool-count regression test 11→13 — covers REQ-07
+- [ ] 36.3.7.10-04-PLAN.md — Dispatcher auto-mode: DispatcherContext.decompose_fn field + run_dispatch_tick_for_board Step 0 (gated on config.auto_decompose && decompose_fn.is_some()) + decompose_triage_tasks helper (sequential, per-tick-capped) + 3 receiver tests — covers REQ-05, REQ-06 (dispatcher invocation)
+
+**Wave 4** *(depends on 01 + 02)*
+
+- [ ] 36.3.7.10-05-PLAN.md — CLI verbs: KanbanCommands::Decompose + Specify variants + dispatch arms + cmd_decompose + cmd_specify + build_runtime_decompose_fn (three-tier model cascade: kanban.decomposer_model > auxiliary.kanban_decomposer > main provider) + ≥4 clap parity tests in NEW tests/decompose_cli.rs — covers REQ-02, REQ-03
+
+**Wave 5** *(depends on all prior plans)*
+
+- [ ] 36.3.7.10-06-PLAN.md — Docs reconciliation: replace `deferred to Phase 36.3.7.10` at §425 + §744 with `Shipped in Phase 36.3.7.10` blocks; add `hermes kanban decompose` line to §609 CLI listing; annotate §444 config row with IronHermes v1 default override — covers REQ-10
 
 ### Phase 36.3.7.11: Dashboard plugin — SPA + REST + WebSocket live-update for hermes dashboard Kanban tab (INSERTED 2026-05-30)
 
