@@ -90,8 +90,16 @@ pub enum SkipReason {
     /// Resolved handle equals the parent task's assignee — self-delegation
     /// creates a busy-loop and adds no value (REQ-09, D-04 layer 1).
     SelfReference,
-    /// Resolved handle appears within `MAX_MENTION_CHAIN_DEPTH` ancestor hops
-    /// (D-04 layer 2 — checked in `store.rs::create_mention_children`, Plan 02).
+    /// Reserved for a future resolver-side ancestor-chain pre-check.
+    ///
+    /// WR-04 (Phase 36.3.7.8 code review): the resolver does NOT currently
+    /// produce this variant. Today, ancestor-chain cycle detection (D-04
+    /// layer 2) lives exclusively in `store.rs::create_mention_children` and
+    /// surfaces as a whole-batch `KanbanError::Other("mention_cycle: ...")`
+    /// — NOT as a per-handle skip. The variant is kept so that a future
+    /// resolver-side pre-check (e.g. for cost-avoiding batch aborts) has a
+    /// stable shape to fill, but downstream code MUST treat it as
+    /// `#[allow(unreachable_patterns)]` until a producer is wired up.
     Cycle,
     /// Handle is valid but unknown and the policy is `Skip` or `Error`.
     ///

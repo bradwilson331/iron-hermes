@@ -289,6 +289,13 @@ impl Tool for KanbanMentionTool {
                     }));
                 }
                 Resolution::Skipped(SkipReason::Cycle) => {
+                    // WR-04 (Phase 36.3.7.8 code review): the resolver does NOT
+                    // produce this variant today — layer-2 ancestor-chain cycle
+                    // detection lives in store.rs::create_mention_children and
+                    // raises mention_cycle as a whole-batch KanbanError, not a
+                    // per-handle skip. This arm exists for forward compatibility
+                    // with a future resolver-side cycle pre-check (see
+                    // SkipReason::Cycle doc comment).
                     skipped.push(json!({
                         "handle": span.handle,
                         "reason": "cycle"
