@@ -324,6 +324,19 @@ pub async fn cmd_boards_rm(slug: String, delete: bool) -> Result<i32> {
             }
         };
 
+        // CR-03 fix: RAII guard ensures lock file is removed on ALL exit paths,
+        // including early returns (count > 0) and remove_dir_all failures that
+        // previously left a stale lock blocking future --delete attempts.
+        struct LockGuard {
+            path: std::path::PathBuf,
+        }
+        impl Drop for LockGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+        let _lock_guard = LockGuard { path: lock_path.clone() };
+
         // Pre-flight count inside the lock (D-07)
         let count = {
             let store = KanbanStore::open_for_board(&validated_slug)
@@ -334,9 +347,7 @@ pub async fn cmd_boards_rm(slug: String, delete: bool) -> Result<i32> {
         };
 
         if count > 0 {
-            // Drop the lock file (it's inside board_path, will be cleaned up manually)
-            drop(_lock_file);
-            let _ = std::fs::remove_file(&lock_path);
+            // _lock_guard.drop() will remove the lock file when this arm exits.
             eprintln!(
                 "board '{}' has {} open task(s); refusing hard delete. Archive instead (omit --delete) or close tasks first.",
                 validated_slug, count
@@ -344,7 +355,9 @@ pub async fn cmd_boards_rm(slug: String, delete: bool) -> Result<i32> {
             return Ok(1);
         }
 
-        // count == 0: remove the entire directory (lock file is inside and removed too)
+        // count == 0: remove the entire directory.
+        // Even if remove_dir_all fails, _lock_guard.drop() removes the lock so
+        // future --delete attempts are not permanently blocked.
         std::fs::remove_dir_all(&board_path)
             .with_context(|| format!("delete board dir {}", board_path.display()))?;
         println!("deleted board '{}'", validated_slug);
@@ -388,22 +401,45 @@ fn write_current_board_atomic(slug: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// board.toml TOML helpers (CR-02 fix: use `toml` crate, not hand-rolled parser)
+// ---------------------------------------------------------------------------
+
+/// In-memory representation of board.toml fields.
+///
+/// CR-02 fix: parse via `toml::from_str` so that key matching is exact (no
+/// false-positives on `name_alt`, `namespace`, etc.) and value unescaping is
+/// handled correctly by the TOML parser rather than `trim_matches('"')`.
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct BoardToml {
+    /// Human-readable display name. Omitted from TOML if not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Optional board description. Omitted from TOML if not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+/// Parse board.toml from disk.  Returns `None` if the file is missing or
+/// malformed — callers fall back to the slug as the display name.
+fn read_board_toml(path: &std::path::Path) -> Option<BoardToml> {
+    let s = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&s).ok()
+}
+
 /// Write board.toml with the given name and description fields.
 /// Uses atomic tmp+rename for crash safety.
+/// Uses `toml::to_string` for correct escaping (CR-02 fix).
 fn write_board_toml(dir: &std::path::Path, name: Option<&str>, description: Option<&str>) -> Result<()> {
     let toml_path = dir.join("board.toml");
     let tmp_path = dir.join("board.toml.tmp");
 
-    let mut content = String::new();
-    if let Some(n) = name {
-        // Escape any double-quotes in name
-        let escaped = n.replace('\\', "\\\\").replace('"', "\\\"");
-        content.push_str(&format!("name = \"{}\"\n", escaped));
-    }
-    if let Some(d) = description {
-        let escaped = d.replace('\\', "\\\\").replace('"', "\\\"");
-        content.push_str(&format!("description = \"{}\"\n", escaped));
-    }
+    let board = BoardToml {
+        name: name.map(|s| s.to_string()),
+        description: description.map(|s| s.to_string()),
+    };
+    let content = toml::to_string(&board)
+        .with_context(|| "failed to serialize board.toml")?;
 
     std::fs::write(&tmp_path, content.as_bytes())
         .with_context(|| format!("write tmp board.toml {}", tmp_path.display()))?;
@@ -413,34 +449,16 @@ fn write_board_toml(dir: &std::path::Path, name: Option<&str>, description: Opti
 }
 
 /// Read the display name from board.toml (if present).
+/// Falls back to `None` (caller uses slug) if file is missing or malformed.
 fn read_board_display_name(slug: &str) -> Option<String> {
     if slug == "default" {
         return None;
     }
     let path = paths::board_dir(slug).join("board.toml");
-    let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("name") {
-            let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
-            let value = rest.trim_matches('"');
-            return Some(value.to_string());
-        }
-    }
-    None
+    read_board_toml(&path)?.name
 }
 
 /// Read the description field from board.toml (if present).
 fn read_board_description(dir: &std::path::Path) -> Option<String> {
-    let path = dir.join("board.toml");
-    let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("description") {
-            let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
-            let value = rest.trim_matches('"');
-            return Some(value.to_string());
-        }
-    }
-    None
+    read_board_toml(&dir.join("board.toml"))?.description
 }

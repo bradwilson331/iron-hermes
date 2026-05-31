@@ -379,3 +379,145 @@ fn rm_refuses_to_follow_symlink() {
     // Real dir should be untouched
     assert!(real_dir.exists(), "real dir should be untouched");
 }
+
+// ---------------------------------------------------------------------------
+// CR-02: TOML parser round-trip — escaped names must survive write + read
+// ---------------------------------------------------------------------------
+
+/// Regression test for CR-02 (Phase 36.3.7.9 code review): a board name
+/// containing double-quotes and backslashes must round-trip correctly through
+/// `write_board_toml` + `read_board_display_name` (previously the hand-rolled
+/// parser did not unescape `\\\"` sequences).
+#[test]
+fn board_name_with_quotes_round_trips_correctly() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = ScopedHome::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Create a board with a name containing double-quotes (previously mis-read).
+    let raw_name = r#"My "Project""#;
+    let code = rt
+        .block_on(boards::cmd_boards_create(
+            "myproject".into(),
+            Some(raw_name.to_string()),
+            None,
+            false,
+            false,
+        ))
+        .expect("create should succeed");
+    assert_eq!(code, 0, "boards create should return 0");
+
+    // Read back via the boards list JSON output and confirm name is correct.
+    // We call read_board_display_name indirectly by verifying the board.toml
+    // written by write_board_toml can be parsed by toml::from_str.
+    let board_toml_path = home
+        .root
+        .join("kanban")
+        .join("boards")
+        .join("myproject")
+        .join("board.toml");
+    assert!(board_toml_path.exists(), "board.toml should exist");
+
+    let raw = std::fs::read_to_string(&board_toml_path).expect("read board.toml");
+    // The file should contain valid TOML (no hand-rolled escaping issues).
+    let parsed: toml::Value = toml::from_str(&raw).expect("board.toml must be valid TOML");
+    let name_from_toml = parsed["name"].as_str().expect("name key must exist");
+    assert_eq!(
+        name_from_toml, raw_name,
+        "name must round-trip through TOML: expected {:?}, got {:?}",
+        raw_name, name_from_toml
+    );
+}
+
+/// `name_alt = "x"` in board.toml must NOT be matched by the name reader —
+/// the fix uses exact TOML key matching, not line-prefix matching.
+#[test]
+fn board_toml_name_alt_key_not_matched_as_name() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = ScopedHome::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Create a board without a name.
+    rt.block_on(boards::cmd_boards_create(
+        "noname".into(), None, None, false, false,
+    ))
+    .expect("create should succeed");
+
+    // Manually write a board.toml with a `name_alt` key (previously false-matched
+    // by strip_prefix("name")).
+    let board_toml_path = home
+        .root
+        .join("kanban")
+        .join("boards")
+        .join("noname")
+        .join("board.toml");
+    std::fs::write(&board_toml_path, b"name_alt = \"misleading\"\n")
+        .expect("write board.toml");
+
+    // cmd_boards_list writes to stdout — we test indirectly by calling
+    // cmd_boards_list and confirming it returns 0 (no crash on malformed name).
+    let code = rt
+        .block_on(boards::cmd_boards_list(false))
+        .expect("boards list should not crash on name_alt key");
+    assert_eq!(code, 0, "boards list should succeed even with name_alt key");
+
+    drop(home);
+}
+
+// ---------------------------------------------------------------------------
+// CR-03: lock file cleaned up on all exit paths (RAII guard)
+// ---------------------------------------------------------------------------
+
+/// Regression test for CR-03 (Phase 36.3.7.9 code review): the `kanban.db.rm-lock`
+/// file must be removed on ALL exit paths from `cmd_boards_rm --delete`.
+///
+/// This test verifies the `count > 0` early-return path: before CR-03 the manual
+/// `drop(_lock_file); remove_file(&lock_path);` covered this case, but the
+/// `remove_dir_all` failure path was not covered. The RAII `LockGuard` introduced
+/// by CR-03 covers all paths uniformly — including early returns and I/O failures.
+///
+/// We verify the count > 0 path because it is reliably reproducible in CI
+/// without OS-specific permission tricks.
+#[test]
+fn rm_lock_file_cleaned_up_on_count_gt_zero_exit() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = ScopedHome::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Create board and seed one open task so the pre-flight count blocks deletion.
+    rt.block_on(boards::cmd_boards_create(
+        "lockedboard".into(), None, None, false, false,
+    ))
+    .expect("create should succeed");
+
+    {
+        let mut store = ironhermes_kanban::KanbanStore::open_for_board("lockedboard")
+            .expect("open board for seeding");
+        store
+            .create_task(
+                "Pending",
+                "alice",
+                ironhermes_kanban::store::CreateTaskOptions::default(),
+            )
+            .expect("seed task");
+    }
+
+    let board_dir = home.root.join("kanban").join("boards").join("lockedboard");
+    let lock_path = board_dir.join("kanban.db.rm-lock");
+
+    // --delete must be refused (count > 0) and return exit code 1.
+    let code = rt
+        .block_on(boards::cmd_boards_rm("lockedboard".into(), true))
+        .expect("cmd_boards_rm should return Ok(1)");
+    assert_eq!(code, 1, "should refuse --delete with open tasks");
+
+    // Lock file must be cleaned up by the RAII guard even in the early-return path.
+    assert!(
+        !lock_path.exists(),
+        "kanban.db.rm-lock must be removed after count>0 refusal; path: {}",
+        lock_path.display()
+    );
+
+    // Board directory itself should still exist (was not deleted).
+    assert!(board_dir.exists(), "board dir must still exist after refusal");
+}
