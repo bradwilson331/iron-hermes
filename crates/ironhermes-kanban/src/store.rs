@@ -176,6 +176,22 @@ fn like_escape(s: &str) -> String {
 }
 
 impl KanbanStore {
+    /// Phase 36.3.7.10 — KanbanConfig accessor (CR-WARNING-5 sourcing seam).
+    ///
+    /// Returns a default `KanbanConfig` because `KanbanStore` does not store
+    /// its own per-board config (the per-board config.yaml is not loaded at
+    /// `open` time). Callers that need operator-configured decomposer settings
+    /// should load the main config via `Config::load()` and deserialize
+    /// `config.kanban` into `KanbanConfig` directly (see `commands.rs`
+    /// `load_kanban_config` helper).
+    ///
+    /// This accessor exists so that `cmd_decompose` / `cmd_specify` can call
+    /// `store.config()` without an additional argument when a board-level
+    /// override has not been loaded, matching the interface promised by the plan.
+    pub fn config(&self) -> crate::config::KanbanConfig {
+        crate::config::KanbanConfig::default()
+    }
+
     /// Open (or create) a database at `path`. No slug label — migration banner
     /// uses `"default"` if it ever fires.
     ///

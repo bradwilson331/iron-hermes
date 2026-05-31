@@ -509,6 +509,53 @@ pub enum KanbanCommands {
         #[arg(long = "thread-id")]
         thread_id: Option<String>,
     },
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.3.7.10 — LLM-driven decomposer / specifier CLI verbs
+    // ---------------------------------------------------------------------------
+
+    /// LLM-driven decomposer: fan a triage task into a child swarm (Phase 36.3.7.10).
+    #[command(name = "decompose")]
+    Decompose {
+        /// Task ID to decompose. Mutually exclusive with --all.
+        #[arg(conflicts_with = "all")]
+        id: Option<String>,
+        /// Sweep all triage tasks (capped by config auto_decompose_per_tick).
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        /// Filter --all sweep to one tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Output as JSON {ok, task_id, reason, fanout, child_ids, new_title}.
+        #[arg(long)]
+        json: bool,
+        /// Board slug (overrides --board global flag).
+        #[arg(long)]
+        board: Option<String>,
+    },
+
+    /// LLM-driven specifier: rewrite triage task body + promote to todo (Phase 36.3.7.10).
+    #[command(name = "specify")]
+    Specify {
+        /// Task ID to specify. Mutually exclusive with --all.
+        #[arg(conflicts_with = "all")]
+        id: Option<String>,
+        /// Sweep all triage tasks (capped by config auto_decompose_per_tick).
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        /// Filter --all sweep to one tenant.
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Author field in the `specified` event (default: HERMES_PROFILE env).
+        #[arg(long)]
+        author: Option<String>,
+        /// Output as JSON {ok, task_id, reason, new_title}.
+        #[arg(long)]
+        json: bool,
+        /// Board slug (overrides --board global flag).
+        #[arg(long)]
+        board: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -711,5 +758,13 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             chat_id,
             thread_id: _,
         } => commands::cmd_notify_unsubscribe(task_id, platform, chat_id, board.as_deref()).await,
+        // Phase 36.3.7.10 — hermes kanban decompose.
+        KanbanCommands::Decompose { id, all, tenant, json, board: cmd_board } => {
+            commands::cmd_decompose(id, all, tenant, json, cmd_board.as_deref().or(board.as_deref())).await
+        }
+        // Phase 36.3.7.10 — hermes kanban specify.
+        KanbanCommands::Specify { id, all, tenant, author, json, board: cmd_board } => {
+            commands::cmd_specify(id, all, tenant, author, json, cmd_board.as_deref().or(board.as_deref())).await
+        }
     }
 }
