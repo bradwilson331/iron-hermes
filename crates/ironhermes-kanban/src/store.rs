@@ -2142,4 +2142,58 @@ impl KanbanStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(runs)
     }
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.3.7.9 Plan 03 — boards rm pre-flight (D-07)
+    // ---------------------------------------------------------------------------
+
+    /// Count tasks in open statuses (`todo`, `ready`, `in_progress`).
+    ///
+    /// Used by `cmd_boards_rm --delete` for the D-07 pre-flight check: refuses
+    /// hard-delete if the count is > 0. Keeping the SQL inside the kanban crate
+    /// preserves rusqlite isolation from ironhermes-cli.
+    pub fn open_tasks_count(&self) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status IN ('todo','ready','in_progress')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.9 Plan 03 — open_tasks_count unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod open_tasks_count_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn open_tasks_count_returns_zero_on_fresh_store() {
+        let dir = TempDir::new().unwrap();
+        let store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+        assert_eq!(store.open_tasks_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn open_tasks_count_returns_n_after_seeding_tasks() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        // Seed 3 tasks in open statuses
+        for i in 0..3 {
+            store
+                .create_task(
+                    &format!("Task {}", i),
+                    "alice",
+                    CreateTaskOptions::default(),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(store.open_tasks_count().unwrap(), 3);
+    }
 }
