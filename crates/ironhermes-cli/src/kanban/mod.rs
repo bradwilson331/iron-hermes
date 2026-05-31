@@ -6,6 +6,7 @@
 //!
 //! All verbs route through `KanbanStore` — no raw SQL in this module.
 
+pub mod boards;
 pub mod commands;
 pub mod format;
 pub mod store_reader_impl;
@@ -18,6 +19,8 @@ pub use ironhermes_kanban::KanbanStoreWriterImpl;
 
 use anyhow::Result;
 use clap::Subcommand;
+
+use boards::BoardsCommands;
 
 // ---------------------------------------------------------------------------
 // KanbanCommands enum
@@ -299,6 +302,13 @@ pub enum KanbanCommands {
         /// Output result as JSON.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Manage boards (multi-project isolation) (Phase 36.3.7.9)
+    #[command(name = "boards")]
+    Boards {
+        #[command(subcommand)]
+        cmd: BoardsCommands,
     },
 
     /// Archive one or more tasks
@@ -625,6 +635,19 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             )
             .await
         }
+        // Phase 36.3.7.9 — boards subcommand (multi-board isolation).
+        KanbanCommands::Boards { cmd } => match cmd {
+            BoardsCommands::List { json } => boards::cmd_boards_list(json).await,
+            BoardsCommands::Create { slug, name, description, switch, json } => {
+                boards::cmd_boards_create(slug, name, description, switch, json).await
+            }
+            BoardsCommands::Switch { slug } => boards::cmd_boards_switch(slug).await,
+            BoardsCommands::Show { json } => boards::cmd_boards_show(json).await,
+            BoardsCommands::Rename { slug, new_name } => {
+                boards::cmd_boards_rename(slug, new_name).await
+            }
+            BoardsCommands::Rm { slug, delete } => boards::cmd_boards_rm(slug, delete).await,
+        },
         KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json).await,
         KanbanCommands::Tail { id } => commands::cmd_tail(id).await,
         KanbanCommands::Watch {
