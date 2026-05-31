@@ -68,13 +68,13 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 
 ## Boards (multi-project)
 
-> **v1 NOTE:** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag are deferred to Phase 36.3.7.9 (re-homed 2026-05-30 from the defunct Phase 36.3.7.3 assignment, which shipped the CLI CFG-03 doc-comment scan-window fix instead). Only the `default` board is exercised in v1; the multi-board layout at `~/.ironhermes/kanban/boards/<slug>/kanban.db` is reserved but not populated.
+> **Shipped in Phase 36.3.7.9.** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag shipped in Phase 36.3.7.9. Per D-01 the default board stays at `~/.ironhermes/kanban.db` (no migration); named boards live at `~/.ironhermes/kanban/boards/<slug>/kanban.db`. Per D-02 the 4-tier resolution order is `--board` flag > `HERMES_KANBAN_BOARD` env > `~/.ironhermes/kanban/current` file > `default`.
 
-Boards let you separate unrelated streams of work — one per project, repo, or domain — into isolated queues. A new install has exactly one board called `default` (DB at `~/.hermes/kanban.db` for back-compat). Users who only want one stream of work never need to know about boards; the feature is opt-in.
+Boards let you separate unrelated streams of work — one per project, repo, or domain — into isolated queues. A new install has exactly one board called `default` (DB at `~/.ironhermes/kanban.db` for back-compat). Users who only want one stream of work never need to know about boards; the feature is opt-in.
 
 Per-board isolation is absolute:
 
-- Separate SQLite DB per board (`~/.hermes/kanban/boards/<slug>/kanban.db`).
+- Separate SQLite DB per board (`~/.ironhermes/kanban/boards/<slug>/kanban.db`).
 - Separate `workspaces/` and `logs/` directories.
 - Workers spawned for a task see only their board's tasks — the dispatcher sets `HERMES_KANBAN_BOARD` in the child env and every `kanban_*` tool the worker has access to reads it.
 - Linking tasks across boards is not allowed (keeps the schema simple; if you really need cross-project refs, use free-text mentions and look them up by id manually).
@@ -115,7 +115,7 @@ Board resolution order (highest precedence first):
 
 1. Explicit `--board <slug>` on the CLI call.
 2. `HERMES_KANBAN_BOARD` env var (set by the dispatcher when spawning a worker, so workers can't see other boards).
-3. `~/.hermes/kanban/current` — the slug persisted by `hermes kanban boards switch`.
+3. `~/.ironhermes/kanban/current` — the slug persisted by `hermes kanban boards switch`.
 4. `default`.
 
 Slugs are validated: lowercase alphanumerics + hyphens + underscores, 1–64 chars, must start with alphanumeric. Uppercase input is auto-downcased. Anything else (slashes, spaces, dots, `..`) is rejected at the CLI layer so path-traversal tricks can't name a board.
