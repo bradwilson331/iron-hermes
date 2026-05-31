@@ -22,6 +22,7 @@ pub mod create;
 pub mod heartbeat;
 pub mod link;
 pub mod list;
+pub mod mention;
 pub mod show;
 pub mod swarm;
 pub mod unblock;
@@ -33,6 +34,7 @@ pub use create::KanbanCreateTool;
 pub use heartbeat::KanbanHeartbeatTool;
 pub use link::KanbanLinkTool;
 pub use list::KanbanListTool;
+pub use mention::KanbanMentionTool;
 pub use show::KanbanShowTool;
 pub use swarm::KanbanSwarmTool;
 pub use unblock::KanbanUnblockTool;
@@ -42,7 +44,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::store::KanbanStore;
 
-/// Register all 10 kanban tools onto `registry`.
+/// Register all 11 kanban tools onto `registry`.
 ///
 /// Each tool shares the same `store` Arc for direct in-process DB access (D-20
 /// backend portability — no CLI shelling).
@@ -87,4 +89,6 @@ pub fn register_kanban_tools(
         store.clone(),
         explicit_enable,
     )));
+    // Phase 36.3.7.8 — kanban_mention (@mention delegation parser inline routing).
+    registry.register(Box::new(KanbanMentionTool::new(store.clone(), explicit_enable)));
 }
