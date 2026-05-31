@@ -28,6 +28,7 @@ pub mod error;
 pub mod events;
 pub mod kanban_guidance;
 pub mod notifier;
+pub mod notifier_config;
 pub mod paths;
 pub mod pid;
 pub mod schema;
@@ -61,6 +62,9 @@ pub use dispatcher::{
 };
 pub use notifier::{
     NotifierContext, NotifierTickReport, SendFn, run_notifier_loop, run_notifier_tick,
+};
+pub use notifier_config::{
+    NotifierToml, SubscribeBoardsConfig, load_notifier_toml, resolve_subscribe_boards,
 };
 pub use pid::is_pid_alive;
 pub use skills_bundle::{
