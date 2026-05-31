@@ -27,16 +27,21 @@ pub mod mention;
 pub mod show;
 pub mod swarm;
 pub mod unblock;
+// Phase 36.3.7.10 — kanban_decompose + kanban_specify (LLM-driven triage tools).
+pub mod decompose;
+pub mod specify;
 
 pub use block::KanbanBlockTool;
 pub use comment::KanbanCommentTool;
 pub use complete::KanbanCompleteTool;
 pub use create::KanbanCreateTool;
+pub use decompose::KanbanDecomposeTool;
 pub use heartbeat::KanbanHeartbeatTool;
 pub use link::KanbanLinkTool;
 pub use list::KanbanListTool;
 pub use mention::KanbanMentionTool;
 pub use show::KanbanShowTool;
+pub use specify::KanbanSpecifyTool;
 pub use swarm::KanbanSwarmTool;
 pub use unblock::KanbanUnblockTool;
 
@@ -52,10 +57,10 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Mutex as TokioMutex;
 
-    /// Tool-count regression: `register_kanban_tools` must register exactly 11 tools
+    /// Tool-count regression: `register_kanban_tools` must register exactly 13 tools
     /// so that schema counts and multi-board envelope assertions remain stable.
     #[test]
-    fn register_kanban_tools_registers_exactly_eleven() {
+    fn register_kanban_tools_registers_exactly_thirteen() {
         let dir = tempdir().unwrap();
         let store = KanbanStore::new(dir.path().join("test.db")).unwrap();
         std::mem::forget(dir);
@@ -66,14 +71,14 @@ mod tests {
         let after = registry.list_tools().len();
         assert_eq!(
             after - before,
-            11,
-            "register_kanban_tools must register exactly 11 tools, got {}",
+            13,
+            "register_kanban_tools must register exactly 13 tools, got {}",
             after - before
         );
     }
 }
 
-/// Register all 11 kanban tools onto `registry`.
+/// Register all 13 kanban tools onto `registry`.
 ///
 /// Each tool shares the same `store` Arc for direct in-process DB access (D-20
 /// backend portability — no CLI shelling).
@@ -120,4 +125,8 @@ pub fn register_kanban_tools(
     )));
     // Phase 36.3.7.8 — kanban_mention (@mention delegation parser inline routing).
     registry.register(Box::new(KanbanMentionTool::new(store.clone(), explicit_enable)));
+    // Phase 36.3.7.10 — kanban_decompose (LLM-driven triage decomposer).
+    registry.register(Box::new(KanbanDecomposeTool::new(store.clone(), explicit_enable)));
+    // Phase 36.3.7.10 — kanban_specify (LLM-driven triage specifier, no fan-out).
+    registry.register(Box::new(KanbanSpecifyTool::new(store.clone(), explicit_enable)));
 }
