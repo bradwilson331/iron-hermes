@@ -577,6 +577,21 @@ pub async fn cmd_swarm(
 }
 
 // ---------------------------------------------------------------------------
+// cmd_mention (Phase 36.3.7.8 — kanban_mention @mention delegation, inline routing)
+// TEMPORARY STUB — Plan 04 Task 2 implements
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_mention(
+    _task_id: Option<String>,
+    _fallback_policy: String,
+    _idempotency_key: Option<String>,
+    _body_override: Option<String>,
+    _json: bool,
+) -> Result<i32> {
+    todo!("cmd_mention: Plan 04 Task 2 implements this")
+}
+
+// ---------------------------------------------------------------------------
 // cmd_archive
 // ---------------------------------------------------------------------------
 
