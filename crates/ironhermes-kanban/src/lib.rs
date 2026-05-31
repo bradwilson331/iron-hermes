@@ -61,7 +61,8 @@ pub use dispatcher::{
     run_dispatch_tick,
 };
 pub use notifier::{
-    NotifierContext, NotifierTickReport, SendFn, run_notifier_loop, run_notifier_tick,
+    BoardTickStats, NotifierContext, NotifierTickReport, SendFn, run_notifier_loop,
+    run_notifier_tick,
 };
 pub use notifier_config::{
     NotifierToml, SubscribeBoardsConfig, load_notifier_toml, resolve_subscribe_boards,
