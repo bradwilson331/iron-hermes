@@ -68,6 +68,36 @@ pub struct KanbanConfig {
     /// to keep the polling cost trivial vs. dispatcher tick (60s).
     #[serde(default = "default_notifier_poll_seconds")]
     pub notifier_poll_seconds: u64,
+
+    /// Auto-run decomposer on triage tasks every dispatcher tick (Phase 36.3.7.10).
+    /// Default `false` for v1 (opt-in) — reference.md §444.
+    #[serde(default)]
+    pub auto_decompose: bool,
+
+    /// Cap on LLM decompositions per dispatcher tick (Phase 36.3.7.10).
+    /// Default 3 — reference.md §444.
+    #[serde(default = "default_auto_decompose_per_tick")]
+    pub auto_decompose_per_tick: u32,
+
+    /// Profile that owns decomposition decisions (Phase 36.3.7.10).
+    /// Empty = fall back to active default profile — reference.md §444.
+    #[serde(default)]
+    pub orchestrator_profile: String,
+
+    /// Where child tasks land when the LLM picks an unknown profile (Phase 36.3.7.10).
+    /// Empty = active default — reference.md §444.
+    #[serde(default)]
+    pub default_assignee: String,
+
+    /// Model identifier for the decomposer LLM call (Phase 36.3.7.10).
+    /// Empty = use auxiliary.kanban_decomposer then fall back to main provider — reference.md §449-451.
+    #[serde(default)]
+    pub decomposer_model: String,
+
+    /// Auto-promote decomposed children to `ready` when they have no parent blockers (Phase 36.3.7.10).
+    /// Default `true` per reference.md §625.
+    #[serde(default = "default_auto_promote_children")]
+    pub auto_promote_children: bool,
 }
 
 impl Default for KanbanConfig {
@@ -82,6 +112,12 @@ impl Default for KanbanConfig {
             default_workdir: None,
             notification_sources: None,
             notifier_poll_seconds: default_notifier_poll_seconds(),
+            auto_decompose: false,
+            auto_decompose_per_tick: default_auto_decompose_per_tick(),
+            orchestrator_profile: String::new(),
+            default_assignee: String::new(),
+            decomposer_model: String::new(),
+            auto_promote_children: default_auto_promote_children(),
         }
     }
 }
@@ -118,6 +154,14 @@ fn default_notifier_poll_seconds() -> u64 {
     3
 }
 
+fn default_auto_decompose_per_tick() -> u32 {
+    3
+}
+
+fn default_auto_promote_children() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +178,12 @@ mod tests {
         assert!(cfg.default_workdir.is_none());
         assert!(cfg.notification_sources.is_none());
         assert_eq!(cfg.notifier_poll_seconds, 3);
+        assert!(!cfg.auto_decompose);
+        assert_eq!(cfg.auto_decompose_per_tick, 3);
+        assert!(cfg.orchestrator_profile.is_empty());
+        assert!(cfg.default_assignee.is_empty());
+        assert!(cfg.decomposer_model.is_empty());
+        assert!(cfg.auto_promote_children);
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
 // Reserved role names (D-05, Phase 26)
 // =============================================================================
 
-/// The seven reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
+/// The eight reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10).
 ///
 /// Used by `model.roles:` map keys and `auxiliary` per-task overrides.
 /// Unknown role names must be rejected at config load (Phase 26 anti-pattern
@@ -56,14 +56,15 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "session_search",
     "skills_hub",
     "mcp_helper",
-    "summarization", // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
-    "curator",       // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
+    "summarization",     // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
+    "curator",           // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
+    "kanban_decomposer", // Phase 36.3.7.10 — bridges to auxiliary.kanban_decomposer config key (reference.md §449-451)
 ];
 
-/// Validate that a role name is one of the seven reserved helper-task roles.
+/// Validate that a role name is one of the eight reserved helper-task roles.
 ///
 /// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`,
-/// `summarization`, `curator` (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
+/// `summarization`, `curator`, `kanban_decomposer` (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10).
 ///
 /// # Errors
 /// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
@@ -2474,14 +2475,14 @@ custom_providers:
     // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
     // =========================================================================
 
-    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1: RESERVED_ROLE_NAMES must hold exactly
-    /// the seven roles (5 from Phase 26 + summarization from Phase 25.2 + curator from Phase 25.3).
+    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10: RESERVED_ROLE_NAMES must hold exactly
+    /// the eight roles (5 from Phase 26 + summarization from Phase 25.2 + curator from Phase 25.3 + kanban_decomposer from Phase 36.3.7.10).
     #[test]
-    fn reserved_role_names_contains_all_seven_roles_with_curator() {
+    fn reserved_role_names_contains_all_eight_roles_with_kanban_decomposer() {
         assert_eq!(
             RESERVED_ROLE_NAMES.len(),
-            7,
-            "Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 specify exactly 7 reserved roles"
+            8,
+            "Phase 36.3.7.10 adds kanban_decomposer as the 8th reserved role"
         );
         for required in &[
             "vision",
@@ -2491,6 +2492,7 @@ custom_providers:
             "mcp_helper",
             "summarization",
             "curator",
+            "kanban_decomposer",
         ] {
             assert!(
                 RESERVED_ROLE_NAMES.contains(required),

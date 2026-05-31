@@ -72,6 +72,17 @@ pub enum KanbanEventKind {
     /// Dispatcher skipped a `ready` task whose assignee profile is not
     /// spawnable on this host (per worker-lanes doc).
     SkippedNonspawnable,
+
+    // ---------- Decomposer lifecycle (Phase 36.3.7.10) ----------
+    /// LLM decomposer rewrote body + promoted triage task to todo (Phase 36.3.7.10).
+    /// Success with fan-out: parent promoted, children created as todo.
+    Decomposed,
+    /// LLM specifier rewrote body + promoted triage task to todo without fan-out (Phase 36.3.7.10).
+    /// Success without fan-out: body rewritten, task promoted, no children created.
+    Specified,
+    /// LLM decomposer failed; task retained in triage (Phase 36.3.7.10).
+    /// Retain-in-triage policy: operator can see failure, fix title, re-trigger manually.
+    DecomposeFailed,
 }
 
 impl KanbanEventKind {
@@ -105,6 +116,9 @@ impl KanbanEventKind {
             KanbanEventKind::TipScratchWorkspace => "tip_scratch_workspace",
             KanbanEventKind::ClaimExpired => "claim_expired",
             KanbanEventKind::SkippedNonspawnable => "skipped_nonspawnable",
+            KanbanEventKind::Decomposed => "decomposed",
+            KanbanEventKind::Specified => "specified",
+            KanbanEventKind::DecomposeFailed => "decompose_failed",
         }
     }
 }
@@ -166,6 +180,9 @@ mod tests {
             KanbanEventKind::SkippedNonspawnable.as_str(),
             "skipped_nonspawnable"
         );
+        assert_eq!(KanbanEventKind::Decomposed.as_str(), "decomposed");
+        assert_eq!(KanbanEventKind::Specified.as_str(), "specified");
+        assert_eq!(KanbanEventKind::DecomposeFailed.as_str(), "decompose_failed");
     }
 
     #[test]

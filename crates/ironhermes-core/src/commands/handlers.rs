@@ -1147,7 +1147,9 @@ const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
     "stats", "log", "context", "gc", "daemon", "diagnostics",
     "swarm",
     "mention",
-    "boards",   // Phase 36.3.7.9
+    "boards",      // Phase 36.3.7.9
+    "decompose",   // Phase 36.3.7.10 — use `hermes kanban decompose` CLI verb
+    "specify",     // Phase 36.3.7.10 — use `hermes kanban specify` CLI verb
 ];
 
 /// Map ironhermes-core's Platform enum to the lowercase string form used by
