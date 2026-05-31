@@ -2021,10 +2021,19 @@ async fn mention_case_insensitive_handle_resolution() {
     }
 }
 
-// ─── Test 16 (bonus): invalid assignee rolls back whole batch (REQ-11) ────────
+// ─── Test 16 (bonus): invalid assignee rejected BEFORE tx (pre-flight) ────────
+//
+// WR-02 (Phase 36.3.7.8 code review): this test exercises the PRE-TRANSACTION
+// validate_profile_name loop in create_mention_children, NOT the in-loop atomic
+// rollback path. No INSERT is ever attempted because the validation failure
+// returns before `transaction_with_behavior(Immediate)` opens. The "atomic
+// rollback" assertion holds trivially.
+//
+// The genuine mid-batch rollback path is exercised by
+// `mention_unique_collision_rolls_back_first_child` below.
 
 #[tokio::test]
-async fn mention_invalid_assignee_rolls_back_whole_batch() {
+async fn mention_invalid_assignee_rejected_before_tx() {
     let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = make_store();
     let mut s = store.lock().await;
@@ -2077,7 +2086,7 @@ async fn mention_invalid_assignee_rolls_back_whole_batch() {
         "invalid assignee must cause create_mention_children to error"
     );
 
-    // Atomic rollback: all counts must be unchanged.
+    // Pre-tx validation: no rows changed (vacuous because tx never opened).
     let task_after: i64 = s
         .conn
         .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
@@ -2091,9 +2100,104 @@ async fn mention_invalid_assignee_rolls_back_whole_batch() {
         .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
         .unwrap();
 
-    assert_eq!(task_before, task_after, "no tasks rows on rollback");
-    assert_eq!(link_before, link_after, "no task_links rows on rollback");
-    assert_eq!(event_before, event_after, "no task_events rows on rollback");
+    assert_eq!(task_before, task_after, "no tasks rows after pre-tx reject");
+    assert_eq!(link_before, link_after, "no task_links rows after pre-tx reject");
+    assert_eq!(event_before, event_after, "no task_events rows after pre-tx reject");
+}
+
+// ─── Test 16b: mid-batch UNIQUE-constraint failure actually triggers rollback ─
+//
+// WR-02 (Phase 36.3.7.8 code review): this is the real test for REQ-11 atomic
+// rollback. Two children share the same `mention_index` AND a non-None
+// `idempotency_key`, so the per-child key suffix `:mention:{mention_index}` is
+// identical for both. The first INSERT succeeds inside the tx; the second
+// fails with a UNIQUE-constraint violation on `tasks.idempotency_key`. Dropping
+// the rusqlite Transaction RAII-rolls back the first INSERT — so a regression
+// that auto-commits per child would leave the first row behind and this test
+// would catch it.
+
+#[tokio::test]
+async fn mention_unique_collision_rolls_back_first_child() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let mut s = store.lock().await;
+
+    let (parent_id, _) = seed_mention_parent(&mut s, "Assign @a and @a", "alice");
+
+    let task_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let event_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
+        .unwrap();
+
+    // Both children use the same mention_index AND a non-None idempotency_key,
+    // forcing identical per-child keys "midbatch_dup:mention:0" and UNIQUE-violation
+    // on the second INSERT.
+    let plan = MentionPlan {
+        parent_id: parent_id.clone(),
+        children: vec![
+            MentionChildSpec {
+                handle: "alpha".to_string(),
+                assignee: "alpha".to_string(),
+                mention_index: 0,
+                title: format!("@alpha mention from {parent_id}"),
+                body: None,
+            },
+            MentionChildSpec {
+                handle: "beta".to_string(),
+                assignee: "beta".to_string(),
+                mention_index: 0, // identical to first → UNIQUE collision
+                title: format!("@beta mention from {parent_id}"),
+                body: None,
+            },
+        ],
+        idempotency_key: Some("midbatch_dup".to_string()),
+        workspace: None,
+        skills: None,
+        tenant: None,
+        created_by: Some("alice".to_string()),
+    };
+
+    let result = s.create_mention_children(plan);
+    assert!(
+        result.is_err(),
+        "duplicate per-child idempotency key must surface as an error"
+    );
+
+    // REQ-11: the first INSERT must be rolled back — no new rows in any of
+    // tasks, task_links, or task_events.
+    let task_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let event_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_events", params![], |r| r.get(0))
+        .unwrap();
+
+    assert_eq!(
+        task_before, task_after,
+        "first child INSERT must be rolled back on UNIQUE collision"
+    );
+    assert_eq!(
+        link_before, link_after,
+        "first child link must be rolled back on UNIQUE collision"
+    );
+    assert_eq!(
+        event_before, event_after,
+        "first child Created event must be rolled back on UNIQUE collision"
+    );
 }
 
 // ─── Test 17 (bonus): kanban_mention registered as 11th tool (REQ-06) ────────
