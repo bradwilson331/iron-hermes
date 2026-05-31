@@ -693,14 +693,41 @@ pub async fn cmd_mention(
                 if matches!(policy, FallbackPolicy::Error)
                     && matches!(reason, SkipReason::UnknownHandle)
                 {
+                    // WR-05 (Phase 36.3.7.8 code review): when --json is set,
+                    // emit a structured rejection envelope on stdout (mirroring
+                    // the LLM tool's reject() shape) and exit non-zero so shell
+                    // pipelines can parse the failure without scraping stderr.
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "rejected",
+                                "reason": "unknown_handle",
+                                "detail": format!(
+                                    "handle '{}' did not resolve under fallback_policy=error",
+                                    span.handle
+                                ),
+                            }))?
+                        );
+                        return Ok(2);
+                    }
                     return Err(anyhow!(
                         "unknown_handle: handle '{}' did not resolve under fallback_policy=error",
                         span.handle
                     ));
                 }
+                // IN-04 (Phase 36.3.7.8 code review): emit snake_case reason
+                // strings (matching the LLM-tool envelope) instead of Rust
+                // Debug formatting ("Malformed", "SelfReference", ...).
+                let reason_str = match reason {
+                    SkipReason::Malformed => "malformed",
+                    SkipReason::SelfReference => "self_reference",
+                    SkipReason::UnknownHandle => "unknown_handle",
+                    SkipReason::Cycle => "cycle",
+                };
                 skipped.push(serde_json::json!({
                     "handle": &span.handle,
-                    "reason": format!("{:?}", reason),
+                    "reason": reason_str,
                 }));
             }
         }
