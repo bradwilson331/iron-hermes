@@ -133,3 +133,5 @@ ansi-to-tui = "8"
 ratatui = "0.30"
 tui-logger = { version = "0.18", features = ["tracing-support"] }
 tui-textarea-2 = "0.10.2"
+# Phase 36.3.7.9 Plan 05: notifier.toml parser for subscribe_boards config (D-03)
+toml = "0.8"

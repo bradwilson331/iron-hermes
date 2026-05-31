@@ -25,6 +25,8 @@ async-trait = { workspace = true }
 # nix is already used by ironhermes-gateway; no new workspace dep introduced.
 nix = { workspace = true, features = ["signal"] }
 regex = { workspace = true }
+# Phase 36.3.7.9 Plan 05: notifier.toml subscribe_boards parser (D-03)
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
