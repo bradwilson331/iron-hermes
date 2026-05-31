@@ -220,6 +220,27 @@ Multi-task fan-out for orchestrators — the 10th LLM tool + `hermes kanban swar
 - [ ] **REQ-36.3.7.7-11**: `crates/ironhermes-kanban/src/store.rs::create_task` is byte-unchanged on its existing signature line — `create_swarm` is a sibling primitive, never a re-entrant caller. Anchors: D-no-create-task-reuse.
 - [ ] **REQ-36.3.7.7-12**: Tool count is exactly 10 — `grep -c 'registry.register(Box::new(' crates/ironhermes-kanban/src/tools/mod.rs` returns 10. Anchors: D-tool-surface-mounts-store-directly, D-docs-reconciliation.
 
+### Phase 36.3.7.8 - @mention delegation parser
+
+Inline `@handle` routing from prose — the 11th LLM tool + `hermes kanban mention` CLI verb + new `KanbanStore::create_mention_children` sibling primitive. Each REQ anchors to one or more D-XX decisions from `.planning/phases/36.3.7.8-mention-delegation-parser-inline-routing-from-prose/36.3.7.8-CONTEXT.md`.
+
+- [ ] **REQ-36.3.7.8-01**: Pure `parse_mentions(body: &str) -> Vec<MentionSpan>` function exists in `crates/ironhermes-kanban/src/mention/parser.rs` and returns one `MentionSpan { handle, byte_offset }` per literal `@<word>` occurrence in Markdown prose, skipping fenced code blocks, inline code, and HTML comments. Anchors: D-02.
+- [ ] **REQ-36.3.7.8-02**: `parse_mentions` follows CommonMark §6.5 + §6.6 fence detection rules (fence openers at column 0 with up to 3 leading spaces, matching-count backtick runs for inline). Indented 4-space code blocks are NOT treated as fences in v1 (documented limitation). Anchors: D-02.
+- [ ] **REQ-36.3.7.8-03**: `resolve_mention(handle, &ctx) -> Resolution` exists in `mention/resolver.rs` returning `Resolution::Resolved(String)`, `Resolution::Fallback(String, FallbackReason)`, or `Resolution::Skipped(SkipReason)`. Anchors: D-03.
+- [ ] **REQ-36.3.7.8-04**: Handle resolution is case-insensitive — `@Reviewer` and `@reviewer` collapse to lowercase `reviewer` BEFORE `validate_profile_name`. Anchors: D-03.
+- [ ] **REQ-36.3.7.8-05**: Three fallback policies — `skip` (default, drop silently), `pending` (materialize child with assignee="pending"), `error` (whole-batch reject). Anchors: D-03.
+- [ ] **REQ-36.3.7.8-06**: `kanban_mention` LLM tool registered as the 11th tool in `crates/ironhermes-kanban/src/tools/mod.rs::register_kanban_tools`. Returns `{task_id, mentions_parsed, children_created, skipped}` JSON. Anchors: D-01.
+- [ ] **REQ-36.3.7.8-07**: `hermes kanban mention <task_id>` CLI verb exists; dispatch arm in `handle_kanban_command` calls `cmd_mention(...)`. Flags: `--fallback-policy`, `--idempotency-key`, `--body-override`, `--json`. Anchors: D-01.
+- [ ] **REQ-36.3.7.8-08**: `"mention"` added to `DEFERRED_KANBAN_SUBVERBS` at `crates/ironhermes-core/src/commands/handlers.rs:1143-1148`. Gateway `/kanban mention ...` routes to the deferred-CLI message. Anchors: D-01.
+- [ ] **REQ-36.3.7.8-09**: Self-mention rejected at resolver layer — a handle resolving to the parent task's assignee returns `Resolution::Skipped(SkipReason::SelfReference)`. Anchors: D-04 layer 1.
+- [ ] **REQ-36.3.7.8-10**: Ancestor-chain cycle detection — `WITH RECURSIVE ancestors` walk capped at `MAX_MENTION_CHAIN_DEPTH = 4` skips children whose assignee appears in the chain. Anchors: D-04 layer 2.
+- [ ] **REQ-36.3.7.8-11**: Atomic transaction — `parse → resolve → insert N children + N links + N events` runs in one `BEGIN IMMEDIATE` transaction. Per-child failure rolls back the entire batch (zero rows in tasks/task_links/task_events). Anchors: D-04, INV-36.3.7-atomic.
+- [ ] **REQ-36.3.7.8-12**: Idempotency replay — per-child keys are `"{base}:mention:{i}"` (0-indexed by original parse order). Re-invocation short-circuits via `find_mentions_by_idempotency_key` and returns identical `MentionResult.children`. Anchors: D-01.
+- [ ] **REQ-36.3.7.8-13**: Receiver-end tests in `crates/ironhermes-kanban/tests/tools_smoke.rs` mention section cover REQ-01..REQ-12 — ≥ 15 tests. Anchors: D-01, D-02, D-03, D-04.
+- [ ] **REQ-36.3.7.8-14**: CLI parity tests in `crates/ironhermes-cli/tests/mention_cli.rs` — ≥ 4 tests covering clap parse + flag handling. Anchors: D-01.
+- [ ] **REQ-36.3.7.8-15**: `docs/kanban/reference.md` §741 row replaced with `*Shipped in Phase 36.3.7.8.*`; §14 V1-NOTE bumped from "10 LLM tools" to "11 LLM tools" with `kanban_mention` in the inline list; §200 table grows by one row for `kanban_mention`. Anchors: RESEARCH §Validation Architecture.
+- [ ] **REQ-36.3.7.8-16**: Verifier grep gates pass — `grep -c 'deferred to Phase 36.3.7.8' docs/kanban/reference.md` returns 0; `grep -c 'all 11 LLM tools' docs/kanban/reference.md` returns ≥ 1; `grep -c 'kanban_mention' docs/kanban/reference.md` returns ≥ 2. Anchors: D-04, RESEARCH §Validation Architecture.
+
 ## Future Requirements
 
 Deferred to v2.2+. Tracked but not in current roadmap. CLI-03..CLI-08 (ACP adapter) were moved BACK to v2.1 active scope on 2026-04-27 — see "Current Milestone: v2.1 Carry-Overs" at the top of this file.
@@ -432,6 +453,22 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REQ-36.3.7.7-10 | Phase 36.3.7.7 | Pending |
 | REQ-36.3.7.7-11 | Phase 36.3.7.7 | Pending |
 | REQ-36.3.7.7-12 | Phase 36.3.7.7 | Pending |
+| REQ-36.3.7.8-01 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-02 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-03 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-04 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-05 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-06 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-07 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-08 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-09 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-10 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-11 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-12 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-13 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-14 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-15 | Phase 36.3.7.8 | Pending |
+| REQ-36.3.7.8-16 | Phase 36.3.7.8 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)

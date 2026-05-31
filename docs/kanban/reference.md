@@ -11,7 +11,7 @@ Hermes Kanban is a durable task board, shared across all your Hermes profiles, t
 
 ## Two surfaces: the model talks through tools, you talk through the CLI
 
-> **v1 NOTE:** Shipped in Phase 36.3.7.7 — IronHermes now ships all 10 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`, `kanban_heartbeat`, `kanban_link`, `kanban_unblock`, `kanban_swarm`. The full LLM-tool surface matches the CLI surface.
+> **v1 NOTE:** Shipped in Phase 36.3.7.8 — IronHermes now ships all 11 LLM tools listed below: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`, `kanban_heartbeat`, `kanban_link`, `kanban_unblock`, `kanban_swarm`, `kanban_mention`. The full LLM-tool surface matches the CLI surface.
 
 The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
@@ -207,6 +207,7 @@ Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker
 | `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. Rejects cycles (descendant-walk via `WITH RECURSIVE` CTE) and cross-tenant links. | `parent_id`, `child_id` | Shipped in Phase 36.3.7.6. |
 | `kanban_unblock` | (Orchestrators) move a blocked task back to ready. Fails closed if the task is not currently in `blocked` status (prevents accidentally reviving `done`/`running` tasks via the LLM-tool surface). | `task_id` (defaults to `$HERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.6. |
 | `kanban_swarm` | (Orchestrators) create N parallel worker cards + optional verifier + optional synthesizer + blackboard root, in one atomic transaction. Implements the multi-agent patterns documented at §740 (P1 fan-out, fan-out+verify, full 4-tier §664 example, P3 quorum). | `goal`, `workers` | Shipped in Phase 36.3.7.7. |
+| `kanban_mention` | (Orchestrators) parse `@<handle>` mentions in a task body and fan out one child task per resolved handle in a single atomic transaction. Skips fenced code, inline code, and HTML comments. Supports `skip`, `pending`, and `error` fallback policies for unknown handles. | — (uses `$HERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.8. |
 
 A typical worker turn looks like:
 
@@ -739,7 +740,7 @@ The board supports these eight patterns without any new primitives:
 | P3 Voting / quorum | N siblings + 1 aggregator | 3 researchers → 1 reviewer picks |
 | P4 Long-running journal | same profile + shared dir + cron | Obsidian vault |
 | P5 Human-in-the-loop | worker blocks → user comments → unblock | ambiguous decisions |
-| P6 @mention | inline routing from prose | `@reviewer look at this` | *(deferred to Phase 36.3.7.8 — @mention delegation parser not implemented in v1; re-homed 2026-05-30 from 36.3.7.7 which now hosts `kanban swarm`)* |
+| P6 @mention | inline routing from prose | `@reviewer look at this` | *Shipped in Phase 36.3.7.8.* |
 | P7 Thread-scoped workspace | `/kanban here` in a thread | per-project gateway threads |
 | P8 Fleet farming | one profile, N subjects | 50 social accounts |
 | P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" | *(deferred to Phase 36.3.7.10 — triage decomposer/specifier not implemented in v1; re-homed 2026-05-30 from the defunct 36.3.7.2 assignment which shipped the delegate_task `oneOf` tool-schema fix instead)* |
