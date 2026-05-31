@@ -1143,6 +1143,240 @@ impl KanbanStore {
         Ok(Some(MentionResult { children }))
     }
 
+    /// Materialize resolved @mention children as child cards atomically (Phase 36.3.7.8,
+    /// REQ-10 layer 2, REQ-11, REQ-12).
+    ///
+    /// Sibling of [`create_swarm`](Self::create_swarm) — never re-enters [`create_task`](Self::create_task);
+    /// INSERT statements are inlined directly inside the `BEGIN IMMEDIATE` transaction
+    /// to avoid deadlock and keep atomicity.
+    ///
+    /// # Zero-children plan
+    /// If `plan.children.is_empty()`, returns `Ok(MentionResult { children: vec![] })`
+    /// without opening a transaction. This is a valid no-op (all mentions were skipped
+    /// by the resolver), NOT an error — contrast with `create_swarm` which rejects empty
+    /// workers.
+    ///
+    /// # Pre-flight
+    /// Every `MentionChildSpec.assignee` is validated via
+    /// `ironhermes_core::profile::validate_profile_name` BEFORE the transaction opens,
+    /// minimising the lock window.
+    ///
+    /// # Idempotency (REQ-12, WR-01 carry-over from 36.3.7.7)
+    /// The replay short-circuit lives INSIDE `BEGIN IMMEDIATE` so a concurrent
+    /// first-create race resolves deterministically. If `plan.idempotency_key = Some("k")`,
+    /// per-child keys are `"k:mention:{mention_index}"`.
+    ///
+    /// # Ancestor-chain cycle detection (REQ-10 layer 2)
+    /// Before inserting each child link, a `WITH RECURSIVE ancestors` walk over
+    /// `task_links` checks whether `spec.assignee` already appears in the ancestor
+    /// chain of `plan.parent_id` up to `MAX_MENTION_CHAIN_DEPTH` hops. A match
+    /// returns [`KanbanError::Other`] and the dropped `Transaction` auto-rolls back
+    /// (RAII), producing zero rows (REQ-11).
+    pub fn create_mention_children(
+        &mut self,
+        plan: MentionPlan,
+    ) -> Result<MentionResult> {
+        use rusqlite::TransactionBehavior;
+
+        // ---------------- Empty-plan short-circuit (not an error) ---------------
+        if plan.children.is_empty() {
+            return Ok(MentionResult { children: vec![] });
+        }
+
+        // ---------------- Pre-flight: validate every assignee before tx ---------
+        for spec in &plan.children {
+            ironhermes_core::profile::validate_profile_name(&spec.assignee)
+                .map_err(|e| KanbanError::Other(anyhow::anyhow!("invalid assignee: {e}")))?;
+        }
+
+        // Workspace validation (D-31 / Pitfall 6).
+        if let Some(ref ws) = plan.workspace {
+            validate_dir_workspace(ws)?;
+        }
+
+        // ---------------- Open transaction (BEGIN IMMEDIATE) --------------------
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // ---------------- Idempotency replay INSIDE transaction (WR-01) ---------
+        //
+        // WR-01 (Phase 36.3.7.7 code review carry-over): the lookup MUST happen
+        // inside BEGIN IMMEDIATE so a concurrent first-create race resolves
+        // deterministically. If T1 commits its first-child row first, T2 (which
+        // blocked on BEGIN IMMEDIATE) then observes the row and replays instead of
+        // trying its own INSERT and failing with a UNIQUE-constraint error.
+        //
+        // Borrow gymnastic: rusqlite Transaction holds &mut Connection, so we
+        // cannot simultaneously call &self.find_mentions_by_idempotency_key.
+        // Solution: check inside the tx, commit (no-op reads), then call the
+        // shared-borrow replay finder. SAFETY: tx is read-only here — commit is
+        // equivalent to rollback and correct under WAL.
+        if let Some(ref base) = plan.idempotency_key {
+            let first_key = format!("{base}:mention:0");
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM tasks WHERE idempotency_key = ?1",
+                    params![first_key],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(KanbanError::from)?;
+            if existing.is_some() {
+                // Commit the read-only tx (no rows written — safe to commit).
+                tx.commit()?;
+                // Now &self borrow is available.
+                if let Some(replay) = self.find_mentions_by_idempotency_key(base)? {
+                    return Ok(replay);
+                }
+                // Defensive fall-through: first_key existed but LIKE scan returned
+                // nothing — re-open tx and insert. Shouldn't happen under normal use.
+                let tx = self
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                return Self::mention_insert_loop(tx, plan);
+            }
+        }
+
+        Self::mention_insert_loop(tx, plan)
+    }
+
+    /// Inner INSERT loop for [`create_mention_children`](Self::create_mention_children).
+    ///
+    /// Free function (not `&mut self`) so the borrow checker allows passing a
+    /// `Transaction<'_>` (which borrows `conn`) without conflicting with `&mut self`.
+    fn mention_insert_loop(
+        tx: rusqlite::Transaction<'_>,
+        plan: MentionPlan,
+    ) -> Result<MentionResult> {
+        let now = Self::now();
+        let skills_json: Option<String> = plan
+            .skills
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()?;
+
+        let mut children: Vec<MentionChildIds> = Vec::with_capacity(plan.children.len());
+
+        for spec in &plan.children {
+            // ---- REQ-10 layer 2: ancestor-chain assignee-identity cycle check ----
+            //
+            // Walk PARENTS of plan.parent_id up to MAX_MENTION_CHAIN_DEPTH hops.
+            // Reject if `spec.assignee` already appears as any ancestor task's
+            // assignee. This catches the case where the resolver's layer-1
+            // self-reference check missed a transitive cycle (legitimate layer-2
+            // scenario). Dropping `tx` on error auto-rolls back (RAII → REQ-11).
+            //
+            // Bind order: ?1 = plan.parent_id, ?2 = depth limit, ?3 = assignee.
+            let cycle: Option<i64> = tx
+                .query_row(
+                    "WITH RECURSIVE ancestors(id, depth) AS ( \
+                        SELECT parent_id, 1 FROM task_links WHERE child_id = ?1 \
+                        UNION \
+                        SELECT tl.parent_id, a.depth + 1 \
+                          FROM task_links tl \
+                          JOIN ancestors a ON tl.child_id = a.id \
+                         WHERE a.depth < ?2 \
+                     ) \
+                     SELECT 1 FROM tasks t \
+                      WHERE t.id IN (SELECT id FROM ancestors) \
+                        AND t.assignee = ?3 \
+                      LIMIT 1",
+                    params![
+                        &plan.parent_id,
+                        Self::MAX_MENTION_CHAIN_DEPTH as i64,
+                        &spec.assignee
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(KanbanError::from)?;
+
+            if cycle.is_some() {
+                // Drop of `tx` triggers rusqlite RAII rollback → zero rows (REQ-11).
+                return Err(KanbanError::Other(anyhow::anyhow!(
+                    "mention_cycle: assignee {} appears in ancestor chain of {}",
+                    spec.assignee,
+                    plan.parent_id
+                )));
+            }
+
+            // ---- Compute child ID and per-child idempotency key -----------------
+            let child_id = Self::new_id("t");
+            let child_key: Option<String> = plan
+                .idempotency_key
+                .as_ref()
+                .map(|k| format!("{k}:mention:{}", spec.mention_index));
+
+            // ---- INSERT INTO tasks (15-column shape from create_task:246-270) ---
+            //
+            // Column order mirrors create_task exactly (INV-36.3.7):
+            //   id, title, body, assignee, status='todo', priority=0, tenant,
+            //   workspace, skills, idempotency_key, consecutive_failures=0,
+            //   max_retries=NULL, max_runtime_seconds=NULL, scheduled_at=NULL,
+            //   created_by, created_at
+            //
+            // We do NOT call create_task re-entrantly (D-no-create-task-reuse):
+            // that would break the BEGIN IMMEDIATE boundary.
+            tx.execute(
+                "INSERT INTO tasks \
+                 (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                  idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
+                  scheduled_at, created_by, created_at) \
+                 VALUES \
+                 (?1, ?2, ?3, ?4, 'todo', 0, ?5, ?6, ?7, ?8, 0, NULL, NULL, NULL, ?9, ?10)",
+                params![
+                    child_id,
+                    spec.title,
+                    spec.body,
+                    spec.assignee,
+                    plan.tenant,
+                    plan.workspace,
+                    skills_json,
+                    child_key,
+                    plan.created_by,
+                    now,
+                ],
+            )
+            .map_err(KanbanError::from)?;
+
+            // ---- INSERT INTO task_links (inline — calling insert_link_checked ----
+            //      would open its own tx → deadlock).
+            tx.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+                 VALUES (?1, ?2, ?3)",
+                params![&plan.parent_id, &child_id, now],
+            )
+            .map_err(KanbanError::from)?;
+
+            // ---- Append Created event (mention-specific payload) ----------------
+            let payload = serde_json::json!({
+                "source": "mention",
+                "handle": &spec.handle,
+                "mention_index": spec.mention_index,
+                "parent_id": &plan.parent_id,
+            });
+            Self::append_event_internal(
+                &tx,
+                &child_id,
+                None,
+                KanbanEventKind::Created,
+                Some(&payload),
+                now,
+            )?;
+
+            children.push(MentionChildIds {
+                child_id,
+                assignee: spec.assignee.clone(),
+                handle: spec.handle.clone(),
+                mention_index: spec.mention_index,
+            });
+        }
+
+        tx.commit()?;
+        Ok(MentionResult { children })
+    }
+
     /// Append an event row for a task and return the new event id.
     pub fn append_event(
         &mut self,
