@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: completed
+status: executing
 stopped_at: Phase 36.3.7.7 context gathered
-last_updated: "2026-05-31T08:33:03.623Z"
-last_activity: 2026-05-31 -- Phase 36.3.7.8 marked complete
+last_updated: "2026-05-31T13:40:43.810Z"
+last_activity: 2026-05-31 -- Phase 36.3.7.9 execution started
 progress:
-  total_phases: 59
-  completed_phases: 18
-  total_plans: 91
+  total_phases: 55
+  completed_phases: 19
+  total_plans: 99
   completed_plans: 87
-  percent: 31
+  percent: 35
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.8 — mention-delegation-parser-inline-routing-from-prose
+**Current focus:** Phase 36.3.7.9 — multi-board-cli-boards-and-board-flag
 
 ## Current Position
 
-Phase: 36.3.7.8 — COMPLETE
-Plan: 1 of 5
-Status: Phase 36.3.7.8 complete
-Last activity: 2026-05-31 -- Phase 36.3.7.8 marked complete
+Phase: 36.3.7.9 (multi-board-cli-boards-and-board-flag) — EXECUTING
+Plan: 1 of 9
+Status: Executing Phase 36.3.7.9
+Last activity: 2026-05-31 -- Phase 36.3.7.9 execution started
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
