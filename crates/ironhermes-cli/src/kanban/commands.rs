@@ -31,6 +31,26 @@ fn open_store() -> Result<KanbanStore> {
     KanbanStore::open_default().context("Failed to open kanban.db")
 }
 
+/// Open the correct board store given an optional `--board <slug>` flag value.
+///
+/// When `board` is `Some(slug)`, opens that board directly.
+/// When `board` is `None`, runs the 4-tier resolver (D-02) to determine the
+/// active board and opens it.
+///
+/// Plan 04 will retrofit all existing `cmd_*` functions to call this helper
+/// instead of `open_store()`. For now it is available for `boards.rs` functions
+/// and future plans to use.
+pub(crate) fn open_store_for_board(board: Option<&str>) -> Result<KanbanStore> {
+    match board {
+        Some(slug) => KanbanStore::open_for_board(slug).context("Failed to open board DB"),
+        None => {
+            let ctx = ironhermes_kanban::board::resolve_board_context(None)
+                .context("Failed to resolve board context")?;
+            KanbanStore::open(&ctx.db_path).context("Failed to open kanban DB")
+        }
+    }
+}
+
 fn profile_from_env() -> String {
     std::env::var("HERMES_PROFILE").unwrap_or_else(|_| "operator".to_string())
 }
