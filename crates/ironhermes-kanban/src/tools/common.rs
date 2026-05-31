@@ -111,6 +111,22 @@ pub fn reject_with_board(reason: &str, detail: &str, ctx: Option<&BoardContext>)
     }
 }
 
+/// Build a rejection envelope from a rich `Value` (which must be a JSON object),
+/// injecting `"board"` and `"board_source"` from `ctx`.
+///
+/// Use this when the rejection needs structured fields beyond `"detail"` (e.g.
+/// `"task_id"`, `"current"`, `"expected"`, `"parent_id"`, `"child_id"`) to
+/// preserve backward-compatible envelope shapes while adding D-08 provenance.
+pub fn reject_value_with_board(mut value: Value, ctx: Option<&BoardContext>) -> anyhow::Result<String> {
+    if let Some(c) = ctx
+        && let Some(map) = value.as_object_mut()
+    {
+        map.insert("board".to_string(), json!(c.slug));
+        map.insert("board_source".to_string(), json!(c.source.as_str()));
+    }
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -120,10 +136,6 @@ mod tests {
     use super::*;
     use crate::board::{BoardContext, BoardSource};
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    // Serialise all env-mutating tests to avoid races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_ctx(slug: &str, source: BoardSource) -> BoardContext {
         BoardContext {
@@ -201,7 +213,7 @@ mod tests {
 
     #[test]
     fn resolve_from_args_with_string_board_returns_flag_source() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure env does not interfere.
         unsafe { std::env::remove_var("HERMES_KANBAN_BOARD"); }
 
@@ -215,7 +227,7 @@ mod tests {
 
     #[test]
     fn resolve_from_args_with_no_board_returns_default_source_when_no_env_file() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Clear env and use a tempdir as IRONHERMES_HOME so no current file exists.
         unsafe { std::env::remove_var("HERMES_KANBAN_BOARD"); }
         let dir = tempfile::tempdir().unwrap();
@@ -233,7 +245,7 @@ mod tests {
 
     #[test]
     fn resolve_from_args_with_invalid_slug_returns_err_and_default_ctx() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("HERMES_KANBAN_BOARD"); }
 
         // Path traversal slug must fail validation.

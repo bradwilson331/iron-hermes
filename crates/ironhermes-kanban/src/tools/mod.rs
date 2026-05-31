@@ -45,6 +45,34 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::store::KanbanStore;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// Tool-count regression: `register_kanban_tools` must register exactly 11 tools
+    /// so that schema counts and multi-board envelope assertions remain stable.
+    #[test]
+    fn register_kanban_tools_registers_exactly_eleven() {
+        let dir = tempdir().unwrap();
+        let store = KanbanStore::new(dir.path().join("test.db")).unwrap();
+        std::mem::forget(dir);
+        let store = Arc::new(TokioMutex::new(store));
+        let mut registry = ironhermes_tools::ToolRegistry::new();
+        let before = registry.list_tools().len();
+        register_kanban_tools(&mut registry, store, false);
+        let after = registry.list_tools().len();
+        assert_eq!(
+            after - before,
+            11,
+            "register_kanban_tools must register exactly 11 tools, got {}",
+            after - before
+        );
+    }
+}
+
 /// Register all 11 kanban tools onto `registry`.
 ///
 /// Each tool shares the same `store` Arc for direct in-process DB access (D-20

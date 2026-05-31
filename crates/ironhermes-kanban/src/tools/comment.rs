@@ -7,6 +7,12 @@
 //!
 //! In orchestrator mode (explicit_enable=true, no claim lock), the comment is
 //! inserted directly via `store.add_comment`.
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! every success and rejection envelope (T-5 mitigation).
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,6 +40,7 @@ fn new_id(prefix: &str) -> String {
 
 /// LLM tool: append a comment to a task.
 pub struct KanbanCommentTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -77,6 +84,10 @@ impl Tool for KanbanCommentTool {
                     "body": {
                         "type": "string",
                         "description": "Comment text."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["body"]
@@ -89,21 +100,43 @@ impl Tool for KanbanCommentTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // Resolve task_id.
-        let task_id = args
+        let task_id = match args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!("task_id required when HERMES_KANBAN_TASK is not set")
-            })?;
+        {
+            Some(t) => t,
+            None => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_task_id",
+                    "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    Some(&board_ctx),
+                ));
+            }
+        };
 
-        let body = args
-            .get("body")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("body is required"))?
-            .to_string();
+        let body = match args.get("body").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_required_arg",
+                    "body is required",
+                    Some(&board_ctx),
+                ));
+            }
+        };
 
         let author = std::env::var("HERMES_PROFILE").unwrap_or_else(|_| "unknown".into());
 
@@ -112,7 +145,9 @@ impl Tool for KanbanCommentTool {
 
         if let Some(claim_lock) = claim_lock_env {
             // Worker mode — gate the write on claim validity (D-41).
-            let mut store = self.store.lock().await;
+            // Open per-board store.
+            let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+                .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
             let comment_id = new_id("c");
             let task_id_c = task_id.clone();
@@ -137,24 +172,25 @@ impl Tool for KanbanCommentTool {
             )?;
 
             if gated {
-                Ok(serde_json::to_string_pretty(&json!({
+                crate::tools::common::ok_with_board(json!({
                     "comment_id": comment_id,
                     "task_id": task_id,
-                }))?)
+                }), &board_ctx)
             } else {
-                Ok(serde_json::to_string_pretty(&json!({
+                crate::tools::common::ok_with_board(json!({
                     "status": "no-op",
                     "reason": "claim_expired",
-                }))?)
+                }), &board_ctx)
             }
         } else {
-            // Orchestrator mode or unclaimed worker — direct insert (HERMES_KANBAN_CLAIM_LOCK not set).
-            let mut store = self.store.lock().await;
+            // Orchestrator mode or unclaimed worker — direct insert.
+            let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+                .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
             let comment = store.add_comment(&task_id, &author, &body)?;
-            Ok(serde_json::to_string_pretty(&json!({
+            crate::tools::common::ok_with_board(json!({
                 "comment_id": comment.id,
                 "task_id": comment.task_id,
-            }))?)
+            }), &board_ctx)
         }
     }
 }
@@ -184,5 +220,13 @@ mod tests {
 
         let tool3 = KanbanCommentTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanCommentTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

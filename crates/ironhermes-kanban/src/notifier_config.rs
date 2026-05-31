@@ -181,8 +181,7 @@ mod tests {
         }
     }
 
-    // Serialize env-mutating tests so they do not race under `cargo test`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Env-mutating tests serialise via the process-wide crate::ENV_LOCK.
 
     // -----------------------------------------------------------------------
     // 1. default_is_subscribe_all_star
@@ -246,7 +245,7 @@ mod tests {
 
     #[test]
     fn resolve_all_prepends_default() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let boards = dir.path().join("kanban").join("boards");
         fs::create_dir_all(boards.join("alpha")).unwrap();
@@ -282,7 +281,7 @@ mod tests {
 
     #[test]
     fn resolve_all_with_no_boards_dir_returns_default_only() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         // No boards/ directory created — list_boards() should return empty.
         let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
@@ -303,7 +302,7 @@ mod tests {
 
     #[test]
     fn parse_error_uses_default() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let kanban_dir = dir.path().join("kanban");
         fs::create_dir_all(&kanban_dir).unwrap();

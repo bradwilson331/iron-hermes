@@ -6,6 +6,12 @@
 //! `reason` strings starting with `"review-required:"` are doc-flagged (D-23);
 //! the dashboard treatment deferred to a follow-up phase. This tool detects
 //! the prefix and emits an advisory tracing log.
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! every success and rejection envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -20,6 +26,7 @@ use crate::store::KanbanStore;
 
 /// LLM tool: block a kanban task (protocol terminator).
 pub struct KanbanBlockTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -68,6 +75,10 @@ impl Tool for KanbanBlockTool {
                     "expected_run_id": {
                         "type": "string",
                         "description": "Run ID that must still be the active run. Defaults to $HERMES_KANBAN_RUN_ID."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["reason"]
@@ -80,6 +91,16 @@ impl Tool for KanbanBlockTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // Resolve task_id.
         let task_id = args
             .get("task_id")
@@ -112,22 +133,24 @@ impl Tool for KanbanBlockTool {
             );
         }
 
-        let mut store = self.store.lock().await;
+        // Open per-board store (D-08).
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         match store.block_task(&task_id, &reason, expected_run_id.as_deref()) {
-            Ok(()) => Ok(serde_json::to_string_pretty(&json!({
+            Ok(()) => crate::tools::common::ok_with_board(json!({
                 "status": "ok",
                 "task_id": task_id,
-            }))?),
+            }), &board_ctx),
 
             Err(KanbanError::StaleRunId { expected, actual }) => {
-                Ok(serde_json::to_string_pretty(&json!({
+                crate::tools::common::ok_with_board(json!({
                     "status": "rejected",
                     "reason": "stale_run_id",
                     "task_id": task_id,
                     "expected": expected,
                     "actual": actual,
-                }))?)
+                }), &board_ctx)
             }
 
             Err(other) => Err(other.into()),
@@ -160,5 +183,13 @@ mod tests {
 
         let tool3 = KanbanBlockTool::new(store, true);
         assert!(tool3.is_available());
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanBlockTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

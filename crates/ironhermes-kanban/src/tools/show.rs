@@ -9,6 +9,12 @@
 //! - parent_handoffs: most recent completed run's {summary, metadata} per parent
 //! - prior_attempts: per-run {outcome, summary, error, started_at, ended_at}
 //! - comments: full chronological [{author, body, created_at}]
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Injects `board` + `board_source` into
+//! every success and rejection envelope (T-5 mitigation).
 
 use std::sync::Arc;
 
@@ -24,6 +30,7 @@ use crate::store::KanbanStore;
 
 /// LLM tool: read the current kanban task and return the worker_context envelope.
 pub struct KanbanShowTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -62,6 +69,10 @@ impl Tool for KanbanShowTool {
                     "task_id": {
                         "type": "string",
                         "description": "Task ID to inspect. Omit to use $HERMES_KANBAN_TASK (worker mode default)."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": []
@@ -76,20 +87,49 @@ impl Tool for KanbanShowTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // Resolve task_id: from arg, then from HERMES_KANBAN_TASK env.
-        let task_id = args
+        let task_id = match args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!("task_id required when HERMES_KANBAN_TASK is not set")
-            })?;
+        {
+            Some(t) => t,
+            None => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "missing_task_id",
+                    "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    Some(&board_ctx),
+                ));
+            }
+        };
 
-        let store = self.store.lock().await;
+        // Open the per-board store (D-08: always use the resolved board's DB).
+        let store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
-        // Load the task.
-        let task = store.get_task(&task_id)?;
+        // Load the task — map TaskNotFound to a structured rejection (D-08 T-5).
+        let task = match store.get_task(&task_id) {
+            Ok(t) => t,
+            Err(crate::error::KanbanError::TaskNotFound(_)) => {
+                return Ok(crate::tools::common::reject_with_board(
+                    "task_not_found",
+                    &format!("task '{}' not found", task_id),
+                    Some(&board_ctx),
+                ));
+            }
+            Err(other) => return Err(other.into()),
+        };
 
         // Resolve workspace path.
         let workspace = task
@@ -190,7 +230,7 @@ impl Tool for KanbanShowTool {
             "comments": comments,
         });
 
-        Ok(serde_json::to_string_pretty(&worker_context)?)
+        crate::tools::common::ok_with_board(worker_context, &board_ctx)
     }
 }
 
@@ -226,6 +266,7 @@ mod tests {
 
     #[test]
     fn is_available_respects_env() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Remove the env var to ensure a clean state.
         unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
         let store = make_store();
@@ -239,5 +280,13 @@ mod tests {
 
         let tool3 = KanbanShowTool::new(store, true);
         assert!(tool3.is_available(), "should be available with explicit_enable=true");
+    }
+
+    #[test]
+    fn schema_contains_board_property() {
+        let store = make_store();
+        let tool = KanbanShowTool::new(store, true);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
     }
 }

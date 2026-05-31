@@ -33,7 +33,7 @@
 //!
 //! - T-01 (Tampering/panics): all `args` access uses `.and_then` + Option
 //!   semantics; zero runtime `.unwrap()`.
-//! - T-02 (Info leak): `reject()` detail strings never include task body
+//! - T-02 (Info leak): rejection detail strings never include task body
 //!   content — only handle names, task IDs, and error strings.
 //! - T-03 (DoS / lock held during parse): `parse_mentions` and `resolve_mention`
 //!   run WITHOUT the store lock; only `get_task`, `list_known_assignees` inline
@@ -41,6 +41,12 @@
 //! - T-04 (EoP / self-mention): resolver layer-1 + store layer-2 ALWAYS run.
 //! - T-05 (Spoofing / cross-tenant): tenant inherited from parent; cross-tenant
 //!   links rejected inside `create_mention_children`.
+//!
+//! # Multi-board (Plan 07, D-08)
+//!
+//! Accepts an optional `board` parameter. Resolves the board context at the top
+//! of `execute()` before any DB access. Opens the per-board store. Injects
+//! `board` + `board_source` into every success and rejection envelope (T-5 mitigation).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -63,6 +69,7 @@ use crate::store::{KanbanStore, MentionChildSpec, MentionPlan};
 
 /// LLM tool: fan out one child task per `@handle` mention found in a task body.
 pub struct KanbanMentionTool {
+    #[allow(dead_code)]
     store: Arc<TokioMutex<KanbanStore>>,
     explicit_enable: bool,
 }
@@ -74,21 +81,6 @@ impl KanbanMentionTool {
             explicit_enable,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Rejection helper — copied VERBATIM from tools/swarm.rs:56-64
-// ---------------------------------------------------------------------------
-
-/// Build the locked rejection JSON envelope (matches sibling 9-tool pattern).
-fn reject(reason: &str, detail: &str) -> String {
-    // Sanitize detail to keep it valid inside a JSON string literal.
-    let safe_detail = detail.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(
-        r#"{{"status":"rejected","reason":"{reason}","detail":"{safe_detail}"}}"#,
-        reason = reason,
-        safe_detail = safe_detail,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +126,10 @@ impl Tool for KanbanMentionTool {
                     "idempotency_key": {
                         "type": "string",
                         "description": "Replay key — re-invocation returns same children."
+                    },
+                    "board": {
+                        "type": "string",
+                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "additionalProperties": false
@@ -146,6 +142,16 @@ impl Tool for KanbanMentionTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
+        // D-08: resolve board context at the top, before any DB access.
+        let (board_ctx, board_err) = crate::tools::common::resolve_board_context_from_args(&args);
+        if let Some(err) = board_err {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_board",
+                &format!("{}", err),
+                Some(&board_ctx),
+            ));
+        }
+
         // ── Step 1: Resolve task_id ─────────────────────────────────────────
         let task_id = match args
             .get("task_id")
@@ -155,9 +161,10 @@ impl Tool for KanbanMentionTool {
         {
             Some(id) if !id.is_empty() => id,
             _ => {
-                return Ok(reject(
+                return Ok(crate::tools::common::reject_with_board(
                     "invalid_task_id",
                     "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    Some(&board_ctx),
                 ));
             }
         };
@@ -171,7 +178,11 @@ impl Tool for KanbanMentionTool {
         {
             Ok(p) => p,
             Err(e) => {
-                return Ok(reject("invalid_policy", &format!("{e}")));
+                return Ok(crate::tools::common::reject_with_board(
+                    "invalid_policy",
+                    &format!("{e}"),
+                    Some(&board_ctx),
+                ));
             }
         };
 
@@ -181,19 +192,22 @@ impl Tool for KanbanMentionTool {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        // ── Step 4: Acquire store lock; fetch parent task ───────────────────
-        // T-03: lock is acquired AFTER parse_mentions runs (no-op here; parse
-        // runs in step 6 after we have the body). But we need the parent body
-        // first, so we take the lock, fetch the task, release nothing yet —
-        // parse is cheap so the brief additional lock time is acceptable and
-        // simpler than a two-lock acquisition dance.
-        let mut store = self.store.lock().await;
+        // ── Step 4: Open per-board store; fetch parent task ─────────────────
+        // T-03: store opened ONCE per call; parse_mentions runs in Step 6 after we
+        // have the body. Brief extra time holding the connection is acceptable and
+        // simpler than a two-open dance.
+        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         let parent = match store.get_task(&task_id) {
             Ok(t) => t,
             Err(e) => {
                 let msg = format!("{e}");
-                return Ok(reject("task_not_found", &msg));
+                return Ok(crate::tools::common::reject_with_board(
+                    "task_not_found",
+                    &msg,
+                    Some(&board_ctx),
+                ));
             }
         };
 
@@ -306,12 +320,13 @@ impl Tool for KanbanMentionTool {
 
         // Emit hard error for policy=error + unknown handle.
         if let Some(handle) = unknown_handle_error {
-            return Ok(reject(
+            return Ok(crate::tools::common::reject_with_board(
                 "unknown_handle",
                 &format!(
                     "handle '{}' did not resolve under fallback_policy=error",
                     handle
                 ),
+                Some(&board_ctx),
             ));
         }
 
@@ -346,7 +361,11 @@ impl Tool for KanbanMentionTool {
                 } else {
                     "store_error"
                 };
-                return Ok(reject(reason, &msg));
+                return Ok(crate::tools::common::reject_with_board(
+                    reason,
+                    &msg,
+                    Some(&board_ctx),
+                ));
             }
         };
 
@@ -366,13 +385,13 @@ impl Tool for KanbanMentionTool {
         // WR-08 (Phase 36.3.7.8 code review): include "status":"ok" so the
         // tool's success envelope can be disambiguated from the reject()
         // envelope by a single discriminator field.
-        Ok(serde_json::to_string_pretty(&json!({
+        crate::tools::common::ok_with_board(json!({
             "status": "ok",
             "task_id": task_id,
             "mentions_parsed": spans.len(),
             "children_created": children_created,
             "skipped": skipped
-        }))?)
+        }), &board_ctx)
     }
 }
 
@@ -419,6 +438,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn schema_contains_board_property() {
+        let tool = KanbanMentionTool::new(make_store(), false);
+        let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
+    }
+
     /// Test `is_available` logic.
     ///
     /// SAFETY: env-mutating tests MUST run with `--test-threads=1` to avoid
@@ -426,6 +452,7 @@ mod tests {
     /// when run in that mode.
     #[test]
     fn tool_is_available_respects_env_and_explicit_enable() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // explicit_enable=true → always available regardless of env.
         let tool_explicit = KanbanMentionTool::new(make_store(), true);
         assert!(

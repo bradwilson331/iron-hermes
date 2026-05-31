@@ -75,11 +75,8 @@ fn read_current_board_file_opt() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
     /// Serialise all env-mutation tests to prevent races when running with
-    /// multiple test threads (follows the ENV_LOCK pattern from tools_smoke.rs).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// multiple test threads. Uses the process-wide crate::ENV_LOCK.
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -129,7 +126,7 @@ mod tests {
 
     #[test]
     fn flag_overrides_env() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
         let _env = ScopedEnv::set("HERMES_KANBAN_BOARD", "env-board");
 
@@ -144,7 +141,7 @@ mod tests {
 
     #[test]
     fn env_overrides_file() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
 
         // Write a current file
@@ -165,7 +162,7 @@ mod tests {
 
     #[test]
     fn file_overrides_default() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
         let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
 
@@ -184,7 +181,7 @@ mod tests {
 
     #[test]
     fn fourth_tier_is_default() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
         let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
         // No current file exists in tempdir
@@ -200,7 +197,7 @@ mod tests {
 
     #[test]
     fn default_slug_skips_validation_and_uses_legacy_db_path() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
         let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
 
@@ -223,7 +220,7 @@ mod tests {
 
     #[test]
     fn invalid_flag_slug_returns_path_traversal_error() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
 
         let result = resolve_board_context(Some("BAD..PATH"));
@@ -240,7 +237,7 @@ mod tests {
 
     #[test]
     fn current_file_trims_trailing_newline() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
         let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
 
@@ -259,7 +256,7 @@ mod tests {
 
     #[test]
     fn empty_current_file_falls_through_to_default() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
         let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
 
