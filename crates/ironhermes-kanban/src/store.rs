@@ -63,6 +63,82 @@ pub struct ListFilters {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 36.3.7.8 — @mention delegation public types
+// ---------------------------------------------------------------------------
+
+/// Input plan for [`KanbanStore::create_mention_children`].
+///
+/// Carries the resolved, pre-validated mention children that the store will
+/// materialize atomically into the DB. The caller (Plan 03 LLM tool or Plan 04
+/// CLI verb) is responsible for running the mention parser + resolver before
+/// constructing this struct; the store only sees post-resolution children.
+#[derive(Debug, Clone)]
+pub struct MentionPlan {
+    /// ID of the parent task whose body was parsed.
+    pub parent_id: String,
+    /// Resolved, validated mention children to materialize (may be empty).
+    pub children: Vec<MentionChildSpec>,
+    /// When set, enables idempotency replay: re-invocation with the same key
+    /// returns the existing children instead of inserting new rows (REQ-12).
+    ///
+    /// # Invariant
+    /// The key must be stable across re-invocations even if the parent body
+    /// changes — idempotency is keyed on the *intent*, not the content.
+    pub idempotency_key: Option<String>,
+    pub workspace: Option<String>,
+    pub skills: Option<Vec<String>>,
+    pub tenant: Option<String>,
+    /// Profile slug that created the mention batch (`$HERMES_PROFILE`).
+    pub created_by: Option<String>,
+}
+
+/// A single resolved mention child ready for DB insertion.
+///
+/// `handle` is the original-cased handle from prose; `assignee` is the
+/// lowercased, `validate_profile_name`-validated form. Both are stored so the
+/// caller can surface the original text in UI without a separate lookup.
+#[derive(Debug, Clone)]
+pub struct MentionChildSpec {
+    /// Original-cased handle as it appeared in prose (e.g. `"Reviewer"`).
+    pub handle: String,
+    /// Normalized + validated profile name (post-resolver, e.g. `"reviewer"`).
+    pub assignee: String,
+    /// 0-indexed position within the ORIGINAL parsed mention list (REQ-12 key
+    /// stability). Skipped mentions reserve their slot so `mention_index` is
+    /// deterministic on re-parse regardless of which handles were resolved.
+    pub mention_index: usize,
+    /// Auto-derived title, e.g. `"@reviewer mention from t_abcd"`.
+    pub title: String,
+    /// Optional body for the child card.
+    pub body: Option<String>,
+}
+
+/// Result returned by [`KanbanStore::create_mention_children`].
+#[derive(Debug, Clone)]
+pub struct MentionResult {
+    pub children: Vec<MentionChildIds>,
+}
+
+/// IDs and metadata for a single materialized mention child card.
+///
+/// # Handle on replay
+/// When [`MentionResult`] is produced via the idempotency replay path
+/// ([`KanbanStore::find_mentions_by_idempotency_key`]), `handle` is `""` because
+/// the original-cased handle is not persisted in a separate column. Callers that
+/// need it can recover it from the `task_events` row whose payload contains
+/// `"source":"mention"` and `"handle":<original>`.
+#[derive(Debug, Clone)]
+pub struct MentionChildIds {
+    pub child_id: String,
+    pub assignee: String,
+    /// Original-cased handle. Empty string on idempotency-replay paths — see
+    /// type-level doc for details.
+    pub handle: String,
+    /// Original parse-order index (matches [`MentionChildSpec::mention_index`]).
+    pub mention_index: usize,
+}
+
+// ---------------------------------------------------------------------------
 // KanbanStore
 // ---------------------------------------------------------------------------
 
@@ -986,6 +1062,85 @@ impl KanbanStore {
             synthesizer_id,
             blackboard_event_id,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 36.3.7.8 — @mention delegation store primitive
+    // -----------------------------------------------------------------------
+
+    /// Maximum ancestor hops the store-layer cycle check will walk (REQ-10 layer 2).
+    ///
+    /// Mirrors `mention::MAX_MENTION_CHAIN_DEPTH` — when the `mention` module
+    /// (Plan 01) merges, this local constant will be unified via re-export.
+    const MAX_MENTION_CHAIN_DEPTH: usize = 4;
+
+    /// Find all mention children created under a given idempotency base key.
+    ///
+    /// Scans `tasks` where `idempotency_key LIKE '{base_key}:mention:%'`, parses
+    /// the trailing `mention_index`, and returns children sorted by `mention_index`
+    /// ascending (REQ-12 stability guarantee).
+    ///
+    /// Returns `Ok(None)` when no rows match — i.e., the batch was never created.
+    ///
+    /// # Handle field
+    /// The `handle` field in [`MentionChildIds`] is not persisted as a separate
+    /// column. On replay, `handle` is set to `""` (empty string). Callers that
+    /// need the original-cased handle should store it in the task body or derive
+    /// it from the `task_events` payload (where `"source":"mention"` rows carry
+    /// `"handle"`). This trade-off avoids a schema column addition in this phase.
+    pub fn find_mentions_by_idempotency_key(
+        &self,
+        base_key: &str,
+    ) -> Result<Option<MentionResult>> {
+        let pattern = format!("{base_key}:mention:%");
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, idempotency_key, assignee \
+                 FROM tasks \
+                 WHERE idempotency_key LIKE ?1 \
+                 ORDER BY idempotency_key",
+            )
+            .map_err(KanbanError::from)?;
+
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map(params![pattern], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(KanbanError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(KanbanError::from)?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let mut children: Vec<MentionChildIds> = Vec::with_capacity(rows.len());
+        for (child_id, idem_key, assignee) in rows {
+            // Parse mention_index from suffix: "{base_key}:mention:{i}"
+            let mention_index: usize = idem_key
+                .split(":mention:")
+                .last()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            // handle is not persisted — see doc comment above.
+            children.push(MentionChildIds {
+                child_id,
+                assignee,
+                handle: String::new(),
+                mention_index,
+            });
+        }
+
+        // Sort by mention_index for REQ-12 stability (ORDER BY idem_key is
+        // lexicographic, not numeric — e.g. ":mention:10" < ":mention:2").
+        children.sort_by_key(|c| c.mention_index);
+
+        Ok(Some(MentionResult { children }))
     }
 
     /// Append an event row for a task and return the new event id.
