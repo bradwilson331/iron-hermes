@@ -167,6 +167,7 @@ mod tests {
 
     #[test]
     fn is_available_respects_env() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
         let store = make_store();
         let tool = KanbanListTool::new(store.clone(), false);

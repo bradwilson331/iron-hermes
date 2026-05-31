@@ -433,10 +433,8 @@ mod tests {
 
     #[test]
     fn is_available_respects_env() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tool = KanbanSwarmTool::new(make_store(), false);
-        // SAFETY: tests run sequentially under cargo test --test-threads=1
-        // for env-touching cases; this read-only check is harmless when
-        // either value is set.
         unsafe {
             std::env::remove_var("HERMES_KANBAN_TASK");
         }
