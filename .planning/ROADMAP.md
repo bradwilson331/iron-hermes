@@ -684,7 +684,7 @@ Plans:
 
 **Requirements**: REQ-36.3.7.10-01 (decomposer module), REQ-36.3.7.10-02 (CLI decompose verb), REQ-36.3.7.10-03 (CLI specify verb), REQ-36.3.7.10-04 (auto_decompose config knob), REQ-36.3.7.10-05 (dispatcher Step 0), REQ-36.3.7.10-06 (failure-mode policy + DecomposeFailed event), REQ-36.3.7.10-07 (KanbanDecomposeTool + KanbanSpecifyTool LLM tools), REQ-36.3.7.10-08 (kanban_decomposer reserved role), REQ-36.3.7.10-09 (DEFERRED_KANBAN_SUBVERBS extension), REQ-36.3.7.10-10 (docs/kanban/reference.md reconciliation). Derived from ROADMAP goal + RESEARCH §Acceptance Criteria; full list in 36.3.7.10-01-PLAN.md §Requirements (Derived).
 **Depends on:** Phase 36.3.7.6 (CLOSED — kanban_create + kanban_comment tools available), Phase 36.3.7.9 (CLOSED — multi-board CLI + --board flag + tools/common.rs envelope helpers + DEFERRED_KANBAN_SUBVERBS pattern). NOT dependent on Phase 36.3.7.7 (swarm) — RESEARCH §Q8 + §Assumptions A3 show decompose-children land via a new store.apply_decompose mirroring create_swarm's atomic-tx shape but NOT calling create_swarm directly (the "root" is a pre-existing triage task, not a new card).
-**Plans:** 1/6 plans executed
+**Plans:** 2/6 plans executed
 
 Plans:
 **Wave 1** *(no dependencies)*
@@ -693,7 +693,7 @@ Plans:
 
 **Wave 2** *(depends on 01)*
 
-- [ ] 36.3.7.10-02-PLAN.md — Decomposer kernel: NEW decomposer.rs (DecomposeFn typedef + 4 data structs + specify_triage_task + decompose_triage_task) + 2 new store helpers (apply_specify + apply_decompose with WHERE status='triage' guard + BEGIN IMMEDIATE) + lib.rs re-exports + 6 receiver tests (DEC-01..06) — covers REQ-01, REQ-06 (policy wired)
+- [x] 36.3.7.10-02-PLAN.md — Decomposer kernel: NEW decomposer.rs (DecomposeFn typedef + 4 data structs + specify_triage_task + decompose_triage_task) + 2 new store helpers (apply_specify + apply_decompose with WHERE status='triage' guard + BEGIN IMMEDIATE) + lib.rs re-exports + 6 receiver tests (DEC-01..06) — covers REQ-01, REQ-06 (policy wired)
 
 **Wave 3** *(depends on 02; plans 03 + 04 are file-disjoint and parallel-eligible)*
 
