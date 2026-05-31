@@ -623,6 +623,9 @@ pub async fn cmd_mention(
 
     // 6. Build known-assignees HashSet via inline SELECT DISTINCT.
     //    Uses params![] — no string-interpolated SQL (T-36.3.7.8-04-02).
+    //    CR-02 (Phase 36.3.7.8 code review): lowercase every DB-returned
+    //    assignee so the resolver's case-insensitive contract holds even if
+    //    a future migration or repair-script bypasses validate_profile_name.
     let known: HashSet<String> = {
         let mut stmt = store
             .conn
@@ -633,7 +636,8 @@ pub async fn cmd_mention(
             .context("Failed to query known assignees")?;
         let mut set = HashSet::new();
         for r in rows {
-            set.insert(r.context("Failed to read assignee row")?);
+            let a = r.context("Failed to read assignee row")?;
+            set.insert(a.to_lowercase());
         }
         set
     };
@@ -644,7 +648,11 @@ pub async fn cmd_mention(
         .context("Invalid --fallback-policy value (expected: skip | pending | error)")?;
 
     // 8. Build resolver context and resolve every span.
-    let parent_assignee = parent.assignee.clone();
+    // CR-02 (Phase 36.3.7.8 code review): lowercase parent.assignee to mirror
+    // the LLM-tool path (tools/mention.rs:233) and honour the resolver
+    // precondition documented at resolver.rs::ResolverCtx::parent_assignee
+    // ("validated, lowercased").
+    let parent_assignee = parent.assignee.to_lowercase();
     let ctx = ResolverCtx {
         parent_task_id: task_id.clone(),
         parent_assignee,
