@@ -684,7 +684,7 @@ Plans:
 
 **Requirements**: REQ-36.3.7.10-01 (decomposer module), REQ-36.3.7.10-02 (CLI decompose verb), REQ-36.3.7.10-03 (CLI specify verb), REQ-36.3.7.10-04 (auto_decompose config knob), REQ-36.3.7.10-05 (dispatcher Step 0), REQ-36.3.7.10-06 (failure-mode policy + DecomposeFailed event), REQ-36.3.7.10-07 (KanbanDecomposeTool + KanbanSpecifyTool LLM tools), REQ-36.3.7.10-08 (kanban_decomposer reserved role), REQ-36.3.7.10-09 (DEFERRED_KANBAN_SUBVERBS extension), REQ-36.3.7.10-10 (docs/kanban/reference.md reconciliation). Derived from ROADMAP goal + RESEARCH §Acceptance Criteria; full list in 36.3.7.10-01-PLAN.md §Requirements (Derived).
 **Depends on:** Phase 36.3.7.6 (CLOSED — kanban_create + kanban_comment tools available), Phase 36.3.7.9 (CLOSED — multi-board CLI + --board flag + tools/common.rs envelope helpers + DEFERRED_KANBAN_SUBVERBS pattern). NOT dependent on Phase 36.3.7.7 (swarm) — RESEARCH §Q8 + §Assumptions A3 show decompose-children land via a new store.apply_decompose mirroring create_swarm's atomic-tx shape but NOT calling create_swarm directly (the "root" is a pre-existing triage task, not a new card).
-**Plans:** 2/6 plans executed
+**Plans:** 5/6 plans executed
 
 Plans:
 **Wave 1** *(no dependencies)*
@@ -697,12 +697,12 @@ Plans:
 
 **Wave 3** *(depends on 02; plans 03 + 04 are file-disjoint and parallel-eligible)*
 
-- [ ] 36.3.7.10-03-PLAN.md — LLM tool surface: NEW tools/decompose.rs + tools/specify.rs (KanbanDecomposeTool + KanbanSpecifyTool mirror tools/create.rs shape; v1 returns no_aux_client envelope per crate-isolation fence) + register_kanban_tools tool-count regression test 11→13 — covers REQ-07
-- [ ] 36.3.7.10-04-PLAN.md — Dispatcher auto-mode: DispatcherContext.decompose_fn field + run_dispatch_tick_for_board Step 0 (gated on config.auto_decompose && decompose_fn.is_some()) + decompose_triage_tasks helper (sequential, per-tick-capped) + 3 receiver tests — covers REQ-05, REQ-06 (dispatcher invocation)
+- [x] 36.3.7.10-03-PLAN.md — LLM tool surface: NEW tools/decompose.rs + tools/specify.rs (KanbanDecomposeTool + KanbanSpecifyTool mirror tools/create.rs shape; v1 returns no_aux_client envelope per crate-isolation fence) + register_kanban_tools tool-count regression test 11→13 — covers REQ-07
+- [x] 36.3.7.10-04-PLAN.md — Dispatcher auto-mode: DispatcherContext.decompose_fn field + run_dispatch_tick_for_board Step 0 (gated on config.auto_decompose && decompose_fn.is_some()) + decompose_triage_tasks helper (sequential, per-tick-capped) + 3 receiver tests — covers REQ-05, REQ-06 (dispatcher invocation)
 
 **Wave 4** *(depends on 01 + 02)*
 
-- [ ] 36.3.7.10-05-PLAN.md — CLI verbs: KanbanCommands::Decompose + Specify variants + dispatch arms + cmd_decompose + cmd_specify + build_runtime_decompose_fn (three-tier model cascade: kanban.decomposer_model > auxiliary.kanban_decomposer > main provider) + ≥4 clap parity tests in NEW tests/decompose_cli.rs — covers REQ-02, REQ-03
+- [x] 36.3.7.10-05-PLAN.md — CLI verbs: KanbanCommands::Decompose + Specify variants + dispatch arms + cmd_decompose + cmd_specify + build_runtime_decompose_fn (three-tier model cascade: kanban.decomposer_model > auxiliary.kanban_decomposer > main provider) + ≥4 clap parity tests in NEW tests/decompose_cli.rs — covers REQ-02, REQ-03
 
 **Wave 5** *(depends on all prior plans)*
 
