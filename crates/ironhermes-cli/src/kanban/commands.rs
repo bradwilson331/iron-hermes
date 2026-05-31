@@ -29,7 +29,8 @@ use super::format::{
 
 /// Open the correct board store given an optional `--board <slug>` flag value.
 ///
-/// When `board` is `Some(slug)`, opens that board directly.
+/// When `board` is `Some(slug)`, validates the slug (T-1 path-traversal guard)
+/// then opens that board directly.
 /// When `board` is `None`, runs the 4-tier resolver (D-02) to determine the
 /// active board and opens it.
 ///
@@ -37,7 +38,12 @@ use super::format::{
 /// Also used by `boards.rs` functions.
 pub fn open_store_for_board(board: Option<&str>) -> Result<KanbanStore> {
     match board {
-        Some(slug) => KanbanStore::open_for_board(slug).context("Failed to open board DB"),
+        Some(raw_slug) => {
+            // T-1: validate slug at CLI boundary before constructing any path.
+            let slug = ironhermes_kanban::board::validate_board_slug(raw_slug)
+                .map_err(|e| anyhow::anyhow!("invalid --board slug: {}", e))?;
+            KanbanStore::open_for_board(&slug).context("Failed to open board DB")
+        }
         None => {
             let ctx = ironhermes_kanban::board::resolve_board_context(None)
                 .context("Failed to resolve board context")?;

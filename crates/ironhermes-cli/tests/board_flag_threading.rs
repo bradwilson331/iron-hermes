@@ -191,3 +191,50 @@ fn board_flag_routes_open_store_to_named_board() {
         "legacy kanban.db should NOT be created when opening a named board"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 5: CR-01 regression — path-traversal via --board slug must be rejected
+// ---------------------------------------------------------------------------
+
+/// `open_store_for_board(Some(".."))` must return Err with "invalid --board slug".
+///
+/// Regression test for CR-01 (Phase 36.3.7.9 code review): the CLI fast path
+/// in `open_store_for_board` must call `validate_board_slug` BEFORE forwarding
+/// the slug to `KanbanStore::open_for_board`. Without the fix, `PathBuf::join("..")`
+/// would escape the boards root directory.
+#[test]
+fn open_store_for_board_rejects_dotdot_slug() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = ScopedHome::new();
+
+    let result = ironhermes_cli::kanban::commands::open_store_for_board(Some(".."));
+    match result {
+        Ok(_) => panic!("open_store_for_board(Some(\"..\")) must return Err (path-traversal rejected)"),
+        Err(e) => {
+            let err_msg = format!("{}", e);
+            assert!(
+                err_msg.contains("invalid --board slug"),
+                "error must contain 'invalid --board slug', got: {err_msg}"
+            );
+        }
+    }
+}
+
+/// `open_store_for_board(Some("../etc/passwd"))` must return Err.
+#[test]
+fn open_store_for_board_rejects_path_traversal_slug() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = ScopedHome::new();
+
+    let result = ironhermes_cli::kanban::commands::open_store_for_board(Some("../etc/passwd"));
+    match result {
+        Ok(_) => panic!("open_store_for_board(Some(\"../etc/passwd\")) must return Err (path-traversal rejected)"),
+        Err(e) => {
+            let err_msg = format!("{}", e);
+            assert!(
+                err_msg.contains("invalid --board slug"),
+                "error must contain 'invalid --board slug', got: {err_msg}"
+            );
+        }
+    }
+}
