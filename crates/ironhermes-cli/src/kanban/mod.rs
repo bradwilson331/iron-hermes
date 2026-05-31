@@ -278,6 +278,29 @@ pub enum KanbanCommands {
         json: bool,
     },
 
+    /// Fan-out @mention delegations from a task body as child tasks (Phase 36.3.7.8).
+    ///
+    /// Parses all `@handle` occurrences from the task's body (or `--body-override`),
+    /// resolves each handle against known assignees, and materializes child tasks
+    /// in one atomic transaction. See docs/kanban/reference.md §741 for semantics.
+    #[command(name = "mention")]
+    Mention {
+        /// Source task ID (defaults to $HERMES_KANBAN_TASK in worker mode).
+        task_id: Option<String>,
+        /// Fallback policy for unknown handles: skip | pending | error (default: skip).
+        #[arg(long, default_value = "skip")]
+        fallback_policy: String,
+        /// Idempotency key — re-invocation returns existing children.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Parse this string instead of the task's current body (preview mode).
+        #[arg(long)]
+        body_override: Option<String>,
+        /// Output result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Archive one or more tasks
     #[command(name = "archive")]
     Archive {
@@ -581,6 +604,23 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
                 max_runtime,
                 max_retries,
                 idempotency_key,
+                json,
+            )
+            .await
+        }
+        // Phase 36.3.7.8 — kanban_mention (@mention delegation parser, inline routing).
+        KanbanCommands::Mention {
+            task_id,
+            fallback_policy,
+            idempotency_key,
+            body_override,
+            json,
+        } => {
+            commands::cmd_mention(
+                task_id,
+                fallback_policy,
+                idempotency_key,
+                body_override,
                 json,
             )
             .await

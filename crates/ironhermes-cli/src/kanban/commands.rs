@@ -577,6 +577,169 @@ pub async fn cmd_swarm(
 }
 
 // ---------------------------------------------------------------------------
+// cmd_mention (Phase 36.3.7.8 — kanban_mention @mention delegation, inline routing)
+//
+// CRITICAL: runs the parser + resolver INLINE (NOT via the LLM tool registry).
+// Plan 03's tool path is the LLM surface; this CLI path calls store.create_mention_children
+// directly per the 36.3.7.6/36.3.7.7 precedent (PATTERNS.md Landmine 7 + RESEARCH §Pitfall 7).
+// ---------------------------------------------------------------------------
+
+/// Fan-out `@mention` delegations from a task body as child tasks.
+///
+/// Resolves handles inline (parser + resolver + store), NOT via the LLM tool
+/// registry. Human operators invoke this verb directly; gateway `/kanban mention`
+/// routes here via `DEFERRED_KANBAN_SUBVERBS` (REQ-08).
+pub async fn cmd_mention(
+    task_id: Option<String>,
+    fallback_policy: String,
+    idempotency_key: Option<String>,
+    body_override: Option<String>,
+    json: bool,
+) -> Result<i32> {
+    use std::collections::HashSet;
+
+    use ironhermes_kanban::mention::{
+        FallbackPolicy, Resolution, SkipReason, ResolverCtx,
+        parse_mentions, resolve_mention,
+    };
+    use ironhermes_kanban::store::{MentionChildSpec, MentionPlan};
+
+    // 1. Resolve task_id from arg or $HERMES_KANBAN_TASK env.
+    let task_id = task_id
+        .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
+        .ok_or_else(|| anyhow!("task_id required when HERMES_KANBAN_TASK is not set"))?;
+
+    // 2. Open store (sync handle; CLI is single-process).
+    let mut store = open_store()?;
+
+    // 3. Fetch the parent task.
+    let parent = store.get_task(&task_id).context("Failed to fetch parent task")?;
+
+    // 4. Determine body to parse.
+    let body = body_override.unwrap_or_else(|| parent.body.clone().unwrap_or_default());
+
+    // 5. Run the parser (pure function — no IO).
+    let spans = parse_mentions(&body);
+
+    // 6. Build known-assignees HashSet via inline SELECT DISTINCT.
+    //    Uses params![] — no string-interpolated SQL (T-36.3.7.8-04-02).
+    let known: HashSet<String> = {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT DISTINCT assignee FROM tasks WHERE assignee != '' AND assignee IS NOT NULL")
+            .context("Failed to prepare known-assignees query")?;
+        let rows = stmt
+            .query_map(rusqlite::params![], |row| row.get::<_, String>(0))
+            .context("Failed to query known assignees")?;
+        let mut set = HashSet::new();
+        for r in rows {
+            set.insert(r.context("Failed to read assignee row")?);
+        }
+        set
+    };
+
+    // 7. Parse fallback_policy.
+    let policy: FallbackPolicy = fallback_policy
+        .parse()
+        .context("Invalid --fallback-policy value (expected: skip | pending | error)")?;
+
+    // 8. Build resolver context and resolve every span.
+    let parent_assignee = parent.assignee.clone();
+    let ctx = ResolverCtx {
+        parent_task_id: task_id.clone(),
+        parent_assignee,
+        known_assignees: &known,
+        fallback_policy: policy,
+    };
+
+    let mut children: Vec<MentionChildSpec> = Vec::new();
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+
+    for (mention_index, span) in spans.iter().enumerate() {
+        match resolve_mention(&span.handle, &ctx) {
+            Resolution::Resolved(assignee) => {
+                children.push(MentionChildSpec {
+                    handle: span.handle.clone(),
+                    assignee,
+                    mention_index,
+                    title: format!("@{} mention from {}", span.handle.to_lowercase(), task_id),
+                    body: None,
+                });
+            }
+            Resolution::Fallback(assignee, _reason) => {
+                children.push(MentionChildSpec {
+                    handle: span.handle.clone(),
+                    assignee,
+                    mention_index,
+                    title: format!("@{} mention from {}", span.handle.to_lowercase(), task_id),
+                    body: None,
+                });
+            }
+            Resolution::Skipped(reason) => {
+                // Under Error policy, unknown-handle skips are hard errors.
+                if matches!(policy, FallbackPolicy::Error)
+                    && matches!(reason, SkipReason::UnknownHandle)
+                {
+                    return Err(anyhow!(
+                        "unknown_handle: handle '{}' did not resolve under fallback_policy=error",
+                        span.handle
+                    ));
+                }
+                skipped.push(serde_json::json!({
+                    "handle": &span.handle,
+                    "reason": format!("{:?}", reason),
+                }));
+            }
+        }
+    }
+
+    // 9. Decode parent skills (stored as JSON string in DB).
+    let parent_skills: Option<Vec<String>> = parent
+        .skills
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+
+    // 10. Construct MentionPlan and call store.create_mention_children.
+    let plan = MentionPlan {
+        parent_id: task_id.clone(),
+        children,
+        idempotency_key,
+        workspace: parent.workspace.clone(),
+        skills: parent_skills,
+        tenant: parent.tenant.clone(),
+        created_by: Some(profile_from_env()),
+    };
+
+    let result = store
+        .create_mention_children(plan)
+        .context("Failed to create mention children")?;
+
+    // 11. Output.
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "task_id": task_id,
+                "mentions_parsed": spans.len(),
+                "children_created": result.children.iter().map(|c| serde_json::json!({
+                    "child_id": &c.child_id,
+                    "assignee": &c.assignee,
+                    "handle": &c.handle,
+                })).collect::<Vec<_>>(),
+                "skipped": skipped,
+            }))?
+        );
+    } else {
+        println!(
+            "Created {} mention children for {}",
+            result.children.len(),
+            task_id
+        );
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
 // cmd_archive
 // ---------------------------------------------------------------------------
 
