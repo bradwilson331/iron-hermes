@@ -51,7 +51,8 @@ fn make_ctx_failing_spawn(
     let spawn_fn = Arc::new(
         |_task: ironhermes_kanban::types::Task,
          _run: ironhermes_kanban::types::TaskRun,
-         _ws: String|
+         _ws: String,
+         _board_slug: String|
          -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
@@ -76,7 +77,8 @@ fn make_ctx_ok_spawn(
     let spawn_fn = Arc::new(
         move |_task: ironhermes_kanban::types::Task,
               _run: ironhermes_kanban::types::TaskRun,
-              _ws: String|
+              _ws: String,
+              _board_slug: String|
               -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>

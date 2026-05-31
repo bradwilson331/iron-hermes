@@ -162,7 +162,7 @@ fn build_kanban_worker_env_emits_skills_env_when_task_has_extras() {
     let mut task = fake_task("t_skills_test", "worker-alice");
     task.skills = Some(r#"["foo","bar"]"#.to_string());
     let run = fake_run("r_skills_run", "t_skills_test", "host:1:uuid-s");
-    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_skills");
+    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_skills", "default");
 
     let found = env
         .iter()
@@ -183,7 +183,7 @@ fn build_kanban_worker_env_emits_skills_env_when_task_has_extras() {
 fn build_kanban_worker_env_omits_skills_env_when_task_has_none() {
     let task = fake_task("t_no_skills", "worker-bob");
     let run = fake_run("r_no_skills_run", "t_no_skills", "host:2:uuid-n");
-    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_no_skills");
+    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_no_skills", "default");
 
     let found = env.iter().find(|(k, _)| k == "HERMES_KANBAN_TASK_SKILLS");
     assert!(
@@ -200,7 +200,7 @@ fn build_kanban_worker_env_omits_skills_env_when_task_has_empty_array() {
     let mut task = fake_task("t_empty_skills", "worker-carol");
     task.skills = Some("[]".to_string());
     let run = fake_run("r_empty_skills_run", "t_empty_skills", "host:3:uuid-e");
-    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_empty_skills");
+    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_empty_skills", "default");
 
     let found = env.iter().find(|(k, _)| k == "HERMES_KANBAN_TASK_SKILLS");
     assert!(

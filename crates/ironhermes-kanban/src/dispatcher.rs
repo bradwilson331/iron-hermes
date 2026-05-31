@@ -62,7 +62,8 @@ use crate::types::{Task, TaskRun};
 // ---------------------------------------------------------------------------
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
-type SpawnFn = Arc<dyn Fn(Task, TaskRun, String) -> BoxFuture<Result<u32>> + Send + Sync>;
+/// spawn_fn signature: (task, run, workspace, board_slug) -> pid
+type SpawnFn = Arc<dyn Fn(Task, TaskRun, String, String) -> BoxFuture<Result<u32>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // DispatcherContext
@@ -90,8 +91,10 @@ impl DispatcherContext {
             config,
             hostname: crate::pid::current_hostname(),
             dispatcher_pid: std::process::id(),
-            spawn_fn: Arc::new(|task, run, workspace| {
-                Box::pin(async move { crate::worker_spawn::spawn_worker(&task, &run, &workspace).await })
+            spawn_fn: Arc::new(|task, run, workspace, board_slug| {
+                Box::pin(async move {
+                    crate::worker_spawn::spawn_worker_for_board(&task, &run, &workspace, &board_slug).await
+                })
             }),
         }
     }
@@ -100,7 +103,7 @@ impl DispatcherContext {
     pub fn with_spawn_fn(
         store: Arc<TokioMutex<KanbanStore>>,
         config: KanbanConfig,
-        spawn_fn: Arc<dyn Fn(Task, TaskRun, String) -> BoxFuture<Result<u32>> + Send + Sync>,
+        spawn_fn: SpawnFn,
     ) -> Self {
         Self {
             store,
@@ -152,8 +155,65 @@ pub async fn run_dispatch_loop(ctx: Arc<DispatcherContext>, cancel: Cancellation
 
 /// Execute one full dispatcher tick (all 8 steps).
 ///
-/// Steps are isolated — a failure in step N does not prevent step N+1.
+/// Phase 36.3.7.9: iterates every board (prepending "default" to `list_boards()`)
+/// and runs all 8 steps for each board. For the "default" board the existing
+/// `ctx.store` Arc is reused (back-compat for tests and the notifier Arc hoist in
+/// runner.rs). For named boards a fresh per-board KanbanStore is opened from disk.
+/// Per-board open failures are logged + skipped; other boards continue
+/// (INV-36.3.7-08-05 extension).
 pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
+    // Build the ordered board list: "default" first, then named boards.
+    let mut all_boards = vec!["default".to_string()];
+    match crate::paths::list_boards() {
+        Ok(named) => all_boards.extend(named),
+        Err(e) => {
+            tracing::warn!("[kanban] dispatcher could not enumerate boards: {e}; using default only");
+        }
+    }
+
+    for slug in all_boards {
+        // For "default": reuse the existing ctx.store Arc (back-compat; see module doc).
+        // For named boards: open a fresh store per tick (Option A: no Arc-per-board
+        // caching this phase; Arc-per-board caching is a future optimization).
+        let board_store_arc: Arc<TokioMutex<KanbanStore>> = if slug == "default" {
+            Arc::clone(&ctx.store)
+        } else {
+            match KanbanStore::open_for_board(&slug) {
+                Ok(s) => Arc::new(TokioMutex::new(s)),
+                Err(e) => {
+                    tracing::warn!("[kanban] dispatcher skipping board '{slug}': {e}");
+                    continue;
+                }
+            }
+        };
+
+        // Build a per-board context that shares config + spawn_fn from the
+        // outer DispatcherContext but uses the per-board store.
+        let board_ctx = DispatcherContext {
+            store: board_store_arc,
+            config: ctx.config.clone(),
+            hostname: ctx.hostname.clone(),
+            dispatcher_pid: ctx.dispatcher_pid,
+            spawn_fn: Arc::new({
+                let outer_spawn_fn = Arc::clone(&ctx.spawn_fn);
+                let slug = slug.clone();
+                move |task, run, workspace, _ignored_slug| {
+                    // The board-loop slug is captured here; the inner arg is ignored.
+                    outer_spawn_fn(task, run, workspace, slug.clone())
+                }
+            }),
+        };
+
+        run_dispatch_tick_for_board(&board_ctx, &slug).await;
+    }
+
+    Ok(())
+}
+
+/// Run all 8 dispatch steps for a single board.
+///
+/// Steps are isolated — a failure in step N does not prevent step N+1.
+async fn run_dispatch_tick_for_board(ctx: &DispatcherContext, board_slug: &str) {
     let now = now_secs();
 
     // Step 1: detect crashed workers.
@@ -162,61 +222,60 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
     // tokio::spawn context. This pattern applies to all steps below.
     async {
         if let Err(e) = detect_crashed_workers(ctx, now).await {
-            tracing::error!(error = %e, step = "detect_crashed", "dispatch step error");
+            tracing::error!(error = %e, step = "detect_crashed", board = board_slug, "dispatch step error");
         }
     }
-    .instrument(tracing::info_span!("kanban.dispatch.step", step = "detect_crashed"))
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "detect_crashed", board = board_slug))
     .await;
 
     // Step 2: extend claims for live PIDs at TTL expiry.
     async {
         if let Err(e) = extend_live_pid_claims(ctx, now).await {
-            tracing::error!(error = %e, step = "extend_live", "dispatch step error");
+            tracing::error!(error = %e, step = "extend_live", board = board_slug, "dispatch step error");
         }
     }
-    .instrument(tracing::info_span!("kanban.dispatch.step", step = "extend_live"))
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "extend_live", board = board_slug))
     .await;
 
     // Step 3: reclaim stale claims (dead PID or null PID, expired TTL).
     async {
         if let Err(e) = reclaim_stale_claims(ctx, now).await {
-            tracing::error!(error = %e, step = "reclaim_stale", "dispatch step error");
+            tracing::error!(error = %e, step = "reclaim_stale", board = board_slug, "dispatch step error");
         }
     }
-    .instrument(tracing::info_span!("kanban.dispatch.step", step = "reclaim_stale"))
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "reclaim_stale", board = board_slug))
     .await;
 
     // Step 4: enforce max runtime.
     async {
         if let Err(e) = enforce_max_runtime(ctx, now).await {
-            tracing::error!(error = %e, step = "enforce_max_runtime", "dispatch step error");
+            tracing::error!(error = %e, step = "enforce_max_runtime", board = board_slug, "dispatch step error");
         }
     }
     .instrument(tracing::info_span!(
         "kanban.dispatch.step",
-        step = "enforce_max_runtime"
+        step = "enforce_max_runtime",
+        board = board_slug,
     ))
     .await;
 
     // Step 5: promote ready tasks (todo → ready when all parents done).
     async {
         if let Err(e) = promote_ready(ctx, now).await {
-            tracing::error!(error = %e, step = "promote_ready", "dispatch step error");
+            tracing::error!(error = %e, step = "promote_ready", board = board_slug, "dispatch step error");
         }
     }
-    .instrument(tracing::info_span!("kanban.dispatch.step", step = "promote_ready"))
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "promote_ready", board = board_slug))
     .await;
 
     // Steps 6–8: claim + guard + spawn.
     async {
         if let Err(e) = claim_and_spawn(ctx, now).await {
-            tracing::error!(error = %e, step = "claim_and_spawn", "dispatch step error");
+            tracing::error!(error = %e, step = "claim_and_spawn", board = board_slug, "dispatch step error");
         }
     }
-    .instrument(tracing::info_span!("kanban.dispatch.step", step = "claim_and_spawn"))
+    .instrument(tracing::info_span!("kanban.dispatch.step", step = "claim_and_spawn", board = board_slug))
     .await;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -821,8 +880,10 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
             })?
         };
 
-        // Step 8: spawn worker.
-        let spawn_result = (ctx.spawn_fn)(task.clone(), run.clone(), workspace.clone()).await;
+        // Step 8: spawn worker. The board slug is captured in ctx.spawn_fn by the
+        // per-board context wrapper in run_dispatch_tick; the empty string below
+        // is ignored by that wrapper (the wrapper uses its captured slug).
+        let spawn_result = (ctx.spawn_fn)(task.clone(), run.clone(), workspace.clone(), String::new()).await;
 
         match spawn_result {
             Ok(pid) => {
