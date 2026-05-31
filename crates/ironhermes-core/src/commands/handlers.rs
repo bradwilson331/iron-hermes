@@ -1147,6 +1147,7 @@ const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
     "stats", "log", "context", "gc", "daemon", "diagnostics",
     "swarm",
     "mention",
+    "boards",   // Phase 36.3.7.9
 ];
 
 /// Map ironhermes-core's Platform enum to the lowercase string form used by
