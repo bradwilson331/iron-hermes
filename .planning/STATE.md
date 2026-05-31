@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.3.7.7 context gathered
-last_updated: "2026-05-30T23:06:36.071Z"
-last_activity: 2026-05-30 -- Phase 36.3.7.8 planning complete
+last_updated: "2026-05-31T05:55:05.317Z"
+last_activity: 2026-05-31 -- Phase 36.3.7.8 execution started
 progress:
   total_phases: 55
   completed_phases: 18
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.7 — kanban-swarm-helper-multi-task-fan-out-for-orchestrators
+**Current focus:** Phase 36.3.7.8 — mention-delegation-parser-inline-routing-from-prose
 
 ## Current Position
 
-Phase: 36.3.7.7 — COMPLETE
-Plan: 1 of 1
-Status: Ready to execute
-Last activity: 2026-05-30 -- Phase 36.3.7.8 planning complete
+Phase: 36.3.7.8 (mention-delegation-parser-inline-routing-from-prose) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 36.3.7.8
+Last activity: 2026-05-31 -- Phase 36.3.7.8 execution started
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
