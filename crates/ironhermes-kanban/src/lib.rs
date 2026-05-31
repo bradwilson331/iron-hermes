@@ -20,6 +20,7 @@
 //! [`KanbanEvent::kind`] are plain `String` so consumer crates don't take
 //! a dep on us for the enum.
 
+pub mod board;
 pub mod cas;
 pub mod config;
 pub mod dispatcher;
@@ -42,6 +43,7 @@ pub mod tools;
 pub mod types;
 pub mod worker_spawn;
 
+pub use board::{BoardContext, BoardSource, resolve_board_context};
 pub use cas::{
     DEFAULT_CLAIM_TTL_SECONDS, assert_claim_lock, assert_run_id, atomic_claim, build_claim_lock,
     release_claim, worker_write_gated,
