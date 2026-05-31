@@ -35,7 +35,7 @@ use super::format::{
 ///
 /// All existing `cmd_*` functions call this helper (Plan 04 retrofit).
 /// Also used by `boards.rs` functions.
-pub(crate) fn open_store_for_board(board: Option<&str>) -> Result<KanbanStore> {
+pub fn open_store_for_board(board: Option<&str>) -> Result<KanbanStore> {
     match board {
         Some(slug) => KanbanStore::open_for_board(slug).context("Failed to open board DB"),
         None => {
