@@ -1833,30 +1833,46 @@ async fn mention_ancestor_cycle_skipped() {
     // The store must block this (layer-2 cycle detection).
     let _ = MAX_MENTION_CHAIN_DEPTH; // used to confirm the const is accessible
 
+    // Snapshot pre-call counts so we can assert REQ-11 rollback below.
+    let task_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_before: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    let _ = t1;
+    let _ = t2;
+    let _ = t3;
+
     let plan = make_single_child_plan(&t4, "alice", "alice", None);
     let result = s.create_mention_children(plan);
 
-    // Either the store rejects with an error (layer 2 fires) OR
-    // it succeeds but returns empty children (if the cycle guard short-circuits
-    // at the resolution layer). Either way, no new tasks should have a cycle.
-    // The key assertion: if it succeeds, the child must not create a cycle.
-    match result {
-        Err(e) => {
-            let msg = format!("{e}");
-            assert!(
-                msg.contains("cycle") || msg.contains("mention_cycle") || msg.contains("ancestor"),
-                "error must mention cycle: {msg}"
-            );
-        }
-        Ok(r) => {
-            // Layer-2 skipped it — result.children may be 0 or the store allowed it.
-            // At minimum the DB must not have a cycle: assert t4's child (if any)
-            // does not create t4→alice→t1 which would re-enter the chain.
-            // This is acceptable as the resolver layer-1 self-reference check may
-            // have already blocked the assignment.
-            let _ = r; // result accepted — no hard assertion needed for layer-1 skip path
-        }
-    }
+    // WR-06 (Phase 36.3.7.8 code review): REQ-10 layer-2 cycle detection MUST
+    // fire here. The chain t1(alice)→t2(bob)→t3(alice)→t4(bob) plus a
+    // @alice mention under t4 means t4's ancestor t3 carries assignee "alice"
+    // — the store-layer WITH RECURSIVE walk hits it inside
+    // MAX_MENTION_CHAIN_DEPTH=4 hops and aborts the batch with
+    // KanbanError::Other("mention_cycle: ...").
+    let e = result.expect_err("layer-2 cycle detection must fire (alice in ancestor chain)");
+    let msg = format!("{e}");
+    assert!(
+        msg.contains("mention_cycle"),
+        "error must report mention_cycle, got: {msg}"
+    );
+
+    // REQ-11: no new rows on cycle abort.
+    let task_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM tasks", params![], |r| r.get(0))
+        .unwrap();
+    let link_after: i64 = s
+        .conn
+        .query_row("SELECT count(*) FROM task_links", params![], |r| r.get(0))
+        .unwrap();
+    assert_eq!(task_before, task_after, "no tasks rows on cycle abort");
+    assert_eq!(link_before, link_after, "no task_links rows on cycle abort");
 }
 
 // ─── Test 12: idempotency key replay returns same children (REQ-12) ──────────
