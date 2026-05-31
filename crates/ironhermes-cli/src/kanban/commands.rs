@@ -1,6 +1,6 @@
 //! Per-verb implementations for the `kanban` CLI subcommand.
 //!
-//! Each `cmd_<verb>` function opens `KanbanStore::open_default()` and
+//! Each `cmd_<verb>` function opens `open_store_for_board(board)` and
 //! calls the appropriate store method — no raw SQL in this file.
 //!
 //! Return value: `Result<i32>` where the integer is the process exit code
@@ -24,12 +24,8 @@ use super::format::{
 };
 
 // ---------------------------------------------------------------------------
-// Helper: open the default store
+// Helper: open the correct board store (board-aware, D-02 4-tier resolver)
 // ---------------------------------------------------------------------------
-
-fn open_store() -> Result<KanbanStore> {
-    KanbanStore::open_default().context("Failed to open kanban.db")
-}
 
 /// Open the correct board store given an optional `--board <slug>` flag value.
 ///
@@ -37,9 +33,8 @@ fn open_store() -> Result<KanbanStore> {
 /// When `board` is `None`, runs the 4-tier resolver (D-02) to determine the
 /// active board and opens it.
 ///
-/// Plan 04 will retrofit all existing `cmd_*` functions to call this helper
-/// instead of `open_store()`. For now it is available for `boards.rs` functions
-/// and future plans to use.
+/// All existing `cmd_*` functions call this helper (Plan 04 retrofit).
+/// Also used by `boards.rs` functions.
 pub(crate) fn open_store_for_board(board: Option<&str>) -> Result<KanbanStore> {
     match board {
         Some(slug) => KanbanStore::open_for_board(slug).context("Failed to open board DB"),
@@ -90,9 +85,17 @@ fn delete_link(store: &mut KanbanStore, parent_id: &str, child_id: &str) -> Resu
 // cmd_init
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_init() -> Result<i32> {
-    let path = ironhermes_kanban::kanban_db_path();
-    KanbanStore::open_default().context("Failed to initialize kanban DB")?;
+pub async fn cmd_init(board: Option<&str>) -> Result<i32> {
+    // Resolve the path first for display, then open (which initializes the schema).
+    let path = match board {
+        Some(slug) => ironhermes_kanban::paths::board_db_path_for_slug(slug),
+        None => {
+            let ctx = ironhermes_kanban::board::resolve_board_context(None)
+                .context("Failed to resolve board context")?;
+            ctx.db_path
+        }
+    };
+    open_store_for_board(board).context("Failed to initialize kanban DB")?;
     println!("Initialized kanban DB at {}", path.display());
     Ok(0)
 }
@@ -118,8 +121,9 @@ pub async fn cmd_create(
     scheduled_at: Option<String>,
     branch: Option<String>,
     json: bool,
+    board: Option<&str>,
 ) -> Result<i32> {
-    let mut store = open_store()?;
+    let mut store = open_store_for_board(board)?;
 
     // Parse max_runtime (e.g. "30m", "3600")
     let max_runtime_seconds: Option<i64> = max_runtime.as_deref().map(parse_duration_secs).transpose()?;
@@ -215,8 +219,9 @@ pub async fn cmd_list(
     tenant: Option<String>,
     archived: bool,
     json: bool,
+    board: Option<&str>,
 ) -> Result<i32> {
-    let store = open_store()?;
+    let store = open_store_for_board(board)?;
 
     let effective_assignee = if mine {
         Some(profile_from_env())
@@ -246,8 +251,8 @@ pub async fn cmd_list(
 // cmd_show
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_show(id: String, json: bool) -> Result<i32> {
-    let store = open_store()?;
+pub async fn cmd_show(id: String, json: bool, board: Option<&str>) -> Result<i32> {
+    let store = open_store_for_board(board)?;
     let task = store.get_task(&id).context("Task not found")?;
     let runs = store.get_runs(&id).context("Failed to load runs")?;
     let events = store.get_events(&id).context("Failed to load events")?;
@@ -265,8 +270,8 @@ pub async fn cmd_show(id: String, json: bool) -> Result<i32> {
 // cmd_assign
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_assign(id: String, profile: String) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_assign(id: String, profile: String, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     // "none" sentinel → unassign (set to empty string)
     let assignee = if profile.eq_ignore_ascii_case("none") { "" } else { &profile };
     store.assign_task(&id, assignee).context("Failed to assign task")?;
@@ -278,15 +283,15 @@ pub async fn cmd_assign(id: String, profile: String) -> Result<i32> {
 // cmd_link / cmd_unlink
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_link(parent_id: String, child_id: String) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_link(parent_id: String, child_id: String, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     store.insert_link(&parent_id, &child_id).context("Failed to create link")?;
     println!("Linked {} → {}", parent_id, child_id);
     Ok(0)
 }
 
-pub async fn cmd_unlink(parent_id: String, child_id: String) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_unlink(parent_id: String, child_id: String, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     delete_link(&mut store, &parent_id, &child_id).context("Failed to delete link")?;
     println!("Unlinked {} → {}", parent_id, child_id);
     Ok(0)
@@ -296,8 +301,8 @@ pub async fn cmd_unlink(parent_id: String, child_id: String) -> Result<i32> {
 // cmd_claim
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_claim(id: String, ttl: Option<u64>) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_claim(id: String, ttl: Option<u64>, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     let hostname = ironhermes_kanban::pid::current_hostname();
     let pid = std::process::id();
     let lock = build_claim_lock(&hostname, pid);
@@ -324,8 +329,8 @@ pub async fn cmd_claim(id: String, ttl: Option<u64>) -> Result<i32> {
 // cmd_comment
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_comment(id: String, body: String, author: Option<String>) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_comment(id: String, body: String, author: Option<String>, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     let author = author.unwrap_or_else(|| profile_from_env());
     store.add_comment(&id, &author, &body).context("Failed to add comment")?;
     println!("Comment added to {}", id);
@@ -341,6 +346,7 @@ pub async fn cmd_complete(
     result: Option<String>,
     summary: Option<String>,
     metadata: Option<String>,
+    board: Option<&str>,
 ) -> Result<i32> {
     // D-34: bulk complete with --summary/--metadata refused
     if ids.len() > 1 && (summary.is_some() || metadata.is_some()) {
@@ -352,7 +358,7 @@ pub async fn cmd_complete(
         return Ok(2);
     }
 
-    let mut store = open_store()?;
+    let mut store = open_store_for_board(board)?;
     let profile = profile_from_env();
     let metadata_val: Option<serde_json::Value> = metadata
         .as_deref()
@@ -385,8 +391,8 @@ pub async fn cmd_complete(
 // cmd_block
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_block(id: String, reason: String, extra_ids: Vec<String>) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_block(id: String, reason: String, extra_ids: Vec<String>, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     let mut all_ids = vec![id];
     all_ids.extend(extra_ids);
 
@@ -407,8 +413,8 @@ pub async fn cmd_block(id: String, reason: String, extra_ids: Vec<String>) -> Re
 // cmd_unblock
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_unblock(ids: Vec<String>, _json: bool) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_unblock(ids: Vec<String>, _json: bool, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     let mut any_err = false;
     for id in &ids {
         match store.unblock_task(id) {
@@ -429,10 +435,10 @@ pub async fn cmd_unblock(ids: Vec<String>, _json: bool) -> Result<i32> {
 /// Append a `heartbeat` event row for a task. Mirrors the kanban_heartbeat
 /// LLM tool's append-event path; the dispatcher's staleness reader at
 /// reference.md:869 is the single consumer of these rows.
-pub async fn cmd_heartbeat(id: String, note: Option<String>) -> Result<i32> {
+pub async fn cmd_heartbeat(id: String, note: Option<String>, board: Option<&str>) -> Result<i32> {
     use ironhermes_kanban::KanbanEventKind;
 
-    let mut store = open_store()?;
+    let mut store = open_store_for_board(board)?;
     let run_id_env = std::env::var("HERMES_KANBAN_RUN_ID").ok();
     let payload = note.as_ref().map(|n| serde_json::json!({ "note": n }));
 
@@ -486,8 +492,9 @@ pub async fn cmd_swarm(
     max_retries: Option<i64>,
     idempotency_key: Option<String>,
     json: bool,
+    board: Option<&str>,
 ) -> Result<i32> {
-    let mut store = open_store()?;
+    let mut store = open_store_for_board(board)?;
 
     // Worker normalization — Pitfall 5: clap does NOT comma-split; we do it here.
     //
@@ -615,6 +622,7 @@ pub async fn cmd_mention(
     idempotency_key: Option<String>,
     body_override: Option<String>,
     json: bool,
+    board: Option<&str>,
 ) -> Result<i32> {
     use std::collections::HashSet;
 
@@ -630,7 +638,7 @@ pub async fn cmd_mention(
         .ok_or_else(|| anyhow!("task_id required when HERMES_KANBAN_TASK is not set"))?;
 
     // 2. Open store (sync handle; CLI is single-process).
-    let mut store = open_store()?;
+    let mut store = open_store_for_board(board)?;
 
     // 3. Fetch the parent task.
     let parent = store.get_task(&task_id).context("Failed to fetch parent task")?;
@@ -808,8 +816,8 @@ pub async fn cmd_mention(
 // cmd_archive
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_archive(ids: Vec<String>, _json: bool) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_archive(ids: Vec<String>, _json: bool, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     let mut any_err = false;
     for id in &ids {
         match store.archive_task(id) {
@@ -827,9 +835,9 @@ pub async fn cmd_archive(ids: Vec<String>, _json: bool) -> Result<i32> {
 // cmd_tail
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_tail(id: String) -> Result<i32> {
+pub async fn cmd_tail(id: String, board: Option<&str>) -> Result<i32> {
     use std::time::Duration;
-    let store = open_store()?;
+    let store = open_store_for_board(board)?;
     let mut last_id: i64 = {
         let events = store.get_events(&id).context("Failed to load events")?;
         events.last().map(|e| e.id).unwrap_or(0)
@@ -858,13 +866,14 @@ pub async fn cmd_watch(
     _tenant: Option<String>,
     _kinds: Option<String>,
     interval: Option<u64>,
+    board: Option<&str>,
 ) -> Result<i32> {
     use std::time::Duration;
     let interval_secs = interval.unwrap_or(2);
 
     println!("Watching board events (Ctrl-C to stop)...");
     let mut last_id: i64 = {
-        let store = open_store()?;
+        let store = open_store_for_board(board)?;
         let tasks = store.list_tasks(ListFilters {
             assignee: assignee.clone(),
             ..Default::default()
@@ -881,7 +890,7 @@ pub async fn cmd_watch(
 
     loop {
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-        let store = open_store()?;
+        let store = open_store_for_board(board)?;
         let tasks = store.list_tasks(ListFilters {
             assignee: assignee.clone(),
             ..Default::default()
@@ -903,8 +912,8 @@ pub async fn cmd_watch(
 // cmd_runs
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_runs(id: String, json: bool) -> Result<i32> {
-    let store = open_store()?;
+pub async fn cmd_runs(id: String, json: bool, board: Option<&str>) -> Result<i32> {
+    let store = open_store_for_board(board)?;
     let runs = store.get_runs(&id).context("Failed to load runs")?;
 
     if json {
@@ -919,8 +928,8 @@ pub async fn cmd_runs(id: String, json: bool) -> Result<i32> {
 // cmd_assignees
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_assignees(json: bool) -> Result<i32> {
-    let store = open_store()?;
+pub async fn cmd_assignees(json: bool, board: Option<&str>) -> Result<i32> {
+    let store = open_store_for_board(board)?;
     // Get all tasks and aggregate by assignee
     let tasks = store.list_tasks(ListFilters {
         archived: true, // include all
@@ -953,12 +962,13 @@ pub async fn cmd_dispatch(
     _max: Option<usize>,
     failure_limit: Option<usize>,
     json: bool,
+    board: Option<&str>,
 ) -> Result<i32> {
     if dry_run {
         eprintln!("--dry-run not yet implemented for dispatch; proceeding with live dispatch");
     }
 
-    let store = KanbanStore::open_default().context("Failed to open kanban.db")?;
+    let store = open_store_for_board(board).context("Failed to open kanban DB")?;
 
     let mut config = KanbanConfig::default();
     if let Some(fl) = failure_limit {
@@ -982,8 +992,8 @@ pub async fn cmd_dispatch(
 // cmd_stats
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_stats(json: bool) -> Result<i32> {
-    let store = open_store()?;
+pub async fn cmd_stats(json: bool, board: Option<&str>) -> Result<i32> {
+    let store = open_store_for_board(board)?;
     let tasks = store.list_tasks(ListFilters {
         archived: true,
         ..Default::default()
@@ -1041,8 +1051,8 @@ pub async fn cmd_log(id: String, tail_bytes: Option<u64>) -> Result<i32> {
 // cmd_context
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_context(id: String) -> Result<i32> {
-    let store = open_store()?;
+pub async fn cmd_context(id: String, board: Option<&str>) -> Result<i32> {
+    let store = open_store_for_board(board)?;
     let task = store.get_task(&id).context("Task not found")?;
     let runs = store.get_runs(&id).context("Failed to load runs")?;
     let events = store.get_events(&id).context("Failed to load events")?;
@@ -1083,8 +1093,9 @@ pub async fn cmd_context(id: String) -> Result<i32> {
 pub async fn cmd_gc(
     event_retention_days: Option<u64>,
     log_retention_days: Option<u64>,
+    board: Option<&str>,
 ) -> Result<i32> {
-    let mut store = open_store()?;
+    let mut store = open_store_for_board(board)?;
     let event_days = event_retention_days.unwrap_or(30);
     let log_days = log_retention_days.unwrap_or(30);
 
@@ -1130,8 +1141,8 @@ pub async fn cmd_gc(
 // cmd_reclaim
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_reclaim(id: String) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_reclaim(id: String, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
     let task = store.get_task(&id).context("Task not found")?;
 
     if task.status != "running" {
@@ -1155,8 +1166,8 @@ pub async fn cmd_reclaim(id: String) -> Result<i32> {
 // cmd_reassign
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_reassign(id: String, new_profile: String, reclaim: bool) -> Result<i32> {
-    let mut store = open_store()?;
+pub async fn cmd_reassign(id: String, new_profile: String, reclaim: bool, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
 
     if reclaim {
         let task = store.get_task(&id).context("Task not found")?;
@@ -1177,8 +1188,8 @@ pub async fn cmd_reassign(id: String, new_profile: String, reclaim: bool) -> Res
 // cmd_diagnostics
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_diagnostics(json: bool) -> Result<i32> {
-    let store = open_store()?;
+pub async fn cmd_diagnostics(json: bool, board: Option<&str>) -> Result<i32> {
+    let store = open_store_for_board(board)?;
     let config = KanbanConfig::default();
     let threshold = config.stranded_threshold_seconds;
 
@@ -1206,6 +1217,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<i32> {
 pub async fn cmd_daemon(
     failure_limit: Option<usize>,
     pidfile: Option<String>,
+    board: Option<&str>,
 ) -> Result<i32> {
     use ironhermes_kanban::run_dispatch_loop;
     use tokio_util::sync::CancellationToken;
@@ -1216,7 +1228,7 @@ pub async fn cmd_daemon(
          Running both simultaneously is not supported."
     );
 
-    let store = KanbanStore::open_default().context("Failed to open kanban.db")?;
+    let store = open_store_for_board(board).context("Failed to open kanban DB")?;
     let mut config = KanbanConfig::default();
     if let Some(fl) = failure_limit {
         config.failure_limit = fl as u32;
@@ -1264,8 +1276,9 @@ pub async fn cmd_notify_subscribe(
     platform: String,
     chat_id: String,
     thread_id: Option<String>,
+    board: Option<&str>,
 ) -> anyhow::Result<i32> {
-    let mut store = match ironhermes_kanban::KanbanStore::open_default() {
+    let mut store = match open_store_for_board(board) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot open kanban DB: {}", e);
@@ -1297,8 +1310,8 @@ pub async fn cmd_notify_subscribe(
 ///
 /// Lists all subscriptions, or filters by task_id. `--json` emits a serde
 /// JSON array (Subscription's derive(Serialize)).
-pub async fn cmd_notify_list(task_id: Option<String>, json: bool) -> anyhow::Result<i32> {
-    let store = match ironhermes_kanban::KanbanStore::open_default() {
+pub async fn cmd_notify_list(task_id: Option<String>, json: bool, board: Option<&str>) -> anyhow::Result<i32> {
+    let store = match open_store_for_board(board) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot open kanban DB: {}", e);
@@ -1358,8 +1371,9 @@ pub async fn cmd_notify_unsubscribe(
     task_id: String,
     platform: Option<String>,
     chat_id: Option<String>,
+    board: Option<&str>,
 ) -> anyhow::Result<i32> {
-    let mut store = match ironhermes_kanban::KanbanStore::open_default() {
+    let mut store = match open_store_for_board(board) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot open kanban DB: {}", e);
