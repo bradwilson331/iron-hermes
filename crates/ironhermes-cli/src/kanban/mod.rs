@@ -517,10 +517,15 @@ pub enum KanbanCommands {
 
 /// Dispatch a `KanbanCommands` variant to the appropriate handler.
 ///
+/// `board` is the value of the parent-level `--board <slug>` flag (Plan 04).
+/// Every non-boards verb receives it and opens the appropriate board DB via
+/// `open_store_for_board(board)`. The `Boards` dispatch arm does NOT forward
+/// `board` — boards verbs operate on slugs passed as positional args.
+///
 /// Returns an exit code (0 = success, 1 = error, 2 = D-34 bulk refusal).
-pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
+pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -> anyhow::Result<i32> {
     match cmd {
-        KanbanCommands::Init => commands::cmd_init().await,
+        KanbanCommands::Init => commands::cmd_init(board.as_deref()).await,
         KanbanCommands::Create {
             title,
             assignee,
@@ -541,7 +546,7 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             commands::cmd_create(
                 title, assignee, body, parents, tenant, workspace, skills,
                 priority, triage, idempotency_key, max_runtime, max_retries,
-                scheduled_at, branch, json,
+                scheduled_at, branch, json, board.as_deref(),
             )
             .await
         }
@@ -552,35 +557,35 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             tenant,
             archived,
             json,
-        } => commands::cmd_list(mine, assignee, status, tenant, archived, json).await,
-        KanbanCommands::Show { id, json } => commands::cmd_show(id, json).await,
-        KanbanCommands::Assign { id, profile } => commands::cmd_assign(id, profile).await,
+        } => commands::cmd_list(mine, assignee, status, tenant, archived, json, board.as_deref()).await,
+        KanbanCommands::Show { id, json } => commands::cmd_show(id, json, board.as_deref()).await,
+        KanbanCommands::Assign { id, profile } => commands::cmd_assign(id, profile, board.as_deref()).await,
         KanbanCommands::Link {
             parent_id,
             child_id,
-        } => commands::cmd_link(parent_id, child_id).await,
+        } => commands::cmd_link(parent_id, child_id, board.as_deref()).await,
         KanbanCommands::Unlink {
             parent_id,
             child_id,
-        } => commands::cmd_unlink(parent_id, child_id).await,
-        KanbanCommands::Claim { id, ttl } => commands::cmd_claim(id, ttl).await,
+        } => commands::cmd_unlink(parent_id, child_id, board.as_deref()).await,
+        KanbanCommands::Claim { id, ttl } => commands::cmd_claim(id, ttl, board.as_deref()).await,
         KanbanCommands::Comment { id, body, author } => {
-            commands::cmd_comment(id, body, author).await
+            commands::cmd_comment(id, body, author, board.as_deref()).await
         }
         KanbanCommands::Complete {
             ids,
             result,
             summary,
             metadata,
-        } => commands::cmd_complete(ids, result, summary, metadata).await,
+        } => commands::cmd_complete(ids, result, summary, metadata, board.as_deref()).await,
         KanbanCommands::Block {
             id,
             reason,
             extra_ids,
-        } => commands::cmd_block(id, reason, extra_ids).await,
-        KanbanCommands::Unblock { ids, json } => commands::cmd_unblock(ids, json).await,
+        } => commands::cmd_block(id, reason, extra_ids, board.as_deref()).await,
+        KanbanCommands::Unblock { ids, json } => commands::cmd_unblock(ids, json, board.as_deref()).await,
         // Phase 36.3.7.6 D-cli-heartbeat-parity — closes reference.md:583 doc-vs-impl gap.
-        KanbanCommands::Heartbeat { id, note } => commands::cmd_heartbeat(id, note).await,
+        KanbanCommands::Heartbeat { id, note } => commands::cmd_heartbeat(id, note, board.as_deref()).await,
         // Phase 36.3.7.7 BUG-36.3.7.7-01 — kanban swarm (D-topology-shapes).
         KanbanCommands::Swarm {
             goal,
@@ -615,6 +620,7 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
                 max_retries,
                 idempotency_key,
                 json,
+                board.as_deref(),
             )
             .await
         }
@@ -632,10 +638,13 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
                 idempotency_key,
                 body_override,
                 json,
+                board.as_deref(),
             )
             .await
         }
         // Phase 36.3.7.9 — boards subcommand (multi-board isolation).
+        // NOTE: board.as_deref() is intentionally NOT forwarded here — boards verbs
+        // operate on slugs passed as positional args, not on the parent --board flag.
         KanbanCommands::Boards { cmd } => match cmd {
             BoardsCommands::List { json } => boards::cmd_boards_list(json).await,
             BoardsCommands::Create { slug, name, description, switch, json } => {
@@ -648,41 +657,41 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             }
             BoardsCommands::Rm { slug, delete } => boards::cmd_boards_rm(slug, delete).await,
         },
-        KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json).await,
-        KanbanCommands::Tail { id } => commands::cmd_tail(id).await,
+        KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json, board.as_deref()).await,
+        KanbanCommands::Tail { id } => commands::cmd_tail(id, board.as_deref()).await,
         KanbanCommands::Watch {
             assignee,
             tenant,
             kinds,
             interval,
-        } => commands::cmd_watch(assignee, tenant, kinds, interval).await,
-        KanbanCommands::Runs { id, json } => commands::cmd_runs(id, json).await,
-        KanbanCommands::Assignees { json } => commands::cmd_assignees(json).await,
+        } => commands::cmd_watch(assignee, tenant, kinds, interval, board.as_deref()).await,
+        KanbanCommands::Runs { id, json } => commands::cmd_runs(id, json, board.as_deref()).await,
+        KanbanCommands::Assignees { json } => commands::cmd_assignees(json, board.as_deref()).await,
         KanbanCommands::Dispatch {
             dry_run,
             max,
             failure_limit,
             json,
-        } => commands::cmd_dispatch(dry_run, max, failure_limit, json).await,
-        KanbanCommands::Stats { json } => commands::cmd_stats(json).await,
+        } => commands::cmd_dispatch(dry_run, max, failure_limit, json, board.as_deref()).await,
+        KanbanCommands::Stats { json } => commands::cmd_stats(json, board.as_deref()).await,
         KanbanCommands::Log { id, tail } => commands::cmd_log(id, tail).await,
-        KanbanCommands::Context { id } => commands::cmd_context(id).await,
+        KanbanCommands::Context { id } => commands::cmd_context(id, board.as_deref()).await,
         KanbanCommands::Gc {
             event_retention_days,
             log_retention_days,
-        } => commands::cmd_gc(event_retention_days, log_retention_days).await,
-        KanbanCommands::Reclaim { id } => commands::cmd_reclaim(id).await,
+        } => commands::cmd_gc(event_retention_days, log_retention_days, board.as_deref()).await,
+        KanbanCommands::Reclaim { id } => commands::cmd_reclaim(id, board.as_deref()).await,
         KanbanCommands::Reassign {
             id,
             new_profile,
             reclaim,
-        } => commands::cmd_reassign(id, new_profile, reclaim).await,
-        KanbanCommands::Diagnostics { json } => commands::cmd_diagnostics(json).await,
+        } => commands::cmd_reassign(id, new_profile, reclaim, board.as_deref()).await,
+        KanbanCommands::Diagnostics { json } => commands::cmd_diagnostics(json, board.as_deref()).await,
         KanbanCommands::Daemon {
             force: _,
             failure_limit,
             pidfile,
-        } => commands::cmd_daemon(failure_limit, pidfile).await,
+        } => commands::cmd_daemon(failure_limit, pidfile, board.as_deref()).await,
         // ---------------------------------------------------------------------
         // Phase 36.3.7.5 BUG-36.3.7.5-05 — notifier subscriptions
         // ---------------------------------------------------------------------
@@ -692,15 +701,15 @@ pub async fn handle_kanban_command(cmd: KanbanCommands) -> anyhow::Result<i32> {
             chat_id,
             thread_id,
             user_id: _,
-        } => commands::cmd_notify_subscribe(task_id, platform, chat_id, thread_id).await,
+        } => commands::cmd_notify_subscribe(task_id, platform, chat_id, thread_id, board.as_deref()).await,
         KanbanCommands::NotifyList { task_id, json } => {
-            commands::cmd_notify_list(task_id, json).await
+            commands::cmd_notify_list(task_id, json, board.as_deref()).await
         }
         KanbanCommands::NotifyUnsubscribe {
             task_id,
             platform,
             chat_id,
             thread_id: _,
-        } => commands::cmd_notify_unsubscribe(task_id, platform, chat_id).await,
+        } => commands::cmd_notify_unsubscribe(task_id, platform, chat_id, board.as_deref()).await,
     }
 }

@@ -226,6 +226,10 @@ enum Commands {
     },
     /// Manage kanban board and tasks (Phase 36.3.7).
     Kanban {
+        /// Select board by slug (D-02 4-tier precedence: flag > HERMES_KANBAN_BOARD env > current-file > "default").
+        /// Use "default" to explicitly open the legacy kanban.db (D-01 back-compat).
+        #[arg(long, global = false)]
+        board: Option<String>,
         #[command(subcommand)]
         command: kanban::KanbanCommands,
     },
@@ -577,9 +581,10 @@ async fn main() -> Result<()> {
             // Phase 25.3 Plan 11 (D-F-1 / D-F-2): single + bulk session export.
             session_cmd::handle_session_command(subcommand).await
         }
-        Some(Commands::Kanban { command }) => {
+        Some(Commands::Kanban { command, board }) => {
             // Phase 36.3.7 (D-33/D-34/D-35): full kanban CLI verb surface.
-            match kanban::handle_kanban_command(command).await {
+            // Phase 36.3.7.9 Plan 04: board is the parent-level --board <slug> flag.
+            match kanban::handle_kanban_command(command, board).await {
                 Ok(0) => Ok(()),
                 Ok(code) => {
                     std::process::exit(code);
