@@ -2157,6 +2157,204 @@ impl KanbanStore {
         )?;
         Ok(count)
     }
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.3.7.10 — decomposer store helpers
+    // ---------------------------------------------------------------------------
+
+    /// Specify a triage task in-place: rewrite title + body, promote to `todo`.
+    ///
+    /// SQL executed inside a single `BEGIN IMMEDIATE` transaction:
+    /// ```sql
+    /// UPDATE tasks SET title=?, body=?, status='todo'
+    ///     WHERE id=? AND status='triage';
+    /// INSERT INTO task_events … kind='specified' …;
+    /// ```
+    ///
+    /// Returns `true` when the status guard matched (task promoted), `false`
+    /// when `rows_affected == 0` (already processed — idempotent double-call).
+    pub fn apply_specify(
+        &mut self,
+        task_id: &str,
+        new_title: &str,
+        new_body: &str,
+    ) -> Result<bool> {
+        use rusqlite::TransactionBehavior;
+
+        let now = Self::now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Status-guarded UPDATE — the WHERE clause is the single-writer gate.
+        let rows = tx.execute(
+            "UPDATE tasks SET title = ?1, body = ?2, status = 'todo' \
+             WHERE id = ?3 AND status = 'triage'",
+            params![new_title, new_body, task_id],
+        )?;
+
+        if rows == 0 {
+            // Already processed — rollback (no-op) and signal caller.
+            tx.rollback()?;
+            return Ok(false);
+        }
+
+        // Append the `specified` event inside the same transaction.
+        let payload = serde_json::json!({ "new_title": new_title });
+        Self::append_event_internal(
+            &tx,
+            task_id,
+            None,
+            crate::events::KanbanEventKind::Specified,
+            Some(&payload),
+            now,
+        )?;
+
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Decompose a triage task: rewrite title + body, promote to `todo`,
+    /// insert child tasks, and insert `task_links` rows — all atomically.
+    ///
+    /// SQL executed inside a single `BEGIN IMMEDIATE` transaction:
+    /// ```sql
+    /// UPDATE tasks SET title=?, body=?, status='todo'
+    ///     WHERE id=? AND status='triage';
+    /// INSERT INTO task_events … kind='decomposed' …;
+    /// INSERT INTO tasks … status='todo' … (per child);
+    /// INSERT INTO task_links (parent_id, child_id, …) (per child);
+    /// ```
+    ///
+    /// # Assignee fallback cascade (RESEARCH §Q5)
+    ///
+    /// When `child.assignee` is empty:
+    /// 1. Fall back to `config.default_assignee`.
+    /// 2. If that is also empty, fall back to `parent_assignee`.
+    ///
+    /// A child with `assignee = ""` never reaches the DB.
+    ///
+    /// Returns [`crate::decomposer::DecomposedIds::already_processed`] when the
+    /// status guard observes 0 rows affected (idempotent double-call).
+    pub fn apply_decompose(
+        &mut self,
+        parent_id: &str,
+        new_title: &str,
+        new_body: &str,
+        children: &[crate::decomposer::ChildSpec],
+        parent_assignee: &str,
+        config: &crate::config::KanbanConfig,
+    ) -> Result<crate::decomposer::DecomposedIds> {
+        use rusqlite::TransactionBehavior;
+
+        let now = Self::now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Status-guarded parent UPDATE.
+        let rows = tx.execute(
+            "UPDATE tasks SET title = ?1, body = ?2, status = 'todo' \
+             WHERE id = ?3 AND status = 'triage'",
+            params![new_title, new_body, parent_id],
+        )?;
+
+        if rows == 0 {
+            tx.rollback()?;
+            return Ok(crate::decomposer::DecomposedIds::already_processed());
+        }
+
+        // Insert child tasks and links.
+        let mut child_ids: Vec<String> = Vec::with_capacity(children.len());
+
+        for child in children {
+            let child_id = Self::new_id("t");
+
+            // Assignee fallback cascade: child → config.default_assignee → parent.
+            let assignee = if !child.assignee.is_empty() {
+                child.assignee.clone()
+            } else if !config.default_assignee.is_empty() {
+                config.default_assignee.clone()
+            } else {
+                parent_assignee.to_string()
+            };
+
+            tx.execute(
+                "INSERT INTO tasks \
+                 (id, title, body, assignee, status, priority, tenant, workspace, skills, \
+                  consecutive_failures, created_by, created_at) \
+                 VALUES \
+                 (?1, ?2, ?3, ?4, 'todo', 0, NULL, NULL, NULL, 0, ?5, ?6)",
+                params![child_id, child.title, child.body, assignee, parent_id, now],
+            )?;
+
+            // Child creation event.
+            let child_payload = serde_json::json!({
+                "assignee": assignee,
+                "status": "todo",
+                "parents": [parent_id],
+            });
+            Self::append_event_internal(
+                &tx,
+                &child_id,
+                None,
+                crate::events::KanbanEventKind::Created,
+                Some(&child_payload),
+                now,
+            )?;
+
+            // Parent → child link.
+            tx.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id, created_at) \
+                 VALUES (?1, ?2, ?3)",
+                params![parent_id, &child_id, now],
+            )?;
+
+            child_ids.push(child_id);
+        }
+
+        // Decomposed event on the parent.
+        let decomposed_payload = serde_json::json!({
+            "child_count": children.len(),
+            "child_ids": child_ids,
+        });
+        Self::append_event_internal(
+            &tx,
+            parent_id,
+            None,
+            crate::events::KanbanEventKind::Decomposed,
+            Some(&decomposed_payload),
+            now,
+        )?;
+
+        tx.commit()?;
+
+        Ok(crate::decomposer::DecomposedIds {
+            child_ids,
+            root_promoted: true,
+        })
+    }
+
+    /// Read accessor for `task_links` rows by parent ID.
+    ///
+    /// Used by the receiver tests in `tests/decomposer_logic.rs` to verify
+    /// that child links were inserted atomically. Returns all links where
+    /// `parent_id = ?`. (Phase 36.3.7.10 — read accessor for receiver tests)
+    pub fn list_links_for_parent(&self, parent_id: &str) -> Result<Vec<crate::types::TaskLink>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT parent_id, child_id, created_at FROM task_links WHERE parent_id = ?1 ORDER BY child_id ASC",
+        )?;
+        let links = stmt
+            .query_map(params![parent_id], |r| {
+                Ok(crate::types::TaskLink {
+                    parent_id: r.get(0)?,
+                    child_id: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(links)
+    }
 }
 
 // ---------------------------------------------------------------------------
