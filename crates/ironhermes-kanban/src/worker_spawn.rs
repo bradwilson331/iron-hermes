@@ -21,8 +21,8 @@
 //!
 //! 9 kanban env vars (always set):
 //!   HERMES_KANBAN_TASK     = task.id
-//!   HERMES_KANBAN_DB       = kanban_db_path()
-//!   HERMES_KANBAN_BOARD    = "default"
+//!   HERMES_KANBAN_DB       = board_db_path_for_slug(board_slug)
+//!   HERMES_KANBAN_BOARD    = board_slug (the resolved board slug, Phase 36.3.7.9)
 //!   HERMES_KANBAN_WORKSPACES_ROOT = kanban_workspaces_root()
 //!   HERMES_KANBAN_WORKSPACE = workspace
 //!   HERMES_KANBAN_RUN_ID   = run.id
@@ -47,7 +47,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::error::{KanbanError, Result};
-use crate::paths::{kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_workspaces_root};
+use crate::paths::{kanban_log_stderr, kanban_log_stdout, kanban_workspaces_root};
 use crate::types::{Task, TaskRun};
 
 // ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ pub const SAFE_SYSTEM_VARS: &[&str] = &[
 ///
 /// Every other env var, including `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 /// `GITHUB_TOKEN`, `*_SECRET`, `*_PASSWORD`, etc. (T-36.3.7-03-01).
-pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str) -> Vec<(String, String)> {
+pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, board_slug: &str) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
 
     // Safe system pass-through (D-18): only include if present in caller env.
@@ -108,13 +108,13 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str) -> V
     // 9 kanban env vars (D-17).
     // HERMES_KANBAN_TASK — gates the 6 LLM tools in plan 04.
     env.push(("HERMES_KANBAN_TASK".into(), task.id.clone()));
-    // HERMES_KANBAN_DB — path to kanban.db.
+    // HERMES_KANBAN_DB — path to the board's kanban.db (routes to legacy path for "default").
     env.push((
         "HERMES_KANBAN_DB".into(),
-        kanban_db_path().to_string_lossy().into_owned(),
+        crate::paths::board_db_path_for_slug(board_slug).to_string_lossy().into_owned(),
     ));
-    // HERMES_KANBAN_BOARD — always "default" in v1 (D-03).
-    env.push(("HERMES_KANBAN_BOARD".into(), "default".into()));
+    // HERMES_KANBAN_BOARD — the resolved board slug for this task's board (Phase 36.3.7.9).
+    env.push(("HERMES_KANBAN_BOARD".into(), board_slug.to_string()));
     // HERMES_KANBAN_WORKSPACES_ROOT — root for scratch workspaces (D-31).
     env.push((
         "HERMES_KANBAN_WORKSPACES_ROOT".into(),
@@ -223,7 +223,7 @@ pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result
         .arg("-q")
         .arg(format!("work kanban task {}", task.id))
         .env_clear()
-        .envs(build_kanban_worker_env(task, run, workspace))
+        .envs(build_kanban_worker_env(task, run, workspace, "default"))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -316,7 +316,7 @@ mod tests {
 
         let task = fake_task("t_abc123", "alice");
         let run = fake_run("r_run001", "t_abc123", "host:123:uuid");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws", "default");
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
 
@@ -348,7 +348,7 @@ mod tests {
     fn build_kanban_worker_env_includes_eight_kanban_vars() {
         let task = fake_task("t_def456", "bob");
         let run = fake_run("r_run002", "t_def456", "host:456:uuid2");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws2");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws2", "default");
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
 
@@ -376,7 +376,7 @@ mod tests {
         task.tenant = Some("acme".to_string());
 
         let run = fake_run("r_run003", "t_ghi789", "host:789:uuid3");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws3");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws3", "default");
 
         let found = env.iter().find(|(k, _)| k == "HERMES_TENANT");
         assert!(found.is_some(), "HERMES_TENANT must be present when task.tenant is Some");
@@ -388,7 +388,7 @@ mod tests {
     fn build_kanban_worker_env_task_id_matches() {
         let task = fake_task("t_specific_id", "diana");
         let run = fake_run("r_run004", "t_specific_id", "host:1:uuid4");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws4");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws4", "default");
 
         let task_val = env
             .iter()
@@ -397,17 +397,42 @@ mod tests {
         assert_eq!(task_val, Some("t_specific_id"));
     }
 
-    /// HERMES_KANBAN_BOARD must always be "default" in v1.
+    /// HERMES_KANBAN_BOARD must equal "default" when board_slug is "default".
     #[test]
     fn build_kanban_worker_env_board_is_default() {
         let task = fake_task("t_board_test", "evan");
         let run = fake_run("r_run005", "t_board_test", "host:2:uuid5");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws5");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws5", "default");
 
         let board = env
             .iter()
             .find(|(k, _)| k == "HERMES_KANBAN_BOARD")
             .map(|(_, v)| v.as_str());
         assert_eq!(board, Some("default"));
+    }
+
+    /// HERMES_KANBAN_BOARD and HERMES_KANBAN_DB must reflect the named slug
+    /// when board_slug is a non-default value (Phase 36.3.7.9 D-04).
+    #[test]
+    fn build_kanban_worker_env_board_slug_propagates() {
+        let task = fake_task("t_slug_test", "alice");
+        let run = fake_run("r_run999", "t_slug_test", "host:2:uuid9");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_slug", "atm10-server");
+
+        let board = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_BOARD")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(board, Some("atm10-server"));
+
+        let db = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_DB")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            db.contains("boards/atm10-server/kanban.db"),
+            "HERMES_KANBAN_DB must contain 'boards/atm10-server/kanban.db', got: {db}"
+        );
     }
 }
