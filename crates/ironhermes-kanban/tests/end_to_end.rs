@@ -91,7 +91,8 @@ async fn full_lifecycle_via_tools_layer() {
     let spawn_fn = Arc::new(
         move |task: ironhermes_kanban::types::Task,
               run: ironhermes_kanban::types::TaskRun,
-              _ws: String|
+              _ws: String,
+              _board_slug: String|
               -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {

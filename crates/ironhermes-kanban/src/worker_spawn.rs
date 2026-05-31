@@ -151,12 +151,21 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
 // spawn_worker
 // ---------------------------------------------------------------------------
 
-/// Spawn a kanban worker subprocess for a task.
+/// Spawn a kanban worker subprocess for a task (single-board / back-compat version).
+///
+/// Always passes `"default"` as the board slug. Retained for callers that do
+/// not yet carry a resolved board slug. Prefer [`spawn_worker_for_board`] in
+/// new multi-board code (Phase 36.3.7.9).
+pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result<u32> {
+    spawn_worker_for_board(task, run, workspace, "default").await
+}
+
+/// Spawn a kanban worker subprocess for a task, with an explicit board slug.
 ///
 /// Builds the `ironhermes --profile <P> chat -q "work kanban task <id>"`
 /// command (D-15; D-28 superseded by 36.3.7.0 BUG-01 — extras now carried
 /// via HERMES_KANBAN_TASK_SKILLS env), applies the env scrub via
-/// `.env_clear()` + `.envs(build_kanban_worker_env(...))` (D-18 /
+/// `.env_clear()` + `.envs(build_kanban_worker_env(..., board_slug))` (D-18 /
 /// INV-36.3.7-05), and redirects stdout/stderr to per-task log files (D-19).
 ///
 /// Returns the spawned child PID on success.
@@ -167,7 +176,7 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
 /// it's a scratch workspace), this function creates the directory before
 /// spawning. For `dir:<abs>` workspaces the directory must already exist.
 /// Worktree workspaces are managed by the worker itself.
-pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result<u32> {
+pub async fn spawn_worker_for_board(task: &Task, run: &TaskRun, workspace: &str, board_slug: &str) -> Result<u32> {
     let stdout_log = kanban_log_stdout(&task.id);
     let stderr_log = kanban_log_stderr(&task.id);
 
@@ -223,7 +232,7 @@ pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result
         .arg("-q")
         .arg(format!("work kanban task {}", task.id))
         .env_clear()
-        .envs(build_kanban_worker_env(task, run, workspace, "default"))
+        .envs(build_kanban_worker_env(task, run, workspace, board_slug))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
