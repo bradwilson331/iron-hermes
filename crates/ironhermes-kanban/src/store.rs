@@ -153,6 +153,28 @@ pub struct KanbanStore {
     pub conn: Connection,
 }
 
+/// Escape SQLite LIKE wildcards (`%`, `_`) and the escape character itself
+/// (`\`) so the result can be used as a literal-match LIKE pattern with
+/// `ESCAPE '\'`.
+///
+/// WR-01 (Phase 36.3.7.8 code review): operator/LLM-supplied idempotency
+/// keys may contain wildcard characters that, without escaping, would cause
+/// cross-batch identity confusion when matching `{base}:mention:%`. Apply
+/// this helper at every LIKE site that interpolates user-supplied data.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 impl KanbanStore {
     /// Open (or create) a database at `path`.
     ///
@@ -1092,13 +1114,18 @@ impl KanbanStore {
         &self,
         base_key: &str,
     ) -> Result<Option<MentionResult>> {
-        let pattern = format!("{base_key}:mention:%");
+        // WR-01 (Phase 36.3.7.8 code review): operator/LLM-supplied `base_key`
+        // may contain `_` or `%`, which are LIKE wildcards by default in SQLite.
+        // Escape them (and the escape char itself) and emit ESCAPE '\' so the
+        // pattern matches the literal base_key only — preventing cross-batch
+        // leakage where `my_batch_1` would otherwise match `myxbatchY1:mention:0`.
+        let pattern = format!("{}:mention:%", like_escape(base_key));
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT id, idempotency_key, assignee \
                  FROM tasks \
-                 WHERE idempotency_key LIKE ?1 \
+                 WHERE idempotency_key LIKE ?1 ESCAPE '\\' \
                  ORDER BY idempotency_key",
             )
             .map_err(KanbanError::from)?;
@@ -1199,7 +1226,7 @@ impl KanbanStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // ---------------- Idempotency replay INSIDE transaction (WR-01) ---------
+        // ---------------- Idempotency replay INSIDE transaction (WR-01, CR-01, WR-03) ---
         //
         // WR-01 (Phase 36.3.7.7 code review carry-over): the lookup MUST happen
         // inside BEGIN IMMEDIATE so a concurrent first-create race resolves
@@ -1207,34 +1234,60 @@ impl KanbanStore {
         // blocked on BEGIN IMMEDIATE) then observes the row and replays instead of
         // trying its own INSERT and failing with a UNIQUE-constraint error.
         //
-        // Borrow gymnastic: rusqlite Transaction holds &mut Connection, so we
-        // cannot simultaneously call &self.find_mentions_by_idempotency_key.
-        // Solution: check inside the tx, commit (no-op reads), then call the
-        // shared-borrow replay finder. SAFETY: tx is read-only here — commit is
-        // equivalent to rollback and correct under WAL.
+        // CR-01 (Phase 36.3.7.8 code review): scan for ANY persisted child under
+        // this batch using the LIKE pattern (escaped per WR-01 of 36.3.7.8) instead
+        // of probing only `:mention:0`. The first surviving MentionChildSpec may
+        // have `mention_index >= 1` if the resolver skipped index 0 (malformed,
+        // self-reference, etc.), so a `:mention:0` row may never exist.
+        //
+        // WR-03 (Phase 36.3.7.8 code review): the replay reconstruction is inlined
+        // directly inside this `&tx` borrow — no commit-then-reborrow dance, no
+        // second BEGIN IMMEDIATE, no defensive fall-through. This keeps the entire
+        // existence-check-plus-reconstruction inside a single atomic boundary.
         if let Some(ref base) = plan.idempotency_key {
-            let first_key = format!("{base}:mention:0");
-            let existing: Option<String> = tx
-                .query_row(
-                    "SELECT id FROM tasks WHERE idempotency_key = ?1",
-                    params![first_key],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(KanbanError::from)?;
-            if existing.is_some() {
-                // Commit the read-only tx (no rows written — safe to commit).
-                tx.commit()?;
-                // Now &self borrow is available.
-                if let Some(replay) = self.find_mentions_by_idempotency_key(base)? {
-                    return Ok(replay);
+            let pattern = format!("{}:mention:%", like_escape(base));
+            let rows: Vec<(String, String, String)> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT id, idempotency_key, assignee \
+                         FROM tasks \
+                         WHERE idempotency_key LIKE ?1 ESCAPE '\\' \
+                         ORDER BY idempotency_key",
+                    )
+                    .map_err(KanbanError::from)?;
+                let collected: rusqlite::Result<Vec<(String, String, String)>> = stmt
+                    .query_map(params![pattern], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(KanbanError::from)?
+                    .collect();
+                collected.map_err(KanbanError::from)?
+            };
+
+            if !rows.is_empty() {
+                // Reconstruct MentionResult identically to
+                // find_mentions_by_idempotency_key.
+                let mut children: Vec<MentionChildIds> = Vec::with_capacity(rows.len());
+                for (child_id, idem_key, assignee) in rows {
+                    let mention_index: usize = idem_key
+                        .split(":mention:")
+                        .last()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    children.push(MentionChildIds {
+                        child_id,
+                        assignee,
+                        handle: String::new(),
+                        mention_index,
+                    });
                 }
-                // Defensive fall-through: first_key existed but LIKE scan returned
-                // nothing — re-open tx and insert. Shouldn't happen under normal use.
-                let tx = self
-                    .conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                return Self::mention_insert_loop(tx, plan);
+                children.sort_by_key(|c| c.mention_index);
+                tx.commit()?;
+                return Ok(MentionResult { children });
             }
         }
 
