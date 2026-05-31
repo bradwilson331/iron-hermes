@@ -63,7 +63,7 @@ pub use paths::{
 };
 pub use dispatcher::{
     DispatcherContext, StrandedReport, StrandedSeverity, diagnose_stranded, run_dispatch_loop,
-    run_dispatch_tick,
+    run_dispatch_tick, run_dispatch_tick_for_board,
 };
 pub use notifier::{
     BoardTickStats, NotifierContext, NotifierTickReport, SendFn, run_notifier_loop,

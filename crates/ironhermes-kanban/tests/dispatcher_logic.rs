@@ -23,9 +23,13 @@ use rusqlite::params;
 use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ironhermes_kanban::{
     KanbanConfig, KanbanStore, StrandedSeverity, diagnose_stranded, run_dispatch_tick,
+    run_dispatch_tick_for_board,
 };
+use ironhermes_kanban::decomposer::{ChildSpec, DecomposeOutput, DecomposeFn};
 use ironhermes_kanban::dispatcher::DispatcherContext;
 use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
 
@@ -1465,4 +1469,263 @@ async fn reclaim_stale_claims_appends_reclaimed_event_to_task_events() {
              {claim_lock_seeded}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.10 Plan 04 — Step 0 auto-decompose receiver tests
+// ---------------------------------------------------------------------------
+
+/// Build a mock DecomposeFn that increments a counter and returns a canned
+/// DecomposeOutput. The counter is Arc<AtomicUsize> for safe access across
+/// async boundaries.
+fn make_counting_decompose_fn(
+    counter: Arc<AtomicUsize>,
+) -> DecomposeFn {
+    Arc::new(move |_req| {
+        let counter = Arc::clone(&counter);
+        let output = DecomposeOutput {
+            new_title: "Decomposed title".to_string(),
+            new_body: "## Goal\nDecomposed body.".to_string(),
+            // No children — mirrors the specify path so parent status goes to todo.
+            children: vec![
+                ChildSpec {
+                    title: "Child task A".to_string(),
+                    assignee: "alice".to_string(),
+                    body: None,
+                },
+            ],
+        };
+        Box::pin(async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(output)
+        })
+    })
+}
+
+/// Build a DispatcherContext with auto_decompose=true, an injected DecomposeFn,
+/// and a failing spawn_fn (we only care about Step 0, not Step 6-8 spawning).
+fn make_ctx_auto_decompose(
+    store: Arc<TokioMutex<KanbanStore>>,
+    config: KanbanConfig,
+    decompose_fn: DecomposeFn,
+) -> DispatcherContext {
+    let spawn_fn = Arc::new(
+        |_task: ironhermes_kanban::types::Task,
+         _run: ironhermes_kanban::types::TaskRun,
+         _ws: String,
+         _board_slug: String|
+         -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
+                    + Send,
+            >,
+        > {
+            Box::pin(async move {
+                Err(ironhermes_kanban::error::KanbanError::Other(
+                    anyhow::anyhow!("spawn stubbed for auto_decompose test"),
+                ))
+            })
+        },
+    );
+    let mut ctx = DispatcherContext::with_spawn_fn(store, config, spawn_fn);
+    ctx.decompose_fn = Some(decompose_fn);
+    ctx
+}
+
+/// Step 0 active path: when auto_decompose=true AND decompose_fn=Some(fn),
+/// seeded triage tasks are decomposed and promoted to todo. Mock must be
+/// called exactly once per triage task (2 tasks → 2 calls).
+#[tokio::test]
+async fn auto_decompose_step_invokes_decomposer_when_gates_pass() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Seed 2 triage tasks.
+    {
+        let mut store = store_arc.lock().await;
+        for i in 0..2 {
+            store
+                .create_task(
+                    &format!("triage task {i}"),
+                    "alice",
+                    CreateTaskOptions {
+                        triage: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let decompose_fn = make_counting_decompose_fn(Arc::clone(&counter));
+    let config = KanbanConfig {
+        auto_decompose: true,
+        auto_decompose_per_tick: 10,
+        ..Default::default()
+    };
+    let ctx = make_ctx_auto_decompose(store_arc.clone(), config, decompose_fn);
+
+    run_dispatch_tick_for_board(&ctx, "default").await;
+
+    // Mock must have been called exactly 2 times (one per triage task).
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "decompose_fn must be called exactly once per triage task (2 tasks)"
+    );
+
+    // Both tasks must have been promoted to todo.
+    let store = store_arc.lock().await;
+    let triage_remaining = store
+        .list_tasks(ListFilters {
+            status: Some("triage".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        triage_remaining.is_empty(),
+        "all triage tasks must be promoted after auto-decompose; {} remain",
+        triage_remaining.len()
+    );
+
+    let todo_tasks = store
+        .list_tasks(ListFilters {
+            status: Some("todo".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        todo_tasks.len(),
+        2,
+        "both tasks must be promoted to todo (parent tasks)"
+    );
+}
+
+/// Step 0 no-op path: when auto_decompose=false, Step 0 gate does not fire
+/// and the decompose_fn is never called, even if it is Some.
+#[tokio::test]
+async fn auto_decompose_step_no_op_when_gate_off() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Seed 2 triage tasks.
+    {
+        let mut store = store_arc.lock().await;
+        for i in 0..2 {
+            store
+                .create_task(
+                    &format!("triage task gate-off {i}"),
+                    "alice",
+                    CreateTaskOptions {
+                        triage: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let decompose_fn = make_counting_decompose_fn(Arc::clone(&counter));
+    // auto_decompose = false (default) — gate must block Step 0.
+    let config = KanbanConfig {
+        auto_decompose: false,
+        auto_decompose_per_tick: 10,
+        ..Default::default()
+    };
+    let ctx = make_ctx_auto_decompose(store_arc.clone(), config, decompose_fn);
+
+    run_dispatch_tick_for_board(&ctx, "default").await;
+
+    // Mock must NOT have been called.
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "decompose_fn must not be called when auto_decompose=false"
+    );
+
+    // Both tasks must still be in triage.
+    let store = store_arc.lock().await;
+    let triage_remaining = store
+        .list_tasks(ListFilters {
+            status: Some("triage".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        triage_remaining.len(),
+        2,
+        "triage tasks must remain untouched when auto_decompose=false"
+    );
+}
+
+/// Step 0 cap path: auto_decompose_per_tick=2 with 5 triage tasks → exactly
+/// 2 decomposer calls; the other 3 tasks remain in triage.
+#[tokio::test]
+async fn auto_decompose_step_respects_per_tick_cap() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Seed 5 triage tasks.
+    {
+        let mut store = store_arc.lock().await;
+        for i in 0..5 {
+            store
+                .create_task(
+                    &format!("triage task cap-test {i}"),
+                    "alice",
+                    CreateTaskOptions {
+                        triage: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let decompose_fn = make_counting_decompose_fn(Arc::clone(&counter));
+    let config = KanbanConfig {
+        auto_decompose: true,
+        auto_decompose_per_tick: 2, // cap at 2
+        ..Default::default()
+    };
+    let ctx = make_ctx_auto_decompose(store_arc.clone(), config, decompose_fn);
+
+    run_dispatch_tick_for_board(&ctx, "default").await;
+
+    // Mock must have been called exactly 2 times (per-tick cap).
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "decompose_fn must be called exactly auto_decompose_per_tick=2 times"
+    );
+
+    // Exactly 3 tasks must remain in triage (5 - 2 = 3).
+    let store = store_arc.lock().await;
+    let triage_remaining = store
+        .list_tasks(ListFilters {
+            status: Some("triage".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        triage_remaining.len(),
+        3,
+        "exactly 3 of 5 triage tasks must remain (cap=2)"
+    );
+
+    // Exactly 2 parent tasks promoted to todo.
+    let todo_tasks = store
+        .list_tasks(ListFilters {
+            status: Some("todo".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        todo_tasks.len(),
+        2,
+        "exactly 2 tasks must be promoted to todo (cap=2)"
+    );
 }

@@ -81,6 +81,10 @@ pub struct DispatcherContext {
     pub dispatcher_pid: u32,
     /// Injectable spawn function for tests. Default: `worker_spawn::spawn_worker`.
     pub spawn_fn: SpawnFn,
+    /// Phase 36.3.7.10 — optional decomposer injection. None = auto_decompose has no
+    /// effect (graceful degradation). Production: wired by CLI cmd_decompose or a future
+    /// gateway runner update. Tests: inject a mock closure via `with_decompose_fn`.
+    pub decompose_fn: Option<crate::decomposer::DecomposeFn>,
 }
 
 impl DispatcherContext {
@@ -96,6 +100,7 @@ impl DispatcherContext {
                     crate::worker_spawn::spawn_worker_for_board(&task, &run, &workspace, &board_slug).await
                 })
             }),
+            decompose_fn: None,
         }
     }
 
@@ -111,6 +116,7 @@ impl DispatcherContext {
             hostname: crate::pid::current_hostname(),
             dispatcher_pid: std::process::id(),
             spawn_fn,
+            decompose_fn: None,
         }
     }
 }
@@ -187,8 +193,8 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
             }
         };
 
-        // Build a per-board context that shares config + spawn_fn from the
-        // outer DispatcherContext but uses the per-board store.
+        // Build a per-board context that shares config + spawn_fn + decompose_fn
+        // from the outer DispatcherContext but uses the per-board store.
         let board_ctx = DispatcherContext {
             store: board_store_arc,
             config: ctx.config.clone(),
@@ -202,6 +208,7 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
                     outer_spawn_fn(task, run, workspace, slug.clone())
                 }
             }),
+            decompose_fn: ctx.decompose_fn.clone(),
         };
 
         run_dispatch_tick_for_board(&board_ctx, &slug).await;
@@ -213,7 +220,33 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
 /// Run all 8 dispatch steps for a single board.
 ///
 /// Steps are isolated — a failure in step N does not prevent step N+1.
-async fn run_dispatch_tick_for_board(ctx: &DispatcherContext, board_slug: &str) {
+/// Step 0 (auto-decompose) runs BEFORE crash detection when both gates pass:
+/// `ctx.config.auto_decompose == true` AND `ctx.decompose_fn.is_some()`.
+///
+/// `pub` so integration tests can drive a single board tick directly
+/// without the multi-board sweep in `run_dispatch_tick` (needed for receiver
+/// tests that verify Step 0 auto-decompose behavior).
+pub async fn run_dispatch_tick_for_board(ctx: &DispatcherContext, board_slug: &str) {
+    // Step 0: auto-decompose triage tasks (Phase 36.3.7.10).
+    // Gate 1: config.auto_decompose must be true (default false — zero cost when off).
+    // Gate 2: decompose_fn must be Some (gateway runner ships None in v1 — graceful no-op).
+    // Both gates must pass; either gate failing short-circuits with zero work + zero noise.
+    if ctx.config.auto_decompose {
+        if let Some(ref decompose_fn) = ctx.decompose_fn {
+            async {
+                if let Err(e) = decompose_triage_tasks(ctx, decompose_fn).await {
+                    tracing::warn!(error = %e, board = board_slug, "auto-decompose step error");
+                }
+            }
+            .instrument(tracing::info_span!(
+                "kanban.dispatch.step",
+                step = "auto_decompose",
+                board = board_slug,
+            ))
+            .await;
+        }
+    }
+
     let now = now_secs();
 
     // Step 1: detect crashed workers.
@@ -1197,4 +1230,64 @@ fn now_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+// ---------------------------------------------------------------------------
+// Step 0: decompose_triage_tasks (Phase 36.3.7.10)
+// ---------------------------------------------------------------------------
+
+/// Run the auto-decompose step: query triage tasks up to the per-tick cap and
+/// call `decompose_triage_task` sequentially on each.
+///
+/// # Sequential iteration (NOT parallel)
+///
+/// Tasks are processed one at a time to prevent burst LLM billing. A flood of
+/// triage tasks with `auto_decompose_per_tick = 3` clears at ~3 tasks/tick —
+/// see RESEARCH §"Dispatcher Integration Point" for the cost analysis.
+///
+/// # Per-task failure policy
+///
+/// An `Err` from `decompose_triage_task` is logged at `warn` level and consumed.
+/// The task is retained in `triage` with a `decompose_failed` event (appended by
+/// `decompose_triage_task` itself — Plan 02 DEC-05). The loop continues to the
+/// next task; the outer Step 0 block returns `Ok(())` regardless.
+async fn decompose_triage_tasks(
+    ctx: &DispatcherContext,
+    decompose_fn: &crate::decomposer::DecomposeFn,
+) -> crate::error::Result<()> {
+    let cap = ctx.config.auto_decompose_per_tick as usize;
+
+    // Acquire store lock briefly to read triage tasks, then DROP the lock
+    // before any LLM call (never hold the mutex across an async network call).
+    let triage_tasks = {
+        let store = ctx.store.lock().await;
+        store.list_tasks(crate::store::ListFilters {
+            status: Some("triage".to_string()),
+            ..Default::default()
+        })?
+    };
+
+    // Cap the iteration to prevent burst LLM billing (T-36.3.7.10-04-01).
+    let bounded: Vec<_> = triage_tasks.into_iter().take(cap).collect();
+
+    // Sequential loop — NOT join_all / FuturesUnordered (burst-billing prevention).
+    for task in bounded {
+        match crate::decomposer::decompose_triage_task(
+            ctx.store.clone(),
+            &task.id,
+            decompose_fn,
+            &ctx.config,
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(task_id = %task.id, "auto-decomposed"),
+            Err(e) => tracing::warn!(
+                error = %e,
+                task_id = %task.id,
+                "decomposer failed; retaining task in triage"
+            ),
+        }
+    }
+
+    Ok(())
 }
