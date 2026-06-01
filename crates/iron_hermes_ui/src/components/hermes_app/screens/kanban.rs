@@ -89,8 +89,9 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // Plan 03 (D-21): per-task event counter. Increments on every WS
     // TaskEventBatch row whose task_id matches the currently-open drawer
     // task — drives the drawer's `use_resource` re-fetch (UI-SPEC §8.4).
-    // 200ms debounce is applied below.
-    let mut per_task_event_counter: Signal<HashMap<String, u64>> =
+    // 200ms debounce is applied below. Mutations go through `.write()`;
+    // the signal handle itself is Copy so no `mut` binding is required.
+    let per_task_event_counter: Signal<HashMap<String, u64>> =
         use_signal(HashMap::new);
 
     // Drawer open state — Plan 03 wires this end-to-end.
@@ -318,6 +319,39 @@ pub fn ScreenKanban(is_active: bool) -> Element {
         });
     };
 
+    // Plan 03 (D-12): TRIAGE card decompose/specify handler — used by both
+    // the card-level buttons (in TRIAGE column) AND the drawer's
+    // TriageActionRow. Spawns `run_decompose_or_specify` and surfaces the
+    // result via toast (NotWired tooltip per UI-SPEC §4.3 / §7.5).
+    let on_triage_action =
+        move |(task_id, action): (String, crate::protocol::DecomposeOrSpecify)| {
+            let mut tm = toast_msg;
+            spawn(async move {
+                match crate::server::kanban_api::run_decompose_or_specify(
+                    task_id, None, action,
+                )
+                .await
+                {
+                    Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                        tm.set(Some(format!(
+                            "{:?}: {children_count} children. {summary}",
+                            action
+                        )));
+                    }
+                    Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                        // UI-SPEC §7.5 toast: "{action} not configured. Run: ..."
+                        tm.set(Some(format!(
+                            "{} not configured. {message}",
+                            action.slug()
+                        )));
+                    }
+                    Err(e) => {
+                        tm.set(Some(format!("{}: {e}", action.slug())));
+                    }
+                }
+            });
+        };
+
     // Modal-success handlers refresh the board + close.
     let mut close_complete_modal = move || complete_modal_task.set(None);
     let mut close_block_modal = move || block_modal_task.set(None);
@@ -385,6 +419,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     toast_msg: toast_msg,
                     live_region_msg: live_region_msg,
                     archive_modal_task: archive_modal_task,
+                    on_triage_action: on_triage_action,
                 }
             }
             // UI-SPEC §7.5: optimistic-revert toast surface (visible).

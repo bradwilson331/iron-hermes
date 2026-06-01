@@ -1,16 +1,16 @@
 //! Phase 36.3.7.11 Plan 03 — Kanban modal dialogs.
 //!
 //! Four modals (UI-SPEC §3.10 / §7.2):
-//! - `CompleteModal`        — Header "Complete task" — summary + metadata
-//!                           textareas; dismiss "Keep editing".
-//! - `BlockModal`           — Header "Block task" — reason textarea;
-//!                           dismiss "Keep editing".
-//! - `ArchiveConfirmModal`  — Header "Archive task?" — confirm + dismiss
-//!                           "Keep task" (note: confirm CTA uses default
-//!                           primary styling per §7.2, NOT --danger).
-//! - `CreateTaskModal`      — Header "Create task" — title + assignee +
-//!                           priority segmented + tenant + body + Start in
-//!                           Triage checkbox; dismiss "Discard task".
+//! - `CompleteModal` — Header "Complete task" — summary + metadata
+//!   textareas; dismiss "Keep editing".
+//! - `BlockModal` — Header "Block task" — reason textarea;
+//!   dismiss "Keep editing".
+//! - `ArchiveConfirmModal` — Header "Archive task?" — confirm + dismiss
+//!   "Keep task" (note: confirm CTA uses default primary styling per §7.2,
+//!   NOT --danger).
+//! - `CreateTaskModal` — Header "Create task" — title + assignee +
+//!   priority segmented + tenant + body + Start in Triage checkbox;
+//!   dismiss "Discard task".
 //!
 //! Shared spec (UI-SPEC §3.10): all modals use a `ModalShell` overlay with
 //! `role="dialog"`, `aria-modal="true"`, focus trap, and Escape
