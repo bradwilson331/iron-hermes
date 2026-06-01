@@ -18,7 +18,7 @@
 use crate::components::hermes_app::screens::kanban::board::move_task_optimistic;
 use crate::components::hermes_app::screens::kanban::card::KanbanCard;
 use crate::kanban::transitions::{drag_blocked_hint, is_drag_allowed};
-use crate::protocol::{KanbanStatus, TaskRow};
+use crate::protocol::{DecomposeOrSpecify, KanbanStatus, TaskRow};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -113,6 +113,10 @@ pub fn KanbanColumn(
     toast_msg: Signal<Option<String>>,
     live_region_msg: Signal<Option<String>>,
     archive_modal_task: Signal<Option<String>>,
+    // Plan 03 (D-12): TRIAGE card decompose/specify action dispatch.
+    // KanbanCard renders the buttons only on TRIAGE cards; the screen
+    // owns the actual `run_decompose_or_specify` spawn.
+    on_triage_action: EventHandler<(String, DecomposeOrSpecify)>,
 ) -> Element {
     let status_str = status.as_str();
     let target_status = status.to_kanban_status();
@@ -218,6 +222,7 @@ pub fn KanbanColumn(
                                     on_open_drawer: on_open_drawer,
                                     dragged_task_id: dragged_task_id,
                                     is_pending: is_pending,
+                                    on_triage_action: on_triage_action,
                                 }
                             }
                         }

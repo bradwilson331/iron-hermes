@@ -16,15 +16,21 @@
 //!   move confirmations, and disallowed-transition hints.
 
 // Submodules in the sibling `kanban/` directory — board/column/card form
-// the visual shell. Drawer + modals land in Plan 03.
+// the visual shell. Plan 03 adds drawer + modals.
 pub mod board;
 pub mod card;
 pub mod column;
+pub mod drawer;
+pub mod modals;
 
 use crate::components::hermes_app::screens::kanban::board::KanbanBoard;
+use crate::components::hermes_app::screens::kanban::drawer::TaskDrawer;
+use crate::components::hermes_app::screens::kanban::modals::{
+    ArchiveConfirmModal, BlockModal, CompleteModal, CreateTaskModal,
+};
 use crate::protocol::TaskRow;
 use dioxus::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Phase 36.3.7.11 Plan 01: stylesheet for the kanban dashboard. Defines
 /// the `.kn-card` cyan-glow rules, `.kn-board` layout, chip styles, and
@@ -69,10 +75,26 @@ pub fn ScreenKanban(is_active: bool) -> Element {
 
     // Plan 03 archive-confirm modal target. Plan 02 sets `Some(task_id)`
     // when a card is dragged to ARCHIVED; Plan 03 reads it to open the
-    // confirm modal.
-    let archive_modal_task: Signal<Option<String>> = use_signal(|| None);
+    // confirm modal. Mutable here because Plan 03's drag-archive AND
+    // drawer Archive button both write through this signal.
+    let mut archive_modal_task: Signal<Option<String>> = use_signal(|| None);
 
-    // Reserved for Plan 03 (drawer open state).
+    // Plan 03 (D-13) modal-target signals — the drawer emits modal-open
+    // events that set these; modals.rs reads them to decide whether to
+    // render. Each modal closes by resetting its signal to None.
+    let mut complete_modal_task: Signal<Option<String>> = use_signal(|| None);
+    let mut block_modal_task: Signal<Option<String>> = use_signal(|| None);
+    let mut create_modal_open: Signal<bool> = use_signal(|| false);
+
+    // Plan 03 (D-21): per-task event counter. Increments on every WS
+    // TaskEventBatch row whose task_id matches the currently-open drawer
+    // task — drives the drawer's `use_resource` re-fetch (UI-SPEC §8.4).
+    // 200ms debounce is applied below. Mutations go through `.write()`;
+    // the signal handle itself is Copy so no `mut` binding is required.
+    let per_task_event_counter: Signal<HashMap<String, u64>> =
+        use_signal(HashMap::new);
+
+    // Drawer open state — Plan 03 wires this end-to-end.
     let mut open_drawer_task_id: Signal<Option<String>> = use_signal(|| None);
 
     // Archive toggle — drives the 7th column visibility (D-09).
@@ -121,9 +143,47 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                                 Err(_) => continue,
                             };
                         match event {
-                            crate::protocol::KanbanWsEvent::TaskEventBatch { .. } => {
+                            crate::protocol::KanbanWsEvent::TaskEventBatch { events, .. } => {
                                 // Plan 01 behavior preserved: full re-fetch.
                                 board_resource.restart();
+                                // Plan 03 (D-21 / UI-SPEC §8.4): per-task
+                                // event counter increments for each row in
+                                // the batch. The 200ms debounce: we collect
+                                // per-tick increments by delaying the write
+                                // until the next event-loop tick. With
+                                // gloo-timers on WASM and tokio::time on
+                                // native, schedule the increment after 200ms.
+                                let task_ids: Vec<String> = events
+                                    .iter()
+                                    .map(|e| e.task_id.clone())
+                                    .collect();
+                                if !task_ids.is_empty() {
+                                    let mut counter = per_task_event_counter;
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        let task_ids_for_timer = task_ids;
+                                        wasm_bindgen_futures::spawn_local(async move {
+                                            gloo_timers::future::TimeoutFuture::new(200).await;
+                                            let mut w = counter.write();
+                                            for tid in task_ids_for_timer {
+                                                *w.entry(tid).or_insert(0) += 1;
+                                            }
+                                        });
+                                    }
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        let task_ids_for_timer = task_ids;
+                                        // Native build (tests): apply
+                                        // increments immediately. The
+                                        // 200ms debounce is a UX nicety
+                                        // on the browser; native build is
+                                        // exercised by source-string tests.
+                                        let mut w = counter.write();
+                                        for tid in task_ids_for_timer {
+                                            *w.entry(tid).or_insert(0) += 1;
+                                        }
+                                    }
+                                }
                             }
                             crate::protocol::KanbanWsEvent::Error { message } => {
                                 #[cfg(target_arch = "wasm32")]
@@ -163,13 +223,141 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     let archived_visible_ro: ReadSignal<bool> = archived_visible.into();
 
     let on_open_drawer = move |task_id: String| {
-        // Plan 03 wires the drawer; Plan 02 just records the id so the
-        // hook is in place + the click is observable.
+        // Plan 03 opens the drawer by writing the task_id signal.
         open_drawer_task_id.set(Some(task_id));
     };
 
     let live_msg_str = live_region_msg.read().clone().unwrap_or_default();
     let toast_text = toast_msg.read().clone();
+
+    // Read-only views of the drawer/counter signals for the TaskDrawer
+    // component (props use ReadSignal for read-only access).
+    let drawer_task_id_ro: ReadSignal<Option<String>> = open_drawer_task_id.into();
+    let per_task_counter_ro: ReadSignal<HashMap<String, u64>> = per_task_event_counter.into();
+
+    // Drawer-event handlers — they update the modal-target signals or
+    // spawn one-click writes (Unblock).
+    let on_drawer_close = move |_| {
+        open_drawer_task_id.set(None);
+    };
+    let on_open_complete = move |task_id: String| {
+        complete_modal_task.set(Some(task_id));
+    };
+    let on_open_block = move |task_id: String| {
+        block_modal_task.set(Some(task_id));
+    };
+    let on_open_archive = move |task_id: String| {
+        archive_modal_task.set(Some(task_id));
+    };
+    let on_unblock = move |task_id: String| {
+        // Unblock is one-click — no modal. Spawn patch_task_status to Ready.
+        let mut tm = toast_msg;
+        spawn(async move {
+            match crate::server::kanban_api::patch_task_status(
+                task_id,
+                None,
+                crate::protocol::KanbanStatus::Ready,
+                None,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => tm.set(Some(format!("Unblock failed: {e}"))),
+            }
+        });
+    };
+    let on_decompose = move |task_id: String| {
+        let mut tm = toast_msg;
+        spawn(async move {
+            match crate::server::kanban_api::run_decompose_or_specify(
+                task_id,
+                None,
+                crate::protocol::DecomposeOrSpecify::Decompose,
+            )
+            .await
+            {
+                Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                    tm.set(Some(format!(
+                        "Decomposed into {children_count} children: {summary}"
+                    )));
+                }
+                Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                    tm.set(Some(format!("Decompose not configured. {message}")));
+                }
+                Err(e) => tm.set(Some(format!("Decompose failed: {e}"))),
+            }
+        });
+    };
+    let on_specify = move |task_id: String| {
+        let mut tm = toast_msg;
+        spawn(async move {
+            match crate::server::kanban_api::run_decompose_or_specify(
+                task_id,
+                None,
+                crate::protocol::DecomposeOrSpecify::Specify,
+            )
+            .await
+            {
+                Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                    tm.set(Some(format!(
+                        "Specified ({children_count} children): {summary}"
+                    )));
+                }
+                Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                    tm.set(Some(format!("Specify not configured. {message}")));
+                }
+                Err(e) => tm.set(Some(format!("Specify failed: {e}"))),
+            }
+        });
+    };
+    let on_post_comment = move |(task_id, body): (String, String)| {
+        let mut tm = toast_msg;
+        spawn(async move {
+            if let Err(e) = crate::server::kanban_api::post_comment(task_id, None, body).await {
+                tm.set(Some(format!("Comment not saved. Try again. ({e})")));
+            }
+        });
+    };
+
+    // Plan 03 (D-12): TRIAGE card decompose/specify handler — used by both
+    // the card-level buttons (in TRIAGE column) AND the drawer's
+    // TriageActionRow. Spawns `run_decompose_or_specify` and surfaces the
+    // result via toast (NotWired tooltip per UI-SPEC §4.3 / §7.5).
+    let on_triage_action =
+        move |(task_id, action): (String, crate::protocol::DecomposeOrSpecify)| {
+            let mut tm = toast_msg;
+            spawn(async move {
+                match crate::server::kanban_api::run_decompose_or_specify(
+                    task_id, None, action,
+                )
+                .await
+                {
+                    Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                        tm.set(Some(format!(
+                            "{:?}: {children_count} children. {summary}",
+                            action
+                        )));
+                    }
+                    Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                        // UI-SPEC §7.5 toast: "{action} not configured. Run: ..."
+                        tm.set(Some(format!(
+                            "{} not configured. {message}",
+                            action.slug()
+                        )));
+                    }
+                    Err(e) => {
+                        tm.set(Some(format!("{}: {e}", action.slug())));
+                    }
+                }
+            });
+        };
+
+    // Modal-success handlers refresh the board + close.
+    let mut close_complete_modal = move || complete_modal_task.set(None);
+    let mut close_block_modal = move || block_modal_task.set(None);
+    let mut close_archive_modal = move || archive_modal_task.set(None);
+    let mut close_create_modal = move || create_modal_open.set(false);
+    let mut restart_board = move || board_resource.restart();
 
     rsx! {
         section {
@@ -187,6 +375,11 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         class: "kn-ws-status {ws_state_class}",
                         "aria-label": "WebSocket status",
                         "•"
+                    }
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        onclick: move |_| create_modal_open.set(true),
+                        "+ Add card"
                     }
                     button {
                         class: "btn btn--ghost btn--sm",
@@ -226,6 +419,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     toast_msg: toast_msg,
                     live_region_msg: live_region_msg,
                     archive_modal_task: archive_modal_task,
+                    on_triage_action: on_triage_action,
                 }
             }
             // UI-SPEC §7.5: optimistic-revert toast surface (visible).
@@ -235,6 +429,66 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     role: "status",
                     aria_live: "polite",
                     "{toast}"
+                }
+            }
+            // Plan 03 (D-20 / UI-SPEC §3.9): the slide-in detail drawer.
+            // Mounted unconditionally — TaskDrawer itself renders nothing
+            // until `task_id.read().is_some()`, but mounting it
+            // unconditionally keeps the use_resource hooks registered
+            // across opens/closes (Pattern E discipline).
+            TaskDrawer {
+                task_id: drawer_task_id_ro,
+                per_task_event_counter: per_task_counter_ro,
+                on_close: on_drawer_close,
+                on_open_complete_modal: on_open_complete,
+                on_open_block_modal: on_open_block,
+                on_open_archive_modal: on_open_archive,
+                on_unblock: on_unblock,
+                on_decompose: on_decompose,
+                on_specify: on_specify,
+                on_post_comment: on_post_comment,
+            }
+            // Plan 03 (D-13 / UI-SPEC §3.10): modals — render conditionally
+            // based on the modal-target signals.
+            if let Some(tid) = complete_modal_task.read().clone() {
+                CompleteModal {
+                    task_id: tid,
+                    on_dismiss: move |_| { close_complete_modal(); },
+                    on_success: move |_| {
+                        close_complete_modal();
+                        open_drawer_task_id.set(None);
+                        restart_board();
+                    },
+                }
+            }
+            if let Some(tid) = block_modal_task.read().clone() {
+                BlockModal {
+                    task_id: tid,
+                    on_dismiss: move |_| { close_block_modal(); },
+                    on_success: move |_| {
+                        close_block_modal();
+                        restart_board();
+                    },
+                }
+            }
+            if let Some(tid) = archive_modal_task.read().clone() {
+                ArchiveConfirmModal {
+                    task_id: tid,
+                    on_dismiss: move |_| { close_archive_modal(); },
+                    on_success: move |_| {
+                        close_archive_modal();
+                        open_drawer_task_id.set(None);
+                        restart_board();
+                    },
+                }
+            }
+            if *create_modal_open.read() {
+                CreateTaskModal {
+                    on_dismiss: move |_| { close_create_modal(); },
+                    on_success: move |_| {
+                        close_create_modal();
+                        restart_board();
+                    },
                 }
             }
         }

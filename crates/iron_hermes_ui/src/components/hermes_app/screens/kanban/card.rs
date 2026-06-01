@@ -11,7 +11,7 @@
 //! `dragged_task_id: Signal<Option<String>>`. Plan 03 will consume the
 //! `kn-card-action-<id>` id for drawer-close focus restoration.
 
-use crate::protocol::TaskRow;
+use crate::protocol::{DecomposeOrSpecify, TaskRow};
 use dioxus::prelude::*;
 
 /// Phase 36.3.7.11 Plan 02: a single kanban task card.
@@ -31,8 +31,16 @@ pub fn KanbanCard(
     on_open_drawer: EventHandler<String>,
     dragged_task_id: Signal<Option<String>>,
     is_pending: bool,
+    // Plan 03 (D-12): emitted when the user clicks ⚗ Decompose or ✨
+    // Specify on a TRIAGE card. ScreenKanban dispatches the actual
+    // `run_decompose_or_specify` server fn. Only the TRIAGE arm renders
+    // these buttons (see below).
+    on_triage_action: EventHandler<(String, DecomposeOrSpecify)>,
 ) -> Element {
     let t = task.read().clone();
+    let is_triage = t.status == "triage";
+    let task_id_for_decompose = t.id.clone();
+    let task_id_for_specify = t.id.clone();
     // ARIA label per UI-SPEC §6.1.
     let aria = format!(
         "{} — {}, priority {}, assigned to {}",
@@ -122,6 +130,32 @@ pub fn KanbanCard(
                         on_open_drawer.call(task_id_for_click.clone());
                     },
                     "▶"
+                }
+            }
+            // Plan 03 (D-12 / UI-SPEC §3.7): TRIAGE-card-only action row
+            // — ⚗ Decompose / ✨ Specify buttons that call the screen's
+            // run_decompose_or_specify dispatcher. The drawer's
+            // TriageActionRow does the same for the drawer surface.
+            if is_triage {
+                div { class: "kn-card-triage-actions",
+                    button {
+                        class: "kn-action-btn kn-action-btn--sm",
+                        "aria-label": "Decompose triage task",
+                        onclick: move |_| {
+                            on_triage_action
+                                .call((task_id_for_decompose.clone(), DecomposeOrSpecify::Decompose));
+                        },
+                        "\u{2697} Decompose"
+                    }
+                    button {
+                        class: "kn-action-btn kn-action-btn--sm",
+                        "aria-label": "Specify triage task",
+                        onclick: move |_| {
+                            on_triage_action
+                                .call((task_id_for_specify.clone(), DecomposeOrSpecify::Specify));
+                        },
+                        "\u{2728} Specify"
+                    }
                 }
             }
         }

@@ -14,7 +14,7 @@
 //! the prior guard is long gone).
 
 use crate::components::hermes_app::screens::kanban::column::{KanbanColumn, KanbanColumnStatus};
-use crate::protocol::{KanbanStatus, TaskRow};
+use crate::protocol::{DecomposeOrSpecify, KanbanStatus, TaskRow};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -44,6 +44,8 @@ pub fn KanbanBoard(
     toast_msg: Signal<Option<String>>,
     live_region_msg: Signal<Option<String>>,
     archive_modal_task: Signal<Option<String>>,
+    // Plan 03 (D-12): TRIAGE-card decompose/specify action handler.
+    on_triage_action: EventHandler<(String, DecomposeOrSpecify)>,
 ) -> Element {
     let show_archived = *archived_visible.read();
     rsx! {
@@ -60,6 +62,7 @@ pub fn KanbanBoard(
                 toast_msg: toast_msg,
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
+                on_triage_action: on_triage_action,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Todo,
@@ -70,6 +73,7 @@ pub fn KanbanBoard(
                 toast_msg: toast_msg,
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
+                on_triage_action: on_triage_action,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Ready,
@@ -80,6 +84,7 @@ pub fn KanbanBoard(
                 toast_msg: toast_msg,
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
+                on_triage_action: on_triage_action,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::InProgress,
@@ -90,6 +95,7 @@ pub fn KanbanBoard(
                 toast_msg: toast_msg,
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
+                on_triage_action: on_triage_action,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Blocked,
@@ -100,6 +106,7 @@ pub fn KanbanBoard(
                 toast_msg: toast_msg,
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
+                on_triage_action: on_triage_action,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Done,
@@ -110,6 +117,7 @@ pub fn KanbanBoard(
                 toast_msg: toast_msg,
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
+                on_triage_action: on_triage_action,
             }
             if show_archived {
                 KanbanColumn {
@@ -121,6 +129,7 @@ pub fn KanbanBoard(
                     toast_msg: toast_msg,
                     live_region_msg: live_region_msg,
                     archive_modal_task: archive_modal_task,
+                    on_triage_action: on_triage_action,
                 }
             }
         }
