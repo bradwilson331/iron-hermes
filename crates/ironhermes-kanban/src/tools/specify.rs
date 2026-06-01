@@ -103,17 +103,11 @@ impl Tool for KanbanSpecifyTool {
             ));
         }
 
-        // Validate task_id is present and non-empty.
-        let _task_id = match args["task_id"].as_str() {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                return Ok(crate::tools::common::reject_with_board(
-                    "missing_task_id",
-                    "task_id is required",
-                    Some(&board_ctx),
-                ));
-            }
-        };
+        // WR-09 fix: removed task_id validation block. The rejection below
+        // is unconditional in v1; validating task_id first sent mixed
+        // signals (valid id and empty id both got the same `no_aux_client`
+        // rejection) and added a hidden DB-less code path the test suite
+        // had to cover. Restore validation when the runtime wiring lands.
 
         // v1: DecomposeFn not wired in the LLM tool runtime.
         // Orchestrators should use `hermes kanban specify <id>` CLI verb instead.
