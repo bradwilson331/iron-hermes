@@ -1267,11 +1267,42 @@ async fn decompose_triage_tasks(
         })?
     };
 
-    // Cap the iteration to prevent burst LLM billing (T-36.3.7.10-04-01).
-    let bounded: Vec<_> = triage_tasks.into_iter().take(cap).collect();
-
+    // WR-10 fix: track real work consumed vs short-circuited cap. The
+    // previous implementation read `triage_tasks` once and capped at the
+    // start; if an operator (or another shell) manually promoted a task
+    // out of `triage` mid-tick, the kernel short-circuited with
+    // `Ok(already_processed)` but the iteration still counted toward the
+    // cap. With heavy ad-hoc operator intervention this prevented the
+    // dispatcher from reaching still-triage tasks lower in the list.
+    //
+    // Strategy: iterate the full pre-read list and re-check `task.status
+    // == "triage"` inside the loop before invoking the kernel. Tasks
+    // already promoted are skipped without consuming cap; only real LLM
+    // work counts.
+    let mut consumed = 0usize;
     // Sequential loop — NOT join_all / FuturesUnordered (burst-billing prevention).
-    for task in bounded {
+    for task in triage_tasks.into_iter() {
+        if consumed >= cap {
+            break;
+        }
+
+        // Re-check status under a brief lock — the task may have been
+        // promoted out of triage since `list_tasks` was called above.
+        let still_triage = {
+            let store = ctx.store.lock().await;
+            store
+                .get_task(&task.id)
+                .map(|t| t.status == "triage")
+                .unwrap_or(false)
+        };
+        if !still_triage {
+            tracing::debug!(
+                task_id = %task.id,
+                "skipping auto-decompose: task no longer in triage"
+            );
+            continue;
+        }
+
         match crate::decomposer::decompose_triage_task(
             ctx.store.clone(),
             &task.id,
@@ -1280,12 +1311,19 @@ async fn decompose_triage_tasks(
         )
         .await
         {
-            Ok(_) => tracing::info!(task_id = %task.id, "auto-decomposed"),
-            Err(e) => tracing::warn!(
-                error = %e,
-                task_id = %task.id,
-                "decomposer failed; retaining task in triage"
-            ),
+            Ok(_) => {
+                tracing::info!(task_id = %task.id, "auto-decomposed");
+                consumed += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    task_id = %task.id,
+                    "decomposer failed; retaining task in triage"
+                );
+                // Failed attempts DO consume cap (they made an LLM call).
+                consumed += 1;
+            }
         }
     }
 
