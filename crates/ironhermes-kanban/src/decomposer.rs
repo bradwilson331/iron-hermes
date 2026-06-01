@@ -205,8 +205,17 @@ pub async fn specify_triage_task(
     };
 
     // Step 4: apply atomically.
+    // WR-11 fix: thread `config.orchestrator_profile` into the apply layer so
+    // the `specified` event payload carries author attribution (the
+    // cmd_specify docstring promised this; previously the payload only
+    // carried `new_title`).
     let mut s = store.lock().await;
-    let promoted = s.apply_specify(task_id, &output.new_title, &output.new_body)?;
+    let promoted = s.apply_specify(
+        task_id,
+        &output.new_title,
+        &output.new_body,
+        &config.orchestrator_profile,
+    )?;
     Ok(DecomposedIds {
         child_ids: vec![],
         root_promoted: promoted,

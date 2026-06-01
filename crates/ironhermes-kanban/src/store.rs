@@ -2194,6 +2194,7 @@ impl KanbanStore {
         task_id: &str,
         new_title: &str,
         new_body: &str,
+        orchestrator_profile: &str,
     ) -> Result<bool> {
         use rusqlite::TransactionBehavior;
 
@@ -2216,7 +2217,16 @@ impl KanbanStore {
         }
 
         // Append the `specified` event inside the same transaction.
-        let payload = serde_json::json!({ "new_title": new_title });
+        // WR-11 fix: include `orchestrator_profile` in the payload so the
+        // event log is a real audit trail of WHO performed the specify
+        // (the docstring on cmd_specify promises this attribution).
+        // Empty string is preserved (rather than omitted) for shape
+        // stability — downstream consumers see `"orchestrator_profile":
+        // ""` and know attribution was not set.
+        let payload = serde_json::json!({
+            "new_title": new_title,
+            "orchestrator_profile": orchestrator_profile,
+        });
         Self::append_event_internal(
             &tx,
             task_id,
