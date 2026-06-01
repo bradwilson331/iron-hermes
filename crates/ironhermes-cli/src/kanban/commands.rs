@@ -1499,11 +1499,15 @@ fn build_runtime_decompose_fn(
 
             // Parse JSON response → DecomposeOutput.
             // On parse failure → Err so kernel appends DecomposeFailed event.
+            // CR-01 fix: use char-boundary-aware truncate (raw_text.chars().take(N))
+            // rather than a byte-slice — multi-byte UTF-8 (emoji, non-English LLM
+            // output) would otherwise panic with `byte index N is not a char boundary`.
+            let preview: String = raw_text.chars().take(200).collect();
             let parsed: serde_json::Value = serde_json::from_str(&raw_text)
                 .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
                     "parse_error: LLM response is not valid JSON: {} (raw: {})",
                     e,
-                    &raw_text[..raw_text.len().min(200)]
+                    preview
                 )))?;
 
             let new_title = parsed["new_title"]
