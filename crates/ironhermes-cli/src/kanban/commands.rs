@@ -1432,11 +1432,19 @@ fn build_runtime_decompose_fn(
     };
 
     // Verify we have an API key (empty key → reject clearly).
+    // CR-03 fix: fail closed regardless of scheme — the previous protocol
+    // filter (`base_url.starts_with("https://")`) allowed misconfigured HTTP
+    // endpoints to pass clearance, after which the closure would build an
+    // LlmClient with `api_key = ""` and either silently send triage prose
+    // over plaintext (if the gateway accepts empty keys) or surface a generic
+    // LLM auth error rather than the actionable "missing key" guard.
     let api_key = endpoint.api_key.clone().unwrap_or_default();
-    if api_key.is_empty() && endpoint.base_url.starts_with("https://") {
+    if api_key.is_empty() {
         anyhow::bail!(
-            "decomposer model not configured — set `kanban.decomposer_model` in config.yaml \
-             OR `auxiliary.kanban_decomposer` OR ensure `model.default` is set with a valid API key"
+            "decomposer model not configured — set `kanban.decomposer_model` in \
+             config.yaml OR `auxiliary.kanban_decomposer` OR ensure `model.default` \
+             is set with a valid API key (endpoint: {})",
+            endpoint.base_url
         );
     }
 
