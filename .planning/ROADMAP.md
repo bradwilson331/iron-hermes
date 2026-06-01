@@ -684,7 +684,7 @@ Plans:
 
 **Requirements**: REQ-36.3.7.10-01 (decomposer module), REQ-36.3.7.10-02 (CLI decompose verb), REQ-36.3.7.10-03 (CLI specify verb), REQ-36.3.7.10-04 (auto_decompose config knob), REQ-36.3.7.10-05 (dispatcher Step 0), REQ-36.3.7.10-06 (failure-mode policy + DecomposeFailed event), REQ-36.3.7.10-07 (KanbanDecomposeTool + KanbanSpecifyTool LLM tools), REQ-36.3.7.10-08 (kanban_decomposer reserved role), REQ-36.3.7.10-09 (DEFERRED_KANBAN_SUBVERBS extension), REQ-36.3.7.10-10 (docs/kanban/reference.md reconciliation). Derived from ROADMAP goal + RESEARCH §Acceptance Criteria; full list in 36.3.7.10-01-PLAN.md §Requirements (Derived).
 **Depends on:** Phase 36.3.7.6 (CLOSED — kanban_create + kanban_comment tools available), Phase 36.3.7.9 (CLOSED — multi-board CLI + --board flag + tools/common.rs envelope helpers + DEFERRED_KANBAN_SUBVERBS pattern). NOT dependent on Phase 36.3.7.7 (swarm) — RESEARCH §Q8 + §Assumptions A3 show decompose-children land via a new store.apply_decompose mirroring create_swarm's atomic-tx shape but NOT calling create_swarm directly (the "root" is a pre-existing triage task, not a new card).
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1** *(no dependencies)*
@@ -706,7 +706,7 @@ Plans:
 
 **Wave 5** *(depends on all prior plans)*
 
-- [ ] 36.3.7.10-06-PLAN.md — Docs reconciliation: replace `deferred to Phase 36.3.7.10` at §425 + §744 with `Shipped in Phase 36.3.7.10` blocks; add `hermes kanban decompose` line to §609 CLI listing; annotate §444 config row with IronHermes v1 default override — covers REQ-10
+- [x] 36.3.7.10-06-PLAN.md — Docs reconciliation: replace `deferred to Phase 36.3.7.10` at §425 + §744 with `Shipped in Phase 36.3.7.10` blocks; add `hermes kanban decompose` line to §609 CLI listing; annotate §444 config row with IronHermes v1 default override — covers REQ-10
 
 ### Phase 36.3.7.11: Dashboard plugin — SPA + REST + WebSocket live-update for hermes dashboard Kanban tab (INSERTED 2026-05-30)
 
