@@ -1769,16 +1769,27 @@ pub async fn cmd_specify(
                 &decompose_fn,
                 &kanban_config,
             ).await {
-                Ok(_ids) => {
+                Ok(ids) => {
+                    // WR-05 fix: surface root_promoted in the JSON envelope so
+                    // operators can distinguish "this run promoted the task"
+                    // from "the task was already specified — short-circuit".
+                    // Re-read for the rewritten title too (WR-01/WR-02 sibling).
+                    let new_title = {
+                        let s = store_arc.lock().await;
+                        s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
+                    };
                     if json {
                         output_rows.push(serde_json::json!({
                             "ok": true,
                             "task_id": task_id,
                             "reason": serde_json::Value::Null,
-                            "new_title": task.title,
+                            "new_title": new_title,
+                            "root_promoted": ids.root_promoted,
                         }));
-                    } else {
+                    } else if ids.root_promoted {
                         println!("[{}] specified (promoted to todo)", task_id);
+                    } else {
+                        println!("[{}] (already specified — skipped)", task_id);
                     }
                 }
                 Err(e) => {
@@ -1790,6 +1801,7 @@ pub async fn cmd_specify(
                             "task_id": task_id,
                             "reason": e.to_string(),
                             "new_title": task.title,
+                            "root_promoted": false,
                         }));
                     }
                 }
@@ -1816,7 +1828,7 @@ pub async fn cmd_specify(
             &decompose_fn,
             &kanban_config,
         ).await {
-            Ok(_ids) => {
+            Ok(ids) => {
                 let new_title = {
                     let s = store_arc.lock().await;
                     s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
@@ -1827,9 +1839,12 @@ pub async fn cmd_specify(
                         "task_id": task_id,
                         "reason": serde_json::Value::Null,
                         "new_title": new_title,
+                        "root_promoted": ids.root_promoted,
                     }))?);
-                } else {
+                } else if ids.root_promoted {
                     println!("[{}] specified (promoted to todo)", task_id);
+                } else {
+                    println!("[{}] (already specified — skipped)", task_id);
                 }
                 Ok(0)
             }
@@ -1841,6 +1856,7 @@ pub async fn cmd_specify(
                         "task_id": task_id,
                         "reason": e.to_string(),
                         "new_title": original_title,
+                        "root_promoted": false,
                     }))?);
                 }
                 Ok(1)
