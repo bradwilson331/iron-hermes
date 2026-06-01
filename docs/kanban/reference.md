@@ -424,7 +424,7 @@ Visually the target is the familiar Linear / Fusion layout: dark theme, column h
 
 ### Auto vs Manual orchestration
 
-> **v1 NOTE:** Auto-decompose / triage decomposer / specifier (`hermes kanban decompose`, `hermes kanban specify`, `kanban.auto_decompose`) are deferred to Phase 36.3.7.10 (re-homed 2026-05-30 from the defunct Phase 36.3.7.2 assignment, which shipped the delegate_task `oneOf` tool-schema fix instead). In v1, the `triage` column exists as a parking lot; transitions out of `triage` are operator-only (`hermes kanban assign` + manual status update). The **Orchestration: Auto/Manual** toggle does not exist yet.
+> **Shipped in Phase 36.3.7.10:** Auto-decompose / triage decomposer / specifier ship with three production surfaces: (1) CLI verbs `hermes kanban decompose [<id>|--all]` and `hermes kanban specify [<id>|--all] [--author NAME]` (operator-driven, fully wired); (2) config knob `kanban.auto_decompose` (default `false` in IronHermes v1 — conservative opt-in; contrast hermes-agent reference default `true`); (3) dispatcher Step 0 auto-mode (gated on `auto_decompose=true` AND a wired `DecomposeFn`; gateway runner ships with `decompose_fn=None` in v1 per scope-fence — production wiring is queued for a follow-up phase). The LLM-tool surface (`kanban_decompose` / `kanban_specify`) is registered-but-quiescent in v1: invocations return `no_aux_client` and direct the orchestrator to the CLI verb. Gateway slash arms `/kanban decompose` and `/kanban specify` return the standard deferred-subverb response (entries added to `DEFERRED_KANBAN_SUBVERBS` in 36.3.7.10-01) until a future phase wires them. The **Orchestration: Auto/Manual** UI pill is also deferred — toggle behavior via the config knob until the dashboard plugin ships (Phase 36.3.7.11).
 
 The kanban board has two ways to handle a task you drop into the Triage column:
 
@@ -439,7 +439,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 
 | Key | Default | Purpose |
 |---|---|---|
-| `auto_decompose` | `true` | Dispatcher auto-runs the decomposer every tick. |
+| `auto_decompose` | `true` (hermes-agent ref) / `false` (IronHermes v1) | Dispatcher auto-runs the decomposer every tick. **Phase 36.3.7.10:** IronHermes ships `false` as the conservative opt-in default (per the gateway notifier + boards precedent); set to `true` in `config.yaml` to enable auto-mode. The gateway runner does NOT wire a production `DecomposeFn` in v1 — auto-mode is a no-op until a follow-up phase ships the wiring. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
 | `orchestrator_profile` | `""` | Profile that owns decomposition. Empty = fall back to active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to active default. |
@@ -606,6 +606,7 @@ hermes kanban notify-unsubscribe <id>
 
 hermes kanban context <id>                             # what a worker sees
 
+hermes kanban decompose [<id> | --all] [--tenant T] [--json]   # fan a triage task into a child swarm (Phase 36.3.7.10)
 hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-column idea
         [--author NAME] [--json]                       #   into a full spec and promote to todo
 
@@ -743,7 +744,7 @@ The board supports these eight patterns without any new primitives:
 | P6 @mention | inline routing from prose | `@reviewer look at this` | *Shipped in Phase 36.3.7.8.* |
 | P7 Thread-scoped workspace | `/kanban here` in a thread | per-project gateway threads |
 | P8 Fleet farming | one profile, N subjects | 50 social accounts |
-| P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" | *(deferred to Phase 36.3.7.10 — triage decomposer/specifier not implemented in v1; re-homed 2026-05-30 from the defunct 36.3.7.2 assignment which shipped the delegate_task `oneOf` tool-schema fix instead)* |
+| P9 Triage specifier | rough idea → `triage` → `hermes kanban specify` expands body → `todo` | "turn this one-liner into a spec'd task" | *(Shipped in Phase 36.3.7.10 — see `.planning/phases/36.3.7.10-auto-decompose-triage-decomposer-specifier/` for the implementation set: CLI verbs + dispatcher Step 0 + LLM-tool registration + config knobs)* |
 
 For worked examples of each, see `docs/hermes-kanban-v1-spec.pdf`.
 
