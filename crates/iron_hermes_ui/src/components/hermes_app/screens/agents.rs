@@ -87,6 +87,10 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // SSR), preventing the "Could not find context" panic.
     let ws_connected_ctx = use_context::<Signal<bool>>();      // is_ws_connected
     let subagent_events = use_context::<Signal<u64>>();        // D-07 — increments on ws SubagentEvent
+    // Phase 36.3.7.11 D-03 — Agents-toolbar `KANBAN BOARD →` button writes to
+    // the screen signal published by HermesApp. Same context-access pattern as
+    // screens/sessions.rs:63 and screens/settings.rs:326.
+    let mut active_screen = use_context::<Signal<crate::state::Screen>>();
 
     // Materialise the list and error flag BEFORE the rsx! block so no
     // GenerationalRef is held across the macro boundary (clippy.toml).
@@ -357,6 +361,18 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                             });
                         },
                         "PRUNE ENDED"
+                    }
+                    // Phase 36.3.7.11 D-03 — primary navigation entry-point for
+                    // operators supervising swarm work. Single-tap to swap the
+                    // screen signal to Screen::Kanban; the screen-router fans
+                    // out to the placeholder ScreenKanban (Plan 04) until
+                    // Plan 01 wires the live KanbanBoard.
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        onclick: move |_| {
+                            active_screen.set(crate::state::Screen::Kanban);
+                        },
+                        "KANBAN BOARD →"
                     }
                 }
             }

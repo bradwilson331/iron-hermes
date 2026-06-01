@@ -1,17 +1,17 @@
 //! Class-toggle screen router (RESEARCH Pattern 7).
 //!
-//! Mounts all 13 screen placeholder components simultaneously. Only the
+//! Mounts all 14 screen placeholder components simultaneously. Only the
 //! one matching the context-provided `Signal<Screen>` carries the
 //! `is-active` class — every other screen stays mounted but invisible.
 //! This matches `app.html`'s native SPA pattern and avoids any
 //! WebSocket-teardown problem when the user navigates (RESEARCH Pitfall
 //! 5).
 //!
-//! The 13-way fan-out is laid out in the canonical Plan-04-wedge order
-//! followed by the three off-wheel screens (Soul, Schedules, Office) and
-//! finally Settings + Providers. Plans 06 / 07 / 08 each edit exactly
-//! one file per screen — the router itself stays untouched after this
-//! plan lands.
+//! The 14-way fan-out is laid out in the canonical Plan-04-wedge order
+//! followed by the three off-wheel screens (Soul, Schedules, Office),
+//! Settings + Providers, and finally the Kanban screen added in
+//! Phase 36.3.7.11 Plan 04 per D-02. Plan 01 of that phase replaces
+//! `ScreenKanban`'s placeholder body with the live KanbanBoard.
 
 use super::screens;
 use crate::state::Screen;
@@ -37,5 +37,8 @@ pub fn ScreenRouter() -> Element {
         screens::office::ScreenOffice { is_active: cur == Screen::Office }
         screens::settings::ScreenSettings { is_active: cur == Screen::Settings }
         screens::providers::ScreenProviders { is_active: cur == Screen::Providers }
+        // Phase 36.3.7.11 Plan 04 — placeholder mount; Plan 01 replaces the
+        // body of ScreenKanban with the live KanbanBoard.
+        screens::kanban::ScreenKanban { is_active: cur == Screen::Kanban }
     }
 }
