@@ -2308,6 +2308,20 @@ impl KanbanStore {
                 parent_assignee.to_string()
             };
 
+            // WR-04 fix: post-cascade emptiness guard. If child/config/parent
+            // are all empty, the dispatcher will never claim the child (it
+            // matches no worker profile) and the task stalls silently in
+            // `todo`. The rustdoc on `ChildSpec::assignee` already promises
+            // "empty string must never reach the DB" — enforce it here.
+            if assignee.is_empty() {
+                tx.rollback()?;
+                return Err(crate::error::KanbanError::Other(anyhow::anyhow!(
+                    "decompose: child '{}' has no resolvable assignee \
+                     (child/config/parent all empty)",
+                    child.title
+                )));
+            }
+
             tx.execute(
                 "INSERT INTO tasks \
                  (id, title, body, assignee, status, priority, tenant, workspace, skills, \
