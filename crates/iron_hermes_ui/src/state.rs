@@ -583,10 +583,14 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level screens addressable by the wheel + Settings sub-nav.
 ///
-/// 13 variants. The 10 wedge-reachable screens correspond 1-to-1 with
+/// 14 variants. The 11 wedge-reachable screens correspond 1-to-1 with
 /// `WheelWedge`; `Soul`, `Schedules`, `Office` are reachable via the
 /// Settings screen's "Other Screens" sub-nav (Plan 07's
 /// `SettingsScreenLink`) — they are not wheel wedges per CONTEXT D-10.
+///
+/// `Kanban` is the 11th wheel-reachable screen, added in Phase
+/// 36.3.7.11 Plan 04 per D-02. Plan 01 will wire the live dashboard;
+/// until then a minimal `ScreenKanban` placeholder is rendered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Screen {
     #[default]
@@ -603,17 +607,20 @@ pub enum Screen {
     Office,
     Settings,
     Providers,
+    Kanban,
 }
 
-/// The 10 wheel wedges in CONTEXT D-10 canonical order:
+/// The 11 wheel wedges in CONTEXT D-10 + Phase 36.3.7.11 D-02 canonical order:
 /// `chat, agents, models, tools, skills, memory, sessions, providers,
-/// gateway, settings` — sourced verbatim from `wheel-v2.js`
-/// `DEFAULT_SECTIONS` lines 11-22.
+/// gateway, settings, kanban` — the first 10 are sourced verbatim from
+/// `wheel-v2.js` `DEFAULT_SECTIONS` lines 11-22; `Kanban` was appended in
+/// Phase 36.3.7.11 Plan 04 per D-02.
 ///
 /// Note: this is **not** the app.html visual ordering — the JS file is
-/// the wheel's source of truth (per D-10), and the `WheelWedge::label`
-/// / `sub` / `glyph` helpers below emit the exact strings from those
-/// 12 JS lines so the wheel SVG matches the prototype byte-for-byte.
+/// the wheel's source of truth for the original 10 wedges (per D-10), and
+/// the `WheelWedge::label` / `sub` / `glyph` helpers below emit the exact
+/// strings from those 12 JS lines so the wheel SVG matches the prototype
+/// byte-for-byte. The Kanban wedge's strings come from UI-SPEC §3.3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum WheelWedge {
     #[default]
@@ -627,10 +634,11 @@ pub enum WheelWedge {
     Providers,
     Gateway,
     Settings,
+    Kanban,
 }
 
 impl WheelWedge {
-    /// Wedge index in CONTEXT D-10 order (0..=9).
+    /// Wedge index in CONTEXT D-10 + Phase 36.3.7.11 D-02 order (0..=10).
     pub fn index(self) -> usize {
         match self {
             WheelWedge::Chat => 0,
@@ -643,15 +651,20 @@ impl WheelWedge {
             WheelWedge::Providers => 7,
             WheelWedge::Gateway => 8,
             WheelWedge::Settings => 9,
+            WheelWedge::Kanban => 10,
         }
     }
 
-    /// Wrap `i` modulo 10 and return the matching wedge. Used by the wheel
+    /// Wrap `i` modulo 11 and return the matching wedge. Used by the wheel
     /// rim hit-test (Plan 04) and by keyboard nav. Never panics — wraps
     /// safely via `rem_euclid` on the signed-cast value so even
     /// `usize::MAX` yields a valid variant.
+    ///
+    /// Phase 36.3.7.11 D-02 Risk 1 atomic fix: modulo changed from 10 → 11
+    /// alongside the new `10 => WheelWedge::Kanban` arm; failure to update
+    /// any one of these would silently route index 10 to Chat.
     pub fn from_index(i: usize) -> Self {
-        let n = ((i as i64).rem_euclid(10)) as usize;
+        let n = ((i as i64).rem_euclid(11)) as usize;
         match n {
             0 => WheelWedge::Chat,
             1 => WheelWedge::Agents,
@@ -663,11 +676,13 @@ impl WheelWedge {
             7 => WheelWedge::Providers,
             8 => WheelWedge::Gateway,
             9 => WheelWedge::Settings,
-            _ => WheelWedge::Settings,
+            10 => WheelWedge::Kanban,
+            _ => WheelWedge::Settings, // unreachable after rem_euclid(11)
         }
     }
 
-    /// Wedge label per `wheel-v2.js` DEFAULT_SECTIONS `label` field.
+    /// Wedge label per `wheel-v2.js` DEFAULT_SECTIONS `label` field
+    /// (and UI-SPEC §3.3 for `Kanban`).
     /// Note: `Providers` reads `"PROVIDER"` (singular) — that's the
     /// prototype's value, not a typo here.
     pub fn label(self) -> &'static str {
@@ -682,10 +697,12 @@ impl WheelWedge {
             WheelWedge::Providers => "PROVIDER",
             WheelWedge::Gateway => "GATEWAY",
             WheelWedge::Settings => "SYSTEM",
+            WheelWedge::Kanban => "KANBAN",
         }
     }
 
-    /// Wedge sublabel per `wheel-v2.js` DEFAULT_SECTIONS `sub` field.
+    /// Wedge sublabel per `wheel-v2.js` DEFAULT_SECTIONS `sub` field
+    /// (and UI-SPEC §3.3 for `Kanban`).
     pub fn sub(self) -> &'static str {
         match self {
             WheelWedge::Chat => "INTELLIGENCE CONSOLE",
@@ -698,10 +715,13 @@ impl WheelWedge {
             WheelWedge::Providers => "INFERENCE GATEWAYS",
             WheelWedge::Gateway => "NETWORK BRIDGE",
             WheelWedge::Settings => "CONFIGURATION",
+            WheelWedge::Kanban => "TASK BOARD",
         }
     }
 
-    /// Wedge glyph per `wheel-v2.js` DEFAULT_SECTIONS `glyph` field.
+    /// Wedge glyph per `wheel-v2.js` DEFAULT_SECTIONS `glyph` field
+    /// (and UI-SPEC §3.3 for `Kanban`). The Kanban glyph `▦` is NOT in the
+    /// original 10-wedge set (▓◆◇◈✦⬢▣◉⌬⚙) — no new asset required.
     pub fn glyph(self) -> &'static str {
         match self {
             WheelWedge::Chat => "▓",
@@ -714,6 +734,7 @@ impl WheelWedge {
             WheelWedge::Providers => "◉",
             WheelWedge::Gateway => "⌬",
             WheelWedge::Settings => "⚙",
+            WheelWedge::Kanban => "▦",
         }
     }
 
@@ -733,6 +754,7 @@ impl WheelWedge {
             WheelWedge::Providers => Screen::Providers,
             WheelWedge::Gateway => Screen::Gateway,
             WheelWedge::Settings => Screen::Settings,
+            WheelWedge::Kanban => Screen::Kanban,
         }
     }
 }
@@ -802,25 +824,29 @@ mod tests {
 
     #[test]
     fn wheel_wedge_from_index_round_trips_all_indices() {
-        for i in 0..10 {
+        // Phase 36.3.7.11 D-02: 11 wedges (was 10) — bump upper bound.
+        for i in 0..11 {
             assert_eq!(WheelWedge::from_index(i).index(), i, "wedge {} mismatch", i);
         }
     }
 
     #[test]
-    fn wheel_wedge_from_index_wraps_modulo_ten() {
-        assert_eq!(WheelWedge::from_index(10), WheelWedge::Chat);
-        assert_eq!(WheelWedge::from_index(11), WheelWedge::Agents);
-        assert_eq!(WheelWedge::from_index(19), WheelWedge::Settings);
-        assert_eq!(WheelWedge::from_index(20), WheelWedge::Chat);
+    fn wheel_wedge_from_index_wraps_modulo_eleven() {
+        // Phase 36.3.7.11 D-02 Risk 1: modulo changed from 10 → 11.
+        // 10 → Kanban (new), 11 → Chat (wrap to 0), 21 → Kanban (21 % 11 == 10),
+        // 22 → Chat (22 % 11 == 0).
+        assert_eq!(WheelWedge::from_index(10), WheelWedge::Kanban);
+        assert_eq!(WheelWedge::from_index(11), WheelWedge::Chat);
+        assert_eq!(WheelWedge::from_index(21), WheelWedge::Kanban);
+        assert_eq!(WheelWedge::from_index(22), WheelWedge::Chat);
     }
 
     #[test]
     fn wheel_wedge_from_index_handles_extreme_value() {
         // Should not panic; result is a valid variant.
         let w = WheelWedge::from_index(usize::MAX);
-        // Round-trip via index() must be ≤ 9.
-        assert!(w.index() < 10);
+        // Round-trip via index() must be ≤ 10 (11 wedges → 0..=10).
+        assert!(w.index() <= 10);
     }
 
     #[test]
@@ -835,6 +861,8 @@ mod tests {
         assert_eq!(WheelWedge::Providers.label(), "PROVIDER");
         assert_eq!(WheelWedge::Gateway.label(), "GATEWAY");
         assert_eq!(WheelWedge::Settings.label(), "SYSTEM");
+        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition (UI-SPEC §3.3).
+        assert_eq!(WheelWedge::Kanban.label(), "KANBAN");
     }
 
     #[test]
@@ -849,6 +877,8 @@ mod tests {
         assert_eq!(WheelWedge::Providers.sub(), "INFERENCE GATEWAYS");
         assert_eq!(WheelWedge::Gateway.sub(), "NETWORK BRIDGE");
         assert_eq!(WheelWedge::Settings.sub(), "CONFIGURATION");
+        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition (UI-SPEC §3.3).
+        assert_eq!(WheelWedge::Kanban.sub(), "TASK BOARD");
     }
 
     #[test]
@@ -863,6 +893,8 @@ mod tests {
         assert_eq!(WheelWedge::Providers.glyph(), "◉");
         assert_eq!(WheelWedge::Gateway.glyph(), "⌬");
         assert_eq!(WheelWedge::Settings.glyph(), "⚙");
+        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition (UI-SPEC §3.3).
+        assert_eq!(WheelWedge::Kanban.glyph(), "▦");
     }
 
     #[test]
@@ -877,6 +909,8 @@ mod tests {
         assert_eq!(WheelWedge::Providers.to_screen(), Screen::Providers);
         assert_eq!(WheelWedge::Gateway.to_screen(), Screen::Gateway);
         assert_eq!(WheelWedge::Settings.to_screen(), Screen::Settings);
+        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition.
+        assert_eq!(WheelWedge::Kanban.to_screen(), Screen::Kanban);
     }
 
     #[test]
@@ -897,7 +931,8 @@ mod tests {
 
     #[test]
     fn wheel_wedge_round_trips_through_json() {
-        for i in 0..10 {
+        // Phase 36.3.7.11 D-02: 11 wedges (was 10).
+        for i in 0..11 {
             let w = WheelWedge::from_index(i);
             let json = serde_json::to_string(&w).expect("serialize");
             let parsed: WheelWedge = serde_json::from_str(&json).expect("deserialize");
